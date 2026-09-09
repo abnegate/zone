@@ -1193,6 +1193,77 @@ mod tests {
         assert_eq!(fs::read(victim.join("0000.png")).unwrap(), [0]);
     }
 
+    /// `fetch` had no test at all, so the header it demands was never compared
+    /// with the header ComfyUI sends. Requiring `application/octet-stream` is
+    /// what refused every trained adapter in `train::download`; the same check
+    /// guards every candidate checkpoint here.
+    #[tokio::test]
+    async fn a_candidate_checkpoint_is_fetched_from_the_header_comfyui_sends() {
+        for served in ["application/safetensors", "application/octet-stream"] {
+            let server = MockServer::start().await;
+            let run = run();
+            let name = format!("{}.safetensors", run.artifact);
+            Mock::given(method("GET"))
+                .and(path("/view"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header(
+                            "content-disposition",
+                            format!("filename=\"{name}\"").as_str(),
+                        )
+                        .insert_header("content-type", served)
+                        .set_body_bytes(vec![3u8; MIN_WEIGHT_BYTES + 1]),
+                )
+                .mount(&server)
+                .await;
+            let config = Config {
+                base_url: server.uri(),
+                poll_interval_ms: 1,
+                ..Default::default()
+            };
+            let model = flux();
+
+            let bytes = probe(&config, &model, &run).fetch(&name).await;
+
+            assert_eq!(
+                bytes.map(|bytes| bytes.len()),
+                Some(MIN_WEIGHT_BYTES + 1),
+                "{served} must be fetched"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_candidate_checkpoint_that_is_an_error_page_is_refused() {
+        let server = MockServer::start().await;
+        let run = run();
+        let name = format!("{}.safetensors", run.artifact);
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "content-disposition",
+                        format!("filename=\"{name}\"").as_str(),
+                    )
+                    .insert_header("content-type", "text/html")
+                    .set_body_bytes(vec![3u8; MIN_WEIGHT_BYTES + 1]),
+            )
+            .mount(&server)
+            .await;
+        let config = Config {
+            base_url: server.uri(),
+            poll_interval_ms: 1,
+            ..Default::default()
+        };
+        let model = flux();
+
+        assert!(
+            probe(&config, &model, &run).fetch(&name).await.is_none(),
+            "an HTML body must not be taken for a checkpoint"
+        );
+    }
+
     #[tokio::test]
     async fn malformed_probe_history_cancels_exact_job_and_waits_for_terminal_history() {
         let server = MockServer::start().await;

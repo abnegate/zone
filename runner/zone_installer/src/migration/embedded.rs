@@ -42,4 +42,5 @@ pub const EMBEDDED: &[Source] = &[
     source!("019_task_admission_index.sql"),
     source!("020_task_heartbeat_index.sql"),
     source!("021_task_validation.sql"),
+    source!("022_tenant_admin_permissions.sql"),
 ];
