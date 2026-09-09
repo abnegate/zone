@@ -176,10 +176,7 @@ pub async fn require_auth(
     })?;
     require_active_session(&state, &access)
         .await
-        .map_err(|error| {
-            crate::metrics::record_auth_failure("inactive_session");
-            error
-        })?;
+        .inspect_err(|_| crate::metrics::record_auth_failure("inactive_session"))?;
 
     // Add claims to request extensions
     request.extensions_mut().insert(access.claims);
