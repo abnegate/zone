@@ -191,9 +191,35 @@ Chat, tasks and captions use the host Ollama. ComfyUI is replaced by a stand-in
 that speaks the real `/prompt`, `/history`, `/view` protocol and returns real
 PNG, WebM and FLAC bytes, so the server's whole media path runs without the
 weights — each lane is asserted byte-exact against the fixture it should have
-collected. What a *model* produces is therefore never claimed by this suite; add
-a test here for the console path, and keep model quality in
-`comfyui/tests`.
+collected.
+
+**The stand-in says nothing about what a model produces.** It is deliberately
+silent on that, and a lane passing here is not evidence the model works: the
+MPS upscale defect in `inference_hooks.py` passed every check in this suite. So
+do not describe a stand-in run as verifying generation, upscaling, audio or
+training.
+
+### Verifying the models themselves
+
+`live/real-media.live.ts` and `live/real-train.live.ts` drive the same console
+against real ComfyUI and real weights, and assert the model's own output — that
+an upscale is four times its source on both axes, that an audio clip is FLAC of
+a real length, that a trained adapter beats its base by more than the 15% a
+run that learned nothing scores. They need the weights and take tens of
+minutes, so they skip unless asked for:
+
+```bash
+make setup-comfyui-macos                 # pinned native ComfyUI
+PYTHON_BIN=python3.13 ./scripts/setup-comfyui-macos.sh --download-model --bundle upscale
+make vision-model                        # U2-Net, for subject-aware crops
+# then start ComfyUI and, with the rig up:
+make live-real                           # media lanes
+make live-real ARGS=live/real-train.live.ts ZONE_TRAIN_CLIP=/path/to/subject.mp4
+```
+
+Adapter quality also has its own measured check that needs no console:
+`make test-lora-live` trains against the running ComfyUI and scores the result
+against its base.
 
 ### Testing Checklist
 

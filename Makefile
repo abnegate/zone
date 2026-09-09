@@ -9,7 +9,7 @@
 	shell-ollama shell-litellm shell-manager shell-console \
 	shell-postgres shell-valkey db-shell db-migrate \
 	test-server test-console test-console-coverage test-e2e test-e2e-ui \
-	live-verify \
+	live-verify live-real \
 	lint-console format-console check-console \
 	list-models stats prune version env urls \
 	sqlx-prepare \
@@ -674,6 +674,12 @@ test-e2e: ## Run Playwright end-to-end tests
 live-verify: ## Verify the console against a real server (ARGS=live/train for a subset)
 	@echo "$(BLUE)Verifying the console against a real server...$(NC)"
 	./scripts/live-verify.sh $(ARGS)
+
+live-real: ## Verify the media lanes against real ComfyUI weights (needs a running ComfyUI)
+	@echo "$(BLUE)Verifying the media lanes against real weights...$(NC)"
+	cd manager/frontend && ZONE_LIVE_REAL_MODELS=1 \
+		bunx playwright test --config playwright.live.config.ts \
+		$(if $(ARGS),$(ARGS),live/real-media.live.ts)
 
 test-e2e-ui: ## Run Playwright tests with UI
 	@echo "$(BLUE)Running E2E tests with UI...$(NC)"
