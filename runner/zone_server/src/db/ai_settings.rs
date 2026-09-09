@@ -6,6 +6,7 @@ use uuid::Uuid;
 use zone_context::embeddings::providers::{
     PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
 };
+use zone_core::SecretValue;
 
 use super::{
     DbResult,
