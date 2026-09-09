@@ -15,14 +15,34 @@ use axum::{
     },
     response::IntoResponse,
 };
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, stream::SplitSink};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::auth::validate_token;
-use crate::db::tasks;
+use crate::auth::{AccessClaims, validate_access_token};
+use crate::db::{self, sessions, tasks, workspace_members};
 use crate::state::AppState;
+
+const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+type LogCursor = (Option<chrono::NaiveDateTime>, Uuid);
+
+fn log_follows_cursor(
+    created_at: Option<chrono::NaiveDateTime>,
+    id: Uuid,
+    cursor: LogCursor,
+) -> bool {
+    match (created_at, cursor.0) {
+        (Some(created_at), Some(last_created_at)) => {
+            created_at > last_created_at || (created_at == last_created_at && id > cursor.1)
+        }
+        (None, Some(_)) => true,
+        (Some(_), None) => false,
+        (None, None) => id > cursor.1,
+    }
+}
 
 /// Progress message sent to clients
 #[derive(Debug, Clone, Serialize)]
@@ -129,50 +149,130 @@ pub async fn handle_task_ws(
     ws.on_upgrade(move |socket| handle_socket(socket, state, run_id))
 }
 
+/// Whether the bound identity may watch this run.
+///
+/// Validating the token proves who is calling and nothing about what they may
+/// see. Without this step the run id is the only credential, and any account
+/// can stream another tenant's agent logs -- which carry command output, file
+/// contents and diffs from their repository.
+#[derive(Debug, Clone, Copy)]
+struct Authorization {
+    expires_at: i64,
+    session_id: Uuid,
+    user_id: Uuid,
+    workspace_id: Uuid,
+}
+
+impl Authorization {
+    async fn is_current(self, state: &AppState) -> db::DbResult<bool> {
+        if chrono::Utc::now().timestamp() >= self.expires_at {
+            return Ok(false);
+        }
+
+        let (session, member) = tokio::try_join!(
+            sessions::is_active_user_session(state.db(), self.session_id, self.user_id),
+            workspace_members::is_member(state.db(), self.user_id, self.workspace_id),
+        )?;
+
+        Ok(session && member)
+    }
+}
+
+async fn authorize(
+    state: &AppState,
+    access: &AccessClaims,
+    run_id: Uuid,
+) -> db::DbResult<Option<Authorization>> {
+    let Ok(user_id) = access.claims.user_id() else {
+        return Ok(None);
+    };
+    let Some(session_id) = access.session_id else {
+        return Ok(None);
+    };
+
+    let Some(run) = tasks::get_task_run(state.db(), run_id).await? else {
+        return Ok(None);
+    };
+
+    let Some(task) = tasks::get_task(state.db(), run.task_id).await? else {
+        return Ok(None);
+    };
+
+    let authorization = Authorization {
+        expires_at: access.claims.exp,
+        session_id,
+        user_id,
+        workspace_id: task.workspace_id,
+    };
+    authorization
+        .is_current(state)
+        .await
+        .map(|current| current.then_some(authorization))
+}
+
+async fn revalidate(
+    sender: &mut SplitSink<WebSocket, Message>,
+    state: &AppState,
+    authorization: Authorization,
+    run_id: Uuid,
+) -> bool {
+    let message = match authorization.is_current(state).await {
+        Ok(true) => return true,
+        Ok(false) => "Authorization expired or revoked",
+        Err(error) => {
+            tracing::error!(%run_id, %error, "Failed to revalidate task stream authorization");
+            "Authorization unavailable"
+        }
+    };
+    let error = ProgressMessage::Error {
+        message: message.to_string(),
+    };
+    let _ = sender.send(error.to_ws_message()).await;
+    let _ = sender.close().await;
+    false
+}
+
 /// Handle the WebSocket connection
 async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
 
     // Wait for auth message
-    let authenticated =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), receiver.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(ClientMessage::Auth { token }) => {
-                        match validate_token(&token, state.config().jwt_secret()) {
-                            Ok(_claims) => true,
-                            Err(e) => {
-                                let msg = ProgressMessage::Error {
-                                    message: format!("Authentication failed: {}", e),
-                                };
-                                let _ = sender.send(msg.to_ws_message()).await;
-                                false
-                            }
-                        }
-                    }
-                    Err(_) => {
+    let authorization = match tokio::time::timeout(AUTH_TIMEOUT, receiver.next()).await {
+        Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<ClientMessage>(&text) {
+            Ok(ClientMessage::Auth { token }) => {
+                match validate_access_token(&token, state.config().jwt_secret()) {
+                    Ok(access) => authorize(&state, &access, run_id).await.ok().flatten(),
+                    Err(error) => {
                         let msg = ProgressMessage::Error {
-                            message: "Invalid message format".to_string(),
+                            message: format!("Authentication failed: {}", error),
                         };
                         let _ = sender.send(msg.to_ws_message()).await;
-                        false
+                        None
                     }
                 }
             }
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return,
-            _ => {
+            Err(_) => {
                 let msg = ProgressMessage::Error {
-                    message: "Authentication timeout or error".to_string(),
+                    message: "Invalid message format".to_string(),
                 };
                 let _ = sender.send(msg.to_ws_message()).await;
-                false
+                None
             }
-        };
+        },
+        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return,
+        _ => {
+            let msg = ProgressMessage::Error {
+                message: "Authentication timeout or error".to_string(),
+            };
+            let _ = sender.send(msg.to_ws_message()).await;
+            None
+        }
+    };
 
-    if !authenticated {
+    let Some(authorization) = authorization else {
         let _ = sender.close().await;
         return;
-    }
+    };
 
     // Verify task run exists and get initial state
     let task_run = match tasks::get_task_run(state.db(), run_id).await {
@@ -184,14 +284,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
             let _ = sender.send(msg.to_ws_message()).await;
             return;
         }
-        Err(e) => {
+        Err(error) => {
+            tracing::error!(%run_id, %error, "Failed to load task run");
             let msg = ProgressMessage::Error {
-                message: format!("Database error: {}", e),
+                message: "Task stream unavailable".to_string(),
             };
             let _ = sender.send(msg.to_ws_message()).await;
+            let _ = sender.close().await;
             return;
         }
     };
+
+    if !revalidate(&mut sender, &state, authorization, run_id).await {
+        return;
+    }
 
     // Send initial state
     let init_msg = ProgressMessage::Init {
@@ -204,19 +310,35 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
         return;
     }
 
-    // Send existing logs
-    if let Ok(logs) = tasks::get_task_run_logs(state.db(), run_id).await {
-        for log in logs {
-            let log_msg = ProgressMessage::Log {
-                id: log.id,
-                phase: log.phase,
-                agent_type: log.agent_type,
-                log_level: log.log_level,
-                message: log.message,
-            };
-            if sender.send(log_msg.to_ws_message()).await.is_err() {
+    let mut last_log_cursor: Option<LogCursor> = None;
+    match tasks::get_task_run_logs(state.db(), run_id).await {
+        Ok(logs) => {
+            if !revalidate(&mut sender, &state, authorization, run_id).await {
                 return;
             }
+
+            for log in logs {
+                last_log_cursor = Some((log.created_at, log.id));
+                let log_msg = ProgressMessage::Log {
+                    id: log.id,
+                    phase: log.phase,
+                    agent_type: log.agent_type,
+                    log_level: log.log_level,
+                    message: log.message,
+                };
+                if sender.send(log_msg.to_ws_message()).await.is_err() {
+                    return;
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(%run_id, %error, "Failed to load task run logs");
+            let msg = ProgressMessage::Error {
+                message: "Task stream unavailable".to_string(),
+            };
+            let _ = sender.send(msg.to_ws_message()).await;
+            let _ = sender.close().await;
+            return;
         }
     }
 
@@ -239,8 +361,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
 
     // For now, we'll poll the database for updates
     // In production, this would use the TaskProgressBroadcaster with Redis pub/sub
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
-    let mut last_log_id: Option<Uuid> = None;
+    let mut interval = tokio::time::interval(POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_status = task_run.status;
 
     loop {
@@ -249,6 +371,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                 // Check for status updates
                 match tasks::get_task_run(state.db(), run_id).await {
                     Ok(Some(run)) => {
+                        if !revalidate(&mut sender, &state, authorization, run_id).await {
+                            return;
+                        }
+
                         // Send status update if changed
                         if run.status != last_status {
                             last_status = run.status.clone();
@@ -284,31 +410,55 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                         let _ = sender.send(msg.to_ws_message()).await;
                         return;
                     }
-                    Err(_) => continue,
+                    Err(error) => {
+                        tracing::error!(%run_id, %error, "Failed to poll task run status");
+                        let msg = ProgressMessage::Error {
+                            message: "Task stream unavailable".to_string(),
+                        };
+                        let _ = sender.send(msg.to_ws_message()).await;
+                        let _ = sender.close().await;
+                        return;
+                    },
                 }
 
                 // Check for new logs
-                if let Ok(logs) = tasks::get_task_run_logs(state.db(), run_id).await {
-                    for log in logs {
-                        // Skip logs we've already sent
-                        if let Some(last_id) = last_log_id
-                            && log.id <= last_id {
-                                continue;
-                            }
-
-                        last_log_id = Some(log.id);
-
-                        let log_msg = ProgressMessage::Log {
-                            id: log.id,
-                            phase: log.phase,
-                            agent_type: log.agent_type,
-                            log_level: log.log_level,
-                            message: log.message,
-                        };
-                        if sender.send(log_msg.to_ws_message()).await.is_err() {
+                match tasks::get_task_run_logs(state.db(), run_id).await {
+                    Ok(logs) => {
+                        if !revalidate(&mut sender, &state, authorization, run_id).await {
                             return;
                         }
-                    }
+
+                        for log in logs {
+                            // Skip logs we've already sent
+                            if let Some(cursor) = last_log_cursor
+                                && !log_follows_cursor(log.created_at, log.id, cursor)
+                            {
+                                    continue;
+                                }
+
+                            last_log_cursor = Some((log.created_at, log.id));
+
+                            let log_msg = ProgressMessage::Log {
+                                id: log.id,
+                                phase: log.phase,
+                                agent_type: log.agent_type,
+                                log_level: log.log_level,
+                                message: log.message,
+                            };
+                            if sender.send(log_msg.to_ws_message()).await.is_err() {
+                                return;
+                            }
+                        }
+                    },
+                    Err(error) => {
+                        tracing::error!(%run_id, %error, "Failed to poll task run logs");
+                        let msg = ProgressMessage::Error {
+                            message: "Task stream unavailable".to_string(),
+                        };
+                        let _ = sender.send(msg.to_ws_message()).await;
+                        let _ = sender.close().await;
+                        return;
+                    },
                 }
             }
 
@@ -325,5 +475,39 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn later_log_follows_cursor_even_when_its_uuid_is_lower() {
+        let previous_time = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let later_time = previous_time + chrono::Duration::seconds(1);
+
+        assert!(log_follows_cursor(
+            Some(later_time),
+            Uuid::nil(),
+            (Some(previous_time), Uuid::max()),
+        ));
+    }
+
+    #[test]
+    fn log_uuid_breaks_created_at_ties() {
+        let created_at = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+
+        assert!(log_follows_cursor(
+            Some(created_at),
+            Uuid::max(),
+            (Some(created_at), Uuid::nil()),
+        ));
     }
 }

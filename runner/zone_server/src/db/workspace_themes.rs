@@ -1,10 +1,53 @@
 //! Workspace theme database queries
 
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
-use super::DbResult;
+use super::{
+    DbResult,
+    workspace_members::{self, WorkspaceRole},
+};
+
+#[derive(Debug, thiserror::Error)]
+pub enum AccessError {
+    #[error("{0}")]
+    Forbidden(&'static str),
+    #[error("{0}")]
+    NotFound(&'static str),
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+type AccessResult<T> = Result<T, AccessError>;
+
+pub struct Update<'a> {
+    pub primary_color_light: Option<&'a str>,
+    pub secondary_color_light: Option<&'a str>,
+    pub primary_color_dark: Option<&'a str>,
+    pub secondary_color_dark: Option<&'a str>,
+    pub font_family: Option<&'a str>,
+    pub font_size_base: Option<&'a str>,
+    pub border_radius: Option<&'a str>,
+}
+
+async fn authorize(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    write: bool,
+) -> AccessResult<()> {
+    let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
+
+    match role {
+        Some(WorkspaceRole::Owner | WorkspaceRole::Admin | WorkspaceRole::Member) => Ok(()),
+        Some(WorkspaceRole::Viewer) if !write => Ok(()),
+        _ if write => Err(AccessError::Forbidden(
+            "You do not have write access to this workspace",
+        )),
+        _ => Err(AccessError::NotFound("Workspace not found")),
+    }
+}
 
 /// Workspace theme row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -22,8 +65,10 @@ pub struct WorkspaceThemeRow {
     pub updated_at: Option<NaiveDateTime>,
 }
 
-/// Get theme for a workspace
-pub async fn get_theme(pool: &PgPool, workspace_id: Uuid) -> DbResult<Option<WorkspaceThemeRow>> {
+async fn get<'e, E>(executor: E, workspace_id: Uuid) -> DbResult<Option<WorkspaceThemeRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let row: Option<WorkspaceThemeRow> = sqlx::query_as(
         r#"
         SELECT id, workspace_id, primary_color_light, secondary_color_light,
@@ -34,24 +79,33 @@ pub async fn get_theme(pool: &PgPool, workspace_id: Uuid) -> DbResult<Option<Wor
         "#,
     )
     .bind(workspace_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(row)
 }
 
-/// Upsert (create or update) theme for a workspace
-pub async fn upsert_theme(
+/// Read a theme while holding the caller's membership row.
+pub async fn get_authorized(
     pool: &PgPool,
     workspace_id: Uuid,
-    primary_color_light: Option<&str>,
-    secondary_color_light: Option<&str>,
-    primary_color_dark: Option<&str>,
-    secondary_color_dark: Option<&str>,
-    font_family: Option<&str>,
-    font_size_base: Option<&str>,
-    border_radius: Option<&str>,
-) -> DbResult<WorkspaceThemeRow> {
+    user_id: Uuid,
+) -> AccessResult<Option<WorkspaceThemeRow>> {
+    let mut transaction = pool.begin().await?;
+    authorize(&mut transaction, workspace_id, user_id, false).await?;
+    let theme = get(&mut *transaction, workspace_id).await?;
+    transaction.commit().await?;
+    Ok(theme)
+}
+
+async fn upsert<'e, E>(
+    executor: E,
+    workspace_id: Uuid,
+    update: &Update<'_>,
+) -> DbResult<WorkspaceThemeRow>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let row: WorkspaceThemeRow = sqlx::query_as(
         r#"
         INSERT INTO workspace_themes (
@@ -74,25 +128,54 @@ pub async fn upsert_theme(
         "#,
     )
     .bind(workspace_id)
-    .bind(primary_color_light)
-    .bind(secondary_color_light)
-    .bind(primary_color_dark)
-    .bind(secondary_color_dark)
-    .bind(font_family)
-    .bind(font_size_base)
-    .bind(border_radius)
-    .fetch_one(pool)
+    .bind(update.primary_color_light)
+    .bind(update.secondary_color_light)
+    .bind(update.primary_color_dark)
+    .bind(update.secondary_color_dark)
+    .bind(update.font_family)
+    .bind(update.font_size_base)
+    .bind(update.border_radius)
+    .fetch_one(executor)
     .await?;
 
     Ok(row)
 }
 
-/// Delete theme for a workspace
-pub async fn delete_theme(pool: &PgPool, workspace_id: Uuid) -> DbResult<bool> {
+/// Upsert a theme while holding the caller's writer membership row.
+pub async fn upsert_authorized(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    update: Update<'_>,
+) -> AccessResult<WorkspaceThemeRow> {
+    let mut transaction = pool.begin().await?;
+    authorize(&mut transaction, workspace_id, user_id, true).await?;
+    let theme = upsert(&mut *transaction, workspace_id, &update).await?;
+    transaction.commit().await?;
+    Ok(theme)
+}
+
+async fn delete<'e, E>(executor: E, workspace_id: Uuid) -> DbResult<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query("DELETE FROM workspace_themes WHERE workspace_id = $1")
         .bind(workspace_id)
-        .execute(pool)
+        .execute(executor)
         .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+/// Delete a theme while holding the caller's writer membership row.
+pub async fn delete_authorized(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> AccessResult<bool> {
+    let mut transaction = pool.begin().await?;
+    authorize(&mut transaction, workspace_id, user_id, true).await?;
+    let deleted = delete(&mut *transaction, workspace_id).await?;
+    transaction.commit().await?;
+    Ok(deleted)
 }

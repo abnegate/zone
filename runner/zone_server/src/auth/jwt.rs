@@ -7,6 +7,14 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode}
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Purpose encoded into every newly issued JWT.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TokenKind {
+    Access,
+    Refresh,
+}
+
 /// JWT claims
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
@@ -26,6 +34,22 @@ pub struct Claims {
     pub jti: String,
     /// Whether user is admin
     pub is_admin: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct TokenClaims {
+    #[serde(flatten)]
+    claims: Claims,
+    token_type: TokenKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<Uuid>,
+}
+
+/// Claims from a token proven to be an access credential.
+#[derive(Debug, Clone)]
+pub struct AccessClaims {
+    pub claims: Claims,
+    pub session_id: Option<Uuid>,
 }
 
 impl Claims {
@@ -59,6 +83,9 @@ pub enum JwtError {
     #[error("Invalid token")]
     Invalid,
 
+    #[error("Token is not an access token")]
+    WrongKind,
+
     #[error("JWT secret must be at least 32 characters long")]
     SecretTooShort,
 
@@ -91,20 +118,69 @@ pub fn create_access_token(
     secret: &str,
     expires_in: Duration,
 ) -> Result<String, JwtError> {
+    create_access_token_for_session(
+        user_id,
+        email,
+        roles,
+        permissions,
+        is_admin,
+        None,
+        secret,
+        expires_in,
+    )
+}
+
+/// Create an access token bound to a live authentication session.
+pub fn create_session_access_token(
+    user_id: Uuid,
+    email: &str,
+    roles: Vec<String>,
+    permissions: Vec<String>,
+    is_admin: bool,
+    session_id: Uuid,
+    secret: &str,
+    expires_in: Duration,
+) -> Result<String, JwtError> {
+    create_access_token_for_session(
+        user_id,
+        email,
+        roles,
+        permissions,
+        is_admin,
+        Some(session_id),
+        secret,
+        expires_in,
+    )
+}
+
+fn create_access_token_for_session(
+    user_id: Uuid,
+    email: &str,
+    roles: Vec<String>,
+    permissions: Vec<String>,
+    is_admin: bool,
+    session_id: Option<Uuid>,
+    secret: &str,
+    expires_in: Duration,
+) -> Result<String, JwtError> {
     validate_secret(secret)?;
 
     let now = Utc::now();
     let exp = now + expires_in;
 
-    let claims = Claims {
-        sub: user_id.to_string(),
-        email: email.to_string(),
-        roles,
-        permissions,
-        is_admin,
-        exp: exp.timestamp(),
-        iat: now.timestamp(),
-        jti: Uuid::new_v4().to_string(),
+    let claims = TokenClaims {
+        claims: Claims {
+            sub: user_id.to_string(),
+            email: email.to_string(),
+            roles,
+            permissions,
+            is_admin,
+            exp: exp.timestamp(),
+            iat: now.timestamp(),
+            jti: Uuid::new_v4().to_string(),
+        },
+        token_type: TokenKind::Access,
+        session_id,
     };
 
     let token = encode(
@@ -127,16 +203,19 @@ pub fn create_refresh_token(
     let now = Utc::now();
     let exp = now + expires_in;
 
-    // Refresh tokens have minimal claims
-    let claims = Claims {
-        sub: user_id.to_string(),
-        email: String::new(),
-        roles: vec![],
-        permissions: vec![],
-        is_admin: false,
-        exp: exp.timestamp(),
-        iat: now.timestamp(),
-        jti: Uuid::new_v4().to_string(),
+    let claims = TokenClaims {
+        claims: Claims {
+            sub: user_id.to_string(),
+            email: String::new(),
+            roles: vec![],
+            permissions: vec![],
+            is_admin: false,
+            exp: exp.timestamp(),
+            iat: now.timestamp(),
+            jti: Uuid::new_v4().to_string(),
+        },
+        token_type: TokenKind::Refresh,
+        session_id: None,
     };
 
     let token = encode(
@@ -148,12 +227,12 @@ pub fn create_refresh_token(
     Ok(token)
 }
 
-/// Validate and decode a JWT token
-pub fn validate_token(token: &str, secret: &str) -> Result<Claims, JwtError> {
+/// Validate and decode claims for tests that exercise the common JWT fields.
+fn validate_token(token: &str, secret: &str) -> Result<Claims, JwtError> {
     validate_secret(secret)?;
 
     let validation = Validation {
-        validate_exp: true,
+        leeway: 0,
         ..Validation::default()
     };
 
@@ -168,6 +247,34 @@ pub fn validate_token(token: &str, secret: &str) -> Result<Claims, JwtError> {
     })?;
 
     Ok(token_data.claims)
+}
+
+/// Validate a JWT and prove it was issued for access rather than refresh.
+pub fn validate_access_token(token: &str, secret: &str) -> Result<AccessClaims, JwtError> {
+    validate_secret(secret)?;
+
+    let validation = Validation {
+        leeway: 0,
+        ..Validation::default()
+    };
+    let token_data = decode::<TokenClaims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|error| match error.kind() {
+        jsonwebtoken::errors::ErrorKind::ExpiredSignature => JwtError::Expired,
+        _ => JwtError::Invalid,
+    })?;
+
+    if token_data.claims.token_type != TokenKind::Access {
+        return Err(JwtError::WrongKind);
+    }
+
+    Ok(AccessClaims {
+        claims: token_data.claims.claims,
+        session_id: token_data.claims.session_id,
+    })
 }
 
 /// Extract token from Authorization header
@@ -235,8 +342,6 @@ mod tests {
         assert_eq!(extract_bearer_token("abc123"), None);
     }
 
-    // ============ Admin permission tests ============
-
     #[test]
     fn test_admin_has_all_permissions() {
         let claims = Claims {
@@ -297,8 +402,6 @@ mod tests {
         assert!(!claims.has_permission("write"));
         assert!(!claims.has_role("admin"));
     }
-
-    // ============ Invalid secret handling tests ============
 
     #[test]
     fn test_validate_with_wrong_secret() {
@@ -391,8 +494,6 @@ mod tests {
         let result = create_refresh_token(user_id, short_secret, expires_in);
         assert!(matches!(result, Err(JwtError::SecretTooShort)));
     }
-
-    // ============ Entropy validation tests ============
 
     #[test]
     fn test_create_token_with_low_entropy_secret() {
@@ -488,8 +589,6 @@ mod tests {
         assert!(matches!(result, Err(JwtError::SecretLowEntropy)));
     }
 
-    // ============ Claims user_id() parsing tests ============
-
     #[test]
     fn test_user_id_valid_uuid() {
         let expected_id = Uuid::new_v4();
@@ -559,8 +658,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ============ Refresh token tests ============
-
     #[test]
     fn test_create_and_validate_refresh_token() {
         let user_id = Uuid::new_v4();
@@ -576,6 +673,40 @@ mod tests {
         assert!(claims.roles.is_empty());
         assert!(claims.permissions.is_empty());
         assert!(!claims.is_admin);
+    }
+
+    #[test]
+    fn test_refresh_token_is_not_an_access_credential() {
+        let user_id = Uuid::new_v4();
+        let secret = "refresh-secret-must-be-32-chars-or-longer-here";
+        let token = create_refresh_token(user_id, secret, Duration::days(7)).unwrap();
+
+        let result = validate_access_token(&token, secret);
+
+        assert!(matches!(result, Err(JwtError::WrongKind)));
+    }
+
+    #[test]
+    fn test_access_token_preserves_session_binding() {
+        let user_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let secret = "access-secret-must-be-32-chars-or-longer-here";
+        let token = create_session_access_token(
+            user_id,
+            "test@example.com",
+            vec!["user".to_string()],
+            vec!["read".to_string()],
+            false,
+            session_id,
+            secret,
+            Duration::hours(1),
+        )
+        .unwrap();
+
+        let access = validate_access_token(&token, secret).unwrap();
+
+        assert_eq!(access.claims.user_id().unwrap(), user_id);
+        assert_eq!(access.session_id, Some(session_id));
     }
 
     #[test]
@@ -605,8 +736,6 @@ mod tests {
 
         assert!(matches!(result, Err(JwtError::Expired)));
     }
-
-    // ============ JWT error type tests ============
 
     #[test]
     fn test_jwt_error_expired_display() {
@@ -655,8 +784,6 @@ mod tests {
         let result = validate_token("", secret);
         assert!(matches!(result, Err(JwtError::Invalid)));
     }
-
-    // ============ Additional edge case tests ============
 
     #[test]
     fn test_extract_bearer_token_empty() {

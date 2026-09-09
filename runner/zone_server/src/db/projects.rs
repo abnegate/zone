@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::DbResult;
 
 /// Project row from database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ProjectRow {
     pub id: Uuid,
     pub workspace_id: Option<Uuid>,
@@ -115,6 +115,26 @@ pub async fn get_project(pool: &PgPool, id: Uuid) -> DbResult<Option<ProjectRow>
         created_at: r.created_at,
         updated_at: r.updated_at,
     }))
+}
+
+/// Get a project only when it belongs to the specified workspace.
+pub async fn get_project_in_workspace(
+    pool: &PgPool,
+    id: Uuid,
+    workspace_id: Uuid,
+) -> DbResult<Option<ProjectRow>> {
+    sqlx::query_as::<_, ProjectRow>(
+        r#"
+        SELECT id, workspace_id, source_id, name, description, status,
+               github_repo_url, github_access_token, created_at, updated_at
+        FROM projects
+        WHERE id = $1 AND workspace_id = $2
+        "#,
+    )
+    .bind(id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
 }
 
 /// Create a new project

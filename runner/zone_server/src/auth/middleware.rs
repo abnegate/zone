@@ -12,7 +12,8 @@ use axum::{
 };
 use serde_json::json;
 
-use super::jwt::{Claims, extract_bearer_token, validate_token};
+use super::jwt::{AccessClaims, Claims, extract_bearer_token, validate_access_token};
+use crate::db::sessions;
 use crate::state::AppState;
 
 /// Auth error response
@@ -42,6 +43,32 @@ impl IntoResponse for AuthError {
 #[derive(Debug, Clone)]
 pub struct AuthUser(pub Claims);
 
+async fn require_active_session(state: &AppState, access: &AccessClaims) -> Result<(), AuthError> {
+    let user_id = access.claims.user_id().map_err(|_| AuthError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "Invalid token subject".to_string(),
+    })?;
+    let session_id = access.session_id.ok_or_else(|| AuthError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "Session expired or revoked".to_string(),
+    })?;
+
+    match sessions::is_active_user_session(state.db(), session_id, user_id).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Session expired or revoked".to_string(),
+        }),
+        Err(error) => {
+            tracing::error!(%error, %session_id, %user_id, "Failed to validate authentication session");
+            Err(AuthError {
+                status: StatusCode::UNAUTHORIZED,
+                message: "Unable to validate session".to_string(),
+            })
+        }
+    }
+}
+
 impl<S> FromRequestParts<S> for AuthUser
 where
     S: Send + Sync,
@@ -70,13 +97,16 @@ where
         })?;
 
         // Validate the token
-        let claims =
-            validate_token(token, app_state.config().jwt_secret()).map_err(|e| AuthError {
-                status: StatusCode::UNAUTHORIZED,
-                message: format!("Invalid token: {}", e),
+        let access =
+            validate_access_token(token, app_state.config().jwt_secret()).map_err(|e| {
+                AuthError {
+                    status: StatusCode::UNAUTHORIZED,
+                    message: format!("Invalid token: {}", e),
+                }
             })?;
+        require_active_session(&app_state, &access).await?;
 
-        Ok(AuthUser(claims))
+        Ok(AuthUser(access.claims))
     }
 }
 
@@ -137,16 +167,19 @@ pub async fn require_auth(
     })?;
 
     // Validate the token
-    let claims = validate_token(token, state.config().jwt_secret()).map_err(|e| {
+    let access = validate_access_token(token, state.config().jwt_secret()).map_err(|e| {
         crate::metrics::record_auth_failure("invalid_token");
         AuthError {
             status: StatusCode::UNAUTHORIZED,
             message: format!("Invalid token: {}", e),
         }
     })?;
+    require_active_session(&state, &access)
+        .await
+        .inspect_err(|_| crate::metrics::record_auth_failure("inactive_session"))?;
 
     // Add claims to request extensions
-    request.extensions_mut().insert(claims);
+    request.extensions_mut().insert(access.claims);
 
     Ok(next.run(request).await)
 }

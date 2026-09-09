@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{
-    AuthUser, create_access_token, create_refresh_token, hash_password, verify_password,
+    AuthUser, create_refresh_token, create_session_access_token, hash_password, verify_password,
 };
 use crate::db::{
     organization_members::{self, OrgRole},
@@ -559,25 +559,6 @@ async fn generate_tokens(
 ) -> Result<(String, String), (StatusCode, Json<ErrorResponse>)> {
     let config = state.config();
 
-    // Create access token
-    let access_token = create_access_token(
-        user.user.id,
-        &user.user.email,
-        user.roles.clone(),
-        user.permissions.clone(),
-        user.user.is_admin.unwrap_or(false),
-        config.jwt_secret(),
-        config.access_token_lifetime(),
-    )
-    .map_err(|e| {
-        tracing::error!("Token creation error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        )
-    })?;
-
-    // Create refresh token
     let refresh_token = create_refresh_token(
         user.user.id,
         config.jwt_secret(),
@@ -612,28 +593,50 @@ async fn generate_tokens(
         ));
     }
 
-    // Create session record to track this authentication
-    if let Err(e) = sessions::create_session(
+    let session = match sessions::create_session(
         state.db(),
         user.user.id,
         &token_hash,
         ip_address,
         user_agent,
-        None, // device_info can be parsed from user_agent if needed
+        None,
         expires_at.naive_utc(),
     )
     .await
     {
-        tracing::error!("Failed to create session: {}", e);
-        // Don't fail auth if session creation fails, just log it
-    }
+        Ok(session) => session,
+        Err(error) => {
+            tracing::error!("Failed to create session: {}", error);
+            let _ = refresh_tokens::revoke_refresh_token(state.db(), &token_hash).await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            ));
+        }
+    };
+
+    let access_token = create_session_access_token(
+        user.user.id,
+        &user.user.email,
+        user.roles.clone(),
+        user.permissions.clone(),
+        user.user.is_admin.unwrap_or(false),
+        session.id,
+        config.jwt_secret(),
+        config.access_token_lifetime(),
+    )
+    .map_err(|error| {
+        tracing::error!("Token creation error: {}", error);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("Internal server error")),
+        )
+    })?;
 
     Ok((access_token, refresh_token))
 }
 
-// =============================================================================
 // Email Verification Endpoints
-// =============================================================================
 
 /// Request to verify an email address
 #[derive(Debug, Deserialize)]
@@ -772,9 +775,7 @@ pub async fn resend_verification(
         .into_response()
 }
 
-// =============================================================================
 // Password Reset Endpoints
-// =============================================================================
 
 /// Request to initiate password reset
 #[derive(Debug, Deserialize)]
