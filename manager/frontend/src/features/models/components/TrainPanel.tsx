@@ -6,6 +6,7 @@ import {
   type DropReason,
   modelsApi,
   type TrainQuality,
+  type TrainRemediation,
   type TrainResult,
   type TrainScreening,
 } from '../../../api/models';
@@ -84,6 +85,12 @@ const REASONS: Record<DropReason, { singular: string; plural: string; meaning: s
   },
 };
 
+const REMEDIATION_OUTCOMES: Record<TrainRemediation['outcome'], string> = {
+  used: 'It passed the final screen, and the improved copy was used.',
+  still_rejected: 'It did not pass the final screen, so it was not used.',
+  failed: 'Zone could not create an improved copy, so it was not used.',
+};
+
 let sequence = 0;
 
 function nextKey(): string {
@@ -150,7 +157,7 @@ function label(reason: DropReason, count: number): string {
 }
 
 function Screening({ screening }: { screening: TrainScreening | null }): ReactElement | null {
-  if (!screening?.dropped?.length) return null;
+  if (!screening) return null;
 
   const groups = (Object.keys(REASONS) as DropReason[])
     .map((reason) => ({
@@ -160,27 +167,56 @@ function Screening({ screening }: { screening: TrainScreening | null }): ReactEl
         .map((image) => image.filename),
     }))
     .filter((group) => group.filenames.length > 0);
+  const attempted = screening.attempted ?? [];
 
-  if (groups.length === 0) return null;
+  if (groups.length === 0 && attempted.length === 0) return null;
 
   return (
     <div className="train-screening">
       <p className="train-screening-title">Screened before training</p>
-      <p className="train-screening-summary">
-        Trained on {screening.kept} of {screening.kept + screening.dropped.length} images. These
-        were set aside:
-      </p>
-      <ul className="train-screening-list">
-        {groups.map((group) => (
-          <li className="train-screening-item" key={group.reason}>
-            <span className="tag train-drop">{label(group.reason, group.filenames.length)}</span>
-            <span>{REASONS[group.reason].meaning}</span>
-            <span className="train-screening-files">{group.filenames.join(', ')}</span>
-          </li>
-        ))}
-      </ul>
+      {groups.length > 0 && (
+        <>
+          <p className="train-screening-summary">
+            Trained on {screening.kept} of {screening.kept + screening.dropped.length} images.
+            These were set aside:
+          </p>
+          <ul className="train-screening-list">
+            {groups.map((group) => (
+              <li className="train-screening-item" key={group.reason}>
+                <span className="tag train-drop">
+                  {label(group.reason, group.filenames.length)}
+                </span>
+                <span>{REASONS[group.reason].meaning}</span>
+                <span className="train-screening-files">{group.filenames.join(', ')}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {attempted.length > 0 && (
+        <>
+          <p className="train-screening-title">Image repairs</p>
+          <p className="train-screening-summary">
+            Zone tried to improve these images before the final screen:
+          </p>
+          <ul className="train-screening-list">
+            {attempted.map((image, index) => (
+              <li
+                className="train-screening-item"
+                key={`${image.filename}:${image.reason}:${index}`}
+              >
+                <span className="tag train-drop">{image.filename}</span>
+                <span>
+                  We tried to improve this {REASONS[image.reason].singular}.{' '}
+                  {REMEDIATION_OUTCOMES[image.outcome]}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       <p className="train-screening-note">
-        Your originals are untouched. Screening only decides what a run learns from.
+        Your originals are untouched. Zone only uses repaired copies inside this training run.
       </p>
     </div>
   );

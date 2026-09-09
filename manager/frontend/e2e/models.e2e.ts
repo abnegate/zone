@@ -43,6 +43,11 @@ type TrainResult = {
   screening?: {
     kept: number;
     dropped: Array<{ filename: string; reason: 'duplicate' | 'blurred' | 'small' }>;
+    attempted?: Array<{
+      filename: string;
+      reason: 'duplicate' | 'blurred' | 'small';
+      outcome: 'used' | 'still_rejected' | 'failed';
+    }>;
   } | null;
 };
 
@@ -873,7 +878,46 @@ test.describe('Models Page', () => {
     await expect(panel.getByRole('alert')).toHaveCount(0);
   });
 
-  test('says nothing about screening when nothing was dropped', async ({ page }) => {
+  test('receipts image repairs even when the final screen keeps every target', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.36,
+        checkpoint: 'step400',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+      screening: {
+        kept: 3,
+        dropped: [],
+        attempted: [
+          { filename: 'small.png', reason: 'small', outcome: 'used' },
+          { filename: 'blurred.png', reason: 'blurred', outcome: 'still_rejected' },
+          { filename: 'broken.png', reason: 'small', outcome: 'failed' },
+        ],
+      },
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const screening = panel.locator('.train-screening');
+    await expect(screening).toContainText('Image repairs');
+    await expect(screening).toContainText(
+      'Zone tried to improve these images before the final screen'
+    );
+    const items = screening.locator('.train-screening-item');
+    await expect(items).toHaveCount(3);
+    await expect(items.nth(0)).toContainText('small.png');
+    await expect(items.nth(0)).toContainText('improved copy was used');
+    await expect(items.nth(1)).toContainText('blurred.png');
+    await expect(items.nth(1)).toContainText('did not pass the final screen');
+    await expect(items.nth(2)).toContainText('broken.png');
+    await expect(items.nth(2)).toContainText('could not create an improved copy');
+  });
+
+  test('says nothing about screening when nothing was dropped or repaired', async ({ page }) => {
     const panel = trainPanel(page);
     await routeTrainResult(page, {
       filename: 'zoneface.safetensors',

@@ -43,9 +43,16 @@ export type DroppedImage = {
   reason: DropReason;
 };
 
+export type TrainRemediation = {
+  filename: string;
+  reason: DropReason;
+  outcome: 'used' | 'still_rejected' | 'failed';
+};
+
 export type TrainScreening = {
   kept: number;
   dropped: DroppedImage[];
+  attempted?: TrainRemediation[];
 };
 
 export type TrainResult = {

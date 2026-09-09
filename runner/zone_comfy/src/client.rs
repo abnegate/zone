@@ -78,6 +78,21 @@ impl SourceImage {
             mime,
         })
     }
+
+    /// Creates an image source when only its encoded contents are available.
+    pub fn from_bytes(bytes: impl Into<bytes::Bytes>) -> Result<Self, Error> {
+        let bytes = bytes.into();
+        let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "image/png"
+        } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+            "image/jpeg"
+        } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+            "image/webp"
+        } else {
+            return Err(Error::Configuration("source image type is not supported"));
+        };
+        Self::new(bytes, mime)
+    }
 }
 
 #[derive(Debug, Clone)]

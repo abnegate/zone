@@ -330,6 +330,53 @@ describe('TrainPanel', () => {
     expect(screen.queryByText('Strong')).toBeNull();
   });
 
+  it('reports every image repair attempt after the final screen', async () => {
+    mockTrain.mockImplementationOnce(() =>
+      Promise.resolve({
+        filename: 'zoneface.safetensors',
+        quality: null,
+        dataset: [],
+        screening: {
+          kept: 3,
+          dropped: [],
+          attempted: [
+            { filename: 'small.png', reason: 'small' as const, outcome: 'used' as const },
+            {
+              filename: 'blurred.png',
+              reason: 'blurred' as const,
+              outcome: 'still_rejected' as const,
+            },
+            { filename: 'broken.png', reason: 'small' as const, outcome: 'failed' as const },
+          ],
+        },
+      })
+    );
+    render(<TrainPanel onTrained={mock()} />);
+    await selectBase('FLUX.1 Schnell');
+    fillIdentity();
+    await addTargets(file('target.png', 'target'));
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+
+    await screen.findByText('Image repairs');
+    expect(
+      screen.getByText('Zone tried to improve these images before the final screen:')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('It passed the final screen, and the improved copy was used.')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('It did not pass the final screen, so it was not used.')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Zone could not create an improved copy, so it was not used.')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Your originals are untouched. Zone only uses repaired copies inside this training run.'
+      )
+    ).toBeInTheDocument();
+  });
+
   it('merges deferred captions by stable target key without overwriting later edits', async () => {
     const response = deferred<{ captions: string[] }>();
     mockCaptions.mockImplementationOnce(() => response.promise);

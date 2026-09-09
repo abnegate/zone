@@ -322,6 +322,19 @@ The indexed manifest, target latent, source reference, and instruction are
 mapped together by ComfyUI's list execution. Missing, reordered, or extra pairs
 fail before training.
 
+### Training-set repair
+
+Before cropping or captioning, Zone screens target images for near-duplicates,
+blur, and insufficient resolution. Near-duplicates stay out of the run. For a
+target rejected as blurry or too small, Zone first sends a temporary copy through
+the configured image-upscale workflow, then screens that copy again. Only a copy
+that passes the final screen is staged for training; uploads are never changed.
+
+The Models Train result records every attempted repair, including an unavailable
+or failed upscale and a repair that still does not meet the screen. This makes it
+clear why an image was or was not used without asking the user to find their
+original upload again.
+
 ### Train on Dev, not Schnell
 
 FLUX.1 Schnell is timestep-distilled to produce an image in four steps without

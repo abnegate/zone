@@ -1,6 +1,7 @@
 //! Packaged LoRA training jobs. Default path posts ZoneTrainLoRA to ComfyUI.
 
 use crate::caption::{Captioner, Draft};
+use crate::client::{Client, SourceImage};
 use crate::config::Config;
 use crate::inventory::{PUBLICATION_DIRECTORY, WeightDocument, WeightSidecar, publication_marker};
 use crate::quality::Quality;
@@ -66,12 +67,30 @@ pub struct TrainOutcome {
 pub struct Screening {
     pub kept: usize,
     pub dropped: Vec<Dropped>,
+    pub attempted: Vec<Remediation>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Dropped {
     pub filename: String,
     pub reason: crate::screening::Rejection,
+}
+
+/// The result of trying the configured image upscaler before rejecting a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemediationOutcome {
+    Used,
+    StillRejected,
+    Failed,
+}
+
+/// One target that Zone tried to repair before selecting the training set.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct Remediation {
+    pub filename: String,
+    pub reason: crate::screening::Rejection,
+    pub outcome: RemediationOutcome,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +109,12 @@ struct ScreenedImage {
     /// Base64 of the crop, kept only for identity runs, which caption it.
     encoded: Option<String>,
     group: usize,
+}
+
+struct RemediationAttempt {
+    index: usize,
+    remediation: Remediation,
+    replaced: bool,
 }
 
 struct Attempt {
@@ -201,7 +226,7 @@ pub async fn train(
     litellm_key: String,
     request: TrainRequest,
 ) -> Result<TrainOutcome, TrainError> {
-    train_with_screening(
+    train_with_remediation(
         config,
         litellm_host,
         litellm_key,
@@ -211,12 +236,34 @@ pub async fn train(
     .await
 }
 
+async fn train_with_remediation(
+    config: &Config,
+    litellm_host: String,
+    litellm_key: String,
+    request: TrainRequest,
+    screening: fn(&[Vec<u8>], u32) -> crate::screening::Verdict,
+) -> Result<TrainOutcome, TrainError> {
+    train_with_pipeline(config, litellm_host, litellm_key, request, screening, true).await
+}
+
+#[cfg(test)]
 async fn train_with_screening(
     config: &Config,
     litellm_host: String,
     litellm_key: String,
     request: TrainRequest,
     screening: fn(&[Vec<u8>], u32) -> crate::screening::Verdict,
+) -> Result<TrainOutcome, TrainError> {
+    train_with_pipeline(config, litellm_host, litellm_key, request, screening, false).await
+}
+
+async fn train_with_pipeline(
+    config: &Config,
+    litellm_host: String,
+    litellm_key: String,
+    request: TrainRequest,
+    screening: fn(&[Vec<u8>], u32) -> crate::screening::Verdict,
+    repair_rejections: bool,
 ) -> Result<TrainOutcome, TrainError> {
     if config.train_command.is_none() && !config.enabled {
         return Err(TrainError::Disabled);
@@ -242,14 +289,27 @@ async fn train_with_screening(
         ));
     }
     validate_pairing(&request.images, &model)?;
-    let decoded = request
+    let mut decoded = request
         .images
         .iter()
         .map(|image| decode_base64(&image.bytes_base64))
         .collect::<Result<Vec<Vec<u8>>, TrainError>>()?;
     let side = crate::train::packaged_config()?.resolution();
-    let verdict = screening(&decoded, side);
+    let mut verdict = screening(&decoded, side);
     validate_verdict(&verdict, request.images.len())?;
+    let mut attempts = Vec::new();
+    if repair_rejections {
+        loop {
+            let fresh = remediate(config, &mut decoded, &request.images, &verdict, &attempts).await;
+            if fresh.is_empty() {
+                break;
+            }
+            attempts.extend(fresh);
+            verdict = screening(&decoded, side);
+            validate_verdict(&verdict, request.images.len())?;
+        }
+    }
+    let attempted = finish_remediation(attempts, &verdict);
     let dropped = verdict
         .drop
         .iter()
@@ -270,7 +330,7 @@ async fn train_with_screening(
         .enumerate()
         .filter(|(index, _)| verdict.keep.binary_search(index).is_ok())
         .map(|(original, (image, group))| {
-            let framed = frame(&subject, image, side)?;
+            let framed = frame_with_target(&subject, image, &decoded[original], side)?;
             Ok(ScreenedImage {
                 original,
                 encoded: (!edit).then(|| framed.encoded()),
@@ -457,6 +517,7 @@ async fn train_with_screening(
         screening: Screening {
             kept: verdict.keep.len(),
             dropped,
+            attempted,
         },
     })
 }
@@ -511,6 +572,107 @@ fn validate_verdict(verdict: &crate::screening::Verdict, count: usize) -> Result
         ));
     }
     Ok(())
+}
+
+fn repairable(rejection: crate::screening::Rejection) -> bool {
+    matches!(
+        rejection,
+        crate::screening::Rejection::Blurred | crate::screening::Rejection::Small
+    )
+}
+
+async fn remediate(
+    config: &Config,
+    images: &mut [Vec<u8>],
+    request: &[TrainImage],
+    verdict: &crate::screening::Verdict,
+    previous: &[RemediationAttempt],
+) -> Vec<RemediationAttempt> {
+    let mut attempts = verdict
+        .drop
+        .iter()
+        .filter(|(index, rejection)| {
+            repairable(*rejection) && !previous.iter().any(|attempt| attempt.index == *index)
+        })
+        .map(|(index, reason)| RemediationAttempt {
+            index: *index,
+            remediation: Remediation {
+                filename: request[*index].filename.clone(),
+                reason: *reason,
+                outcome: RemediationOutcome::Failed,
+            },
+            replaced: false,
+        })
+        .collect::<Vec<_>>();
+    if attempts.is_empty() {
+        return attempts;
+    }
+
+    let client = match Client::new(config.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(error = %error, "could not initialize LoRA image remediation");
+            return attempts;
+        }
+    };
+    let (_cancel, mut cancel) = tokio::sync::broadcast::channel(1);
+    let (progress, updates) = tokio::sync::mpsc::unbounded_channel();
+    drop(updates);
+
+    for attempt in &mut attempts {
+        let Some(bytes) = images.get(attempt.index).cloned() else {
+            tracing::warn!("LoRA screening returned an invalid remediation index");
+            continue;
+        };
+        let source = match SourceImage::from_bytes(bytes) {
+            Ok(source) => source,
+            Err(error) => {
+                tracing::warn!(error = %error, "could not prepare a LoRA image for remediation");
+                continue;
+            }
+        };
+        let generated = match client
+            .upscale_image(&source, &mut cancel, progress.clone())
+            .await
+        {
+            Ok(generated) => generated,
+            Err(error) => {
+                tracing::warn!(error = %error, "could not remediate a LoRA training image");
+                continue;
+            }
+        };
+        let Some(repaired) = generated.into_iter().next() else {
+            tracing::warn!("LoRA image remediation returned no image");
+            continue;
+        };
+        if decode::decode(&repaired.bytes).is_err() {
+            tracing::warn!("LoRA image remediation returned an undecodable image");
+            continue;
+        }
+        images[attempt.index] = repaired.bytes.to_vec();
+        attempt.replaced = true;
+    }
+    attempts
+}
+
+fn finish_remediation(
+    attempts: Vec<RemediationAttempt>,
+    verdict: &crate::screening::Verdict,
+) -> Vec<Remediation> {
+    attempts
+        .into_iter()
+        .map(|mut attempt| {
+            if attempt.replaced {
+                attempt.remediation.outcome = if verdict.keep.binary_search(&attempt.index).is_ok()
+                {
+                    RemediationOutcome::Used
+                } else {
+                    RemediationOutcome::StillRejected
+                };
+            }
+            attempt.remediation
+        })
+        .collect()
 }
 
 fn identity_caption(caption: &str, trigger: &str) -> String {
@@ -1125,7 +1287,17 @@ impl Framed {
 /// an uncropped photo trains on its own letterboxing and on however much
 /// background the photographer happened to include.
 fn frame(subject: &Subject, image: &TrainImage, side: u32) -> Result<Framed, TrainError> {
-    let raster = decode(&image.bytes_base64)?;
+    let target = decode_base64(&image.bytes_base64)?;
+    frame_with_target(subject, image, &target, side)
+}
+
+fn frame_with_target(
+    subject: &Subject,
+    image: &TrainImage,
+    target: &[u8],
+    side: u32,
+) -> Result<Framed, TrainError> {
+    let raster = decode_bytes(target)?;
     let focus = subject.focus(&raster, CENTRE);
     let control = match &image.before_base64 {
         // The control has to keep answering the target pixel for pixel, so it
@@ -1153,14 +1325,11 @@ fn square(
 /// Decoding is also what applies a photo's EXIF rotation: a sideways image
 /// otherwise trains a sideways subject.
 fn decode(base64: &str) -> Result<Raster, TrainError> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(base64.trim())
-        .map_err(|_| TrainError::Invalid("image is not valid base64"))?;
-    if bytes.is_empty() {
-        return Err(TrainError::Invalid("image is empty"));
-    }
-    decode::decode(&bytes)
+    decode_bytes(&decode_base64(base64)?)
+}
+
+fn decode_bytes(bytes: &[u8]) -> Result<Raster, TrainError> {
+    decode::decode(bytes)
         .map_err(|_| TrainError::Invalid("training images must be PNG, JPEG, or WebP"))
 }
 
@@ -1305,6 +1474,22 @@ mod tests {
             keep: vec![0, 2],
             drop: vec![(1, Rejection::Duplicate)],
         }
+    }
+
+    fn reject_tiny(images: &[Vec<u8>], _resolution: u32) -> Verdict {
+        let mut keep = Vec::new();
+        let mut drop = Vec::new();
+        for (index, image) in images.iter().enumerate() {
+            let (width, height) = zone_vision::decode::decode(image)
+                .expect("test images are decodable")
+                .oriented_size();
+            if width.min(height) < 2 {
+                drop.push((index, Rejection::Small));
+            } else {
+                keep.push(index);
+            }
+        }
+        Verdict { keep, drop }
     }
 
     fn training_entries(config: &Config) -> Vec<PathBuf> {
@@ -1918,6 +2103,157 @@ mod tests {
                 "control_1/{index:04} must hold the {name} pair's reference"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_repaired_target_is_rescreened_and_staged_instead_of_its_original() {
+        let server = MockServer::start().await;
+        let repaired = png(&Rendered {
+            width: 2,
+            height: 2,
+            pixels: vec![220, 30, 90, 220, 30, 90, 220, 30, 90, 220, 30, 90],
+        })
+        .expect("repaired fixture");
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(Stage)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains(
+                "ImageUpscaleWithModel",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "repair"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/history/repair"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "repair": {"status": {"status_str": "success"}, "outputs": {
+                    "4": {"images": [{"filename": "repaired.png", "subfolder": "", "type": "temp"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(repaired.clone()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let staged = tempfile::tempdir().expect("staged target");
+        let target = staged.path().join("target.png");
+        let command = format!(
+            "cp \"$ZONE_TRAIN_DIR/targets/0000.png\" \"{}\"; printf trained > \"$ZONE_TRAIN_OUTPUT\"",
+            target.display()
+        );
+        let (_root, mut config) = harness(&command);
+        config.enabled = true;
+        config.base_url = server.uri();
+        config.poll_interval_ms = 1;
+
+        let outcome = train_with_remediation(
+            &config,
+            String::new(),
+            String::new(),
+            identity("repaired"),
+            reject_tiny,
+        )
+        .await
+        .expect("repaired target trains");
+
+        assert_eq!(outcome.screening.kept, 1);
+        assert!(outcome.screening.dropped.is_empty());
+        assert_eq!(
+            outcome.screening.attempted,
+            vec![Remediation {
+                filename: "target.png".into(),
+                reason: Rejection::Small,
+                outcome: RemediationOutcome::Used,
+            }]
+        );
+        let expected = frame(
+            &Subject::shared(&config),
+            &TrainImage {
+                filename: "target.png".into(),
+                caption: "a portrait".into(),
+                bytes_base64: base64::engine::general_purpose::STANDARD.encode(&repaired),
+                before_base64: None,
+                group: None,
+            },
+            crate::train::packaged_config().unwrap().resolution(),
+        )
+        .expect("expected repaired target")
+        .target;
+        assert_eq!(fs::read(target).unwrap(), expected);
+    }
+
+    #[test]
+    fn final_screen_marks_repaired_targets_used_or_rejected_and_keeps_failures_visible() {
+        let attempted = finish_remediation(
+            vec![
+                RemediationAttempt {
+                    index: 0,
+                    remediation: Remediation {
+                        filename: "used.png".into(),
+                        reason: Rejection::Small,
+                        outcome: RemediationOutcome::Failed,
+                    },
+                    replaced: true,
+                },
+                RemediationAttempt {
+                    index: 1,
+                    remediation: Remediation {
+                        filename: "rejected.png".into(),
+                        reason: Rejection::Blurred,
+                        outcome: RemediationOutcome::Failed,
+                    },
+                    replaced: true,
+                },
+                RemediationAttempt {
+                    index: 2,
+                    remediation: Remediation {
+                        filename: "failed.png".into(),
+                        reason: Rejection::Small,
+                        outcome: RemediationOutcome::Failed,
+                    },
+                    replaced: false,
+                },
+            ],
+            &Verdict {
+                keep: vec![0],
+                drop: vec![(1, Rejection::Blurred), (2, Rejection::Small)],
+            },
+        );
+
+        assert_eq!(
+            attempted,
+            vec![
+                Remediation {
+                    filename: "used.png".into(),
+                    reason: Rejection::Small,
+                    outcome: RemediationOutcome::Used,
+                },
+                Remediation {
+                    filename: "rejected.png".into(),
+                    reason: Rejection::Blurred,
+                    outcome: RemediationOutcome::StillRejected,
+                },
+                Remediation {
+                    filename: "failed.png".into(),
+                    reason: Rejection::Small,
+                    outcome: RemediationOutcome::Failed,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
