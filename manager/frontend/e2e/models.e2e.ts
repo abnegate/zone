@@ -179,7 +179,12 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ filename: adapter.name }),
+        body: JSON.stringify({
+          filename: adapter.name,
+          quality: null,
+          dataset: [],
+          screening: null,
+        }),
       });
     } else if (method === 'DELETE') {
       route.fulfill({ status: 200, body: '' });
@@ -377,7 +382,9 @@ test.describe('Models Page', () => {
       page.getByText('subject.mp4: 24 frames read at 8.0/s, 2 kept')
     ).toBeVisible();
     await expect(page.getByText('Caption for subject.mp4 frame-0000.png')).toBeVisible();
-    await expect(page.getByText('mirrored')).toBeVisible();
+    await expect(
+      page.getByText('subject.mp4 frame-0001.png (mirrored)', { exact: true })
+    ).toBeVisible();
   });
 
   test('submits a LoRA and lists the trained adapter', async ({ page }) => {
