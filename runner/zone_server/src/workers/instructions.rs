@@ -65,6 +65,13 @@ struct Prepared {
     length: usize,
 }
 
+/// One file's leading bytes, and whether `MAX_FILE_BYTES` is what ended the
+/// read rather than the file itself.
+struct Bounded {
+    bytes: Vec<u8>,
+    cut: bool,
+}
+
 /// Why a candidate file contributed nothing.
 enum Skipped {
     /// This repository does not carry the file, or it holds only whitespace.
@@ -165,8 +172,8 @@ fn collect(root: &Path) -> Vec<Prepared> {
 
 fn prepare(root: &Path, name: &'static str) -> Result<Prepared, Skipped> {
     let path = require_regular_file(root, &root.join(name))?;
-    let bytes = read_bounded(&path).map_err(rejected)?;
-    let text = decode(&bytes).ok_or_else(|| Skipped::Rejected("not valid UTF-8".to_string()))?;
+    let bounded = read_bounded(&path).map_err(rejected)?;
+    let text = decode(&bounded).ok_or_else(|| Skipped::Rejected("not valid UTF-8".to_string()))?;
     let body = escape(&normalize(text.trim()));
     if body.is_empty() {
         return Err(Skipped::Absent);
@@ -199,21 +206,26 @@ fn require_regular_file(root: &Path, path: &Path) -> Result<PathBuf, Skipped> {
     Ok(real)
 }
 
-fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
+/// The byte past the bound is what separates a file the bound cut from one that
+/// ended there of its own accord; the length cannot, because a file of exactly
+/// `MAX_FILE_BYTES` was read whole.
+fn read_bounded(path: &Path) -> io::Result<Bounded> {
+    let mut file = fs::File::open(path)?;
     let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(MAX_FILE_BYTES)
-        .read_to_end(&mut bytes)?;
-    Ok(bytes)
+    file.by_ref().take(MAX_FILE_BYTES).read_to_end(&mut bytes)?;
+    let cut = file.read(&mut [0u8; 1])? > 0;
+    Ok(Bounded { bytes, cut })
 }
 
-/// A character the read bound split keeps its valid prefix; anything genuinely
-/// malformed is refused, because a lossy decode invents content nobody wrote.
-fn decode(bytes: &[u8]) -> Option<&str> {
-    match std::str::from_utf8(bytes) {
+/// Only the character our own read bound split keeps its valid prefix. An
+/// incomplete sequence ending a file we read whole is the file's own tail, so it
+/// is refused with every other malformed case, because a lossy decode invents
+/// content nobody wrote.
+fn decode(bounded: &Bounded) -> Option<&str> {
+    match std::str::from_utf8(&bounded.bytes) {
         Ok(text) => Some(text),
-        Err(error) if error.error_len().is_none() => {
-            std::str::from_utf8(&bytes[..error.valid_up_to()]).ok()
+        Err(error) if bounded.cut && error.error_len().is_none() => {
+            std::str::from_utf8(&bounded.bytes[..error.valid_up_to()]).ok()
         }
         Err(_) => None,
     }
@@ -516,6 +528,25 @@ mod tests {
         let rendered = block(root.path());
 
         assert!(!rendered.contains("CLAUDE.md"), "{rendered}");
+        assert!(!rendered.contains('\u{fffd}'), "{rendered}");
+        assert_eq!(
+            body(&rendered, "AGENTS.md"),
+            "Run the suite before pushing."
+        );
+    }
+
+    /// The tail of a whole file is the file's own, so it carries none of the
+    /// licence a character our read bound split does.
+    #[test]
+    fn an_incomplete_sequence_ending_a_whole_file_is_refused_rather_than_salvaged() {
+        let root = checkout();
+        fs::write(root.path().join("CLAUDE.md"), b"safe\xe2\x82").expect("the file is written");
+        write(root.path(), "AGENTS.md", "Run the suite before pushing.");
+
+        let rendered = block(root.path());
+
+        assert!(!rendered.contains("CLAUDE.md"), "{rendered}");
+        assert!(!rendered.contains("safe"), "{rendered}");
         assert!(!rendered.contains('\u{fffd}'), "{rendered}");
         assert_eq!(
             body(&rendered, "AGENTS.md"),
