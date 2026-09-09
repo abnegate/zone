@@ -67,7 +67,7 @@ async fn task_writer(state: &AppState, workspace: Uuid, actor: Uuid) -> bool {
 }
 
 /// Where server tools start when the model gives a relative path.
-fn host_root() -> std::path::PathBuf {
+pub(crate) fn host_root() -> std::path::PathBuf {
     std::env::var_os("ZONE_CHAT_AGENT_CWD")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
@@ -177,6 +177,9 @@ pub struct ChatTools {
     names: Vec<String>,
     name_set: HashSet<String>,
     definitions: Vec<ToolDefinition>,
+    /// Frozen at assembly, like the catalog, so a prompt built from a
+    /// hand-written catalog still carries the guidance it was handed.
+    mcp_guidance: Option<String>,
     lease: Option<TaskLease>,
     membership: OnceCell<bool>,
     actor_name: OnceCell<String>,
@@ -194,6 +197,49 @@ impl ChatTools {
     /// Preview only the known catalog; never start MCP processes while drafting.
     pub async fn preview(scope: WorkspaceScope) -> Self {
         Self::assemble(Some(scope), ToolProfile::Chat, None, false).await
+    }
+
+    /// No tools at all, for a chat that answers from the server's own context.
+    ///
+    /// Built directly rather than through `assemble`, which would
+    /// register the host tools.
+    pub fn empty() -> Self {
+        Self {
+            registry: ToolRegistry::new(),
+            context: context(ToolProfile::Chat, host_root()),
+            scope: None,
+            workspace: Vec::new(),
+            profile: ToolProfile::Chat,
+            names: Vec::new(),
+            name_set: HashSet::new(),
+            definitions: Vec::new(),
+            mcp_guidance: None,
+            lease: None,
+            membership: OnceCell::new(),
+            actor_name: OnceCell::new(),
+        }
+    }
+
+    /// A catalog by name only, for prompt tests that cannot reach a database.
+    ///
+    /// Mirrors `cache_catalog`: names sort and populate the lookup set,
+    /// so `has` answers and section ordering stay what they are in production.
+    #[cfg(test)]
+    pub(crate) fn with_names(
+        profile: ToolProfile,
+        names: &[&str],
+        mcp_guidance: Option<String>,
+    ) -> Self {
+        let mut sorted: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+        sorted.sort();
+        Self {
+            context: context(profile, host_root()),
+            profile,
+            name_set: sorted.iter().cloned().collect(),
+            names: sorted,
+            mcp_guidance,
+            ..Self::empty()
+        }
     }
 
     /// Sandboxed tools and workspace tools authorized as the initiating task actor.
@@ -289,6 +335,7 @@ impl ChatTools {
             ToolProfile::Task => task_cwd.unwrap_or_else(host_root),
         };
         let context = context(profile, cwd);
+        let mcp_guidance = registry.mcp_guidance();
 
         let mut assembled = Self {
             registry,
@@ -299,6 +346,7 @@ impl ChatTools {
             names: Vec::new(),
             name_set: HashSet::new(),
             definitions: Vec::new(),
+            mcp_guidance,
             lease: None,
             membership: OnceCell::new(),
             actor_name: OnceCell::new(),
@@ -342,7 +390,7 @@ impl ChatTools {
     }
 
     pub fn mcp_guidance(&self) -> Option<String> {
-        self.registry.mcp_guidance()
+        self.mcp_guidance.clone()
     }
 
     pub fn mutating(&self, name: &str) -> bool {
@@ -1441,9 +1489,14 @@ mod tests {
         assert!(tools.mutating("apply_patch"));
         assert!(tools.mutating("start_task"));
         assert!(!tools.mutating("get_task_run"));
-        let required = crate::agent::system_prompt(&tools, false);
+        let environment = crate::agent::prompt::Environment::at(
+            chrono::DateTime::parse_from_rfc3339("2026-09-09T09:30:00+12:00").unwrap(),
+            "Pacific/Auckland",
+            std::path::PathBuf::from("/srv/zone"),
+        );
+        let required = crate::agent::prompt::chat(&tools, false, &environment);
         assert!(required.contains("wait for the user to approve"));
-        let auto = crate::agent::system_prompt(&tools, true);
+        let auto = crate::agent::prompt::chat(&tools, true, &environment);
         assert!(auto.contains("without waiting for confirmation"));
         assert!(!auto.contains("wait for the user to approve"));
     }

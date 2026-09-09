@@ -8,6 +8,7 @@ use uuid::Uuid;
 use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
 use zone_core::llm::{LlmClient, LlmConfig, Message, Role};
 
+use crate::agent::prompt::{self, Environment};
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
 use crate::db::chats::ChatRow;
 use crate::db::context::{Error, Guard, Lease, Store};
@@ -249,6 +250,9 @@ pub struct Preparation {
     pub stop: Vec<String>,
     pub budget: LoopBudget,
     pub timeout: Duration,
+    /// Built once here so a preview and the generation that follows it, and
+    /// the retrieval-augmented reassembly in `ws::chat`, all read one clock.
+    pub environment: Environment,
 }
 
 /// Read-only common builder. It never classifies intent, executes tools, searches, or summarizes.
@@ -289,6 +293,18 @@ pub async fn build(
     let history = history.map_err(|error| error.to_string())?;
     let agentic = chat.agent_enabled && !tools.is_empty();
     let policy = policy(settings, &capacity);
+    let request = pending
+        .map(|(content, _)| content.to_string())
+        .or_else(|| latest_user(&history))
+        .unwrap_or_default();
+    let effort = capacity
+        .reasoning
+        .then(|| chat.reasoning_effort.resolve(&request))
+        .flatten();
+    let mut environment = Environment::here();
+    if let Some(effort) = effort {
+        environment = environment.with_effort(effort);
+    }
     let mut entries = vec![Entry {
         id: "instructions".into(),
         message: Message::system(system_prompt(
@@ -296,6 +312,7 @@ pub async fn build(
             &tools,
             agentic,
             &SearchContext::new(&state.config().web_search).capability(),
+            &environment,
         )),
         preserve: true,
         consumed: true,
@@ -375,19 +392,7 @@ pub async fn build(
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(&chat.model_name, limit);
     }
-    let prompt = pending
-        .map(|(content, _)| content)
-        .or_else(|| {
-            entries.iter().rev().find_map(|entry| {
-                (entry.message.role == Role::User)
-                    .then_some(entry.message.content.as_deref())
-                    .flatten()
-            })
-        })
-        .unwrap_or("");
-    if capacity.reasoning
-        && let Some(effort) = chat.reasoning_effort.resolve(prompt)
-    {
+    if let Some(effort) = effort {
         llm = llm.with_reasoning(&chat.model_name, effort);
     }
     let mut context = RunContext {
@@ -413,7 +418,19 @@ pub async fn build(
         stop,
         budget: settings.budget(),
         timeout: settings.timeout,
+        environment,
     })
+}
+
+/// The content of the newest canonical user turn, read before `history.entries`
+/// is moved into the projection.
+fn latest_user(history: &history::History) -> Option<String> {
+    let id = history.latest_user.as_ref()?;
+    history
+        .entries
+        .iter()
+        .find(|entry| &entry.id == id)
+        .and_then(|entry| entry.message.content.clone())
 }
 
 pub fn policy(settings: &Settings, capacity: &capacity::Capacity) -> Policy {
@@ -429,20 +446,55 @@ pub fn policy(settings: &Settings, capacity: &capacity::Capacity) -> Policy {
     }
 }
 
-pub fn system_prompt(chat: &ChatRow, tools: &ChatTools, agentic: bool, capability: &str) -> String {
+/// The whole system entry: a character card if there is one, the built prompt
+/// for this surface, then the web-search capability tail.
+pub fn system_prompt(
+    chat: &ChatRow,
+    tools: &ChatTools,
+    agentic: bool,
+    capability: &str,
+    environment: &Environment,
+) -> String {
     let prompt = match (chat.character.as_ref(), agentic) {
         (Some(card), true) => format!(
             "{}\n\n{}",
             card.system_prompt(),
-            crate::agent::system_prompt(tools, chat.auto_approve)
+            prompt::chat(tools, chat.auto_approve, environment)
         ),
-        (Some(card), false) => card.system_prompt(),
-        (None, true) => crate::agent::system_prompt(tools, chat.auto_approve),
-        (None, false) => {
-            "You are Zone's assistant, answering inside one of the user's workspaces.".into()
-        }
+        (Some(card), false) => match prompt::boundary() {
+            boundary if boundary.is_empty() => card.system_prompt(),
+            boundary => format!("{}\n\n{boundary}", card.system_prompt()),
+        },
+        (None, true) => prompt::chat(tools, chat.auto_approve, environment),
+        (None, false) => prompt::plain(environment),
     };
     format!("{prompt}\n\n{capability}")
+}
+
+/// A minimal chat row, so prompt tests do not need a database.
+///
+/// The three shapes that matter are a card with the agent on, a card alone, and
+/// a plain assistant chat.
+#[cfg(test)]
+pub(crate) fn chat_row(
+    character: Option<crate::services::character::ChatCharacter>,
+    agent_enabled: bool,
+    auto_approve: bool,
+) -> ChatRow {
+    ChatRow {
+        id: Uuid::new_v4(),
+        workspace_id: Some(Uuid::new_v4()),
+        title: "Prompt fixture".into(),
+        model_name: "fixture-model".into(),
+        archived: None,
+        agent_enabled,
+        agent_sandboxed: false,
+        auto_approve,
+        reasoning_effort: zone_core::llm::ReasoningEffort::default(),
+        character,
+        created_at: None,
+        updated_at: None,
+    }
 }
 
 pub fn images(metadata: Option<&Value>) -> Vec<String> {
@@ -561,6 +613,90 @@ mod tests {
         };
         assert_eq!(settings.reserved(Some(4096)), 512);
         assert_eq!(settings.budget(), LoopBudget::chat());
+    }
+
+    /// The wiring proof for the whole builder: whichever of the four arms runs,
+    /// a character card prefixes the assembled text, the boundary section is
+    /// present, and the web-search capability tail is still the last thing the
+    /// model reads. A persona chat with the agent off gets the boundary alone
+    /// rather than a whole prompt, which is the only arm the builder does not
+    /// assemble, so it is the one most easily lost.
+    #[test]
+    fn every_arm_carries_the_boundary_and_ends_with_the_capability_tail() {
+        const CAPABILITY: &str = "Web search is unavailable this turn.";
+        const CARD: &str = "You are Ada, and you stay in character.";
+
+        let environment = Environment::at(
+            chrono::DateTime::parse_from_rfc3339("2026-09-09T09:30:00+12:00").unwrap(),
+            "Pacific/Auckland",
+            PathBuf::from("/srv/zone"),
+        );
+        let tools = ChatTools::with_names(
+            crate::agent::ToolProfile::Chat,
+            &["list_documents", "read_document", "read_file"],
+            None,
+        );
+        let card = crate::services::character::ChatCharacter {
+            name: "Ada".into(),
+            system_prompt: Some(CARD.into()),
+            ..Default::default()
+        };
+        let boundary = prompt::boundary();
+        assert!(!boundary.is_empty());
+
+        let plain = system_prompt(
+            &chat_row(None, false, false),
+            &tools,
+            false,
+            CAPABILITY,
+            &environment,
+        );
+        let agentic = system_prompt(
+            &chat_row(None, true, false),
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+        );
+        let persona = system_prompt(
+            &chat_row(Some(card.clone()), false, false),
+            &tools,
+            false,
+            CAPABILITY,
+            &environment,
+        );
+        let persona_agentic = system_prompt(
+            &chat_row(Some(card), true, false),
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+        );
+
+        for prompt in [&plain, &agentic, &persona, &persona_agentic] {
+            assert!(prompt.contains(&boundary), "{prompt}");
+            assert!(prompt.ends_with(&format!("\n\n{CAPABILITY}")), "{prompt}");
+        }
+
+        assert!(plain.starts_with("You are Zone's assistant"), "{plain}");
+        assert!(!plain.contains("You can call these tools"), "{plain}");
+
+        assert!(agentic.starts_with("You are Zone's assistant"), "{agentic}");
+        assert!(agentic.contains("You can call these tools:"), "{agentic}");
+        assert!(agentic.contains("Workspace actions:"), "{agentic}");
+
+        for prompt in [&persona, &persona_agentic] {
+            assert!(prompt.starts_with(CARD), "{prompt}");
+        }
+        assert_eq!(persona, format!("{CARD}\n\n{boundary}\n\n{CAPABILITY}"));
+        assert!(
+            persona_agentic.contains("You can call these tools:"),
+            "{persona_agentic}"
+        );
+        assert!(
+            persona_agentic.find(CARD) < persona_agentic.find(&boundary),
+            "{persona_agentic}"
+        );
     }
 
     #[test]

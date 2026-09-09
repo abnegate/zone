@@ -122,6 +122,18 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
     run_with_context(run, context, true)
 }
 
+/// The system entry that ends a turn once tool work has stopped. The closing
+/// self-check is here as well as in the prompt because a turn that runs out of
+/// rounds is exactly where a model settles for promising the work instead.
+fn finalizing_instruction(reason: &str) -> String {
+    format!(
+        "{reason} Answer the user in ordinary text using the evidence already available. Do not \
+         call more tools or emit function JSON. Explain any remaining uncertainty. Before ending, \
+         read your last paragraph: if it is a plan, a question, a list of next steps or a promise \
+         about work you have not done, do that work now in this reply instead of proposing it."
+    )
+}
+
 /// Shared loop for ordinary text and tool-assisted chats. Every durable event is a
 /// suspension point: the consumer must commit before resuming model or tool work.
 pub fn run_with_context(
@@ -165,7 +177,7 @@ pub fn run_with_context(
                     .take()
                     .unwrap_or_else(|| "Tool execution has ended for this turn.".into());
                 yield AgentEvent::Finalizing(reason.clone());
-                context.entries.push(Entry {id:Uuid::new_v4().to_string(),message:LlmMessage::system(format!("{reason} Answer the user in ordinary text using the evidence already available. Do not call more tools or emit function JSON. Explain any remaining uncertainty.")),preserve:true,consumed:true});
+                context.entries.push(Entry {id:Uuid::new_v4().to_string(),message:LlmMessage::system(finalizing_instruction(&reason)),preserve:true,consumed:true});
             }
             let definitions = (agentic && !finalizing).then_some(tools.definitions());
             let mut usage = context.usage(&model, definitions);
@@ -1025,6 +1037,28 @@ mod tests {
                 name: name.map(str::to_string),
                 arguments: arguments.map(str::to_string),
             }),
+        }
+    }
+
+    /// Running out of rounds is where a model is most tempted to sign off with a
+    /// plan, so the closing entry keeps the last-paragraph self-check.
+    #[test]
+    fn the_finalizing_entry_forbids_signing_off_with_a_promise() {
+        let instruction = finalizing_instruction("The configured model-round budget was reached.");
+
+        for rule in [
+            "The configured model-round budget was reached.",
+            "Answer the user in ordinary text using the evidence already available.",
+            "Do not call more tools or emit function JSON.",
+            "Explain any remaining uncertainty.",
+            "Before ending, read your last paragraph",
+            "a plan, a question, a list of next steps or a promise",
+            "do that work now in this reply instead of proposing it",
+        ] {
+            assert!(
+                instruction.contains(rule),
+                "the finalizing entry dropped {rule:?}: {instruction}"
+            );
         }
     }
 
