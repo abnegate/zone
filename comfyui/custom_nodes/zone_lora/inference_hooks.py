@@ -17,6 +17,39 @@ def install_all() -> None:
     install_keep_loaded_on_clone_swap()
     install_bypass_lora_loader()
     install_out_of_place_residuals()
+    install_contiguous_tiled_scale()
+
+
+def install_contiguous_tiled_scale() -> None:
+    """Upscaling a whole image works on MPS; upscaling it in tiles does not.
+
+    `ImageUpscaleWithModel` hands `tiled_scale` the permuted view that
+    `image.movedim(-1, -3)` returns, whose strides are (H*W*C, 1, W*C, C). A
+    slice of that spans two non-contiguous subspaces, and the MPS convolution
+    reshapes its input with `view`, which refuses such a tensor:
+
+        view size is not compatible with input tensor's size and stride
+
+    So every ESRGAN pass over an image larger than one tile fails on Apple
+    Silicon, which is every image the image and video upscale lanes produce.
+    Slicing a contiguous tensor is fine, so the copy happens once here rather
+    than per tile, and only when the caller's tensor is not contiguous already.
+    """
+    import comfy.utils
+
+    if getattr(comfy.utils.tiled_scale_multidim, '_zone_patched', False):
+        return
+    original = comfy.utils.tiled_scale_multidim
+
+    def tiled_scale_multidim(samples, function, *args, **kwargs):
+        if hasattr(samples, 'is_contiguous') and not samples.is_contiguous():
+            samples = samples.contiguous()
+        return original(samples, function, *args, **kwargs)
+
+    tiled_scale_multidim._zone_patched = True
+    tiled_scale_multidim.__wrapped__ = original
+    comfy.utils.tiled_scale_multidim = tiled_scale_multidim
+    logging.info('Zone LoRA: tiled upscales get a contiguous tensor')
 
 
 class OutOfPlaceResidual(torch.Tensor):
