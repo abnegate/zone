@@ -34,6 +34,7 @@ import comfy.model_management
 
 from .inference_hooks import install_all, prepare_frozen_weights, wrap_early_frozen
 from .train_config import (
+    checkpoint_interval,
     load_config,
     lora_alpha,
     trains,
@@ -362,7 +363,7 @@ class ZoneTrainLoRA(io.ComfyNode):
             losses = []
             stem = Path(save_name).name.removesuffix('.safetensors')
             output_dir = Path(folder_paths.get_output_directory()) / 'loras'
-            every = int(settings.get('checkpoint_every', 0))
+            every = checkpoint_interval(steps, settings)
 
             def loss_callback(loss):
                 losses.append(loss)

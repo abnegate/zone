@@ -19,6 +19,8 @@ jobs:
   tests:
     name: Python tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -29,14 +31,17 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
-          cache-dependency-path: comfyui/requirements.lock
+          cache-dependency-path: comfyui/requirements-ci.lock
 
       - name: Read pinned ComfyUI commit
         id: comfyui
         run: |
           commit=$(sed -n 's/^COMFYUI_COMMIT="\(.*\)"$/\1/p' scripts/setup-comfyui-macos.sh)
-          test -n "$commit" || { echo "COMFYUI_COMMIT not found" >&2; exit 1; }
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "COMFYUI_COMMIT must be exactly 40 lowercase hexadecimal characters" >&2
+            exit 1
+          fi
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
 
       - name: Cache ComfyUI checkout
         id: comfyui-cache
@@ -47,17 +52,30 @@ jobs:
 
       - name: Fetch ComfyUI
         if: steps.comfyui-cache.outputs.cache-hit != 'true'
+        env:
+          COMFYUI_COMMIT: ${{ steps.comfyui.outputs.commit }}
         run: |
           git init .comfyui-runtime
           git -C .comfyui-runtime remote add origin https://github.com/comfyanonymous/ComfyUI.git
-          git -C .comfyui-runtime fetch --depth 1 origin ${{ steps.comfyui.outputs.commit }}
+          git -C .comfyui-runtime fetch --depth 1 origin "$COMFYUI_COMMIT"
           git -C .comfyui-runtime checkout FETCH_HEAD
 
-      - name: Install CPU PyTorch
-        run: pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
+      - name: Verify exact ComfyUI revision
+        env:
+          COMFYUI_COMMIT: ${{ steps.comfyui.outputs.commit }}
+        run: test "$(git -C .comfyui-runtime rev-parse HEAD)" = "$COMFYUI_COMMIT"
 
-      - name: Install ComfyUI requirements
-        run: pip install -r .comfyui-runtime/requirements.txt
+      - name: Install repository extension
+        run: |
+          rm -rf .comfyui-runtime/custom_nodes/zone_lora
+          cp -R comfyui/custom_nodes/zone_lora .comfyui-runtime/custom_nodes/zone_lora
+
+      - name: Install locked ComfyUI requirements
+        run: >-
+          python -m pip install --require-hashes
+          --index-url https://download.pytorch.org/whl/cpu
+          --extra-index-url https://pypi.org/simple
+          -r comfyui/requirements-ci.lock
 
       - name: Run tests
         env:

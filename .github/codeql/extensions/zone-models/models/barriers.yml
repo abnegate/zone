@@ -1,0 +1,24 @@
+extensions:
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: barrierModel
+    data:
+      - ["zone_server::utils::url::validate_public_url", "ReturnValue", "request-url", "manual"]
+      - ["zone_server::services::artifacts::safe_path_component", "ReturnValue", "path-injection", "manual"]
+      - ["zone_server::services::artifacts::uuid_component", "ReturnValue", "path-injection", "manual"]
+      - ["zone_installer::frontend::sanitize_writable_config_path", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::final_filename", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::ensure_child_directory", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::recipe::sanitize_weight_filename", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::recipe::sanitize_upload_name", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::train::require_directory", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::train::require_child_directory", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::quality::real_directory", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::quality::child_directory", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::quality::destination", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::inventory::publication_marker", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::require_directory", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::require_confined_directory", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::require_regular_file", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::validate_output", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::require_regular_output", "ReturnValue", "path-injection", "manual"]

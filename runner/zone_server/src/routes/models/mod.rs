@@ -506,8 +506,7 @@ pub async fn delete(
 
 /// GET /api/models/train/bases
 pub async fn train_bases(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
-    let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
-        .or_else(|_| RecipeCatalog::packaged());
+    let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()));
     match catalog {
         Ok(catalog) => Json(lora::available_bases(
             &catalog,
@@ -637,8 +636,11 @@ pub async fn train(
     )
     .await
     {
-        Ok(path) => Json(serde_json::json!({
-            "filename": path.file_name().and_then(|name| name.to_str()),
+        Ok(outcome) => Json(serde_json::json!({
+            "filename": outcome.path.file_name().and_then(|name| name.to_str()),
+            "quality": outcome.quality,
+            "dataset": outcome.dataset,
+            "screening": outcome.screening,
         }))
         .into_response(),
         Err(lora::TrainError::Disabled) => (

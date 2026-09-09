@@ -1,18 +1,39 @@
 from __future__ import annotations
 
-import importlib.util
+import json
 import os
+import sys
+import tempfile
 import unittest
+import urllib.error
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
-MODULE_PATH = Path(__file__).parents[1] / 'train_lora.py'
-SPEC = importlib.util.spec_from_file_location('zone_train_lora', MODULE_PATH)
-assert SPEC and SPEC.loader
-train_lora = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(train_lora)
+COMFYUI = Path(__file__).parents[1]
+if str(COMFYUI) not in sys.path:
+    sys.path.insert(0, str(COMFYUI))
 
-VARIABLES = ('ZONE_COMFY_INPUT', 'COMFYUI_MODELS_DIR', 'ZONE_TRAIN_STEPS')
+import train_lora  # noqa: E402
+
+VARIABLES = (
+    'COMFYUI_MODELS_DIR',
+    'ZONE_COMFY_INPUT',
+    'ZONE_TRAIN_ARCHITECTURE',
+    'ZONE_TRAIN_CHECKPOINT',
+    'ZONE_TRAIN_CLIP',
+    'ZONE_TRAIN_DEFER_CLEANUP',
+    'ZONE_TRAIN_DIR',
+    'ZONE_TRAIN_FOLDER',
+    'ZONE_TRAIN_ARTIFACT',
+    'ZONE_TRAIN_OUTPUT',
+    'ZONE_TRAIN_STEPS',
+    'ZONE_TRAIN_UNET',
+    'ZONE_TRAIN_VAE',
+)
+DATASETS = (8, 24, 100, 300)
+HEALTHY_PASSES = (17.0, 19.0)
 
 
 @contextmanager
@@ -30,44 +51,450 @@ def environment(**values: str):
                 os.environ[name] = previous[name]
 
 
-class TrainStepsTests(unittest.TestCase):
-    def config(self, **overrides):
-        settings = train_lora.load_config()
-        settings.update(overrides)
-        return settings
+def flux() -> train_lora.TrainingModel:
+    return train_lora.TrainingModel(architecture='flux', checkpoint='flux.safetensors')
 
-    def test_steps_scale_with_images_and_clamp(self):
-        settings = self.config()
-        self.assertGreaterEqual(train_lora.train_steps(1, settings), int(settings['min_steps']))
+
+def qwen() -> train_lora.TrainingModel:
+    return train_lora.TrainingModel(
+        architecture='qwen_edit',
+        unet='qwen-unet.safetensors',
+        clip='qwen-clip.safetensors',
+        vae='qwen-vae.safetensors',
+    )
+
+
+class TrainingModelTests(unittest.TestCase):
+    def test_model_family_is_required_and_never_inferred(self) -> None:
+        with environment():
+            with self.assertRaises(SystemExit):
+                train_lora.TrainingModel.from_environment()
+
+    def test_prompt_response_must_have_the_exact_comfy_shape(self) -> None:
+        identifier = str(uuid.uuid4())
         self.assertEqual(
-            train_lora.train_steps(8, settings),
-            max(int(settings['min_steps']), 8 * int(settings['steps_per_image'])),
+            train_lora.prompt_id(
+                {'prompt_id': identifier, 'number': 0, 'node_errors': {}}
+            ),
+            identifier,
         )
-        self.assertLessEqual(train_lora.train_steps(10_000, settings), int(settings['max_steps']))
+        with self.assertRaises(SystemExit):
+            train_lora.prompt_id(
+                {
+                    'prompt_id': identifier,
+                    'number': 0,
+                    'node_errors': {},
+                    'unexpected': True,
+                }
+            )
 
-    def test_override_wins_over_the_budget(self):
+    def test_qwen_requires_every_explicit_component(self) -> None:
+        with environment(
+            ZONE_TRAIN_ARCHITECTURE='qwen_edit',
+            ZONE_TRAIN_UNET='qwen-unet.safetensors',
+            ZONE_TRAIN_CLIP='qwen-clip.safetensors',
+        ):
+            with self.assertRaises(SystemExit):
+                train_lora.TrainingModel.from_environment()
+
+    def test_flux_does_not_fall_back_to_a_global_checkpoint(self) -> None:
+        with environment(ZONE_TRAIN_ARCHITECTURE='flux'):
+            with self.assertRaises(SystemExit):
+                train_lora.TrainingModel.from_environment()
+
+    def test_weight_names_are_confined_to_one_model_file(self) -> None:
+        with environment(
+            ZONE_TRAIN_ARCHITECTURE='flux', ZONE_TRAIN_CHECKPOINT='../outside.safetensors'
+        ):
+            with self.assertRaises(SystemExit):
+                train_lora.TrainingModel.from_environment()
+
+
+class GraphTests(unittest.TestCase):
+    def config(self) -> dict:
+        return train_lora.load_config()
+
+    def test_flux_uses_native_vae_and_clip_encoders(self) -> None:
+        graph = train_lora.train_graph(flux(), 'folder', '{}', 'artifact', self.config(), 12)
+        self.assertEqual(graph['1']['class_type'], 'CheckpointLoaderSimple')
+        self.assertEqual(graph['3']['class_type'], 'VAEEncode')
+        self.assertEqual(graph['4']['class_type'], 'CLIPTextEncode')
+        self.assertEqual(graph['5']['inputs']['positive'], ['4', 0])
+        self.assertNotIn('MakeTrainingDataset', json.dumps(graph))
+
+    def test_qwen_uses_the_edit_reference_and_target_at_the_same_index(self) -> None:
+        graph = train_lora.train_graph(qwen(), 'folder', '{}', 'artifact', self.config(), 12)
+        self.assertEqual(graph['1']['class_type'], 'UNETLoader')
+        self.assertEqual(graph['1']['inputs']['unet_name'], 'qwen-unet.safetensors')
+        self.assertEqual(graph['2']['class_type'], 'CLIPLoader')
+        self.assertEqual(graph['2']['inputs']['type'], 'qwen_image')
+        self.assertEqual(graph['2']['inputs']['clip_name'], 'qwen-clip.safetensors')
+        self.assertEqual(graph['3']['class_type'], 'VAELoader')
+        self.assertEqual(graph['3']['inputs']['vae_name'], 'qwen-vae.safetensors')
+        self.assertEqual(graph['5']['class_type'], 'VAEEncode')
+        self.assertEqual(graph['6']['class_type'], 'TextEncodeQwenImageEditPlus')
+        self.assertEqual(graph['5']['inputs']['pixels'], ['4', 0])
+        self.assertEqual(graph['6']['inputs']['prompt'], ['4', 2])
+        self.assertEqual(graph['6']['inputs']['image1'], ['4', 1])
+        self.assertEqual(graph['7']['inputs']['positive'], ['6', 0])
+        self.assertNotIn('CheckpointLoaderSimple', json.dumps(graph))
+        self.assertNotIn('MakeTrainingDataset', json.dumps(graph))
+
+
+class DatasetTests(unittest.TestCase):
+    def test_qwen_manifest_and_files_preserve_two_pair_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'source'
+            destination = root / 'input' / train_lora.Run.create().folder
+            destination.parent.mkdir()
+            (source / 'targets').mkdir(parents=True)
+            (source / 'control_1').mkdir()
+            for index in range(2):
+                (source / f'targets/{index:04}.png').write_bytes(bytes([index]))
+                (source / f'targets/{index:04}.txt').write_text(f'instruction {index}')
+                (source / f'control_1/{index:04}.png').write_bytes(bytes([index + 10]))
+            count, manifest_json = train_lora.stage_dataset(source, destination, qwen())
+            manifest = json.loads(manifest_json)
+            self.assertEqual(count, 2)
+            self.assertEqual(manifest['architecture'], 'qwen_edit')
+            self.assertEqual(
+                manifest['pairs'],
+                [
+                    {
+                        'index': 0,
+                        'target': 'targets/0000.png',
+                        'reference': 'control_1/0000.png',
+                        'instruction': 'instruction 0',
+                    },
+                    {
+                        'index': 1,
+                        'target': 'targets/0001.png',
+                        'reference': 'control_1/0001.png',
+                        'instruction': 'instruction 1',
+                    },
+                ],
+            )
+            self.assertEqual((destination / 'targets/0001.png').read_bytes(), bytes([1]))
+            self.assertEqual((destination / 'control_1/0001.png').read_bytes(), bytes([11]))
+
+    def test_qwen_refuses_a_missing_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'source/targets').mkdir(parents=True)
+            (root / 'source/control_1').mkdir()
+            (root / 'input').mkdir()
+            (root / 'source/targets/0000.png').write_bytes(b'target')
+            (root / 'source/targets/0000.txt').write_text('instruction')
+            with self.assertRaises(SystemExit):
+                train_lora.stage_dataset(
+                    root / 'source', root / 'input' / train_lora.Run.create().folder, qwen()
+                )
+
+    def test_run_names_are_generated_uuid_names(self) -> None:
+        first = train_lora.Run.create()
+        second = train_lora.Run.create()
+        first.validate()
+        second.validate()
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(
+            first.folder.removeprefix('zone-train-'),
+            first.artifact.removeprefix('zone-lora-'),
+        )
+
+    def test_host_supplied_run_names_are_validated_as_a_pair(self) -> None:
+        generated = train_lora.Run.create()
+        with environment(
+            ZONE_TRAIN_FOLDER=generated.folder,
+            ZONE_TRAIN_ARTIFACT=generated.artifact,
+        ):
+            self.assertEqual(train_lora.Run.from_environment(), generated)
+        with environment(ZONE_TRAIN_FOLDER=generated.folder):
+            with self.assertRaises(SystemExit):
+                train_lora.Run.from_environment()
+
+
+class TrainStepsTests(unittest.TestCase):
+    def test_budget_is_monotonic_and_inside_the_measured_flux_band(self) -> None:
+        with environment():
+            settings = train_lora.load_config()
+            passes = [train_lora.train_steps(count, settings) / count for count in DATASETS]
+            self.assertEqual(passes, sorted(passes))
+            low, high = HEALTHY_PASSES
+            self.assertTrue(all(low <= value <= high for value in passes))
+
+    def test_override_wins_over_the_budget(self) -> None:
         with environment(ZONE_TRAIN_STEPS='37'):
-            self.assertEqual(train_lora.train_steps(8, self.config()), 37)
+            self.assertEqual(train_lora.train_steps(8, train_lora.load_config()), 37)
 
 
 class ComfyInputDirTests(unittest.TestCase):
-    def test_override_wins(self):
-        with environment(ZONE_COMFY_INPUT='/srv/comfy/input', COMFYUI_MODELS_DIR='/srv/comfy/models'):
-            self.assertEqual(train_lora.comfy_input_dir(), Path('/srv/comfy/input'))
+    def test_override_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'comfy'
+            (root / 'input').mkdir(parents=True)
+            with environment(
+                ZONE_COMFY_INPUT=str(root / 'input'),
+                COMFYUI_MODELS_DIR='/unused/models',
+            ):
+                self.assertEqual(train_lora.comfy_input_dir(), (root / 'input').resolve())
 
-    def test_derived_from_models_dir(self):
-        with environment(COMFYUI_MODELS_DIR='/srv/comfy/models'):
-            self.assertEqual(train_lora.comfy_input_dir(), Path('/srv/comfy/input'))
+    def test_derived_from_models_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'comfy'
+            (root / 'input').mkdir(parents=True)
+            (root / 'models').mkdir()
+            with environment(COMFYUI_MODELS_DIR=str(root / 'models')):
+                self.assertEqual(train_lora.comfy_input_dir(), (root / 'input').resolve())
 
-    def test_never_falls_back_to_the_working_directory(self):
-        """Path('') is '.', so a missing override used to stage images into the cwd."""
-        with environment(COMFYUI_MODELS_DIR='/srv/comfy/models'):
-            self.assertNotEqual(train_lora.comfy_input_dir(), Path('.'))
-
-    def test_requires_a_location(self):
+    def test_requires_a_location(self) -> None:
         with environment():
             with self.assertRaises(SystemExit):
                 train_lora.comfy_input_dir()
+
+    @unittest.skipUnless(hasattr(os, 'symlink'), 'symlinks require Unix')
+    def test_symlinked_comfy_root_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            actual = root / 'actual'
+            (actual / 'input').mkdir(parents=True)
+            link = root / 'comfy'
+            link.symlink_to(actual, target_is_directory=True)
+            with environment(ZONE_COMFY_INPUT=str(link / 'input')):
+                with self.assertRaises(SystemExit):
+                    train_lora.comfy_input_dir()
+
+    @unittest.skipUnless(hasattr(os, 'symlink'), 'symlinks require Unix')
+    def test_symlinked_input_directory_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'comfy'
+            victim = Path(directory) / 'victim'
+            root.mkdir()
+            victim.mkdir()
+            (root / 'input').symlink_to(victim, target_is_directory=True)
+            with environment(ZONE_COMFY_INPUT=str(root / 'input')):
+                with self.assertRaises(SystemExit):
+                    train_lora.comfy_input_dir()
+
+
+class ConfinementTests(unittest.TestCase):
+    def source(self, root: Path) -> Path:
+        source = root / 'source'
+        (source / 'targets').mkdir(parents=True)
+        (source / 'targets/0000.png').write_bytes(b'image')
+        (source / 'targets/0000.txt').write_text('portrait')
+        return source
+
+    @unittest.skipUnless(hasattr(os, 'symlink'), 'symlinks require Unix')
+    def test_staging_refuses_a_symlinked_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'input').mkdir()
+            victim = root / 'victim'
+            victim.mkdir()
+            (victim / 'kept').write_text('safe')
+            run = train_lora.Run.create()
+            destination = root / 'input' / run.folder
+            destination.symlink_to(victim, target_is_directory=True)
+            with self.assertRaises(SystemExit):
+                train_lora.stage_dataset(self.source(root), destination, flux())
+            self.assertEqual((victim / 'kept').read_text(), 'safe')
+
+    @unittest.skipUnless(hasattr(os, 'symlink'), 'symlinks require Unix')
+    def test_cleanup_refuses_a_symlinked_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_directory = root / 'input'
+            input_directory.mkdir()
+            victim = root / 'victim'
+            victim.mkdir()
+            (victim / 'kept').write_text('safe')
+            run = train_lora.Run.create()
+            staged = input_directory / run.folder
+            staged.symlink_to(victim, target_is_directory=True)
+            identifier = str(uuid.uuid4())
+            with (
+                mock.patch.object(train_lora, 'queue_prompt', return_value=identifier),
+                mock.patch.object(train_lora, 'wait_prompt', return_value={}),
+            ):
+                self.assertTrue(train_lora.cleanup('http://comfy', run, staged))
+            self.assertEqual((victim / 'kept').read_text(), 'safe')
+            self.assertTrue(staged.is_symlink())
+
+
+class PromptLifecycleTests(unittest.TestCase):
+    def test_unknown_queue_response_state_is_never_cleanup_safe(self) -> None:
+        with mock.patch.object(
+            train_lora, 'post_json', side_effect=ValueError('malformed JSON')
+        ):
+            with self.assertRaises(train_lora.PromptFailure) as raised:
+                train_lora.queue_prompt('http://comfy', {})
+        self.assertFalse(raised.exception.cleanup)
+
+    def test_malformed_queue_response_cancels_its_valid_prompt_id(self) -> None:
+        identifier = str(uuid.uuid4())
+        queued = {
+            'prompt_id': identifier,
+            'number': 0,
+            'node_errors': {},
+            'unexpected': True,
+        }
+        with (
+            mock.patch.object(train_lora, 'post_json', return_value=queued),
+            mock.patch.object(train_lora, 'cancel_prompt', return_value=False) as cancel,
+        ):
+            with self.assertRaises(train_lora.PromptFailure) as raised:
+                train_lora.queue_prompt('http://comfy', {})
+        self.assertFalse(raised.exception.cleanup)
+        cancel.assert_called_once_with('http://comfy', identifier, False)
+
+    def test_malformed_history_cancels_only_the_exact_prompt(self) -> None:
+        identifier = str(uuid.uuid4())
+        unrelated = str(uuid.uuid4())
+        with (
+            mock.patch.object(train_lora, 'get_json', return_value={unrelated: {}}),
+            mock.patch.object(train_lora, 'cancel_prompt', return_value=False) as cancel,
+        ):
+            with self.assertRaises(train_lora.PromptFailure) as raised:
+                train_lora.wait_prompt('http://comfy', identifier, 10)
+        self.assertFalse(raised.exception.cleanup)
+        cancel.assert_called_once_with('http://comfy', identifier, False)
+
+    def test_error_history_is_terminal_but_still_targets_cancel(self) -> None:
+        identifier = str(uuid.uuid4())
+        history = {identifier: {'status': {'status_str': 'error'}}}
+        with (
+            mock.patch.object(train_lora, 'get_json', return_value=history),
+            mock.patch.object(train_lora, 'cancel_prompt', return_value=False) as cancel,
+        ):
+            with self.assertRaises(train_lora.PromptFailure) as raised:
+                train_lora.wait_prompt('http://comfy', identifier, 10)
+        self.assertTrue(raised.exception.cleanup)
+        cancel.assert_called_once_with('http://comfy', identifier, True)
+
+    def test_timeout_cancels_and_propagates_cleanup_safety(self) -> None:
+        identifier = str(uuid.uuid4())
+        with mock.patch.object(train_lora, 'cancel_prompt', return_value=False) as cancel:
+            with self.assertRaises(train_lora.PromptFailure) as raised:
+                train_lora.wait_prompt('http://comfy', identifier, 0)
+        self.assertFalse(raised.exception.cleanup)
+        cancel.assert_called_once_with('http://comfy', identifier, False)
+
+    def test_cancel_failure_without_terminal_history_is_not_cleanup_safe(self) -> None:
+        identifier = str(uuid.uuid4())
+        with (
+            mock.patch.object(
+                train_lora,
+                'request',
+                side_effect=urllib.error.URLError('cancel failed'),
+            ) as request,
+            mock.patch.object(train_lora, 'get_json', return_value={}) as history,
+            mock.patch.object(
+                train_lora.time, 'monotonic', side_effect=[0.0, 0.0, 0.0, 1.0, 1.0]
+            ),
+            mock.patch.object(train_lora.time, 'sleep'),
+        ):
+            self.assertFalse(train_lora.cancel_prompt('http://comfy', identifier, False, 1))
+        request.assert_called_once()
+        request.assert_called_once_with(
+            f'http://comfy/api/jobs/{identifier}/cancel', {}, timeout=1
+        )
+        history.assert_called_once_with(f'http://comfy/history/{identifier}', timeout=1)
+
+    def test_successful_cancel_waits_for_exact_terminal_history(self) -> None:
+        identifier = str(uuid.uuid4())
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        history = {identifier: {'status': {'status_str': 'error'}}}
+        with (
+            mock.patch.object(train_lora, 'request', return_value=response) as request,
+            mock.patch.object(train_lora, 'get_json', return_value=history) as get_history,
+        ):
+            self.assertTrue(train_lora.cancel_prompt('http://comfy', identifier, False, 1))
+        request.assert_called_once_with(
+            f'http://comfy/api/jobs/{identifier}/cancel', {}, timeout=1
+        )
+        get_history.assert_called_once_with(f'http://comfy/history/{identifier}', timeout=1)
+
+    def test_cleanup_retains_inputs_when_its_job_cannot_be_verified_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_directory = root / 'input'
+            input_directory.mkdir()
+            run = train_lora.Run.create()
+            staged = input_directory / run.folder
+            staged.mkdir()
+            (staged / 'kept').write_text('safe')
+            identifier = str(uuid.uuid4())
+            with (
+                mock.patch.object(train_lora, 'queue_prompt', return_value=identifier),
+                mock.patch.object(
+                    train_lora,
+                    'wait_prompt',
+                    side_effect=train_lora.PromptFailure('unverified', False),
+                ),
+            ):
+                self.assertFalse(train_lora.cleanup('http://comfy', run, staged))
+            self.assertEqual((staged / 'kept').read_text(), 'safe')
+
+    def test_main_retains_staged_inputs_when_queue_state_is_unknown(self) -> None:
+        run = train_lora.Run.create()
+        config = train_lora.load_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_directory = root / 'input'
+            input_directory.mkdir()
+            staged = input_directory / run.folder
+            staged.mkdir()
+            with (
+                environment(ZONE_TRAIN_DIR=str(root), ZONE_TRAIN_OUTPUT=str(root / 'output')),
+                mock.patch.object(train_lora, 'load_config', return_value=config),
+                mock.patch.object(
+                    train_lora.TrainingModel,
+                    'from_environment',
+                    return_value=flux(),
+                ),
+                mock.patch.object(train_lora.Run, 'from_environment', return_value=run),
+                mock.patch.object(train_lora, 'comfy_input_dir', return_value=input_directory),
+                mock.patch.object(
+                    train_lora,
+                    'stage_dataset',
+                    return_value=(1, '{}'),
+                ),
+                mock.patch.object(
+                    train_lora,
+                    'queue_prompt',
+                    side_effect=train_lora.PromptFailure('unknown', False),
+                ),
+                mock.patch.object(train_lora, 'cleanup') as cleanup,
+            ):
+                with self.assertRaises(train_lora.PromptFailure):
+                    train_lora.main()
+            cleanup.assert_not_called()
+            self.assertTrue(staged.is_dir())
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_comfy_revision_is_validated_before_entering_shell_commands(self) -> None:
+        workflow = (COMFYUI.parent / '.github/workflows/comfyui-tests.yml').read_text()
+        self.assertIn('[[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]', workflow)
+        self.assertIn('COMFYUI_COMMIT: ${{ steps.comfyui.outputs.commit }}', workflow)
+        self.assertIn('origin "$COMFYUI_COMMIT"', workflow)
+        self.assertNotIn('origin ${{ steps.comfyui.outputs.commit }}', workflow)
+
+    def test_ci_installs_the_python_313_cpu_dependency_lock(self) -> None:
+        workflow = (COMFYUI.parent / '.github/workflows/comfyui-tests.yml').read_text()
+        requirements = (COMFYUI / 'requirements.in').read_text().splitlines()[3:]
+        ci_requirements = (COMFYUI / 'requirements-ci.in').read_text().splitlines()[3:]
+        lock = (COMFYUI / 'requirements-ci.lock').read_text()
+        self.assertEqual(ci_requirements, requirements)
+        self.assertIn('python-version: \'3.13\'', workflow)
+        self.assertIn('--require-hashes', workflow)
+        self.assertIn('-r comfyui/requirements-ci.lock', workflow)
+        self.assertNotIn('.comfyui-runtime/requirements.txt', workflow)
+        self.assertIn('torch==2.9.1+cpu', lock)
+        self.assertIn('torchvision==0.24.1+cpu', lock)
+        self.assertIn('torchaudio==2.9.1+cpu', lock)
 
 
 if __name__ == '__main__':

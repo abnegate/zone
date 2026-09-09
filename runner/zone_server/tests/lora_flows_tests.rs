@@ -270,9 +270,15 @@ async fn browse_huggingface_empty_query_stays_gguf() {
 #[tokio::test]
 async fn list_models_includes_unready_adapter() {
     let models_dir = temp_models();
+    let lora = models_dir.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors");
+    fs::write(&lora, b"lora").unwrap();
     fs::write(
-        models_dir.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors"),
-        b"lora",
+        models_dir.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors.zone.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "recipe_id": "qwen-image-edit-adapter",
+            "hf_base": "Qwen/Qwen-Image-Edit-2511"
+        }))
+        .unwrap(),
     )
     .unwrap();
     let ollama = mock_ollama().await;
@@ -357,6 +363,15 @@ async fn delete_removes_comfy_lora() {
     let models_dir = temp_models();
     let lora = models_dir.join("loras/custom-style.safetensors");
     fs::write(&lora, b"lora").unwrap();
+    fs::write(
+        models_dir.join("loras/custom-style.safetensors.zone.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "recipe_id": "flux-schnell-adapter",
+            "hf_base": "black-forest-labs/FLUX.1-schnell"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
     let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
@@ -796,6 +811,33 @@ async fn train_bases_lists_flux_when_checkpoint_present() {
             .iter()
             .any(|base| base["id"] == "flux-schnell" && base["edit"] == false)
     );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_bases_rejects_an_invalid_overlay_without_packaged_fallback() {
+    let models_dir = temp_models();
+    let workflows = models_dir.join("workflows");
+    let recipes = models_dir.join("recipes");
+    fs::create_dir(&workflows).unwrap();
+    fs::create_dir(&recipes).unwrap();
+    fs::write(recipes.join("catalog.json"), b"{\"schema_version\":1}").unwrap();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfy| {
+        comfy.workflow_path = workflows.join("unused.json");
+    })
+    .await;
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri("/api/models/train/bases")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let _ = fs::remove_dir_all(models_dir);
 }
 

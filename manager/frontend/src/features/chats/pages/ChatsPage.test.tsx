@@ -977,7 +977,7 @@ describe('ChatsPage', () => {
       restoreClock = undefined;
     });
 
-    function controlClock(): (elapsed: number) => void {
+    function controlClock(): (elapsed: number) => Promise<void> {
       const ticks = new Map<number, () => void>();
       let nextIntervalId = 1;
       const now = spyOn(performance, 'now').mockReturnValue(0);
@@ -996,10 +996,14 @@ describe('ChatsPage', () => {
         interval.mockRestore();
         clear.mockRestore();
       };
-      return (elapsed: number): void => {
-        // Flush the pending effect that captures `started` before the clock
-        // moves, or it captures the advanced value and never reports elapsed.
-        act(() => {});
+      return async (elapsed: number): Promise<void> => {
+        // Drain the pending send before touching the clock: `started` and the
+        // interval are captured in an effect, and advancing first makes that
+        // effect read the moved clock, so elapsed never leaves 0. A sync
+        // act() is not enough — the update is still queued in a microtask.
+        // waitFor cannot help here either, since it polls on the setInterval
+        // this test has stubbed out.
+        await act(async () => {});
         // Advancing a clock nothing is subscribed to reports the timer's
         // starting text back as if it never moved, which reads as a broken
         // component rather than a test that measured nothing.
@@ -1028,7 +1032,7 @@ describe('ChatsPage', () => {
       const input = await sendPrompt();
       expect(screen.getByRole('timer')).toHaveTextContent('0:00');
       expect(screen.getByRole('status').contains(screen.getByRole('timer'))).toBe(false);
-      advance(1000);
+      await advance(1000);
       expect(screen.getByRole('timer')).toHaveTextContent('0:01');
       act(() => socket.emit({ type: 'status', message: 'Generating image…' }));
       expect(screen.getByRole('timer')).toHaveTextContent('0:01');
@@ -1047,7 +1051,7 @@ describe('ChatsPage', () => {
       const advance = controlClock();
       await sendPrompt();
       expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
-      advance(1000);
+      await advance(1000);
       expect(screen.getByRole('timer')).toHaveTextContent('0:01');
       fireEvent.click(screen.getByText('Chat 2'));
       expect(screen.queryByRole('timer')).not.toBeInTheDocument();

@@ -156,7 +156,8 @@ details, and native macOS / bundled NVIDIA instructions.
   do not set `model_image`. Path separators and traversal are rejected.
   Chat image generation uses the effective `model_image` setting when present.
   The filename may also be a LoRA in `models/loras/`; the matching adapter
-  recipe is selected automatically.
+  recipe is selected from its coherent `.zone.json` sidecar. A missing,
+  incomplete, or mismatched adapter sidecar fails closed.
 
 ### `COMFYUI_MODELS_DIR`
 - **Default**: `/app/comfyui/models`
@@ -169,11 +170,25 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: Optional shell command used by the Models Train tab. When
   empty and `COMFYUI_ENABLED` is true, Zone posts a `ZoneTrainLoRA` graph to
   ComfyUI. The command still receives `ZONE_TRAIN_NAME`, `ZONE_TRAIN_BASE`,
-  `ZONE_TRAIN_DIR`, `ZONE_TRAIN_OUTPUT`, `ZONE_TRAIN_TRIGGER`,
-  `ZONE_TRAIN_CHECKPOINT`, and `COMFYUI_BASE_URL` if you override it. Must
-  write the LoRA to `ZONE_TRAIN_OUTPUT`. Identity defaults live in
-  `comfyui/custom_nodes/zone_lora/train_config.json` (rank 8, alpha=rank, all
-  transformer blocks, 512px, at least 400 steps). macOS apply:
+  `ZONE_TRAIN_ATTEMPT`, `ZONE_TRAIN_DIR`, `ZONE_TRAIN_OUTPUT`, `ZONE_TRAIN_TRIGGER`,
+  `ZONE_TRAIN_ARCHITECTURE`, `ZONE_TRAIN_FOLDER`, `ZONE_TRAIN_ARTIFACT`, and
+  `COMFYUI_BASE_URL` if you override it. `ZONE_TRAIN_NAME` remains the
+  user-visible final filename. `ZONE_TRAIN_ATTEMPT`, `ZONE_TRAIN_FOLDER`, and
+  `ZONE_TRAIN_ARTIFACT` identify
+  isolated runtime namespaces. FLUX runs also receive `ZONE_TRAIN_CHECKPOINT`;
+  Qwen edit runs receive
+  `ZONE_TRAIN_UNET`, `ZONE_TRAIN_CLIP`, and `ZONE_TRAIN_VAE`. These are resolved
+  from explicit recipe training metadata, never inferred from a recipe name or
+  the global checkpoint. The command must write the LoRA to
+  `ZONE_TRAIN_OUTPUT`. Defaults live in
+  `comfyui/custom_nodes/zone_lora/train_config.json` (rank 32, alpha=rank,
+  transformer linear layers, 512px, at least 150 steps). Qwen needs paired
+  same-index `targets/NNNN.png` and `control_1/NNNN.png` files, with the edit
+  instruction in `targets/NNNN.txt`. Its quality score is measured but
+  uncalibrated; FLUX health bands do not apply, and live identity retention is
+  not yet proven. A command that uses the packaged Python driver should also
+  receive `ZONE_TRAIN_DEFER_CLEANUP=1`; Zone performs quality selection and
+  cleans that exact UUID namespace afterward. macOS apply:
   `./scripts/setup-comfyui-macos.sh --apply-nodes`. The NVIDIA image copies the
   same folder; Compose bind-mounts it over the container custom node.
 

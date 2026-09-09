@@ -1,20 +1,34 @@
 from __future__ import annotations
 
-import ast
-import importlib.util
+import asyncio
 import json
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
+
+from PIL import Image
 
 ROOT = Path(__file__).parents[2]
-DRIVER = ROOT / 'comfyui' / 'train_lora.py'
-NODES = ROOT / 'comfyui' / 'custom_nodes' / 'zone_lora' / 'train_node.py'
-CONFIG = ROOT / 'comfyui' / 'custom_nodes' / 'zone_lora' / 'train_config.json'
-SERVER = ROOT / 'runner' / 'zone_comfy' / 'src' / 'train.rs'
-PACKAGED = ('ZoneLoadTrainFolder', 'ZoneTrainLoRA')
-ESCAPES = {'n': '\n', 'r': '\r', 't': '\t', '0': '\0'}
+COMFYUI = Path(__file__).parents[1]
+INSTALL = Path(os.environ.get('COMFYUI_INSTALL_DIR', ''))
+PIN = '30bdda1ef13a3a34fce2cd2fec633f15d832122a'
+ZONE_NODES = COMFYUI / 'custom_nodes' / 'zone_lora'
+TRAIN_SERVER = ROOT / 'runner/zone_comfy/src/train.rs'
+QUALITY_SERVER = ROOT / 'runner/zone_comfy/src/quality.rs'
+
+if not INSTALL.is_dir():
+    raise RuntimeError('COMFYUI_INSTALL_DIR must point to the pinned ComfyUI checkout')
+if str(COMFYUI) not in sys.path:
+    sys.path.insert(0, str(COMFYUI))
+if str(INSTALL) not in sys.path:
+    sys.path.insert(0, str(INSTALL))
+
+import probe_lora  # noqa: E402
+import train_lora  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -22,23 +36,11 @@ class Expression:
     text: str
 
 
-@dataclass
-class Node:
-    class_type: str
-    inputs: frozenset[str]
-    links: dict[str, tuple[str, int]]
-
-
-class Rust:
-    """Recursive-descent reader for the `json!` graph literal in train.rs.
-
-    Values that are not literals stay opaque: the contract is the shape of the
-    graph, and the Rust suite owns what those expressions evaluate to.
-    """
-
-    def __init__(self, source: str, index: int) -> None:
+class RustLiteral:
+    def __init__(self, source: str, index: int, path: Path) -> None:
         self.source = source
         self.index = index
+        self.path = path
 
     def skip(self) -> None:
         while self.index < len(self.source):
@@ -58,25 +60,24 @@ class Rust:
         found = self.peek()
         if found != character:
             raise AssertionError(
-                f'{SERVER}: expected {character!r} at offset {self.index}, found {found!r}'
+                f'{self.path}: expected {character!r} at {self.index}, found {found!r}'
             )
         self.index += 1
 
     def string(self) -> str:
         self.take('"')
-        characters: list[str] = []
+        characters = []
         while self.index < len(self.source):
             character = self.source[self.index]
             self.index += 1
             if character == '"':
                 return ''.join(characters)
             if character == '\\':
-                escaped = self.source[self.index]
-                characters.append(ESCAPES.get(escaped, escaped))
+                characters.append(self.source[self.index])
                 self.index += 1
             else:
                 characters.append(character)
-        raise AssertionError(f'{SERVER}: unterminated string literal')
+        raise AssertionError(f'{self.path}: unterminated Rust string')
 
     def expression(self) -> Expression:
         start = self.index
@@ -100,31 +101,28 @@ class Rust:
     def more(self, closing: str) -> bool:
         if self.peek() == ',':
             self.take(',')
-        character = self.peek()
-        if not character:
-            raise AssertionError(f'{SERVER}: graph literal ends before {closing!r}')
-        if character == closing:
+        if self.peek() == closing:
             self.take(closing)
             return False
         return True
 
-    def array(self) -> list[object]:
+    def array(self) -> list:
         self.take('[')
-        items: list[object] = []
+        values = []
         while self.more(']'):
-            items.append(self.value())
-        return items
+            values.append(self.value())
+        return values
 
-    def object(self) -> dict[str, object]:
+    def object(self) -> dict:
         self.take('{')
-        fields: dict[str, object] = {}
+        values = {}
         while self.more('}'):
-            key = self.string()
+            name = self.string()
             self.take(':')
-            fields[key] = self.value()
-        return fields
+            values[name] = self.value()
+        return values
 
-    def value(self) -> object:
+    def value(self):
         character = self.peek()
         if character == '"':
             return self.string()
@@ -135,220 +133,401 @@ class Rust:
         return self.expression()
 
 
-def require(path: Path) -> Path:
-    if not path.is_file():
-        raise AssertionError(f'graph contract source is missing: {path}')
-    return path
-
-
-def source(path: Path) -> str:
-    return require(path).read_text()
-
-
-def link(value: object) -> tuple[str, int] | None:
-    if not isinstance(value, list) or len(value) != 2 or not isinstance(value[0], str):
-        return None
-    slot = value[1]
-    if isinstance(slot, Expression):
-        slot = int(slot.text) if slot.text.isdigit() else None
-    if not isinstance(slot, int) or isinstance(slot, bool):
-        return None
-    return value[0], slot
-
-
-def wiring(supplied: dict[str, object]) -> dict[str, tuple[str, int]]:
-    linked = ((name, link(value)) for name, value in supplied.items())
-    return {name: target for name, target in linked if target is not None}
-
-
-def graph(raw: object, path: Path) -> dict[str, Node]:
-    if not isinstance(raw, dict) or not raw:
-        raise AssertionError(f'no train graph nodes extracted from {path}')
-    nodes: dict[str, Node] = {}
-    for identifier, body in raw.items():
-        if not isinstance(body, dict):
-            raise AssertionError(f'{path}: node {identifier} is not an object')
-        class_type = body.get('class_type')
-        supplied = body.get('inputs')
-        if not isinstance(class_type, str) or not isinstance(supplied, dict):
-            raise AssertionError(f'{path}: node {identifier} has no class_type and inputs pair')
-        nodes[identifier] = Node(class_type, frozenset(supplied), wiring(supplied))
-    return nodes
-
-
-def server() -> dict[str, Node]:
-    text = source(SERVER)
-    definition = text.find('fn train_graph(')
-    if definition < 0:
-        raise AssertionError(f'{SERVER}: fn train_graph not found')
-    literal = text.find('json!(', definition)
+def rust_graph(path: Path, function: str) -> dict:
+    source = path.read_text()
+    start = source.find(f'fn {function}(')
+    if start < 0:
+        raise AssertionError(f'{path}: {function} is missing')
+    literal = source.find('json!({', start)
     if literal < 0:
-        raise AssertionError(f'{SERVER}: fn train_graph has no json! literal')
-    reader = Rust(text, literal + len('json!('))
-    return graph(reader.object(), SERVER)
+        raise AssertionError(f'{path}: {function} has no graph literal')
+    return RustLiteral(source, literal + len('json!('), path).object()
 
 
-def driver() -> ModuleType:
-    specification = importlib.util.spec_from_file_location('zone_train_driver', require(DRIVER))
-    if specification is None or specification.loader is None:
-        raise AssertionError(f'{DRIVER}: cannot be loaded as a module')
-    module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
-    return module
+def rust_graphs() -> dict[str, dict]:
+    flux_train = rust_graph(TRAIN_SERVER, 'flux_graph')
+    qwen_train = rust_graph(TRAIN_SERVER, 'qwen_graph')
+    trainer = rust_graph(TRAIN_SERVER, 'trainer')
+    trainer['inputs']['model'] = ['1', 0]
+    trainer['inputs']['latents'] = ['3', 0]
+    trainer['inputs']['positive'] = ['4', 0]
+    flux_train['5'] = trainer
+    trainer = rust_graph(TRAIN_SERVER, 'trainer')
+    trainer['inputs']['model'] = ['1', 0]
+    trainer['inputs']['latents'] = ['5', 0]
+    trainer['inputs']['positive'] = ['6', 0]
+    qwen_train['7'] = trainer
+    return {
+        'Rust flux train': flux_train,
+        'Rust qwen train': qwen_train,
+        'Rust flux probe': rust_graph(QUALITY_SERVER, 'flux_graph'),
+        'Rust qwen probe': rust_graph(QUALITY_SERVER, 'qwen_graph'),
+    }
 
 
-def standalone() -> dict[str, Node]:
-    built = driver().train_graph(
-        checkpoint='contract.safetensors',
-        folder='zone-train-contract',
-        captions={'contract.png': 'a photo of contract'},
-        save_name='contract',
-        config=json.loads(source(CONFIG)),
-        steps=1,
+def flux() -> train_lora.TrainingModel:
+    return train_lora.TrainingModel(architecture='flux', checkpoint='flux.safetensors')
+
+
+def qwen() -> train_lora.TrainingModel:
+    return train_lora.TrainingModel(
+        architecture='qwen_edit',
+        unet='qwen-unet.safetensors',
+        clip='qwen-clip.safetensors',
+        vae='qwen-vae.safetensors',
     )
-    return graph(built, DRIVER)
 
 
-def inputs(declared: ast.expr | None) -> dict[str, bool]:
-    if not isinstance(declared, ast.List):
-        raise AssertionError(f'{NODES}: an io.Schema declares no inputs list')
-    names: dict[str, bool] = {}
-    for element in declared.elts:
-        if not isinstance(element, ast.Call) or not isinstance(element.func, ast.Attribute):
-            continue
-        if element.func.attr != 'Input':
-            continue
-        name = element.args[0] if element.args else None
-        if not isinstance(name, ast.Constant) or not isinstance(name.value, str):
-            raise AssertionError(f'{NODES}: an io Input has no literal name')
-        names[name.value] = any(keyword.arg == 'default' for keyword in element.keywords)
-    return names
+def graphs() -> dict[str, dict]:
+    config = train_lora.load_config()
+    manifest = json.dumps(
+        {
+            'schema_version': 1,
+            'architecture': 'flux',
+            'pairs': [
+                {
+                    'index': 0,
+                    'target': 'targets/0000.png',
+                    'reference': None,
+                    'instruction': 'portrait',
+                }
+            ],
+        }
+    )
+    qwen_manifest = manifest.replace('"flux"', '"qwen_edit"').replace(
+        '"reference": null', '"reference": "control_1/0000.png"'
+    )
+    return {
+        'flux train': train_lora.train_graph(flux(), 'folder', manifest, 'artifact', config, 12),
+        'qwen train': train_lora.train_graph(
+            qwen(), 'folder', qwen_manifest, 'artifact', config, 12
+        ),
+        'flux loss probe': probe_lora.loss_graph(flux(), 'folder', manifest, 512, ''),
+        'qwen loss probe': probe_lora.loss_graph(
+            qwen(), 'folder', qwen_manifest, 512, ''
+        ),
+        'flux gradient probe': probe_lora.gradient_graph(
+            flux(), 'folder', manifest, 512
+        ),
+        'qwen gradient probe': probe_lora.gradient_graph(
+            qwen(), 'folder', qwen_manifest, 512
+        ),
+    }
 
 
-def declaration(function: ast.FunctionDef) -> tuple[str, dict[str, bool]] | None:
-    for call in ast.walk(function):
-        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
-            continue
-        if call.func.attr != 'Schema':
-            continue
-        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
-        identifier = keywords.get('node_id')
-        if not isinstance(identifier, ast.Constant) or not isinstance(identifier.value, str):
-            raise AssertionError(f'{NODES}: an io.Schema has no literal node_id')
-        return identifier.value, inputs(keywords.get('inputs'))
-    return None
-
-
-def schema() -> dict[str, dict[str, bool]]:
-    tree = ast.parse(source(NODES), filename=str(NODES))
-    nodes: dict[str, dict[str, bool]] = {}
-    for definition in ast.walk(tree):
-        if not isinstance(definition, ast.ClassDef):
-            continue
-        for member in definition.body:
-            if not isinstance(member, ast.FunctionDef) or member.name != 'define_schema':
-                continue
-            declared = declaration(member)
-            if declared is not None:
-                identifier, names = declared
-                nodes[identifier] = names
-    if not nodes:
-        raise AssertionError(f'{NODES}: no io.Schema node definition found')
-    return nodes
+def schema(node_class) -> tuple[dict[str, tuple], set[str], tuple[str, ...]]:
+    declared = node_class.INPUT_TYPES()
+    inputs = {}
+    required = set()
+    for group in ('required', 'optional'):
+        for name, specification in declared.get(group, {}).items():
+            inputs[name] = specification
+            if group == 'required':
+                required.add(name)
+    return inputs, required, tuple(node_class.RETURN_TYPES)
 
 
 class GraphContractTests(unittest.TestCase):
-    """The server and the standalone driver must post the same prompt graph.
-
-    Neither side imports the other, so only this test stops them drifting.
-    """
-
-    server: dict[str, Node]
-    standalone: dict[str, Node]
-    schema: dict[str, dict[str, bool]]
+    nodes = None
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.server = server()
-        cls.standalone = standalone()
-        cls.schema = schema()
+        revision = subprocess.check_output(
+            ['git', '-C', str(INSTALL), 'rev-parse', 'HEAD'], text=True
+        ).strip()
+        if revision != PIN:
+            raise AssertionError(f'ComfyUI checkout is {revision}, expected exact pin {PIN}')
 
-    def shared(self) -> list[str]:
-        return sorted(set(self.server) & set(self.standalone))
+        # ComfyUI picks its device while `comfy.model_management` is being
+        # imported, and defaults to CUDA. CI has CPU-only torch, where that
+        # import raises before a single contract can be read, so the choice
+        # has to be made before `nodes` pulls it in.
+        from comfy.cli_args import args
 
-    def test_both_graphs_declare_the_same_nodes(self) -> None:
-        self.assertEqual(
-            frozenset(self.server),
-            frozenset(self.standalone),
-            f'{SERVER} and {DRIVER} build different node ids',
+        args.cpu = True
+        import nodes
+
+        async def load_registry() -> bool:
+            from server import PromptServer
+
+            PromptServer(asyncio.get_running_loop())
+            await nodes.init_extra_nodes(init_custom_nodes=True, init_api_nodes=False)
+            return await nodes.load_custom_node(str(ZONE_NODES), set())
+
+        loaded = asyncio.run(load_registry())
+        if not loaded:
+            raise AssertionError(f'failed to load repository extension {ZONE_NODES}')
+        cls.nodes = nodes
+
+    def test_all_train_and_probe_graphs_match_the_pinned_registry(self) -> None:
+        for graph_name, graph in (graphs() | rust_graphs()).items():
+            with self.subTest(graph=graph_name):
+                self.assertTrue(graph)
+                self.validate_graph(graph_name, graph)
+
+    def test_rust_and_python_graph_contracts_are_identical(self) -> None:
+        python = graphs()
+        rust = rust_graphs()
+        pairs = (
+            ('flux train', 'Rust flux train'),
+            ('qwen train', 'Rust qwen train'),
+            ('flux loss probe', 'Rust flux probe'),
+            ('qwen loss probe', 'Rust qwen probe'),
         )
-        self.assertTrue(self.shared(), f'{SERVER} and {DRIVER} share no nodes')
-
-    def test_every_node_runs_the_same_class(self) -> None:
-        for identifier in self.shared():
-            with self.subTest(node=identifier):
+        for python_name, rust_name in pairs:
+            with self.subTest(python=python_name, rust=rust_name):
                 self.assertEqual(
-                    self.server[identifier].class_type,
-                    self.standalone[identifier].class_type,
-                    f'node {identifier} has a different class_type in {SERVER} and {DRIVER}',
+                    self.signature(python[python_name]), self.signature(rust[rust_name])
                 )
 
-    def test_every_node_supplies_the_same_inputs(self) -> None:
-        for identifier in self.shared():
-            with self.subTest(node=identifier):
-                self.assertEqual(
-                    self.server[identifier].inputs,
-                    self.standalone[identifier].inputs,
-                    f'node {identifier} has different input keys in {SERVER} and {DRIVER}',
-                )
-
-    def test_wiring_between_nodes_is_identical(self) -> None:
-        for identifier in self.shared():
-            with self.subTest(node=identifier):
-                self.assertEqual(
-                    self.server[identifier].links,
-                    self.standalone[identifier].links,
-                    f'node {identifier} is wired differently in {SERVER} and {DRIVER}',
-                )
-
-    def test_packaged_nodes_are_used_by_both_graphs(self) -> None:
-        for name in PACKAGED:
-            with self.subTest(node=name):
-                self.assertIn(name, self.schema, f'{NODES} no longer defines {name}')
-                for path, nodes in ((SERVER, self.server), (DRIVER, self.standalone)):
-                    self.assertIn(
-                        name,
-                        {node.class_type for node in nodes.values()},
-                        f'{path} no longer builds a {name} node',
-                    )
-
-    def test_graph_inputs_are_declared_by_the_packaged_schema(self) -> None:
-        for path, nodes in ((SERVER, self.server), (DRIVER, self.standalone)):
-            for identifier, node in sorted(nodes.items()):
-                if node.class_type not in self.schema:
-                    continue
-                with self.subTest(source=path.name, node=identifier):
-                    self.assertLessEqual(
-                        node.inputs,
-                        frozenset(self.schema[node.class_type]),
-                        f'{path} sends inputs {node.class_type} does not declare in {NODES}',
-                    )
-
-    def test_schema_inputs_without_defaults_are_always_supplied(self) -> None:
-        for name in PACKAGED:
-            required = frozenset(
-                key for key, has_default in self.schema.get(name, {}).items() if not has_default
+    @classmethod
+    def signature(cls, graph: dict) -> dict:
+        return {
+            identifier: (
+                node['class_type'],
+                frozenset(node['inputs']),
+                {
+                    name: linked
+                    for name, value in node['inputs'].items()
+                    if (linked := cls.link(value)) is not None
+                },
             )
-            for path, nodes in ((SERVER, self.server), (DRIVER, self.standalone)):
-                for identifier, node in sorted(nodes.items()):
-                    if node.class_type != name:
-                        continue
-                    with self.subTest(source=path.name, node=identifier):
-                        self.assertLessEqual(
-                            required,
-                            node.inputs,
-                            f'{path} omits {name} inputs that {NODES} gives no default',
+            for identifier, node in graph.items()
+        }
+
+    def validate_graph(self, graph_name: str, graph: dict) -> None:
+        for identifier, node in graph.items():
+            class_type = node.get('class_type')
+            supplied = node.get('inputs')
+            self.assertIn(
+                class_type,
+                self.nodes.NODE_CLASS_MAPPINGS,
+                f'{graph_name} node {identifier}',
+            )
+            self.assertIsInstance(supplied, dict, f'{graph_name} node {identifier}')
+            node_class = self.nodes.NODE_CLASS_MAPPINGS[class_type]
+            inputs, required, _ = schema(node_class)
+            self.assertLessEqual(required, set(supplied), f'{graph_name} node {identifier}')
+            self.assertLessEqual(set(supplied), set(inputs), f'{graph_name} node {identifier}')
+            for name, value in supplied.items():
+                linked = self.link(value)
+                if linked is not None:
+                    source, slot = linked
+                    self.assertIn(source, graph, f'{graph_name} node {identifier}.{name}')
+                    source_class = self.nodes.NODE_CLASS_MAPPINGS[graph[source]['class_type']]
+                    _, _, outputs = schema(source_class)
+                    self.assertLess(slot, len(outputs), f'{graph_name} node {identifier}.{name}')
+                    expected = inputs[name][0]
+                    if getattr(expected, 'value', expected) != '*':
+                        self.assertEqual(
+                            outputs[slot],
+                            expected,
+                            f'{graph_name} node {identifier}.{name} link type',
                         )
+                else:
+                    choices = inputs[name][0]
+                    if isinstance(value, Expression):
+                        continue
+                    if isinstance(choices, list) and name not in {
+                        'ckpt_name',
+                        'clip_name',
+                        'lora_name',
+                        'unet_name',
+                        'vae_name',
+                    }:
+                        self.assertIn(value, choices, f'{graph_name} node {identifier}.{name}')
+
+    @staticmethod
+    def link(value) -> tuple[str, int] | None:
+        slot = value[1] if isinstance(value, list) and len(value) == 2 else None
+        if isinstance(slot, Expression) and slot.text.isdigit():
+            slot = int(slot.text)
+        if (
+            isinstance(value, list)
+            and len(value) == 2
+            and isinstance(value[0], str)
+            and isinstance(slot, int)
+            and not isinstance(slot, bool)
+        ):
+            return value[0], slot
+        return None
+
+    def test_no_graph_uses_make_training_dataset(self) -> None:
+        sources = [
+            COMFYUI / 'train_lora.py',
+            COMFYUI / 'probe_lora.py',
+            ROOT / 'runner/zone_comfy/src/train.rs',
+            ROOT / 'runner/zone_comfy/src/quality.rs',
+        ]
+        for source in sources:
+            with self.subTest(source=source.name):
+                self.assertNotIn('MakeTrainingDataset', source.read_text())
+
+    def test_repository_extension_is_part_of_the_loaded_registry(self) -> None:
+        expected = {
+            'ZoneCleanupTrainingRun',
+            'ZoneLoadTrainDataset',
+            'ZoneProbeGradient',
+            'ZoneProbeLoss',
+            'ZoneStageTrainingArtifact',
+            'ZoneTrainLoRA',
+        }
+        self.assertLessEqual(expected, set(self.nodes.NODE_CLASS_MAPPINGS))
+
+    def test_two_pair_dataset_executes_with_native_zipped_list_mapping(self) -> None:
+        node_class = self.nodes.NODE_CLASS_MAPPINGS['ZoneLoadTrainDataset']
+        module = sys.modules[node_class.__module__]
+        run = train_lora.Run.create()
+        manifest = {
+            'schema_version': 1,
+            'architecture': 'qwen_edit',
+            'pairs': [
+                {
+                    'index': index,
+                    'target': f'targets/{index:04}.png',
+                    'reference': f'control_1/{index:04}.png',
+                    'instruction': f'instruction {index}',
+                }
+                for index in range(2)
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = root / run.folder
+            (folder / 'targets').mkdir(parents=True)
+            (folder / 'control_1').mkdir()
+            for index in range(2):
+                Image.new('RGB', (8, 8), (index * 40, 0, 0)).save(
+                    folder / f'targets/{index:04}.png'
+                )
+                Image.new('RGB', (8, 8), (0, index * 40, 0)).save(
+                    folder / f'control_1/{index:04}.png'
+                )
+            original = module.folder_paths.get_input_directory
+            module.folder_paths.get_input_directory = lambda: str(root)
+            try:
+                targets, references, instructions = node_class.execute(
+                    run.folder, json.dumps(manifest), 64
+                ).result
+            finally:
+                module.folder_paths.get_input_directory = original
+
+        self.assertEqual(instructions, ['instruction 0', 'instruction 1'])
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(len(references), 2)
+
+        class Capture:
+            INPUT_IS_LIST = False
+            FUNCTION = 'capture'
+
+            def capture(self, target, reference, instruction):
+                return target, reference, instruction
+
+        from execution import _async_map_node_over_list
+
+        mapped = asyncio.run(
+            _async_map_node_over_list(
+                'contract',
+                'capture',
+                Capture(),
+                {
+                    'target': targets,
+                    'reference': references,
+                    'instruction': instructions,
+                },
+                'capture',
+            )
+        )
+        self.assertEqual([item[2] for item in mapped], ['instruction 0', 'instruction 1'])
+        self.assertIs(mapped[0][0], targets[0])
+        self.assertIs(mapped[0][1], references[0])
+        self.assertIs(mapped[1][0], targets[1])
+        self.assertIs(mapped[1][1], references[1])
+
+    def test_artifact_nodes_stage_and_clean_only_one_uuid_namespace(self) -> None:
+        stage_class = self.nodes.NODE_CLASS_MAPPINGS['ZoneStageTrainingArtifact']
+        cleanup_class = self.nodes.NODE_CLASS_MAPPINGS['ZoneCleanupTrainingRun']
+        stage_module = sys.modules[stage_class.__module__]
+        cleanup_module = sys.modules[cleanup_class.__module__]
+        run = train_lora.Run.create()
+        other = train_lora.Run.create()
+        artifact = f'{run.artifact}.safetensors'
+        checkpoint = f'{run.artifact}-step12.safetensors'
+        unrelated = f'{other.artifact}.safetensors'
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_root = root / 'input'
+            output_root = root / 'output'
+            model_root = root / 'models/loras'
+            (output_root / 'loras').mkdir(parents=True)
+            model_root.mkdir(parents=True)
+            (input_root / run.folder).mkdir(parents=True)
+            (output_root / 'loras' / artifact).write_bytes(b'final')
+            (output_root / 'loras' / checkpoint).write_bytes(b'checkpoint')
+            (output_root / 'loras' / unrelated).write_bytes(b'unrelated')
+
+            originals = {
+                'stage_output': stage_module.folder_paths.get_output_directory,
+                'stage_models': stage_module.folder_paths.get_folder_paths,
+                'cleanup_input': cleanup_module.folder_paths.get_input_directory,
+                'cleanup_output': cleanup_module.folder_paths.get_output_directory,
+                'cleanup_models': cleanup_module.folder_paths.get_folder_paths,
+            }
+            stage_module.folder_paths.get_output_directory = lambda: str(output_root)
+            stage_module.folder_paths.get_folder_paths = lambda _: [str(model_root)]
+            cleanup_module.folder_paths.get_input_directory = lambda: str(input_root)
+            cleanup_module.folder_paths.get_output_directory = lambda: str(output_root)
+            cleanup_module.folder_paths.get_folder_paths = lambda _: [str(model_root)]
+            try:
+                stage_class.execute(artifact)
+                self.assertEqual((model_root / artifact).read_bytes(), b'final')
+                cleanup_class.execute(run.folder, run.artifact)
+            finally:
+                stage_module.folder_paths.get_output_directory = originals['stage_output']
+                stage_module.folder_paths.get_folder_paths = originals['stage_models']
+                cleanup_module.folder_paths.get_input_directory = originals['cleanup_input']
+                cleanup_module.folder_paths.get_output_directory = originals['cleanup_output']
+                cleanup_module.folder_paths.get_folder_paths = originals['cleanup_models']
+
+            self.assertFalse((input_root / run.folder).exists())
+            self.assertFalse((output_root / 'loras' / artifact).exists())
+            self.assertFalse((output_root / 'loras' / checkpoint).exists())
+            self.assertFalse((model_root / artifact).exists())
+            self.assertTrue((output_root / 'loras' / unrelated).is_file())
+
+    @unittest.skipUnless(hasattr(os, 'symlink'), 'symlink regression requires platform support')
+    def test_dataset_node_refuses_a_symlinked_pair_file(self) -> None:
+        node_class = self.nodes.NODE_CLASS_MAPPINGS['ZoneLoadTrainDataset']
+        module = sys.modules[node_class.__module__]
+        run = train_lora.Run.create()
+        manifest = {
+            'schema_version': 1,
+            'architecture': 'flux',
+            'pairs': [
+                {
+                    'index': 0,
+                    'target': 'targets/0000.png',
+                    'reference': None,
+                    'instruction': 'portrait',
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / run.folder / 'targets/0000.png'
+            target.parent.mkdir(parents=True)
+            victim = root / 'victim.png'
+            Image.new('RGB', (8, 8), 'red').save(victim)
+            target.symlink_to(victim)
+            original = module.folder_paths.get_input_directory
+            module.folder_paths.get_input_directory = lambda: str(root)
+            try:
+                with self.assertRaisesRegex(ValueError, 'symlink'):
+                    node_class.execute(run.folder, json.dumps(manifest), 64)
+            finally:
+                module.folder_paths.get_input_directory = original
+            self.assertTrue(victim.is_file())
 
 
 if __name__ == '__main__':

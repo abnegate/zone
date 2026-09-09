@@ -1,12 +1,14 @@
 //! Scan the ComfyUI models directory and join files to packaged recipes.
 
-use crate::recipe::{Recipe, RecipeCatalog, RequiredFile, sanitize_weight_filename};
+use crate::recipe::{MediaKind, Recipe, RecipeCatalog, RequiredFile, sanitize_weight_filename};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const SIDECAR_SUFFIX: &str = ".zone.json";
+pub(crate) const PUBLICATION_DIRECTORY: &str = ".zone-publish";
+const PUBLICATION_SUFFIX: &str = ".pending";
 
 const SCAN_DIRECTORIES: &[(&str, &str)] = &[
     ("checkpoints", "checkpoint"),
@@ -19,6 +21,14 @@ pub struct WeightSidecar {
     pub recipe_id: String,
     #[serde(default)]
     pub hf_base: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct WeightDocument {
+    #[serde(flatten)]
+    pub sidecar: WeightSidecar,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -45,7 +55,7 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
                 continue;
             }
             let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
@@ -55,6 +65,9 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
                 continue;
             }
             if sanitize_weight_filename(filename).is_err() {
+                continue;
+            }
+            if *kind == "lora" && publication_pending(models_dir, filename) {
                 continue;
             }
             let metadata = fs::metadata(&path).ok();
@@ -67,6 +80,9 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
             let Some(recipe) = recipe else {
                 continue;
             };
+            if *kind == "lora" && publication_pending(models_dir, filename) {
+                continue;
+            }
             let missing = missing_required(models_dir, &recipe.required_files);
             let mut required: Vec<String> = recipe
                 .required_files
@@ -128,17 +144,49 @@ fn resolve_recipe<'a>(
     catalog: &'a RecipeCatalog,
     filename: &str,
     kind: &str,
-    sidecar: Option<&WeightSidecar>,
+    document: Option<&WeightDocument>,
 ) -> Option<&'a Recipe> {
-    if let Some(sidecar) = sidecar
-        && let Some(recipe) = catalog.get(&sidecar.recipe_id)
+    if kind == "lora" {
+        let document = document?;
+        if document
+            .generation
+            .as_deref()
+            .is_some_and(|generation| uuid::Uuid::parse_str(generation).is_err())
+        {
+            return None;
+        }
+        let sidecar = &document.sidecar;
+        let recipe = catalog.get(&sidecar.recipe_id)?;
+        let hf_base = sidecar.hf_base.as_deref()?;
+        return (recipe.kind == MediaKind::Image
+            && recipe.adapter
+            && recipe.has_lora_slot()
+            && recipe
+                .hf_bases
+                .iter()
+                .any(|base| base.eq_ignore_ascii_case(hf_base)))
+        .then_some(recipe);
+    }
+    if let Some(document) = document
+        && let Some(recipe) = catalog.get(&document.sidecar.recipe_id)
     {
         return Some(recipe);
     }
-    if kind == "lora" {
-        return catalog.adapter_recipe_for_filename(filename);
-    }
     catalog.image_recipe_for(filename).ok()
+}
+
+pub(crate) fn publication_marker(loras: &Path, filename: &str) -> Option<PathBuf> {
+    let filename = sanitize_weight_filename(filename).ok()?;
+    Some(
+        loras
+            .join(PUBLICATION_DIRECTORY)
+            .join(format!("{filename}{PUBLICATION_SUFFIX}")),
+    )
+}
+
+fn publication_pending(models_dir: &Path, filename: &str) -> bool {
+    publication_marker(&models_dir.join("loras"), filename)
+        .is_some_and(|path| fs::symlink_metadata(path).is_ok())
 }
 
 fn missing_required(models_dir: &Path, required: &[RequiredFile]) -> Vec<String> {
@@ -172,8 +220,13 @@ fn sidecar_path(weight: &Path) -> PathBuf {
     weight.with_file_name(name)
 }
 
-fn read_sidecar(weight: &Path) -> Option<WeightSidecar> {
-    let contents = fs::read_to_string(sidecar_path(weight)).ok()?;
+fn read_sidecar(weight: &Path) -> Option<WeightDocument> {
+    let sidecar = sidecar_path(weight);
+    let metadata = fs::symlink_metadata(&sidecar).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let contents = fs::read_to_string(sidecar).ok()?;
     serde_json::from_str(&contents).ok()
 }
 
@@ -202,11 +255,23 @@ mod tests {
         root
     }
 
+    fn write_qwen_sidecar(weight: &Path) {
+        write_sidecar(
+            weight,
+            &WeightSidecar {
+                recipe_id: "qwen-image-edit-adapter".into(),
+                hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn adapter_is_not_ready_without_base() {
         let root = temp_models();
         let lora = root.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors");
         fs::write(&lora, b"lora").unwrap();
+        write_qwen_sidecar(&lora);
         let catalog = RecipeCatalog::packaged().unwrap();
         let items = scan(&root, &catalog);
         let item = items
@@ -226,11 +291,9 @@ mod tests {
     #[test]
     fn adapter_is_ready_when_required_bundle_exists() {
         let root = temp_models();
-        fs::write(
-            root.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors"),
-            b"lora",
-        )
-        .unwrap();
+        let lora = root.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors");
+        fs::write(&lora, b"lora").unwrap();
+        write_qwen_sidecar(&lora);
         fs::write(
             root.join("diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors"),
             b"unet",
@@ -253,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_selects_qwen_adapter_over_filename_heuristic() {
+    fn coherent_sidecar_selects_adapter_without_filename_inference() {
         let root = temp_models();
         let lora = root.join("loras/custom-style.safetensors");
         fs::write(&lora, b"lora").unwrap();
@@ -268,6 +331,83 @@ mod tests {
         let catalog = RecipeCatalog::packaged().unwrap();
         let items = scan(&root, &catalog);
         assert_eq!(items[0].recipe_id, "qwen-image-edit-adapter");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_or_mismatched_adapter_sidecars_are_not_listed() {
+        let root = temp_models();
+        let missing = root.join("loras/missing.safetensors");
+        let unbound = root.join("loras/unbound.safetensors");
+        let mismatched = root.join("loras/mismatched.safetensors");
+        let unknown = root.join("loras/unknown.safetensors");
+        let malformed = root.join("loras/malformed.safetensors");
+        for weight in [&missing, &unbound, &mismatched, &unknown, &malformed] {
+            fs::write(weight, b"lora").unwrap();
+        }
+        write_sidecar(
+            &unbound,
+            &WeightSidecar {
+                recipe_id: "flux-schnell-adapter".into(),
+                hf_base: None,
+            },
+        )
+        .unwrap();
+        write_sidecar(
+            &mismatched,
+            &WeightSidecar {
+                recipe_id: "flux-schnell-adapter".into(),
+                hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+            },
+        )
+        .unwrap();
+        write_sidecar(
+            &unknown,
+            &WeightSidecar {
+                recipe_id: "missing-adapter".into(),
+                hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+            },
+        )
+        .unwrap();
+        fs::write(
+            sidecar_path(&malformed),
+            serde_json::to_vec(&WeightDocument {
+                sidecar: WeightSidecar {
+                    recipe_id: "flux-schnell-adapter".into(),
+                    hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                },
+                generation: Some("not-a-generation".into()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(scan(&root, &RecipeCatalog::packaged().unwrap()).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pending_publication_is_not_listed() {
+        let root = temp_models();
+        let lora = root.join("loras/style.safetensors");
+        fs::write(&lora, b"lora").unwrap();
+        fs::write(
+            sidecar_path(&lora),
+            serde_json::to_vec(&WeightDocument {
+                sidecar: WeightSidecar {
+                    recipe_id: "flux-schnell-adapter".into(),
+                    hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                },
+                generation: Some(uuid::Uuid::new_v4().to_string()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let marker = publication_marker(&root.join("loras"), "style.safetensors").unwrap();
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(marker, b"pending").unwrap();
+
+        assert!(scan(&root, &RecipeCatalog::packaged().unwrap()).is_empty());
         let _ = fs::remove_dir_all(root);
     }
 }

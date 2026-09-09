@@ -1,10 +1,20 @@
 import type { z } from 'zod';
-import type { TrainFrameSchema } from '../features/models/schemas';
+import type {
+  DatasetConcernSchema,
+  DatasetFindingSchema,
+  DroppedImageSchema,
+  DropReasonSchema,
+  TrainFrameSchema,
+  TrainQualitySchema,
+  TrainRemediationSchema,
+  TrainScreeningSchema,
+} from '../features/models/schemas';
 import {
   BrowseResponseSchema,
   DiskUsageSchema,
   ModelsResponseSchema,
   TrainClipSchema,
+  TrainResultSchema,
 } from '../features/models/schemas';
 import type {
   BrowseOptions,
@@ -21,6 +31,15 @@ const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export type TrainFrame = z.infer<typeof TrainFrameSchema>;
 export type TrainClip = z.infer<typeof TrainClipSchema>;
+
+export type TrainQuality = z.infer<typeof TrainQualitySchema>;
+export type DatasetConcern = z.infer<typeof DatasetConcernSchema>;
+export type DatasetFinding = z.infer<typeof DatasetFindingSchema>;
+export type DropReason = z.infer<typeof DropReasonSchema>;
+export type DroppedImage = z.infer<typeof DroppedImageSchema>;
+export type TrainRemediation = z.infer<typeof TrainRemediationSchema>;
+export type TrainScreening = z.infer<typeof TrainScreeningSchema>;
+export type TrainResult = z.infer<typeof TrainResultSchema>;
 
 /**
  * Models API
@@ -164,7 +183,7 @@ export const modelsApi = {
       before_base64?: string;
       group?: number;
     }>;
-  }): Promise<{ filename: string | null }> {
+  }): Promise<TrainResult> {
     const response = await fetch(`${API_BASE}/api/models/train`, {
       method: 'POST',
       headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
@@ -174,7 +193,7 @@ export const modelsApi = {
       const payload = await response.json().catch(() => ({ error: 'Training failed' }));
       throw new Error(payload.error || `Failed to train: ${response.status}`);
     }
-    return response.json();
+    return parse(TrainResultSchema, await response.json());
   },
 
   /**

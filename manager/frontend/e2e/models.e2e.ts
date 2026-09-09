@@ -28,6 +28,30 @@ type TrainRequest = {
   images: TrainImage[];
 };
 
+type TrainResult = {
+  filename: string;
+  quality: {
+    improvement: number;
+    checkpoint: string;
+    measured: boolean;
+    calibration: 'flux_health_bands' | 'uncalibrated';
+  } | null;
+  dataset?: Array<{
+    concern: 'too_few' | 'low_variety' | 'low_pose_variety' | 'mixed_subjects';
+    detail: string;
+  }>;
+  screening?: {
+    kept: number;
+    dropped: Array<{ filename: string; reason: 'duplicate' | 'blurred' | 'small' }>;
+    attempted?: Array<{
+      source_index: number;
+      filename: string;
+      reason: 'duplicate' | 'blurred' | 'small';
+      outcome: 'used' | 'still_rejected' | 'failed';
+    }>;
+  } | null;
+};
+
 const mockInstalledModels: InstalledModel[] = [
   {
     name: 'llama3.2:latest',
@@ -100,7 +124,10 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify([{ id: 'flux-schnell', label: 'FLUX.1 Schnell', edit: false }]),
+          body: JSON.stringify([
+            { id: 'flux-schnell', label: 'FLUX.1 Schnell', edit: false },
+            { id: 'qwen-image-edit', label: 'Qwen Image Edit', edit: true },
+          ]),
         });
         return;
       }
@@ -152,7 +179,12 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ filename: adapter.name }),
+        body: JSON.stringify({
+          filename: adapter.name,
+          quality: null,
+          dataset: [],
+          screening: null,
+        }),
       });
     } else if (method === 'DELETE') {
       route.fulfill({ status: 200, body: '' });
@@ -207,6 +239,43 @@ function trainPanel(page: Page): Locator {
   return page
     .locator('.card')
     .filter({ has: page.getByRole('heading', { name: 'Train a LoRA' }) });
+}
+
+async function routeTrainResult(page: Page, result: TrainResult): Promise<void> {
+  await routeApi(page, '**/api/models/train', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(result),
+    });
+  });
+}
+
+async function trainOnce(page: Page, panel: Locator, filename = 'portrait.png'): Promise<void> {
+  await panel.getByLabel('Name', { exact: true }).fill('zoneface');
+  await panel.getByLabel('Trigger word').fill('zne person');
+  await panel.getByLabel('Target images').setInputFiles({
+    name: filename,
+    mimeType: 'image/png',
+    buffer: Buffer.from(PNG_BASE64, 'base64'),
+  });
+  const submit = panel.getByRole('button', { name: 'Train' });
+  await expect(submit).toBeEnabled();
+  await submit.click();
+}
+
+async function selectTrainBase(page: Page, panel: Locator, label: string): Promise<void> {
+  await panel.getByLabel('Base').click();
+  await page.getByRole('option', { name: label, exact: true }).click();
+  await expect(panel.getByLabel('Base')).toContainText(label);
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve = (_value: T): void => {};
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
 }
 
 // Helper to switch to browse tab and wait for it to load
@@ -313,7 +382,9 @@ test.describe('Models Page', () => {
       page.getByText('subject.mp4: 24 frames read at 8.0/s, 2 kept')
     ).toBeVisible();
     await expect(page.getByText('Caption for subject.mp4 frame-0000.png')).toBeVisible();
-    await expect(page.getByText('mirrored')).toBeVisible();
+    await expect(
+      page.getByText('subject.mp4 frame-0001.png (mirrored)', { exact: true })
+    ).toBeVisible();
   });
 
   test('submits a LoRA and lists the trained adapter', async ({ page }) => {
@@ -325,7 +396,7 @@ test.describe('Models Page', () => {
 
     await panel.getByLabel('Name', { exact: true }).fill('zoneface');
     await panel.getByLabel('Trigger word').fill('zne person');
-    await panel.getByLabel('Images', { exact: true }).setInputFiles({
+    await panel.getByLabel('Target images').setInputFiles({
       name: 'portrait.png',
       mimeType: 'image/png',
       buffer: Buffer.from(PNG_BASE64, 'base64'),
@@ -359,7 +430,7 @@ test.describe('Models Page', () => {
 
     await page.getByRole('tab', { name: 'Train' }).click();
     await panel.getByLabel('Name', { exact: true }).fill('zoneface');
-    await panel.getByLabel('Images', { exact: true }).setInputFiles({
+    await panel.getByLabel('Target images').setInputFiles({
       name: 'portrait.png',
       mimeType: 'image/png',
       buffer: Buffer.from(PNG_BASE64, 'base64'),
@@ -375,6 +446,551 @@ test.describe('Models Page', () => {
     await expect(submit).toBeDisabled();
 
     expect(requests).toHaveLength(0);
+  });
+
+  test('rejects incomplete Qwen pairs and submits complete pairs in their visible order', async ({
+    page,
+  }) => {
+    const requests = trainRequests(page);
+    const panel = trainPanel(page);
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await selectTrainBase(page, panel, 'Qwen Image Edit');
+    await panel.getByLabel('Name', { exact: true }).fill('zone-edit');
+    await expect(panel.getByLabel('Trigger word')).not.toHaveAttribute('required', '');
+    await panel.getByLabel('Target images').setInputFiles([
+      {
+        name: 'target-a.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from('target a'),
+      },
+      {
+        name: 'target-b.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from('target b'),
+      },
+    ]);
+
+    const submit = panel.getByRole('button', { name: 'Train' });
+    const firstReference = panel.getByLabel('Reference image for target 1: target-a.png');
+    const firstInstruction = panel.getByLabel('Instruction for target 1: target-a.png');
+    await expect(submit).toBeDisabled();
+    await expect(panel.getByRole('button', { name: 'Auto-caption images' })).toHaveCount(0);
+    await expect(firstReference).not.toHaveAttribute('multiple', '');
+    const referenceError = await firstReference.getAttribute('aria-describedby');
+    expect(referenceError).not.toBeNull();
+    await expect(panel.locator(`#${referenceError}`)).toContainText(
+      'Choose one reference image for this target.'
+    );
+    expect(requests).toHaveLength(0);
+
+    await firstReference.setInputFiles({
+      name: 'reference-a.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from('reference a'),
+    });
+    await firstInstruction.fill('add a red coat');
+    await expect(submit).toBeDisabled();
+
+    await panel
+      .getByLabel('Reference image for target 2: target-b.png')
+      .setInputFiles({
+        name: 'reference-b.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from('reference b'),
+      });
+    await panel
+      .getByLabel('Instruction for target 2: target-b.png')
+      .fill('move the subject outside');
+    await expect(submit).toBeEnabled();
+
+    await panel.getByRole('button', { name: 'Move target 2: target-b.png up' }).click();
+    await expect(panel.getByLabel('Instruction for target 1: target-b.png')).toHaveValue(
+      'move the subject outside'
+    );
+    await submit.click();
+
+    await expect.poll(() => requests.length).toBe(1);
+    expect(requests[0].base).toBe('qwen-image-edit');
+    expect(requests[0].trigger).toBeUndefined();
+    expect(requests[0].images).toEqual([
+      {
+        filename: 'target-b.png',
+        caption: 'move the subject outside',
+        bytes_base64: Buffer.from('target b').toString('base64'),
+        before_base64: Buffer.from('reference b').toString('base64'),
+      },
+      {
+        filename: 'target-a.png',
+        caption: 'add a red coat',
+        bytes_base64: Buffer.from('target a').toString('base64'),
+        before_base64: Buffer.from('reference a').toString('base64'),
+      },
+    ]);
+  });
+
+  test('clears Qwen references and instructions when switching bases', async ({ page }) => {
+    const requests = trainRequests(page);
+    const panel = trainPanel(page);
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await selectTrainBase(page, panel, 'Qwen Image Edit');
+    await panel.getByLabel('Target images').setInputFiles({
+      name: 'target.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
+    await panel.getByLabel('Reference image for target 1: target.png').setInputFiles({
+      name: 'reference.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
+    await panel
+      .getByLabel('Instruction for target 1: target.png')
+      .fill('remove the background');
+
+    await selectTrainBase(page, panel, 'FLUX.1 Schnell');
+    await expect(panel.getByLabel('Reference image for target 1: target.png')).toHaveCount(0);
+    await expect(panel.getByLabel('Instruction for target 1: target.png')).toHaveCount(0);
+    await expect(panel.getByLabel('Caption for target.png')).toHaveValue('');
+    await expect(panel.getByRole('button', { name: 'Auto-caption images' })).toBeVisible();
+    await panel.getByLabel('Caption for target.png').fill('portrait in cool light');
+
+    await selectTrainBase(page, panel, 'Qwen Image Edit');
+    await expect(panel.getByLabel('Reference image for target 1: target.png')).toHaveAttribute(
+      'aria-invalid',
+      'true'
+    );
+    await expect(panel.getByLabel('Instruction for target 1: target.png')).toHaveValue('');
+    await expect(panel.getByRole('button', { name: 'Train' })).toBeDisabled();
+    await expect(panel.getByRole('status', { name: 'Training pair readiness' })).toContainText(
+      '1 target pair still needs a reference image and instruction.'
+    );
+    expect(requests).toHaveLength(0);
+  });
+
+  test('keeps deferred auto-captions with their original targets after draft mutations', async ({
+    page,
+  }) => {
+    const requested = deferred<TrainImage[]>();
+    const release = deferred<void>();
+    await routeApi(page, '**/api/models/train/captions', async (route) => {
+      const body = route.request().postDataJSON() as { images: TrainImage[] };
+      requested.resolve(body.images);
+      await release.promise;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ captions: ['generated a', 'generated b', 'generated c'] }),
+      });
+    });
+    const panel = trainPanel(page);
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await panel.getByLabel('Target images').setInputFiles([
+      { name: 'a.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
+      { name: 'b.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
+      { name: 'c.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
+    ]);
+    await panel.getByRole('button', { name: 'Auto-caption images' }).click();
+    await expect.poll(async () => (await requested.promise).map((image) => image.filename)).toEqual([
+      'a.png',
+      'b.png',
+      'c.png',
+    ]);
+
+    await panel.getByRole('button', { name: 'Move target 3: c.png up' }).click();
+    await panel.getByRole('button', { name: 'Remove target 1: a.png' }).click();
+    await panel.getByLabel('Caption for b.png').fill('keep my caption');
+    await panel.getByLabel('Target images').setInputFiles({
+      name: 'd.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
+    await expect(panel.getByLabel('Caption for d.png')).toBeVisible();
+    release.resolve();
+
+    await expect(panel.getByLabel('Caption for c.png')).toHaveValue('generated c');
+    await expect(panel.getByLabel('Caption for b.png')).toHaveValue('keep my caption');
+    await expect(panel.getByLabel('Caption for d.png')).toHaveValue('');
+  });
+
+  test('freezes every draft control while a training request is in flight', async ({ page }) => {
+    const requested = deferred<TrainRequest>();
+    const release = deferred<void>();
+    await routeApi(page, '**/api/models/train', async (route) => {
+      requested.resolve(route.request().postDataJSON() as TrainRequest);
+      await release.promise;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ filename: 'zoneface.safetensors', quality: null }),
+      });
+    });
+    const panel = trainPanel(page);
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await panel.getByLabel('Name', { exact: true }).fill('zoneface');
+    await panel.getByLabel('Trigger word').fill('zne person');
+    await panel.getByLabel('Target images').setInputFiles([
+      { name: 'first.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
+      { name: 'second.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
+    ]);
+    await panel.getByLabel('Caption for first.png').fill('first caption');
+    await panel.getByRole('button', { name: 'Train' }).click();
+    await requested.promise;
+
+    await expect(panel.locator('form')).toHaveAttribute('aria-busy', 'true');
+    for (const control of [
+      panel.getByLabel('Name', { exact: true }),
+      panel.getByLabel('Base'),
+      panel.getByLabel('Trigger word'),
+      panel.getByLabel('Target images'),
+      panel.getByLabel('Caption for first.png'),
+      panel.getByRole('button', { name: 'Auto-caption images' }),
+      panel.getByRole('button', { name: 'Move target 1: first.png down' }),
+      panel.getByRole('button', { name: 'Remove target 1: first.png' }),
+      panel.getByRole('button', { name: 'Train' }),
+    ]) {
+      await expect(control).toBeDisabled();
+    }
+
+    release.resolve();
+    await expect(panel.getByText('Training finished: zoneface.safetensors')).toBeVisible();
+    await expect(panel.locator('form')).toHaveAttribute('aria-busy', 'false');
+    await expect(panel.getByLabel('Name', { exact: true })).toBeEnabled();
+    await expect(panel.getByLabel('Caption for first.png')).toHaveCount(0);
+  });
+
+  test('reports measured Qwen quality without FLUX health bands', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zone-edit.safetensors',
+      quality: {
+        improvement: 0.3472,
+        checkpoint: 'step400',
+        measured: true,
+        calibration: 'uncalibrated',
+      },
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await selectTrainBase(page, panel, 'Qwen Image Edit');
+    await panel.getByLabel('Name', { exact: true }).fill('zone-edit');
+    await panel.getByLabel('Trigger word').fill('zne subject');
+    await panel.getByLabel('Target images').setInputFiles({
+      name: 'target.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
+    await panel.getByLabel('Reference image for target 1: target.png').setInputFiles({
+      name: 'reference.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
+    await panel
+      .getByLabel('Instruction for target 1: target.png')
+      .fill('change the background to a studio');
+    await panel.getByRole('button', { name: 'Train' }).click();
+
+    const result = panel.locator('.train-result');
+    await expect(result).toContainText('Measured, not calibrated');
+    await expect(result).toContainText('35% better than base');
+    await expect(result).toContainText('Qwen Image Edit health bands are not calibrated yet');
+    await expect(result).not.toContainText('Weak');
+    await expect(result).not.toContainText('Healthy');
+    await expect(result).not.toContainText('Strong');
+    await expect(result).not.toContainText('keep that identity');
+  });
+
+  test('bands a measured improvement against what a real run reaches', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.3472,
+        checkpoint: 'step400',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+      dataset: [],
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const result = panel.locator('.train-result');
+    await expect(result).toHaveAttribute('role', 'status');
+    await expect(result).toContainText('zoneface.safetensors');
+    await expect(result).toContainText('Healthy');
+    await expect(result).toContainText('35% better');
+    await expect(result).toContainText('measured at step400');
+    await expect(result).toContainText('around 35%');
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+  });
+
+  test('calls out a score a trainer that learned nothing also reaches', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.135,
+        checkpoint: 'step400',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const result = panel.locator('.train-result');
+    await expect(result).toContainText('No measurable learning');
+    await expect(result).toContainText('14% better');
+    await expect(result).toContainText('still scores around 15%');
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+  });
+
+  test('reports an unprobed run as not measured, not as a failure or a zero', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, { filename: 'zoneface.safetensors', quality: null });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const result = panel.locator('.train-result');
+    await expect(result).toContainText('zoneface.safetensors');
+    await expect(result).toContainText('Not measured');
+    await expect(result).toContainText('The adapter trained normally');
+    await expect(result).not.toContainText('0%');
+    await expect(result.locator('.train-improvement')).toHaveCount(0);
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('offers dataset findings as advice and still accepts another run', async ({ page }) => {
+    const requests = trainRequests(page);
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.34,
+        checkpoint: 'step400',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+      dataset: [
+        {
+          concern: 'low_variety',
+          detail: 'these images look very alike; more angles and lighting will train better',
+        },
+        { concern: 'too_few', detail: 'six images is thin, a dozen holds an identity better' },
+      ],
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const advice = panel.locator('.train-advice');
+    await expect(advice).toContainText('Images too alike');
+    await expect(advice).toContainText('more angles and lighting will train better');
+    await expect(advice).toContainText('Too few images');
+    await expect(advice).toContainText('a dozen holds an identity better');
+    await expect(advice).toContainText('can be wrong');
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+
+    await trainOnce(page, panel, 'portrait-2.png');
+    await expect.poll(() => requests.length).toBe(2);
+  });
+
+  test('says nothing about the dataset when there is nothing to flag', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.46,
+        checkpoint: 'step600',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const result = panel.locator('.train-result');
+    await expect(result).toContainText('Strong');
+    await expect(panel.locator('.train-advice')).toHaveCount(0);
+    await expect(panel.getByText('Worth checking')).toHaveCount(0);
+
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.46,
+        checkpoint: 'step800',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+      dataset: [],
+    });
+    await trainOnce(page, panel, 'portrait-2.png');
+
+    await expect(result).toContainText('measured at step800');
+    await expect(panel.locator('.train-advice')).toHaveCount(0);
+    await expect(panel.getByText('Worth checking')).toHaveCount(0);
+  });
+
+  test('receipts every image screening dropped, grouped by why', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.36,
+        checkpoint: 'step400',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+      screening: {
+        kept: 11,
+        dropped: [
+          { filename: 'IMG_4402.jpg', reason: 'duplicate' },
+          { filename: 'IMG_4407.jpg', reason: 'blurred' },
+          { filename: 'thumb.png', reason: 'small' },
+          { filename: 'IMG_4405.jpg', reason: 'duplicate' },
+        ],
+      },
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const screening = panel.locator('.train-screening');
+    await expect(screening).toContainText('Screened before training');
+    await expect(screening).toContainText('Trained on 11 of 15 images');
+
+    const items = screening.locator('.train-screening-item');
+    await expect(items).toHaveCount(3);
+    await expect(items.nth(0)).toContainText('2 near-duplicates');
+    await expect(items.nth(0)).toContainText('teach one pose over and over');
+    await expect(items.nth(0)).toContainText('IMG_4402.jpg, IMG_4405.jpg');
+    await expect(items.nth(1)).toContainText('1 blurred frame');
+    await expect(items.nth(1)).toContainText('learned as part of the subject');
+    await expect(items.nth(1)).toContainText('IMG_4407.jpg');
+    await expect(items.nth(2)).toContainText('1 undersized image');
+    await expect(items.nth(2)).toContainText('no detail left to learn');
+    await expect(items.nth(2)).toContainText('thumb.png');
+
+    await expect(screening).toContainText('Your originals are untouched');
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('receipts image repairs even when the final screen keeps every target', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.36,
+        checkpoint: 'step400',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+      screening: {
+        kept: 3,
+        dropped: [],
+        attempted: [
+          { source_index: 0, filename: 'small.png', reason: 'small', outcome: 'used' },
+          {
+            source_index: 1,
+            filename: 'blurred.png',
+            reason: 'blurred',
+            outcome: 'still_rejected',
+          },
+          { source_index: 2, filename: 'broken.png', reason: 'small', outcome: 'failed' },
+        ],
+      },
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const screening = panel.locator('.train-screening');
+    await expect(screening).toContainText('Image repairs');
+    await expect(screening).toContainText(
+      'Zone tried to improve these images before the final screen'
+    );
+    const items = screening.locator('.train-screening-item');
+    await expect(items).toHaveCount(3);
+    await expect(items.nth(0)).toContainText('small.png');
+    await expect(items.nth(0)).toContainText('improved copy was used');
+    await expect(items.nth(1)).toContainText('blurred.png');
+    await expect(items.nth(1)).toContainText('did not pass the final screen');
+    await expect(items.nth(2)).toContainText('broken.png');
+    await expect(items.nth(2)).toContainText('could not create an improved copy');
+  });
+
+  test('says nothing about screening when nothing was dropped or repaired', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.36,
+        checkpoint: 'step400',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+      screening: null,
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const result = panel.locator('.train-result');
+    await expect(result).toContainText('Healthy');
+    await expect(panel.locator('.train-screening')).toHaveCount(0);
+    await expect(panel.getByText('Screened before training')).toHaveCount(0);
+
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.36,
+        checkpoint: 'step800',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+      screening: { kept: 12, dropped: [] },
+    });
+    await trainOnce(page, panel, 'portrait-2.png');
+
+    await expect(result).toContainText('measured at step800');
+    await expect(panel.locator('.train-screening')).toHaveCount(0);
+    await expect(panel.getByText('Screened before training')).toHaveCount(0);
+  });
+
+  test('names what a set with no pose variety cannot be prompted to do', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: {
+        improvement: 0.36,
+        checkpoint: 'step400',
+        measured: true,
+        calibration: 'flux_health_bands',
+      },
+      dataset: [
+        { concern: 'low_pose_variety', detail: 'every image is the same head-on standing pose' },
+      ],
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const advice = panel.locator('.train-advice');
+    await expect(advice).toContainText('Cannot be prompted into new poses');
+    await expect(advice).toContainText('every image is the same head-on standing pose');
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+    await expect(panel.getByRole('alert')).toHaveCount(0);
   });
 
   test('displays installed models', async ({ page }) => {

@@ -89,6 +89,36 @@ pub struct RequiredFile {
     pub directory: String,
 }
 
+/// The exact model components a supported training graph loads.
+///
+/// This is resolved only from the catalog's explicit `training` metadata. A
+/// recipe id, prompt mode, or process-wide checkpoint is never enough to select
+/// a trainer because those are presentation and inference concerns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrainingModel {
+    Flux {
+        checkpoint: String,
+    },
+    QwenEdit {
+        unet: String,
+        clip: String,
+        vae: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrainingAdapter {
+    pub recipe_id: String,
+    pub hf_base: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TrainingArchitecture {
+    Flux,
+    QwenEdit,
+}
+
 #[derive(Debug, Clone)]
 pub struct Recipe {
     pub id: String,
@@ -99,6 +129,7 @@ pub struct Recipe {
     pub defaults: HashMap<String, String>,
     pub hf_bases: Vec<String>,
     pub required_files: Vec<RequiredFile>,
+    training: Option<Training>,
     bare: Value,
     with_source: Option<Value>,
     slots: RecipeSlots,
@@ -154,6 +185,21 @@ struct CatalogRecipe {
     hf_bases: Vec<String>,
     #[serde(default)]
     required_files: Vec<RequiredFile>,
+    #[serde(default)]
+    training: Option<CatalogTraining>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CatalogTraining {
+    architecture: TrainingArchitecture,
+    adapter: String,
+    hf_base: String,
+}
+
+#[derive(Debug, Clone)]
+struct Training {
+    architecture: TrainingArchitecture,
+    adapter: TrainingAdapter,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,7 +275,7 @@ impl RecipeCatalog {
             for hint in spec.filename_hints {
                 hints.push((hint.to_ascii_lowercase(), spec.id.clone()));
             }
-            recipes.push(Recipe {
+            let recipe = Recipe {
                 id: spec.id,
                 kind: spec.kind,
                 label: spec.label,
@@ -238,10 +284,54 @@ impl RecipeCatalog {
                 defaults: spec.defaults,
                 hf_bases: spec.hf_bases,
                 required_files: spec.required_files,
+                training: spec.training.map(|training| Training {
+                    architecture: training.architecture,
+                    adapter: TrainingAdapter {
+                        recipe_id: training.adapter,
+                        hf_base: training.hf_base,
+                    },
+                }),
                 bare,
                 with_source,
                 slots,
-            });
+            };
+            recipes.push(recipe);
+        }
+
+        for recipe in recipes.iter().filter(|recipe| recipe.training.is_some()) {
+            let model = recipe.training_model()?;
+            let adapter = recipe.training_adapter()?;
+            let adapter_recipe = recipes
+                .iter()
+                .find(|candidate| candidate.id == adapter.recipe_id)
+                .ok_or(Error::Configuration(
+                    "training metadata references an unknown adapter recipe",
+                ))?;
+            if !adapter_recipe.adapter
+                || adapter_recipe.kind != recipe.kind
+                || !adapter_recipe.has_lora_slot()
+                || !recipe
+                    .hf_bases
+                    .iter()
+                    .any(|base| base.eq_ignore_ascii_case(&adapter.hf_base))
+                || !adapter_recipe
+                    .hf_bases
+                    .iter()
+                    .any(|base| base.eq_ignore_ascii_case(&adapter.hf_base))
+            {
+                return Err(Error::Configuration(
+                    "training metadata does not match its adapter recipe",
+                ));
+            }
+            let prompt_mode = match model {
+                TrainingModel::Flux { .. } => PromptMode::ClipScene,
+                TrainingModel::QwenEdit { .. } => PromptMode::EditInstruction,
+            };
+            if recipe.prompt_mode != prompt_mode || adapter_recipe.prompt_mode != prompt_mode {
+                return Err(Error::Configuration(
+                    "training architecture does not match its prompt mode",
+                ));
+            }
         }
 
         if !recipes
@@ -266,12 +356,6 @@ impl RecipeCatalog {
     }
 
     pub fn image_recipe_for(&self, checkpoint: &str) -> Result<&Recipe, Error> {
-        let trimmed = checkpoint.trim();
-        if trimmed.to_ascii_lowercase().contains("lora")
-            && let Some(adapter) = self.adapter_recipe_for_filename(trimmed)
-        {
-            return Ok(adapter);
-        }
         let id = self.resolve_image_id(checkpoint);
         self.get(id)
             // An adapter recipe drives a LoRA slot. Letting one answer for a
@@ -327,23 +411,54 @@ impl RecipeCatalog {
         self.recipes.iter().find(|recipe| {
             recipe.kind == MediaKind::Image
                 && recipe.adapter
+                && recipe.has_lora_slot()
                 && recipe
                     .hf_bases
                     .iter()
                     .any(|base| base.eq_ignore_ascii_case(hf_base))
         })
     }
-
-    pub fn adapter_recipe_for_filename(&self, filename: &str) -> Option<&Recipe> {
-        let lower = filename.to_ascii_lowercase();
-        if lower.contains("qwen") {
-            return self.get("qwen-image-edit-adapter");
-        }
-        self.get("flux-schnell-adapter")
-    }
 }
 
 impl Recipe {
+    pub fn training_model(&self) -> Result<TrainingModel, Error> {
+        let architecture = self
+            .training
+            .as_ref()
+            .ok_or(Error::Configuration(
+                "recipe does not declare a supported training architecture",
+            ))?
+            .architecture;
+        match architecture {
+            TrainingArchitecture::Flux => Ok(TrainingModel::Flux {
+                checkpoint: self.training_weight("checkpoint")?,
+            }),
+            TrainingArchitecture::QwenEdit => Ok(TrainingModel::QwenEdit {
+                unet: self.training_weight("unet")?,
+                clip: self.training_weight("clip")?,
+                vae: self.training_weight("vae")?,
+            }),
+        }
+    }
+
+    pub fn training_adapter(&self) -> Result<&TrainingAdapter, Error> {
+        self.training
+            .as_ref()
+            .map(|training| &training.adapter)
+            .ok_or(Error::Configuration(
+                "recipe does not declare a supported training adapter",
+            ))
+    }
+
+    fn training_weight(&self, name: &str) -> Result<String, Error> {
+        self.defaults
+            .get(name)
+            .ok_or(Error::Configuration(
+                "training metadata references a missing model weight",
+            ))
+            .and_then(|filename| sanitize_weight_filename(filename))
+    }
+
     pub fn has_lora_slot(&self) -> bool {
         self.slots.weights.contains_key("lora")
     }
@@ -608,6 +723,67 @@ mod tests {
     }
 
     #[test]
+    fn training_model_is_explicit_and_uses_only_catalog_defaults() {
+        let catalog = catalog();
+        assert_eq!(
+            catalog.get("flux-dev").unwrap().training_model().unwrap(),
+            TrainingModel::Flux {
+                checkpoint: "flux1-dev-fp8.safetensors".into()
+            }
+        );
+        assert_eq!(
+            catalog
+                .get("qwen-image-edit")
+                .unwrap()
+                .training_model()
+                .unwrap(),
+            TrainingModel::QwenEdit {
+                unet: "qwen_image_edit_2511_fp8mixed.safetensors".into(),
+                clip: "qwen_2.5_vl_7b_fp8_scaled.safetensors".into(),
+                vae: "qwen_image_vae.safetensors".into(),
+            }
+        );
+        assert_eq!(
+            catalog
+                .get("qwen-image-edit")
+                .unwrap()
+                .training_adapter()
+                .unwrap(),
+            &TrainingAdapter {
+                recipe_id: "qwen-image-edit-adapter".into(),
+                hf_base: "Qwen/Qwen-Image-Edit-2511".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn training_never_infers_a_family_from_recipe_identity_or_prompt_mode() {
+        let catalog = catalog();
+        assert!(
+            catalog
+                .get("qwen-image-edit-adapter")
+                .unwrap()
+                .training_model()
+                .is_err()
+        );
+        assert!(catalog.get("sd15").unwrap().training_model().is_err());
+    }
+
+    #[test]
+    fn declared_training_fails_closed_when_a_weight_is_missing_or_pathful() {
+        let catalog = catalog();
+        let mut missing = catalog.get("qwen-image-edit").unwrap().clone();
+        missing.defaults.remove("clip");
+        assert!(missing.training_model().is_err());
+
+        let mut pathful = catalog.get("flux-schnell").unwrap().clone();
+        pathful
+            .defaults
+            .insert("checkpoint".into(), "../outside.safetensors".into());
+        assert!(pathful.training_model().is_err());
+    }
+
+    #[test]
     fn checkpoint_filename_selects_recipe() {
         let catalog = catalog();
         assert_eq!(
@@ -636,7 +812,7 @@ mod tests {
                 .image_recipe_for("qwen-image-edit-plus-nsfw-lora.safetensors")
                 .unwrap()
                 .id,
-            "qwen-image-edit-adapter"
+            "qwen-image-edit"
         );
         assert_eq!(
             catalog
@@ -893,28 +1069,72 @@ mod tests {
     }
 
     #[test]
-    fn unknown_lora_filename_picks_family_adapter() {
+    fn adapter_selection_requires_catalog_metadata() {
         let catalog = catalog();
-        assert_eq!(
-            catalog
-                .adapter_recipe_for_filename("qwen-image-edit-plus-nsfw-lora.safetensors")
-                .unwrap()
-                .id,
-            "qwen-image-edit-adapter"
-        );
-        assert_eq!(
-            catalog
-                .adapter_recipe_for_filename("my-style.safetensors")
-                .unwrap()
-                .id,
-            "flux-schnell-adapter"
-        );
         assert_eq!(
             catalog
                 .adapter_recipe_for_base("Qwen/Qwen-Image-Edit-2511")
                 .unwrap()
                 .id,
             "qwen-image-edit-adapter"
+        );
+        assert!(
+            !catalog
+                .image_recipe_for("qwen-image-edit-plus-nsfw-lora.safetensors")
+                .unwrap()
+                .adapter,
+            "a filename is not enough evidence to select an adapter graph"
+        );
+    }
+
+    #[test]
+    fn invalid_training_adapter_mappings_fail_catalog_load() {
+        let base: Value = serde_json::from_str(PACKAGED_CATALOG).unwrap();
+        for mutation in [
+            "missing_adapter",
+            "missing_hf_base",
+            "unknown",
+            "mismatched",
+            "prompt",
+        ] {
+            let mut file = base.clone();
+            let recipes = file["recipes"].as_array_mut().unwrap();
+            let flux = recipes
+                .iter_mut()
+                .find(|recipe| recipe["id"] == "flux-schnell")
+                .unwrap();
+            match mutation {
+                "missing_adapter" => {
+                    flux["training"].as_object_mut().unwrap().remove("adapter");
+                }
+                "missing_hf_base" => {
+                    flux["training"].as_object_mut().unwrap().remove("hf_base");
+                }
+                "unknown" => flux["training"]["adapter"] = json!("missing-adapter"),
+                "mismatched" => flux["training"]["adapter"] = json!("qwen-image-edit-adapter"),
+                "prompt" => flux["prompt_mode"] = json!("edit_instruction"),
+                _ => unreachable!(),
+            }
+            assert!(
+                RecipeCatalog::from_json(&file.to_string(), None).is_err(),
+                "{mutation} training mapping must fail closed"
+            );
+        }
+
+        let mut file = base;
+        let adapter = file["recipes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|recipe| recipe["id"] == "flux-schnell-adapter")
+            .unwrap();
+        adapter["slots"]["weights"]
+            .as_object_mut()
+            .unwrap()
+            .remove("lora");
+        assert!(
+            RecipeCatalog::from_json(&file.to_string(), None).is_err(),
+            "a mapped adapter without a LoRA slot must fail closed"
         );
     }
 }

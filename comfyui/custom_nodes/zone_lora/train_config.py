@@ -23,6 +23,23 @@ def lora_alpha(rank: int, config: dict[str, Any] | None = None) -> float:
     return 1.0
 
 
+def checkpoint_interval(steps: int, settings: dict[str, Any] | None = None) -> int:
+    """Keep the count of intermediates bounded rather than the gap between them.
+
+    A fixed gap costs a fixed amount per step, so raising the step ceiling raises
+    the disk bill with it — at rank 32 an intermediate is 220 MB, and a long run
+    would write hundreds of them.
+    """
+    values = settings if settings is not None else load_config()
+    every = int(values.get('checkpoint_every', 0))
+    if not every:
+        return 0
+    most = int(values.get('checkpoints_per_run', 8))
+    if most < 1:
+        return every
+    return max(every, -(-steps // most))
+
+
 def is_transformer_block(name: str) -> bool:
     parts = name.split('.')
     return any(part in TRANSFORMER_PARTS for part in parts)
