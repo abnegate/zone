@@ -2,7 +2,6 @@
 
 use reqwest::{Client, Url};
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -205,30 +204,16 @@ impl LlmClient {
             ));
         }
 
-        let host = parsed.host_str().ok_or_else(|| {
-            LlmError::InvalidConfig("LLM base_url must include a host".to_string())
-        })?;
-
-        if host.eq_ignore_ascii_case("localhost") {
+        if parsed.host_str().is_none() {
             return Err(LlmError::InvalidConfig(
-                "LLM base_url host is not allowed".to_string(),
+                "LLM base_url must include a host".to_string(),
             ));
         }
 
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            let blocked = match ip {
-                IpAddr::V4(v4) => {
-                    v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
-                }
-                IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local(),
-            };
-            if blocked {
-                return Err(LlmError::InvalidConfig(
-                    "LLM base_url IP is not allowed".to_string(),
-                ));
-            }
-        }
-
+        // No private-network rule here on purpose. Every caller passes an
+        // operator-configured host, and a self-hosted Zone points at loopback,
+        // a LAN address or a compose service name. The check belongs where a
+        // tenant-supplied host is first accepted, against that value.
         Ok(())
     }
 
@@ -759,26 +744,18 @@ mod tests {
     }
 
     #[test]
-    fn a_loopback_host_is_refused() {
-        for base_url in ["http://localhost:4000", "http://127.0.0.1:4000"] {
-            let error = client_for(base_url)
-                .validate_outbound_url(base_url)
-                .unwrap_err();
+    fn the_hosts_a_self_hosted_zone_runs_on_are_accepted() {
+        for base_url in [
+            "http://localhost:4000",
+            "http://127.0.0.1:11434",
+            "http://192.168.1.50:4000",
+            "http://host.docker.internal:11434",
+            "http://litellm:4000",
+        ] {
             assert!(
-                matches!(&error, LlmError::InvalidConfig(_)),
-                "{base_url} has to be refused while the loopback rule stands: {error}"
+                client_for(base_url).validate_outbound_url(base_url).is_ok(),
+                "{base_url} is a supported way to reach a self-hosted model server"
             );
         }
-    }
-
-    #[test]
-    fn a_private_address_is_refused() {
-        let error = client_for("http://192.168.1.50:4000")
-            .validate_outbound_url("http://192.168.1.50:4000")
-            .unwrap_err();
-        assert!(
-            matches!(&error, LlmError::InvalidConfig(message) if message.contains("IP is not allowed")),
-            "the refusal has to name the address rule: {error}"
-        );
     }
 }
