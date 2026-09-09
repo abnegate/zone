@@ -325,7 +325,7 @@ test.describe('Models Page', () => {
 
     await panel.getByLabel('Name', { exact: true }).fill('zoneface');
     await panel.getByLabel('Trigger word').fill('zne person');
-    await panel.locator('input[type="file"]').setInputFiles({
+    await panel.getByLabel('Images', { exact: true }).setInputFiles({
       name: 'portrait.png',
       mimeType: 'image/png',
       buffer: Buffer.from(PNG_BASE64, 'base64'),
@@ -359,7 +359,7 @@ test.describe('Models Page', () => {
 
     await page.getByRole('tab', { name: 'Train' }).click();
     await panel.getByLabel('Name', { exact: true }).fill('zoneface');
-    await panel.locator('input[type="file"]').setInputFiles({
+    await panel.getByLabel('Images', { exact: true }).setInputFiles({
       name: 'portrait.png',
       mimeType: 'image/png',
       buffer: Buffer.from(PNG_BASE64, 'base64'),

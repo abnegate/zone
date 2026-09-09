@@ -445,10 +445,54 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{LazyLock, Mutex};
 
-    // Note: Environment variable tests are skipped because env::set_var/remove_var
-    // are unsafe in Rust 2024 edition. Config::from_env() would be tested in
-    // integration tests with proper environment setup.
+    static ENVIRONMENT: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct Environment(Vec<(&'static str, Option<OsString>)>);
+
+    impl Environment {
+        fn isolated(names: &[&'static str]) -> Self {
+            let values = names
+                .iter()
+                .map(|name| (*name, env::var_os(name)))
+                .collect::<Vec<_>>();
+            for name in names {
+                // SAFETY: every environment-mutating test in this module holds
+                // ENVIRONMENT for the guard's lifetime.
+                unsafe { env::remove_var(name) };
+            }
+            Self(values)
+        }
+
+        fn set(name: &'static str, value: &str) {
+            // SAFETY: every environment-mutating test in this module holds
+            // ENVIRONMENT for the duration of the mutation.
+            unsafe { env::set_var(name, value) };
+        }
+
+        fn remove(name: &'static str) {
+            // SAFETY: every environment-mutating test in this module holds
+            // ENVIRONMENT for the duration of the mutation.
+            unsafe { env::remove_var(name) };
+        }
+    }
+
+    impl Drop for Environment {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                // SAFETY: the caller still holds ENVIRONMENT while the saved
+                // process environment is restored.
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(name, value),
+                        None => env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
 
     fn create_test_config() -> Config {
         Config {
@@ -745,5 +789,174 @@ mod tests {
             ..WebSearchConfig::default()
         };
         assert!(!empty_url.requested_for("latest news", None));
+    }
+
+    #[test]
+    fn environment_matrix_validates_secrets_and_loads_server_settings() {
+        let _lock = ENVIRONMENT.lock().expect("environment lock");
+        let names = [
+            "APP_BASE_URL",
+            "CORS_ALLOW_CREDENTIALS",
+            "CORS_ORIGINS",
+            "DATABASE_URL",
+            "ENCRYPTION_KEY",
+            "GPT4ALL_MODELS_URL",
+            "HOST",
+            "HUGGINGFACE_MODELS_URL",
+            "JWT_ACCESS_LIFETIME",
+            "JWT_REFRESH_LIFETIME",
+            "JWT_SECRET",
+            "LITELLM_HOST",
+            "LITELLM_KEY",
+            "MODEL_SEARCH_PROXY_URL",
+            "MONITORING_ENABLED",
+            "MONITORING_GRAFANA_ADMIN_PASSWORD",
+            "MONITORING_GRAFANA_ADMIN_USER",
+            "MONITORING_GRAFANA_TOKEN",
+            "MONITORING_GRAFANA_URL",
+            "MONITORING_PROMETHEUS_URL",
+            "OLLAMA_HOST",
+            "PORT",
+            "PROMETHEUS_URL",
+            "REDIS_URL",
+            "SOURCE_RESYNC_ENABLED",
+            "SOURCE_RESYNC_INTERVAL_SECS",
+            "SOURCE_RESYNC_POLL_SECS",
+            "TRAIN_UPLOAD_LIMIT_MB",
+        ];
+        let _environment = Environment::isolated(&names);
+
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Missing("JWT_SECRET"))
+        ));
+        Environment::set("JWT_SECRET", "short");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid(
+                "JWT_SECRET must be at least 32 characters"
+            ))
+        ));
+        Environment::set("JWT_SECRET", "12345678901234567890123456789012");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Missing("ENCRYPTION_KEY"))
+        ));
+        Environment::set("ENCRYPTION_KEY", "short");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid(
+                "ENCRYPTION_KEY must be at least 32 characters"
+            ))
+        ));
+
+        Environment::set("ENCRYPTION_KEY", "abcdefghijklmnopqrstuvwxyz123456");
+        Environment::set("DATABASE_URL", "postgres://database/zone");
+        Environment::set("REDIS_URL", "redis://cache:6379");
+        Environment::set("LITELLM_HOST", "http://models:4000");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Missing("LITELLM_KEY"))
+        ));
+        Environment::set("LITELLM_KEY", "models-key");
+
+        let defaults = Config::from_env().expect("required values are present");
+        assert_eq!(defaults.host, "0.0.0.0");
+        assert_eq!(defaults.port, 8000);
+        assert_eq!(defaults.jwt_access_lifetime, 900);
+        assert_eq!(defaults.jwt_refresh_lifetime, 604_800);
+        assert_eq!(defaults.ollama_host, "http://ollama:11434");
+        assert_eq!(defaults.cors_origins, ["*"]);
+        assert!(!defaults.cors_allow_credentials);
+        assert_eq!(defaults.app_base_url, "http://localhost:3000");
+        assert_eq!(defaults.source_index, SourceIndexConfig::default());
+        assert_eq!(defaults.monitoring, MonitoringConfig::from_env());
+        assert_eq!(defaults.train_upload_limit_mb, 512);
+
+        Environment::set("HOST", "127.0.0.1");
+        Environment::set("PORT", "9001");
+        Environment::set("JWT_ACCESS_LIFETIME", "1200");
+        Environment::set("JWT_REFRESH_LIFETIME", "not-a-number");
+        Environment::set("OLLAMA_HOST", "http://ollama.test:11434");
+        Environment::set("GPT4ALL_MODELS_URL", "http://catalog.test/gpt4all");
+        Environment::set("HUGGINGFACE_MODELS_URL", "http://catalog.test/huggingface");
+        Environment::set("MODEL_SEARCH_PROXY_URL", "  http://proxy.test:8080  ");
+        Environment::set("CORS_ORIGINS", " https://one.test, ,https://two.test ");
+        Environment::set("CORS_ALLOW_CREDENTIALS", "true");
+        Environment::set("APP_BASE_URL", "https://zone.test");
+        Environment::set("SOURCE_RESYNC_ENABLED", "off");
+        Environment::set("SOURCE_RESYNC_POLL_SECS", "1");
+        Environment::set("SOURCE_RESYNC_INTERVAL_SECS", "9999999");
+        Environment::set("MONITORING_ENABLED", "yes");
+        Environment::set("MONITORING_PROMETHEUS_URL", "http://prometheus.test/");
+        Environment::set("MONITORING_GRAFANA_URL", "http://grafana.test///");
+        Environment::set("MONITORING_GRAFANA_TOKEN", "  ");
+        Environment::set("MONITORING_GRAFANA_ADMIN_USER", "admin");
+        Environment::set("MONITORING_GRAFANA_ADMIN_PASSWORD", "password");
+        Environment::set("TRAIN_UPLOAD_LIMIT_MB", "1");
+
+        let configured = Config::from_env().expect("custom values are valid");
+        assert_eq!(configured.host, "127.0.0.1");
+        assert_eq!(configured.port, 9001);
+        assert_eq!(configured.jwt_access_lifetime, 1200);
+        assert_eq!(configured.jwt_refresh_lifetime, 604_800);
+        assert_eq!(configured.ollama_host, "http://ollama.test:11434");
+        assert_eq!(configured.gpt4all_models_url, "http://catalog.test/gpt4all");
+        assert_eq!(
+            configured.huggingface_models_url,
+            "http://catalog.test/huggingface"
+        );
+        assert_eq!(
+            configured.model_search_proxy_url.as_deref(),
+            Some("http://proxy.test:8080")
+        );
+        assert_eq!(
+            configured.cors_origins,
+            ["https://one.test", "https://two.test"]
+        );
+        assert!(configured.cors_allow_credentials);
+        assert_eq!(configured.app_base_url, "https://zone.test");
+        assert_eq!(
+            configured.source_index,
+            SourceIndexConfig {
+                enabled: false,
+                poll_interval_secs: 30,
+                interval_secs: 7 * 86_400,
+            }
+        );
+        assert!(configured.monitoring.enabled);
+        assert_eq!(
+            configured.monitoring.prometheus_url,
+            "http://prometheus.test"
+        );
+        assert_eq!(configured.monitoring.grafana_url, "http://grafana.test");
+        assert!(configured.monitoring.grafana_token.is_none());
+        assert_eq!(configured.monitoring.grafana_user.as_deref(), Some("admin"));
+        assert_eq!(
+            configured.monitoring.grafana_password.as_deref(),
+            Some("password")
+        );
+        assert_eq!(configured.train_upload_limit_mb, 4);
+        let monitoring = format!("{:?}", configured.monitoring);
+        assert!(monitoring.contains("grafana_token: None"));
+        assert!(monitoring.contains("grafana_secret: Some(\"[REDACTED]\")"));
+
+        Environment::set("PORT", "invalid");
+        Environment::set("SOURCE_RESYNC_ENABLED", "not-truthy");
+        Environment::set("SOURCE_RESYNC_POLL_SECS", "invalid");
+        Environment::set("TRAIN_UPLOAD_LIMIT_MB", "invalid");
+        Environment::set("MODEL_SEARCH_PROXY_URL", "  ");
+        Environment::remove("MONITORING_PROMETHEUS_URL");
+        Environment::set("PROMETHEUS_URL", "http://legacy-prometheus/");
+        let fallbacks = Config::from_env().expect("invalid optional values use defaults");
+        assert_eq!(fallbacks.port, 8000);
+        assert!(!fallbacks.source_index.enabled);
+        assert_eq!(fallbacks.source_index.poll_interval_secs, 300);
+        assert_eq!(fallbacks.train_upload_limit_mb, 512);
+        assert!(fallbacks.model_search_proxy_url.is_none());
+        assert_eq!(
+            fallbacks.monitoring.prometheus_url,
+            "http://legacy-prometheus"
+        );
     }
 }

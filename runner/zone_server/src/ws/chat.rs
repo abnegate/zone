@@ -22,6 +22,7 @@ use dashmap::DashMap;
 use futures::{SinkExt, Stream, StreamExt};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -346,6 +347,13 @@ impl Generation {
             self.cancel.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         )
+    }
+
+    fn cancellation(&self) -> broadcast::Sender<()> {
+        CHAT_CANCELLATIONS
+            .get(&(self.chat_id, self.message_id))
+            .map(|sender| sender.value().clone())
+            .expect("active generation cancellation remains registered")
     }
 
     async fn cancelled(&self, stream: &ChatStream) {
@@ -1224,6 +1232,26 @@ async fn wait_media(
     }
 }
 
+async fn await_media<T>(
+    lost: impl Future<Output = ()>,
+    cancellation: broadcast::Sender<()>,
+    operation: impl Future<Output = T>,
+    progress: &tokio::task::JoinHandle<()>,
+) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+    tokio::pin!(lost);
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+        _ = &mut lost => {
+            let _ = cancellation.send(());
+            let _ = operation.await;
+            progress.abort();
+            Err("Chat generation ownership was lost".into())
+        }
+        result = &mut operation => Ok(result),
+    }
+}
+
 /// How a finished ComfyUI job names itself in the message it saves and in the
 /// errors it reports, so image, video, and upscale jobs deliver the same way.
 #[derive(Clone, Copy)]
@@ -1488,21 +1516,19 @@ async fn handle_image_generation(
     });
 
     session.store.assert_current(&session.lease).await?;
-    let result = tokio::select! {
-        biased;
-        _ = session.guard.lost() => {
-            progress_task.abort();
-            return Err("Chat generation ownership was lost".into());
-        }
-        result = client
-        .generate(
+    let cancellation = generation.cancellation();
+    let result = await_media(
+        session.guard.lost(),
+        cancellation,
+        client.generate(
             &generation_prompt,
             source.as_ref(),
             &mut generation.cancel,
             progress_tx,
-        )
-        => result,
-    };
+        ),
+        &progress_task,
+    )
+    .await?;
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
@@ -1621,16 +1647,14 @@ async fn handle_video_generation(
     });
 
     session.store.assert_current(&session.lease).await?;
-    let result = tokio::select! {
-        biased;
-        _ = session.guard.lost() => {
-            progress_task.abort();
-            return Err("Chat generation ownership was lost".into());
-        }
-        result = client
-        .generate_video(prompt, source.as_ref(), &mut generation.cancel, progress_tx)
-        => result,
-    };
+    let cancellation = generation.cancellation();
+    let result = await_media(
+        session.guard.lost(),
+        cancellation,
+        client.generate_video(prompt, source.as_ref(), &mut generation.cancel, progress_tx),
+        &progress_task,
+    )
+    .await?;
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
@@ -1770,23 +1794,27 @@ async fn handle_upscale(
     });
 
     session.store.assert_current(&session.lease).await?;
-    let result = tokio::select! {
-        biased;
-        _ = session.guard.lost() => {
-            progress_task.abort();
-            return Err("Chat generation ownership was lost".into());
-        }
-        result = async {
+    let cancellation = generation.cancellation();
+    let result = await_media(
+        session.guard.lost(),
+        cancellation,
+        async {
             match &source {
                 Source::Image(image) => {
-                    client.upscale_image(image, &mut generation.cancel, progress_tx).await
+                    client
+                        .upscale_image(image, &mut generation.cancel, progress_tx)
+                        .await
                 }
                 Source::Video(video) => {
-                    client.upscale_video(video, &mut generation.cancel, progress_tx).await
+                    client
+                        .upscale_video(video, &mut generation.cancel, progress_tx)
+                        .await
                 }
             }
-        } => result,
-    };
+        },
+        &progress_task,
+    )
+    .await?;
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
@@ -1937,14 +1965,14 @@ async fn handle_audio_generation(
     });
 
     session.store.assert_current(&session.lease).await?;
-    let result = tokio::select! {
-        biased;
-        _ = session.guard.lost() => {
-            progress_task.abort();
-            return Err("Chat generation ownership was lost".into());
-        }
-        result = client.generate_audio(prompt, &mut generation.cancel, progress_tx) => result,
-    };
+    let cancellation = generation.cancellation();
+    let result = await_media(
+        session.guard.lost(),
+        cancellation,
+        client.generate_audio(prompt, &mut generation.cancel, progress_tx),
+        &progress_task,
+    )
+    .await?;
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
@@ -2616,6 +2644,7 @@ async fn handle_chat_generation(
                             )
                             .await
                             {
+                                pending_content.clone_from(&full_content);
                                 persist_now = true;
                                 stop_stream = true;
                             } else {
@@ -2938,6 +2967,155 @@ async fn handle_chat_generation(
 mod tests {
     use super::*;
 
+    #[test]
+    fn retrieved_context_helpers_normalize_bound_and_interleave_sources() {
+        assert_eq!(snippet_line("  one\n two   three ", 20), "one two three");
+        assert_eq!(snippet_line("one two three", 7), "one two…");
+        assert_eq!(snippet_line("åßç", 2), "åß…");
+        assert_eq!(
+            format_retrieved_line("knowledge", "Runbook", "knowledge://one", "  safe\n text "),
+            "- [knowledge] Runbook (knowledge://one): safe text"
+        );
+
+        let knowledge = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
+        let sources = vec!["s1".to_string(), "s2".to_string()];
+        assert_eq!(
+            interleave_context_lines(knowledge.clone(), sources.clone(), 4),
+            ["k1", "s1", "k2", "s2"]
+        );
+        assert_eq!(
+            interleave_context_lines(knowledge, sources, 8),
+            ["k1", "s1", "k2", "s2", "k3"]
+        );
+        assert_eq!(
+            interleave_context_lines(vec!["k".into()], vec!["s".into()], 1),
+            ["k"]
+        );
+        assert!(interleave_context_lines(vec!["k".into()], vec!["s".into()], 0).is_empty());
+        assert!(interleave_context_lines(Vec::new(), Vec::new(), 5).is_empty());
+    }
+
+    #[tokio::test]
+    async fn system_prompt_preserves_persona_and_agent_contracts() {
+        let state = AppState::for_tests();
+        let tools = agent::ChatTools::preview(agent::WorkspaceScope {
+            state,
+            workspace_id: Uuid::new_v4(),
+            chat_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+        })
+        .await;
+        let character = ChatCharacter {
+            name: "Ari".into(),
+            system_prompt: Some("Stay {{char}}.".into()),
+            ..Default::default()
+        };
+
+        let persona = chat_system_prompt(Some(&character), false, &tools, false);
+        assert_eq!(persona, "Stay Ari.");
+
+        let agent = chat_system_prompt(None, true, &tools, true);
+        assert!(agent.contains("You can call these tools"), "{agent}");
+        assert!(
+            agent.contains("without waiting for confirmation"),
+            "{agent}"
+        );
+
+        let combined = chat_system_prompt(Some(&character), true, &tools, false);
+        assert!(combined.starts_with("Stay Ari.\n\n"), "{combined}");
+        assert!(
+            combined.contains("wait for the user to approve"),
+            "{combined}"
+        );
+
+        assert_eq!(
+            chat_system_prompt(None, false, &tools, false),
+            "You are Zone's assistant, answering inside one of the user's workspaces."
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_web_search_requests_do_not_create_a_client() {
+        let state = AppState::for_tests();
+        assert!(matches!(
+            load_web_search(&state, " \n\t ", true).await,
+            SearchContext::Disabled
+        ));
+    }
+
+    #[tokio::test]
+    async fn unavailable_history_degrades_image_reuse_to_no_source() {
+        let state = AppState::for_tests();
+        let store = crate::services::artifacts::ArtifactStore::new(std::env::temp_dir());
+
+        assert!(
+            resolve_generation_source(
+                &state,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "Change the background to a forest",
+                None,
+                &store,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_emission_tracks_indices_and_stops_before_the_response_limit() {
+        let stream = ChatStream::of(Uuid::new_v4());
+        let mut events = stream.events.subscribe();
+        let mut content = String::new();
+        let mut index = 0;
+        let mut truncated = false;
+
+        assert!(
+            emit_chunk(
+                &stream,
+                &mut content,
+                &mut index,
+                String::new(),
+                &mut truncated
+            )
+            .await
+        );
+        assert!(events.try_recv().is_err());
+        assert!(
+            emit_chunk(
+                &stream,
+                &mut content,
+                &mut index,
+                "hello".into(),
+                &mut truncated
+            )
+            .await
+        );
+        assert_eq!(content, "hello");
+        assert_eq!(index, 1);
+        assert!(!truncated);
+        assert!(matches!(
+            events.recv().await,
+            Ok(ServerMessage::Chunk { content, index: 0 }) if content == "hello"
+        ));
+
+        content = "x".repeat(MAX_RESPONSE_LENGTH);
+        assert!(
+            !emit_chunk(
+                &stream,
+                &mut content,
+                &mut index,
+                "y".into(),
+                &mut truncated
+            )
+            .await
+        );
+        assert!(truncated);
+        assert_eq!(content.len(), MAX_RESPONSE_LENGTH);
+        assert!(events.try_recv().is_err());
+    }
+
     fn started(message_id: Uuid) -> ServerMessage {
         ServerMessage::MessageStart {
             message_id,
@@ -3019,6 +3197,27 @@ mod tests {
             vec!["message_start", "reasoning", "tool_call", "chunk"],
             "thinking still sits with the call it preceded"
         );
+    }
+
+    #[test]
+    fn adjacent_reasoning_frames_coalesce_and_an_error_ends_the_live_turn() {
+        let mut turn = LiveTurn::default();
+        turn.record(&started(Uuid::new_v4()));
+        turn.record(&ServerMessage::Reasoning {
+            content: "Inspect ".into(),
+        });
+        turn.record(&ServerMessage::Reasoning {
+            content: "state".into(),
+        });
+        let replay = turn.replay();
+        assert!(matches!(
+            &replay[1],
+            ServerMessage::Reasoning { content } if content == "Inspect state"
+        ));
+        turn.record(&ServerMessage::Error {
+            message: "stopped".into(),
+        });
+        assert!(turn.replay().is_empty());
     }
 
     #[test]
@@ -3123,6 +3322,66 @@ mod tests {
             !CHAT_STREAMS.contains_key(&chat_id),
             "the last holder leaving frees the chat's frames"
         );
+    }
+
+    #[tokio::test]
+    async fn generation_registration_reports_cancellation_and_cleans_up() {
+        let chat_id = Uuid::new_v4();
+        let stream = ChatStream::of(chat_id);
+        let mut events = stream.events.subscribe();
+        let mut generation = Generation::new(chat_id);
+        let key = (chat_id, generation.message_id);
+        assert!(CHAT_CANCELLATIONS.contains_key(&key));
+        assert!(!generation.is_cancelled());
+
+        CHAT_CANCELLATIONS.get(&key).unwrap().send(()).unwrap();
+        assert!(generation.is_cancelled());
+        generation.cancelled(&stream).await;
+        assert!(matches!(
+            events.recv().await,
+            Ok(ServerMessage::Cancelled { message_id: None })
+        ));
+
+        generation.started = true;
+        generation.cancelled(&stream).await;
+        assert!(matches!(
+            events.recv().await,
+            Ok(ServerMessage::Cancelled { message_id: Some(id) }) if id == generation.message_id
+        ));
+        drop(generation);
+        assert!(!CHAT_CANCELLATIONS.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn connection_cleanup_removes_only_an_idle_chat_entry() {
+        let chat_id = Uuid::new_v4();
+        let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS_PER_CHAT));
+        CHAT_CONNECTIONS.insert(chat_id, semaphore.clone());
+        drop(ConnectionCleanupGuard {
+            chat_id,
+            semaphore: semaphore.clone(),
+        });
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert!(!CHAT_CONNECTIONS.contains_key(&chat_id));
+
+        let active_chat = Uuid::new_v4();
+        let active = Arc::new(Semaphore::new(MAX_CONNECTIONS_PER_CHAT));
+        let permit = active.clone().acquire_owned().await.unwrap();
+        CHAT_CONNECTIONS.insert(active_chat, active.clone());
+        drop(ConnectionCleanupGuard {
+            chat_id: active_chat,
+            semaphore: active,
+        });
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert!(CHAT_CONNECTIONS.contains_key(&active_chat));
+        drop(permit);
+        CHAT_CONNECTIONS.remove(&active_chat);
+    }
+
+    #[test]
+    fn generation_deadlines_accept_normal_timeouts_and_reject_overflow() {
+        assert!(generation_deadline(Duration::from_secs(30)).is_ok());
+        assert!(generation_deadline(Duration::MAX).is_err());
     }
 
     #[test]
@@ -3332,6 +3591,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn comfy_connection_and_timeout_failures_have_actionable_messages() {
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_address = closed.local_addr().unwrap();
+        drop(closed);
+        let connection = reqwest::get(format!("http://{closed_address}"))
+            .await
+            .expect_err("the listener was closed before the request");
+        assert_eq!(
+            comfy_failure("Image generation", &zone_comfy::Error::Http(connection)),
+            "Image generation failed: cannot reach ComfyUI. Start the image service and try again."
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let blocker = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let timeout = reqwest::Client::builder()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .expect_err("the accepted request never receives an HTTP response");
+        assert_eq!(
+            comfy_failure("Video generation", &zone_comfy::Error::Http(timeout)),
+            "Video generation failed: ComfyUI did not respond in time. Check the image service and try again."
+        );
+        blocker.abort();
+    }
+
+    #[test]
     fn test_generated_image_attachment_builds_persistable_metadata() {
         let attachment =
             generated_image_attachment("data:image/webp;base64,abc", 0).expect("valid image");
@@ -3352,6 +3646,20 @@ mod tests {
     fn test_generated_image_attachment_rejects_non_image_data() {
         assert!(generated_image_attachment("data:text/html;base64,abc", 0).is_none());
         assert!(generated_image_attachment("javascript:alert(1)", 0).is_none());
+        assert!(generated_image_attachment("data:image/png;base64", 0).is_none());
+        assert!(generated_media_attachment("ftp://example.test/a.png", "image/png", 0).is_none());
+        assert!(
+            generated_media_attachment(
+                &format!(
+                    "data:image/png;base64,{}",
+                    "x".repeat(MAX_GENERATED_IMAGE_URL_LENGTH)
+                ),
+                "image/png",
+                0
+            )
+            .is_none()
+        );
+        assert!(image_metadata(&[]).is_none());
     }
 
     #[test]
@@ -3636,6 +3944,16 @@ mod tests {
         let merged =
             merge_metadata(None, &[], &[], &[], Some("The capital is Paris.")).expect("reasoning");
         assert_eq!(merged["reasoning"], "The capital is Paris.");
+
+        let merged = merge_metadata(
+            Some(serde_json::json!("invalid image metadata")),
+            &[],
+            &[],
+            &[],
+            Some("Recovered"),
+        )
+        .expect("reasoning replaces malformed metadata");
+        assert_eq!(merged, serde_json::json!({"reasoning":"Recovered"}));
     }
 
     #[test]
@@ -3807,6 +4125,26 @@ mod tests {
         assert_eq!(value["role"], "assistant");
         assert_eq!(value["metadata"], metadata);
         assert!(saved_action(&serde_json::json!({"id":"invalid"})).is_none());
+        for invalid in [
+            serde_json::json!({"role":"user","content":"x"}),
+            serde_json::json!({"id":Uuid::new_v4(),"content":"x"}),
+            serde_json::json!({"id":Uuid::new_v4(),"role":3,"content":"x"}),
+            serde_json::json!({"id":Uuid::new_v4(),"role":"user"}),
+            serde_json::json!({"id":Uuid::new_v4(),"role":"user","content":false}),
+        ] {
+            assert!(saved_action(&invalid).is_none(), "{invalid}");
+        }
+        let without_metadata = saved_action(&serde_json::json!({
+            "id": Uuid::new_v4(),
+            "role": "user",
+            "content": "x",
+            "metadata": null
+        }))
+        .unwrap();
+        assert!(matches!(
+            without_metadata,
+            ServerMessage::MessageSaved { metadata: None, .. }
+        ));
     }
 
     #[test]

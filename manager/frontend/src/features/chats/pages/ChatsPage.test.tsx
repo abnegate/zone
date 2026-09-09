@@ -997,6 +997,9 @@ describe('ChatsPage', () => {
         clear.mockRestore();
       };
       return (elapsed: number): void => {
+        // Flush the pending effect that captures `started` before the clock
+        // moves, or it captures the advanced value and never reports elapsed.
+        act(() => {});
         // Advancing a clock nothing is subscribed to reports the timer's
         // starting text back as if it never moved, which reads as a broken
         // component rather than a test that measured nothing.

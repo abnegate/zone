@@ -320,6 +320,8 @@ pub(crate) fn test_config() -> Config {
 mod tests {
     use super::*;
     use zone_context::adapters::{FilesystemAdapter, GitHubAdapter, TextAdapter};
+    use zone_context::embeddings::providers::MockEmbeddingService;
+    use zone_email::EmailConfig;
 
     fn create_test_config() -> Config {
         Config {
@@ -390,5 +392,101 @@ mod tests {
             assert!(state.embedding_service().is_none());
             assert!(state.context_service().is_none());
         }
+    }
+
+    fn context_dependencies(
+        pool: &PgPool,
+    ) -> (
+        Arc<AdapterRegistry>,
+        Arc<dyn EmbeddingService>,
+        Arc<ContextService>,
+    ) {
+        let mut registry = AdapterRegistry::new();
+        registry.register(TextAdapter::new());
+        let registry = Arc::new(registry);
+        let embedding: Arc<dyn EmbeddingService> = Arc::new(MockEmbeddingService::new(32));
+        let context = Arc::new(ContextService::new(
+            pool.clone(),
+            registry.clone(),
+            embedding.clone(),
+        ));
+        (registry, embedding, context)
+    }
+
+    #[tokio::test]
+    async fn constructors_and_accessors_preserve_supplied_services() {
+        let pool = PgPool::connect_lazy("postgres://localhost/state-services")
+            .expect("a lazy pool needs no server");
+        let (registry, embedding, context) = context_dependencies(&pool);
+        let config = create_test_config();
+        let state = AppState::new_with_services(
+            config.clone(),
+            pool.clone(),
+            None,
+            registry.clone(),
+            embedding.clone(),
+            context.clone(),
+        );
+
+        assert_eq!(state.config().host, config.host);
+        assert!(!state.db().is_closed());
+        assert!(state.cache().is_none());
+        assert!(Arc::ptr_eq(state.adapter_registry().unwrap(), &registry));
+        assert!(Arc::ptr_eq(state.embedding_service().unwrap(), &embedding));
+        assert!(Arc::ptr_eq(state.context_service().unwrap(), &context));
+        assert!(state.email_service().is_none());
+        assert_eq!(
+            state.index_semaphore().available_permits(),
+            MAX_CONCURRENT_INDEX
+        );
+        assert_eq!(
+            state.train_semaphore().available_permits(),
+            MAX_CONCURRENT_TRAIN
+        );
+        assert_eq!(state.encryption_key().len(), 32);
+        let _ = state.rate_limiter();
+        let _ = state.sync_registry();
+        let _ = state.pull_registry();
+        assert!(state.existing_mcp().is_none());
+        state.disable_mcp();
+        assert!(state.existing_mcp().is_some());
+        assert!(std::ptr::eq(
+            state.mcp_hub().await,
+            state.existing_mcp().unwrap()
+        ));
+
+        let email = Arc::new(
+            EmailService::new(EmailConfig {
+                smtp_host: "localhost".to_string(),
+                smtp_port: 2525,
+                smtp_user: "zone".to_string(),
+                smtp_password: "secret".to_string(),
+                from_email: "zone@example.com".to_string(),
+                from_name: "Zone".to_string(),
+            })
+            .expect("valid SMTP settings"),
+        );
+        let with_email = AppState::new_with_all_services(
+            config,
+            pool,
+            None,
+            registry,
+            embedding,
+            context,
+            Some(email.clone()),
+        );
+        assert!(Arc::ptr_eq(with_email.email_service().unwrap(), &email));
+        assert_eq!(with_email.train_semaphore().available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_accessor_exposes_a_connected_cache_when_available() {
+        let Ok(cache) = Cache::connect("redis://localhost:6379").await else {
+            return;
+        };
+        let pool = PgPool::connect_lazy("postgres://localhost/state-cache")
+            .expect("a lazy pool needs no server");
+        let state = AppState::new(create_test_config(), pool, Some(cache));
+        assert!(state.cache().is_some());
     }
 }
