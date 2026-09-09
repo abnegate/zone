@@ -267,7 +267,7 @@ async fn get_task_project_ids_in(
 ) -> DbResult<Vec<Uuid>> {
     let rows = sqlx::query!(
         r#"
-        SELECT project_id FROM task_projects WHERE task_id = $1
+        SELECT project_id FROM task_projects WHERE task_id = $1 ORDER BY project_id
         "#,
         task_id
     )
@@ -314,7 +314,7 @@ async fn set_task_projects_in(
 pub async fn get_task_project_ids(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<Uuid>> {
     let rows = sqlx::query!(
         r#"
-        SELECT project_id FROM task_projects WHERE task_id = $1
+        SELECT project_id FROM task_projects WHERE task_id = $1 ORDER BY project_id
         "#,
         task_id
     )

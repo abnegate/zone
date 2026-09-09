@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import type { ActionReceipt, ActionTarget } from '../types';
 import { formatDate } from '../utils';
+import './ActionReceipts.css';
 
 const ACTION_LABELS: Record<string, { ok: string; failed: string }> = {
   create_task: { ok: 'Created task', failed: 'Create task failed' },

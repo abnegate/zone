@@ -65,3 +65,6 @@ tools/dev-cli/target
 
 # Vision model (fetched by `make vision-model`, ~168 MiB)
 runner/zone_vision/models/
+
+# Python bytecode, from running the comfyui and live-verify scripts
+__pycache__/

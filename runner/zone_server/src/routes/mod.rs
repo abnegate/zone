@@ -51,11 +51,14 @@ pub fn create_router(state: AppState) -> Router {
             Method::GET,
             Method::POST,
             Method::PUT,
+            Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,
         ])
+        // Named rather than `Any`: a wildcard header list cannot be combined
+        // with credentials, and tower-http panics rather than refuses.
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
-        .allow_credentials(true);
+        .allow_credentials(state.config().cors_allow_credentials);
 
     crate::metrics::init();
 
@@ -349,8 +352,13 @@ mod tests {
     use tower::ServiceExt;
 
     fn router(origins: &[&str]) -> Router {
+        router_with_credentials(origins, false)
+    }
+
+    fn router_with_credentials(origins: &[&str], credentials: bool) -> Router {
         let config = crate::config::Config {
             cors_origins: origins.iter().map(|origin| origin.to_string()).collect(),
+            cors_allow_credentials: credentials,
             ..crate::state::test_config()
         };
         let db = sqlx::PgPool::connect_lazy("postgres://localhost/test")
@@ -358,6 +366,22 @@ mod tests {
         let state = AppState::new(config, db, None);
         state.disable_mcp();
         create_router(state)
+    }
+
+    async fn preflight(credentials: bool, method: &str) -> axum::http::Response<Body> {
+        router_with_credentials(&["https://zone.example.com"], credentials)
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/organizations")
+                    .header(header::ORIGIN, "https://zone.example.com")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, method)
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
     }
 
     async fn granted(origins: &[&str], origin: &str) -> Option<String> {
@@ -423,5 +447,88 @@ mod tests {
                 "{origin} must not be granted CORS access"
             );
         }
+    }
+
+    /// `main.rs` used to wrap this router in a second CORS layer whose header
+    /// list was a wildcard. `tower-http` refuses that beside credentials by
+    /// panicking, so a deployment with `CORS_ALLOW_CREDENTIALS=true` and a
+    /// configured `CORS_ORIGINS` could not start at all.
+    #[tokio::test]
+    async fn cors_serves_a_preflight_when_credentials_are_configured_on() {
+        let response = preflight(true, "GET").await;
+
+        assert!(
+            response.status().is_success(),
+            "the configured console's preflight must be answered, got {}",
+            response.status()
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+    }
+
+    /// Two layers send two origin headers, which every browser rejects.
+    #[tokio::test]
+    async fn cors_answers_a_preflight_with_exactly_one_origin_header() {
+        let response = preflight(true, "GET").await;
+
+        let origins: Vec<_> = response
+            .headers()
+            .get_all(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .iter()
+            .collect();
+        assert_eq!(origins.len(), 1, "{origins:?}");
+    }
+
+    #[tokio::test]
+    async fn cors_names_the_headers_it_allows_rather_than_a_wildcard() {
+        let response = preflight(true, "GET").await;
+
+        let allowed = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(!allowed.contains('*'), "{allowed}");
+        assert!(allowed.contains("authorization"), "{allowed}");
+    }
+
+    /// `PATCH /api/organizations/{id}` and both member-role routes are PATCH,
+    /// and the router's own method list omitted it while the layer in `main.rs`
+    /// was masking the omission.
+    #[tokio::test]
+    async fn cors_offers_every_method_the_routes_answer() {
+        let response = preflight(false, "PATCH").await;
+
+        let methods = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+            assert!(
+                methods.contains(method),
+                "{method} is missing from {methods}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cors_credentials_follow_the_configured_value() {
+        let response = preflight(false, "GET").await;
+
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+            None,
+            "credentials were configured off"
+        );
     }
 }

@@ -8,10 +8,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::http::{HeaderValue, Method};
 use tokio::net::TcpListener;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
-use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use zone_context::adapters::{AdapterRegistry, FilesystemAdapter, GitHubAdapter, TextAdapter};
@@ -203,50 +200,11 @@ async fn main() {
     zone_server::workers::reminders::spawn(state.clone());
     let recovery = zone_server::workers::task::spawn_recovery(state.clone());
 
-    // Configure CORS based on environment
-    let cors_layer = if config.cors_origins.len() == 1 && config.cors_origins[0] == "*" {
-        // SECURITY: When using wildcard origin (*), credentials MUST be disabled
-        // to prevent CSRF attacks. This is enforced regardless of config.
-        if config.cors_allow_credentials {
-            tracing::warn!(
-                "CORS: Wildcard origin (*) with credentials is a security risk - forcing credentials to false"
-            );
-        }
-        tracing::info!("CORS: Allowing all origins (development mode)");
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
-            .allow_credentials(false)
-    } else {
-        tracing::info!(
-            "CORS: Restricting to specified origins: {:?}",
-            config.cors_origins
-        );
-        let origins: Vec<HeaderValue> = config
-            .cors_origins
-            .iter()
-            .filter_map(|origin| origin.parse().ok())
-            .collect();
-
-        CorsLayer::new()
-            .allow_origin(AllowOrigin::list(origins))
-            .allow_methods([
-                Method::GET,
-                Method::POST,
-                Method::PUT,
-                Method::PATCH,
-                Method::DELETE,
-                Method::OPTIONS,
-            ])
-            .allow_headers(Any)
-            .allow_credentials(config.cors_allow_credentials)
-    };
-
-    // Build router
-    let app = routes::create_router(state)
-        .layer(TraceLayer::new_for_http())
-        .layer(cors_layer);
+    // Every layer belongs to `create_router`, so what runs here is what the
+    // router tests cover. A second CORS layer here answered every preflight
+    // twice and under a different policy, and its wildcard header list could
+    // not be combined with credentials at all.
+    let app = routes::create_router(state);
 
     // Start server
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)

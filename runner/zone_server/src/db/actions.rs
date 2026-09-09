@@ -781,11 +781,19 @@ mod tests {
         );
     }
 
+    /// The join table stores no ordinal, so the order rows come back in is the
+    /// planner's choice. This asserted the order they were passed in, which held
+    /// only when two random ids happened to be ascending -- a coin flip per run.
+    /// The read is ordered by id now, so a task's projects do not reshuffle
+    /// between reads, and duplicates still collapse.
     #[tokio::test]
-    async fn admission_deduplicates_projects_and_preserves_order() {
+    async fn admission_deduplicates_projects_into_a_stable_order() {
         let (pool, organization, workspace, user, _) = fixture().await;
-        let first = Uuid::new_v4();
-        let second = Uuid::new_v4();
+        let mut ids = [Uuid::new_v4(), Uuid::new_v4()];
+        ids.sort();
+        let [lower, higher] = ids;
+        let first = higher;
+        let second = lower;
         for project in [first, second] {
             sqlx::query("INSERT INTO projects(id,workspace_id,name) VALUES($1,$2,'Admission')")
                 .bind(project)
@@ -824,8 +832,10 @@ mod tests {
         };
         cleanup(&pool, organization, user).await;
         let (created, updated) = result.expect("duplicate project IDs must be accepted");
-        assert_eq!(created.project_ids, vec![second, first]);
-        assert_eq!(updated.unwrap().project_ids, vec![first, second]);
+        // Passed in as [second, first, second] and [first, second, first]; the
+        // duplicates collapse and what comes back is ordered by id either way.
+        assert_eq!(created.project_ids, vec![lower, higher]);
+        assert_eq!(updated.unwrap().project_ids, vec![lower, higher]);
     }
     #[tokio::test]
     async fn admission_cursor_uses_log_order_and_rejects_foreign_ids() {

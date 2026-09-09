@@ -7,12 +7,18 @@ on:
       - 'comfyui/**'
       - 'runner/zone_comfy/**'
       - 'scripts/setup-comfyui-macos.sh'
+      # tests/test_comfy_stub.py pins the live rig's ComfyUI stand-in against
+      # the shipped workflows, so a change to the stand-in has to run it.
+      - 'scripts/live-verify/comfy-stub.py'
       - '.github/workflows/comfyui-tests.yml'
   pull_request:
     paths:
       - 'comfyui/**'
       - 'runner/zone_comfy/**'
       - 'scripts/setup-comfyui-macos.sh'
+      # tests/test_comfy_stub.py pins the live rig's ComfyUI stand-in against
+      # the shipped workflows, so a change to the stand-in has to run it.
+      - 'scripts/live-verify/comfy-stub.py'
       - '.github/workflows/comfyui-tests.yml'
 
 jobs:

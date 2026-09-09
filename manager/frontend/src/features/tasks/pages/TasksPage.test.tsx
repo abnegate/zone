@@ -863,4 +863,48 @@ describe('TasksPage', () => {
       expect(screen.getByText('PR: closed')).toBeInTheDocument();
     });
   });
+
+  it('shows the receipt a run recorded, not the log line it arrived on', async () => {
+    const completed: TaskRun = { ...running, status: 'completed', current_phase: 'complete' };
+    mockRunTask.mockResolvedValueOnce(completed);
+    mockGetTaskRun.mockResolvedValue(completed);
+    mockGetTaskRunLogs.mockResolvedValue([
+      {
+        id: 'log-1',
+        run_id: 'run-1',
+        phase: 'acting',
+        agent_type: 'tool',
+        level: 'info',
+        message: 'Workspace action receipt',
+        metadata: {
+          action_receipt: {
+            id: 'call_1',
+            action: 'create_document',
+            target_type: 'document',
+            target_id: 'doc-1',
+            target_label: 'Release checklist',
+            actor_id: 'user-1',
+            actor_name: 'Owner One',
+            occurred_at: '2026-09-09T08:50:00.000Z',
+            success: true,
+            outcome: 'Document created',
+            href: '/wiki?id=doc-1',
+          },
+        },
+        created_at: '2026-09-09T08:50:00.000Z',
+      },
+    ]);
+
+    renderTasksPage();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Start Execution' }));
+
+    const receipt = await screen.findByTestId('action-receipt');
+    expect(receipt).toHaveTextContent('Created document');
+    expect(receipt).toHaveTextContent('Release checklist');
+    expect(receipt).toHaveTextContent('Document created');
+    expect(screen.getByTestId('action-receipt-link')).toHaveAttribute('href', '/wiki?id=doc-1');
+    // The bare log line says only that a receipt happened.
+    expect(screen.queryByText('Workspace action receipt')).not.toBeInTheDocument();
+  });
 });

@@ -1458,6 +1458,13 @@ test.describe('Models Page', () => {
   });
 
   test('shows delete button loading state', async ({ page }) => {
+    // The delete is held open until this test releases it, rather than for a
+    // fixed 300ms: a wall clock can run out before the assertion below is
+    // evaluated, and under a loaded parallel run on firefox it did.
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let deleteResolved = false;
     await page.unroute('**/api/models**');
     await routeApi(page, '**/api/models**', async (route) => {
@@ -1465,7 +1472,7 @@ test.describe('Models Page', () => {
       const method = route.request().method();
 
       if (method === 'DELETE') {
-        await new Promise(resolve => setTimeout(resolve, 300));
+        await held;
         deleteResolved = true;
         route.fulfill({ status: 200, body: '' });
       } else if (method === 'GET' && !url.includes('?')) {
@@ -1491,6 +1498,10 @@ test.describe('Models Page', () => {
     // Should show deleting state
     await expect(page.locator('button:has-text("Deleting...")')).toBeVisible();
     expect(deleteResolved).toBe(false);
+
+    release();
+    await expect(page.locator('button:has-text("Deleting...")')).toBeHidden();
+    expect(deleteResolved).toBe(true);
   });
 
   test('handles delete API failure gracefully', async ({ page }) => {
