@@ -80,6 +80,18 @@ pub async fn select(
     let selection = match Selection::new(config, model, run, output, captions) {
         Some(selection) => selection,
         None => {
+            // Silence here reads to the caller as "the trainer produced
+            // nothing", which is what the error it raises next says. Name the
+            // step that refused instead.
+            tracing::warn!(
+                artifact = %run.artifact,
+                models_dir = %config.models_dir.display(),
+                images = captions.len(),
+                loras = models_loras(config).is_some(),
+                produced = produced(config).is_some(),
+                manifest = crate::train::manifest(model, captions).is_some(),
+                "quality selection could not start; the adapter stands unscored"
+            );
             crate::train::cleanup(config, run).await;
             return None;
         }
@@ -139,14 +151,32 @@ impl<'a> Selection<'a> {
         let (folder, manifest) = sample
             .map(|sample| (sample.folder.as_str(), sample.manifest.as_str()))
             .unwrap_or((&self.folder, &self.probe.manifest));
-        self.probe.stage_remote(&self.adapter, deadline).await?;
-        let base = self
+        if self
             .probe
-            .mean(folder, manifest, None, RANK_PERCENT, deadline)
-            .await?;
-        if base <= 0.0 {
+            .stage_remote(&self.adapter, deadline)
+            .await
+            .is_none()
+        {
+            tracing::warn!(
+                adapter = %self.adapter,
+                "could not stage the trained adapter for probing; the adapter stands unscored"
+            );
             return None;
         }
+        let base = match self
+            .probe
+            .mean(folder, manifest, None, RANK_PERCENT, deadline)
+            .await
+        {
+            Some(base) if base > 0.0 => base,
+            other => {
+                tracing::warn!(
+                    base = ?other,
+                    "the base model did not produce a usable loss; the adapter stands unscored"
+                );
+                return None;
+            }
+        };
         let mut best = Candidate {
             label: FINAL.to_string(),
             lora: self.adapter.clone(),
@@ -541,11 +571,11 @@ impl<'a> Probe<'a> {
             .get(CONTENT_DISPOSITION)
             .and_then(|value| value.to_str().ok())
             != Some(expected.as_str())
-            || response
+            || !response
                 .headers()
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
-                != Some("application/octet-stream")
+                .is_some_and(crate::train::is_weight_payload)
         {
             return None;
         }

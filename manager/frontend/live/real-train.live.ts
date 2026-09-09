@@ -50,8 +50,21 @@ test.describe('real LoRA training', () => {
 
     await page.getByRole('button', { name: 'Train', exact: true }).click();
 
+    // A failed run answers with the error banner and never renders a result,
+    // so waiting only on the result burns the whole timeout on a run that is
+    // already over. Whichever lands first decides.
     const result = page.locator('.train-result');
-    await expect(result).toBeVisible({ timeout: 7_000_000 });
+    const failure = page.locator('.error-placeholder');
+    await expect
+      .poll(
+        async () => {
+          if (await failure.count()) return `failed: ${await failure.first().innerText()}`;
+          if (await result.count()) return 'finished';
+          return 'running';
+        },
+        { timeout: 7_000_000, intervals: [5_000] }
+      )
+      .toBe('finished');
     await expect(result).toContainText(/Training finished/);
 
     const quality = page.locator('.train-quality');
@@ -66,9 +79,10 @@ test.describe('real LoRA training', () => {
 
     // 15% is what an adapter that learned nothing scores, so a healthy run has
     // to clear it. The band label is the console's own reading of the number.
-    const improvement = reported.match(/(\d+)% better/);
+    // The sign matters: `-5% better` would otherwise read as 5.
+    const improvement = reported.match(/(-?\d+)% better/);
     expect(improvement, `no improvement reported: ${reported}`).not.toBeNull();
-    expect(Number(improvement?.[1])).toBeGreaterThan(15);
+    expect(Number(improvement?.[1]), `reported: ${reported}`).toBeGreaterThan(15);
     expect(reported).not.toContain('No measurable learning');
 
     console.log(`sampling: ${sampling}`);

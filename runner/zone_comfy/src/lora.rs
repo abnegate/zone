@@ -483,6 +483,11 @@ async fn train_with_pipeline(
     }
     let quality = crate::quality::select(config, &model, &run, &staged, &captions).await;
     require_regular_file(&attempt.root, &staged).map_err(|_| {
+        tracing::warn!(
+            staged = %staged.display(),
+            root = %attempt.root.display(),
+            "the trained adapter is gone after quality selection"
+        );
         TrainError::Failed("quality selection did not leave a regular LoRA file".to_string())
     })?;
     let adapter = recipe

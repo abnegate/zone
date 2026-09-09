@@ -327,10 +327,10 @@ async fn download(
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if content_type != "application/octet-stream" {
-        return Err(TrainError::Failed(
-            "ComfyUI view response is not safetensors data".into(),
-        ));
+    if !is_weight_payload(content_type) {
+        return Err(TrainError::Failed(format!(
+            "ComfyUI view response is not safetensors data: {content_type}"
+        )));
     }
     let bytes = response
         .bytes()
@@ -342,6 +342,28 @@ async fn download(
         ));
     }
     atomic_write(output, &bytes)
+}
+
+/// Whether a `/view` response body is weights rather than an error page.
+///
+/// The pinned ComfyUI serves a `.safetensors` artifact as
+/// `application/safetensors`; older builds served the generic
+/// `application/octet-stream`. Accepting only the latter rejected every
+/// trained adapter at the download step, and the run was then swept by the
+/// error path, so a completed training run produced nothing. The check still
+/// has to be narrow: its job is to refuse an HTML or JSON error page before it
+/// is written out as weights.
+pub(crate) fn is_weight_payload(content_type: &str) -> bool {
+    matches!(
+        content_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "application/octet-stream" | "application/safetensors"
+    )
 }
 
 pub(crate) fn atomic_write(output: &Path, bytes: &[u8]) -> Result<(), TrainError> {
@@ -1189,7 +1211,7 @@ mod tests {
 
     /// ComfyUI names the artifact it is serving, and the download checks that
     /// the file it gets back is the one it asked for.
-    struct Serve(Vec<u8>);
+    struct Serve(Vec<u8>, &'static str);
 
     impl wiremock::Respond for Serve {
         fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
@@ -1204,18 +1226,76 @@ mod tests {
                     "content-disposition",
                     format!("filename=\"{filename}\"").as_str(),
                 )
-                .insert_header("content-type", "application/octet-stream")
+                .insert_header("content-type", self.1)
                 .set_body_bytes(self.0.clone())
         }
     }
 
+    /// The pinned ComfyUI serves a `.safetensors` artifact as
+    /// `application/safetensors`, so that is what the default mock sends.
     async fn serves(server: &MockServer, weights: Vec<u8>) {
+        serves_as(server, weights, "application/safetensors").await;
+    }
+
+    async fn serves_as(server: &MockServer, weights: Vec<u8>, content_type: &'static str) {
         Mock::given(method("GET"))
             .and(path("/view"))
             .and(query_param("subfolder", "loras"))
-            .respond_with(Serve(weights))
+            .respond_with(Serve(weights, content_type))
             .mount(server)
             .await;
+    }
+
+    /// The download refused everything but `application/octet-stream`, and the
+    /// pinned ComfyUI serves `application/safetensors`, so every trained
+    /// adapter was rejected and then swept by the error path: a completed run
+    /// produced nothing. The mocks had always sent what the code expected.
+    #[test]
+    fn the_content_types_comfyui_serves_weights_as_are_accepted() {
+        for served in [
+            "application/safetensors",
+            "application/octet-stream",
+            "application/safetensors; charset=binary",
+            "Application/SafeTensors",
+        ] {
+            assert!(is_weight_payload(served), "{served} must be accepted");
+        }
+    }
+
+    /// The check exists to stop an error page being written out as weights.
+    #[test]
+    fn an_error_page_is_not_mistaken_for_weights() {
+        for served in [
+            "text/html",
+            "text/html; charset=utf-8",
+            "application/json",
+            "image/png",
+            "",
+        ] {
+            assert!(!is_weight_payload(served), "{served} must be refused");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_view_response_that_is_not_weights_is_refused() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        uploads(&server).await;
+        queues(&server, json!({"prompt_id": prompt, "number": 1})).await;
+        finishes(&server, prompt).await;
+        serves_as(&server, vec![7u8; 20_000], "text/html").await;
+
+        let work = dataset();
+        let output = work.path().join("my-style.safetensors");
+        let error = run(&config(&server), &base(), work.path(), &output, 2)
+            .await
+            .expect_err("an HTML body must not be written out as weights");
+
+        assert!(
+            format!("{error}").contains("not safetensors data"),
+            "unexpected error: {error}"
+        );
+        assert!(!output.exists(), "a refused download must write nothing");
     }
 
     #[tokio::test]
