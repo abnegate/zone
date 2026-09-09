@@ -38,11 +38,15 @@ fn database_error(error: sqlx::Error) -> axum::response::Response {
         .into_response()
 }
 
+/// A caller who is not a member is told the resource does not exist, so these
+/// endpoints cannot be used to enumerate ids across tenants. A member who lacks
+/// the role for a write already knows the workspace exists, so that stays 403.
 async fn authorize_workspace(
     state: &AppState,
     auth: &AuthUser,
     workspace: Uuid,
     write: bool,
+    missing: &str,
 ) -> Result<Uuid, (StatusCode, Json<ErrorResponse>)> {
     let actor = Uuid::parse_str(&auth.0.sub).map_err(|_| {
         (
@@ -59,7 +63,10 @@ async fn authorize_workspace(
                 Json(ErrorResponse::new("Internal server error")),
             )
         })?;
-    if role.is_none_or(|role| write && role < workspace_members::WorkspaceRole::Member) {
+    let Some(role) = role else {
+        return Err((StatusCode::NOT_FOUND, Json(ErrorResponse::new(missing))));
+    };
+    if write && role < workspace_members::WorkspaceRole::Member {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new("Workspace access required")),
@@ -73,6 +80,7 @@ async fn authorize_task(
     auth: &AuthUser,
     id: Uuid,
     write: bool,
+    missing: &str,
 ) -> Result<(Uuid, tasks::TaskRow), (StatusCode, Json<ErrorResponse>)> {
     let task = tasks::get_task(state.db(), id)
         .await
@@ -83,13 +91,8 @@ async fn authorize_task(
                 Json(ErrorResponse::new("Internal server error")),
             )
         })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Task not found")),
-            )
-        })?;
-    let actor = authorize_workspace(state, auth, task.workspace_id, write).await?;
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ErrorResponse::new(missing))))?;
+    let actor = authorize_workspace(state, auth, task.workspace_id, write, missing).await?;
     Ok((actor, task))
 }
 
@@ -113,7 +116,7 @@ async fn authorize_run(
                 Json(ErrorResponse::new("Task run not found")),
             )
         })?;
-    let (actor, _) = authorize_task(state, auth, run.task_id, false).await?;
+    let (actor, _) = authorize_task(state, auth, run.task_id, false, "Task run not found").await?;
     task_access::read(state.db(), id, actor)
         .await
         .map_err(|error| {
@@ -125,8 +128,8 @@ async fn authorize_run(
         })?
         .ok_or_else(|| {
             (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Workspace access required")),
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Task run not found")),
             )
         })
 }
@@ -380,7 +383,15 @@ pub async fn list(
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
-    let _actor = match authorize_workspace(&state, &auth, workspace_id, false).await {
+    let _actor = match authorize_workspace(
+        &state,
+        &auth,
+        workspace_id,
+        false,
+        "Workspace not found",
+    )
+    .await
+    {
         Ok(actor) => actor,
         Err(response) => return response.into_response(),
     };
@@ -408,10 +419,11 @@ pub async fn create(
     Path(workspace_id): Path<Uuid>,
     Json(request): Json<CreateTaskRequest>,
 ) -> impl IntoResponse {
-    let actor = match authorize_workspace(&state, &auth, workspace_id, true).await {
-        Ok(actor) => actor,
-        Err(response) => return response.into_response(),
-    };
+    let actor =
+        match authorize_workspace(&state, &auth, workspace_id, true, "Workspace not found").await {
+            Ok(actor) => actor,
+            Err(response) => return response.into_response(),
+        };
     if let Err(response) = validate_projects(&state, workspace_id, &request.project_ids).await {
         return response.into_response();
     }
@@ -464,7 +476,7 @@ pub async fn get(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let (_actor, task) = match authorize_task(&state, &auth, id, false).await {
+    let (_actor, task) = match authorize_task(&state, &auth, id, false, "Task not found").await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
@@ -479,7 +491,7 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateTaskRequest>,
 ) -> impl IntoResponse {
-    let (actor, task) = match authorize_task(&state, &auth, id, true).await {
+    let (actor, task) = match authorize_task(&state, &auth, id, true, "Task not found").await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
@@ -520,7 +532,7 @@ pub async fn delete(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let (actor, _task) = match authorize_task(&state, &auth, id, true).await {
+    let (actor, _task) = match authorize_task(&state, &auth, id, true, "Task not found").await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
@@ -542,7 +554,7 @@ pub async fn queue(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let (actor, _task) = match authorize_task(&state, &auth, id, true).await {
+    let (actor, _task) = match authorize_task(&state, &auth, id, true, "Task not found").await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
@@ -566,7 +578,7 @@ pub async fn list_runs(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let (actor, _task) = match authorize_task(&state, &auth, id, false).await {
+    let (actor, _task) = match authorize_task(&state, &auth, id, false, "Task not found").await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
@@ -586,7 +598,7 @@ pub async fn create_run(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let (actor, _task) = match authorize_task(&state, &auth, id, true).await {
+    let (actor, _task) = match authorize_task(&state, &auth, id, true, "Task not found").await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };

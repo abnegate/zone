@@ -101,7 +101,11 @@ async fn foreign_actor_cannot_read_task() {
     let response = zone_server::routes::tasks::get(State(state), auth, Path(task.id))
         .await
         .into_response();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a foreign workspace must not be able to tell a private task from a missing one"
+    );
 }
 
 #[tokio::test]
@@ -252,28 +256,33 @@ async fn task_routes_reject_foreign_and_readonly_mutations() {
             is_admin: false,
         })
     };
+    // A non-member is told the task does not exist, so ids cannot be enumerated
+    // across workspaces. A viewer already knows it exists and is refused on role.
     for id in [foreign, actor] {
-        if id == actor {
+        let expected = if id == actor {
             sqlx::query("UPDATE workspace_members SET role = 'viewer' WHERE workspace_id = $1 AND user_id = $2").bind(workspace).bind(actor).execute(&pool).await.unwrap();
-        }
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::NOT_FOUND
+        };
         let response = routes::create_run(State(state.clone()), auth(id), Path(task.id))
             .await
             .into_response();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), expected);
         let response = routes::queue(State(state.clone()), auth(id), Path(task.id))
             .await
             .into_response();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), expected);
         let response = routes::delete(State(state.clone()), auth(id), Path(task.id))
             .await
             .into_response();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), expected);
         let request =
             serde_json::from_value(serde_json::json!({"description":"malicious"})).unwrap();
         let response = routes::update(State(state.clone()), auth(id), Path(task.id), Json(request))
             .await
             .into_response();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), expected);
         let request = serde_json::from_value(
             serde_json::json!({"title":"Malicious","description":"Injected"}),
         )
@@ -286,7 +295,7 @@ async fn task_routes_reject_foreign_and_readonly_mutations() {
         )
         .await
         .into_response();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), expected);
     }
     for response in [
         routes::get_run(State(state.clone()), auth(foreign), Path(run.id))
@@ -299,7 +308,7 @@ async fn task_routes_reject_foreign_and_readonly_mutations() {
             .await
             .into_response(),
     ] {
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
     let response = routes::get(State(state.clone()), auth(actor), Path(task.id))
         .await
@@ -318,7 +327,8 @@ async fn task_routes_reject_foreign_and_readonly_mutations() {
             .await
             .into_response()
             .status(),
-        StatusCode::FORBIDDEN
+        StatusCode::NOT_FOUND,
+        "a deactivated membership must read as a missing task, not a refused one"
     );
     assert_eq!(
         tasks::get_task(&pool, task.id)

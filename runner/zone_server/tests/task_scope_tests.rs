@@ -601,8 +601,8 @@ async fn http_revocation(logs: bool) {
         .unwrap();
     reader.close().await;
     cleanup(&pool, organization, user).await;
-    response.assert_status(axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(response.json_value()["error"], "Workspace access required");
+    response.assert_status(axum::http::StatusCode::NOT_FOUND);
+    assert_eq!(response.json_value()["error"], "Task run not found");
     assert!(
         blocked.unwrap(),
         "HTTP disclosure must wait for pending revocation"

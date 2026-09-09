@@ -51,7 +51,7 @@ async fn check_creation() {
     for (workspace, source_id, expected) in [
         (workspace_id, Some(source.id), StatusCode::CREATED),
         (workspace_id, None, StatusCode::CREATED),
-        (other_workspace_id, Some(source.id), StatusCode::FORBIDDEN),
+        (other_workspace_id, Some(source.id), StatusCode::NOT_FOUND),
         (workspace_id, Some(Uuid::new_v4()), StatusCode::BAD_REQUEST),
     ] {
         let request: CreateTaskRequest = serde_json::from_value(json!({
