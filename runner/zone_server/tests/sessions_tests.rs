@@ -3,6 +3,7 @@
 //! Tests for the session tracking and management system.
 
 use chrono::{Duration, Utc};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 mod common;
@@ -10,6 +11,10 @@ mod common;
 use common::{create_test_pool, test_password};
 use zone_server::db::sessions;
 use zone_server::utils::crypto::hash_token;
+
+/// `cleanup_expired_sessions` deletes every expired or revoked row in the
+/// table, so the test that exercises it has to run alone.
+static SESSIONS: RwLock<()> = RwLock::const_new(());
 
 fn unique_token(prefix: &str) -> String {
     format!("{}-{}", prefix, Uuid::new_v4())
@@ -34,6 +39,7 @@ async fn create_test_user(pool: &sqlx::PgPool, prefix: &str) -> Uuid {
 
 #[tokio::test]
 async fn test_create_session() {
+    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_create@test.com").await;
@@ -75,6 +81,7 @@ async fn test_create_session() {
 
 #[tokio::test]
 async fn test_get_session_by_token() {
+    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_get@test.com").await;
@@ -114,6 +121,7 @@ async fn test_get_session_by_token() {
 
 #[tokio::test]
 async fn test_get_session_by_token_not_found() {
+    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
 
     let token_hash = hash_token(&unique_token("nonexistent_token"));
@@ -128,6 +136,7 @@ async fn test_get_session_by_token_not_found() {
 
 #[tokio::test]
 async fn test_update_last_active() {
+    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_active@test.com").await;
@@ -176,6 +185,7 @@ async fn test_update_last_active() {
 
 #[tokio::test]
 async fn test_revoke_session() {
+    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_revoke@test.com").await;
@@ -203,21 +213,15 @@ async fn test_revoke_session() {
         .await
         .expect("Failed to revoke session");
 
-    // Verify session is revoked (use direct SQL since get_session_by_token excludes revoked sessions)
-    // Use fetch_optional since cleanup_expired_sessions may delete revoked sessions
-    let revoked_at: Option<Option<chrono::DateTime<Utc>>> =
+    // get_session_by_token excludes revoked sessions, so read the row directly
+    let revoked_at: Option<chrono::DateTime<Utc>> =
         sqlx::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
             .bind(session.id)
-            .fetch_optional(&pool)
+            .fetch_one(&pool)
             .await
             .expect("Failed to query session");
 
-    // Session should either be revoked (revoked_at is Some) or cleaned up (not found)
-    match revoked_at {
-        Some(Some(_)) => {} // Session is revoked as expected
-        None => {} // Session was cleaned up by cleanup_expired_sessions - acceptable in parallel tests
-        Some(None) => panic!("Session exists but is not revoked"),
-    }
+    assert!(revoked_at.is_some(), "Session should be revoked");
 
     // Cleanup
     sqlx::query("DELETE FROM sessions WHERE id = $1")
@@ -229,6 +233,7 @@ async fn test_revoke_session() {
 
 #[tokio::test]
 async fn test_revoke_all_user_sessions() {
+    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_revoke_all@test.com").await;
@@ -279,19 +284,17 @@ async fn test_revoke_all_user_sessions() {
         .await
         .expect("Failed to revoke all sessions");
 
-    // Accept that count may be less than 3 if cleanup ran between creation and revocation
-    assert!(count <= 3, "Should have revoked at most 3 sessions");
+    assert_eq!(count, 3, "Should have revoked all three sessions");
 
-    // Verify remaining sessions are revoked (some may have been cleaned up already)
     let sessions = sessions::list_user_sessions(&pool, user_id)
         .await
         .expect("Failed to list sessions");
 
-    // Sessions may be cleaned up by cleanup_expired_sessions running in parallel
+    assert_eq!(sessions.len(), 3, "All three sessions should still exist");
     for session in &sessions {
         assert!(
             session.revoked_at.is_some(),
-            "Any remaining session should be revoked"
+            "Every session should be revoked"
         );
     }
 
@@ -307,6 +310,7 @@ async fn test_revoke_all_user_sessions() {
 
 #[tokio::test]
 async fn test_list_user_sessions() {
+    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_list@test.com").await;
@@ -361,6 +365,7 @@ async fn test_list_user_sessions() {
 
 #[tokio::test]
 async fn test_cleanup_expired_sessions() {
+    let _sessions = SESSIONS.write().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_cleanup@test.com").await;
@@ -424,6 +429,7 @@ async fn test_cleanup_expired_sessions() {
 
 #[tokio::test]
 async fn test_session_cascade_delete_on_user_deletion() {
+    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_cascade@test.com").await;
@@ -462,6 +468,7 @@ async fn test_session_cascade_delete_on_user_deletion() {
 
 #[tokio::test]
 async fn test_list_active_sessions_only() {
+    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_active_only@test.com").await;
@@ -519,6 +526,7 @@ async fn test_list_active_sessions_only() {
 
 #[tokio::test]
 async fn test_revoke_session_idempotent() {
+    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_idempotent@test.com").await;
