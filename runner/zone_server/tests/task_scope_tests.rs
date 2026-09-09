@@ -1,7 +1,7 @@
 //! Background tasks retain their initiating workspace and never expose foreign runs.
 mod common;
 
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -9,9 +9,39 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 use zone_server::agent::ChatTools;
-use zone_server::auth::jwt::create_access_token;
-use zone_server::db::{task_access, tasks, workspace_members};
+use zone_server::auth::jwt::create_session_access_token;
+use zone_server::db::{sessions, task_access, tasks, workspace_members};
 use zone_server::state::AppState;
+
+/// Mint an access token backed by a live session.
+///
+/// Auth refuses a token whose session is missing or revoked, so a raw JWT is
+/// no longer enough to reach these routes: every actor needs a session of its
+/// own, the way a real sign-in would leave one.
+async fn session_token(pool: &PgPool, actor: Uuid, secret: &str) -> String {
+    let session = sessions::create_session(
+        pool,
+        actor,
+        &format!("refresh-{}", Uuid::new_v4()),
+        None,
+        None,
+        None,
+        (Utc::now() + Duration::hours(1)).naive_utc(),
+    )
+    .await
+    .expect("the actor gets a session");
+    create_session_access_token(
+        actor,
+        "scope@example.com",
+        vec![],
+        vec![],
+        false,
+        session.id,
+        secret,
+        Duration::minutes(1),
+    )
+    .expect("the session token is signed")
+}
 
 async fn fixture() -> (PgPool, AppState, Uuid, Uuid, Uuid) {
     let pool = common::create_test_pool().await;
@@ -187,16 +217,7 @@ async fn websocket_case(status: &str, authorized: bool, token_valid: bool) {
     assert_ne!(workspace, foreign_workspace);
     let actor = if authorized { user } else { foreign_user };
     let token = if token_valid {
-        create_access_token(
-            actor,
-            "scope@example.com",
-            vec![],
-            vec![],
-            false,
-            &config.jwt_secret,
-            Duration::minutes(1),
-        )
-        .unwrap()
+        session_token(&pool, actor, &config.jwt_secret).await
     } else {
         "invalid-token".into()
     };
@@ -221,8 +242,8 @@ async fn websocket_case(status: &str, authorized: bool, token_valid: bool) {
         .unwrap()
         .unwrap()
         .unwrap();
-    let response: Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
     if authorized && token_valid {
+        let response: Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
         assert_eq!(response["type"], "init");
         assert_eq!(response["task_id"], task.id.to_string());
         let log = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
@@ -251,21 +272,31 @@ async fn websocket_case(status: &str, authorized: bool, token_valid: bool) {
             })
             .await
             .unwrap();
-            assert_eq!(denied["message"], "Forbidden");
+            assert_eq!(denied["message"], "Authorization expired or revoked");
         }
     } else {
-        assert_eq!(
-            response["type"], "error",
-            "foreign or invalid actor received task data: {response}"
-        );
-        assert!(!response.to_string().contains("DO NOT LEAK"));
-        if token_valid {
-            assert_eq!(response["message"], "Forbidden");
+        // A refused socket is closed without task data. Whether the refusal is
+        // named in an error frame first or the socket simply closes, nothing
+        // about the run may cross it.
+        match &response {
+            Message::Text(text) => {
+                let event: Value = serde_json::from_str(text).unwrap();
+                assert_eq!(
+                    event["type"], "error",
+                    "foreign or invalid actor received task data: {event}"
+                );
+                assert!(!text.contains("DO NOT LEAK"));
+                if token_valid {
+                    assert_eq!(event["message"], "Authorization expired or revoked");
+                }
+                let closed = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                    .await
+                    .unwrap();
+                assert!(matches!(closed, None | Some(Ok(Message::Close(_)))));
+            }
+            Message::Close(_) => {}
+            other => panic!("a refused socket sent {other:?} instead of closing"),
         }
-        let closed = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
-            .await
-            .unwrap();
-        assert!(matches!(closed, None | Some(Ok(Message::Close(_)))));
     }
     socket.close(None).await.ok();
     server.abort();
@@ -311,16 +342,7 @@ async fn later_smaller_log_uuid_is_streamed_once_before_completion() {
     sqlx::query("INSERT INTO task_run_logs (id, task_run_id, phase, agent_type, log_level, message) VALUES ($1, $2, 'acting', 'tool', 'info', 'first')")
         .bind(first).bind(run.id).execute(&pool).await.unwrap();
     let config = common::test_config();
-    let token = create_access_token(
-        user,
-        "scope@example.com",
-        vec![],
-        vec![],
-        false,
-        &config.jwt_secret,
-        Duration::minutes(1),
-    )
-    .unwrap();
+    let token = session_token(&pool, user, &config.jwt_secret).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -548,16 +570,7 @@ async fn http_revocation(logs: bool) {
         .await
         .unwrap();
     let config = common::test_config();
-    let token = create_access_token(
-        user,
-        "scope@example.com",
-        vec![],
-        vec![],
-        false,
-        &config.jwt_secret,
-        Duration::minutes(1),
-    )
-    .unwrap();
+    let token = session_token(&pool, user, &config.jwt_secret).await;
     let client = common::TestClient::new(common::create_test_router(common::create_test_state(
         config,
         reader.clone(),
@@ -651,16 +664,7 @@ async fn http_admission_waits_for_revocation() {
         .await
         .unwrap();
     let config = common::test_config();
-    let token = create_access_token(
-        user,
-        "scope@example.com",
-        vec![],
-        vec![],
-        false,
-        &config.jwt_secret,
-        Duration::minutes(1),
-    )
-    .unwrap();
+    let token = session_token(&pool, user, &config.jwt_secret).await;
     let client = common::TestClient::new(common::create_test_router(common::create_test_state(
         config,
         reader.clone(),
@@ -710,8 +714,8 @@ async fn http_admission_waits_for_revocation() {
     assert_eq!(before, after, "denied admission must leave task unchanged");
     assert_eq!(runs, 0, "denied admission must not create a run");
     assert!(after["active_run_id"].is_null());
-    response.assert_status(axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(response.json_value()["error"], "Workspace access required");
+    response.assert_status(axum::http::StatusCode::NOT_FOUND);
+    assert_eq!(response.json_value()["error"], "Task not found");
     assert!(
         blocked.unwrap(),
         "HTTP admission must wait for pending revocation"
@@ -736,16 +740,7 @@ async fn http_admission_preserves_missing_and_conflict_statuses() {
     .unwrap();
     tasks::create_task_run(&pool, task.id).await.unwrap();
     let config = common::test_config();
-    let token = create_access_token(
-        user,
-        "scope@example.com",
-        vec![],
-        vec![],
-        false,
-        &config.jwt_secret,
-        Duration::minutes(1),
-    )
-    .unwrap();
+    let token = session_token(&pool, user, &config.jwt_secret).await;
     let client = common::TestClient::new(common::create_test_router(state));
     let missing = client
         .post_json_auth(
@@ -760,8 +755,9 @@ async fn http_admission_preserves_missing_and_conflict_statuses() {
     cleanup(&pool, organization, user).await;
     missing.assert_status(axum::http::StatusCode::NOT_FOUND);
     conflict.assert_status(axum::http::StatusCode::CONFLICT);
-    assert_eq!(
-        conflict.json_value()["error"],
-        "Task already has an active run"
+    let error = conflict.json_value()["error"].as_str().unwrap().to_owned();
+    assert!(
+        error.starts_with("Task already has an active run") && error.contains("status: running"),
+        "the conflict has to name the run holding the slot: {error}"
     );
 }

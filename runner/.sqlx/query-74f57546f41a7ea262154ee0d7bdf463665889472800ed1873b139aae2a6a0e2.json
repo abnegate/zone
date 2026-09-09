@@ -6,32 +6,68 @@
       {
         "ordinal": 0,
         "name": "id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "chat_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "chat_id"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "role",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "role"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "content",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "content"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "metadata",
-        "type_info": "Jsonb"
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "metadata"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "created_at",
-        "type_info": "Timestamp"
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "created_at"
+          }
+        }
       }
     ],
     "parameters": {

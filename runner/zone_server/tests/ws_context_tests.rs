@@ -58,8 +58,8 @@ impl TestContext {
 
 /// Get a valid auth token for WebSocket tests by creating user directly in database
 async fn get_ws_auth_token_with_pool(pool: &PgPool) -> (String, Uuid) {
-    use zone_server::auth::jwt::create_access_token;
-    use zone_server::db::users;
+    use zone_server::auth::create_session_access_token;
+    use zone_server::db::{sessions, users};
 
     let email = common::test_email();
     let password_hash = zone_server::auth::hash_password(&common::test_password()).unwrap();
@@ -69,14 +69,27 @@ async fn get_ws_auth_token_with_pool(pool: &PgPool) -> (String, Uuid) {
         .await
         .expect("Failed to create test user");
 
-    // Create JWT token directly
+    let session = sessions::create_session(
+        pool,
+        user.id,
+        &format!("refresh-{}", Uuid::new_v4()),
+        None,
+        None,
+        None,
+        (chrono::Utc::now() + Duration::hours(1)).naive_utc(),
+    )
+    .await
+    .expect("Failed to create test session");
+
+    // Create a JWT token bound to the active session.
     let config = common::test_config();
-    let token = create_access_token(
+    let token = create_session_access_token(
         user.id,
         &email,
         vec![], // roles
         vec![], // permissions
         false,  // is_admin
+        session.id,
         &config.jwt_secret,
         Duration::seconds(config.jwt_access_lifetime as i64),
     )

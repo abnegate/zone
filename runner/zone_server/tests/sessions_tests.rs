@@ -2,7 +2,10 @@
 //!
 //! Tests for the session tracking and management system.
 
+use std::sync::LazyLock;
+
 use chrono::{Duration, Utc};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 mod common;
@@ -10,6 +13,12 @@ mod common;
 use common::{create_test_pool, test_password};
 use zone_server::db::sessions;
 use zone_server::utils::crypto::hash_token;
+
+/// `cleanup_expired_sessions` deletes every revoked or expired row in the
+/// database, not just its own, so it cannot run while another test is holding
+/// one. Tests that leave a revoked session and read it back share this lock;
+/// the cleanup test takes it exclusively.
+static REVOKED_ROWS: LazyLock<RwLock<()>> = LazyLock::new(RwLock::default);
 
 fn unique_token(prefix: &str) -> String {
     format!("{}-{}", prefix, Uuid::new_v4())
@@ -176,6 +185,7 @@ async fn test_update_last_active() {
 
 #[tokio::test]
 async fn test_revoke_session() {
+    let _shared = REVOKED_ROWS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_revoke@test.com").await;
@@ -229,6 +239,7 @@ async fn test_revoke_session() {
 
 #[tokio::test]
 async fn test_revoke_all_user_sessions() {
+    let _shared = REVOKED_ROWS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_revoke_all@test.com").await;
@@ -361,6 +372,7 @@ async fn test_list_user_sessions() {
 
 #[tokio::test]
 async fn test_cleanup_expired_sessions() {
+    let _exclusive = REVOKED_ROWS.write().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_cleanup@test.com").await;
@@ -462,6 +474,7 @@ async fn test_session_cascade_delete_on_user_deletion() {
 
 #[tokio::test]
 async fn test_list_active_sessions_only() {
+    let _shared = REVOKED_ROWS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_active_only@test.com").await;
@@ -519,6 +532,7 @@ async fn test_list_active_sessions_only() {
 
 #[tokio::test]
 async fn test_revoke_session_idempotent() {
+    let _shared = REVOKED_ROWS.read().await;
     let pool = create_test_pool().await;
 
     let user_id = create_test_user(&pool, "session_idempotent@test.com").await;

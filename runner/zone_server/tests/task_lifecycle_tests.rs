@@ -256,15 +256,17 @@ async fn task_routes_reject_foreign_and_readonly_mutations() {
             is_admin: false,
         })
     };
-    // A non-member is told the task does not exist, so ids cannot be enumerated
-    // across workspaces. A viewer already knows it exists and is refused on role.
+    // Anything addressed by task id answers "not found" to a caller who cannot
+    // write it, whether they are a stranger or a viewer, so the reply cannot be
+    // used to enumerate ids across workspaces. Creation is addressed by
+    // workspace instead and refuses everyone alike, revealing nothing by
+    // naming the refusal.
     for id in [foreign, actor] {
-        let expected = if id == actor {
+        if id == actor {
             sqlx::query("UPDATE workspace_members SET role = 'viewer' WHERE workspace_id = $1 AND user_id = $2").bind(workspace).bind(actor).execute(&pool).await.unwrap();
-            StatusCode::FORBIDDEN
-        } else {
-            StatusCode::NOT_FOUND
-        };
+        }
+        let expected = StatusCode::NOT_FOUND;
+        let expected_creation = StatusCode::FORBIDDEN;
         let response = routes::create_run(State(state.clone()), auth(id), Path(task.id))
             .await
             .into_response();
@@ -295,7 +297,7 @@ async fn task_routes_reject_foreign_and_readonly_mutations() {
         )
         .await
         .into_response();
-        assert_eq!(response.status(), expected);
+        assert_eq!(response.status(), expected_creation);
     }
     for response in [
         routes::get_run(State(state.clone()), auth(foreign), Path(run.id))

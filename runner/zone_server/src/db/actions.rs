@@ -14,7 +14,10 @@ pub fn publish(chat_id: Uuid, message: Value) {
     let _ = UPDATES.send((chat_id, message));
 }
 
-use super::DbResult;
+use super::{
+    DbResult,
+    workspace_members::{self, WorkspaceRole},
+};
 
 fn patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
@@ -77,11 +80,10 @@ pub async fn authorize(
     user_id: Uuid,
     write: bool,
 ) -> DbResult<()> {
-    let role: Option<String> = sqlx::query_scalar("SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND is_active FOR SHARE")
-        .bind(workspace_id).bind(user_id).fetch_optional(connection).await?;
-    if !matches!(role.as_deref(), Some("owner" | "admin" | "member"))
-        && (write || role.as_deref() != Some("viewer"))
-    {
+    let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
+    if !role.is_some_and(|role| {
+        role >= WorkspaceRole::Member || (!write && role == WorkspaceRole::Viewer)
+    }) {
         return Err(invalid("Workspace access denied"));
     }
     Ok(())
@@ -285,23 +287,37 @@ pub async fn start_task(
     {
         return Err(invalid("priority must be between 1 and 5"));
     }
-    let mut transaction = pool.begin().await?;
-    authorize(&mut transaction, workspace_id, user_id, true).await?;
-    let task = super::tasks::create_task_in(
-        &mut transaction,
-        workspace_id,
-        &input.project_ids,
-        input.title.trim(),
-        input.description.trim(),
-        input.acceptance_criteria.as_deref(),
-        input.priority,
-        true,
-        input.source_id,
-        Some(user_id),
+    let (task, run) = match super::tasks::start_task_authorized(
+        pool,
+        user_id,
+        super::tasks::Create {
+            workspace_id,
+            project_ids: &input.project_ids,
+            title: input.title.trim(),
+            description: input.description.trim(),
+            acceptance_criteria: input.acceptance_criteria.as_deref(),
+            priority: input.priority,
+            is_agentic: true,
+            source_id: input.source_id,
+            created_by: Some(user_id),
+        },
     )
-    .await?;
-    let run = super::tasks::create_task_run_in(&mut transaction, task.id, Some(user_id)).await?;
-    transaction.commit().await?;
+    .await
+    {
+        Ok(super::tasks::Mutation::Applied(result)) => result,
+        Ok(super::tasks::Mutation::NotFound) => return Err(invalid("Workspace access denied")),
+        Err(super::tasks::MutationError::Project) => {
+            return Err(invalid("Project is not available in this workspace"));
+        }
+        Err(super::tasks::MutationError::Source) => {
+            return Err(invalid("Source not found in this workspace or inactive"));
+        }
+        // A task created here has no prior run to conflict with.
+        Err(super::tasks::MutationError::ActiveRun) => {
+            return Err(invalid("Task has an active run"));
+        }
+        Err(super::tasks::MutationError::Database(error)) => return Err(error),
+    };
     Ok(json!({
         "task_id": task.id,
         "run_id": run.id,
@@ -900,20 +916,26 @@ mod tests {
     #[tokio::test]
     async fn admission_revoked_actor_cannot_mutate_existing_tasks() {
         let (pool, organization, workspace, user, _) = fixture().await;
-        let task = super::super::tasks::create_task_as(
+        let task = super::super::tasks::start_task_authorized(
             &pool,
-            workspace,
-            &[],
-            "protected",
-            "",
-            None,
-            None,
-            true,
-            None,
-            Some(user),
+            user,
+            super::super::tasks::Create {
+                workspace_id: workspace,
+                project_ids: &[],
+                title: "protected",
+                description: "",
+                acceptance_criteria: None,
+                priority: None,
+                is_agentic: true,
+                source_id: None,
+                created_by: Some(user),
+            },
         )
         .await
         .unwrap();
+        let super::super::tasks::Mutation::Applied((task, _)) = task else {
+            panic!("the fixture actor is a member and must be admitted");
+        };
         sqlx::query(
             "UPDATE workspace_members SET is_active=false WHERE workspace_id=$1 AND user_id=$2",
         )
@@ -922,24 +944,40 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let updated = super::super::tasks::update_task_as(
+        let updated = super::super::tasks::update_task_authorized(
             &pool,
-            task.id,
-            Some("changed"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(user),
+            user,
+            super::super::tasks::Patch {
+                id: task.id,
+                title: Some("changed"),
+                description: None,
+                acceptance_criteria: None,
+                status: None,
+                priority: None,
+                project_ids: None,
+            },
         )
         .await;
-        let queued = super::super::tasks::queue_task_as(&pool, task.id, Some(user)).await;
+        let queued = super::super::tasks::queue_task_authorized(&pool, user, task.id).await;
         let admitted = super::super::tasks::create_task_run_as(&pool, task.id, Some(user)).await;
-        let deleted = super::super::tasks::delete_task_as(&pool, task.id, Some(user)).await;
+        let deleted = super::super::tasks::delete_task_authorized(&pool, user, task.id).await;
         let row = super::super::tasks::get_task(&pool, task.id).await.unwrap();
         cleanup(&pool, organization, user).await;
-        assert!(updated.is_err() && queued.is_err() && admitted.is_err() && deleted.is_err());
+        // A revoked member is told the task is gone rather than refused, so the
+        // reply cannot be used to confirm it exists.
+        assert!(
+            matches!(updated, Ok(super::super::tasks::Mutation::NotFound)),
+            "a revoked actor must not update"
+        );
+        assert!(
+            matches!(queued, Ok(super::super::tasks::Mutation::NotFound)),
+            "a revoked actor must not queue"
+        );
+        assert!(admitted.is_err(), "a revoked actor must not admit a run");
+        assert!(
+            matches!(deleted, Ok(super::super::tasks::Mutation::NotFound)),
+            "a revoked actor must not delete"
+        );
         assert_eq!(row.unwrap().title, "protected");
     }
 
@@ -1010,7 +1048,11 @@ mod tests {
             .unwrap();
         cleanup(&pool, organization, user).await;
         assert_eq!(update.unwrap().unwrap().project_ids, vec![project]);
-        assert!(matches!(foreign, Err(sqlx::Error::RowNotFound)));
+        assert!(
+            matches!(&foreign, Err(sqlx::Error::Protocol(message))
+                if message == "Project is not available in this workspace"),
+            "a foreign project must be named, not reported as a missing row"
+        );
         assert_eq!(
             associations,
             vec![project],

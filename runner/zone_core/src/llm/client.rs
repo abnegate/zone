@@ -204,13 +204,16 @@ impl LlmClient {
             ));
         }
 
-        // Loopback and private addresses stay reachable: base_url is operator
-        // configuration, and a self-hosted LiteLLM or Ollama is normally the
-        // host or another machine on the LAN.
-        parsed.host_str().ok_or_else(|| {
-            LlmError::InvalidConfig("LLM base_url must include a host".to_string())
-        })?;
+        if parsed.host_str().is_none() {
+            return Err(LlmError::InvalidConfig(
+                "LLM base_url must include a host".to_string(),
+            ));
+        }
 
+        // No private-network rule here on purpose. Every caller passes an
+        // operator-configured host, and a self-hosted Zone points at loopback,
+        // a LAN address or a compose service name. The check belongs where a
+        // tenant-supplied host is first accepted, against that value.
         Ok(())
     }
 
@@ -417,56 +420,6 @@ mod tests {
     use super::*;
     use crate::llm::Effort;
     use crate::llm::types::{ChatRequest, Message};
-
-    fn client_for(base_url: &str) -> LlmClient {
-        LlmClient::new(LlmConfig {
-            base_url: base_url.to_string(),
-            ..LlmConfig::default()
-        })
-    }
-
-    #[test]
-    fn self_hosted_addresses_are_reachable() {
-        for url in [
-            "http://127.0.0.1:11434/v1/chat/completions",
-            "http://localhost:4000/v1/chat/completions",
-            "http://192.168.1.50:11434/v1/chat/completions",
-            "http://litellm:4000/v1/chat/completions",
-            "http://host.docker.internal:11434/v1/chat/completions",
-            "http://[::1]:4000/v1/chat/completions",
-        ] {
-            assert!(
-                client_for(url).validate_outbound_url(url).is_ok(),
-                "{url} must stay reachable for self-hosted deployments"
-            );
-        }
-    }
-
-    #[test]
-    fn non_http_schemes_are_rejected() {
-        for url in [
-            "file:///etc/passwd",
-            "gopher://example.com/",
-            "ftp://example.com/",
-        ] {
-            assert!(
-                client_for(url).validate_outbound_url(url).is_err(),
-                "{url} must be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn urls_carrying_credentials_are_rejected() {
-        let url = "https://user:secret@api.openai.com/v1";
-        assert!(client_for(url).validate_outbound_url(url).is_err());
-    }
-
-    #[test]
-    fn relative_urls_are_rejected() {
-        let url = "/v1/chat/completions";
-        assert!(client_for(url).validate_outbound_url(url).is_err());
-    }
 
     #[test]
     fn classifies_explicit_tool_capability_rejections() {
@@ -750,5 +703,71 @@ mod tests {
             })
             .unwrap();
         assert!(compact.get("reasoning_effort").is_none());
+    }
+
+    fn client_for(base_url: &str) -> LlmClient {
+        LlmClient::new(LlmConfig {
+            base_url: base_url.to_string(),
+            ..LlmConfig::default()
+        })
+    }
+
+    #[test]
+    fn a_public_https_host_is_accepted() {
+        assert!(
+            client_for("https://api.openai.com/v1")
+                .validate_outbound_url("https://api.openai.com/v1/chat/completions")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_non_http_scheme_is_refused() {
+        let error = client_for("file:///etc/passwd")
+            .validate_outbound_url("file:///etc/passwd")
+            .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::InvalidConfig(message) if message.contains("http or https")),
+            "the refusal has to name the scheme rule: {error}"
+        );
+    }
+
+    #[test]
+    fn credentials_in_the_url_are_refused() {
+        let error = client_for("https://user:pass@api.openai.com/v1")
+            .validate_outbound_url("https://user:pass@api.openai.com/v1")
+            .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::InvalidConfig(message) if message.contains("userinfo")),
+            "the refusal has to name the userinfo rule: {error}"
+        );
+    }
+
+    #[test]
+    fn the_hosts_a_self_hosted_zone_runs_on_are_accepted() {
+        for base_url in [
+            "http://localhost:4000",
+            "http://127.0.0.1:11434",
+            "http://192.168.1.50:4000",
+            "http://host.docker.internal:11434",
+            "http://litellm:4000",
+            "http://[::1]:4000",
+        ] {
+            assert!(
+                client_for(base_url).validate_outbound_url(base_url).is_ok(),
+                "{base_url} is a supported way to reach a self-hosted model server"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relative_url_is_refused() {
+        let error = client_for("/v1/chat/completions")
+            .validate_outbound_url("/v1/chat/completions")
+            .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::InvalidConfig(message) if message.contains("absolute URL")),
+            "the refusal has to name the absolute-URL rule: {error}"
+        );
     }
 }

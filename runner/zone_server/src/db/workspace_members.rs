@@ -2,7 +2,7 @@
 //!
 //! Provides authorization functions to check workspace membership and roles.
 
-use sqlx::{Executor, PgPool, Postgres};
+use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -67,6 +67,34 @@ pub async fn get_role(
         .await?;
 
     Ok(role.and_then(|r| r.parse().ok()))
+}
+
+/// Read and lock an active membership for the duration of the caller's transaction.
+///
+/// Holding this shared row lock gives membership revocation and the protected
+/// operation a definite order. Callers must keep the transaction open until
+/// the protected read or mutation finishes.
+pub async fn lock_role(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<WorkspaceRole>> {
+    let role: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT role
+        FROM workspace_members
+        WHERE workspace_id = $1
+          AND user_id = $2
+          AND is_active = TRUE
+        FOR SHARE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(connection)
+    .await?;
+
+    Ok(role.and_then(|value| value.parse().ok()))
 }
 
 /// Check if user has at least the specified role

@@ -4,7 +4,6 @@ mod common;
 use axum::{Json, Router, body::Body, http::StatusCode, response::IntoResponse, routing::post};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use sqlx::postgres::PgPoolOptions;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -12,7 +11,8 @@ use std::sync::{
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
-use zone_server::auth::{create_access_token, create_refresh_token};
+use zone_server::auth::{create_refresh_token, create_session_access_token};
+use zone_server::db::{sessions, users};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -67,12 +67,34 @@ impl Fixture {
             axum::serve(listener, provider).await.unwrap();
         });
         let config = common::test_config_with_ollama_host(&format!("http://{address}"));
-        let token = create_access_token(
-            uuid::Uuid::new_v4(),
+        let pool = common::create_test_pool().await;
+        let user = users::create_user(
+            &pool,
+            &common::test_email(),
+            "password-hash",
+            Some("Pull test user"),
+            false,
+        )
+        .await
+        .unwrap();
+        let session = sessions::create_session(
+            &pool,
+            user.id,
+            &format!("refresh-{}", uuid::Uuid::new_v4()),
+            None,
+            None,
+            None,
+            (chrono::Utc::now() + chrono::Duration::hours(1)).naive_utc(),
+        )
+        .await
+        .unwrap();
+        let token = create_session_access_token(
+            user.id,
             "user@example.com",
             vec![],
             vec![],
             false,
+            session.id,
             config.jwt_secret(),
             chrono::Duration::hours(1),
         )
@@ -83,9 +105,6 @@ impl Fixture {
             chrono::Duration::hours(1),
         )
         .unwrap();
-        let pool = PgPoolOptions::new()
-            .connect_lazy(&config.database_url)
-            .unwrap();
         let router = common::create_test_router(common::create_test_state(config, pool));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
