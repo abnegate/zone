@@ -10,6 +10,10 @@ const baseURL = `http://localhost:${port}`;
 // Allow running specific browser via environment variable (for CI matrix)
 const browserProject = process.env.BROWSER;
 const collectCoverage = process.env.COLLECT_COVERAGE === 'true';
+// The visual-regression job starts its own preview build and points Playwright
+// at it, so that job has to be allowed to reuse a server it already has. Every
+// other CI run still gets a fresh one.
+const reuseServer = process.env.PLAYWRIGHT_REUSE_SERVER === 'true';
 const localWorkers = Math.max(1, os.cpus().length);
 const workerOverride = process.env.PLAYWRIGHT_WORKERS
   ? Number.parseInt(process.env.PLAYWRIGHT_WORKERS, 10)
@@ -101,7 +105,7 @@ export default defineConfig({
   webServer: {
     command: `bun start -- --port ${port}`,
     url: baseURL,
-    reuseExistingServer: !isCI,
+    reuseExistingServer: reuseServer || !isCI,
     timeout: 120000, // 120s to start server
     env: {
       PORT: port,
