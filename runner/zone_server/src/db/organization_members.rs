@@ -4,7 +4,7 @@
 //! including role management and permission checking.
 
 use chrono::NaiveDateTime;
-use sqlx::{Executor, PgPool, Postgres};
+use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -317,6 +317,34 @@ pub async fn is_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> D
             .await?;
 
     Ok(result.flatten().unwrap_or(false))
+}
+
+/// Read and lock an active membership for the duration of the caller's transaction.
+///
+/// Holding this shared row lock gives membership revocation and the protected
+/// operation a definite order. Callers must keep the transaction open until
+/// the protected read or mutation finishes.
+pub async fn lock_role(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<OrgRole>> {
+    let role: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT role
+        FROM organization_members
+        WHERE organization_id = $1
+          AND user_id = $2
+          AND is_active = TRUE
+        FOR SHARE
+        "#,
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_optional(connection)
+    .await?;
+
+    Ok(role.and_then(|value| value.parse().ok()))
 }
 
 /// Check if user is an admin or owner of organization

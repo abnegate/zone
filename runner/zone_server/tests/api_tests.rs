@@ -3042,8 +3042,10 @@ async fn test_task_run_logs_not_found() {
         )
         .await;
 
-    // Returns empty array for non-existent run
-    response.assert_status(StatusCode::OK);
+    // Was 200 with an empty array for any run id at all, which answered
+    // "does this run exist" for every tenant. A caller who may not see the
+    // run is told it is not there.
+    response.assert_status(StatusCode::NOT_FOUND);
 }
 
 // =============================================================================
@@ -3386,9 +3388,10 @@ async fn test_task_runs_list_for_nonexistent_task() {
         .get_auth(&format!("/api/tasks/{}/runs", uuid::Uuid::new_v4()), &token)
         .await;
 
-    // Returns empty runs array
-    response.assert_status(StatusCode::OK);
-    assert!(response.json_value()["runs"].is_array());
+    // Was 200 with an empty array for any task id at all. A caller who may
+    // not see the task is told it is not there.
+    response.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(response.json_value()["error"], "Task not found");
 }
 
 #[tokio::test]
@@ -3491,8 +3494,9 @@ async fn test_task_create_run_for_nonexistent_task() {
         )
         .await;
 
-    // Should fail with FK constraint
-    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    // Was a 500 raised by the foreign key, which reported a server fault for
+    // an ordinary bad id. The task is now resolved before anything is written.
+    response.assert_status(StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -3535,8 +3539,11 @@ async fn test_task_create_for_nonexistent_project() {
         )
         .await;
 
-    // Should fail with FK constraint
-    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": "Project is not available in this workspace" })
+    );
 }
 
 #[tokio::test]

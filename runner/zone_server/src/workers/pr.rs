@@ -83,15 +83,19 @@ pub async fn create_pr_for_task(
         }
     };
 
-    let project = match projects::get_project(state.db(), project_id).await {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            return PrCreationResult::Error(format!("Project {} not found", project_id));
-        }
-        Err(e) => {
-            return PrCreationResult::Error(format!("Failed to get project: {}", e));
-        }
-    };
+    let project =
+        match projects::get_project_in_workspace(state.db(), project_id, task.workspace_id).await {
+            Ok(Some(project)) => project,
+            Ok(None) => {
+                return PrCreationResult::Error(format!(
+                    "Project {} is not available in the task workspace",
+                    project_id
+                ));
+            }
+            Err(e) => {
+                return PrCreationResult::Error(format!("Failed to get project: {}", e));
+            }
+        };
 
     let repo_url = match &project.github_repo_url {
         Some(url) => url.clone(),

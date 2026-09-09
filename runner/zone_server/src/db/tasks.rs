@@ -1,10 +1,71 @@
 //! Task database queries
 
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
+use thiserror::Error;
 use uuid::Uuid;
 
-use super::DbResult;
+use super::{
+    DbResult,
+    workspace_members::{self, WorkspaceRole},
+};
+
+/// Result of a tenant-scoped mutation without exposing resource existence.
+#[derive(Debug)]
+pub enum Mutation<T> {
+    Applied(T),
+    NotFound,
+}
+
+/// Validation and database failures raised by task mutations.
+#[derive(Debug, Error)]
+pub enum MutationError {
+    #[error("Database error: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("Project is not available in this workspace")]
+    Project,
+    #[error("Source is not available in this workspace")]
+    Source,
+}
+
+impl MutationError {
+    fn into_database(self) -> sqlx::Error {
+        match self {
+            Self::Database(error) => error,
+            error => sqlx::Error::Protocol(error.to_string()),
+        }
+    }
+}
+
+/// Result of creating a task run while serializing active-run checks.
+#[derive(Debug)]
+pub enum RunMutation {
+    Created(TaskRunRow),
+    Active(TaskRunRow),
+}
+
+/// Values required to create a task and its project associations atomically.
+pub struct Create<'a> {
+    pub workspace_id: Uuid,
+    pub project_ids: &'a [Uuid],
+    pub title: &'a str,
+    pub description: &'a str,
+    pub acceptance_criteria: Option<&'a str>,
+    pub priority: Option<i32>,
+    pub is_agentic: bool,
+    pub source_id: Option<Uuid>,
+}
+
+/// Sparse values accepted by an atomic task update.
+pub struct Patch<'a> {
+    pub id: Uuid,
+    pub title: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub acceptance_criteria: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub priority: Option<i32>,
+    pub project_ids: Option<&'a [Uuid]>,
+}
 
 /// Task row from database
 #[derive(Debug, Clone)]
@@ -37,7 +98,7 @@ pub struct TaskRow {
 }
 
 /// Task run row from database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TaskRunRow {
     pub id: Uuid,
     pub task_id: Uuid,
@@ -95,6 +156,136 @@ macro_rules! map_task_row {
     };
 }
 
+async fn lock_writer(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<bool> {
+    Ok(
+        workspace_members::lock_role(connection, workspace_id, user_id)
+            .await?
+            .is_some_and(|role| role >= WorkspaceRole::Member),
+    )
+}
+
+async fn lock_task_writer(
+    connection: &mut PgConnection,
+    task_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<Uuid>> {
+    let workspace_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT workspace_id FROM tasks WHERE id = $1 FOR UPDATE")
+            .bind(task_id)
+            .fetch_optional(&mut *connection)
+            .await?;
+    let Some(workspace_id) = workspace_id else {
+        return Ok(None);
+    };
+
+    Ok(lock_writer(connection, workspace_id, user_id)
+        .await?
+        .then_some(workspace_id))
+}
+
+async fn lock_projects(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    project_ids: &[Uuid],
+) -> Result<(), MutationError> {
+    if project_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut expected = project_ids.to_vec();
+    expected.sort_unstable();
+    expected.dedup();
+
+    let mut found: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM projects
+        WHERE workspace_id = $1 AND id = ANY($2)
+        ORDER BY id
+        FOR SHARE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&expected)
+    .fetch_all(&mut *connection)
+    .await?;
+    found.sort_unstable();
+
+    if found == expected {
+        Ok(())
+    } else {
+        Err(MutationError::Project)
+    }
+}
+
+async fn lock_source(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    source_id: Uuid,
+) -> DbResult<bool> {
+    let source: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM sources WHERE id = $1 AND workspace_id = $2 FOR SHARE")
+            .bind(source_id)
+            .bind(workspace_id)
+            .fetch_optional(&mut *connection)
+            .await?;
+
+    Ok(source.is_some())
+}
+
+async fn get_task_project_ids_in(
+    connection: &mut PgConnection,
+    task_id: Uuid,
+) -> DbResult<Vec<Uuid>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT project_id FROM task_projects WHERE task_id = $1
+        "#,
+        task_id
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+
+    Ok(rows.into_iter().map(|row| row.project_id).collect())
+}
+
+async fn add_task_projects_in(
+    connection: &mut PgConnection,
+    task_id: Uuid,
+    project_ids: &[Uuid],
+) -> DbResult<()> {
+    for project_id in project_ids {
+        sqlx::query!(
+            r#"
+            INSERT INTO task_projects (task_id, project_id)
+            VALUES ($1, $2)
+            ON CONFLICT (task_id, project_id) DO NOTHING
+            "#,
+            task_id,
+            project_id
+        )
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn set_task_projects_in(
+    connection: &mut PgConnection,
+    task_id: Uuid,
+    project_ids: &[Uuid],
+) -> DbResult<()> {
+    sqlx::query!(r#"DELETE FROM task_projects WHERE task_id = $1"#, task_id)
+        .execute(&mut *connection)
+        .await?;
+    add_task_projects_in(connection, task_id, project_ids).await
+}
+
 /// Get project IDs for a task from the join table
 pub async fn get_task_project_ids(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<Uuid>> {
     let rows = sqlx::query!(
@@ -107,55 +298,6 @@ pub async fn get_task_project_ids(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<
     .await?;
 
     Ok(rows.into_iter().map(|r| r.project_id).collect())
-}
-
-/// Add project associations to a task
-pub async fn add_task_projects(pool: &PgPool, task_id: Uuid, project_ids: &[Uuid]) -> DbResult<()> {
-    for project_id in project_ids {
-        sqlx::query!(
-            r#"
-            INSERT INTO task_projects (task_id, project_id)
-            VALUES ($1, $2)
-            ON CONFLICT (task_id, project_id) DO NOTHING
-            "#,
-            task_id,
-            project_id
-        )
-        .execute(pool)
-        .await?;
-    }
-    Ok(())
-}
-
-/// Remove project associations from a task
-pub async fn remove_task_projects(
-    pool: &PgPool,
-    task_id: Uuid,
-    project_ids: &[Uuid],
-) -> DbResult<()> {
-    for project_id in project_ids {
-        sqlx::query!(
-            r#"
-            DELETE FROM task_projects WHERE task_id = $1 AND project_id = $2
-            "#,
-            task_id,
-            project_id
-        )
-        .execute(pool)
-        .await?;
-    }
-    Ok(())
-}
-
-/// Set the exact project associations for a task (replaces existing)
-pub async fn set_task_projects(pool: &PgPool, task_id: Uuid, project_ids: &[Uuid]) -> DbResult<()> {
-    // Delete all existing associations
-    sqlx::query!(r#"DELETE FROM task_projects WHERE task_id = $1"#, task_id)
-        .execute(pool)
-        .await?;
-
-    // Add new associations
-    add_task_projects(pool, task_id, project_ids).await
 }
 
 /// List tasks with optional filters (workspace_id is required)
@@ -298,6 +440,78 @@ pub async fn create_task(
     is_agentic: bool,
     source_id: Option<Uuid>,
 ) -> DbResult<TaskRow> {
+    let input = Create {
+        workspace_id,
+        project_ids,
+        title,
+        description,
+        acceptance_criteria,
+        priority,
+        is_agentic,
+        source_id,
+    };
+    let mut transaction = pool.begin().await?;
+    lock_projects(&mut transaction, input.workspace_id, input.project_ids)
+        .await
+        .map_err(MutationError::into_database)?;
+    let task = insert_task(&mut transaction, &input).await?;
+    transaction.commit().await?;
+    Ok(task)
+}
+
+pub async fn create_task_authorized(
+    pool: &PgPool,
+    user_id: Uuid,
+    input: Create<'_>,
+) -> Result<Mutation<TaskRow>, MutationError> {
+    let mut transaction = pool.begin().await?;
+    if !lock_writer(&mut transaction, input.workspace_id, user_id).await? {
+        return Ok(Mutation::NotFound);
+    }
+    if let Some(source_id) = input.source_id
+        && !lock_source(&mut transaction, input.workspace_id, source_id).await?
+    {
+        return Err(MutationError::Source);
+    }
+    lock_projects(&mut transaction, input.workspace_id, input.project_ids).await?;
+    let task = insert_task(&mut transaction, &input).await?;
+    transaction.commit().await?;
+    Ok(Mutation::Applied(task))
+}
+
+pub async fn start_task_authorized(
+    pool: &PgPool,
+    user_id: Uuid,
+    input: Create<'_>,
+) -> Result<Mutation<(TaskRow, TaskRunRow)>, MutationError> {
+    let input = Create {
+        is_agentic: true,
+        ..input
+    };
+    let mut transaction = pool.begin().await?;
+    if !lock_writer(&mut transaction, input.workspace_id, user_id).await? {
+        return Ok(Mutation::NotFound);
+    }
+    if let Some(source_id) = input.source_id {
+        let active: Option<Option<bool>> = sqlx::query_scalar(
+            "SELECT is_active FROM sources WHERE id = $1 AND workspace_id = $2 FOR SHARE",
+        )
+        .bind(source_id)
+        .bind(input.workspace_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if !matches!(active, Some(None) | Some(Some(true))) {
+            return Err(MutationError::Source);
+        }
+    }
+    lock_projects(&mut transaction, input.workspace_id, input.project_ids).await?;
+    let task = insert_task(&mut transaction, &input).await?;
+    let run = insert_task_run(&mut transaction, task.id).await?;
+    transaction.commit().await?;
+    Ok(Mutation::Applied((task, run)))
+}
+
+async fn insert_task(connection: &mut PgConnection, input: &Create<'_>) -> DbResult<TaskRow> {
     let row = sqlx::query!(
         r#"
         INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, source_id)
@@ -307,24 +521,23 @@ pub async fn create_task(
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at
         "#,
-        workspace_id,
-        title,
-        description,
-        acceptance_criteria,
-        priority,
-        is_agentic,
-        source_id
+        input.workspace_id,
+        input.title,
+        input.description,
+        input.acceptance_criteria,
+        input.priority,
+        input.is_agentic,
+        input.source_id
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
 
     let mut task = map_task_row!(row);
 
-    // Add project associations if any
-    if !project_ids.is_empty() {
-        add_task_projects(pool, task.id, project_ids).await?;
-        task.project_ids = project_ids.to_vec();
+    if !input.project_ids.is_empty() {
+        add_task_projects_in(connection, task.id, input.project_ids).await?;
     }
+    task.project_ids = get_task_project_ids_in(connection, task.id).await?;
 
     Ok(task)
 }
@@ -339,6 +552,57 @@ pub async fn update_task(
     status: Option<&str>,
     priority: Option<i32>,
     project_ids: Option<&[Uuid]>,
+) -> DbResult<Option<TaskRow>> {
+    let input = Patch {
+        id,
+        title,
+        description,
+        acceptance_criteria,
+        status,
+        priority,
+        project_ids,
+    };
+    let mut transaction = pool.begin().await?;
+    let workspace_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT workspace_id FROM tasks WHERE id = $1 FOR UPDATE")
+            .bind(input.id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    let Some(workspace_id) = workspace_id else {
+        return Ok(None);
+    };
+    if let Some(project_ids) = input.project_ids {
+        lock_projects(&mut transaction, workspace_id, project_ids)
+            .await
+            .map_err(MutationError::into_database)?;
+    }
+    let task = update_task_in(&mut transaction, &input).await?;
+    transaction.commit().await?;
+    Ok(task)
+}
+
+pub async fn update_task_authorized(
+    pool: &PgPool,
+    user_id: Uuid,
+    input: Patch<'_>,
+) -> Result<Mutation<TaskRow>, MutationError> {
+    let mut transaction = pool.begin().await?;
+    let Some(workspace_id) = lock_task_writer(&mut transaction, input.id, user_id).await? else {
+        return Ok(Mutation::NotFound);
+    };
+    if let Some(project_ids) = input.project_ids {
+        lock_projects(&mut transaction, workspace_id, project_ids).await?;
+    }
+    let Some(task) = update_task_in(&mut transaction, &input).await? else {
+        return Ok(Mutation::NotFound);
+    };
+    transaction.commit().await?;
+    Ok(Mutation::Applied(task))
+}
+
+async fn update_task_in(
+    connection: &mut PgConnection,
+    input: &Patch<'_>,
 ) -> DbResult<Option<TaskRow>> {
     let row = sqlx::query!(
         r#"
@@ -355,26 +619,25 @@ pub async fn update_task(
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at
         "#,
-        id,
-        title,
-        description,
-        acceptance_criteria,
-        status,
-        priority
+        input.id,
+        input.title,
+        input.description,
+        input.acceptance_criteria,
+        input.status,
+        input.priority
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     match row {
         Some(r) => {
             let mut task = map_task_row!(r);
 
-            // Update project associations if provided
-            if let Some(pids) = project_ids {
-                set_task_projects(pool, id, pids).await?;
-                task.project_ids = pids.to_vec();
+            if let Some(project_ids) = input.project_ids {
+                set_task_projects_in(connection, input.id, project_ids).await?;
+                task.project_ids = get_task_project_ids_in(connection, task.id).await?;
             } else {
-                task.project_ids = get_task_project_ids(pool, task.id).await?;
+                task.project_ids = get_task_project_ids_in(connection, task.id).await?;
             }
 
             Ok(Some(task))
@@ -390,6 +653,25 @@ pub async fn delete_task(pool: &PgPool, id: Uuid) -> DbResult<bool> {
         .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn delete_task_authorized(
+    pool: &PgPool,
+    user_id: Uuid,
+    id: Uuid,
+) -> DbResult<Mutation<()>> {
+    let mut transaction = pool.begin().await?;
+    if lock_task_writer(&mut transaction, id, user_id)
+        .await?
+        .is_none()
+    {
+        return Ok(Mutation::NotFound);
+    }
+    sqlx::query!("DELETE FROM tasks WHERE id = $1", id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(Mutation::Applied(()))
 }
 
 /// Queue a task for execution
@@ -421,8 +703,97 @@ pub async fn queue_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
     }
 }
 
+pub async fn queue_task_authorized(
+    pool: &PgPool,
+    user_id: Uuid,
+    id: Uuid,
+) -> DbResult<Mutation<TaskRow>> {
+    let mut transaction = pool.begin().await?;
+    if lock_task_writer(&mut transaction, id, user_id)
+        .await?
+        .is_none()
+    {
+        return Ok(Mutation::NotFound);
+    }
+    let Some(task) = queue_task_in(&mut transaction, id).await? else {
+        return Ok(Mutation::NotFound);
+    };
+    transaction.commit().await?;
+    Ok(Mutation::Applied(task))
+}
+
+async fn queue_task_in(connection: &mut PgConnection, id: Uuid) -> DbResult<Option<TaskRow>> {
+    let row = sqlx::query!(
+        r#"
+        UPDATE tasks
+        SET status = 'queued',
+            queued_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, title, description, acceptance_criteria, status, priority,
+                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
+                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+                  pr_url, branch_name, pr_status, pr_created_at
+        "#,
+        id
+    )
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    match row {
+        Some(row) => {
+            let mut task = map_task_row!(row);
+            task.project_ids = get_task_project_ids_in(connection, task.id).await?;
+            Ok(Some(task))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Create a new task run
 pub async fn create_task_run(pool: &PgPool, task_id: Uuid) -> DbResult<TaskRunRow> {
+    let mut transaction = pool.begin().await?;
+    let run = insert_task_run(&mut transaction, task_id).await?;
+    transaction.commit().await?;
+    Ok(run)
+}
+
+pub async fn create_task_run_authorized(
+    pool: &PgPool,
+    user_id: Uuid,
+    task_id: Uuid,
+) -> DbResult<Mutation<RunMutation>> {
+    let mut transaction = pool.begin().await?;
+    if lock_task_writer(&mut transaction, task_id, user_id)
+        .await?
+        .is_none()
+    {
+        return Ok(Mutation::NotFound);
+    }
+
+    let active = sqlx::query_as::<_, TaskRunRow>(
+        r#"
+        SELECT id, task_id, status, current_phase, progress_percent, started_at,
+               completed_at, error_message, artifacts
+        FROM task_runs
+        WHERE task_id = $1 AND status IN ('running', 'pending')
+        ORDER BY started_at DESC, id
+        LIMIT 1
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if let Some(run) = active {
+        return Ok(Mutation::Applied(RunMutation::Active(run)));
+    }
+
+    let run = insert_task_run(&mut transaction, task_id).await?;
+    transaction.commit().await?;
+    Ok(Mutation::Applied(RunMutation::Created(run)))
+}
+
+async fn insert_task_run(connection: &mut PgConnection, task_id: Uuid) -> DbResult<TaskRunRow> {
     let row = sqlx::query!(
         r#"
         INSERT INTO task_runs (task_id, status)
@@ -432,7 +803,7 @@ pub async fn create_task_run(pool: &PgPool, task_id: Uuid) -> DbResult<TaskRunRo
         "#,
         task_id
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
 
     Ok(TaskRunRow {
@@ -628,7 +999,7 @@ pub async fn get_task_run_logs(pool: &PgPool, task_run_id: Uuid) -> DbResult<Vec
         SELECT id, task_run_id, phase, agent_type, log_level, message, metadata, created_at
         FROM task_run_logs
         WHERE task_run_id = $1
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC NULLS LAST, id ASC
         "#,
         task_run_id
     )

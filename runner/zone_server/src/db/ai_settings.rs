@@ -1,12 +1,125 @@
 //! AI provider settings database queries
 
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
-use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
-use zone_core::SecretValue;
+use zone_context::embeddings::providers::{
+    PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
+};
 
-use super::DbResult;
+use super::{
+    DbResult,
+    organization_members::{self, OrgRole},
+    workspace_members::{self, WorkspaceRole},
+};
+
+const PROVIDER_ANTHROPIC: &str = "anthropic";
+
+#[derive(Debug, thiserror::Error)]
+pub enum AccessError {
+    #[error("{0}")]
+    Forbidden(&'static str),
+    #[error("{0}")]
+    NotFound(&'static str),
+    #[error("{0}")]
+    Invalid(String),
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+type AccessResult<T> = Result<T, AccessError>;
+
+pub struct Update<'a> {
+    pub provider: Option<&'a str>,
+    pub litellm_host: Option<&'a str>,
+    pub litellm_key: Option<&'a str>,
+    pub openai_api_key: Option<&'a str>,
+    pub openai_base_url: Option<&'a str>,
+    pub anthropic_api_key: Option<&'a str>,
+    pub anthropic_base_url: Option<&'a str>,
+    pub bedrock_region: Option<&'a str>,
+    pub bedrock_access_key: Option<&'a str>,
+    pub bedrock_secret_key: Option<&'a str>,
+    pub bedrock_use_iam_role: Option<bool>,
+    pub model_fast: Option<&'a str>,
+    pub model_reasoning: Option<&'a str>,
+    pub model_embedding: Option<&'a str>,
+    pub model_image: Option<&'a str>,
+    pub model_video: Option<&'a str>,
+    pub model_audio: Option<&'a str>,
+}
+
+fn validate(update: &Update<'_>) -> AccessResult<()> {
+    if update.provider.is_some_and(|provider| {
+        ![
+            PROVIDER_SELF_HOSTED,
+            PROVIDER_OPENAI,
+            PROVIDER_ANTHROPIC,
+            PROVIDER_BEDROCK,
+        ]
+        .contains(&provider)
+    }) {
+        return Err(AccessError::Invalid(format!(
+            "Invalid provider. Must be one of: {PROVIDER_SELF_HOSTED}, {PROVIDER_OPENAI}, {PROVIDER_ANTHROPIC}, {PROVIDER_BEDROCK}"
+        )));
+    }
+    Ok(())
+}
+
+async fn authorize_organization(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    user_id: Uuid,
+    write: bool,
+) -> AccessResult<()> {
+    let role = organization_members::lock_role(connection, organization_id, user_id).await?;
+
+    match role {
+        Some(OrgRole::Owner | OrgRole::Admin) => Ok(()),
+        Some(OrgRole::Member) if !write => Ok(()),
+        _ if write => Err(AccessError::Forbidden(
+            "Only organization admins can change AI settings",
+        )),
+        _ => Err(AccessError::NotFound("Organization not found")),
+    }
+}
+
+async fn authorize_workspace(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    write: bool,
+) -> AccessResult<()> {
+    // Lock the owning relationship before either membership check so a nested
+    // path can never combine authorization from two different tenants.
+    let workspace: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workspaces WHERE id = $1 AND organization_id = $2 FOR SHARE",
+    )
+    .bind(workspace_id)
+    .bind(organization_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if workspace.is_none() {
+        return Err(AccessError::NotFound("Workspace not found"));
+    }
+
+    // Membership proves the caller belongs to the tenant that owns the
+    // workspace; the workspace role below decides whether they may write. The
+    // organization admin rule guards organization-wide settings only.
+    authorize_organization(&mut *connection, organization_id, user_id, false).await?;
+
+    let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
+
+    match role {
+        Some(WorkspaceRole::Owner | WorkspaceRole::Admin | WorkspaceRole::Member) => Ok(()),
+        Some(WorkspaceRole::Viewer) if !write => Ok(()),
+        Some(_) if write => Err(AccessError::Forbidden(
+            "You do not have write access to this workspace",
+        )),
+        _ => Err(AccessError::NotFound("Workspace not found")),
+    }
+}
 
 /// Organization AI settings row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -111,15 +224,10 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-// ============================================================================
-// Organization AI Settings
-// ============================================================================
-
-/// Get AI settings for an organization
-pub async fn get_org_ai_settings(
-    pool: &PgPool,
-    organization_id: Uuid,
-) -> DbResult<Option<OrgAiSettingsRow>> {
+async fn get_org<'e, E>(executor: E, organization_id: Uuid) -> DbResult<Option<OrgAiSettingsRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let row: Option<OrgAiSettingsRow> = sqlx::query_as(
         r#"
         SELECT id, organization_id, provider, litellm_host, litellm_key,
@@ -131,34 +239,41 @@ pub async fn get_org_ai_settings(
         "#,
     )
     .bind(organization_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(row)
 }
 
-/// Upsert (create or update) AI settings for an organization
-pub async fn upsert_org_ai_settings(
+/// Get AI settings for an organization.
+pub async fn get_org_ai_settings(
     pool: &PgPool,
     organization_id: Uuid,
-    provider: Option<&str>,
-    litellm_host: Option<&str>,
-    litellm_key: Option<&SecretValue>,
-    openai_api_key: Option<&SecretValue>,
-    openai_base_url: Option<&str>,
-    anthropic_api_key: Option<&SecretValue>,
-    anthropic_base_url: Option<&str>,
-    bedrock_region: Option<&str>,
-    bedrock_access_key: Option<&SecretValue>,
-    bedrock_secret_key: Option<&SecretValue>,
-    bedrock_use_iam_role: Option<bool>,
-    model_fast: Option<&str>,
-    model_reasoning: Option<&str>,
-    model_embedding: Option<&str>,
-    model_image: Option<&str>,
-    model_video: Option<&str>,
-    model_audio: Option<&str>,
-) -> DbResult<OrgAiSettingsRow> {
+) -> DbResult<Option<OrgAiSettingsRow>> {
+    get_org(pool, organization_id).await
+}
+
+/// Read organization settings while holding the caller's membership row.
+pub async fn get_org_authorized(
+    pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> AccessResult<Option<OrgAiSettingsRow>> {
+    let mut transaction = pool.begin().await?;
+    authorize_organization(&mut transaction, organization_id, user_id, false).await?;
+    let settings = get_org(&mut *transaction, organization_id).await?;
+    transaction.commit().await?;
+    Ok(settings)
+}
+
+async fn upsert_org<'e, E>(
+    executor: E,
+    organization_id: Uuid,
+    update: &Update<'_>,
+) -> DbResult<OrgAiSettingsRow>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let row: OrgAiSettingsRow = sqlx::query_as(
         r#"
         INSERT INTO organization_ai_settings (
@@ -209,48 +324,76 @@ pub async fn upsert_org_ai_settings(
         "#
     )
     .bind(organization_id)
-    .bind(provider)
-    .bind(litellm_host)
-    .bind(litellm_key)
-    .bind(openai_api_key)
-    .bind(openai_base_url)
-    .bind(anthropic_api_key)
-    .bind(anthropic_base_url)
-    .bind(bedrock_region)
-    .bind(bedrock_access_key)
-    .bind(bedrock_secret_key)
-    .bind(bedrock_use_iam_role)
-    .bind(model_fast)
-    .bind(model_reasoning)
-    .bind(model_embedding)
-    .bind(model_image)
-    .bind(model_video)
-    .bind(model_audio)
-    .fetch_one(pool)
+    .bind(update.provider)
+    .bind(update.litellm_host)
+    .bind(update.litellm_key)
+    .bind(update.openai_api_key)
+    .bind(update.openai_base_url)
+    .bind(update.anthropic_api_key)
+    .bind(update.anthropic_base_url)
+    .bind(update.bedrock_region)
+    .bind(update.bedrock_access_key)
+    .bind(update.bedrock_secret_key)
+    .bind(update.bedrock_use_iam_role)
+    .bind(update.model_fast)
+    .bind(update.model_reasoning)
+    .bind(update.model_embedding)
+    .bind(update.model_image)
+    .bind(update.model_video)
+    .bind(update.model_audio)
+    .fetch_one(executor)
     .await?;
 
     Ok(row)
 }
 
-/// Delete AI settings for an organization
-pub async fn delete_org_ai_settings(pool: &PgPool, organization_id: Uuid) -> DbResult<bool> {
+/// Upsert organization settings while holding the caller's admin membership row.
+pub async fn upsert_org_authorized(
+    pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+    update: Update<'_>,
+) -> AccessResult<OrgAiSettingsRow> {
+    let mut transaction = pool.begin().await?;
+    authorize_organization(&mut transaction, organization_id, user_id, true).await?;
+    validate(&update)?;
+    let settings = upsert_org(&mut *transaction, organization_id, &update).await?;
+    transaction.commit().await?;
+    Ok(settings)
+}
+
+async fn delete_org<'e, E>(executor: E, organization_id: Uuid) -> DbResult<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query("DELETE FROM organization_ai_settings WHERE organization_id = $1")
         .bind(organization_id)
-        .execute(pool)
+        .execute(executor)
         .await?;
 
     Ok(result.rows_affected() > 0)
 }
 
-// ============================================================================
-// Workspace AI Settings
-// ============================================================================
-
-/// Get AI settings for a workspace
-pub async fn get_workspace_ai_settings(
+/// Delete organization settings while holding the caller's admin membership row.
+pub async fn delete_org_authorized(
     pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> AccessResult<bool> {
+    let mut transaction = pool.begin().await?;
+    authorize_organization(&mut transaction, organization_id, user_id, true).await?;
+    let deleted = delete_org(&mut *transaction, organization_id).await?;
+    transaction.commit().await?;
+    Ok(deleted)
+}
+
+async fn get_workspace<'e, E>(
+    executor: E,
     workspace_id: Uuid,
-) -> DbResult<Option<WorkspaceAiSettingsRow>> {
+) -> DbResult<Option<WorkspaceAiSettingsRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let row: Option<WorkspaceAiSettingsRow> = sqlx::query_as(
         r#"
         SELECT id, workspace_id, provider, litellm_host, litellm_key,
@@ -262,34 +405,49 @@ pub async fn get_workspace_ai_settings(
         "#,
     )
     .bind(workspace_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(row)
 }
 
-/// Upsert (create or update) AI settings for a workspace
-pub async fn upsert_workspace_ai_settings(
+/// Get AI settings for a workspace.
+pub async fn get_workspace_ai_settings(
     pool: &PgPool,
     workspace_id: Uuid,
-    provider: Option<&str>,
-    litellm_host: Option<&str>,
-    litellm_key: Option<&SecretValue>,
-    openai_api_key: Option<&SecretValue>,
-    openai_base_url: Option<&str>,
-    anthropic_api_key: Option<&SecretValue>,
-    anthropic_base_url: Option<&str>,
-    bedrock_region: Option<&str>,
-    bedrock_access_key: Option<&SecretValue>,
-    bedrock_secret_key: Option<&SecretValue>,
-    bedrock_use_iam_role: Option<bool>,
-    model_fast: Option<&str>,
-    model_reasoning: Option<&str>,
-    model_embedding: Option<&str>,
-    model_image: Option<&str>,
-    model_video: Option<&str>,
-    model_audio: Option<&str>,
-) -> DbResult<WorkspaceAiSettingsRow> {
+) -> DbResult<Option<WorkspaceAiSettingsRow>> {
+    get_workspace(pool, workspace_id).await
+}
+
+/// Read workspace settings while holding both membership rows and the owning workspace row.
+pub async fn get_workspace_authorized(
+    pool: &PgPool,
+    organization_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> AccessResult<Option<WorkspaceAiSettingsRow>> {
+    let mut transaction = pool.begin().await?;
+    authorize_workspace(
+        &mut transaction,
+        organization_id,
+        workspace_id,
+        user_id,
+        false,
+    )
+    .await?;
+    let settings = get_workspace(&mut *transaction, workspace_id).await?;
+    transaction.commit().await?;
+    Ok(settings)
+}
+
+async fn upsert_workspace<'e, E>(
+    executor: E,
+    workspace_id: Uuid,
+    update: &Update<'_>,
+) -> DbResult<WorkspaceAiSettingsRow>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let row: WorkspaceAiSettingsRow = sqlx::query_as(
         r#"
         INSERT INTO workspace_ai_settings (
@@ -340,54 +498,89 @@ pub async fn upsert_workspace_ai_settings(
         "#,
     )
     .bind(workspace_id)
-    .bind(provider)
-    .bind(litellm_host)
-    .bind(litellm_key)
-    .bind(openai_api_key)
-    .bind(openai_base_url)
-    .bind(anthropic_api_key)
-    .bind(anthropic_base_url)
-    .bind(bedrock_region)
-    .bind(bedrock_access_key)
-    .bind(bedrock_secret_key)
-    .bind(bedrock_use_iam_role)
-    .bind(model_fast)
-    .bind(model_reasoning)
-    .bind(model_embedding)
-    .bind(model_image)
-    .bind(model_video)
-    .bind(model_audio)
-    .fetch_one(pool)
+    .bind(update.provider)
+    .bind(update.litellm_host)
+    .bind(update.litellm_key)
+    .bind(update.openai_api_key)
+    .bind(update.openai_base_url)
+    .bind(update.anthropic_api_key)
+    .bind(update.anthropic_base_url)
+    .bind(update.bedrock_region)
+    .bind(update.bedrock_access_key)
+    .bind(update.bedrock_secret_key)
+    .bind(update.bedrock_use_iam_role)
+    .bind(update.model_fast)
+    .bind(update.model_reasoning)
+    .bind(update.model_embedding)
+    .bind(update.model_image)
+    .bind(update.model_video)
+    .bind(update.model_audio)
+    .fetch_one(executor)
     .await?;
 
     Ok(row)
 }
 
-/// Delete AI settings for a workspace
-pub async fn delete_workspace_ai_settings(pool: &PgPool, workspace_id: Uuid) -> DbResult<bool> {
+/// Upsert workspace settings while holding the organization and workspace membership rows.
+pub async fn upsert_workspace_authorized(
+    pool: &PgPool,
+    organization_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    update: Update<'_>,
+) -> AccessResult<WorkspaceAiSettingsRow> {
+    let mut transaction = pool.begin().await?;
+    authorize_workspace(
+        &mut transaction,
+        organization_id,
+        workspace_id,
+        user_id,
+        true,
+    )
+    .await?;
+    validate(&update)?;
+    let settings = upsert_workspace(&mut *transaction, workspace_id, &update).await?;
+    transaction.commit().await?;
+    Ok(settings)
+}
+
+async fn delete_workspace<'e, E>(executor: E, workspace_id: Uuid) -> DbResult<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query("DELETE FROM workspace_ai_settings WHERE workspace_id = $1")
         .bind(workspace_id)
-        .execute(pool)
+        .execute(executor)
         .await?;
 
     Ok(result.rows_affected() > 0)
 }
 
-// ============================================================================
-// Effective Settings (Merged)
-// ============================================================================
-
-/// Get effective AI settings for a workspace (workspace overrides org)
-pub async fn get_effective_ai_settings(
+/// Delete workspace settings while holding the organization and workspace membership rows.
+pub async fn delete_workspace_authorized(
     pool: &PgPool,
     organization_id: Uuid,
     workspace_id: Uuid,
-) -> DbResult<EffectiveAiSettings> {
-    // Get org settings first (defaults)
-    let org = get_org_ai_settings(pool, organization_id).await?;
-    let ws = get_workspace_ai_settings(pool, workspace_id).await?;
+    user_id: Uuid,
+) -> AccessResult<bool> {
+    let mut transaction = pool.begin().await?;
+    authorize_workspace(
+        &mut transaction,
+        organization_id,
+        workspace_id,
+        user_id,
+        true,
+    )
+    .await?;
+    let deleted = delete_workspace(&mut *transaction, workspace_id).await?;
+    transaction.commit().await?;
+    Ok(deleted)
+}
 
-    // Start with defaults
+fn effective(
+    organization: Option<OrgAiSettingsRow>,
+    workspace: Option<WorkspaceAiSettingsRow>,
+) -> EffectiveAiSettings {
     let mut effective = EffectiveAiSettings {
         provider: PROVIDER_SELF_HOSTED.to_string(),
         litellm_host: None,
@@ -408,8 +601,7 @@ pub async fn get_effective_ai_settings(
         model_audio: None,
     };
 
-    // Apply org settings
-    if let Some(org) = org {
+    if let Some(org) = organization {
         effective.provider = org.provider;
         effective.litellm_host = org.litellm_host;
         effective.litellm_key = org.litellm_key;
@@ -429,8 +621,7 @@ pub async fn get_effective_ai_settings(
         effective.model_audio = org.model_audio;
     }
 
-    // Override with workspace settings (only non-None values)
-    if let Some(ws) = ws {
+    if let Some(ws) = workspace {
         if let Some(provider) = ws.provider {
             effective.provider = provider;
         }
@@ -484,7 +675,40 @@ pub async fn get_effective_ai_settings(
         }
     }
 
-    Ok(effective)
+    effective
+}
+
+/// Get effective AI settings for a workspace (workspace overrides organization).
+pub async fn get_effective_ai_settings(
+    pool: &PgPool,
+    organization_id: Uuid,
+    workspace_id: Uuid,
+) -> DbResult<EffectiveAiSettings> {
+    let organization = get_org_ai_settings(pool, organization_id).await?;
+    let workspace = get_workspace_ai_settings(pool, workspace_id).await?;
+    Ok(effective(organization, workspace))
+}
+
+/// Read effective settings while holding both membership rows and the owning workspace row.
+pub async fn get_effective_authorized(
+    pool: &PgPool,
+    organization_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> AccessResult<EffectiveAiSettings> {
+    let mut transaction = pool.begin().await?;
+    authorize_workspace(
+        &mut transaction,
+        organization_id,
+        workspace_id,
+        user_id,
+        false,
+    )
+    .await?;
+    let organization = get_org(&mut *transaction, organization_id).await?;
+    let workspace = get_workspace(&mut *transaction, workspace_id).await?;
+    transaction.commit().await?;
+    Ok(effective(organization, workspace))
 }
 
 /// Effective settings for a workspace, resolving the owning organization for

@@ -34,7 +34,7 @@ async fn start_test_server() -> SocketAddr {
 }
 
 /// Get a valid auth token for WebSocket tests
-async fn get_ws_auth_token() -> String {
+async fn get_ws_auth_token() -> (String, uuid::Uuid) {
     let config = common::test_config();
     let pool = common::create_test_pool().await;
     let state = common::create_test_state(config, pool);
@@ -66,7 +66,10 @@ async fn get_ws_auth_token() -> String {
     let response = router.clone().oneshot(request).await.unwrap();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    json["access_token"].as_str().unwrap().to_string()
+    (
+        json["access_token"].as_str().unwrap().to_string(),
+        uuid::Uuid::parse_str(json["user"]["id"].as_str().unwrap()).unwrap(),
+    )
 }
 
 // =============================================================================
@@ -394,7 +397,7 @@ async fn test_ws_connect_with_invalid_message_format() {
 #[tokio::test]
 async fn test_ws_connect_task_run_not_found() {
     let addr = start_test_server().await;
-    let token = get_ws_auth_token().await;
+    let (token, _) = get_ws_auth_token().await;
     let run_id = uuid::Uuid::new_v4(); // Non-existent run
     let url = format!("ws://{}/ws/tasks/runs/{}", addr, run_id);
 
@@ -443,13 +446,19 @@ async fn test_ws_ping_pong() {
 
 /// Helper to create a project and task for testing
 async fn create_test_task() -> (uuid::Uuid, uuid::Uuid, String) {
-    use zone_server::db::{projects, tasks};
+    use zone_server::db::{
+        projects, tasks,
+        workspace_members::{self, WorkspaceRole},
+    };
 
     let pool = common::create_test_pool().await;
-    let token = get_ws_auth_token().await;
+    let (token, user_id) = get_ws_auth_token().await;
 
     // Setup test data (organization, workspace, user)
     let (_org_id, workspace_id, _user_id) = common::setup_test_data(&pool).await;
+    workspace_members::add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
+        .await
+        .expect("add workspace member");
 
     // Create a project (pool, name, description, workspace_id)
     let project = projects::create_project(&pool, "WS Test Project", None, Some(workspace_id))
