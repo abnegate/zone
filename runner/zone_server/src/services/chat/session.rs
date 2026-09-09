@@ -35,8 +35,6 @@ pub struct Settings {
     pub output: u32,
     pub context: u64,
     pub timeout: Duration,
-    /// Pings an open chat socket serves between authorization rechecks.
-    pub recheck: u32,
 }
 
 impl Default for Settings {
@@ -47,7 +45,6 @@ impl Default for Settings {
             output: 4096,
             context: 32768,
             timeout: Duration::from_secs(1800),
-            recheck: 200,
         }
     }
 }
@@ -74,8 +71,6 @@ impl Settings {
                 .map_err(|_| "ZONE_CHAT_CALLS exceeds platform range")?,
             output: u32::try_from(value("ZONE_CHAT_OUTPUT_TOKENS", 4096)?)
                 .map_err(|_| "ZONE_CHAT_OUTPUT_TOKENS exceeds provider range")?,
-            recheck: u32::try_from(value("ZONE_CHAT_RECHECK_PINGS", 200)?)
-                .map_err(|_| "ZONE_CHAT_RECHECK_PINGS exceeds platform range")?,
         })
     }
 
@@ -543,11 +538,6 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_chat_socket_rechecks_authorization_every_two_hundred_pings() {
-        assert_eq!(Settings::default().recheck, 200);
-    }
 
     #[test]
     fn small_windows_keep_input_capacity_and_use_the_same_response_reserve() {

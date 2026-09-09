@@ -11,7 +11,10 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_server::{
     auth::{AuthUser, jwt::Claims},
-    db::{sources, tasks},
+    db::{
+        sources, tasks,
+        workspace_members::{self, WorkspaceRole},
+    },
     routes::tasks::{CreateTaskRequest, create},
 };
 
@@ -27,6 +30,9 @@ async fn check_creation() {
     let pool = common::create_test_pool().await;
     let (_, workspace_id, user_id) = common::setup_test_data(&pool).await;
     let (_, other_workspace_id, _) = common::setup_test_data(&pool).await;
+    workspace_members::add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
+        .await
+        .unwrap();
     let source = sources::create_source(
         &pool,
         workspace_id,
@@ -43,7 +49,7 @@ async fn check_creation() {
     for (workspace, source_id, expected) in [
         (workspace_id, Some(source.id), StatusCode::CREATED),
         (workspace_id, None, StatusCode::CREATED),
-        (other_workspace_id, Some(source.id), StatusCode::BAD_REQUEST),
+        (other_workspace_id, Some(source.id), StatusCode::FORBIDDEN),
         (workspace_id, Some(Uuid::new_v4()), StatusCode::BAD_REQUEST),
     ] {
         let request: CreateTaskRequest = serde_json::from_value(json!({

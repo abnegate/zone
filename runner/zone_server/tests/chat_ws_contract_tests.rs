@@ -25,7 +25,7 @@ use wiremock::{
     matchers::{method, path},
 };
 use zone_server::{
-    auth::{jwt::Claims, validate_token},
+    auth::validate_access_token,
     config::Config,
     db::{actions, chats},
 };
@@ -113,6 +113,9 @@ async fn authenticate(address: &str, chat: Uuid, token: &str) -> Socket {
     assert_eq!(init["status"], "connected", "{init}");
     socket
 }
+
+/// Mirrors AUTH_RECHECK_INTERVAL in the server, which is private to it.
+const AUTH_RECHECK: Duration = Duration::from_secs(10);
 
 async fn next_json(socket: &mut Socket) -> Option<Value> {
     loop {
@@ -316,19 +319,22 @@ async fn authentication_fences_invalid_missing_unscoped_and_foreign_chats() {
     let address = spawn(config.clone(), pool.clone()).await;
 
     let now = Utc::now();
-    let invalid_claims = Claims {
-        sub: "not-a-uuid".to_string(),
-        email: test_email(),
-        roles: Vec::new(),
-        permissions: Vec::new(),
-        exp: (now + ChronoDuration::minutes(5)).timestamp(),
-        iat: now.timestamp(),
-        jti: Uuid::new_v4().to_string(),
-        is_admin: false,
-    };
+    // An access token decodes as the claims flattened alongside a token_type,
+    // and a token missing that type is rejected as unauthenticated before the
+    // subject is ever read. Carry it so the malformed subject is what fails.
     let invalid_subject = encode(
         &Header::default(),
-        &invalid_claims,
+        &json!({
+            "sub": "not-a-uuid",
+            "email": test_email(),
+            "roles": [],
+            "permissions": [],
+            "exp": (now + ChronoDuration::minutes(5)).timestamp(),
+            "iat": now.timestamp(),
+            "jti": Uuid::new_v4().to_string(),
+            "is_admin": false,
+            "token_type": "access",
+        }),
         &EncodingKey::from_secret(config.jwt_secret.as_bytes()),
     )
     .unwrap();
@@ -466,8 +472,9 @@ async fn a_send_after_membership_revocation_is_rejected_before_persistence() {
         pool.clone(),
     )));
     let (token, workspace, chat) = seed(&client).await;
-    let user = validate_token(&token, &config.jwt_secret)
+    let user = validate_access_token(&token, &config.jwt_secret)
         .unwrap()
+        .claims
         .user_id()
         .unwrap();
     let address = spawn(config, pool.clone()).await;
@@ -489,7 +496,18 @@ async fn a_send_after_membership_revocation_is_rejected_before_persistence() {
         ))
         .await
         .unwrap();
-    assert_error(&mut socket, "Workspace access denied").await;
+    // The send path and the authorization interval's first tick both query
+    // membership, so either can be the one that catches the revocation. What
+    // this test is about is that neither of them stores the message.
+    let refusal = next_json(&mut socket).await.expect("refusal");
+    assert_eq!(refusal["type"], "error", "{refusal}");
+    assert!(
+        matches!(
+            refusal["message"].as_str().unwrap_or_default(),
+            "Workspace access denied" | "Access revoked"
+        ),
+        "a revoked member's send has to be refused: {refusal}"
+    );
     let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE chat_id = $1")
         .bind(chat)
         .fetch_one(&pool)
@@ -572,15 +590,15 @@ async fn idle_authenticated_connections_are_closed() {
 #[tokio::test]
 async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
     let pool = create_test_pool().await;
-    let mut config = test_config();
-    config.chat.recheck = 2;
+    let config = test_config();
     let client = TestClient::new(create_test_router(create_test_state(
         config.clone(),
         pool.clone(),
     )));
     let (token, workspace, chat) = seed(&client).await;
-    let user = validate_token(&token, &config.jwt_secret)
+    let user = validate_access_token(&token, &config.jwt_secret)
         .unwrap()
+        .claims
         .user_id()
         .unwrap();
     let address = spawn(config, pool.clone()).await;
@@ -594,13 +612,12 @@ async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
     .await
     .unwrap();
 
-    // The interval's first tick lands immediately, so a recheck budget of two
-    // puts the query on the second tick and the single advance below decides
-    // when it runs.
+    // The authorization interval's first tick fires as the socket opens, before
+    // the revocation above can land, so the second tick is the one that sees it.
+    // Stop a millisecond short and resume: SQLx keeps its own Tokio deadlines,
+    // so the query has to run on the real clock.
     tokio::time::pause();
-    // Stop a millisecond short of the tick and resume: SQLx keeps its own
-    // Tokio deadlines, so the query has to run on the real clock.
-    tokio::time::advance(Duration::from_millis(29_999)).await;
+    tokio::time::advance(AUTH_RECHECK - Duration::from_millis(1)).await;
     tokio::time::resume();
     tokio::time::sleep(Duration::from_millis(5)).await;
     assert_error(&mut socket, "Access revoked").await;
@@ -610,8 +627,7 @@ async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
 #[tokio::test]
 async fn periodic_authorization_recheck_keeps_an_active_member_connected() {
     let pool = create_test_pool().await;
-    let mut config = test_config();
-    config.chat.recheck = 2;
+    let config = test_config();
     let client = TestClient::new(create_test_router(create_test_state(
         config.clone(),
         pool.clone(),
@@ -620,11 +636,8 @@ async fn periodic_authorization_recheck_keeps_an_active_member_connected() {
     let address = spawn(config, pool).await;
     let mut socket = authenticate(&address, chat, &token).await;
 
-    // The interval's first tick lands immediately, so a recheck budget of two
-    // puts the query on the second tick and the single advance below decides
-    // when it runs.
     tokio::time::pause();
-    tokio::time::advance(Duration::from_millis(29_999)).await;
+    tokio::time::advance(AUTH_RECHECK - Duration::from_millis(1)).await;
     tokio::time::resume();
     tokio::time::sleep(Duration::from_millis(5)).await;
 
@@ -639,8 +652,7 @@ async fn periodic_authorization_recheck_keeps_an_active_member_connected() {
 #[tokio::test]
 async fn repeated_authorization_database_errors_close_an_unstable_connection() {
     let pool = create_test_pool().await;
-    let mut config = test_config();
-    config.chat.recheck = 1;
+    let config = test_config();
     let client = TestClient::new(create_test_router(create_test_state(
         config.clone(),
         pool.clone(),
@@ -651,9 +663,9 @@ async fn repeated_authorization_database_errors_close_an_unstable_connection() {
     pool.close().await;
 
     tokio::time::pause();
-    // Rechecking on every tick puts the report MAX_CONSECUTIVE_ERRORS ticks
-    // away. The bound is patience, not arithmetic -- the loop returns as soon
-    // as the error lands.
+    // Every recheck against the closed pool is an error, so the report is
+    // MAX_CONSECUTIVE_ERRORS authorization ticks away. The bound is patience,
+    // not arithmetic -- the loop returns as soon as the error lands.
     let reported = periodic_error(&mut socket, 32).await;
     tokio::time::resume();
     assert_eq!(
@@ -672,8 +684,9 @@ async fn action_delivery_rechecks_membership_before_forwarding() {
         pool.clone(),
     )));
     let (token, workspace, chat) = seed(&client).await;
-    let user = validate_token(&token, &config.jwt_secret)
+    let user = validate_access_token(&token, &config.jwt_secret)
         .unwrap()
+        .claims
         .user_id()
         .unwrap();
     let address = spawn(config, pool.clone()).await;

@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-use crate::auth::validate_token;
-use crate::db::{context_gatherings, gathering_events, workspace_members};
+use crate::auth::validate_access_token;
+use crate::db::{self, context_gatherings, gathering_events, sessions, workspace_members};
 use crate::state::AppState;
 
 /// WebSocket polling interval in milliseconds
@@ -61,6 +61,20 @@ const STATUS_CONNECTED: &str = "connected";
 
 /// Global connection limiter per gathering
 static GATHERING_CONNECTIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap::new);
+
+async fn can_access_gathering(
+    state: &AppState,
+    user_id: Uuid,
+    session_id: Uuid,
+    workspace_id: Uuid,
+) -> db::DbResult<bool> {
+    let (session_active, is_member) = tokio::try_join!(
+        sessions::is_active_user_session(state.db(), session_id, user_id),
+        workspace_members::is_member(state.db(), user_id, workspace_id),
+    )?;
+
+    Ok(session_active && is_member)
+}
 
 /// Client message for authentication
 #[derive(Debug, Deserialize)]
@@ -128,7 +142,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, gathering_id: Uuid) {
     };
 
     // Wait for auth message
-    let claims = match tokio::time::timeout(
+    let access = match tokio::time::timeout(
         std::time::Duration::from_secs(WS_AUTH_TIMEOUT_SECS),
         receiver.next(),
     )
@@ -136,8 +150,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, gathering_id: Uuid) {
     {
         Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<ClientMessage>(&text) {
             Ok(ClientMessage::Auth { token }) => {
-                match validate_token(&token, state.config().jwt_secret()) {
-                    Ok(claims) => claims,
+                match validate_access_token(&token, state.config().jwt_secret()) {
+                    Ok(access) => access,
                     Err(e) => {
                         // CRITICAL-1: Don't leak JWT configuration details to client
                         tracing::warn!(
@@ -187,7 +201,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, gathering_id: Uuid) {
     };
 
     // Get user ID from claims
-    let user_id = match claims.user_id() {
+    let user_id = match access.claims.user_id() {
         Ok(id) => id,
         Err(e) => {
             tracing::error!("Invalid user ID in JWT: {}", e);
@@ -202,6 +216,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, gathering_id: Uuid) {
             let _ = sender.close().await;
             return;
         }
+    };
+    let Some(session_id) = access.session_id else {
+        let error_msg = ServerMessage::Error {
+            message: "Authentication failed".to_string(),
+        };
+        let _ = sender
+            .send(Message::Text(
+                serde_json::to_string(&error_msg).unwrap().into(),
+            ))
+            .await;
+        let _ = sender.close().await;
+        return;
     };
 
     // Verify gathering ownership
@@ -253,7 +279,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, gathering_id: Uuid) {
     };
 
     // Verify user is a member of the workspace
-    match workspace_members::is_member(state.db(), user_id, workspace_id).await {
+    match can_access_gathering(&state, user_id, session_id, workspace_id).await {
         Ok(true) => {
             // MINOR-6: Log successful connection
             tracing::info!(
@@ -332,7 +358,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, gathering_id: Uuid) {
                 auth_check_counter += 1;
                 if auth_check_counter >= AUTH_RECHECK_INTERVAL {
                     auth_check_counter = 0;
-                    match workspace_members::is_member(state.db(), user_id, workspace_id).await {
+                    match can_access_gathering(&state, user_id, session_id, workspace_id).await {
                         Ok(false) => {
                             tracing::warn!(
                                 "User {} lost access to workspace {} during gathering {}",
@@ -352,7 +378,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, gathering_id: Uuid) {
                             return;
                         }
                         Err(e) => {
-                            tracing::error!("Error re-checking workspace membership: {}", e);
+                            tracing::error!("Error re-checking gathering authorization: {}", e);
                             // Don't close on transient errors, but count them
                             consecutive_db_errors += 1;
                             if consecutive_db_errors >= MAX_CONSECUTIVE_ERRORS {

@@ -204,6 +204,16 @@ impl LlmClient {
             ));
         }
 
+        if parsed.host_str().is_none() {
+            return Err(LlmError::InvalidConfig(
+                "LLM base_url must include a host".to_string(),
+            ));
+        }
+
+        // No private-network rule here on purpose. Every caller passes an
+        // operator-configured host, and a self-hosted Zone points at loopback,
+        // a LAN address or a compose service name. The check belongs where a
+        // tenant-supplied host is first accepted, against that value.
         Ok(())
     }
 
@@ -538,45 +548,6 @@ mod tests {
     }
 
     #[test]
-    fn reaches_the_operators_own_inference_host() {
-        let client = LlmClient::new(LlmConfig::default());
-        for base_url in [
-            "http://127.0.0.1:4000",
-            "http://localhost:11434",
-            "http://litellm:4000",
-            "http://host.docker.internal:11434",
-            "http://192.168.1.10:4000",
-            "https://api.openai.com/v1",
-        ] {
-            assert!(
-                client
-                    .validate_outbound_url(&format!("{base_url}/chat/completions"))
-                    .is_ok(),
-                "{base_url} is a supported inference target"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_base_urls_no_request_could_use() {
-        let client = LlmClient::new(LlmConfig::default());
-        for base_url in [
-            "litellm:4000/chat/completions",
-            "ftp://litellm:4000/chat/completions",
-            "file:///etc/passwd",
-            "http://user:secret@litellm:4000/chat/completions",
-        ] {
-            assert!(
-                matches!(
-                    client.validate_outbound_url(base_url),
-                    Err(LlmError::InvalidConfig(_))
-                ),
-                "{base_url} is not a usable LLM endpoint"
-            );
-        }
-    }
-
-    #[test]
     fn test_llm_client_clone() {
         let config = LlmConfig {
             base_url: "https://test.api.com".to_string(),
@@ -732,5 +703,59 @@ mod tests {
             })
             .unwrap();
         assert!(compact.get("reasoning_effort").is_none());
+    }
+
+    fn client_for(base_url: &str) -> LlmClient {
+        LlmClient::new(LlmConfig {
+            base_url: base_url.to_string(),
+            ..LlmConfig::default()
+        })
+    }
+
+    #[test]
+    fn a_public_https_host_is_accepted() {
+        assert!(
+            client_for("https://api.openai.com/v1")
+                .validate_outbound_url("https://api.openai.com/v1/chat/completions")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_non_http_scheme_is_refused() {
+        let error = client_for("file:///etc/passwd")
+            .validate_outbound_url("file:///etc/passwd")
+            .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::InvalidConfig(message) if message.contains("http or https")),
+            "the refusal has to name the scheme rule: {error}"
+        );
+    }
+
+    #[test]
+    fn credentials_in_the_url_are_refused() {
+        let error = client_for("https://user:pass@api.openai.com/v1")
+            .validate_outbound_url("https://user:pass@api.openai.com/v1")
+            .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::InvalidConfig(message) if message.contains("userinfo")),
+            "the refusal has to name the userinfo rule: {error}"
+        );
+    }
+
+    #[test]
+    fn the_hosts_a_self_hosted_zone_runs_on_are_accepted() {
+        for base_url in [
+            "http://localhost:4000",
+            "http://127.0.0.1:11434",
+            "http://192.168.1.50:4000",
+            "http://host.docker.internal:11434",
+            "http://litellm:4000",
+        ] {
+            assert!(
+                client_for(base_url).validate_outbound_url(base_url).is_ok(),
+                "{base_url} is a supported way to reach a self-hosted model server"
+            );
+        }
     }
 }

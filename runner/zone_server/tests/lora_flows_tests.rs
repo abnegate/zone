@@ -9,7 +9,7 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{
@@ -19,17 +19,40 @@ use std::sync::{
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tower::ServiceExt;
-use zone_server::auth::create_access_token;
+use zone_server::auth::create_session_access_token;
 use zone_server::config::DEFAULT_HUGGINGFACE_MODELS_URL;
+use zone_server::db::{sessions, users};
 use zone_server::routes::models::{BrowseQuery, HuggingFaceProvider, ModelMediumFilter, ModelSort};
 
-fn token(secret: &str) -> String {
-    create_access_token(
-        uuid::Uuid::new_v4(),
+async fn token(pool: &PgPool, secret: &str) -> String {
+    let user = users::create_user(
+        pool,
+        &common::test_email(),
+        "password-hash",
+        Some("LoRA test user"),
+        false,
+    )
+    .await
+    .unwrap();
+    let session = sessions::create_session(
+        pool,
+        user.id,
+        &format!("refresh-{}", uuid::Uuid::new_v4()),
+        None,
+        None,
+        None,
+        (chrono::Utc::now() + chrono::Duration::hours(1)).naive_utc(),
+    )
+    .await
+    .unwrap();
+
+    create_session_access_token(
+        user.id,
         "lora@example.com",
         vec![],
         vec![],
         false,
+        session.id,
         secret,
         chrono::Duration::hours(1),
     )
@@ -141,13 +164,11 @@ async fn router_tuned(
     config.comfyui.models_dir = models_dir;
     config.comfyui.train_command = train_command;
     tune(&mut config.comfyui);
-    let secret = config.jwt_secret.clone();
-    let pool = PgPoolOptions::new()
-        .connect_lazy(&config.database_url)
-        .unwrap();
+    let pool = common::create_test_pool().await;
+    let token = token(&pool, config.jwt_secret()).await;
     (
         common::create_test_router(common::create_test_state(config, pool)),
-        secret,
+        token,
     )
 }
 
@@ -200,11 +221,11 @@ async fn live_huggingface_adapter_search_finds_qwen_edit_lora() {
 async fn browse_image_generation_returns_loras_not_gguf() {
     let catalog = start_catalog(split_catalog).await;
     let ollama = mock_ollama().await;
-    let (router, secret) = router_with(&ollama, &catalog, temp_models(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, temp_models(), None).await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models?source=huggingface&medium=image_generation")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
@@ -230,11 +251,11 @@ async fn browse_image_generation_returns_loras_not_gguf() {
 async fn browse_huggingface_empty_query_stays_gguf() {
     let catalog = start_catalog(split_catalog).await;
     let ollama = mock_ollama().await;
-    let (router, secret) = router_with(&ollama, &catalog, temp_models(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, temp_models(), None).await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models?source=huggingface")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
@@ -256,11 +277,11 @@ async fn list_models_includes_unready_adapter() {
     .unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(&ollama, &catalog, models_dir, None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir, None).await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
@@ -282,7 +303,7 @@ async fn train_endpoint_writes_lora_and_lists_it() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(
+    let (router, token) = router_with(
         &ollama,
         &catalog,
         models_dir.clone(),
@@ -292,7 +313,7 @@ async fn train_endpoint_writes_lora_and_lists_it() {
     let request = axum::http::Request::builder()
         .method("POST")
         .uri("/api/models/train")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .body(Body::from(
             json!({
@@ -316,7 +337,7 @@ async fn train_endpoint_writes_lora_and_lists_it() {
     let list = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(list).await.unwrap();
@@ -338,11 +359,11 @@ async fn delete_removes_comfy_lora() {
     fs::write(&lora, b"lora").unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
     let request = axum::http::Request::builder()
         .method("DELETE")
         .uri("/api/models/custom-style.safetensors")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
@@ -383,10 +404,8 @@ async fn comfy_pull_writes_lora_from_hub_origin() {
     let mut config = common::test_config_with_ollama_host("http://127.0.0.1:9");
     config.huggingface_models_url = format!("http://{hub_addr}/api/models");
     config.comfyui.models_dir = models_dir.clone();
-    let token = token(&config.jwt_secret);
-    let pool = PgPoolOptions::new()
-        .connect_lazy(&config.database_url)
-        .unwrap();
+    let pool = common::create_test_pool().await;
+    let token = token(&pool, config.jwt_secret()).await;
     let router = common::create_test_router(common::create_test_state(config, pool));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -451,7 +470,7 @@ async fn frames_endpoint_turns_a_clip_into_training_images() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
 
     let clip = models_dir.join("clip.mp4");
     let built = std::process::Command::new("ffmpeg")
@@ -477,7 +496,7 @@ async fn frames_endpoint_turns_a_clip_into_training_images() {
     let request = axum::http::Request::builder()
         .method("POST")
         .uri("/api/models/train/frames")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .body(Body::from(
             json!({
@@ -519,12 +538,12 @@ async fn frames_endpoint_rejects_a_file_that_is_not_a_video() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
 
     let request = axum::http::Request::builder()
         .method("POST")
         .uri("/api/models/train/frames")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .body(Body::from(
             json!({
@@ -551,20 +570,20 @@ async fn frames_endpoint_rejects_a_file_that_is_not_a_video() {
     let _ = fs::remove_dir_all(models_dir);
 }
 
-async fn post_frames(router: axum::Router, secret: &str, body: Value) -> (StatusCode, Value) {
-    post_json(router, secret, "/api/models/train/frames", body).await
+async fn post_frames(router: axum::Router, token: &str, body: Value) -> (StatusCode, Value) {
+    post_json(router, token, "/api/models/train/frames", body).await
 }
 
 async fn post_json(
     router: axum::Router,
-    secret: &str,
+    token: &str,
     uri: &str,
     body: Value,
 ) -> (StatusCode, Value) {
     let request = axum::http::Request::builder()
         .method("POST")
         .uri(uri)
-        .header("Authorization", format!("Bearer {}", token(secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap();
@@ -579,11 +598,11 @@ async fn frames_endpoint_rejects_a_body_that_is_not_base64() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
 
     let (status, body) = post_frames(
         router,
-        &secret,
+        &token,
         json!({ "filename": "clip.mp4", "bytes_base64": "this is not base64!" }),
     )
     .await;
@@ -602,11 +621,11 @@ async fn frames_endpoint_rejects_an_empty_clip() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
 
     let (status, body) = post_frames(
         router,
-        &secret,
+        &token,
         json!({ "filename": "clip.mp4", "bytes_base64": "" }),
     )
     .await;
@@ -621,14 +640,14 @@ async fn frames_endpoint_says_so_when_the_decoder_is_not_installed() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
+    let (router, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
         comfyui.ffmpeg = "zone-has-no-such-decoder".into();
     })
     .await;
 
     let (status, body) = post_frames(
         router,
-        &secret,
+        &token,
         json!({
             "filename": "clip.mp4",
             "bytes_base64": base64::engine::general_purpose::STANDARD.encode("pretend clip"),
@@ -657,14 +676,14 @@ async fn frames_endpoint_maps_decoder_execution_failures() {
     fs::write(&decoder, "not an executable").unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
+    let (router, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
         comfyui.ffmpeg = decoder.display().to_string();
     })
     .await;
 
     let (status, body) = post_frames(
         router,
-        &secret,
+        &token,
         json!({
             "filename": "clip.mp4",
             "bytes_base64": base64::engine::general_purpose::STANDARD.encode("pretend clip"),
@@ -698,7 +717,7 @@ async fn a_second_training_upload_is_refused_while_one_is_running() {
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let path = stub.display().to_string();
-    let (router, secret) = router_tuned(
+    let (router, token) = router_tuned(
         &ollama,
         &catalog,
         models_dir.clone(),
@@ -715,13 +734,13 @@ async fn a_second_training_upload_is_refused_while_one_is_running() {
     });
     let holder = tokio::spawn({
         let router = router.clone();
-        let secret = secret.clone();
+        let token = token.clone();
         let clip = clip.clone();
-        async move { post_frames(router, &secret, clip).await }
+        async move { post_frames(router, &token, clip).await }
     });
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let (status, body) = post_frames(router, &secret, clip).await;
+    let (status, body) = post_frames(router, &token, clip).await;
     holder.abort();
     assert_eq!(
         status,
@@ -761,11 +780,11 @@ async fn train_bases_lists_flux_when_checkpoint_present() {
     .unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models/train/bases")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
@@ -785,7 +804,7 @@ async fn captions_report_configuration_and_preserve_user_drafts() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (disabled, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (disabled, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
     let body = json!({
         "trigger": "ohwx",
         "images": [{
@@ -795,13 +814,8 @@ async fn captions_report_configuration_and_preserve_user_drafts() {
             "group": 4
         }]
     });
-    let (status, error) = post_json(
-        disabled,
-        &secret,
-        "/api/models/train/captions",
-        body.clone(),
-    )
-    .await;
+    let (status, error) =
+        post_json(disabled, &token, "/api/models/train/captions", body.clone()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(
         error["error"]
@@ -809,11 +823,11 @@ async fn captions_report_configuration_and_preserve_user_drafts() {
             .is_some_and(|message| message.contains("COMFYUI_CAPTION_MODEL"))
     );
 
-    let (enabled, secret) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
+    let (enabled, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
         comfyui.caption_model = "vision".to_string()
     })
     .await;
-    let (status, response) = post_json(enabled, &secret, "/api/models/train/captions", body).await;
+    let (status, response) = post_json(enabled, &token, "/api/models/train/captions", body).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["captions"], json!(["ohwx, side light"]));
     let _ = fs::remove_dir_all(models_dir);
@@ -835,15 +849,15 @@ async fn train_maps_disabled_invalid_and_runner_failures() {
         }]
     });
 
-    let (disabled, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
-    let (status, body) = post_json(disabled, &secret, "/api/models/train", request.clone()).await;
+    let (disabled, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (status, body) = post_json(disabled, &token, "/api/models/train", request.clone()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(
         body["error"],
         "LoRA training is not configured on this server"
     );
 
-    let (invalid, secret) = router_with(
+    let (invalid, token) = router_with(
         &ollama,
         &catalog,
         models_dir.clone(),
@@ -852,7 +866,7 @@ async fn train_maps_disabled_invalid_and_runner_failures() {
     .await;
     let mut invalid_request = request.clone();
     invalid_request["name"] = Value::String("../escape".to_string());
-    let (status, body) = post_json(invalid, &secret, "/api/models/train", invalid_request).await;
+    let (status, body) = post_json(invalid, &token, "/api/models/train", invalid_request).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
         body["error"]
@@ -860,9 +874,9 @@ async fn train_maps_disabled_invalid_and_runner_failures() {
             .is_some_and(|message| !message.is_empty())
     );
 
-    let (failed, secret) =
+    let (failed, token) =
         router_with(&ollama, &catalog, models_dir.clone(), Some("exit 7".into())).await;
-    let (status, body) = post_json(failed, &secret, "/api/models/train", request).await;
+    let (status, body) = post_json(failed, &token, "/api/models/train", request).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert!(
         body["error"]
