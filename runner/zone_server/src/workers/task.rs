@@ -646,7 +646,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let mut obs = crate::metrics::TaskObs::new();
 
     // Acquire semaphore permit to limit concurrent executions
-    let permit = match get_semaphore().acquire().await {
+    let _permit = match get_semaphore().acquire().await {
         Ok(p) => p,
         Err(_) => {
             obs.set_status("semaphore_denied");
@@ -826,13 +826,8 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let prompt = prompt.as_str();
     let guidance = guidance.as_str();
 
-    // The retry loop takes a permit per attempt and releases it across backoff,
-    // so this run must not also hold one while it waits.
-    drop(permit);
-
     let result = run_with_policy(
         policy,
-        get_semaphore(),
         move |_| {
             attempt_run(
                 state,
@@ -1109,11 +1104,15 @@ async fn record_evaluation_log(
 
 /// Runs attempts until one succeeds or the policy stops.
 ///
+/// The owned run holds the only permit for its whole life, checkout included,
+/// so nothing is acquired here. Releasing one across backoff would free
+/// nothing while that run still holds its own, and taking one would deadlock
+/// once every permit belonged to a run waiting on this loop.
+///
 /// A permit is acquired per attempt and dropped before any backoff, so a
 /// sleeping run never occupies a slot other runs are waiting on.
 async fn run_with_policy<Run, Running, Record, Recording>(
     policy: RetryPolicy,
-    permits: &Semaphore,
     mut run: Run,
     mut record: Record,
 ) -> Result<Completed, Stopped>
@@ -1125,17 +1124,7 @@ where
 {
     let mut number: u32 = 1;
     loop {
-        let attempted = {
-            let Ok(_permit) = permits.acquire().await else {
-                return Err(Stopped {
-                    fault: Fault::overloaded(),
-                    attempts: number,
-                    exhausted: false,
-                });
-            };
-            run(number).await
-        };
-        let fault = match attempted {
+        let fault = match run(number).await {
             Ok(outcome) => {
                 return Ok(Completed {
                     outcome,
@@ -2213,12 +2202,10 @@ mod retry_tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_terminal_failure_runs_exactly_once() {
-        let permits = Semaphore::new(MAX_CONCURRENT_TASKS);
         let runs = Arc::new(AtomicU32::new(0));
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let stopped = run_with_policy(
             RetryPolicy::default(),
-            &permits,
             |_| {
                 let runs = Arc::clone(&runs);
                 async move {
@@ -2247,12 +2234,10 @@ mod retry_tests {
     #[tokio::test(start_paused = true)]
     async fn transient_failures_stop_at_the_attempt_cap() {
         let policy = RetryPolicy::default();
-        let permits = Semaphore::new(MAX_CONCURRENT_TASKS);
         let runs = Arc::new(AtomicU32::new(0));
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let stopped = run_with_policy(
             policy,
-            &permits,
             |_| {
                 let runs = Arc::clone(&runs);
                 async move {
@@ -2292,10 +2277,8 @@ mod retry_tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_recovered_run_reports_the_attempts_it_took() {
-        let permits = Semaphore::new(MAX_CONCURRENT_TASKS);
         let completed = run_with_policy(
             RetryPolicy::default(),
-            &permits,
             |number| async move {
                 if number < 3 {
                     Err(Fault::agent("429 Too Many Requests".into()))
@@ -2309,46 +2292,39 @@ mod retry_tests {
         .expect("a transient failure must recover");
 
         assert_eq!(completed.attempts, 3);
-        assert_eq!(permits.available_permits(), MAX_CONCURRENT_TASKS);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_backoff_never_holds_its_permit() {
-        let permits = Arc::new(Semaphore::new(1));
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let observer = tokio::spawn({
-            let permits = Arc::clone(&permits);
-            async move {
-                receiver.recv().await;
-                permits.available_permits()
-            }
-        });
+    async fn the_retry_loop_takes_no_permit_of_its_own() {
+        // The owned run holds the only permit for its whole life so its
+        // checkout stays bounded too. A loop that acquired here would deadlock
+        // as soon as every permit belonged to a run waiting on this loop.
+        let permits = Semaphore::new(MAX_CONCURRENT_TASKS);
+        let held: Vec<_> = (0..MAX_CONCURRENT_TASKS)
+            .map(|_| permits.try_acquire().expect("a permit to hold"))
+            .collect();
+        assert_eq!(permits.available_permits(), 0);
 
-        let completed = run_with_policy(
-            RetryPolicy::default(),
-            &permits,
-            move |number| {
-                let sender = sender.clone();
-                async move {
+        let completed = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_with_policy(
+                RetryPolicy::default(),
+                |number| async move {
                     if number == 1 {
-                        let _ = sender.send(());
                         Err(Fault::agent("connection reset by peer".into()))
                     } else {
                         Ok(outcome())
                     }
-                }
-            },
-            |_| async {},
+                },
+                |_| async {},
+            ),
         )
         .await
-        .expect("the retry must acquire a fresh permit");
+        .expect("the retry loop must not wait on a permit")
+        .expect("the transient failure must recover");
 
         assert_eq!(completed.attempts, 2);
-        assert_eq!(
-            observer.await.unwrap(),
-            1,
-            "the permit must be free while the run backs off"
-        );
-        assert_eq!(permits.available_permits(), 1);
+        assert_eq!(permits.available_permits(), 0, "the loop took a permit");
+        drop(held);
     }
 }
