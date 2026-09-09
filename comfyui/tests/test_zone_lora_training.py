@@ -46,12 +46,22 @@ def comfy_available() -> bool:
         return False
     if str(COMFY_DIR) not in sys.path:
         sys.path.insert(0, str(COMFY_DIR))
-    sys.argv = ['main.py', '--cpu']
+    # ComfyUI settles on a device while `comfy.model_management` is imported
+    # and defaults to CUDA, which raises under CPU-only torch. Putting --cpu in
+    # argv never reaches it: imported as a library ComfyUI leaves `args_parsing`
+    # off, so cli_args parses an empty argument list instead.
+    #
+    # Only a missing dependency means the runtime cannot be used. Catching more
+    # than that is what hid the CUDA default, reporting every test below as
+    # skipped for a runtime that was installed and working.
     try:
+        from comfy.cli_args import args
+
+        args.cpu = True
         import comfy.ldm.flux.layers  # noqa: F401
         import comfy.ops  # noqa: F401
         import torch  # noqa: F401
-    except Exception:
+    except ImportError:
         return False
     return True
 
