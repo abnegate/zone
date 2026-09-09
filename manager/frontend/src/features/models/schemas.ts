@@ -96,3 +96,51 @@ export const TrainClipSchema = z.object({
   sampled: z.number(),
   sampled_fps: z.number(),
 });
+
+export const TrainQualitySchema = z.object({
+  improvement: z.number(),
+  checkpoint: z.string(),
+  measured: z.boolean(),
+  calibration: z.enum(['flux_health_bands', 'uncalibrated']),
+});
+
+export const DatasetConcernSchema = z.enum([
+  'too_few',
+  'low_variety',
+  'low_pose_variety',
+  'mixed_subjects',
+]);
+
+export const DatasetFindingSchema = z.object({
+  concern: DatasetConcernSchema,
+  detail: z.string(),
+});
+
+export const DropReasonSchema = z.enum(['duplicate', 'blurred', 'small']);
+
+export const DroppedImageSchema = z.object({
+  filename: z.string(),
+  reason: DropReasonSchema,
+});
+
+export const TrainRemediationOutcomeSchema = z.enum(['used', 'still_rejected', 'failed']);
+
+export const TrainRemediationSchema = z.object({
+  source_index: z.number().int().nonnegative(),
+  filename: z.string(),
+  reason: DropReasonSchema,
+  outcome: TrainRemediationOutcomeSchema,
+});
+
+export const TrainScreeningSchema = z.object({
+  kept: z.number().int().nonnegative(),
+  dropped: z.array(DroppedImageSchema),
+  attempted: z.array(TrainRemediationSchema).optional(),
+});
+
+export const TrainResultSchema = z.object({
+  filename: z.string().nullable(),
+  quality: TrainQualitySchema.nullable(),
+  dataset: z.array(DatasetFindingSchema).optional(),
+  screening: TrainScreeningSchema.nullable().optional(),
+});

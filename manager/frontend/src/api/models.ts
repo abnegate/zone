@@ -1,10 +1,20 @@
 import type { z } from 'zod';
-import type { TrainFrameSchema } from '../features/models/schemas';
+import type {
+  DatasetConcernSchema,
+  DatasetFindingSchema,
+  DroppedImageSchema,
+  DropReasonSchema,
+  TrainFrameSchema,
+  TrainQualitySchema,
+  TrainRemediationSchema,
+  TrainScreeningSchema,
+} from '../features/models/schemas';
 import {
   BrowseResponseSchema,
   DiskUsageSchema,
   ModelsResponseSchema,
   TrainClipSchema,
+  TrainResultSchema,
 } from '../features/models/schemas';
 import type {
   BrowseOptions,
@@ -22,46 +32,14 @@ const API_BASE = import.meta.env.VITE_API_URL || '';
 export type TrainFrame = z.infer<typeof TrainFrameSchema>;
 export type TrainClip = z.infer<typeof TrainClipSchema>;
 
-export type TrainQuality = {
-  improvement: number;
-  checkpoint: string;
-  measured: boolean;
-  calibration: 'flux_health_bands' | 'uncalibrated';
-};
-
-export type DatasetConcern = 'too_few' | 'low_variety' | 'low_pose_variety' | 'mixed_subjects';
-
-export type DatasetFinding = {
-  concern: DatasetConcern;
-  detail: string;
-};
-
-export type DropReason = 'duplicate' | 'blurred' | 'small';
-
-export type DroppedImage = {
-  filename: string;
-  reason: DropReason;
-};
-
-export type TrainRemediation = {
-  source_index: number;
-  filename: string;
-  reason: DropReason;
-  outcome: 'used' | 'still_rejected' | 'failed';
-};
-
-export type TrainScreening = {
-  kept: number;
-  dropped: DroppedImage[];
-  attempted?: TrainRemediation[];
-};
-
-export type TrainResult = {
-  filename: string | null;
-  quality: TrainQuality | null;
-  dataset?: DatasetFinding[];
-  screening?: TrainScreening | null;
-};
+export type TrainQuality = z.infer<typeof TrainQualitySchema>;
+export type DatasetConcern = z.infer<typeof DatasetConcernSchema>;
+export type DatasetFinding = z.infer<typeof DatasetFindingSchema>;
+export type DropReason = z.infer<typeof DropReasonSchema>;
+export type DroppedImage = z.infer<typeof DroppedImageSchema>;
+export type TrainRemediation = z.infer<typeof TrainRemediationSchema>;
+export type TrainScreening = z.infer<typeof TrainScreeningSchema>;
+export type TrainResult = z.infer<typeof TrainResultSchema>;
 
 /**
  * Models API
@@ -215,7 +193,7 @@ export const modelsApi = {
       const payload = await response.json().catch(() => ({ error: 'Training failed' }));
       throw new Error(payload.error || `Failed to train: ${response.status}`);
     }
-    return response.json();
+    return parse(TrainResultSchema, await response.json());
   },
 
   /**

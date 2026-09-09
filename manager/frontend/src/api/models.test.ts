@@ -46,6 +46,28 @@ describe('Namespaced model requests', () => {
     expect(request).toHaveBeenCalledWith('/api/models/disk', expect.anything());
   });
 
+  it('validates the structured training response', async () => {
+    global.fetch = mock(async () =>
+      Response.json({
+        filename: null,
+        quality: null,
+        dataset: [],
+        screening: {
+          kept: 1,
+          dropped: [{ filename: 'broken.png', reason: 'invalid' }],
+        },
+      })
+    ) as typeof fetch;
+
+    await expect(
+      modelsApi.train({
+        name: 'portrait',
+        base: 'flux-schnell',
+        images: [],
+      })
+    ).rejects.toThrow('Validation failed: screening.dropped.0.reason');
+  });
+
   it('encodes the complete model name when deleting it', async () => {
     const request = mock(async () => new Response(null, { status: 204 }));
     global.fetch = request as typeof fetch;
