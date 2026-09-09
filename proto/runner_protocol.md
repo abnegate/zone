@@ -54,7 +54,11 @@ Start executing a command.
   "env": {"NODE_ENV": "production"},
   "timeout_ms": 60000,
   "max_output_bytes": 10485760,
-  "working_dir": "/path/to/workspace/subdir"
+  "working_dir": "/path/to/workspace/subdir",
+  "confinement": {
+    "read_roots": ["/path/to/workspace"],
+    "write_roots": ["/path/to/workspace/target"]
+  }
 }
 ```
 
@@ -68,6 +72,27 @@ Start executing a command.
 | timeout_ms | number | no | Timeout in milliseconds |
 | max_output_bytes | number | no | Max output before truncation |
 | working_dir | string | no | Working directory (defaults to workspace) |
+| confinement | object | no | Run under OS confinement (see below) |
+
+**Confinement**
+
+When `confinement` is present the command runs inside the host sandbox --
+seatbelt on macOS, bubblewrap on Linux -- with no network access and no
+filesystem access beyond the listed roots plus the read-only system trees the
+executable needs.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| read_roots | string[] | no | Absolute directories the command may read |
+| write_roots | string[] | no | Absolute directories the command may read and write |
+
+Roots must be absolute and must exist when the job starts. The first write root
+also becomes `HOME` and `TMPDIR` inside the sandbox.
+
+Confinement is fail-closed. A runner that does not advertise the `confinement`
+capability, or that cannot prove its sandbox blocks reads and network
+connections, answers `RunStart` with a `RunError` carrying
+`confinement_unavailable` and never runs the command unconfined.
 
 #### RunStdin
 
@@ -131,7 +156,7 @@ Response to Hello, confirms connection and capabilities.
   "type": "HelloAck",
   "protocol_version": "1.0",
   "runner_version": "0.1.0",
-  "capabilities": ["cancel", "stdin", "logs", "process_group"]
+  "capabilities": ["cancel", "stdin", "logs", "process_group", "confinement"]
 }
 ```
 
@@ -146,6 +171,7 @@ Response to Hello, confirms connection and capabilities.
 - `stdin`: Can send data to job stdin
 - `logs`: Emits structured log messages
 - `process_group`: Uses process groups for clean termination
+- `confinement`: Can run jobs under OS-level confinement
 
 #### RunStarted
 
@@ -272,6 +298,7 @@ Command encountered an error.
 - `cancelled`: Job was cancelled
 - `internal_error`: Internal runner error
 - `invalid_workspace`: Workspace path is invalid
+- `confinement_unavailable`: Confinement was requested but could not be established
 
 #### Pong
 
@@ -300,7 +327,7 @@ Response to Ping.
 
 ```
 Client: {"type":"Hello","protocol_version":"1.0","capabilities":["cancel"]}
-Runner: {"type":"HelloAck","protocol_version":"1.0","runner_version":"0.1.0","capabilities":["cancel","stdin","logs","process_group"]}
+Runner: {"type":"HelloAck","protocol_version":"1.0","runner_version":"0.1.0","capabilities":["cancel","stdin","logs","process_group","confinement"]}
 Client: {"type":"RunStart","job_id":"job-1","workspace":"/tmp/work","command":"echo","args":["hello"]}
 Runner: {"type":"RunStarted","job_id":"job-1","pid":12345}
 Runner: {"type":"RunStdout","job_id":"job-1","data":"aGVsbG8K","sequence":1}

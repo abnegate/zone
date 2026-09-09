@@ -34,26 +34,18 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::auth::require_auth;
+use crate::config::AllowedOrigins;
 use crate::state::AppState;
 use crate::ws;
 
 /// Create the main API router
 pub fn create_router(state: AppState) -> Router {
-    // CORS configuration - secure defaults
-    // In production, allowed_origins should be configured from environment
+    // Credentials ride on these requests, so the origin is matched on its host
+    // against the configured deployment domain, and loopback for development.
+    let origins = AllowedOrigins::from_config(state.config());
     let cors = CorsLayer::new()
-        // Only allow specific origins in production
-        // For development, this can be overridden via environment variable CORS_ALLOWED_ORIGINS
-        .allow_origin(AllowOrigin::predicate(|origin, _request_parts| {
-            // Allow localhost origins for development
-            let origin_str = origin.to_str().unwrap_or("");
-            origin_str.starts_with("http://localhost")
-                || origin_str.starts_with("https://localhost")
-                || origin_str.starts_with("http://127.0.0.1")
-                || origin_str.starts_with("https://127.0.0.1")
-                // Allow configured manager host
-                || origin_str.contains("manager.")
-                || origin_str.contains("zone.")
+        .allow_origin(AllowOrigin::predicate(move |origin, _request_parts| {
+            origin.to_str().is_ok_and(|origin| origins.allows(origin))
         }))
         .allow_methods([
             Method::GET,
@@ -347,4 +339,89 @@ pub fn create_router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn router(origins: &[&str]) -> Router {
+        let config = crate::config::Config {
+            cors_origins: origins.iter().map(|origin| origin.to_string()).collect(),
+            ..crate::state::test_config()
+        };
+        let db = sqlx::PgPool::connect_lazy("postgres://localhost/test")
+            .expect("a lazy pool needs no server");
+        let state = AppState::new(config, db, None);
+        state.disable_mcp();
+        create_router(state)
+    }
+
+    async fn granted(origins: &[&str], origin: &str) -> Option<String> {
+        let response = router(origins)
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header(header::ORIGIN, origin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .map(|value| value.to_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn cors_rejects_origins_that_only_contain_a_configured_host() {
+        for origin in [
+            "https://evil-zone.attacker.com",
+            "https://manager.attacker.com",
+            "http://localhost.attacker.com",
+            "https://zone.example.com.attacker.com",
+        ] {
+            assert_eq!(
+                granted(&["https://zone.example.com"], origin).await,
+                None,
+                "{origin} must not be granted CORS access"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cors_accepts_the_configured_host_its_subdomains_and_loopback() {
+        for origin in [
+            "https://zone.example.com",
+            "https://manager.zone.example.com",
+            "http://localhost:3001",
+            "http://127.0.0.1:8000",
+        ] {
+            assert_eq!(
+                granted(&["https://zone.example.com"], origin).await,
+                Some(origin.to_string()),
+                "{origin} must be granted CORS access"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cors_falls_back_to_loopback_when_nothing_is_configured() {
+        assert_eq!(
+            granted(&["*"], "http://localhost:3001").await,
+            Some("http://localhost:3001".to_string())
+        );
+        for origin in ["https://zone.attacker.com", "https://manager.attacker.com"] {
+            assert_eq!(
+                granted(&["*"], origin).await,
+                None,
+                "{origin} must not be granted CORS access"
+            );
+        }
+    }
 }

@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+use zone_core::{OptionalSecretExt, SecretValue};
 
 use crate::auth::AuthUser;
 use crate::db::ai_settings;
@@ -127,14 +128,14 @@ impl From<ai_settings::EffectiveAiSettings> for AiSettingsResponse {
 pub struct UpdateAiSettingsRequest {
     pub provider: Option<String>,
     pub litellm_host: Option<String>,
-    pub litellm_key: Option<String>,
-    pub openai_api_key: Option<String>,
+    pub litellm_key: Option<SecretValue>,
+    pub openai_api_key: Option<SecretValue>,
     pub openai_base_url: Option<String>,
-    pub anthropic_api_key: Option<String>,
+    pub anthropic_api_key: Option<SecretValue>,
     pub anthropic_base_url: Option<String>,
     pub bedrock_region: Option<String>,
-    pub bedrock_access_key: Option<String>,
-    pub bedrock_secret_key: Option<String>,
+    pub bedrock_access_key: Option<SecretValue>,
+    pub bedrock_secret_key: Option<SecretValue>,
     pub bedrock_use_iam_role: Option<bool>,
     pub model_fast: Option<String>,
     pub model_reasoning: Option<String>,
@@ -149,14 +150,14 @@ impl UpdateAiSettingsRequest {
         ai_settings::Update {
             provider: self.provider.as_deref(),
             litellm_host: self.litellm_host.as_deref(),
-            litellm_key: self.litellm_key.as_deref(),
-            openai_api_key: self.openai_api_key.as_deref(),
+            litellm_key: self.litellm_key.expose_as_deref(),
+            openai_api_key: self.openai_api_key.expose_as_deref(),
             openai_base_url: self.openai_base_url.as_deref(),
-            anthropic_api_key: self.anthropic_api_key.as_deref(),
+            anthropic_api_key: self.anthropic_api_key.expose_as_deref(),
             anthropic_base_url: self.anthropic_base_url.as_deref(),
             bedrock_region: self.bedrock_region.as_deref(),
-            bedrock_access_key: self.bedrock_access_key.as_deref(),
-            bedrock_secret_key: self.bedrock_secret_key.as_deref(),
+            bedrock_access_key: self.bedrock_access_key.expose_as_deref(),
+            bedrock_secret_key: self.bedrock_secret_key.expose_as_deref(),
             bedrock_use_iam_role: self.bedrock_use_iam_role,
             model_fast: self.model_fast.as_deref(),
             model_reasoning: self.model_reasoning.as_deref(),

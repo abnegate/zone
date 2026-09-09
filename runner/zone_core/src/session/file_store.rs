@@ -227,8 +227,8 @@ mod tests {
         let oldest = session1.updated_at;
         session2.updated_at = oldest + chrono::Duration::seconds(1);
         session3.updated_at = oldest + chrono::Duration::seconds(2);
-
         store.save(&session1).await.unwrap();
+        store.save(&session2).await.unwrap();
         store.save(&session2).await.unwrap();
         store.save(&session3).await.unwrap();
 

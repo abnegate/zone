@@ -878,6 +878,13 @@ pub async fn create_knowledge(
             .into_response();
     }
 
+    if let Some(reason) = knowledge::reserved_namespace(
+        req.category.as_deref(),
+        req.tags.as_deref().unwrap_or_default(),
+    ) {
+        return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(reason))).into_response();
+    }
+
     // Must have either content or source_url
     let has_content = req.content.as_ref().is_some_and(|c| !c.is_empty());
     let has_url = req.source_url.as_ref().is_some_and(|u| !u.is_empty());

@@ -1004,6 +1004,9 @@ describe('ChatsPage', () => {
         // waitFor cannot help here either, since it polls on the setInterval
         // this test has stubbed out.
         await act(async () => {});
+        // Advancing a clock nothing is subscribed to reports the timer's
+        // starting text back as if it never moved, which reads as a broken
+        // component rather than a test that measured nothing.
         expect(ticks.size).toBeGreaterThan(0);
         now.mockReturnValue(elapsed);
         act(() => {

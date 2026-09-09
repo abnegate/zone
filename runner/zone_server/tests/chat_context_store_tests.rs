@@ -345,11 +345,19 @@ async fn stopping_a_turn_leaves_only_the_uncertain_mutation_notice_unconsumed() 
 #[tokio::test]
 async fn renewal_runs_independently_and_loss_wakes_cancellation() {
     let (pool, store, chat, _) = fixture().await;
-    let lifetime = Duration::from_millis(450);
+    // Renewal fires every `lifetime / 3`, and each one is a database round
+    // trip. At 450ms that was a 150ms budget, and three missed in a row lose
+    // the lease -- which is what the whole workspace's test binaries sharing
+    // one Postgres does to it, failing here with LeaseLost. The claim under
+    // test is only that a sleep longer than one lifetime still holds the
+    // lease, which nothing but renewal can achieve, so the ratio is what
+    // matters and the absolute numbers should be nowhere near the machine's
+    // scheduling noise.
+    let lifetime = Duration::from_secs(3);
     let lease = store.acquire(Uuid::new_v4(), lifetime).await.unwrap();
     let mut guard = store.keep_alive(lease.clone(), lifetime).unwrap();
     // Model/socket task may be suspended longer than the initial lease lifetime.
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    tokio::time::sleep(lifetime + lifetime / 2).await;
     store.assert_current(&lease).await.unwrap();
     assert!(!guard.is_lost());
     sqlx::query("UPDATE chat_leases SET owner=$2,fence=fence+1 WHERE chat_id=$1")

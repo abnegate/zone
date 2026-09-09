@@ -151,7 +151,7 @@ fn manager_dir(app: &AppHandle) -> PathBuf {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 mod tests {
     use super::*;
 
@@ -161,7 +161,5 @@ mod tests {
             ClientPlatform::current(),
             ClientPlatform::from_os(std::env::consts::OS)
         );
-        const { assert!(!cfg!(target_os = "android")) };
-        const { assert!(!cfg!(target_os = "ios")) };
     }
 }

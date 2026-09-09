@@ -5,6 +5,9 @@
 //! - Staging and committing changes
 //! - Pushing to remote
 
+/// Longest diff kept before truncation, in bytes.
+const MAXIMUM_DIFF_BYTES: usize = 50_000;
+
 use std::path::Path;
 use std::process::Stdio;
 use thiserror::Error;
@@ -222,9 +225,15 @@ impl GitService {
             .await?;
 
         let diff_text = String::from_utf8_lossy(&diff_output.stdout);
-        // Limit diff text size
-        let diff_text = if diff_text.len() > 50_000 {
-            format!("{}...[truncated]", &diff_text[..50_000])
+        // len() counts bytes, so cutting at a fixed offset panics whenever the
+        // boundary lands inside a multi-byte character -- an emoji or any
+        // accented character in a diff over the cap is enough.
+        let diff_text = if diff_text.len() > MAXIMUM_DIFF_BYTES {
+            let mut end = MAXIMUM_DIFF_BYTES;
+            while end > 0 && !diff_text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...[truncated]", &diff_text[..end])
         } else {
             diff_text.to_string()
         };
@@ -448,7 +457,7 @@ impl GitService {
 }
 
 /// Inject authentication token into a git URL
-fn inject_token_into_url(url: &str, token: &str) -> GitResult<String> {
+pub(crate) fn inject_token_into_url(url: &str, token: &str) -> GitResult<String> {
     // Handle HTTPS URLs: https://github.com/owner/repo.git
     if let Some(without_scheme) = url.strip_prefix("https://") {
         // Insert x-access-token:token@ after the scheme

@@ -66,6 +66,6 @@
     "pretypecheck": "bun run build:ui",
     "typecheck": "tsc --noEmit",
     "lighthouse": "lhci autorun",
-    "audit": "bun audit --ignore GHSA-jmr9-qjv8-65gv --ignore GHSA-7pqw-9j4j-h8q3"
+    "audit": "bun audit --ignore GHSA-jmr9-qjv8-65gv"
   }
 }
