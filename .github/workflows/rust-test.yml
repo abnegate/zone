@@ -177,6 +177,11 @@ jobs:
           echo "PGDATA=$RUNNER_TEMP/zone-postgres" >> "$GITHUB_ENV"
           echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
 
+      # zone_comfy turns a submitted clip into training frames through ffmpeg.
+      # Without it the frames endpoint reports 503 and cannot reject bad input.
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+
       - name: Start database services
         run: |
           initdb --username=postgres --auth=trust --encoding=UTF8
