@@ -50,9 +50,6 @@ const WS_POLL_INTERVAL_MS: u64 = 50;
 /// Authentication timeout in seconds
 const WS_AUTH_TIMEOUT_SECS: u64 = 30;
 
-/// Re-check authorization every ~10 seconds (200 poll cycles at 50ms)
-const AUTH_RECHECK_INTERVAL: u32 = 200;
-
 /// WebSocket idle timeout in seconds (5 minutes)
 const WS_IDLE_TIMEOUT_SECS: u64 = 300;
 
@@ -1082,7 +1079,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
 
                 // Periodic authorization re-check
                 auth_check_counter += 1;
-                if auth_check_counter >= AUTH_RECHECK_INTERVAL {
+                if auth_check_counter >= state.config().chat.recheck {
                     auth_check_counter = 0;
                     match workspace_members::can_write(state.db(), workspace_id, user_id).await {
                         Ok(false) => {
@@ -4034,7 +4031,6 @@ mod tests {
     #[test]
     fn test_constants() {
         assert_eq!(WS_AUTH_TIMEOUT_SECS, 30);
-        assert_eq!(AUTH_RECHECK_INTERVAL, 200);
         assert_eq!(WS_IDLE_TIMEOUT_SECS, 300);
         assert_eq!(WS_PING_INTERVAL_SECS, 30);
         assert_eq!(MAX_CONSECUTIVE_ERRORS, 5);

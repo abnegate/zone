@@ -572,7 +572,8 @@ async fn idle_authenticated_connections_are_closed() {
 #[tokio::test]
 async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
     let pool = create_test_pool().await;
-    let config = test_config();
+    let mut config = test_config();
+    config.chat.recheck = 2;
     let client = TestClient::new(create_test_router(create_test_state(
         config.clone(),
         pool.clone(),
@@ -593,24 +594,12 @@ async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
     .await
     .unwrap();
 
+    // The interval's first tick lands immediately, so a recheck budget of two
+    // puts the query on the second tick and the single advance below decides
+    // when it runs.
     tokio::time::pause();
-    // A Tokio interval yields its first tick immediately, so n advances make
-    // n + 1 ticks due and the 200th lands exactly on the 199th advance. Stop a
-    // tick short: the recheck then waits for the resumed clock below instead of
-    // firing here, which only worked while the server lagged a tick behind.
-    for _ in 0..198 {
-        tokio::time::advance(Duration::from_secs(30)).await;
-        for _ in 0..3 {
-            tokio::task::yield_now().await;
-        }
-        let frame = socket.next().await.expect("authorization ping").unwrap();
-        if let WsMessage::Ping(data) = frame {
-            socket.send(WsMessage::Pong(data)).await.unwrap();
-        }
-        tokio::task::yield_now().await;
-    }
-    // Reach just before the authorization query while time is paused. SQLx
-    // also uses Tokio deadlines, so the query itself must run in real time.
+    // Stop a millisecond short of the tick and resume: SQLx keeps its own
+    // Tokio deadlines, so the query has to run on the real clock.
     tokio::time::advance(Duration::from_millis(29_999)).await;
     tokio::time::resume();
     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -621,7 +610,8 @@ async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
 #[tokio::test]
 async fn periodic_authorization_recheck_keeps_an_active_member_connected() {
     let pool = create_test_pool().await;
-    let config = test_config();
+    let mut config = test_config();
+    config.chat.recheck = 2;
     let client = TestClient::new(create_test_router(create_test_state(
         config.clone(),
         pool.clone(),
@@ -630,22 +620,10 @@ async fn periodic_authorization_recheck_keeps_an_active_member_connected() {
     let address = spawn(config, pool).await;
     let mut socket = authenticate(&address, chat, &token).await;
 
+    // The interval's first tick lands immediately, so a recheck budget of two
+    // puts the query on the second tick and the single advance below decides
+    // when it runs.
     tokio::time::pause();
-    // A Tokio interval yields its first tick immediately, so n advances make
-    // n + 1 ticks due and the 200th lands exactly on the 199th advance. Stop a
-    // tick short: the recheck then waits for the resumed clock below instead of
-    // firing here, which only worked while the server lagged a tick behind.
-    for _ in 0..198 {
-        tokio::time::advance(Duration::from_secs(30)).await;
-        for _ in 0..3 {
-            tokio::task::yield_now().await;
-        }
-        let frame = socket.next().await.expect("authorization ping").unwrap();
-        if let WsMessage::Ping(data) = frame {
-            socket.send(WsMessage::Pong(data)).await.unwrap();
-        }
-        tokio::task::yield_now().await;
-    }
     tokio::time::advance(Duration::from_millis(29_999)).await;
     tokio::time::resume();
     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -661,7 +639,8 @@ async fn periodic_authorization_recheck_keeps_an_active_member_connected() {
 #[tokio::test]
 async fn repeated_authorization_database_errors_close_an_unstable_connection() {
     let pool = create_test_pool().await;
-    let config = test_config();
+    let mut config = test_config();
+    config.chat.recheck = 1;
     let client = TestClient::new(create_test_router(create_test_state(
         config.clone(),
         pool.clone(),
@@ -672,10 +651,10 @@ async fn repeated_authorization_database_errors_close_an_unstable_connection() {
     pool.close().await;
 
     tokio::time::pause();
-    // AUTH_RECHECK_INTERVAL pings per recheck and MAX_CONSECUTIVE_ERRORS of
-    // them puts the report near a thousand ticks. The bound is patience, not
-    // arithmetic -- the loop returns as soon as the error lands.
-    let reported = periodic_error(&mut socket, 2_000).await;
+    // Rechecking on every tick puts the report MAX_CONSECUTIVE_ERRORS ticks
+    // away. The bound is patience, not arithmetic -- the loop returns as soon
+    // as the error lands.
+    let reported = periodic_error(&mut socket, 32).await;
     tokio::time::resume();
     assert_eq!(
         reported.as_deref(),
