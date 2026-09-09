@@ -2,7 +2,6 @@
 
 use reqwest::{Client, Url};
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -51,6 +50,8 @@ pub enum LlmError {
     Json(#[from] serde_json::Error),
     #[error("Stream error: {0}")]
     Stream(String),
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 impl LlmError {
@@ -203,31 +204,12 @@ impl LlmClient {
             ));
         }
 
-        let host = parsed.host_str().ok_or_else(|| {
+        // Loopback and private addresses stay reachable: base_url is operator
+        // configuration, and a self-hosted LiteLLM or Ollama is normally the
+        // host or another machine on the LAN.
+        parsed.host_str().ok_or_else(|| {
             LlmError::InvalidConfig("LLM base_url must include a host".to_string())
         })?;
-
-        if host.eq_ignore_ascii_case("localhost") {
-            return Err(LlmError::InvalidConfig(
-                "LLM base_url host is not allowed".to_string(),
-            ));
-        }
-
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            let blocked = match ip {
-                IpAddr::V4(v4) => {
-                    v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
-                }
-                IpAddr::V6(v6) => {
-                    v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local()
-                }
-            };
-            if blocked {
-                return Err(LlmError::InvalidConfig(
-                    "LLM base_url IP is not allowed".to_string(),
-                ));
-            }
-        }
 
         Ok(())
     }
@@ -435,6 +417,56 @@ mod tests {
     use super::*;
     use crate::llm::Effort;
     use crate::llm::types::{ChatRequest, Message};
+
+    fn client_for(base_url: &str) -> LlmClient {
+        LlmClient::new(LlmConfig {
+            base_url: base_url.to_string(),
+            ..LlmConfig::default()
+        })
+    }
+
+    #[test]
+    fn self_hosted_addresses_are_reachable() {
+        for url in [
+            "http://127.0.0.1:11434/v1/chat/completions",
+            "http://localhost:4000/v1/chat/completions",
+            "http://192.168.1.50:11434/v1/chat/completions",
+            "http://litellm:4000/v1/chat/completions",
+            "http://host.docker.internal:11434/v1/chat/completions",
+            "http://[::1]:4000/v1/chat/completions",
+        ] {
+            assert!(
+                client_for(url).validate_outbound_url(url).is_ok(),
+                "{url} must stay reachable for self-hosted deployments"
+            );
+        }
+    }
+
+    #[test]
+    fn non_http_schemes_are_rejected() {
+        for url in [
+            "file:///etc/passwd",
+            "gopher://example.com/",
+            "ftp://example.com/",
+        ] {
+            assert!(
+                client_for(url).validate_outbound_url(url).is_err(),
+                "{url} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn urls_carrying_credentials_are_rejected() {
+        let url = "https://user:secret@api.openai.com/v1";
+        assert!(client_for(url).validate_outbound_url(url).is_err());
+    }
+
+    #[test]
+    fn relative_urls_are_rejected() {
+        let url = "/v1/chat/completions";
+        assert!(client_for(url).validate_outbound_url(url).is_err());
+    }
 
     #[test]
     fn classifies_explicit_tool_capability_rejections() {
