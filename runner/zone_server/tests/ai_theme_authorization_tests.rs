@@ -252,6 +252,46 @@ async fn nested_ai_writes_require_a_workspace_writer() {
 }
 
 #[tokio::test]
+async fn a_workspace_admin_writes_without_being_an_organization_admin() {
+    let pool = create_test_pool().await;
+    let client = client(pool.clone());
+    let owner = tenant(&client, &pool).await;
+    let lead = tenant(&client, &pool).await;
+
+    organization_members::add_member(
+        &pool,
+        owner.organization,
+        lead.user,
+        organization_members::OrgRole::Member,
+        Some(owner.user),
+    )
+    .await
+    .expect("lead is an ordinary organization member");
+    workspace_members::add_member(
+        &pool,
+        owner.workspace,
+        lead.user,
+        workspace_members::WorkspaceRole::Admin,
+        Some(owner.user),
+    )
+    .await
+    .expect("lead administers the workspace");
+
+    let path = format!(
+        "/api/organizations/{}/workspaces/{}/settings/ai",
+        owner.organization, owner.workspace
+    );
+    client
+        .put_json_auth(&path, &json!({ "provider": "openai" }), &lead.token)
+        .await
+        .assert_status(StatusCode::OK);
+    client
+        .delete_auth(&path, &lead.token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
 async fn ai_write_holds_both_memberships_until_the_mutation_finishes() {
     let database = database();
     let server_pool = pool(&database, 1).await;

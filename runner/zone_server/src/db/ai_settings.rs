@@ -104,7 +104,10 @@ async fn authorize_workspace(
         return Err(AccessError::NotFound("Workspace not found"));
     }
 
-    authorize_organization(&mut *connection, organization_id, user_id, write).await?;
+    // Membership proves the caller belongs to the tenant that owns the
+    // workspace; the workspace role below decides whether they may write. The
+    // organization admin rule guards organization-wide settings only.
+    authorize_organization(&mut *connection, organization_id, user_id, false).await?;
 
     let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
 
