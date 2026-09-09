@@ -50,6 +50,7 @@ rmcp = { workspace = true, default-features = false, features = [
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "=3.27.0"
+wiremock = "=0.6.5"
 rmcp = { workspace = true, default-features = false, features = [
     "client",
     "server",

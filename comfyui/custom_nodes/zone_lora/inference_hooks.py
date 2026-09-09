@@ -62,7 +62,23 @@ def install_inference_safe_bypass() -> None:
     if getattr(BypassForwardHook._bypass_forward, '_zone_patched', False):
         return
 
+    def base_forward(hook):
+        """An ejected hook can stay installed when two of them wrapped one module.
+
+        Ejecting the inner one first restores the module to the outer one's bypass,
+        whose own original_forward is by then None. Falling back to the module's
+        class forward is what the module would do with no hook at all.
+        """
+        if hook.original_forward is not None:
+            return hook.original_forward
+        logging.warning(
+            'Zone LoRA: ejected bypass hook still installed on %s, calling it directly',
+            type(hook.module).__name__,
+        )
+        return type(hook.module).forward.__get__(hook.module)
+
     def bypass_forward(self, x, *args, **kwargs):
+        original_forward = base_forward(self)
         adapter_bypass = getattr(self.adapter, 'bypass_forward', None)
         if adapter_bypass is not None:
             adapter_type = type(self.adapter)
@@ -73,9 +89,8 @@ def install_inference_safe_bypass() -> None:
                 or adapter_type.bypass_forward is WeightAdapterTrainBase.bypass_forward
             )
             if not is_default:
-                return adapter_bypass(self.original_forward, x, *args, **kwargs)
-        with torch.no_grad():
-            base_out = self.original_forward(x, *args, **kwargs)
+                return adapter_bypass(original_forward, x, *args, **kwargs)
+        base_out = original_forward(x, *args, **kwargs)
         if torch.is_inference(base_out):
             base_out = base_out.clone()
         if torch.is_inference(x):
@@ -140,15 +155,17 @@ def install_bypass_lora_loader() -> None:
 
 
 def prepare_frozen_weights(model) -> int:
+    """Autograd refuses to save an inference tensor for backward.
+
+    Leaving the adapted weights that way forces the base matmul under no_grad, which
+    severs the chain the backward pass needs: an adapter only ever sees gradient that
+    reached it through the base weights of every layer below it.
+    """
     converted = 0
-    for name, module in model.named_modules():
+    for _, module in model.named_modules():
         for attr in ('weight', 'bias'):
             tensor = getattr(module, attr, None)
             if tensor is None or not torch.is_inference(tensor):
-                continue
-            if tensor.ndim >= 2 and is_transformer_block(name) and not is_output_module(name):
-                continue
-            if tensor.ndim >= 2 and not is_output_module(name) and not is_transformer_block(name):
                 continue
             setattr(
                 module,

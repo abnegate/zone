@@ -40,7 +40,29 @@ from .train_config import (
 )
 
 
+def error_scale(sigmas, sample, sigma_floor: float):
+    """Flow matching makes the x0 error exactly sigma times the velocity error.
+
+    Measuring the x0 error therefore weights a sample by sigma squared, so the
+    noisy end of the schedule — where only colour and layout are recoverable —
+    dominates and the clean end that carries a subject's shape counts for almost
+    nothing. Training and every probe have to divide it out the same way, or a
+    probe ranks adapters by an objective the trainer never optimised.
+    """
+    if not sigma_floor:
+        return 1.0
+    shape = (-1,) + (1,) * (sample.ndim - 1)
+    return sigmas.detach().float().reshape(shape).clamp(min=sigma_floor)
+
+
 class ZoneTrainSampler(TrainSampler):
+    def __init__(self, *args, sigma_floor=0.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sigma_floor = sigma_floor
+
+    def error_scale(self, sigmas, sample):
+        return error_scale(sigmas, sample, self.sigma_floor)
+
     def fwd_bwd(
         self,
         model_wrap,
@@ -73,7 +95,8 @@ class ZoneTrainSampler(TrainSampler):
             batch_sigmas = batch_sigmas.detach().clone()
         with torch.autocast(xt.device.type, dtype=self.training_dtype):
             x0_pred = model_wrap(xt, batch_sigmas, **batch_extra_args)
-            loss = self.loss_fn(x0_pred.float(), x0.float())
+            scale = self.error_scale(batch_sigmas, x0_pred)
+            loss = self.loss_fn(x0_pred.float() / scale, x0.float() / scale)
         if bwd:
             bwd_loss = loss / self.grad_acc
             if self.grad_scaler is not None:
@@ -81,6 +104,18 @@ class ZoneTrainSampler(TrainSampler):
             else:
                 bwd_loss.backward()
         return loss
+
+
+def snapshot(lora_sd: dict, dtype) -> dict:
+    return {
+        key: value.detach().to(dtype).contiguous().cpu() for key, value in lora_sd.items()
+    }
+
+
+def write_lora(lora_sd: dict, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    safetensors.torch.save_file(lora_sd, str(destination))
+    logging.info('Zone LoRA: wrote %s (%s tensors)', destination, len(lora_sd))
 
 
 def reseed(adapter) -> None:
@@ -125,9 +160,11 @@ def setup_identity_lora(mp, existing_weights, algorithm, lora_dtype, rank):
                 module.weight, rank=rank, alpha=alpha
             ).to(lora_dtype)
             reseed(train_adapter)
+        train_adapter.train()
         for param_name, parameter in train_adapter.named_parameters():
+            parameter.requires_grad_(param_name != 'alpha')
             lora_sd[f'{name}.{param_name}'] = parameter
-        trained.append(train_adapter.train().requires_grad_(True))
+        trained.append(train_adapter)
         bypass_manager.add_adapter(f'{name}.weight', trained[-1], strength=1.0)
     minimum = int(settings.get('min_adapters', 16))
     if len(trained) < minimum:
@@ -136,6 +173,20 @@ def setup_identity_lora(mp, existing_weights, algorithm, lora_dtype, rank):
         )
     logging.info('Zone LoRA: %s adapters alpha=%s rank=%s', len(trained), alpha, rank)
     return lora_sd, trained, bypass_manager
+
+
+def square(image: Image.Image, resolution: int) -> Image.Image:
+    """Crop to the centre square rather than padding to it.
+
+    Padding a 16:9 photo to a square leaves 44% of every training image a flat
+    border, and a border that appears in all of them is exactly what an identity
+    adapter learns first.
+    """
+    side = min(image.width, image.height)
+    left = (image.width - side) // 2
+    top = (image.height - side) // 2
+    cropped = image.crop((left, top, left + side, top + side))
+    return cropped.resize((resolution, resolution), Image.LANCZOS)
 
 
 class ZoneLoadTrainFolder(io.ComfyNode):
@@ -163,14 +214,8 @@ class ZoneLoadTrainFolder(io.ComfyNode):
         images = []
         texts = []
         for png in sorted(root.glob('*.png')):
-            image = Image.open(png).convert('RGB')
-            image.thumbnail((resolution, resolution))
-            canvas = Image.new('RGB', (resolution, resolution), (255, 255, 255))
-            canvas.paste(
-                image,
-                ((resolution - image.width) // 2, (resolution - image.height) // 2),
-            )
-            array = np.array(canvas).astype(np.float32) / 255.0
+            image = square(Image.open(png).convert('RGB'), resolution)
+            array = np.array(image).astype(np.float32) / 255.0
             images.append(torch.from_numpy(array)[None,])
             caption_path = png.with_suffix('.txt')
             texts.append(
@@ -313,14 +358,23 @@ class ZoneTrainLoRA(io.ComfyNode):
                 for module in modules_to_patch:
                     patch(module)
             logging.info('Zone LoRA: training %s steps on the loaded checkpoint', steps)
+            settings = load_config()
             losses = []
+            stem = Path(save_name).name.removesuffix('.safetensors')
+            output_dir = Path(folder_paths.get_output_directory()) / 'loras'
+            every = int(settings.get('checkpoint_every', 0))
 
             def loss_callback(loss):
                 losses.append(loss)
-                if len(losses) == 1 or len(losses) % 10 == 0:
-                    logging.info('Zone LoRA step %s/%s loss=%s', len(losses), steps, f'{loss:.4f}')
                 if loss != loss:
                     raise RuntimeError('training loss became NaN')
+                if len(losses) == 1 or len(losses) % 10 == 0:
+                    logging.info('Zone LoRA step %s/%s loss=%s', len(losses), steps, f'{loss:.4f}')
+                if every and len(losses) % every == 0 and len(losses) < steps:
+                    write_lora(
+                        snapshot(lora_sd, lora_dtype_t),
+                        output_dir / f'{stem}-step{len(losses)}.safetensors',
+                    )
 
             train_sampler = ZoneTrainSampler(
                 criterion,
@@ -332,6 +386,7 @@ class ZoneTrainLoRA(io.ComfyNode):
                 seed=seed,
                 training_dtype=dtype,
                 use_grad_scaler=use_grad_scaler,
+                sigma_floor=float(settings.get('sigma_floor', 0.0)),
             )
             guider = TrainGuider(mp, offloading=False)
             guider.set_conds(positive)
@@ -348,13 +403,7 @@ class ZoneTrainLoRA(io.ComfyNode):
                     unpatch(module)
                 for module, original in frozen_restores:
                     module.forward = original
-            for key in list(lora_sd):
-                lora_sd[key] = lora_sd[key].detach().to(lora_dtype_t).contiguous().cpu()
-            stem = Path(save_name).name.removesuffix('.safetensors')
-            output_dir = Path(folder_paths.get_output_directory()) / 'loras'
-            output_dir.mkdir(parents=True, exist_ok=True)
-            dest = output_dir / f'{stem}.safetensors'
-            safetensors.torch.save_file(lora_sd, str(dest))
-            logging.info('Zone LoRA: wrote %s (%s tensors)', dest, len(lora_sd))
+            lora_sd = snapshot(lora_sd, lora_dtype_t)
+            write_lora(lora_sd, output_dir / f'{stem}.safetensors')
             del trained
             return io.NodeOutput(lora_sd, steps + existing_steps)
