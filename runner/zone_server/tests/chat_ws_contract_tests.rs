@@ -496,25 +496,28 @@ async fn a_send_after_membership_revocation_is_rejected_before_persistence() {
         ))
         .await
         .unwrap();
-    // The send path and the authorization interval's first tick both query
-    // membership, so either can be the one that catches the revocation. What
-    // this test is about is that neither of them stores the message.
-    let refusal = next_json(&mut socket).await.expect("refusal");
-    assert_eq!(refusal["type"], "error", "{refusal}");
-    assert!(
-        matches!(
-            refusal["message"].as_str().unwrap_or_default(),
-            "Workspace access denied" | "Access revoked"
-        ),
-        "a revoked member's send has to be refused: {refusal}"
-    );
+    // The send path and the authorization tick both query membership, so either
+    // can catch the revocation, and whichever does closes the socket -- which
+    // can arrive with the error frame lost behind it. So a close counts as a
+    // refusal, a refusal names one of the two, and anything the server would
+    // send on the happy path fails. What must hold is the count below.
+    if let Some(refusal) = next_json(&mut socket).await {
+        assert_eq!(refusal["type"], "error", "{refusal}");
+        assert!(
+            matches!(
+                refusal["message"].as_str().unwrap_or_default(),
+                "Workspace access denied" | "Access revoked"
+            ),
+            "a revoked member's send has to be refused: {refusal}"
+        );
+    }
     let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE chat_id = $1")
         .bind(chat)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(stored, 0);
-    socket.close(None).await.unwrap();
+    let _ = socket.close(None).await;
 }
 
 #[tokio::test]
@@ -719,10 +722,20 @@ async fn action_delivery_rechecks_membership_before_forwarding() {
         chat,
         json!({"id": Uuid::new_v4(), "role": "assistant", "content": "hidden"}),
     );
-    assert!(
-        next_json(&mut socket).await.is_none(),
-        "revoked members must be disconnected before an action is forwarded"
-    );
+    // The authorization tick refuses the connection out loud before closing it,
+    // so a refusal may arrive ahead of the close. What must never arrive is the
+    // action itself.
+    if let Some(frame) = next_json(&mut socket).await {
+        assert_eq!(
+            frame,
+            json!({"type": "error", "message": "Access revoked"}),
+            "a revoked member gets the refusal or nothing, never the action"
+        );
+        assert!(
+            next_json(&mut socket).await.is_none(),
+            "the refusal is the last thing a revoked member is told"
+        );
+    }
 }
 
 #[tokio::test]
