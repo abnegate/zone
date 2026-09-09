@@ -227,12 +227,36 @@ pub async fn list_active_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult
 ///
 /// Returns true if the session exists and belongs to the specified user.
 pub async fn is_user_session(pool: &PgPool, session_id: Uuid, user_id: Uuid) -> DbResult<bool> {
-    let result: Option<(i64,)> =
+    let result: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM sessions WHERE id = $1 AND user_id = $2")
             .bind(session_id)
             .bind(user_id)
             .fetch_optional(pool)
             .await?;
+
+    Ok(result.is_some())
+}
+
+/// Check whether a session is currently usable by its bound user.
+pub async fn is_active_user_session(
+    pool: &PgPool,
+    session_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<bool> {
+    let result: Option<(i32,)> = sqlx::query_as(
+        r#"
+        SELECT 1
+        FROM sessions
+        WHERE id = $1
+          AND user_id = $2
+          AND revoked_at IS NULL
+          AND expires_at > NOW()
+        "#,
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
 
     Ok(result.is_some())
 }

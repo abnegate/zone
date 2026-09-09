@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, task_run_id, phase, agent_type, log_level, message, metadata, created_at\n        FROM task_run_logs\n        WHERE task_run_id = $1\n        ORDER BY created_at ASC\n        ",
+  "query": "\n        SELECT id, task_run_id, phase, agent_type, log_level, message, metadata, created_at\n        FROM task_run_logs\n        WHERE task_run_id = $1\n        ORDER BY created_at ASC NULLS LAST, id ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -60,5 +60,5 @@
       true
     ]
   },
-  "hash": "4cbca46fa0a7bc2460c269fab25405f612b35a832a4ad0357bd1b338e3b63157"
+  "hash": "484dabc57465308c4ad213f358f879cf14a445d94452bd9a7655cdaeef673b80"
 }
