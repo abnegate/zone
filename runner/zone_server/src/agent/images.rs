@@ -255,13 +255,14 @@ fn extension_for(mime: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::state::{AppState, test_config};
+    use base64::Engine;
     use uuid::Uuid;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn scope() -> WorkspaceScope {
+    fn scope_with_enabled(enabled: bool) -> WorkspaceScope {
         let mut config = test_config();
-        config.comfyui.enabled = true;
+        config.comfyui.enabled = enabled;
         let database = sqlx::PgPool::connect_lazy("postgres://localhost/test")
             .expect("a lazy pool needs no server");
         WorkspaceScope {
@@ -270,6 +271,73 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
         }
+    }
+
+    fn scope() -> WorkspaceScope {
+        scope_with_enabled(true)
+    }
+
+    async fn successful_comfy() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id":"image"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/history/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "image": {
+                    "status": {"status_str": "success"},
+                    "outputs": {"7": {"images": [{
+                        "filename": "image.webp", "subfolder": "", "type": "temp"
+                    }]}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/webp")
+                    .set_body_bytes(vec![1, 2, 3, 4]),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn image_tools_register_only_when_enabled_and_publish_stable_contracts() {
+        let mut disabled = ToolRegistry::new();
+        register(&mut disabled, &scope_with_enabled(false));
+        assert!(disabled.names().is_empty());
+
+        let enabled_scope = scope();
+        let mut enabled = ToolRegistry::new();
+        register(&mut enabled, &enabled_scope);
+        let mut names = enabled.names();
+        names.sort_unstable();
+        assert_eq!(names, vec!["edit_image", "generate_image"]);
+
+        let context = ToolContext::default();
+        let generate = GenerateImageTool(enabled_scope.clone());
+        let edit = EditImageTool(enabled_scope);
+        assert_eq!(generate.name(), "generate_image");
+        assert!(generate.description().contains("ComfyUI"));
+        assert_eq!(generate.parameters_schema()["required"], json!(["prompt"]));
+        assert!(generate.mutating());
+        assert_eq!(generate.timeout(&context), Duration::from_secs(330));
+        assert_eq!(edit.name(), "edit_image");
+        assert!(edit.description().contains("existing image"));
+        assert_eq!(edit.parameters_schema()["required"], json!(["prompt"]));
+        assert_eq!(
+            edit.parameters_schema()["properties"]["image_url"]["type"],
+            "string"
+        );
+        assert!(edit.mutating());
+        assert_eq!(edit.timeout(&context), Duration::from_secs(330));
     }
 
     /// The organization/workspace `model_image` pin reaches ComfyUI when the
@@ -331,5 +399,126 @@ mod tests {
                 "{params} should be rejected for its prompt"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn source_contract_accepts_owned_images_and_rejects_remote_or_non_image_data() {
+        let scope = scope();
+        let store = ArtifactStore::new(std::env::temp_dir());
+        assert!(
+            resolve_source(&scope, &store, None, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let png = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode([1, 2, 3])
+        );
+        let source = resolve_source(&scope, &store, Some(&png), true)
+            .await
+            .expect("inline image")
+            .expect("source image");
+        assert_eq!(source.mime, "image/png");
+        assert_eq!(source.bytes.as_ref(), &[1, 2, 3]);
+
+        let remote = resolve_source(&scope, &store, Some("https://example.com/image.png"), true)
+            .await
+            .unwrap_err();
+        assert_eq!(remote, "the attached media could not be read");
+        let video = resolve_source(&scope, &store, Some("data:video/mp4;base64,AA=="), true)
+            .await
+            .unwrap_err();
+        assert_eq!(video, "the attached media type is not supported");
+    }
+
+    #[tokio::test]
+    async fn generated_images_are_persisted_and_returned_to_the_agent() {
+        let server = successful_comfy().await;
+        let root = std::env::temp_dir().join(format!("zone-image-tool-{}", Uuid::new_v4()));
+        let scope = scope();
+        let config = ComfyUiConfig {
+            base_url: server.uri(),
+            artifact_root: root.clone(),
+            poll_interval_ms: 10,
+            ..scope.state.config().comfyui.clone()
+        };
+        let result = run_image(&scope, &config, json!({"prompt":"a lighthouse"}), false).await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.images.len(), 1);
+        assert!(result.images[0].ends_with(".webp"));
+        assert!(
+            result
+                .output
+                .as_deref()
+                .is_some_and(|output| output.contains("Generated 1 image(s)"))
+        );
+        let chat_id = scope.chat_id.expect("the fixture scope has a chat");
+        let stored = root
+            .join(scope.workspace_id.to_string())
+            .join(chat_id.to_string())
+            .join(chat_id.to_string())
+            .join(result.images[0].rsplit('/').next().unwrap());
+        assert_eq!(tokio::fs::read(stored).await.unwrap(), [1, 2, 3, 4]);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_configuration_and_unwritable_storage_return_tool_errors() {
+        let scope = scope();
+        let invalid = ComfyUiConfig {
+            base_url: String::new(),
+            ..scope.state.config().comfyui.clone()
+        };
+        let result = run_image(&scope, &invalid, json!({"prompt":"a lighthouse"}), false).await;
+        assert_eq!(
+            result.error.as_deref(),
+            Some(
+                "Image generation is not configured: invalid ComfyUI configuration: COMFYUI_BASE_URL is empty"
+            )
+        );
+
+        let server = successful_comfy().await;
+        let root = std::env::temp_dir().join(format!("zone-image-tool-file-{}", Uuid::new_v4()));
+        tokio::fs::write(&root, b"not a directory").await.unwrap();
+        let config = ComfyUiConfig {
+            base_url: server.uri(),
+            artifact_root: root.clone(),
+            poll_interval_ms: 10,
+            ..scope.state.config().comfyui.clone()
+        };
+        let result = run_image(&scope, &config, json!({"prompt":"a lighthouse"}), false).await;
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Image generation failed: could not store the image")
+        );
+        tokio::fs::remove_file(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_without_an_explicit_or_historical_image_explains_the_contract() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let Ok(database) = sqlx::PgPool::connect(&database_url).await else {
+            return;
+        };
+        let mut scope = scope();
+        scope.state = AppState::new(test_config(), database, None);
+        let config = scope.state.config().comfyui.clone();
+        let result = run_image(&scope, &config, json!({"prompt":"make it blue"}), true).await;
+        assert_eq!(
+            result.error.as_deref(),
+            Some("edit_image needs a source image. Pass image_url or attach an image first.")
+        );
+    }
+
+    #[test]
+    fn persisted_extension_follows_the_generated_mime() {
+        assert_eq!(extension_for("image/jpeg"), "jpg");
+        assert_eq!(extension_for("image/webp"), "webp");
+        assert_eq!(extension_for("image/png"), "png");
+        assert_eq!(extension_for("application/octet-stream"), "png");
     }
 }

@@ -997,6 +997,10 @@ describe('ChatsPage', () => {
         clear.mockRestore();
       };
       return (elapsed: number): void => {
+        // Flush the pending effect that captures `started` before the clock
+        // moves, or it captures the advanced value and never reports elapsed.
+        act(() => {});
+        expect(ticks.size).toBeGreaterThan(0);
         now.mockReturnValue(elapsed);
         act(() => {
           for (const tick of ticks.values()) tick();

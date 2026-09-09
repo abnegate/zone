@@ -129,6 +129,11 @@ test.describe('Chat regressions', () => {
     await page.click('a[href="/chats"]');
     await openChat(page);
 
+    let completeResponse: () => void = () => {};
+    const responseCanComplete = new Promise<void>((resolve) => {
+      completeResponse = resolve;
+    });
+
     socket.setOnSend(async () => {
       await socket.emit({ type: 'message_start', message_id: 'a1', role: 'assistant' });
       await socket.emit({ type: 'reasoning', content: '> Search the workspace first.' });
@@ -168,6 +173,7 @@ test.describe('Chat regressions', () => {
         duration_ms: 9,
       });
       await socket.emit({ type: 'reasoning', content: 'Fridays are the deploy window.' });
+      await responseCanComplete;
       await socket.emit({
         type: 'message_end',
         message_id: 'a1',
@@ -206,6 +212,8 @@ test.describe('Chat regressions', () => {
     await expect(page.getByText('That hit looks right; read it.')).toBeVisible();
     await expect(page.getByText('Read a workspace document')).toBeVisible();
     await expect(page.getByText('Fridays are the deploy window.')).toBeVisible();
+    await expect(page.locator('[data-testid="reasoning"][open]')).toHaveCount(3);
+    completeResponse();
     await expect(page.getByText('We deploy on Fridays.')).toBeVisible();
 
     const order = await page.locator('.messages-container').innerText();
@@ -219,8 +227,9 @@ test.describe('Chat regressions', () => {
       order.indexOf('Read a workspace document')
     );
 
-    const openBlocks = page.locator('[data-testid="reasoning"][open]');
-    await expect(openBlocks).toHaveCount(2);
+    const reasoningBlocks = page.locator('[data-testid="reasoning"]');
+    await expect(reasoningBlocks).toHaveCount(3);
+    await expect(page.locator('[data-testid="reasoning"][open]')).toHaveCount(2);
     await expect(page.locator('[data-testid="reasoning"] blockquote')).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('thinking-between-tools.png'), fullPage: true });
   });
