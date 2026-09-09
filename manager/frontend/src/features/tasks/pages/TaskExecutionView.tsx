@@ -1,6 +1,7 @@
 import { Badge, Button, Modal } from '@zone/ui';
 import { useEffect, useRef, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
+import { ActionReceipts } from '../../chats/components';
 import type { Task, TaskRun, TaskRunLog } from '../types';
 
 const ACTIVITIES: Record<string, string> = {
@@ -196,15 +197,25 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
           <h3>Execution Logs</h3>
           {logs.length ? (
             <div className="logs-container">
-              {logs.map((log) => (
-                <div key={log.id} className="log-entry">
-                  <span className="log-phase">{ACTIVITIES[log.phase] ?? log.phase}</span>
-                  <span className="log-details">
-                    {log.agent_type} · {log.level}
-                  </span>
-                  <span className="log-message">{log.message}</span>
-                </div>
-              ))}
+              {logs.map((log) => {
+                // A receipt carries the actor, target, outcome and a link to
+                // the item. Its log message is only "Workspace action receipt",
+                // so showing the line alone throws the record away.
+                const receipt = log.metadata?.action_receipt;
+                return (
+                  <div key={log.id} className="log-entry">
+                    <span className="log-phase">{ACTIVITIES[log.phase] ?? log.phase}</span>
+                    <span className="log-details">
+                      {log.agent_type} · {log.level}
+                    </span>
+                    {receipt ? (
+                      <ActionReceipts receipts={[receipt]} />
+                    ) : (
+                      <span className="log-message">{log.message}</span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <p className="execution-hint">
