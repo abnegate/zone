@@ -23,6 +23,7 @@ pub mod evaluation;
 pub mod gathering;
 pub mod housekeeping;
 pub mod indexing;
+pub mod instructions;
 pub mod knowledge_refresh;
 pub mod learning;
 pub mod notify;
