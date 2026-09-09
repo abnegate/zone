@@ -21,17 +21,14 @@ export default function PermissionGate({
   const auth = (useAuthHook ?? useAuth)();
   const { hasPermission, hasAnyPermission, hasAllPermissions } = auth;
 
-  // Check single permission
   if (permission) {
     return hasPermission(permission) ? children : fallback;
   }
 
-  // Check multiple permissions
   if (permissions && permissions.length > 0) {
     const hasAccess = requireAll ? hasAllPermissions(permissions) : hasAnyPermission(permissions);
     return hasAccess ? children : fallback;
   }
 
-  // No permissions specified, render children
-  return <>{children}</>;
+  return children;
 }
