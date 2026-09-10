@@ -45,12 +45,20 @@ jobs:
           retention-days: 30
 
   test:
-    name: Tests (${{ matrix.browser }})
+    name: Tests (${{ matrix.browser }} ${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        browser: [chromium, firefox, webkit]
+        browser: [firefox, webkit]
+        shards: [4]
+        shard: [1, 2, 3, 4]
+        # Chromium also collects the E2E coverage report, which is one file
+        # per run, so it stays in a single job.
+        include:
+          - browser: chromium
+            shards: 1
+            shard: 1
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,7 +83,7 @@ jobs:
 
       - name: Run Playwright tests
         working-directory: manager/frontend
-        run: bun run test:e2e
+        run: bun run test:e2e -- --shard=${{ matrix.shard }}/${{ matrix.shards }}
         env:
           BROWSER: ${{ matrix.browser }}
           COLLECT_COVERAGE: ${{ matrix.browser == 'chromium' }}
@@ -92,7 +100,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
-          name: playwright-report-${{ matrix.browser }}
+          name: playwright-report-${{ matrix.browser }}-${{ matrix.shard }}
           path: manager/frontend/playwright-report/
           retention-days: 30
 
@@ -100,7 +108,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
-          name: test-results-${{ matrix.browser }}
+          name: test-results-${{ matrix.browser }}-${{ matrix.shard }}
           path: manager/frontend/test-results/
           retention-days: 7
 
