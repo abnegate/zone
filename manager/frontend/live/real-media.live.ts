@@ -26,10 +26,12 @@ async function fetchAttachment(
 ): Promise<Buffer> {
   const source = await page.locator(selector).nth(index).getAttribute('src');
   expect(source, 'the media element resolved no source').toBeTruthy();
+  // A typed array crosses the evaluate boundary as one buffer; a plain array
+  // is serialised element by element, and a 4096-square upscale is 24 MB.
   const bytes = await page.evaluate(async (url) => {
     const response = await fetch(url as string);
     if (!response.ok) throw new Error(`artifact fetch failed: ${response.status}`);
-    return Array.from(new Uint8Array(await response.arrayBuffer()));
+    return new Uint8Array(await response.arrayBuffer());
   }, source);
   return Buffer.from(bytes);
 }
@@ -51,15 +53,18 @@ async function send(page: import('@playwright/test').Page, message: string) {
   await box.fill(message);
   await box.press('Enter');
   await expect(page.locator('.message-user').filter({ hasText: message })).toBeVisible();
+  // A turn that fails renders an alert and no assistant message, so waiting on
+  // the reply alone runs the whole media timeout before the alert is read.
+  const failures = page.getByRole('alert');
+  const failure = failures.nth(await failures.count());
+  await expect(assistant.nth(before).or(failure).first()).toBeVisible({ timeout: 1_500_000 });
+  if (await failure.count()) {
+    expect(await failure.innerText(), 'the turn reported a failure').toBe('');
+  }
   // `.message-status` is absent until `message_start`, so waiting for it to
   // reach zero returns before the turn begins and the long timeout below never
   // applies -- the media assertions would then run on the 30s default.
-  await expect(assistant).toHaveCount(before + 1, { timeout: 1_500_000 });
   await expect(page.locator('.message-status')).toHaveCount(0, { timeout: 1_500_000 });
-  const failure = page.getByRole('alert');
-  if (await failure.count()) {
-    expect(await failure.first().innerText()).toBe('');
-  }
 }
 
 test.describe('real models', () => {
