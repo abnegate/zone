@@ -455,6 +455,9 @@ pub enum ServerMessage {
         arguments: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
+        /// The model's stated reason, for side-effecting tools that carry one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// A mutating file or shell tool is waiting for the user to confirm.
     ToolApprovalRequired {
@@ -462,6 +465,10 @@ pub enum ServerMessage {
         tool_call_id: String,
         name: String,
         arguments: String,
+        /// Why the model says it needs this. Model-authored, so the console
+        /// shows it as a claim the reader is being asked to weigh.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// A tool finished. `detail` is a short outcome for display, not the full
     /// output the model receives.
@@ -2273,7 +2280,7 @@ async fn load_web_search(
         return search;
     }
     match SearxngClient::new(state.config().web_search.clone()) {
-        Ok(client) => match client.search(&query).await {
+        Ok(client) => match client.search(&query, None).await {
             Ok(hits) if !hits.is_empty() => SearchContext::Results(hits),
             Ok(_) => SearchContext::Empty,
             Err(e) => {
@@ -2635,7 +2642,7 @@ async fn handle_chat_generation(
                             }
                         }
                     }
-                    Some(AgentEvent::ToolApprovalRequired { id, name, arguments }) => {
+                    Some(AgentEvent::ToolApprovalRequired { id, name, arguments, reason }) => {
                         if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
                             record.detail = "Waiting for approval…".to_string();
                         }
@@ -2644,6 +2651,7 @@ async fn handle_chat_generation(
                             tool_call_id: id,
                             name,
                             arguments,
+                            reason,
                         };
                         publish(stream, tool_msg).await;
                         persist_now = true;
@@ -2655,6 +2663,7 @@ async fn handle_chat_generation(
                             let text = std::mem::take(&mut round_reasoning);
                             (!text.is_empty()).then_some(text)
                         };
+                        let reason = crate::agent::reason(&arguments);
                         tool_calls.push(ToolCallRecord {
                             id: id.clone(),
                             name: name.clone(),
@@ -2663,6 +2672,7 @@ async fn handle_chat_generation(
                             detail: "Did not finish".to_string(),
                             duration_ms: 0,
                             reasoning: reasoning.clone(),
+                            reason: reason.clone(),
                         });
 
                         let tool_msg = ServerMessage::ToolCall {
@@ -2671,6 +2681,7 @@ async fn handle_chat_generation(
                             name,
                             arguments,
                             reasoning,
+                            reason,
                         };
                         publish(stream, tool_msg).await;
                         persist_now = true;
@@ -3197,6 +3208,7 @@ mod tests {
             name: "read_file".to_string(),
             arguments: "{}".to_string(),
             reasoning: None,
+            reason: None,
         });
         turn.record(&chunk("Found it", 0));
 
@@ -3831,6 +3843,7 @@ mod tests {
             name: "search_knowledge".to_string(),
             arguments: r#"{"query":"deploys"}"#.to_string(),
             reasoning: Some("Need workspace deploy docs.".to_string()),
+            reason: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"tool_call\""));
@@ -3871,12 +3884,14 @@ mod tests {
             detail: "2 tasks".to_string(),
             duration_ms: 7,
             reasoning: None,
+            reason: None,
         }];
         let metadata = serde_json::json!({ "tool_calls": records });
 
         assert_eq!(metadata["tool_calls"][0]["name"], "list_tasks");
         assert_eq!(metadata["tool_calls"][0]["success"], true);
         assert_eq!(metadata["tool_calls"][0]["duration_ms"], 7);
+        assert!(metadata["tool_calls"][0].get("reason").is_none());
     }
 
     #[test]
@@ -3894,6 +3909,7 @@ mod tests {
             detail: "ok".to_string(),
             duration_ms: 3,
             reasoning: Some("Inspect the workspace first.".to_string()),
+            reason: Some("The user asked which tests are failing.".to_string()),
         }];
 
         let merged =
@@ -3903,6 +3919,10 @@ mod tests {
         assert_eq!(
             merged["tool_calls"][0]["reasoning"],
             "Inspect the workspace first."
+        );
+        assert_eq!(
+            merged["tool_calls"][0]["reason"],
+            "The user asked which tests are failing."
         );
     }
 
@@ -3945,6 +3965,7 @@ mod tests {
             success: true,
             outcome: "Task created".to_string(),
             href: "/tasks?id=task-1".to_string(),
+            reason: None,
         }];
         let merged =
             merge_metadata(None, &[], &[], &receipts, None).expect("receipts produce metadata");
@@ -3990,6 +4011,7 @@ mod tests {
                 success: true,
                 outcome: "Task created".to_string(),
                 href: "/tasks?id=task-1".to_string(),
+                reason: None,
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -4191,11 +4213,45 @@ mod tests {
             message_id: Uuid::nil(),
             tool_call_id: "call_1".into(),
             name: "write_file".into(),
-            arguments: r#"{"path":"x"}"#.into(),
+            arguments: r#"{"path":"x","reason":"Persist the config the user dictated."}"#.into(),
+            reason: Some("Persist the config the user dictated.".into()),
         })
         .unwrap();
         assert_eq!(json["type"], "tool_approval_required");
         assert_eq!(json["tool_call_id"], "call_1");
         assert_eq!(json["name"], "write_file");
+        assert_eq!(json["reason"], "Persist the config the user dictated.");
+    }
+
+    #[test]
+    fn an_approval_request_without_a_reason_omits_the_field() {
+        let json = serde_json::to_value(ServerMessage::ToolApprovalRequired {
+            message_id: Uuid::nil(),
+            tool_call_id: "call_1".into(),
+            name: "run_shell".into(),
+            arguments: r#"{"command":"ls"}"#.into(),
+            reason: None,
+        })
+        .unwrap();
+        assert_eq!(json["type"], "tool_approval_required");
+        assert!(json.get("reason").is_none());
+    }
+
+    #[test]
+    fn tool_call_carries_the_stated_reason_to_the_console() {
+        let json = serde_json::to_value(ServerMessage::ToolCall {
+            message_id: Uuid::nil(),
+            tool_call_id: "call_1".into(),
+            name: "create_pull_request".into(),
+            arguments: r#"{"title":"Fix the export","reason":"The user asked me to open it."}"#
+                .into(),
+            reasoning: None,
+            reason: Some("The user asked me to open it.".into()),
+        })
+        .unwrap();
+        assert_eq!(json["type"], "tool_call");
+        assert_eq!(json["name"], "create_pull_request");
+        assert_eq!(json["reason"], "The user asked me to open it.");
+        assert!(json.get("reasoning").is_none());
     }
 }

@@ -157,6 +157,81 @@ describe('ToolTrace', () => {
     expect(screen.getByTestId('tool-call').closest('li')).toHaveClass('tool-call--approval');
   });
 
+  it('shows the reason the model gave for a call still awaiting approval', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'run_shell',
+            arguments: '{"command":"rm -rf build"}',
+            pending: true,
+            approval: 'pending',
+            detail: 'Waiting for approval…',
+            reason: 'The user asked me to clear the stale build output.',
+          }),
+        ]}
+        onDecide={() => {}}
+      />
+    );
+
+    expect(
+      screen.getByText('The user asked me to clear the stale build output.')
+    ).toBeInTheDocument();
+    expect(screen.getByTestId('tool-approve')).toBeInTheDocument();
+  });
+
+  it('keeps the reason on the row after the call has completed', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'create_pull_request',
+            detail: 'Opened #42',
+            reason: 'The user asked me to open the pull request.',
+          }),
+        ]}
+      />
+    );
+
+    expect(screen.getByText('Opened #42')).toBeInTheDocument();
+    expect(screen.getByText('The user asked me to open the pull request.')).toBeInTheDocument();
+  });
+
+  it('labels the reason as stated by the model, not observed by the server', () => {
+    render(<ToolTrace calls={[call({ name: 'write_file', reason: 'Persist the config.' })]} />);
+
+    expect(screen.getByTestId('tool-call-reason')).toHaveTextContent('Reason, stated by the model');
+  });
+
+  it('says so out loud when a side-effecting call gave no reason', () => {
+    render(<ToolTrace calls={[call({ name: 'send_message', detail: 'Message sent' })]} />);
+
+    expect(screen.getByTestId('tool-call-reason')).toBeInTheDocument();
+    expect(screen.getByText('No reason given')).toBeInTheDocument();
+  });
+
+  it('treats a blank reason as no reason rather than an empty line', () => {
+    render(<ToolTrace calls={[call({ name: 'apply_patch', reason: '   ' })]} />);
+
+    expect(screen.getByTestId('tool-call-reason')).toHaveTextContent('No reason given');
+  });
+
+  it('leaves read-only tools out of it entirely', () => {
+    render(<ToolTrace calls={[call({ name: 'search_knowledge' })]} />);
+
+    expect(screen.queryByTestId('tool-call-reason')).not.toBeInTheDocument();
+  });
+
+  it('shows a reason volunteered by a tool this client has never heard of', () => {
+    render(
+      <ToolTrace
+        calls={[call({ name: 'a_tool_from_a_later_release', reason: 'Because I must.' })]}
+      />
+    );
+
+    expect(screen.getByText('Because I must.')).toBeInTheDocument();
+  });
+
   it('hides approval buttons after the reader has decided', () => {
     render(
       <ToolTrace

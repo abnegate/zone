@@ -81,6 +81,17 @@
   font-size: var(--ui-text-sm);
 }
 
+/* The model's own account of why, spanning the row so a full sentence reads as
+   prose. Every other field on this card is server-observed; the label is what
+   keeps the difference visible. */
+.action-receipt-reason {
+  grid-column: 1 / -1;
+}
+
+.action-receipt-reason dd {
+  overflow-wrap: anywhere;
+}
+
 .action-receipt-link {
   justify-self: start;
   color: var(--ui-accent, var(--ui-text-primary));

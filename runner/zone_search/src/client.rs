@@ -7,11 +7,16 @@ use serde::Deserialize;
 use std::time::Duration;
 
 use crate::config::WebSearchConfig;
+use crate::time_range::TimeRange;
 
 /// Truncate user messages so a pasted file cannot become the search query.
 const MAX_QUERY_CHARS: usize = 500;
 
 const USER_AGENT: &str = "zone-server/web-search";
+
+/// Query placeholders a configured URL template may carry.
+const ANGLE_QUERY_PLACEHOLDER: &str = "<query>";
+const BRACE_QUERY_PLACEHOLDER: &str = "{query}";
 
 /// Prefix the console appends when inlining attached files into `content`.
 const ATTACHED_FILE_MARKER: &str = "\n\nAttached file:";
@@ -146,8 +151,13 @@ impl SearxngClient {
         Ok(Self { http, config })
     }
 
-    /// Query SearXNG and return at most `result_count` hits.
-    pub async fn search(&self, query: &str) -> Result<Vec<SearchHit>, SearchError> {
+    /// Query SearXNG and return at most `result_count` hits, optionally
+    /// restricted to results published within `range`.
+    pub async fn search(
+        &self,
+        query: &str,
+        range: Option<TimeRange>,
+    ) -> Result<Vec<SearchHit>, SearchError> {
         let started = std::time::Instant::now();
         let query = sanitize_query(query);
         if query.is_empty() {
@@ -155,7 +165,7 @@ impl SearxngClient {
             return Ok(Vec::new());
         }
 
-        let url = build_search_url(&self.config.query_url, &query);
+        let url = build_search_url(&self.config.query_url, &query, range);
         let response = match self.http.get(&url).send().await {
             Ok(response) => response,
             Err(error) => {
@@ -399,17 +409,40 @@ fn has_web_intent(lower: &str) -> bool {
     FRESH_QUESTIONS.iter().any(|phrase| lower.contains(phrase))
 }
 
-/// Substitute `<query>` / `{query}` in the configured template, or append `q=`.
-pub fn build_search_url(template: &str, query: &str) -> String {
-    let encoded = urlencoding::encode(query);
-    if template.contains("<query>") {
-        template.replace("<query>", encoded.as_ref())
-    } else if template.contains("{query}") {
-        template.replace("{query}", encoded.as_ref())
-    } else {
-        let separator = if template.contains('?') { '&' } else { '?' };
-        format!("{template}{separator}q={encoded}&format=json")
+/// Add `parameter` to `url`'s query string, ahead of any fragment.
+///
+/// A fragment is never sent in the request, so a parameter appended past the
+/// `#` reaches no engine and the filter is silently dropped. Splitting it off
+/// first also keeps a `?` inside the fragment from being read as a query
+/// string that is already open.
+fn append_parameter(url: &mut String, parameter: &str) {
+    let fragment = url.find('#').map(|hash| url.split_off(hash));
+    url.push(if url.contains('?') { '&' } else { '?' });
+    url.push_str(parameter);
+    if let Some(fragment) = fragment {
+        url.push_str(&fragment);
     }
+}
+
+/// Substitute `<query>` / `{query}` in the configured template, or append `q=`.
+///
+/// A template may place the query in the path, so the separator for an
+/// appended parameter follows the built URL rather than the template.
+pub fn build_search_url(template: &str, query: &str, range: Option<TimeRange>) -> String {
+    let encoded = urlencoding::encode(query);
+    let mut url = if template.contains(ANGLE_QUERY_PLACEHOLDER) {
+        template.replace(ANGLE_QUERY_PLACEHOLDER, encoded.as_ref())
+    } else if template.contains(BRACE_QUERY_PLACEHOLDER) {
+        template.replace(BRACE_QUERY_PLACEHOLDER, encoded.as_ref())
+    } else {
+        let mut url = template.to_string();
+        append_parameter(&mut url, &format!("q={encoded}&format=json"));
+        url
+    };
+    if let Some(range) = range {
+        append_parameter(&mut url, &format!("{}={range}", TimeRange::PARAM));
+    }
+    url
 }
 
 #[cfg(test)]
@@ -417,26 +450,143 @@ mod tests {
     use super::*;
     use crate::config::DEFAULT_SEARXNG_QUERY_URL;
     use serde_json::json;
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn build_search_url_replaces_placeholders() {
         assert_eq!(
-            build_search_url(DEFAULT_SEARXNG_QUERY_URL, "open source"),
+            build_search_url(DEFAULT_SEARXNG_QUERY_URL, "open source", None),
             "http://gluetun:8080/search?q=open%20source&format=json"
         );
         assert_eq!(
-            build_search_url("http://gluetun:8080/search?q={query}&format=json", "a&b"),
+            build_search_url(
+                "http://gluetun:8080/search?q={query}&format=json",
+                "a&b",
+                None
+            ),
             "http://gluetun:8080/search?q=a%26b&format=json"
         );
         assert_eq!(
-            build_search_url("http://gluetun:8080/search", "hello"),
+            build_search_url("http://gluetun:8080/search", "hello", None),
             "http://gluetun:8080/search?q=hello&format=json"
         );
         assert_eq!(
-            build_search_url("http://gluetun:8080/search?lang=en", "hello"),
+            build_search_url("http://gluetun:8080/search?lang=en", "hello", None),
             "http://gluetun:8080/search?lang=en&q=hello&format=json"
+        );
+    }
+
+    /// Each template shape reaches the range differently: the two placeholder
+    /// forms keep whatever separator the operator wrote, and the appended form
+    /// has already opened a query string of its own.
+    #[test]
+    fn build_search_url_appends_the_range_to_every_template_shape() {
+        assert_eq!(
+            build_search_url(
+                DEFAULT_SEARXNG_QUERY_URL,
+                "open source",
+                Some(TimeRange::Day)
+            ),
+            "http://gluetun:8080/search?q=open%20source&format=json&time_range=day"
+        );
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search?q={query}&format=json",
+                "a&b",
+                Some(TimeRange::Week)
+            ),
+            "http://gluetun:8080/search?q=a%26b&format=json&time_range=week"
+        );
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search",
+                "hello",
+                Some(TimeRange::Month)
+            ),
+            "http://gluetun:8080/search?q=hello&format=json&time_range=month"
+        );
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search?lang=en",
+                "hello",
+                Some(TimeRange::Day)
+            ),
+            "http://gluetun:8080/search?lang=en&q=hello&format=json&time_range=day"
+        );
+    }
+
+    /// A fragment is never sent to the server, so a parameter appended after
+    /// one reaches nothing and the engine silently ignores the filter. Every
+    /// parameter has to land ahead of the `#`.
+    #[test]
+    fn build_search_url_keeps_a_template_fragment_behind_the_parameters() {
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search?q={query}&format=json#view",
+                "hello",
+                Some(TimeRange::Day)
+            ),
+            "http://gluetun:8080/search?q=hello&format=json&time_range=day#view"
+        );
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search/<query>#view",
+                "hello",
+                Some(TimeRange::Week)
+            ),
+            "http://gluetun:8080/search/hello?time_range=week#view"
+        );
+        assert_eq!(
+            build_search_url("http://gluetun:8080/search#view", "hello", None),
+            "http://gluetun:8080/search?q=hello&format=json#view"
+        );
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search#view",
+                "hello",
+                Some(TimeRange::Month)
+            ),
+            "http://gluetun:8080/search?q=hello&format=json&time_range=month#view"
+        );
+    }
+
+    /// A `?` inside a fragment does not open a query string, so it must not
+    /// decide the separator either.
+    #[test]
+    fn build_search_url_ignores_a_question_mark_inside_a_fragment() {
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search/<query>#view?tab=all",
+                "hello",
+                Some(TimeRange::Day)
+            ),
+            "http://gluetun:8080/search/hello?time_range=day#view?tab=all"
+        );
+    }
+
+    /// A placeholder can sit in the path, leaving no query string to extend.
+    #[test]
+    fn build_search_url_opens_a_query_string_for_a_path_placeholder() {
+        assert_eq!(
+            build_search_url("http://gluetun:8080/search/<query>", "hello", None),
+            "http://gluetun:8080/search/hello"
+        );
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search/<query>",
+                "hello",
+                Some(TimeRange::Week)
+            ),
+            "http://gluetun:8080/search/hello?time_range=week"
+        );
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search/{query}",
+                "open source",
+                Some(TimeRange::Month)
+            ),
+            "http://gluetun:8080/search/open%20source?time_range=month"
         );
     }
 
@@ -585,7 +735,7 @@ mod tests {
             .await;
 
         let client = test_client(format!("{}/search?q=<query>&format=json", server.uri()), 2);
-        let hits = client.search("open source").await.expect("search");
+        let hits = client.search("open source", None).await.expect("search");
         assert_eq!(
             hits,
             vec![
@@ -618,7 +768,7 @@ mod tests {
             .await;
 
         let client = test_client(format!("{}/search?q=<query>&format=json", server.uri()), 5);
-        let hits = client.search("q").await.expect("search");
+        let hits = client.search("q", None).await.expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "https://ok.test");
         assert_eq!(hits[0].url, "https://ok.test");
@@ -634,7 +784,7 @@ mod tests {
             .await;
 
         let client = test_client(format!("{}/search?q=<query>&format=json", server.uri()), 5);
-        let err = client.search("q").await.expect_err("http error");
+        let err = client.search("q", None).await.expect_err("http error");
         assert!(matches!(err, SearchError::Status(429)));
     }
 
@@ -644,6 +794,57 @@ mod tests {
             "http://127.0.0.1:1/search?q=<query>&format=json".to_string(),
             5,
         );
-        assert!(client.search("   ").await.expect("empty").is_empty());
+        assert!(client.search("   ", None).await.expect("empty").is_empty());
+    }
+
+    /// A schema the engine never receives is worthless, so the mock only
+    /// answers a request that actually carries the narrowed range.
+    #[tokio::test]
+    async fn search_sends_the_range_to_the_engine() {
+        for range in TimeRange::ALL {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/search"))
+                .and(query_param("q", "zone release"))
+                .and(query_param(TimeRange::PARAM, range.as_str()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "results": [{"title": "Zone", "url": "https://zone.test", "content": "Fresh"}]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let client = test_client(format!("{}/search?q=<query>&format=json", server.uri()), 5);
+            let hits = client
+                .search("zone release", Some(range))
+                .await
+                .unwrap_or_else(|error| panic!("{range} search failed: {error}"));
+
+            assert_eq!(hits.len(), 1, "{range}");
+        }
+    }
+
+    #[tokio::test]
+    async fn search_without_a_range_sends_no_range_parameter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search"))
+            .and(query_param_is_missing(TimeRange::PARAM))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"title": "Zone", "url": "https://zone.test", "content": ""}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = test_client(format!("{}/search?q=<query>&format=json", server.uri()), 5);
+        assert_eq!(
+            client
+                .search("zone release", None)
+                .await
+                .expect("search")
+                .len(),
+            1
+        );
     }
 }

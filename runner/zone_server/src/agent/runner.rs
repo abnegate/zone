@@ -96,10 +96,13 @@ pub enum AgentEvent {
     /// the consumer decides how to store it and whether it is a duplicate.
     Image(String),
     /// A mutating file or shell tool is waiting for the user to confirm.
+    /// `reason` is the model's own account of why, shown alongside the request
+    /// so the reader is deciding on a stated intent rather than bare arguments.
     ToolApprovalRequired {
         id: String,
         name: String,
         arguments: String,
+        reason: Option<String>,
     },
     /// The turn could not continue. Anything already streamed still stands.
     Failed(String),
@@ -449,6 +452,7 @@ pub fn run_with_context(
                             id: call.id.clone(),
                             name: call.function.name.clone(),
                             arguments: call.function.arguments.clone(),
+                            reason: super::reason(&call.function.arguments),
                         };
                         !approval.awaited_decision(&call.id, pending).await
                     } else {

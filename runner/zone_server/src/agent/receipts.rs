@@ -5,6 +5,12 @@
 //! record: what happened, to which item, by whom, when, and whether it stuck.
 //! That record is built here from the tool name, arguments, and result — never
 //! from model prose — then stored on the assistant message.
+//!
+//! `reason` is the one deliberate exception. It is the model's own sentence
+//! saying why it made the call, carried so a human can judge an action they
+//! did not authorise one by one. It is model-authored and unverified, so it is
+//! labelled as stated rather than observed wherever it is shown, and nothing
+//! here treats it as evidence.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -44,6 +50,10 @@ pub struct ActionReceipt {
     pub success: bool,
     pub outcome: String,
     pub href: String,
+    /// Why the model said it was making this write. Model-authored, unlike
+    /// every other field here, and absent on receipts stored before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Tools that mutate a workspace item and should mint a receipt.
@@ -100,6 +110,7 @@ pub fn from_write(
         success: result.success,
         outcome,
         href,
+        reason: super::reason(arguments),
     })
 }
 
@@ -403,5 +414,63 @@ mod tests {
         assert_eq!(json["actor_id"], actor().to_string());
         let parsed: ActionReceipt = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, built);
+    }
+
+    #[test]
+    fn a_receipt_carries_the_reason_the_model_stated() {
+        let built = receipt(
+            "send_message",
+            r#"{"chat_id":"chat-9","content":"Standup is at ten","reason":"The user asked me to tell the team."}"#,
+            ToolResult::success(json!({"id":"msg-3","chat_id":"chat-9"}).to_string()),
+        );
+
+        assert_eq!(
+            built.reason.as_deref(),
+            Some("The user asked me to tell the team.")
+        );
+
+        let json = serde_json::to_value(&built).unwrap();
+        assert_eq!(json["reason"], "The user asked me to tell the team.");
+        let parsed: ActionReceipt = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, built);
+    }
+
+    #[test]
+    fn a_receipt_without_a_reason_round_trips_unchanged() {
+        let built = receipt(
+            "create_task",
+            r#"{"title":"Ship"}"#,
+            ToolResult::success(json!({"id":"task-1","title":"Ship"}).to_string()),
+        );
+
+        assert_eq!(built.reason, None);
+        let json = serde_json::to_value(&built).unwrap();
+        assert!(
+            json.get("reason").is_none(),
+            "an absent reason must not be written back as null"
+        );
+        let parsed: ActionReceipt = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, built);
+    }
+
+    #[test]
+    fn a_receipt_stored_before_the_reason_existed_still_parses() {
+        let stored = json!({
+            "id": "call_1",
+            "action": "send_message",
+            "target_type": "message",
+            "target_id": "msg-3",
+            "target_label": "Standup is at ten",
+            "actor_id": actor().to_string(),
+            "actor_name": "Alice",
+            "occurred_at": "2026-09-05T10:47:00.000Z",
+            "success": true,
+            "outcome": "Message sent",
+            "href": "/chats?id=chat-9&message=msg-3"
+        });
+
+        let parsed: ActionReceipt = serde_json::from_value(stored).unwrap();
+        assert_eq!(parsed.reason, None);
+        assert_eq!(parsed.outcome, "Message sent");
     }
 }
