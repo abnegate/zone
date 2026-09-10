@@ -226,7 +226,10 @@ export default function WorkspaceMembersSection({
     return members.filter((m) => m.role === 'owner').length;
   };
 
+  const canManageMembers = currentUserRole === 'admin' || currentUserRole === 'owner';
+
   const canModifyMember = (member: WorkspaceMember): boolean => {
+    if (!canManageMembers) return false;
     // Cannot modify yourself
     if (member.user_id === user?.id) return false;
     // Cannot modify last owner
@@ -234,13 +237,8 @@ export default function WorkspaceMembersSection({
     return true;
   };
 
-  const getAvailableRoles = (
-    member: WorkspaceMember
-  ): Array<{ value: WorkspaceRole; label: string }> => {
-    // Viewers and members can't change roles (already prevented by canModifyMember, but extra safety)
-    if (currentUserRole === 'viewer' || currentUserRole === 'member') {
-      return roleOptions.filter((r) => r.value === member.role);
-    }
+  const getAssignableRoles = (): Array<{ value: WorkspaceRole; label: string }> => {
+    if (!canManageMembers) return [];
 
     // Admins can only assign viewer/member/admin roles (not owner)
     if (currentUserRole === 'admin') {
@@ -250,6 +248,11 @@ export default function WorkspaceMembersSection({
     // Owners can assign any role
     return roleOptions;
   };
+
+  const getAvailableRoles = (
+    member: WorkspaceMember
+  ): Array<{ value: WorkspaceRole; label: string }> =>
+    canManageMembers ? getAssignableRoles() : roleOptions.filter((r) => r.value === member.role);
 
   if (loading) {
     return <div className="loading-state">Loading members...</div>;
@@ -264,7 +267,7 @@ export default function WorkspaceMembersSection({
           <h2 className="section-title">Workspace Members</h2>
           <p className="section-description">Manage members and their roles in this workspace.</p>
         </div>
-        {(currentUserRole === 'admin' || currentUserRole === 'owner') && (
+        {canManageMembers && (
           <Button onClick={() => setShowAddModal(true)} variant="primary">
             Add Member
           </Button>
@@ -392,11 +395,7 @@ export default function WorkspaceMembersSection({
             label="Role"
             value={addRole}
             onChange={(e) => setAddRole(e.target.value as WorkspaceRole)}
-            options={
-              currentUserRole === 'admin'
-                ? roleOptions.filter((r) => r.value !== 'owner')
-                : roleOptions
-            }
+            options={getAssignableRoles()}
           />
           <div className="modal-actions">
             <Button
