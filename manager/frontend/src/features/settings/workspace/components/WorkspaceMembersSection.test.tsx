@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { OrganizationMember, WorkspaceMember } from '../types';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { OrganizationMember, WorkspaceMember, WorkspaceRole } from '../types';
 
 // Mock client
 const mockClient = {
@@ -83,6 +83,56 @@ const mockOrgMember1: OrganizationMember = {
   email: 'orgmember@test.com',
   display_name: 'Org Member',
   joined_at: '2024-01-05T00:00:00Z',
+};
+
+const rosterWithSignedInUserAs = (role: WorkspaceRole): WorkspaceMember[] => [
+  {
+    ...mockOwner,
+    id: 'ws-member-0',
+    user_id: 'user-0',
+    email: 'other-owner@test.com',
+    display_name: 'Other Owner',
+  },
+  // A second owner, so it is the caller's role and not the last-owner rule that
+  // disables the owner row.
+  {
+    ...mockOwner,
+    id: 'ws-member-8',
+    user_id: 'user-8',
+    email: 'spare-owner@test.com',
+    display_name: 'Spare Owner',
+  },
+  mockAdmin,
+  mockMember,
+  mockViewer,
+  {
+    ...mockMember,
+    id: 'ws-member-9',
+    user_id: 'user-1',
+    role,
+    email: 'self@test.com',
+    display_name: 'Signed In User',
+  },
+];
+
+const memberRow = (email: string): HTMLElement => {
+  const row = screen
+    .getAllByRole('row')
+    .find((candidate) => candidate.textContent?.includes(email));
+  if (!row) throw new Error(`no members table row for ${email}`);
+  return row;
+};
+
+const removeButtonFor = (email: string): HTMLElement =>
+  within(memberRow(email)).getByRole('button', { name: /Remove/i });
+
+const roleSelectFor = (email: string): HTMLElement =>
+  within(memberRow(email)).getByRole('combobox');
+
+const rolesOfferedForNewMember = (): string[] => {
+  const field = screen.getByRole('combobox', { name: 'Role' }).closest('.ui-select-wrapper');
+  if (!field) throw new Error('no role field in the add member modal');
+  return Array.from(field.querySelectorAll('option')).map((option) => option.value);
 };
 
 describe('WorkspaceMembersSection', () => {
@@ -446,6 +496,81 @@ describe('WorkspaceMembersSection', () => {
         });
         expect(ownerRoleSelect).toBeDisabled();
       });
+    });
+  });
+
+  describe('Caller Role Restrictions', () => {
+    const renderAs = async (role: WorkspaceRole) => {
+      mockClient.getWorkspaceMembers.mockResolvedValue({ members: rosterWithSignedInUserAs(role) });
+      render(<WorkspaceMembersSection workspaceId="ws-123" orgId="org-123" />);
+      await waitFor(() => {
+        expect(screen.getByText('admin@test.com')).toBeInTheDocument();
+      });
+    };
+
+    const openAddMemberModal = async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
+      await waitFor(() => {
+        expect(screen.getByText('Add Workspace Member')).toBeInTheDocument();
+      });
+    };
+
+    it('offers a viewer no control over any other member', async () => {
+      await renderAs('viewer');
+
+      expect(screen.queryByRole('button', { name: /Add Member/i })).not.toBeInTheDocument();
+      expect(removeButtonFor('viewer@test.com')).toBeDisabled();
+      expect(roleSelectFor('viewer@test.com')).toBeDisabled();
+      expect(removeButtonFor('member@test.com')).toBeDisabled();
+      expect(roleSelectFor('member@test.com')).toBeDisabled();
+      expect(removeButtonFor('admin@test.com')).toBeDisabled();
+      expect(roleSelectFor('admin@test.com')).toBeDisabled();
+      expect(removeButtonFor('other-owner@test.com')).toBeDisabled();
+      expect(roleSelectFor('other-owner@test.com')).toBeDisabled();
+    });
+
+    it('offers a member no control over any other member', async () => {
+      await renderAs('member');
+
+      expect(screen.queryByRole('button', { name: /Add Member/i })).not.toBeInTheDocument();
+      expect(removeButtonFor('viewer@test.com')).toBeDisabled();
+      expect(roleSelectFor('viewer@test.com')).toBeDisabled();
+      expect(removeButtonFor('member@test.com')).toBeDisabled();
+      expect(roleSelectFor('member@test.com')).toBeDisabled();
+      expect(removeButtonFor('admin@test.com')).toBeDisabled();
+      expect(roleSelectFor('admin@test.com')).toBeDisabled();
+      expect(removeButtonFor('other-owner@test.com')).toBeDisabled();
+      expect(roleSelectFor('other-owner@test.com')).toBeDisabled();
+    });
+
+    it('offers an admin control over a member', async () => {
+      await renderAs('admin');
+
+      expect(screen.getByRole('button', { name: /Add Member/i })).toBeInTheDocument();
+      expect(removeButtonFor('member@test.com')).toBeEnabled();
+      expect(roleSelectFor('member@test.com')).toBeEnabled();
+    });
+
+    it('offers an owner control over a member', async () => {
+      await renderAs('owner');
+
+      expect(screen.getByRole('button', { name: /Add Member/i })).toBeInTheDocument();
+      expect(removeButtonFor('member@test.com')).toBeEnabled();
+      expect(roleSelectFor('member@test.com')).toBeEnabled();
+    });
+
+    it('offers an admin every role but owner when adding a member', async () => {
+      await renderAs('admin');
+      await openAddMemberModal();
+
+      expect(rolesOfferedForNewMember()).toEqual(['viewer', 'member', 'admin']);
+    });
+
+    it('offers an owner every role when adding a member', async () => {
+      await renderAs('owner');
+      await openAddMemberModal();
+
+      expect(rolesOfferedForNewMember()).toEqual(['viewer', 'member', 'admin', 'owner']);
     });
   });
 

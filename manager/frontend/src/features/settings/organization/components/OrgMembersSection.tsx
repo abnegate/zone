@@ -204,7 +204,10 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     return members.filter((m) => m.role === 'owner').length;
   };
 
+  const canManageMembers = currentUserRole === 'admin' || currentUserRole === 'owner';
+
   const canModifyMember = (member: OrganizationMember): boolean => {
+    if (!canManageMembers) return false;
     // Cannot modify yourself
     if (member.user_id === user?.id) return false;
     // Cannot modify last owner
@@ -212,13 +215,8 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     return true;
   };
 
-  const getAvailableRoles = (
-    member: OrganizationMember
-  ): Array<{ value: OrgRole; label: string }> => {
-    // Members and viewers can't change roles (already prevented by canModifyMember, but extra safety)
-    if (currentUserRole === 'member') {
-      return roleOptions.filter((r) => r.value === member.role);
-    }
+  const getAssignableRoles = (): Array<{ value: OrgRole; label: string }> => {
+    if (!canManageMembers) return [];
 
     // Admins can only assign member/admin roles (not owner)
     if (currentUserRole === 'admin') {
@@ -228,6 +226,11 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     // Owners can assign any role
     return roleOptions;
   };
+
+  const getAvailableRoles = (
+    member: OrganizationMember
+  ): Array<{ value: OrgRole; label: string }> =>
+    canManageMembers ? getAssignableRoles() : roleOptions.filter((r) => r.value === member.role);
 
   if (loading) {
     return <div className="loading-state">Loading members...</div>;
@@ -242,9 +245,11 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
             Manage members and their roles in this organization.
           </p>
         </div>
-        <Button onClick={() => setShowAddModal(true)} variant="primary">
-          Add Member
-        </Button>
+        {canManageMembers && (
+          <Button onClick={() => setShowAddModal(true)} variant="primary">
+            Add Member
+          </Button>
+        )}
       </div>
 
       {error && (
@@ -364,11 +369,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
             label="Role"
             value={addRole}
             onChange={(e) => setAddRole(e.target.value as OrgRole)}
-            options={
-              currentUserRole === 'admin'
-                ? roleOptions.filter((r) => r.value !== 'owner')
-                : roleOptions
-            }
+            options={getAssignableRoles()}
           />
           <div className="modal-actions">
             <Button
