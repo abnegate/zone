@@ -20,7 +20,7 @@ use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
 use zone_core::llm::{LlmClient, LlmConfig, Message};
 use zone_vcs::conflict::{BranchName, ConflictService};
 use zone_vcs::git::GitService;
-use zone_vcs::pull_request::{Description, PrService, PullRequestReception, PullRequestReference};
+use zone_vcs::pull_request::{Description, PrService, PullRequestReception};
 use zone_vcs::subject::Subject;
 
 /// Temperature for a repair: a merge resolution is a mechanical edit, not a draft.
