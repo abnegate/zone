@@ -480,6 +480,13 @@ pub async fn update_member_role(
         Ok(workspace_members::RoleChange::Applied(member)) => {
             Json(WorkspaceMemberResponse::from(*member)).into_response()
         }
+        Ok(workspace_members::RoleChange::LastOwner) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Cannot demote the last owner of the workspace",
+            )),
+        )
+            .into_response(),
         Ok(workspace_members::RoleChange::LastAdmin) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(
@@ -540,6 +547,13 @@ pub async fn remove_member(
 
     match workspace_members::remove_guarded(state.db(), admin.workspace_id, path.user_id).await {
         Ok(workspace_members::Removal::Removed) => StatusCode::NO_CONTENT.into_response(),
+        Ok(workspace_members::Removal::LastOwner) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Cannot remove the last owner of the workspace",
+            )),
+        )
+            .into_response(),
         Ok(workspace_members::Removal::LastAdmin) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(

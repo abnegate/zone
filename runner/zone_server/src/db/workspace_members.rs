@@ -203,6 +203,7 @@ pub enum Removal {
     Removed,
     Missing,
     LastAdmin,
+    LastOwner,
 }
 
 /// Remove a member, refusing to unseat the last admin or owner.
@@ -214,20 +215,13 @@ pub enum Removal {
 pub async fn remove_guarded(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<Removal> {
     let mut transaction = pool.begin().await?;
 
-    let privileged: Vec<Uuid> = sqlx::query_scalar(
-        r#"
-        SELECT user_id FROM workspace_members
-        WHERE workspace_id = $1
-          AND is_active = TRUE
-          AND (role = 'admin' OR role = 'owner')
-        FOR UPDATE
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_all(&mut *transaction)
-    .await?;
+    let privileged = lock_privileged(&mut transaction, workspace_id).await?;
 
-    if privileged.len() <= 1 && privileged.contains(&user_id) {
+    if privileged.owners.len() <= 1 && privileged.owns(user_id) {
+        return Ok(Removal::LastOwner);
+    }
+
+    if privileged.all.len() <= 1 && privileged.holds(user_id) {
         return Ok(Removal::LastAdmin);
     }
 
@@ -481,11 +475,57 @@ pub async fn can_admin(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbRe
 
 /// Count the number of active admins (admin or owner) in a workspace
 /// Used to prevent removal of the last admin
+/// The workspace's active admins and owners, held for the length of a
+/// transaction so a count taken from them still describes the table when the
+/// update lands.
+struct Privileged {
+    all: Vec<Uuid>,
+    owners: Vec<Uuid>,
+}
+
+impl Privileged {
+    fn holds(&self, user_id: Uuid) -> bool {
+        self.all.contains(&user_id)
+    }
+
+    fn owns(&self, user_id: Uuid) -> bool {
+        self.owners.contains(&user_id)
+    }
+}
+
+async fn lock_privileged(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+) -> DbResult<Privileged> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT user_id, role FROM workspace_members
+        WHERE workspace_id = $1
+          AND is_active = TRUE
+          AND (role = 'admin' OR role = 'owner')
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+
+    Ok(Privileged {
+        owners: rows
+            .iter()
+            .filter(|(_, role)| role == WorkspaceRole::Owner.as_str())
+            .map(|(user_id, _)| *user_id)
+            .collect(),
+        all: rows.into_iter().map(|(user_id, _)| user_id).collect(),
+    })
+}
+
 /// Outcome of a role change that must leave the workspace administrable.
 #[derive(Debug)]
 pub enum RoleChange {
     Applied(Box<WorkspaceMemberRow>),
     LastAdmin,
+    LastOwner,
 }
 
 /// Change a member's role, refusing to unseat the last admin or owner.
@@ -504,20 +544,18 @@ pub async fn change_role(
 ) -> DbResult<RoleChange> {
     let mut transaction = pool.begin().await?;
 
-    let privileged: Vec<Uuid> = sqlx::query_scalar(
-        r#"
-        SELECT user_id FROM workspace_members
-        WHERE workspace_id = $1
-          AND is_active = TRUE
-          AND (role = 'admin' OR role = 'owner')
-        FOR UPDATE
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_all(&mut *transaction)
-    .await?;
+    let privileged = lock_privileged(&mut transaction, workspace_id).await?;
 
-    if role < WorkspaceRole::Admin && privileged.len() <= 1 && privileged.contains(&user_id) {
+    // An owner is not interchangeable with an admin here: only an owner may
+    // delete the workspace or seat another owner, so a workspace whose last
+    // owner steps down -- to admin as readily as to member -- is one nobody can
+    // repair. Counting them together would let an owner leave while an admin
+    // stands, which is the state migration 023 exists to undo.
+    if role != WorkspaceRole::Owner && privileged.owners.len() <= 1 && privileged.owns(user_id) {
+        return Ok(RoleChange::LastOwner);
+    }
+
+    if role < WorkspaceRole::Admin && privileged.all.len() <= 1 && privileged.holds(user_id) {
         return Ok(RoleChange::LastAdmin);
     }
 
