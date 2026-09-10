@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { REASON_LABEL, type ActionReceipt, type ActionTarget } from '../types';
+import { type ActionReceipt, type ActionTarget, REASON_LABEL } from '../types';
 import { formatDate } from '../utils';
 import './ActionReceipts.css';
 
