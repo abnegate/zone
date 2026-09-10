@@ -229,7 +229,13 @@ fn private_key_at(text: &str, index: usize) -> Option<usize> {
     if !rest[..line].contains(PEM_PRIVATE) {
         return None;
     }
-    let end = rest.find(PEM_END).map_or(rest.len(), |at| {
+    // Closing on the first END marker lets an intervening one -- an END line
+    // for some other label, sitting in the same output -- cut the redaction
+    // short and leave the rest of the key material standing. Close on the label
+    // this block opened with.
+    let label = rest[PEM_BEGIN.len()..line].trim_end_matches('\r');
+    let closing = format!("{PEM_END}{label}");
+    let end = rest.find(&closing).map_or(rest.len(), |at| {
         rest[at..]
             .find('\n')
             .map_or(rest.len(), |newline| at + newline)
@@ -493,6 +499,26 @@ mod shapes_that_carry_no_prefix {
         assert!(
             redacted.contains("postgres://zone:") && redacted.contains("@db:5432/manager"),
             "the rest of the URL should stay legible: {redacted}"
+        );
+    }
+
+    /// Closing on the first END marker in the text lets an END line for some
+    /// other label -- which the same tool output can carry, next to the key or
+    /// inside it -- end the redaction early and leave the rest standing.
+    #[test]
+    fn an_intervening_end_marker_does_not_close_a_private_key() {
+        let key = concat!(
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "MIIEowIBAAKCAQEAx4fW1pQ8mJ7kR2vLnT5cYdB3sHgKqZ0uWpXvNfE1aOiCjMlP\n",
+            "-----END CERTIFICATE-----\n",
+            "b2ZuRk9tS3hZd0hqTmRQaVFsY0dYcVJzVHZCa0xtWm5Ob3BBcVJzVHZCa0xtWm4=\n",
+            "-----END RSA PRIVATE KEY-----"
+        );
+        let redacted = redact(key);
+        assert!(!redacted.contains("MIIEowIBAAKCAQEA"), "{redacted}");
+        assert!(
+            !redacted.contains("b2ZuRk9tS3hZd0hq"),
+            "the key material after the mismatched marker survived: {redacted}"
         );
     }
 
