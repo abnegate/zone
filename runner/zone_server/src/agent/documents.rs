@@ -379,6 +379,7 @@ impl DocumentTool {
             chat,
             Kind::Doc,
             &document.uri,
+            &document.uri,
             &document.title,
         )
         .await;
@@ -592,6 +593,7 @@ mod tests {
             chat_id: Uuid::new_v4(),
             identifier: identifier.to_string(),
             kind: Kind::Doc,
+            key: document.uri.clone(),
             uri: document.uri.clone(),
             title: document.title.clone(),
             first_observed_at: observed,

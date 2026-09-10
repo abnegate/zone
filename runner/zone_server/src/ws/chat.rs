@@ -2319,6 +2319,7 @@ async fn identify(pool: &PgPool, chat_id: Uuid, hits: &mut [SearchHit]) {
             chat_id,
             agent::identifier::Kind::Web,
             &hit.url,
+            &hit.url,
             &hit.title,
         )
         .await;
@@ -3257,6 +3258,7 @@ mod tests {
             chat_id,
             identifier: identifier.to_string(),
             kind: agent::identifier::Kind::Web,
+            key: hit.url.clone(),
             uri: hit.url.clone(),
             title: hit.title.clone(),
             first_observed_at: now,
@@ -4557,6 +4559,7 @@ mod tests {
             chat_id: Uuid::nil(),
             identifier: agent::identifier::mint(agent::identifier::Kind::Web, uri),
             kind: agent::identifier::Kind::Web,
+            key: uri.to_string(),
             uri: uri.to_string(),
             title: title.to_string(),
             first_observed_at,

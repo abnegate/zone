@@ -51,9 +51,15 @@ impl WebSearchTool {
             return;
         };
         for hit in hits.iter_mut() {
-            let observed =
-                chat_sources::observe(self.scope.state.db(), chat, Kind::Web, &hit.url, &hit.title)
-                    .await;
+            let observed = chat_sources::observe(
+                self.scope.state.db(),
+                chat,
+                Kind::Web,
+                &hit.url,
+                &hit.url,
+                &hit.title,
+            )
+            .await;
             stamp(hit, chat, observed);
         }
     }
@@ -376,6 +382,7 @@ mod tests {
             chat_id: Uuid::new_v4(),
             identifier: identifier.to_string(),
             kind: Kind::Web,
+            key: hit.url.clone(),
             uri: hit.url.clone(),
             title: hit.title.clone(),
             first_observed_at: observed,

@@ -1054,6 +1054,9 @@ impl SearchKnowledgeTool {
     /// The passage key is what gets hashed, verbatim: it names the entry or
     /// indexed item itself, so the same passage retrieved again in a later turn
     /// mints the same identifier and the reply cites one source rather than two.
+    /// The passage URI is registered as the address, because that is what a
+    /// citation resolved from the registry has to carry to deduplicate against
+    /// the one this envelope already renders for the same passage.
     ///
     /// A task run has no chat and mints nothing: a per-chat identifier written
     /// into another chat's registry would let one conversation cite a source it
@@ -1068,6 +1071,7 @@ impl SearchKnowledgeTool {
                 chat,
                 Kind::Kb,
                 &passage.key,
+                &passage.uri,
                 &passage.title,
             )
             .await;
@@ -1765,7 +1769,8 @@ mod tests {
             chat_id: Uuid::new_v4(),
             identifier: identifier.to_string(),
             kind: Kind::Kb,
-            uri: passage.key.clone(),
+            key: passage.key.clone(),
+            uri: passage.uri.clone(),
             title: passage.title.clone(),
             first_observed_at: observed,
             last_observed_at: observed,

@@ -1,4 +1,14 @@
 //! Per-chat registry of retrieved sources, addressed by a stable identifier.
+//!
+//! A source arrives with two strings that are not always the same. Its *key*
+//! names the thing itself and is what the identifier hashes, so retrieving it
+//! again in a later turn mints the identifier the reply already cites. Its
+//! *uri* is the address a reader opens, and is what a citation resolved from
+//! this registry carries. A knowledge passage keyed by its entry but addressed
+//! by a URL is the case that forces them apart: hashing the address would move
+//! the identifier whenever the address did, and storing the key as the address
+//! would make a registry citation and the retrieval envelope's own citation
+//! disagree about the same passage, so deduplication would keep both.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -12,7 +22,7 @@ use uuid::Uuid;
 use super::DbResult;
 use crate::agent::identifier::{self, Kind};
 
-/// A unique violation naming the primary key means a different URI already
+/// A unique violation naming the primary key means a different key already
 /// holds the minted identifier. Every other unique violation is a real
 /// conflict, and retrying one would never terminate.
 const IDENTIFIER_CONSTRAINT: &str = "chat_sources_pkey";
@@ -39,6 +49,9 @@ pub struct Source {
     pub chat_id: Uuid,
     pub identifier: String,
     pub kind: Kind,
+    /// What the identifier is derived from. Never rendered to a reader.
+    pub key: String,
+    /// Where a reader goes to check the citation.
     pub uri: String,
     pub title: String,
     pub first_observed_at: DateTime<Utc>,
@@ -49,16 +62,17 @@ pub async fn observe(
     pool: &PgPool,
     chat: Uuid,
     kind: Kind,
+    key: &str,
     uri: &str,
     title: &str,
 ) -> DbResult<Source> {
-    let mut identifier = identifier::mint(kind, uri);
+    let mut identifier = identifier::mint(kind, key);
 
     loop {
-        match insert(pool, chat, kind, &identifier, uri, title).await {
+        match insert(pool, chat, kind, &identifier, key, uri, title).await {
             Ok(source) => return Ok(source),
             Err(error) if collided(&error) => {
-                identifier = identifier::extend(&identifier, uri).ok_or_else(|| {
+                identifier = identifier::extend(&identifier, key).ok_or_else(|| {
                     sqlx::Error::Protocol(format!(
                         "Exhausted identifiers for {kind} source in chat {chat}"
                     ))
@@ -74,20 +88,23 @@ async fn insert(
     chat: Uuid,
     kind: Kind,
     identifier: &str,
+    key: &str,
     uri: &str,
     title: &str,
 ) -> DbResult<Source> {
     sqlx::query_as::<_, Source>(
         r#"
-        INSERT INTO chat_sources (chat_id, identifier, kind, uri, title)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (chat_id, kind, uri) DO UPDATE SET last_observed_at = clock_timestamp()
-        RETURNING chat_id, identifier, kind, uri, title, first_observed_at, last_observed_at
+        INSERT INTO chat_sources (chat_id, identifier, kind, key, uri, title)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT ON CONSTRAINT chat_sources_identity
+            DO UPDATE SET last_observed_at = clock_timestamp()
+        RETURNING chat_id, identifier, kind, key, uri, title, first_observed_at, last_observed_at
         "#,
     )
     .bind(chat)
     .bind(identifier)
     .bind(kind.as_str())
+    .bind(key)
     .bind(uri)
     .bind(title)
     .fetch_one(pool)
@@ -107,7 +124,7 @@ pub async fn resolve(pool: &PgPool, chat: Uuid, identifiers: &[String]) -> DbRes
 
     sqlx::query_as::<_, Source>(
         r#"
-        SELECT chat_id, identifier, kind, uri, title, first_observed_at, last_observed_at
+        SELECT chat_id, identifier, kind, key, uri, title, first_observed_at, last_observed_at
         FROM chat_sources
         WHERE chat_id = $1 AND identifier = ANY($2)
         "#,
@@ -124,7 +141,7 @@ mod tests {
     use sqlx::error::{DatabaseError, ErrorKind};
     use std::fmt;
 
-    const URI_CONSTRAINT: &str = "chat_sources_chat_id_kind_uri_key";
+    const IDENTITY_CONSTRAINT: &str = "chat_sources_identity";
 
     #[derive(Debug)]
     struct Violation {
@@ -181,8 +198,8 @@ mod tests {
             "a unique violation on the primary key must retry with a longer identifier"
         );
         assert!(
-            !collided(&violation(URI_CONSTRAINT, true)),
-            "a unique violation on the chat, kind and uri must not retry, or observe would loop forever"
+            !collided(&violation(IDENTITY_CONSTRAINT, true)),
+            "a unique violation on the chat, kind and key must not retry, or observe would loop forever"
         );
         assert!(
             !collided(&violation(IDENTIFIER_CONSTRAINT, false)),

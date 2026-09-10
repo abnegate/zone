@@ -3,19 +3,24 @@
 //! A reply cites a source by identifier rather than by its position in a result
 //! list, so a citation survives re-ranking, pagination, and a second search that
 //! returns the same page in a different slot. The identifier is derived from the
-//! source URI, which is what makes a citation checkable: the server re-derives
+//! source key, which is what makes a citation checkable: the server re-derives
 //! the identifier for everything it actually retrieved and refuses any marker
 //! that names something it never saw.
 //!
-//! # The URI is hashed verbatim
+//! # The key is hashed verbatim
 //!
-//! [`mint`] hashes the canonical source URI byte for byte. It does not
-//! normalise, lowercase, trim, sort query parameters, strip fragments, or
-//! resolve redirects, and it must never begin to. Normalisation is a per-caller
+//! [`mint`] hashes the source key byte for byte. It does not normalise,
+//! lowercase, trim, sort query parameters, strip fragments, or resolve
+//! redirects, and it must never begin to. Normalisation is a per-caller
 //! judgement, and two callers that judge differently would mint two different
-//! identifiers for one page — exactly the failure a content-derived identifier
-//! exists to prevent. Canonicalise the URI once, before it reaches this module,
-//! and hand the same bytes to every call.
+//! identifiers for one source — exactly the failure a content-derived
+//! identifier exists to prevent. Settle the key once, before it reaches this
+//! module, and hand the same bytes to every call.
+//!
+//! The key is what names the source, which is not always where the source
+//! lives: a knowledge passage is keyed by the entry it came from and addressed
+//! by a URL. Only the key reaches this module. The address is the registry's
+//! business, and [`crate::db::chat_sources`] stores it alongside.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -86,10 +91,10 @@ impl fmt::Display for Kind {
 
 /// Derive the bare identifier for a source, as `kind:digest`.
 ///
-/// The URI is hashed verbatim. Read the module documentation before changing
+/// The key is hashed verbatim. Read the module documentation before changing
 /// anything about what reaches the hasher.
-pub fn mint(kind: Kind, uri: &str) -> String {
-    token(kind, &prefix(uri, MINT_WIDTH))
+pub fn mint(kind: Kind, key: &str) -> String {
+    token(kind, &prefix(key, MINT_WIDTH))
 }
 
 /// Assemble a bare identifier out of the parts [`markers`] hands back.
@@ -97,16 +102,16 @@ pub fn token(kind: Kind, digest: &str) -> String {
     format!("{kind}{SEPARATOR}{digest}")
 }
 
-/// Re-derive an identifier from the same URI, [`WIDTH_STEP`] characters wider.
+/// Re-derive an identifier from the same key, [`WIDTH_STEP`] characters wider.
 ///
-/// Two URIs can share a six-character prefix, and the registry settles that by
+/// Two keys can share a six-character prefix, and the registry settles that by
 /// lengthening both until they differ. Nothing comes back once the digest is at
 /// [`MAX_WIDTH`], or when `existing` is not a well-formed identifier, so a
 /// caller lengthening in a loop always terminates.
-pub fn extend(existing: &str, uri: &str) -> Option<String> {
+pub fn extend(existing: &str, key: &str) -> Option<String> {
     let (kind, digest) = split(existing)?;
     let width = digest.len() + WIDTH_STEP;
-    (width <= MAX_WIDTH).then(|| token(kind, &prefix(uri, width)))
+    (width <= MAX_WIDTH).then(|| token(kind, &prefix(key, width)))
 }
 
 /// Every distinct `[kind:digest]` marker in a reply, in the order it first
@@ -134,8 +139,8 @@ pub fn render(identifier: &str) -> String {
     format!("[{identifier}]")
 }
 
-fn prefix(uri: &str, width: usize) -> String {
-    let digest: [u8; DIGEST_BYTES] = Sha256::digest(uri.as_bytes()).into();
+fn prefix(key: &str, width: usize) -> String {
+    let digest: [u8; DIGEST_BYTES] = Sha256::digest(key.as_bytes()).into();
     let mut encoded = hex::encode(digest);
     encoded.truncate(width);
     encoded
