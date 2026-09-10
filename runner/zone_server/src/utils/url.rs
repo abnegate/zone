@@ -223,8 +223,6 @@ mod tests {
         assert!(error.to_string().contains("must not be fetched"), "{error}");
     }
 
-    use super::*;
-
     #[test]
     fn rejects_private_and_internal_targets() {
         for url in [
