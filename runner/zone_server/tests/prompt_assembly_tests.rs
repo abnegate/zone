@@ -75,6 +75,7 @@ async fn a_background_run_reads_the_task_sections_and_none_of_the_chat_ones() {
     for chat_only in [
         "Declining and directness:",
         "Web tools:",
+        "Citing sources:",
         "Images:",
         "Cluster:",
         "act in the server runtime",
@@ -96,6 +97,7 @@ async fn a_chat_reads_the_chat_sections_and_none_of_the_run_only_ones() {
     );
     assert!(rendered.contains("act in the server runtime"), "{rendered}");
     assert!(rendered.contains("Git: interactive flags"), "{rendered}");
+    assert!(rendered.contains("Citing sources:"), "{rendered}");
 
     for run_only in [
         SANDBOX,
@@ -238,4 +240,39 @@ async fn a_citation_names_a_source_the_tools_returned() {
         rendered.contains("Reason a contested question out from what the tools returned"),
         "{rendered}"
     );
+    assert!(
+        rendered.contains("Cite only identifiers a tool returned in this chat."),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("bracketed identifier such as [web:a3f21c]"),
+        "{rendered}"
+    );
+}
+
+/// The marker is what the console resolves back to a source, so a reply that
+/// spelled the source out as a link would leave nothing to resolve. A chat with
+/// no catalog is still handed the pre-turn search block, so it reads the same
+/// rule without the sentence about a tool returning anything.
+#[tokio::test]
+async fn every_chat_surface_cites_by_marker_rather_than_by_link() {
+    let rendered = prompt::chat(&chat_tools().await, false, &environment());
+    let plain = prompt::plain(&environment());
+
+    for prompt in [&rendered, &plain] {
+        assert!(
+            prompt.contains("Never write a markdown link or a bare URL for a cited source"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Put the marker after the final punctuation of the sentence or table"),
+            "{prompt}"
+        );
+    }
+
+    assert!(
+        plain.contains("Cite only identifiers the sources in this prompt arrived with."),
+        "{plain}"
+    );
+    assert!(!plain.contains("a tool returned in this chat"), "{plain}");
 }
