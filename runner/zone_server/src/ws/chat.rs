@@ -3932,6 +3932,7 @@ mod tests {
             kind: crate::agent::CitationKind::GithubBuild,
             title: "repository main@aaaaaaa".into(),
             url: "https://github.com/owner/repository/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            identifier: None,
             revision: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
             observed_at: "2026-09-05T00:00:00+00:00".into(),
             complete: false,

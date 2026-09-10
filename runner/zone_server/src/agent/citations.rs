@@ -1,4 +1,5 @@
-//! Structured citations for live GitHub observations and workspace documents.
+//! Structured citations for live GitHub observations, retrieved web pages and
+//! workspace documents.
 //!
 //! Tool results already carry source URLs, commit SHAs and freshness. This
 //! module turns those observations into a stable message-metadata shape the
@@ -28,6 +29,7 @@ pub enum CitationKind {
     GithubIssue,
     GithubFile,
     WorkspaceDocument,
+    Web,
     BehavioralVerification,
 }
 
@@ -47,6 +49,11 @@ pub struct Citation {
     pub kind: CitationKind,
     pub title: String,
     pub url: String,
+    /// Stable per-chat handle for this source. A reply cites it by this name
+    /// and the server checks the claim against what it actually retrieved.
+    /// Citations stored before the field existed carry none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
     pub observed_at: String,
@@ -226,6 +233,7 @@ fn build_citation(value: &Value, observed_at: &str) -> Citation {
             first_html_url(value.get("workflows")),
             first_html_url(value.get("checks")),
         ]),
+        identifier: None,
         revision: nonempty(sha),
         observed_at: observed(value, observed_at),
         complete,
@@ -267,6 +275,7 @@ fn deployment_citations(value: &Value, observed_at: &str) -> Vec<Citation> {
                     commit_url(value, revision.as_deref().unwrap_or_default()),
                     text(row, "url"),
                 ]),
+                identifier: None,
                 revision,
                 observed_at: observed_at.clone(),
                 complete: !matches!(outcome, CitationOutcome::Incomplete),
@@ -299,6 +308,7 @@ fn issue_citations(value: &Value, observed_at: &str) -> Vec<Citation> {
                     format!("{number} {title}")
                 },
                 url: text(row, "html_url"),
+                identifier: None,
                 revision: nonempty(text(row, "updated_at")),
                 observed_at: observed_at.clone(),
                 complete: row.get("body").is_some_and(|body| !body.is_null()),
@@ -322,6 +332,7 @@ fn file_citation(value: &Value, observed_at: &str) -> Citation {
             path
         },
         url: first_http([text(value, "url"), commit_url(value, &sha)]),
+        identifier: None,
         revision: nonempty(sha).or_else(|| nonempty(blob)),
         observed_at: observed(value, observed_at),
         complete: value
@@ -355,6 +366,7 @@ pub fn from_verification(
         kind: CitationKind::BehavioralVerification,
         title: nonempty(title.to_string()).unwrap_or_else(|| VERIFICATION_TITLE.to_string()),
         url: url.to_string(),
+        identifier: None,
         revision: revision.and_then(|revision| nonempty(revision.to_string())),
         observed_at: observed_at.to_string(),
         complete: outcome.complete(),
@@ -391,6 +403,7 @@ pub fn from_retrieved(title: &str, uri: &str, complete: bool, observed_at: &str)
             title.to_string()
         },
         url,
+        identifier: None,
         revision,
         observed_at: observed_at.to_string(),
         complete,
@@ -459,6 +472,7 @@ fn document_citation(document: &Value, parent: &Value, observed_at: &str) -> Cit
             title
         },
         url,
+        identifier: None,
         revision: nonempty(text(document, "revision"))
             .or_else(|| nonempty(text(document, "updated_at")))
             .or_else(|| nonempty(text(document, "fetched_at"))),
@@ -564,6 +578,7 @@ mod tests {
 
     const OBSERVED: &str = "2026-09-05T00:00:00+00:00";
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const IDENTIFIER: &str = "web-1";
 
     fn citations(name: &str, value: Value) -> Vec<Citation> {
         from_tool_at(name, &value.to_string(), OBSERVED)
@@ -625,6 +640,7 @@ mod tests {
             kind: CitationKind::GithubBuild,
             title: "repository".into(),
             url: "https://github.com/owner/repository/commit/aaa".into(),
+            identifier: None,
             revision: Some(SHA.into()),
             observed_at: OBSERVED.into(),
             complete: false,
@@ -1101,5 +1117,51 @@ mod tests {
 
         assert_eq!(stored.provenance, Provenance::ServerExecution);
         assert!(stored.passing());
+    }
+
+    #[test]
+    fn a_web_citation_keeps_its_kind_and_identifier_across_the_wire() {
+        let citation = Citation {
+            kind: CitationKind::Web,
+            title: "Example changelog".into(),
+            url: "https://example.test/changelog".into(),
+            identifier: Some(IDENTIFIER.into()),
+            revision: None,
+            observed_at: OBSERVED.into(),
+            complete: true,
+            provenance: Provenance::ServerExecution,
+            outcome: CitationOutcome::Observed,
+            note: None,
+        };
+
+        let wire = serde_json::to_value(&citation).expect("a citation serializes");
+        assert_eq!(wire["kind"], "web");
+        assert_eq!(wire["identifier"], IDENTIFIER);
+
+        let read: Citation = serde_json::from_value(wire).expect("a citation deserializes");
+        assert_eq!(read, citation);
+        assert!(read.usable());
+    }
+
+    #[test]
+    fn a_citation_stored_before_identifiers_existed_still_deserializes() {
+        let stored: Citation = serde_json::from_value(json!({
+            "kind": "github_build",
+            "title": "repository main@aaaaaaa",
+            "url": "https://github.com/owner/repository/commit/aaa",
+            "observed_at": OBSERVED,
+            "complete": true,
+            "outcome": "success"
+        }))
+        .expect("a stored citation deserializes");
+
+        assert_eq!(stored.identifier, None);
+        assert!(stored.passing());
+
+        let wire = serde_json::to_value(&stored).expect("a citation serializes");
+        assert!(
+            wire.get("identifier").is_none(),
+            "an absent identifier must stay absent rather than be written back as null"
+        );
     }
 }
