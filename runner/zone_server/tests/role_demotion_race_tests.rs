@@ -81,7 +81,7 @@ async fn a_demotion_waits_for_one_already_in_flight_and_then_sees_it() {
 
     let racing = tokio::spawn({
         let pool = pool.clone();
-        async move { change_role(&pool, organization, second, OrgRole::Member).await }
+        async move { change_role(&pool, organization, second, OrgRole::Member, OrgRole::Owner).await }
     });
 
     tokio::time::sleep(Duration::from_millis(750)).await;
@@ -139,7 +139,7 @@ async fn a_removal_waits_for_a_demotion_already_in_flight_and_then_sees_it() {
 
     let racing = tokio::spawn({
         let pool = pool.clone();
-        async move { remove_guarded(&pool, organization, second).await }
+        async move { remove_guarded(&pool, organization, second, OrgRole::Owner).await }
     });
 
     tokio::time::sleep(Duration::from_millis(750)).await;
@@ -172,4 +172,80 @@ async fn a_removal_waits_for_a_demotion_already_in_flight_and_then_sees_it() {
         1,
         "an organization must not be left without an owner"
     );
+}
+
+/// The count is not the only thing read too early. The routes used to fetch
+/// the target's role, decide the caller outranked it, and only then call in
+/// here -- so an owner promoting that target in the gap left an admin
+/// demoting an admin, which the route had just refused in principle.
+///
+/// Rather than race it, hold the rows the guard must take and promote the
+/// target while the demotion waits for them.
+#[tokio::test]
+async fn a_demotion_sees_the_rank_the_target_holds_when_it_lands() {
+    let pool = create_test_pool().await;
+    let owner = user(&pool).await;
+    let target = user(&pool).await;
+    let organization = organization_owned_by(&pool, &[owner]).await;
+
+    sqlx::query(
+        "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'member')",
+    )
+    .bind(organization)
+    .bind(target)
+    .execute(&pool)
+    .await
+    .expect("the target is seated as a member");
+
+    let mut holder = pool.begin().await.expect("a transaction to hold the lock");
+    sqlx::query(
+        "SELECT user_id FROM organization_members \
+         WHERE organization_id = $1 AND role = 'owner' AND is_active = TRUE FOR UPDATE",
+    )
+    .bind(organization)
+    .fetch_all(&mut *holder)
+    .await
+    .expect("the owner rows are locked");
+
+    // An admin re-seating a member: allowed, on the rank the target holds now.
+    let racing = tokio::spawn({
+        let pool = pool.clone();
+        async move { change_role(&pool, organization, target, OrgRole::Member, OrgRole::Admin).await }
+    });
+
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    assert!(
+        !racing.is_finished(),
+        "the demotion did not wait for the rows the guard takes"
+    );
+
+    sqlx::query("UPDATE organization_members SET role = 'admin' WHERE organization_id = $1 AND user_id = $2")
+        .bind(organization)
+        .bind(target)
+        .execute(&mut *holder)
+        .await
+        .expect("the target is promoted");
+    holder.commit().await.expect("the promotion lands");
+
+    let outcome = tokio::time::timeout(Duration::from_secs(10), racing)
+        .await
+        .expect("the demotion stops waiting")
+        .expect("the demotion task ran")
+        .expect("the demotion is answered");
+
+    assert!(
+        matches!(outcome, RoleChange::Forbidden),
+        "an admin demoted an admin, because the rank was read before the \
+         promotion landed: {outcome:?}"
+    );
+
+    let role: String = sqlx::query_scalar(
+        "SELECT role FROM organization_members WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(organization)
+    .bind(target)
+    .fetch_one(&pool)
+    .await
+    .expect("the target is readable");
+    assert_eq!(role, "admin", "the target was demoted anyway");
 }

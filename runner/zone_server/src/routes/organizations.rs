@@ -712,42 +712,30 @@ pub async fn update_member_role(
             .into_response();
     }
 
-    let target =
-        match organization_members::get_member(state.db(), admin.org_id, path.user_id).await {
-            Ok(Some(member)) => member,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new("Member not found")),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                tracing::error!("Database error: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        };
-
-    if target.role >= organization_members::OrgRole::Admin
-        && admin.role != organization_members::OrgRole::Owner
+    match organization_members::change_role(
+        state.db(),
+        admin.org_id,
+        path.user_id,
+        role,
+        admin.role,
+    )
+    .await
     {
-        return (
+        Ok(organization_members::RoleChange::Applied(member)) => {
+            Json(OrganizationMemberResponse::from(*member)).into_response()
+        }
+        Ok(organization_members::RoleChange::Forbidden) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(
                 "Only owners can change the role of an admin or owner",
             )),
         )
-            .into_response();
-    }
-
-    match organization_members::change_role(state.db(), admin.org_id, path.user_id, role).await {
-        Ok(organization_members::RoleChange::Applied(member)) => {
-            Json(OrganizationMemberResponse::from(*member)).into_response()
-        }
+            .into_response(),
+        Ok(organization_members::RoleChange::Missing) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new("Member not found")),
+        )
+            .into_response(),
         Ok(organization_members::RoleChange::LastOwner) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(
@@ -772,44 +760,17 @@ pub async fn remove_member(
     admin: OrgAdmin,
     Path(path): Path<MemberPath>,
 ) -> impl IntoResponse {
-    // CRITICAL-6: Get the target member's role to check permissions
-    let target_member =
-        match organization_members::get_member(state.db(), admin.org_id, path.user_id).await {
-            Ok(Some(member)) => member,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new("Member not found")),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                tracing::error!("Database error: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        };
-
-    // CRITICAL-6: Check role hierarchy - can't remove someone with higher or equal role
-    // Owner > Admin > Member
-    if admin.role != organization_members::OrgRole::Owner {
-        // Non-owners cannot remove admins or owners
-        if target_member.role >= organization_members::OrgRole::Admin {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new(
-                    "Only owners can remove admins or owners",
-                )),
-            )
-                .into_response();
-        }
-    }
-
-    match organization_members::remove_guarded(state.db(), admin.org_id, path.user_id).await {
+    match organization_members::remove_guarded(state.db(), admin.org_id, path.user_id, admin.role)
+        .await
+    {
         Ok(organization_members::Removal::Removed) => StatusCode::NO_CONTENT.into_response(),
+        Ok(organization_members::Removal::Forbidden) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only owners can remove admins or owners",
+            )),
+        )
+            .into_response(),
         Ok(organization_members::Removal::LastOwner) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(

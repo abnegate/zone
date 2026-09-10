@@ -201,6 +201,7 @@ where
 #[derive(Debug)]
 pub enum Removal {
     Removed,
+    Forbidden,
     Missing,
     LastAdmin,
     LastOwner,
@@ -212,10 +213,21 @@ pub enum Removal {
 /// strip access. This is the one a route wants: it counts and removes with the
 /// privileged rows locked, so two removals arriving together cannot each read
 /// a count that says one may go.
-pub async fn remove_guarded(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<Removal> {
+pub async fn remove_guarded(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    caller: WorkspaceRole,
+) -> DbResult<Removal> {
     let mut transaction = pool.begin().await?;
 
     let privileged = lock_privileged(&mut transaction, workspace_id).await?;
+    let Some(target) = lock_member(&mut transaction, workspace_id, user_id).await? else {
+        return Ok(Removal::Missing);
+    };
+    if !outranks(caller, target) {
+        return Ok(Removal::Forbidden);
+    }
 
     if privileged.owners.len() <= 1 && privileged.owns(user_id) {
         return Ok(Removal::LastOwner);
@@ -493,6 +505,37 @@ impl Privileged {
     }
 }
 
+/// The target's own role, held for the length of the transaction.
+///
+/// Reading it in the route and acting on it here are two moments: an owner can
+/// promote the target in between, and the request then lands on an admin or
+/// owner the caller was never allowed to touch. Read it under the same lock as
+/// the count.
+async fn lock_member(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<WorkspaceRole>> {
+    let role: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT role FROM workspace_members
+        WHERE workspace_id = $1 AND user_id = $2 AND is_active = TRUE
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(role.map(|role| role.parse().unwrap_or(WorkspaceRole::Viewer)))
+}
+
+/// Whether `caller` outranks what `target` currently holds.
+fn outranks(caller: WorkspaceRole, target: WorkspaceRole) -> bool {
+    target < WorkspaceRole::Admin || caller == WorkspaceRole::Owner
+}
+
 async fn lock_privileged(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -524,6 +567,8 @@ async fn lock_privileged(
 #[derive(Debug)]
 pub enum RoleChange {
     Applied(Box<WorkspaceMemberRow>),
+    Forbidden,
+    Missing,
     LastAdmin,
     LastOwner,
 }
@@ -541,10 +586,17 @@ pub async fn change_role(
     workspace_id: Uuid,
     user_id: Uuid,
     role: WorkspaceRole,
+    caller: WorkspaceRole,
 ) -> DbResult<RoleChange> {
     let mut transaction = pool.begin().await?;
 
     let privileged = lock_privileged(&mut transaction, workspace_id).await?;
+    let Some(target) = lock_member(&mut transaction, workspace_id, user_id).await? else {
+        return Ok(RoleChange::Missing);
+    };
+    if !outranks(caller, target) {
+        return Ok(RoleChange::Forbidden);
+    }
 
     // An owner is not interchangeable with an admin here: only an owner may
     // delete the workspace or seat another owner, so a workspace whose last

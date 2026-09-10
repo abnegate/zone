@@ -444,42 +444,30 @@ pub async fn update_member_role(
             .into_response();
     }
 
-    let target =
-        match workspace_members::get_member(state.db(), admin.workspace_id, path.user_id).await {
-            Ok(Some(member)) => member,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new("Member not found")),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                tracing::error!("Database error fetching member: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        };
-
-    if target.role >= workspace_members::WorkspaceRole::Admin
-        && admin.role != workspace_members::WorkspaceRole::Owner
+    match workspace_members::change_role(
+        state.db(),
+        admin.workspace_id,
+        path.user_id,
+        role,
+        admin.role,
+    )
+    .await
     {
-        return (
+        Ok(workspace_members::RoleChange::Applied(member)) => {
+            Json(WorkspaceMemberResponse::from(*member)).into_response()
+        }
+        Ok(workspace_members::RoleChange::Forbidden) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(
                 "Only workspace owners can change the role of an admin or owner",
             )),
         )
-            .into_response();
-    }
-
-    match workspace_members::change_role(state.db(), admin.workspace_id, path.user_id, role).await {
-        Ok(workspace_members::RoleChange::Applied(member)) => {
-            Json(WorkspaceMemberResponse::from(*member)).into_response()
-        }
+            .into_response(),
+        Ok(workspace_members::RoleChange::Missing) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new("Member not found")),
+        )
+            .into_response(),
         Ok(workspace_members::RoleChange::LastOwner) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(
@@ -511,42 +499,22 @@ pub async fn remove_member(
     admin: WorkspaceAdmin,
     Path(path): Path<WorkspaceMemberPath>,
 ) -> impl IntoResponse {
-    // NEW-MAJOR-2: Get the target member to check permissions
-    let target_member =
-        match workspace_members::get_member(state.db(), admin.workspace_id, path.user_id).await {
-            Ok(Some(member)) => member,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new("Member not found")),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                tracing::error!("Database error fetching member: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        };
-
-    // NEW-MAJOR-2: Check role hierarchy - only owners can remove admins/owners
-    if target_member.role >= workspace_members::WorkspaceRole::Admin
-        && admin.role != workspace_members::WorkspaceRole::Owner
+    match workspace_members::remove_guarded(
+        state.db(),
+        admin.workspace_id,
+        path.user_id,
+        admin.role,
+    )
+    .await
     {
-        return (
+        Ok(workspace_members::Removal::Removed) => StatusCode::NO_CONTENT.into_response(),
+        Ok(workspace_members::Removal::Forbidden) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(
                 "Only workspace owners can remove admins or owners",
             )),
         )
-            .into_response();
-    }
-
-    match workspace_members::remove_guarded(state.db(), admin.workspace_id, path.user_id).await {
-        Ok(workspace_members::Removal::Removed) => StatusCode::NO_CONTENT.into_response(),
+            .into_response(),
         Ok(workspace_members::Removal::LastOwner) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(

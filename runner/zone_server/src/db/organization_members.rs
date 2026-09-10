@@ -164,10 +164,41 @@ pub async fn remove_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) 
     Ok(result.rows_affected() > 0)
 }
 
+/// The target's own role, held for the length of the transaction.
+///
+/// Reading it in the route and acting on it here are two moments: an owner can
+/// promote the target in between, and the request then lands on an admin or
+/// owner the caller was never allowed to touch.
+async fn lock_member(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<OrgRole>> {
+    let role: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT role FROM organization_members
+        WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE
+        FOR UPDATE
+        "#,
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(role.map(|role| role.parse().unwrap_or(OrgRole::Member)))
+}
+
+/// Whether `caller` outranks what `target` currently holds.
+fn outranks(caller: OrgRole, target: OrgRole) -> bool {
+    target < OrgRole::Admin || caller == OrgRole::Owner
+}
+
 /// Outcome of a removal that must leave an owner seated.
 #[derive(Debug)]
 pub enum Removal {
     Removed,
+    Forbidden,
     Missing,
     LastOwner,
 }
@@ -182,6 +213,7 @@ pub async fn remove_guarded(
     pool: &PgPool,
     organization_id: Uuid,
     user_id: Uuid,
+    caller: OrgRole,
 ) -> DbResult<Removal> {
     let mut transaction = pool.begin().await?;
 
@@ -196,6 +228,13 @@ pub async fn remove_guarded(
     .bind(organization_id)
     .fetch_all(&mut *transaction)
     .await?;
+
+    let Some(target) = lock_member(&mut transaction, organization_id, user_id).await? else {
+        return Ok(Removal::Missing);
+    };
+    if !outranks(caller, target) {
+        return Ok(Removal::Forbidden);
+    }
 
     if owners.len() <= 1 && owners.contains(&user_id) {
         return Ok(Removal::LastOwner);
@@ -369,6 +408,8 @@ pub async fn update_member_role(
 #[derive(Debug)]
 pub enum RoleChange {
     Applied(Box<OrganizationMemberRow>),
+    Forbidden,
+    Missing,
     LastOwner,
 }
 
@@ -383,6 +424,7 @@ pub async fn change_role(
     organization_id: Uuid,
     user_id: Uuid,
     role: OrgRole,
+    caller: OrgRole,
 ) -> DbResult<RoleChange> {
     let mut transaction = pool.begin().await?;
 
@@ -397,6 +439,13 @@ pub async fn change_role(
     .bind(organization_id)
     .fetch_all(&mut *transaction)
     .await?;
+
+    let Some(target) = lock_member(&mut transaction, organization_id, user_id).await? else {
+        return Ok(RoleChange::Missing);
+    };
+    if !outranks(caller, target) {
+        return Ok(RoleChange::Forbidden);
+    }
 
     if role != OrgRole::Owner && owners.len() <= 1 && owners.contains(&user_id) {
         return Ok(RoleChange::LastOwner);

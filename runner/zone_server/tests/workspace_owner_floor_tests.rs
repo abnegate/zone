@@ -77,9 +77,15 @@ async fn the_last_owner_cannot_be_demoted_to_member_while_an_admin_stands() {
     let pool = create_test_pool().await;
     let (workspace, owner, _admin) = workspace_with_owner_and_admin(&pool).await;
 
-    let outcome = change_role(&pool, workspace, owner, WorkspaceRole::Member)
-        .await
-        .expect("the demotion is answered");
+    let outcome = change_role(
+        &pool,
+        workspace,
+        owner,
+        WorkspaceRole::Member,
+        WorkspaceRole::Owner,
+    )
+    .await
+    .expect("the demotion is answered");
 
     assert!(
         matches!(outcome, RoleChange::LastOwner),
@@ -96,9 +102,15 @@ async fn the_last_owner_cannot_step_down_to_admin() {
     let pool = create_test_pool().await;
     let (workspace, owner, _admin) = workspace_with_owner_and_admin(&pool).await;
 
-    let outcome = change_role(&pool, workspace, owner, WorkspaceRole::Admin)
-        .await
-        .expect("the demotion is answered");
+    let outcome = change_role(
+        &pool,
+        workspace,
+        owner,
+        WorkspaceRole::Admin,
+        WorkspaceRole::Owner,
+    )
+    .await
+    .expect("the demotion is answered");
 
     assert!(
         matches!(outcome, RoleChange::LastOwner),
@@ -113,7 +125,7 @@ async fn the_last_owner_cannot_be_removed_while_an_admin_stands() {
     let pool = create_test_pool().await;
     let (workspace, owner, _admin) = workspace_with_owner_and_admin(&pool).await;
 
-    let outcome = remove_guarded(&pool, workspace, owner)
+    let outcome = remove_guarded(&pool, workspace, owner, WorkspaceRole::Owner)
         .await
         .expect("the removal is answered");
 
@@ -131,13 +143,25 @@ async fn an_owner_still_steps_down_once_another_owner_stands() {
     let pool = create_test_pool().await;
     let (workspace, owner, admin) = workspace_with_owner_and_admin(&pool).await;
 
-    change_role(&pool, workspace, admin, WorkspaceRole::Owner)
-        .await
-        .expect("the admin is promoted");
+    change_role(
+        &pool,
+        workspace,
+        admin,
+        WorkspaceRole::Owner,
+        WorkspaceRole::Owner,
+    )
+    .await
+    .expect("the admin is promoted");
 
-    let outcome = change_role(&pool, workspace, owner, WorkspaceRole::Member)
-        .await
-        .expect("the demotion is answered");
+    let outcome = change_role(
+        &pool,
+        workspace,
+        owner,
+        WorkspaceRole::Member,
+        WorkspaceRole::Owner,
+    )
+    .await
+    .expect("the demotion is answered");
 
     assert!(
         matches!(outcome, RoleChange::Applied(_)),
