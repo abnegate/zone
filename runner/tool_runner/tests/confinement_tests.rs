@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use tool_runner::error::ExecutorError;
 use tool_runner::executor::{
-    Backend, CommandExecutor, Confinement, ConfinementError, ConfinementMode,
+    Backend, CommandExecutor, Confinement, ConfinementError, ConfinementMode, HOST_BACKEND,
 };
 use tool_runner::protocol::{
     Capability, ConfinementRequest, ErrorCode, InboundMessage, OutboundMessage, ProcessTreeRequest,
@@ -1055,7 +1055,11 @@ async fn test_a_confined_tree_cannot_execute_outside_its_execute_roots() {
     {
         return;
     }
-    if !Backend::Seatbelt.enforces_execute_roots() {
+    // The host's backend, not seatbelt's: bubblewrap bounds a tree by its mount
+    // namespace and has no exec filter, so a planted file inside a bound root
+    // does run there. Asking seatbelt lets this run on a Linux host with
+    // bubblewrap installed, where the refusal below cannot hold.
+    if !HOST_BACKEND.is_some_and(Backend::enforces_execute_roots) {
         return;
     }
 
