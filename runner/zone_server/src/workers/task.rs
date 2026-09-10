@@ -36,6 +36,13 @@ const TASK_TIMEOUT: Duration = Duration::from_secs(TASK_TIMEOUT_SECS);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a run may produce nothing before the log says so.
+///
+/// The lease heartbeat proves the process is alive, which a wedged run is too.
+/// This is the other half: silence in the run's own log is what a reader
+/// mistakes for progress, so the silence gets a line of its own.
+const STALL_AFTER: Duration = Duration::from_secs(zone_core::tools::MAX_SLEEP_SECS);
+
 /// Matches the sampling temperature `session::build` gives an interactive chat.
 const TASK_TEMPERATURE: f32 = 0.7;
 
@@ -1693,6 +1700,31 @@ pub(super) async fn complete_publication(
     status
 }
 
+/// Wait for the next event, announcing every [`STALL_AFTER`] of silence.
+///
+/// A run that has gone quiet looks exactly like one that is working: both
+/// produce nothing. The announcement is what tells them apart while the run is
+/// still going, rather than an hour later when the timeout ends it.
+async fn next_or_stall<Announce, Announcing>(
+    events: &mut (impl futures::Stream<Item = AgentEvent> + Unpin),
+    mut announce: Announce,
+) -> Option<AgentEvent>
+where
+    Announce: FnMut(Duration) -> Announcing,
+    Announcing: Future<Output = ()>,
+{
+    let mut silent = Duration::ZERO;
+    loop {
+        match tokio::time::timeout(STALL_AFTER, events.next()).await {
+            Ok(event) => return event,
+            Err(_) => {
+                silent += STALL_AFTER;
+                announce(silent).await;
+            }
+        }
+    }
+}
+
 async fn run_task_loop(
     llm: LlmClient,
     model: String,
@@ -1715,7 +1747,20 @@ async fn run_task_loop(
         context,
         true
     ));
-    while let Some(event) = events.next().await {
+    while let Some(event) = next_or_stall(&mut events, |silent| async move {
+        let seconds = silent.as_secs();
+        let _ = callback
+            .log(
+                "acting",
+                SOURCE_AGENT,
+                LEVEL_WARNING,
+                &format!("Task run has produced nothing for {seconds}s"),
+                Some(serde_json::json!({ "silent_secs": seconds })),
+            )
+            .await;
+    })
+    .await
+    {
         match event {
             AgentEvent::Chunk(text) => summary.push_str(&text),
             AgentEvent::ToolCallStarted {
@@ -2693,5 +2738,77 @@ mod retry_tests {
         assert_eq!(completed.attempts, 2);
         assert_eq!(permits.available_permits(), 0, "the loop took a permit");
         drop(held);
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// A run that is working announces nothing: the watchdog is there for the
+    /// silence, and firing on a busy run would bury the log it writes to.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_keeps_producing_events_is_never_announced_as_stalled() {
+        let announced = Arc::new(Mutex::new(Vec::new()));
+        let mut events = futures::stream::iter(vec![
+            AgentEvent::Chunk("one".into()),
+            AgentEvent::Chunk("two".into()),
+        ]);
+
+        for expected in ["one", "two"] {
+            let event = next_or_stall(&mut events, |silent| {
+                let announced = Arc::clone(&announced);
+                async move { announced.lock().unwrap().push(silent) }
+            })
+            .await;
+
+            assert!(matches!(event, Some(AgentEvent::Chunk(text)) if text == expected));
+        }
+
+        assert!(announced.lock().unwrap().is_empty());
+    }
+
+    /// The stall is announced while the run is still going, and keeps being
+    /// announced: one line an hour before the timeout would be a line nobody
+    /// sees the end of.
+    #[tokio::test(start_paused = true)]
+    async fn silence_is_announced_every_interval_until_an_event_arrives() {
+        let announced = Arc::new(Mutex::new(Vec::new()));
+        let quiet = futures::stream::once(async {
+            tokio::time::sleep(STALL_AFTER * 3 + Duration::from_secs(1)).await;
+            AgentEvent::Chunk("finally".into())
+        });
+        let mut events = std::pin::pin!(quiet);
+
+        let event = next_or_stall(&mut events, |silent| {
+            let announced = Arc::clone(&announced);
+            async move { announced.lock().unwrap().push(silent) }
+        })
+        .await;
+
+        assert!(matches!(event, Some(AgentEvent::Chunk(text)) if text == "finally"));
+        assert_eq!(
+            *announced.lock().unwrap(),
+            vec![STALL_AFTER, STALL_AFTER * 2, STALL_AFTER * 3],
+            "each interval of silence gets its own line, carrying how long it has been"
+        );
+    }
+
+    /// The watchdog wraps the stream, so a stream that has ended still ends the
+    /// loop rather than leaving it announcing silence forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_stream_ends_the_loop_instead_of_stalling_it() {
+        let announced = Arc::new(Mutex::new(Vec::new()));
+        let mut events = futures::stream::empty::<AgentEvent>();
+
+        let event = next_or_stall(&mut events, |silent| {
+            let announced = Arc::clone(&announced);
+            async move { announced.lock().unwrap().push(silent) }
+        })
+        .await;
+
+        assert!(event.is_none());
+        assert!(announced.lock().unwrap().is_empty());
     }
 }
