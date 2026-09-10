@@ -85,6 +85,12 @@ fn descendable(path: &Path, context: &ToolContext) -> bool {
     path.is_dir() && confine(&resolve(path), context).is_ok()
 }
 
+/// `Path::is_file` follows symlinks, so a link inside the tree names a file
+/// outside it. The walker reads whatever it accepts here.
+fn readable(path: &Path, context: &ToolContext) -> bool {
+    path.is_file() && confine(&resolve(path), context).is_ok()
+}
+
 /// Read a file's contents
 pub struct ReadFileTool;
 
@@ -822,7 +828,7 @@ fn search_dir(
                 max_results,
                 context,
             )?;
-        } else if path.is_file() {
+        } else if readable(&path, context) {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let code_exts = [
                 "rs", "py", "js", "ts", "jsx", "tsx", "go", "java", "c", "cpp", "h", "hpp", "rb",
@@ -1466,6 +1472,40 @@ mod tests {
         assert!(
             !output.contains("secrets.sh"),
             "the walk left cwd: {output}"
+        );
+    }
+
+    /// The directory case above is caught by `descendable`; a link to a *file*
+    /// takes the other branch, which read whatever `is_file` resolved to.
+    #[cfg(unix)]
+    #[test]
+    fn the_search_walk_does_not_read_a_symlink_to_a_file_out_of_cwd() {
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join("secrets.rs");
+        fs::write(&secret, "open sesame please\n").unwrap();
+        let inside = tempdir().unwrap();
+        fs::write(inside.path().join("own.rs"), "open sesame please\n").unwrap();
+        symlinked(inside.path(), "hop.rs", &secret);
+        let context = create_test_context(inside.path());
+        let root = context.cwd.clone();
+
+        let mut results = Vec::new();
+        search_dir(
+            &root,
+            &root,
+            "open sesame please",
+            true,
+            &mut results,
+            SEARCH_MAX_RESULTS,
+            &context,
+        )
+        .expect("a walk of cwd");
+
+        let output = results.join("\n");
+        assert!(output.contains("own.rs"), "{output}");
+        assert!(
+            !output.contains("hop.rs"),
+            "the walk read a file outside cwd through a symlink: {output}"
         );
     }
 

@@ -19,4 +19,4 @@ pub use jwt::{
 pub use middleware::{AuthUser, require_auth};
 pub use organization_guard::{OrgAdmin, OrgMember, OrgOwner};
 pub use password::{hash_password, verify_password};
-pub use workspace_guard::{WorkspaceAdmin, WorkspaceMember, WorkspaceWriter};
+pub use workspace_guard::{WorkspaceAdmin, WorkspaceMember, WorkspaceOwner, WorkspaceWriter};

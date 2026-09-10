@@ -9,7 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::{OrgMember, WorkspaceAdmin, WorkspaceMember};
+use crate::auth::{OrgMember, WorkspaceAdmin, WorkspaceMember, WorkspaceOwner};
 use crate::db::{workspace_members, workspaces};
 use crate::state::AppState;
 
@@ -155,12 +155,16 @@ pub async fn update_workspace(
     }
 }
 
-/// DELETE /api/workspaces/:workspace_id - Delete workspace (requires admin)
+/// DELETE /api/workspaces/:workspace_id - Delete workspace (requires owner)
+///
+/// Deleting the workspace unseats every member at once, so it takes the role
+/// `remove_member` demands to unseat a single admin, and the one
+/// `organizations::delete` demands to destroy the organization above it.
 pub async fn delete_workspace(
     State(state): State<AppState>,
-    admin: WorkspaceAdmin,
+    owner: WorkspaceOwner,
 ) -> impl IntoResponse {
-    match workspaces::delete_workspace(state.db(), admin.workspace_id).await {
+    match workspaces::delete_workspace(state.db(), owner.workspace_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
@@ -460,45 +464,29 @@ pub async fn update_member_role(
             }
         };
 
-    if target.role >= workspace_members::WorkspaceRole::Admin {
-        if admin.role != workspace_members::WorkspaceRole::Owner {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new(
-                    "Only workspace owners can change the role of an admin or owner",
-                )),
-            )
-                .into_response();
-        }
-
-        if role < workspace_members::WorkspaceRole::Admin {
-            match workspace_members::count_admins(state.db(), admin.workspace_id).await {
-                Ok(count) if count <= 1 => {
-                    return (
-                        StatusCode::FORBIDDEN,
-                        Json(ErrorResponse::new(
-                            "Cannot demote the last admin of the workspace",
-                        )),
-                    )
-                        .into_response();
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!("Database error counting admins: {}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::new("Internal server error")),
-                    )
-                        .into_response();
-                }
-            }
-        }
+    if target.role >= workspace_members::WorkspaceRole::Admin
+        && admin.role != workspace_members::WorkspaceRole::Owner
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only workspace owners can change the role of an admin or owner",
+            )),
+        )
+            .into_response();
     }
 
-    match workspace_members::update_member_role(state.db(), admin.workspace_id, path.user_id, role)
-        .await
-    {
-        Ok(member) => Json(WorkspaceMemberResponse::from(member)).into_response(),
+    match workspace_members::change_role(state.db(), admin.workspace_id, path.user_id, role).await {
+        Ok(workspace_members::RoleChange::Applied(member)) => {
+            Json(WorkspaceMemberResponse::from(*member)).into_response()
+        }
+        Ok(workspace_members::RoleChange::LastAdmin) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Cannot demote the last admin of the workspace",
+            )),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -538,45 +526,28 @@ pub async fn remove_member(
         };
 
     // NEW-MAJOR-2: Check role hierarchy - only owners can remove admins/owners
-    if target_member.role >= workspace_members::WorkspaceRole::Admin {
-        if admin.role != workspace_members::WorkspaceRole::Owner {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new(
-                    "Only workspace owners can remove admins or owners",
-                )),
-            )
-                .into_response();
-        }
-
-        // NEW-MAJOR-2: Prevent removal of last admin
-        match workspace_members::count_admins(state.db(), admin.workspace_id).await {
-            Ok(count) if count <= 1 => {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(ErrorResponse::new(
-                        "Cannot remove the last admin from the workspace",
-                    )),
-                )
-                    .into_response();
-            }
-            Ok(_) => {
-                // More than one admin, proceed
-            }
-            Err(e) => {
-                tracing::error!("Database error counting admins: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        }
+    if target_member.role >= workspace_members::WorkspaceRole::Admin
+        && admin.role != workspace_members::WorkspaceRole::Owner
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only workspace owners can remove admins or owners",
+            )),
+        )
+            .into_response();
     }
 
-    match workspace_members::remove_member(state.db(), admin.workspace_id, path.user_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (
+    match workspace_members::remove_guarded(state.db(), admin.workspace_id, path.user_id).await {
+        Ok(workspace_members::Removal::Removed) => StatusCode::NO_CONTENT.into_response(),
+        Ok(workspace_members::Removal::LastAdmin) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Cannot remove the last admin from the workspace",
+            )),
+        )
+            .into_response(),
+        Ok(workspace_members::Removal::Missing) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Member not found")),
         )
