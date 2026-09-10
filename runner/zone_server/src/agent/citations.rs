@@ -506,7 +506,7 @@ fn document_citation(document: &Value, parent: &Value, observed_at: &str) -> Cit
             title
         },
         url,
-        identifier: None,
+        identifier: nonempty(text(document, "identifier")),
         revision: nonempty(text(document, "revision"))
             .or_else(|| nonempty(text(document, "updated_at")))
             .or_else(|| nonempty(text(document, "fetched_at"))),

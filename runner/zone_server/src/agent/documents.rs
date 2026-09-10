@@ -680,6 +680,33 @@ mod tests {
         assert_eq!(record["title"], json!(citation.title));
     }
 
+    /// The envelope tells the model to cite a document as `[doc:6a1f2c]`, and
+    /// the console resolves that marker against the identifier its citation
+    /// carries. A citation built without one leaves every document marker
+    /// inert: the server read the document, said so, and still rendered the
+    /// reader an unresolved marker.
+    #[test]
+    fn a_read_document_is_cited_by_the_identifier_its_marker_names() {
+        let document = document(URI, TITLE);
+        let minted = identifier::mint(Kind::Doc, &document.uri);
+        let record = identified_record(&document, &minted);
+        let envelope = reading(json!({"complete": true, "observed_at": OBSERVED}), record);
+
+        let citations = citations::from_tool_at(READ_TOOL, &envelope.to_string(), OBSERVED);
+
+        assert_eq!(
+            citations.len(),
+            1,
+            "one document is one citation: {citations:?}"
+        );
+        assert_eq!(
+            citations[0].identifier.as_deref(),
+            Some(minted.as_str()),
+            "the marker the envelope asks for resolves against this identifier, so the \
+             citation has to carry it"
+        );
+    }
+
     /// An identifier the write never produced would resolve to nothing, leaving
     /// the reader an inert marker for a document that genuinely exists. The
     /// registry here accepts the connection and answers nothing, so the write
