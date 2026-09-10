@@ -2329,6 +2329,57 @@ describe('ChatsPage', () => {
     });
   });
 
+  describe('message links', () => {
+    const linkedChat = (overrides: Partial<Message> = {}): ChatWithMessages => ({
+      ...mockChatWithMessages,
+      messages: [
+        {
+          id: 'msg-link',
+          chat_id: 'chat-1',
+          role: 'assistant',
+          content: 'Confirmed in [the audit](https://audit.example/x)',
+          created_at: '2024-01-01T00:00:00Z',
+          metadata: {
+            citations: [
+              {
+                kind: 'github_file',
+                title: 'an unrelated source',
+                url: 'https://sourced.example/other',
+                observed_at: '2024-01-01T00:00:00Z',
+                complete: true,
+                outcome: 'success',
+                provenance: 'server_execution',
+              },
+            ],
+          },
+          ...overrides,
+        },
+      ],
+    });
+
+    it('keeps a link the user wrote themselves clickable', async () => {
+      mockGetChat.mockResolvedValue(
+        linkedChat({ role: 'user', content: 'See [the runbook](https://runbook.example/x)' })
+      );
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      expect(await screen.findByRole('link', { name: 'the runbook' })).toHaveAttribute(
+        'href',
+        'https://runbook.example/x'
+      );
+    });
+
+    it('renders an assistant link that resolves to no citation inert', async () => {
+      mockGetChat.mockResolvedValue(linkedChat());
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      expect(await screen.findByText(/Confirmed in/)).toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: 'the audit' })).not.toBeInTheDocument();
+    });
+  });
+
   describe('action receipts', () => {
     const receiptChat: ChatWithMessages = {
       ...mockChatWithMessages,

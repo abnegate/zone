@@ -1002,6 +1002,26 @@
   text-underline-offset: 2px;
 }
 
+/* A link no citation on this reply backs, kept visible rather than deleted so
+   the reader can see what was rejected. It borrows the amber the citations
+   give a claim the server did not verify, but only in the ground and the
+   underline: amber ink fails contrast on paper at the length of a sentence. */
+.message-markdown .message-md-link-unsourced {
+  padding: 0 var(--ui-space-1);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-warning-muted);
+  color: var(--ui-text-secondary);
+  text-decoration: underline dotted var(--ui-warning);
+  text-underline-offset: 2px;
+  text-decoration-skip-ink: none;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.message-user .message-markdown .message-md-link-unsourced {
+  color: color-mix(in srgb, var(--ui-text-inverse) 80%, transparent);
+}
+
 .message-markdown code {
   padding: 0.125rem 0.3rem;
   border-radius: var(--ui-radius-sm);

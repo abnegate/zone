@@ -63,6 +63,13 @@ describe('citation presentation', () => {
     expect(formatRevision('content-hash')).toBe('content-hash');
   });
 
+  it('refuses a protocol-relative url that would navigate off-site', () => {
+    expect(citationHref({ kind: 'github_file', url: '//evil.example/x' })).toBeNull();
+    expect(citationHref({ kind: 'github_file', url: '/\\evil.example/x' })).toBeNull();
+    expect(citationHref({ kind: 'github_file', url: '/wiki/page' })).toBe('/wiki/page');
+    expect(citationHref({ kind: 'github_file', url: '/' })).toBe('/');
+  });
+
   it('deduplicates streamed citations by url and revision', () => {
     const first = citation();
     expect(mergeCitations([first], [first, citation({ title: 'duplicate' })])).toEqual([first]);
