@@ -4531,7 +4531,7 @@ mod tests {
     const UNRETRIEVED: &str = "web:abc123";
     const FIRST_OBSERVED: &str = "2026-09-05T00:00:00+00:00";
 
-    fn registered(uri: &str, title: &str) -> db::chat_sources::Source {
+    fn stored(uri: &str, title: &str) -> db::chat_sources::Source {
         let first_observed_at = chrono::DateTime::parse_from_rfc3339(FIRST_OBSERVED)
             .expect("the fixture observation time is rfc3339")
             .with_timezone(&chrono::Utc);
@@ -4596,7 +4596,7 @@ mod tests {
 
     #[test]
     fn a_stored_identifier_resolves_by_its_row_and_never_by_rehashing_its_uri() {
-        let mut source = registered(SOURCE_URI, SOURCE_TITLE);
+        let mut source = stored(SOURCE_URI, SOURCE_TITLE);
         source.identifier =
             agent::identifier::mint(agent::identifier::Kind::Web, "https://example.test/other");
         assert_ne!(
@@ -4630,7 +4630,7 @@ mod tests {
 
     #[test]
     fn a_source_cited_twice_in_one_reply_produces_one_citation() {
-        let source = registered(SOURCE_URI, SOURCE_TITLE);
+        let source = stored(SOURCE_URI, SOURCE_TITLE);
         let marker = agent::identifier::render(&source.identifier);
         let reply = format!("It shipped {marker}, and the notes agree {marker}.");
 
