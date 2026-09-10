@@ -76,7 +76,7 @@ async fn role_of(client: &TestClient, token: &str, organization: &str, user: &st
         .expect("members are listed")
         .iter()
         .find(|member| member["user_id"] == user)
-        .unwrap_or_else(|| panic!("{user} is no longer a member"))["role"]
+        .expect("the member is still listed")["role"]
         .as_str()
         .expect("a member has a role")
         .to_string()
