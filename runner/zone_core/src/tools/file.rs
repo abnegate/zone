@@ -4,8 +4,10 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use super::beneath::{self, Access};
 use super::{REASON_PARAM, Tool, ToolContext, ToolError, ToolResult, reason_property};
 
 // Prompt budget; matches `read_repository_file` paging in zone_server.
@@ -72,21 +74,10 @@ impl Tool for ReadFileTool {
         let params: ReadFileParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
 
-        let full_path = context.cwd.join(&params.path);
+        let mut file = beneath::open(context, Path::new(&params.path), Access::Read)?;
 
-        let canonical = full_path
-            .canonicalize()
-            .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
-
-        // Security check: ensure path doesn't escape cwd, unless the caller
-        // has deliberately opted out of containment.
-        if !context.unrestricted && !canonical.starts_with(&context.cwd) {
-            return Err(ToolError::Execution(
-                "Path escapes working directory".to_string(),
-            ));
-        }
-
-        let metadata = fs::metadata(&canonical)
+        let metadata = file
+            .metadata()
             .map_err(|e| ToolError::Execution(format!("Cannot read file: {}", e)))?;
 
         if metadata.len() > context.max_file_size as u64 {
@@ -97,7 +88,8 @@ impl Tool for ReadFileTool {
             )));
         }
 
-        let content = fs::read_to_string(&canonical)
+        let mut content = String::new();
+        file.read_to_string(&mut content)
             .map_err(|e| ToolError::Execution(format!("Cannot read file: {}", e)))?;
 
         let selected = if params.start_line.is_some() || params.end_line.is_some() {
@@ -226,60 +218,19 @@ impl Tool for WriteFileTool {
             ));
         }
 
-        let full_path = context.cwd.join(&params.path);
-
-        // Ensure the canonical cwd is available for comparison
-        let canonical_cwd = context
-            .cwd
-            .canonicalize()
-            .unwrap_or_else(|_| context.cwd.clone());
-
-        // For new files, check that the target path (once normalized) stays within cwd
-        // We check the parent directory since the file doesn't exist yet
-        if let Some(parent) = full_path.parent() {
-            // Create parent directories if needed
-            fs::create_dir_all(parent)
-                .map_err(|e| ToolError::Execution(format!("Cannot create directory: {}", e)))?;
-
-            // Now verify the parent stays within cwd
-            let canonical_parent = parent
-                .canonicalize()
-                .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
-
-            if !context.unrestricted && !canonical_parent.starts_with(&canonical_cwd) {
-                return Err(ToolError::Execution(
-                    "Path escapes working directory".to_string(),
-                ));
-            }
+        let path = Path::new(&params.path);
+        if let Some(parent) = path.parent() {
+            beneath::create_dir_all(context, parent)?;
         }
 
-        // Security check for existing files (additional check for symlinks)
-        if full_path.exists() {
-            let canonical = full_path
-                .canonicalize()
-                .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
-
-            if !context.unrestricted && !canonical.starts_with(&canonical_cwd) {
-                return Err(ToolError::Execution(
-                    "Path escapes working directory".to_string(),
-                ));
-            }
-        }
-
-        if params.append {
-            use std::io::Write;
-            let mut file = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&full_path)
-                .map_err(|e| ToolError::Execution(format!("Cannot open file: {}", e)))?;
-
-            file.write_all(params.content.as_bytes())
-                .map_err(|e| ToolError::Execution(format!("Cannot write file: {}", e)))?;
+        let access = if params.append {
+            Access::Append
         } else {
-            fs::write(&full_path, &params.content)
-                .map_err(|e| ToolError::Execution(format!("Cannot write file: {}", e)))?;
-        }
+            Access::Replace
+        };
+        let mut file = beneath::open(context, path, access)?;
+        file.write_all(params.content.as_bytes())
+            .map_err(|e| ToolError::Execution(format!("Cannot write file: {}", e)))?;
 
         let action = if params.append {
             "appended to"
@@ -432,21 +383,10 @@ impl Tool for ApplyPatchTool {
             ));
         }
 
-        let full_path = context.cwd.join(&params.path);
-        let canonical = full_path
-            .canonicalize()
-            .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
-        let canonical_cwd = context
-            .cwd
-            .canonicalize()
-            .unwrap_or_else(|_| context.cwd.clone());
-        if !context.unrestricted && !canonical.starts_with(&canonical_cwd) {
-            return Err(ToolError::Execution(
-                "Path escapes working directory".to_string(),
-            ));
-        }
+        let mut file = beneath::open(context, Path::new(&params.path), Access::Update)?;
 
-        let metadata = fs::metadata(&canonical)
+        let metadata = file
+            .metadata()
             .map_err(|e| ToolError::Execution(format!("Cannot read file: {}", e)))?;
         if metadata.len() > context.max_file_size as u64 {
             return Err(ToolError::Execution(format!(
@@ -456,7 +396,8 @@ impl Tool for ApplyPatchTool {
             )));
         }
 
-        let mut content = fs::read_to_string(&canonical)
+        let mut content = String::new();
+        file.read_to_string(&mut content)
             .map_err(|e| ToolError::Execution(format!("Cannot read file: {}", e)))?;
         let mut replacements = Vec::new();
 
@@ -485,7 +426,9 @@ impl Tool for ApplyPatchTool {
             replacements.push(matches);
         }
 
-        fs::write(&canonical, &content)
+        file.set_len(0)
+            .and_then(|()| file.seek(SeekFrom::Start(0)))
+            .and_then(|_| file.write_all(content.as_bytes()))
             .map_err(|e| ToolError::Execution(format!("Cannot write file: {}", e)))?;
 
         let total: usize = replacements.iter().sum();
@@ -707,6 +650,7 @@ impl Tool for SearchCodeTool {
             params.case_sensitive,
             &mut results,
             max_results,
+            context,
         )?;
         Ok(format_search_results(results, max_results))
     }
@@ -737,6 +681,7 @@ fn search_dir(
     case_sensitive: bool,
     results: &mut Vec<String>,
     max_results: usize,
+    context: &ToolContext,
 ) -> Result<(), ToolError> {
     if results.len() >= max_results {
         return Ok(());
@@ -783,7 +728,15 @@ fn search_dir(
                 continue;
             }
 
-            search_dir(&path, base, pattern, case_sensitive, results, max_results)?;
+            search_dir(
+                &path,
+                base,
+                pattern,
+                case_sensitive,
+                results,
+                max_results,
+                context,
+            )?;
         } else if path.is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let code_exts = [
@@ -797,10 +750,13 @@ fn search_dir(
                 continue;
             }
 
-            let content = match fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
+            let Ok(mut file) = beneath::open(context, &path, Access::Read) else {
+                continue;
             };
+            let mut content = String::new();
+            if file.read_to_string(&mut content).is_err() {
+                continue;
+            }
 
             let relative = path.strip_prefix(base).unwrap_or(&path);
 
@@ -921,7 +877,22 @@ mod tests {
     use super::*;
     use crate::tools::test_support::captured_logs;
     use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    const ATTEMPTS: usize = 2_000;
+    /// Roughly the gap between a tool's check and the open that follows it, so
+    /// a swap lands inside that gap often rather than once in a long while.
+    const HELD: Duration = Duration::from_micros(2);
+    const KEEP: &str = "keep";
+    const LEAF: &str = "leaf.rs";
+    const SECRET_FILE: &str = "secret.rs";
+    const INSIDE: &str = "written inside cwd";
+    const SECRET: &str = "swordfish";
 
     fn create_test_context(dir: &Path) -> ToolContext {
         // Use canonicalized path to handle symlinks (e.g., /var -> /private/var on macOS)
@@ -1748,5 +1719,172 @@ mod tests {
             .await;
 
         assert!(result.unwrap_err().to_string().contains("did not match"));
+    }
+
+    /// The window this closes: a tool checks where a path leads, and the entry
+    /// it checked is replaced with a symlink out of `cwd` before the open
+    /// resolves the same name a second time.
+    ///
+    /// Both states arrive by renaming over the entry, which is atomic, so the
+    /// name never stops existing and never resolves to something half-made.
+    /// Every attempt gets past the check; only which file the open lands on is
+    /// in question.
+    #[cfg(unix)]
+    fn swapping(entry: PathBuf, escape: PathBuf, stop: Arc<AtomicBool>) -> JoinHandle<()> {
+        let spare = entry.with_extension("spare");
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = fs::remove_file(&spare);
+                if fs::write(&spare, INSIDE).is_ok() {
+                    let _ = fs::rename(&spare, &entry);
+                }
+                held();
+
+                let _ = fs::remove_file(&spare);
+                if std::os::unix::fs::symlink(&escape, &spare).is_ok() {
+                    let _ = fs::rename(&spare, &entry);
+                }
+                held();
+            }
+        })
+    }
+
+    /// Spun rather than slept: the gap being aimed at is a couple of syscalls
+    /// wide, far below the granularity a sleep can hold to.
+    #[cfg(unix)]
+    fn held() {
+        let until = Instant::now() + HELD;
+        while Instant::now() < until {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// The relative name a link in `cwd/keep` uses to reach a file beside
+    /// `cwd`, so the escape is by `..` rather than by an absolute target.
+    #[cfg(unix)]
+    fn beside(outside: &Path) -> PathBuf {
+        Path::new("../..")
+            .join(outside.file_name().expect("a temporary directory name"))
+            .join(SECRET_FILE)
+    }
+
+    /// `cwd/keep/leaf.rs` holding `INSIDE`, and the swapper aimed at it.
+    #[cfg(unix)]
+    fn swapped(context: &ToolContext, outside: &Path, stop: &Arc<AtomicBool>) -> JoinHandle<()> {
+        let keep = context.cwd.join(KEEP);
+        fs::create_dir(&keep).expect("a directory inside cwd");
+        let entry = keep.join(LEAF);
+        fs::write(&entry, INSIDE).expect("a file inside cwd");
+        swapping(entry, beside(outside), Arc::clone(stop))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_file_never_returns_a_file_swapped_in_after_the_check() {
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join(SECRET_FILE), SECRET).unwrap();
+        let inside = tempdir().unwrap();
+        let context = create_test_context(inside.path());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = swapped(&context, outside.path(), &stop);
+
+        let mut disclosed = None;
+        for _ in 0..ATTEMPTS {
+            let result = ReadFileTool
+                .execute(
+                    serde_json::json!({"path": format!("{KEEP}/{LEAF}")}),
+                    &context,
+                )
+                .await;
+            if let Ok(result) = result
+                && let Some(output) = result.output
+                && output.contains(SECRET)
+            {
+                disclosed = Some(output);
+                break;
+            }
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+
+        assert!(
+            disclosed.is_none(),
+            "read_file returned a file swapped in after its check: {disclosed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_file_never_follows_an_entry_swapped_in_after_the_check() {
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join(SECRET_FILE);
+        fs::write(&secret, SECRET).unwrap();
+        let inside = tempdir().unwrap();
+        let context = create_test_context(inside.path());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = swapped(&context, outside.path(), &stop);
+
+        for _ in 0..ATTEMPTS {
+            let _ = WriteFileTool
+                .execute(
+                    serde_json::json!({
+                        "path": format!("{KEEP}/{LEAF}"),
+                        "content": INSIDE,
+                        "reason": "the swap"
+                    }),
+                    &context,
+                )
+                .await;
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&secret).unwrap(),
+            SECRET,
+            "write_file wrote through an entry swapped in after its check"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_code_never_reads_an_entry_swapped_out_of_cwd() {
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join(SECRET_FILE), SECRET).unwrap();
+        let inside = tempdir().unwrap();
+        let context = create_test_context(inside.path());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = swapped(&context, outside.path(), &stop);
+
+        let mut disclosed = Vec::new();
+        for _ in 0..ATTEMPTS {
+            let mut results = Vec::new();
+            let _ = search_dir(
+                &context.cwd,
+                &context.cwd,
+                SECRET,
+                true,
+                &mut results,
+                SEARCH_MAX_RESULTS,
+                &context,
+            );
+            if !results.is_empty() {
+                disclosed = results;
+                break;
+            }
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+
+        assert!(
+            disclosed.is_empty(),
+            "the search walker read an entry swapped out of cwd: {disclosed:?}"
+        );
     }
 }
