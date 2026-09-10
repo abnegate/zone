@@ -99,4 +99,24 @@ describe('ActionReceipts', () => {
 
     expect(screen.getByText('archive_task')).toBeInTheDocument();
   });
+
+  it('shows the reason the model gave, labelled as its own words', () => {
+    renderReceipts([
+      receipt({
+        action: 'send_message',
+        target_type: 'message',
+        reason: 'The user asked me to tell the team.',
+      }),
+    ]);
+
+    const reason = screen.getByTestId('action-receipt-reason');
+    expect(reason).toHaveTextContent('Reason, stated by the model');
+    expect(reason).toHaveTextContent('The user asked me to tell the team.');
+  });
+
+  it('omits the reason on a receipt stored before the field existed', () => {
+    renderReceipts([receipt()]);
+
+    expect(screen.queryByTestId('action-receipt-reason')).not.toBeInTheDocument();
+  });
 });

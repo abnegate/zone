@@ -9,7 +9,8 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use uuid::Uuid;
 use zone_core::tools::{
-    MAX_TOOL_MESSAGE_CHARS, Tool, ToolContext, ToolError, ToolRegistry, ToolResult,
+    MAX_TOOL_MESSAGE_CHARS, REASON_PARAM, Tool, ToolContext, ToolError, ToolRegistry, ToolResult,
+    reason_property,
 };
 
 use super::readiness::{
@@ -132,6 +133,10 @@ struct Arguments {
     number: Option<u64>,
     job_id: Option<u64>,
     tag: Option<String>,
+    /// Why the model made this write. Declared so `deny_unknown_fields` accepts
+    /// the property the write schemas advertise; a parse failure here reaches
+    /// the model as an unrepairable message, so its absence never fails a call.
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -241,6 +246,10 @@ impl Tool for Integration {
             properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Issue or pull request number."});
             properties["body"] = json!({"type": "string", "description": "Comment markdown."});
             required.extend(["number", "body"]);
+        }
+        if self.mutating() {
+            properties[REASON_PARAM] = reason_property();
+            required.push(REASON_PARAM);
         }
         json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
     }
@@ -2017,11 +2026,26 @@ fn readiness_citation(record: &Value, observed_at: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::AppState;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zone_core::tools::REASON_DESCRIPTION;
 
     const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const BLOB: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const WHY: &str = "The user asked for this to be opened.";
+
+    fn tool(operation: Operation) -> Integration {
+        Integration {
+            scope: WorkspaceScope {
+                state: AppState::for_tests(),
+                workspace_id: Uuid::new_v4(),
+                chat_id: None,
+                user_id: Uuid::new_v4(),
+            },
+            operation,
+        }
+    }
 
     fn github(server: &MockServer) -> Github {
         let mut github = Github::new(Configuration {
@@ -2044,6 +2068,66 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(response))
             .mount(server)
             .await;
+    }
+
+    #[tokio::test]
+    async fn writes_ask_for_a_reason_the_arguments_accept() {
+        let source = Uuid::new_v4();
+        for (operation, mut call) in [
+            (
+                Operation::CreatePull,
+                json!({"source_id": source, "title": "Fix", "head": "feature"}),
+            ),
+            (
+                Operation::Comment,
+                json!({"source_id": source, "number": 7, "body": "ship it"}),
+            ),
+        ] {
+            let schema = tool(operation).parameters_schema();
+            assert_eq!(
+                schema["properties"][REASON_PARAM]["description"],
+                REASON_DESCRIPTION
+            );
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .expect("required is a list")
+                    .contains(&json!(REASON_PARAM)),
+                "reason must be advertised as required: {schema}"
+            );
+            call[REASON_PARAM] = json!(WHY);
+            let given: Arguments = serde_json::from_value(call.clone())
+                .expect("deny_unknown_fields must accept every property the schema advertises");
+            assert_eq!(given.reason.as_deref(), Some(WHY));
+
+            call.as_object_mut()
+                .expect("a call is an object")
+                .remove(REASON_PARAM);
+            let omitted: Arguments =
+                serde_json::from_value(call).expect("a missing reason must never fail the call");
+            assert!(omitted.reason.is_none(), "an absent reason stays absent");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_writes_ask_for_a_reason() {
+        for operation in [
+            Operation::Build,
+            Operation::Deployments,
+            Operation::Issues,
+            Operation::File,
+            Operation::PullRequests,
+            Operation::ReleasePipelines,
+            Operation::CheckLogs,
+        ] {
+            let tool = tool(operation);
+            let schema = tool.parameters_schema();
+            assert!(
+                schema["properties"].get(REASON_PARAM).is_none(),
+                "{} must not ask for a reason: {schema}",
+                tool.name()
+            );
+        }
     }
 
     #[test]
@@ -2108,6 +2192,7 @@ mod tests {
                     number: None,
                     job_id: None,
                     tag: None,
+                    reason: None,
                 },
             )
             .await
@@ -2413,6 +2498,7 @@ mod tests {
                     number: None,
                     job_id: None,
                     tag: None,
+                    reason: None,
                 },
             )
             .await
@@ -2542,6 +2628,7 @@ mod tests {
                     number: None,
                     job_id: None,
                     tag: None,
+                    reason: None,
                 },
             )
             .await
@@ -2585,6 +2672,7 @@ mod tests {
                     number: Some(7),
                     job_id: None,
                     tag: None,
+                    reason: None,
                 },
             )
             .await
@@ -2614,6 +2702,7 @@ mod tests {
             number,
             job_id: None,
             tag: None,
+            reason: None,
         }
     }
 
@@ -2739,6 +2828,7 @@ mod tests {
             number,
             job_id: None,
             tag: None,
+            reason: None,
         }
     }
 
@@ -3229,6 +3319,7 @@ mod tests {
             number,
             job_id,
             tag: None,
+            reason: None,
         }
     }
 

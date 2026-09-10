@@ -1195,6 +1195,7 @@ impl ListProjectsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zone_core::tools::{REASON_DESCRIPTION, REASON_PARAM};
 
     fn process_env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -1436,6 +1437,67 @@ mod tests {
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
         }
+    }
+
+    /// Every tool the user is asked to approve, across both crates: four host
+    /// tools from `zone_core` and three that write outward from here.
+    const REASONED_TOOLS: [&str; 7] = [
+        "apply_patch",
+        "comment_on_issue",
+        "create_pull_request",
+        "run_command",
+        "run_shell",
+        "send_message",
+        "write_file",
+    ];
+
+    /// `zone_core` holds its own four to one sentence, but only the assembled
+    /// chat catalog can hold all seven to it at once. The sentence lives in
+    /// `zone_core::tools::REASON_DESCRIPTION`; a second copy anywhere, however
+    /// lightly reworded, fails here.
+    #[tokio::test]
+    async fn every_side_effecting_tool_shares_one_reason_description() {
+        let tools = ChatTools::preview(scope()).await;
+
+        let mut asked: HashSet<String> = HashSet::new();
+        let mut descriptions: HashSet<String> = HashSet::new();
+
+        for definition in tools.definitions() {
+            let name = &definition.function.name;
+            let schema = &definition.function.parameters;
+            let Some(property) = schema["properties"].get(REASON_PARAM) else {
+                continue;
+            };
+
+            assert_eq!(property["type"], "string", "{name} asks for a non-string");
+            descriptions.insert(
+                property["description"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{name} describes no reason"))
+                    .to_string(),
+            );
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{name} has no required array"))
+                    .iter()
+                    .any(|entry| entry.as_str() == Some(REASON_PARAM)),
+                "{name} does not advertise {REASON_PARAM} as required"
+            );
+            asked.insert(name.clone());
+        }
+
+        let expected: HashSet<String> =
+            REASONED_TOOLS.iter().map(|name| name.to_string()).collect();
+        assert_eq!(
+            asked, expected,
+            "the set of tools asked for a reason has changed"
+        );
+        assert_eq!(
+            descriptions,
+            HashSet::from([REASON_DESCRIPTION.to_string()]),
+            "the reason description has forked across the two crates"
+        );
     }
 
     #[tokio::test]

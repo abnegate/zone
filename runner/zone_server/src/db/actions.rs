@@ -156,6 +156,10 @@ pub struct Message {
     pub content: String,
     #[serde(default)]
     pub mentions: Vec<Uuid>,
+    /// Why the model sent this. Declared so `deny_unknown_fields` accepts the
+    /// property the tool schema advertises; the console reads it back off the
+    /// raw call arguments, and its absence never fails the send.
+    pub reason: Option<String>,
 }
 
 pub async fn send_message(
@@ -541,7 +545,8 @@ mod tests {
                 Message {
                     chat_id: other_chat,
                     content: "fail".into(),
-                    mentions: vec![]
+                    mentions: vec![],
+                    reason: None,
                 }
             )
             .await
@@ -556,7 +561,8 @@ mod tests {
                 Message {
                     chat_id,
                     content: "fail".into(),
-                    mentions: vec![other_user]
+                    mentions: vec![other_user],
+                    reason: None,
                 }
             )
             .await
@@ -571,6 +577,7 @@ mod tests {
                 chat_id,
                 content: "Hello".into(),
                 mentions: vec![user],
+                reason: None,
             },
         )
         .await
@@ -612,6 +619,35 @@ mod tests {
             .unwrap();
         assert!(list_chats(&pool, workspace, user).await.is_err());
         cleanup(&pool, other_organization, other_user).await;
+        cleanup(&pool, organization, user).await;
+    }
+
+    #[tokio::test]
+    async fn a_message_sends_with_or_without_a_reason() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        for reason in [
+            Some("The user asked for the team to be told.".to_string()),
+            None,
+        ] {
+            let sent = send_message(
+                &pool,
+                workspace,
+                user,
+                chat_id,
+                Message {
+                    chat_id,
+                    content: "Shipped".into(),
+                    mentions: vec![],
+                    reason,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                sent["content"], "Shipped",
+                "a reason never edits the message"
+            );
+        }
         cleanup(&pool, organization, user).await;
     }
 

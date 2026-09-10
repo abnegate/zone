@@ -622,6 +622,33 @@
   color: var(--ui-text-secondary);
 }
 
+/* The model's stated reason for a side-effecting call. Louder than the rest of
+   the trace because it is what a reader weighs before approving, but the label
+   keeps it marked as the model's words rather than an observed fact. */
+
+.tool-call-reason {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0 var(--ui-space-3) var(--ui-space-2);
+  font-size: var(--ui-text-xs);
+}
+
+.tool-call-reason-label {
+  color: var(--ui-text-secondary);
+  letter-spacing: var(--ui-tracking-tight);
+}
+
+.tool-call-reason-text {
+  color: var(--ui-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.tool-call-reason-text--missing {
+  color: var(--ui-text-secondary);
+  font-style: italic;
+}
+
 /* Citations.
    Checkable sources for an agent reply. Incomplete evidence must never read
    as a passing result — that distinction is carried in the label and colour. */

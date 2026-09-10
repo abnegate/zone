@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import type { ActionReceipt, ActionTarget } from '../types';
+import { type ActionReceipt, type ActionTarget, REASON_LABEL } from '../types';
 import { formatDate } from '../utils';
 import './ActionReceipts.css';
 
@@ -30,6 +30,7 @@ function actionLabel(receipt: ActionReceipt): string {
 
 function ReceiptCard({ receipt }: { receipt: ActionReceipt }) {
   const status = receipt.success ? 'ok' : 'failed';
+  const stated = receipt.reason?.trim();
 
   return (
     <article className={`action-receipt action-receipt--${status}`} data-testid="action-receipt">
@@ -53,6 +54,12 @@ function ReceiptCard({ receipt }: { receipt: ActionReceipt }) {
           <dt>Outcome</dt>
           <dd>{receipt.outcome}</dd>
         </div>
+        {stated ? (
+          <div className="action-receipt-reason" data-testid="action-receipt-reason">
+            <dt>{REASON_LABEL}</dt>
+            <dd>{stated}</dd>
+          </div>
+        ) : null}
       </dl>
       {receipt.href ? (
         <Link to={receipt.href} className="action-receipt-link" data-testid="action-receipt-link">

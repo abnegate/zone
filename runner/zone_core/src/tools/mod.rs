@@ -4,10 +4,12 @@
 
 mod command;
 mod file;
+mod reason;
 mod sanitize;
 
 pub use command::*;
 pub use file::*;
+pub use reason::{REASON_DESCRIPTION, REASON_PARAM, reason_property};
 pub use sanitize::sanitize;
 
 use async_trait::async_trait;
@@ -20,8 +22,28 @@ use thiserror::Error;
 
 use crate::llm::ToolDefinition;
 
+/// Budget a tool spends on output it pages or trims for itself: a `read_file`
+/// page, a captured command log.
+pub const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
+
+/// Headroom between a tool's own budget and the transcript cap, for the
+/// framing a tool wraps around its output: a pagination footer, an exit-code
+/// line, the `Error: ` prefix.
+const TOOL_FRAMING_CHARS: usize = 1_000;
+
 /// Last-resort cap on tool text stored in the chat transcript.
-pub const MAX_TOOL_MESSAGE_CHARS: usize = 8_000;
+///
+/// Sits above [`MAX_TOOL_OUTPUT_CHARS`] and the framing around it, so a tool
+/// that stayed inside its own budget is never cut here. Setting the two equal
+/// meant a full page plus its footer overflowed by a few characters and lost
+/// its middle to a second trim, which is the double cut this exists to avoid.
+pub const MAX_TOOL_MESSAGE_CHARS: usize = MAX_TOOL_OUTPUT_CHARS + TOOL_FRAMING_CHARS;
+
+/// What [`ToolResult::to_message`] puts in front of a failure.
+///
+/// A tool trimming to a caller's cap has to reserve this, or the message the
+/// model reads is longer than the cap it asked for.
+pub(crate) const ERROR_PREFIX: &str = "Error: ";
 
 const TOOL_TRUNCATION_MARKER: &str = "\n[truncated]";
 
@@ -30,6 +52,34 @@ pub(crate) fn truncate_chars(text: &str, max_chars: usize) -> String {
         Some((byte_idx, _)) => format!("{}{TOOL_TRUNCATION_MARKER}", &text[..byte_idx]),
         None => text.to_string(),
     }
+}
+
+fn trim_marker(dropped: usize) -> String {
+    format!("\n\n[… {dropped} characters trimmed …]\n\n")
+}
+
+/// Cap `text` at `max_chars`, dropping the middle rather than the tail.
+///
+/// The error a build was run for is usually at the end, so a cut that keeps
+/// only the head throws away the reason for the call. The marker is paid for
+/// out of the budget, which makes a second pass over already-trimmed text a
+/// no-op.
+pub(crate) fn trim_middle(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    // The widest the marker can get, so head + marker + tail always fits.
+    let reserved = trim_marker(chars.len()).chars().count();
+    let kept = max_chars.saturating_sub(reserved);
+    let head = kept / 2;
+    let tail = kept - head;
+    format!(
+        "{}{}{}",
+        chars[..head].iter().collect::<String>(),
+        trim_marker(chars.len() - kept),
+        chars[chars.len() - tail..].iter().collect::<String>()
+    )
 }
 
 /// Tool execution error
@@ -93,11 +143,11 @@ impl ToolResult {
             self.output.clone().unwrap_or_default()
         } else {
             format!(
-                "Error: {}",
+                "{ERROR_PREFIX}{}",
                 self.error.as_deref().unwrap_or("Unknown error")
             )
         };
-        truncate_chars(&message, MAX_TOOL_MESSAGE_CHARS)
+        trim_middle(&message, MAX_TOOL_MESSAGE_CHARS)
     }
 }
 
@@ -359,6 +409,75 @@ impl Default for ToolRegistry {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::cell::RefCell;
+    use std::future::Future;
+    use std::io;
+    use std::sync::{Arc, Mutex, Once};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// One subscriber for the whole binary, because a scoped one is not
+    /// reliable here: `tracing` caches each callsite's interest globally, and a
+    /// test running in parallel with no subscriber of its own caches
+    /// `Interest::never` for a callsite another test is about to read.
+    static INSTALLED: Once = Once::new();
+
+    thread_local! {
+        static SINK: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
+    }
+
+    /// Routes each line to whichever buffer the emitting thread is collecting
+    /// into, and drops it when that thread is not collecting.
+    struct Sink;
+
+    impl io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            SINK.with(|sink| {
+                if let Some(buffer) = sink.borrow().as_ref() {
+                    buffer.lock().expect("log buffer").extend_from_slice(bytes);
+                }
+            });
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for Sink {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            Sink
+        }
+    }
+
+    /// Run `work` and return it with everything it logged on this thread.
+    ///
+    /// `zone_server` turns `zone_core=debug` on by default, so a debug field is
+    /// a production log line. This is how a test reads one back.
+    pub(crate) async fn captured_logs<T>(work: impl Future<Output = T>) -> (T, String) {
+        INSTALLED.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(Sink)
+                .try_init();
+        });
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        SINK.with(|sink| *sink.borrow_mut() = Some(buffer.clone()));
+        let value = work.await;
+        SINK.with(|sink| sink.borrow_mut().take());
+
+        let logged =
+            String::from_utf8(buffer.lock().expect("log buffer").clone()).expect("logs are utf-8");
+        (value, logged)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -398,37 +517,67 @@ mod tests {
     }
 
     #[test]
-    fn to_message_caps_huge_success_output() {
-        let result = ToolResult::success("x".repeat(20_000));
-        let message = result.to_message();
-        assert!(message.contains("[truncated]"));
-        assert!(message.starts_with('x'));
-        assert_eq!(
-            message.chars().count(),
-            MAX_TOOL_MESSAGE_CHARS + TOOL_TRUNCATION_MARKER.chars().count()
+    fn to_message_keeps_the_head_and_tail_of_huge_success_output() {
+        let body = format!("HEAD_MARKER{}TAIL_MARKER", "x".repeat(20_000));
+        let message = ToolResult::success(body).to_message();
+        assert!(message.starts_with("HEAD_MARKER"), "{message}");
+        assert!(message.ends_with("TAIL_MARKER"), "{message}");
+        assert!(message.contains("characters trimmed"), "{message}");
+        assert!(
+            message.chars().count() <= MAX_TOOL_MESSAGE_CHARS,
+            "{message}"
         );
-        let prefix = message
-            .strip_suffix(TOOL_TRUNCATION_MARKER)
-            .expect("truncation marker");
-        assert_eq!(prefix.chars().count(), MAX_TOOL_MESSAGE_CHARS);
-        assert!(prefix.chars().all(|ch| ch == 'x'));
     }
 
     #[test]
     fn to_message_caps_huge_error_on_character_boundary() {
         let result = ToolResult::error("é".repeat(20_000));
         let message = result.to_message();
-        assert!(message.starts_with("Error: "));
-        assert!(message.contains("[truncated]"));
-        assert_eq!(
-            message.chars().count(),
-            MAX_TOOL_MESSAGE_CHARS + TOOL_TRUNCATION_MARKER.chars().count()
+        assert!(message.starts_with("Error: é"), "{message}");
+        assert!(message.ends_with('é'), "{message}");
+        assert!(message.contains("characters trimmed"), "{message}");
+        assert!(!message.contains('\u{fffd}'), "{message}");
+        assert!(
+            message.chars().count() <= MAX_TOOL_MESSAGE_CHARS,
+            "{message}"
         );
-        let prefix = message
-            .strip_suffix(TOOL_TRUNCATION_MARKER)
-            .expect("truncation marker");
-        assert!(std::str::from_utf8(prefix.as_bytes()).is_ok());
-        assert_eq!(prefix.chars().count(), MAX_TOOL_MESSAGE_CHARS);
+    }
+
+    /// A tool that pages itself already returns the right amount; the
+    /// transcript cap is there for one that does not. When the two budgets
+    /// were equal, a full `read_file` page plus its pagination footer
+    /// overflowed by the length of the footer and lost its middle here, so the
+    /// model received the first and last halves of a page with the body gone.
+    #[test]
+    fn a_full_page_and_its_framing_are_not_cut_a_second_time() {
+        let page = "p".repeat(MAX_TOOL_OUTPUT_CHARS);
+        let framed =
+            format!("{page}\n[truncated; total=99999 offset=0 next={MAX_TOOL_OUTPUT_CHARS}]");
+        assert!(
+            framed.chars().count() > MAX_TOOL_OUTPUT_CHARS,
+            "the framing has to overflow the tool budget for this to be a test"
+        );
+
+        let message = ToolResult::success(framed.clone()).to_message();
+
+        assert_eq!(message, framed, "a page that fits its budget was trimmed");
+        assert!(!message.contains("characters trimmed"), "{message}");
+    }
+
+    #[test]
+    fn trim_middle_keeps_head_and_tail_inside_the_budget() {
+        let text = format!("HEAD{}TAIL", "x".repeat(40_000));
+        let trimmed = trim_middle(&text, MAX_TOOL_MESSAGE_CHARS);
+        assert!(trimmed.starts_with("HEAD"), "{trimmed}");
+        assert!(trimmed.ends_with("TAIL"), "{trimmed}");
+        assert!(trimmed.contains("characters trimmed"), "{trimmed}");
+        assert!(trimmed.chars().count() <= MAX_TOOL_MESSAGE_CHARS);
+        assert_eq!(trim_middle("hello", MAX_TOOL_MESSAGE_CHARS), "hello");
+        assert_eq!(
+            trim_middle(&trimmed, MAX_TOOL_MESSAGE_CHARS),
+            trimmed,
+            "trimming an already trimmed string must not cut it again"
+        );
     }
 
     #[test]
@@ -522,6 +671,60 @@ mod tests {
         ] {
             assert!(!is_vision_url(excluded), "{excluded}");
         }
+    }
+
+    fn side_effecting_tools() -> Vec<Arc<dyn Tool>> {
+        vec![
+            Arc::new(RunCommandTool),
+            Arc::new(RunShellTool),
+            Arc::new(WriteFileTool),
+            Arc::new(ApplyPatchTool),
+        ]
+    }
+
+    #[test]
+    fn every_side_effecting_schema_lists_reason_as_a_property_and_as_required() {
+        for tool in side_effecting_tools() {
+            let schema = tool.parameters_schema();
+            let property = &schema["properties"][REASON_PARAM];
+            assert_eq!(property["type"], "string", "{}", tool.name());
+            assert_eq!(
+                property["description"],
+                REASON_DESCRIPTION,
+                "{}",
+                tool.name()
+            );
+
+            let required = schema["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{} has no required array", tool.name()));
+            assert!(
+                required
+                    .iter()
+                    .any(|name| name.as_str() == Some(REASON_PARAM)),
+                "{} does not require {REASON_PARAM}",
+                tool.name()
+            );
+        }
+    }
+
+    #[test]
+    fn one_reason_description_is_shared_by_every_side_effecting_schema() {
+        let descriptions: HashSet<String> = side_effecting_tools()
+            .iter()
+            .map(|tool| {
+                tool.parameters_schema()["properties"][REASON_PARAM]["description"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{} has no reason description", tool.name()))
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(
+            descriptions,
+            HashSet::from([REASON_DESCRIPTION.to_string()]),
+            "reason descriptions have forked"
+        );
     }
 
     #[test]

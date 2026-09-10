@@ -11,10 +11,11 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::{LlmClient, LlmConfig, Message, Role};
+use zone_core::tools::Tool;
 use zone_server::agent::prompt;
 use zone_server::agent::{
     AgentEvent, AgentRun, ApprovalGate, ApprovalPolicy, ChatTools, Environment, MAX_ITERATIONS,
-    WorkspaceScope, run,
+    ToolCallRecord, WorkspaceScope, run,
 };
 
 const MALFORMED: &str =
@@ -861,4 +862,168 @@ async fn the_assembled_system_prompt_reaches_the_provider_in_section_order() {
         1,
         "{prompt}"
     );
+}
+
+/// Approves `id` as soon as the loop registers it, so the run does not sit out
+/// its timeout waiting for a decision that only a person would otherwise make.
+fn approve(gate: &ApprovalGate, id: &'static str) {
+    let poll = gate.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if poll.decide(id, true) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+}
+
+/// The decision this PR rests on, first half: a stated reason has to survive
+/// the whole way to the two places a person reads it — the approval frame they
+/// decide on, and the record stored on the message that the console re-renders
+/// after a reload. Neither is reachable from the schema alone.
+#[tokio::test]
+async fn a_stated_reason_reaches_the_approval_frame_and_the_stored_record() {
+    const WHY: &str = "The user asked me to save the draft they dictated.";
+    let path = std::env::temp_dir().join(format!("zone-reason-{}.txt", Uuid::new_v4()));
+    let gate = ApprovalGate::new();
+    approve(&gate, "stated_write");
+    let write = json!({
+        "id": "stated_write",
+        "name": "write_file",
+        "arguments": {"path": path, "content": "draft", "reason": WHY},
+    });
+    let (events, _) = exercise_approved(
+        vec![(200, text(&write.to_string())), (200, text("Saved."))],
+        vec![Message::user("Save the draft.")],
+        ApprovalPolicy::required(gate),
+    )
+    .await;
+    let written = std::fs::read_to_string(&path);
+    let _ = std::fs::remove_file(&path);
+
+    let frame = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolApprovalRequired { id, reason, .. } if id == "stated_write" => {
+                Some(reason.clone())
+            }
+            _ => None,
+        })
+        .expect("the write asked for approval");
+    assert_eq!(
+        frame,
+        Some(WHY.to_string()),
+        "the approval frame decides on bare arguments without the stated intent"
+    );
+
+    // The stored record is built off ToolCallStarted's arguments, the way
+    // ws::chat does when it writes messages.metadata.
+    let arguments = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCallStarted { id, arguments, .. } if id == "stated_write" => {
+                Some(arguments.clone())
+            }
+            _ => None,
+        })
+        .expect("the write started");
+    let record = ToolCallRecord {
+        id: "stated_write".to_string(),
+        name: "write_file".to_string(),
+        arguments: arguments.clone(),
+        success: true,
+        detail: "Wrote".to_string(),
+        duration_ms: 0,
+        reasoning: None,
+        reason: zone_server::agent::reason(&arguments),
+    };
+    assert_eq!(record.reason.as_deref(), Some(WHY));
+    let stored = serde_json::to_value(&record).unwrap();
+    assert_eq!(stored["reason"], json!(WHY), "{stored}");
+    assert_eq!(
+        serde_json::from_value::<ToolCallRecord>(stored).unwrap(),
+        record,
+        "the record does not survive the round trip through messages.metadata"
+    );
+
+    assert_eq!(written.unwrap(), "draft");
+    assert_eq!(answer(&events), "Saved.");
+}
+
+/// The decision this PR rests on, second half, and the one worth a test.
+///
+/// `reason` sits in seven schemas' `required` arrays, but nothing validates
+/// that array at dispatch and this is deliberate: a missing annotation must
+/// never fail a call. A model too small to keep the parameter straight would
+/// otherwise spend a whole turn on a rejection it cannot read its way out of,
+/// and the anti-loop guard would refuse the identical retry.
+///
+/// If a later author "tightens" this into real validation, this test fails —
+/// which is the point of it.
+#[tokio::test]
+async fn a_side_effecting_call_omitting_its_reason_still_executes() {
+    assert!(
+        zone_core::tools::WriteFileTool.parameters_schema()["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .any(|name| name == "reason"),
+        "this test is only meaningful while the schema advertises reason as required"
+    );
+
+    let path = std::env::temp_dir().join(format!("zone-noreason-{}.txt", Uuid::new_v4()));
+    let gate = ApprovalGate::new();
+    approve(&gate, "silent_write");
+    let write = json!({
+        "id": "silent_write",
+        "name": "write_file",
+        "arguments": {"path": path, "content": "written anyway"},
+    });
+    let (events, requests) = exercise_approved(
+        vec![(200, text(&write.to_string())), (200, text("Saved."))],
+        vec![Message::user("Save it.")],
+        ApprovalPolicy::required(gate),
+    )
+    .await;
+    let written = std::fs::read_to_string(&path);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(
+        written.unwrap(),
+        "written anyway",
+        "a missing reason stopped the write from happening"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallCompleted { id, success: true, .. } if id == "silent_write"
+        )),
+        "the call reported failure: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Failed(_))),
+        "the turn failed over a missing annotation: {events:?}"
+    );
+
+    // The frame still goes up, saying plainly that no reason was given rather
+    // than holding the call back until one is.
+    assert_eq!(
+        events.iter().find_map(|event| match event {
+            AgentEvent::ToolApprovalRequired { id, reason, .. } if id == "silent_write" =>
+                Some(reason.clone()),
+            _ => None,
+        }),
+        Some(None),
+        "an unexplained write must still reach the approver"
+    );
+
+    // One dispatch, not a rejected first attempt and a retry: a turn spent on
+    // the missing parameter is the cost this non-enforcement exists to avoid.
+    assert_eq!(started(&events), vec!["silent_write"]);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(answer(&events), "Saved.");
 }

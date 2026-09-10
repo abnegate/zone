@@ -297,6 +297,65 @@ describe('useChat', () => {
     expect(running?.arguments).toBe('{"query":"deploys"}');
   });
 
+  it('keeps the stated reason on the call it arrived with, through approval', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: 'm4',
+      tool_call_id: 'call_1',
+      name: 'run_shell',
+      arguments: '{"command":"bun test","reason":"The user asked which tests fail."}',
+      reason: 'The user asked which tests fail.',
+    });
+    lastSocket?.emit({
+      type: 'tool_approval_required',
+      message_id: 'm4',
+      tool_call_id: 'call_1',
+      name: 'run_shell',
+      arguments: '{"command":"bun test","reason":"The user asked which tests fail."}',
+      reason: 'The user asked which tests fail.',
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.approval).toBe(
+        'pending'
+      );
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.reason).toBe(
+      'The user asked which tests fail.'
+    );
+
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: 'm4',
+      tool_call_id: 'call_1',
+      name: 'run_shell',
+      success: true,
+      detail: '2 failing',
+      duration_ms: 900,
+    });
+
+    // The result frame carries no reason of its own; the completed row must
+    // still show the one the model gave when it asked.
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.pending).toBe(false);
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.reason).toBe(
+      'The user asked which tests fail.'
+    );
+  });
+
   it('attaches streamed reasoning to the following tool call', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
