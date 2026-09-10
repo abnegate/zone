@@ -19,7 +19,142 @@ interface MessageContentProps {
 
 export const UNSOURCED_LINK_NOTE = 'Link disabled: not among the sources for this reply';
 
+export const UNRESOLVED_MARKER_NOTE =
+  'Source marker unresolved: no source on this reply carries this identifier';
+
+/// A marker reads as bracketed hex, so the source it names is spelled out for
+/// anyone listening rather than looking.
+export const REFERENCE_NOTE = 'source';
+
 const EXTERNAL = /^https?:\/\//i;
+
+/// Retrieval namespaces a source marker can name. The kind is part of the
+/// identifier, not decoration: two namespaces may digest to the same value.
+const MARKER_KINDS = ['web', 'doc', 'kb', 'chat'] as const;
+
+/// `[web:a3f21c]` — what the model writes to cite a source it was given.
+const MARKER = new RegExp(`\\[(${MARKER_KINDS.join('|')}):([0-9a-fA-F]{6,32})\\]`, 'g');
+
+const REFERENCE_CLASS = 'message-md-citation-ref';
+const UNRESOLVED_CLASS = 'message-md-citation-unresolved';
+const ANCHOR_PREFIX = 'citation-';
+
+/// Widened here until the shared `Citation` carries `identifier`; the field
+/// stays optional because citations stored before markers existed have none.
+type IdentifiedCitation = Citation & { identifier?: string | null };
+
+/// The id the citations aside puts on a chip, so a marker can link to it.
+export function citationAnchorId(identifier: string): string {
+  return `${ANCHOR_PREFIX}${identifier
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')}`;
+}
+
+/// Markers resolve by identifier, never by position: a citation list's order is
+/// not a contract, and a reordered list would silently re-point every marker.
+function identified(citations: readonly Citation[]): Map<string, IdentifiedCitation> {
+  const index = new Map<string, IdentifiedCitation>();
+  for (const citation of citations as readonly IdentifiedCitation[]) {
+    const identifier = citation.identifier?.trim().toLowerCase();
+    if (identifier && !index.has(identifier)) index.set(identifier, citation);
+  }
+  return index;
+}
+
+interface MarkdownNode {
+  type: string;
+  value?: string;
+  children?: MarkdownNode[];
+  data?: {
+    hName?: string;
+    hProperties?: Record<string, string>;
+  };
+}
+
+/// Both renderings keep the marker exactly as written. An unresolved marker is
+/// a fabricated attribution, and deleting it would leave a confident sentence
+/// with nothing left to check.
+function markerNode(
+  raw: string,
+  kind: string,
+  digest: string,
+  index: Map<string, IdentifiedCitation>
+): MarkdownNode {
+  const key = digest.toLowerCase();
+  const citation = index.get(`${kind}:${key}`) ?? index.get(key);
+
+  if (!citation?.identifier) {
+    return {
+      type: 'text',
+      value: raw,
+      data: {
+        hName: 'span',
+        hProperties: { className: UNRESOLVED_CLASS, title: UNRESOLVED_MARKER_NOTE },
+      },
+    };
+  }
+
+  return {
+    type: 'text',
+    value: raw,
+    data: {
+      hName: 'a',
+      hProperties: {
+        className: REFERENCE_CLASS,
+        href: `#${citationAnchorId(citation.identifier)}`,
+        title: citation.title,
+      },
+    },
+  };
+}
+
+/// Markers are rewritten on the parsed tree rather than in the raw string, so a
+/// fenced block and inline code — separate node types, never text — stay byte
+/// for byte what the model wrote.
+function citationMarkers(citations: readonly Citation[]) {
+  const index = identified(citations);
+
+  const split = (value: string): MarkdownNode[] | null => {
+    const nodes: MarkdownNode[] = [];
+    let cursor = 0;
+
+    for (const match of value.matchAll(MARKER)) {
+      const start = match.index;
+      if (start > cursor) nodes.push({ type: 'text', value: value.slice(cursor, start) });
+      nodes.push(markerNode(match[0], match[1], match[2], index));
+      cursor = start + match[0].length;
+    }
+
+    if (nodes.length === 0) return null;
+    if (cursor < value.length) nodes.push({ type: 'text', value: value.slice(cursor) });
+    return nodes;
+  };
+
+  const walk = (node: MarkdownNode): void => {
+    if (!node.children) return;
+    const rewritten: MarkdownNode[] = [];
+
+    for (const child of node.children) {
+      const parts =
+        child.type === 'text' && typeof child.value === 'string' && !child.data
+          ? split(child.value)
+          : null;
+      if (parts) {
+        rewritten.push(...parts);
+        continue;
+      }
+      walk(child);
+      rewritten.push(child);
+    }
+
+    node.children = rewritten;
+  };
+
+  return () => (tree: MarkdownNode) => {
+    walk(tree);
+  };
+}
 
 function Anchor({ href, title, children }: { href?: string; title?: string; children: ReactNode }) {
   const external = Boolean(href && EXTERNAL.test(href));
@@ -59,13 +194,28 @@ export function MessageContent({ content, links, citations, compact }: MessageCo
   /// would de-link every legitimate link. Once it mints them, drop the
   /// `&& sources.length > 0` and the guard becomes unconditional.
   const resolving = links === 'citations' && sources.length > 0;
+  /// Markers are read on assistant replies whether or not the citations have
+  /// settled yet, so a streaming marker shows as unresolved and then resolves
+  /// in place. Reasoning and user text carry no marker convention.
+  const marking = links === 'citations';
 
   return (
     <div className={compact ? 'message-markdown message-markdown--compact' : 'message-markdown'}>
       <Markdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={marking ? [remarkGfm, citationMarkers(sources)] : [remarkGfm]}
         components={{
-          a: ({ href, title, children }) => {
+          a: ({ href, title, className, children }) => {
+            if (className === REFERENCE_CLASS) {
+              return (
+                <a className={className} href={href} title={title} data-testid="citation-reference">
+                  {children}
+                  <span className="sr-only">
+                    {' '}
+                    ({REFERENCE_NOTE}: {title})
+                  </span>
+                </a>
+              );
+            }
             if (links === 'none') return <>{children}</>;
             if (resolving && !resolvesToCitation(href, sources)) {
               return <UnsourcedLink>{children}</UnsourcedLink>;
@@ -74,6 +224,16 @@ export function MessageContent({ content, links, citations, compact }: MessageCo
               <Anchor href={href} title={title}>
                 {children}
               </Anchor>
+            );
+          },
+          span: ({ className, title, children }) => {
+            if (className !== UNRESOLVED_CLASS)
+              return <span className={className}>{children}</span>;
+            return (
+              <span className={className} title={title} data-testid="unresolved-marker">
+                {children}
+                <span className="sr-only"> ({UNRESOLVED_MARKER_NOTE})</span>
+              </span>
             );
           },
           img: ({ src, alt, title }) =>

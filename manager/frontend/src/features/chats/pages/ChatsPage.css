@@ -1022,6 +1022,49 @@
   color: color-mix(in srgb, var(--ui-text-inverse) 80%, transparent);
 }
 
+/* Keeps the marker's own text so a reader can match what the model claimed
+   against what the citations aside proves. */
+.message-markdown .message-md-citation-ref {
+  padding: 0 var(--ui-space-0-5);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-accent-muted);
+  color: var(--ui-accent);
+  font-family: var(--ui-font-mono);
+  font-size: 0.85em;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.message-markdown .message-md-citation-ref:hover {
+  background: color-mix(in srgb, var(--ui-accent) 24%, transparent);
+}
+
+.message-markdown .message-md-citation-ref:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+/* Neutral, not amber: markers arrive before the citations settle, so the
+   unresolved state is the ordinary first frame of a streaming reply and has to
+   read as settling rather than as an error appearing. */
+.message-markdown .message-md-citation-unresolved {
+  padding: 0 var(--ui-space-0-5);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-muted);
+  font-family: var(--ui-font-mono);
+  font-size: 0.85em;
+  text-decoration: underline dotted var(--ui-border-strong);
+  text-underline-offset: 2px;
+  text-decoration-skip-ink: none;
+  white-space: nowrap;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
 .message-markdown code {
   padding: 0.125rem 0.3rem;
   border-radius: var(--ui-radius-sm);
