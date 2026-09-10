@@ -65,6 +65,10 @@ impl fmt::Display for Kind {
 /// of that list is not read at all.
 const MAX_SUMMARY_CHARS: usize = 72;
 
+/// What a change with no title and no classification is called. A task title is
+/// only `NOT NULL`, so an empty one reaches here.
+const UNTITLED: &str = "apply the work of a background task";
+
 /// A commit subject: the kind of change, then what it did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subject {
@@ -84,9 +88,17 @@ impl Subject {
     ///
     /// A task's title is what the user asked for rather than what the run
     /// turned out to do, so it stands in for a summary without claiming to be
-    /// one.
+    /// one. A title with nothing in it leaves the subject saying only where the
+    /// change came from, which still beats a kind with nothing after it.
     pub fn unclassified(title: &str) -> Self {
-        Self::new(Kind::UNCLASSIFIED, title)
+        let summary = normalize(title);
+        Self {
+            kind: Kind::UNCLASSIFIED,
+            summary: match summary.is_empty() {
+                true => UNTITLED.to_string(),
+                false => summary,
+            },
+        }
     }
 
     /// Read `(kind): summary` back out of a line.
@@ -232,5 +244,21 @@ mod tests {
             subject.to_string(),
             "(chore): add rate limiting to the public API"
         );
+    }
+
+    /// A task's title is only `NOT NULL`, so an empty one reaches the fallback.
+    /// `(chore): ` with nothing after it is not a subject.
+    #[test]
+    fn an_untitled_change_is_still_named_something_a_reader_can_read() {
+        for title in ["", "   ", "\n\t "] {
+            let subject = Subject::unclassified(title);
+
+            assert_eq!(subject.summary(), UNTITLED, "{title:?}");
+            assert_eq!(
+                subject.to_string(),
+                format!("(chore): {UNTITLED}"),
+                "{title:?}"
+            );
+        }
     }
 }
