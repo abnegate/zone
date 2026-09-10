@@ -242,10 +242,9 @@ describe('InvitationsSection', () => {
     expect(screen.getByRole('heading', { name: /invite member/i })).toBeInTheDocument();
   });
 
-  // Note: Uses mock() for global.confirm mock
-  it.skip('revokes invitation when revoke button clicked', async () => {
+  it('revokes invitation when revoke button clicked', async () => {
     mockRevokeInvitation.mockResolvedValue();
-    global.confirm = mock(() => true) as typeof global.confirm;
+    window.confirm = mock(() => true) as typeof window.confirm;
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 
@@ -256,7 +255,7 @@ describe('InvitationsSection', () => {
     const revokeButtons = screen.getAllByRole('button', { name: /revoke/i });
     fireEvent.click(revokeButtons[0]);
 
-    expect(global.confirm).toHaveBeenCalledWith('Are you sure you want to revoke this invitation?');
+    expect(window.confirm).toHaveBeenCalledWith('Are you sure you want to revoke this invitation?');
 
     await waitFor(() => {
       expect(mockRevokeInvitation).toHaveBeenCalledWith(orgId, 'inv-1');
@@ -266,9 +265,8 @@ describe('InvitationsSection', () => {
     expect(mockGetInvitations).toHaveBeenCalledTimes(2);
   });
 
-  // Note: Uses mock() for global.confirm mock
-  it.skip('does not revoke invitation when user cancels confirmation', async () => {
-    global.confirm = mock(() => false) as typeof global.confirm;
+  it('does not revoke invitation when user cancels confirmation', async () => {
+    window.confirm = mock(() => false) as typeof window.confirm;
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 

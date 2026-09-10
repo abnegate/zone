@@ -11,7 +11,7 @@ import {
   vi,
 } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { client } from '../../../api/client';
 import type { SessionsResponse } from '../types';
 import type SessionsPageType from './SessionsPage';
@@ -565,7 +565,12 @@ describe('SessionsPage', () => {
 
   describe('Button States', () => {
     // TODO: Fix timing issue with async mock resolution in happy-dom
-    it.skip('disables buttons while revoking', async () => {
+    /// The guard against firing a revoke twice lives on the open dialog, not on
+    /// the table: while the request is in flight the dialog stays up with both
+    /// buttons disabled. The table's own buttons cannot be asserted here at all
+    /// -- Radix marks the rest of the document `aria-hidden` while a modal is
+    /// open, so they are not in the accessibility tree.
+    it('disables the confirmation while the revoke is in flight', async () => {
       let resolveRevoke: (() => void) | undefined;
       mockRevokeSession.mockReturnValueOnce(
         new Promise((resolve) => {
@@ -581,20 +586,25 @@ describe('SessionsPage', () => {
 
       clickFirstRevokeButton();
 
-      await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument();
-      });
-
-      fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+      const button = (name: string) =>
+        within(screen.getByRole('dialog')).getByRole('button', { name });
 
       await waitFor(() => {
-        const allRevokeButtons = screen.getAllByRole('button', { name: /revoke/i });
-        allRevokeButtons.forEach((button) => {
-          if (!button.textContent?.includes('All')) {
-            expect(button).toBeDisabled();
-          }
-        });
+        expect(button('Confirm')).toBeEnabled();
       });
+      expect(button('Cancel')).toBeEnabled();
+
+      fireEvent.click(button('Confirm'));
+
+      await waitFor(() => {
+        expect(button('Confirm')).toBeDisabled();
+      });
+      expect(button('Cancel')).toBeDisabled();
+      expect(mockRevokeSession).toHaveBeenCalledTimes(1);
+
+      // A second click while in flight must not start another revoke.
+      fireEvent.click(button('Confirm'));
+      expect(mockRevokeSession).toHaveBeenCalledTimes(1);
 
       resolveRevoke?.();
     });

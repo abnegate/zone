@@ -27,6 +27,39 @@ const SECRET_KEY_WORDS: &[&str] = &[
     "token",
 ];
 
+/// Key words that name a credential and nothing else. `key` and `auth` are
+/// absent on purpose: `--key=main` and `auth=none` are ordinary output, so a
+/// value assigned to those still has to look like a secret to be redacted.
+/// A value assigned to one of these does not -- a chosen passphrase is low
+/// entropy by nature, and `JWT_SECRET=correct-horse-battery-staple` is a
+/// credential however it reads.
+const NAMED_SECRET_KEY_WORDS: &[&str] = &[
+    "accesskey",
+    "apikey",
+    "credential",
+    "encryptionkey",
+    "passwd",
+    "password",
+    "privatekey",
+    "pwd",
+    "secret",
+    "secretkey",
+    "signature",
+    "signingkey",
+    "token",
+];
+
+/// Words that introduce a credential without an assignment, as
+/// `Authorization: Bearer <token>` does.
+const SECRET_INTRODUCERS: &[&str] = &["bearer", "basic", "token", "password", "passwd", "secret"];
+
+/// Shortest run redacted when a key word names it outright.
+const MINIMUM_NAMED_LENGTH: usize = 6;
+
+const PEM_BEGIN: &str = "-----BEGIN ";
+const PEM_END: &str = "-----END ";
+const PEM_PRIVATE: &str = "PRIVATE KEY-----";
+
 #[derive(Clone, Copy)]
 enum Charset {
     /// `[A-Za-z0-9_.:/+-]`
@@ -176,9 +209,121 @@ pub fn redact(text: &str) -> Cow<'_, str> {
 }
 
 fn secret_at(text: &str, index: usize) -> Option<usize> {
-    credential_at(text, index)
+    private_key_at(text, index)
+        .or_else(|| credential_at(text, index))
         .or_else(|| json_web_token_at(text, index))
+        .or_else(|| url_password_at(text, index))
         .or_else(|| encoded_at(text, index))
+        .or_else(|| named_at(text, index))
+}
+
+/// The body of a PEM private key, from its BEGIN line to the end of its END
+/// line. Nothing in the block carries a prefix or an assignment, and the base64
+/// is newline-wrapped, so the run scanners never see it whole.
+fn private_key_at(text: &str, index: usize) -> Option<usize> {
+    let rest = text.get(index..)?;
+    if !rest.starts_with(PEM_BEGIN) {
+        return None;
+    }
+    let line = rest.find('\n').unwrap_or(rest.len());
+    if !rest[..line].contains(PEM_PRIVATE) {
+        return None;
+    }
+    // Closing on the first END marker lets an intervening one -- an END line
+    // for some other label, sitting in the same output -- cut the redaction
+    // short and leave the rest of the key material standing. Close on the label
+    // this block opened with.
+    let label = rest[PEM_BEGIN.len()..line].trim_end_matches('\r');
+    let closing = format!("{PEM_END}{label}");
+    // The marker has to be the whole line. Matching it anywhere lets a line
+    // that merely starts with it -- `-----END X----- and then some` -- close
+    // the block, which is the same escape one spelling further on.
+    let end = closes_at(rest, &closing).map_or(rest.len(), |at| {
+        rest[at..]
+            .find('\n')
+            .map_or(rest.len(), |newline| at + newline)
+    });
+    Some(index + end)
+}
+
+/// Where `closing` occurs as a complete line, rather than as a prefix of one.
+fn closes_at(text: &str, closing: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(offset) = text[from..].find(closing) {
+        let at = from + offset;
+        let after = &text[at + closing.len()..];
+        if after.is_empty() || after.starts_with('\n') || after.starts_with('\r') {
+            return Some(at);
+        }
+        from = at + closing.len();
+    }
+    None
+}
+
+/// The password in a `scheme://user:password@host` URL.
+///
+/// The run is preceded by a colon, so `assigned_to_secret` looks back over the
+/// *username* for a key word and finds none: `postgres://zone:<password>@db`
+/// reads as an assignment to `zone`.
+fn url_password_at(text: &str, index: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if index == 0 || bytes[index - 1] != b':' {
+        return None;
+    }
+
+    let mut start = index - 1;
+    while start > 0 && !matches!(bytes[start - 1], b'/' | b'@' | b' ' | b'\t' | b'\n') {
+        start -= 1;
+    }
+    if !text[..start].ends_with("://") {
+        return None;
+    }
+
+    let mut end = index;
+    while end < bytes.len() && !matches!(bytes[end], b'@' | b'/' | b' ' | b'\t' | b'\n') {
+        end += 1;
+    }
+    (end > index && end < bytes.len() && bytes[end] == b'@').then_some(end)
+}
+
+/// A run that a key word names outright, whatever it looks like.
+fn named_at(text: &str, index: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if index > 0 && Charset::Token.contains(bytes[index - 1]) {
+        return None;
+    }
+
+    let end = run(bytes, index, Charset::Token);
+    if end - index < MINIMUM_NAMED_LENGTH {
+        return None;
+    }
+    (assigned_to(bytes, index, NAMED_SECRET_KEY_WORDS) || introduced_at(bytes, index))
+        .then_some(end)
+}
+
+/// Whether the word immediately before `index`, separated by spaces rather than
+/// an assignment, introduces a credential.
+fn introduced_at(bytes: &[u8], index: usize) -> bool {
+    let mut cursor = index;
+    while cursor > 0 && matches!(bytes[cursor - 1], b' ' | b'\t') {
+        cursor -= 1;
+    }
+    if cursor == index || cursor == 0 {
+        return false;
+    }
+
+    let end = cursor;
+    let limit = end.saturating_sub(KEY_LOOKBEHIND);
+    let mut start = end;
+    while start > limit && bytes[start - 1].is_ascii_alphabetic() {
+        start -= 1;
+    }
+
+    let word: String = bytes[start..end]
+        .iter()
+        .map(|byte| byte.to_ascii_lowercase() as char)
+        .collect();
+    SECRET_INTRODUCERS.contains(&word.as_str())
 }
 
 fn credential_at(text: &str, index: usize) -> Option<usize> {
@@ -246,6 +391,10 @@ fn encoded_at(text: &str, index: usize) -> Option<usize> {
 /// hash, a base64 payload or a build identifier, so entropy alone must not
 /// redact it: `cargo test` output and lockfiles are full of such runs.
 fn assigned_to_secret(bytes: &[u8], index: usize) -> bool {
+    assigned_to(bytes, index, SECRET_KEY_WORDS)
+}
+
+fn assigned_to(bytes: &[u8], index: usize, words: &[&str]) -> bool {
     let skip_padding = |mut cursor: usize| {
         while cursor > 0 && matches!(bytes[cursor - 1], b' ' | b'\t' | b'"' | b'\'' | b'`') {
             cursor -= 1;
@@ -270,7 +419,7 @@ fn assigned_to_secret(bytes: &[u8], index: usize) -> bool {
         .filter(|byte| byte.is_ascii_alphanumeric())
         .map(|byte| byte.to_ascii_lowercase() as char)
         .collect();
-    SECRET_KEY_WORDS.iter().any(|word| key.contains(word))
+    words.iter().any(|word| key.contains(word))
 }
 
 fn run(bytes: &[u8], from: usize, charset: Charset) -> usize {
@@ -331,9 +480,143 @@ fn longest_alphanumeric_run(candidate: &[u8]) -> usize {
 }
 
 #[cfg(test)]
+mod shapes_that_carry_no_prefix {
+    use super::redact;
+
+    /// Each of these reached stored tool output whole: the value carries no
+    /// vendor prefix, so it was left to the entropy scanner, which needs an
+    /// assignment whose key names a secret. A bearer header is introduced by a
+    /// space, a URL password's key is the username, and a PEM body is wrapped
+    /// across lines.
+    #[test]
+    fn a_bearer_token_does_not_survive_its_header() {
+        for line in [
+            "Authorization: Bearer sk-live-8f3a91c74b2e6d05a1",
+            "authorization: bearer AbCdEf0123456789XyZ",
+            "-H 'Authorization: Bearer ghs_notaprefixhere123456'",
+        ] {
+            let redacted = redact(line);
+            assert!(
+                !redacted.contains("sk-live-8f3a91c74b2e6d05a1")
+                    && !redacted.contains("AbCdEf0123456789XyZ")
+                    && !redacted.contains("ghs_notaprefixhere123456"),
+                "{redacted}"
+            );
+            assert!(
+                redacted.to_ascii_lowercase().contains("bearer"),
+                "the header should stay legible: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_connection_string_password_does_not_survive() {
+        let redacted = redact("DATABASE_URL=postgres://zone:hunter2seventeen@db:5432/manager");
+        assert!(!redacted.contains("hunter2seventeen"), "{redacted}");
+        assert!(
+            redacted.contains("postgres://zone:") && redacted.contains("@db:5432/manager"),
+            "the rest of the URL should stay legible: {redacted}"
+        );
+    }
+
+    /// Closing on the first END marker in the text lets an END line for some
+    /// other label -- which the same tool output can carry, next to the key or
+    /// inside it -- end the redaction early and leave the rest standing.
+    /// One spelling further on: a line that merely *starts* with the closing
+    /// marker is not the closing line, and must not end the redaction.
+    #[test]
+    fn an_end_marker_with_trailing_text_does_not_close_a_private_key() {
+        let key = concat!(
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "MIIEowIBAAKCAQEAx4fW1pQ8mJ7kR2vLnT5cYdB3sHgKqZ0uWpXvNfE1aOiCjMlP\n",
+            "-----END RSA PRIVATE KEY----- not really, keep reading\n",
+            "b2ZuRk9tS3hZd0hqTmRQaVFsY0dYcVJzVHZCa0xtWm5Ob3BBcVJzVHZCa0xtWm4=\n",
+            "-----END RSA PRIVATE KEY-----"
+        );
+        let redacted = redact(key);
+        assert!(
+            !redacted.contains("b2ZuRk9tS3hZd0hq"),
+            "the key material after the partial marker survived: {redacted}"
+        );
+    }
+
+    #[test]
+    fn an_intervening_end_marker_does_not_close_a_private_key() {
+        let key = concat!(
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "MIIEowIBAAKCAQEAx4fW1pQ8mJ7kR2vLnT5cYdB3sHgKqZ0uWpXvNfE1aOiCjMlP\n",
+            "-----END CERTIFICATE-----\n",
+            "b2ZuRk9tS3hZd0hqTmRQaVFsY0dYcVJzVHZCa0xtWm5Ob3BBcVJzVHZCa0xtWm4=\n",
+            "-----END RSA PRIVATE KEY-----"
+        );
+        let redacted = redact(key);
+        assert!(!redacted.contains("MIIEowIBAAKCAQEA"), "{redacted}");
+        assert!(
+            !redacted.contains("b2ZuRk9tS3hZd0hq"),
+            "the key material after the mismatched marker survived: {redacted}"
+        );
+    }
+
+    #[test]
+    fn a_private_key_body_does_not_survive() {
+        let key = concat!(
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "MIIEowIBAAKCAQEAx4fW1pQ8mJ7kR2vLnT5cYdB3sHgKqZ0uWpXvNfE1aOiCjMlP\n",
+            "b2ZuRk9tS3hZd0hqTmRQaVFsY0dYcVJzVHZCa0xtWm5Ob3BBcVJzVHZCa0xtWm4=\n",
+            "-----END RSA PRIVATE KEY-----"
+        );
+        let redacted = redact(key);
+        assert!(!redacted.contains("MIIEowIBAAKCAQEA"), "{redacted}");
+        assert!(!redacted.contains("b2ZuRk9tS3hZd0hq"), "{redacted}");
+    }
+
+    #[test]
+    fn a_chosen_passphrase_assigned_to_a_secret_does_not_survive() {
+        for line in [
+            "JWT_SECRET=correct-horse-battery-staple",
+            "ENCRYPTION_KEY: my-dev-passphrase",
+            "password = letmein-please",
+        ] {
+            let redacted = redact(line);
+            assert!(
+                !redacted.contains("correct-horse-battery-staple")
+                    && !redacted.contains("my-dev-passphrase")
+                    && !redacted.contains("letmein-please"),
+                "{redacted}"
+            );
+        }
+    }
+
+    /// The relaxation must not start eating ordinary output. `key` and `auth`
+    /// are deliberately not treated as naming a credential outright, and a
+    /// value has to be assigned or introduced to be redacted at all.
+    #[test]
+    fn ordinary_output_is_left_alone() {
+        for line in [
+            "cargo build --key=main --features auth=none",
+            "commit 4f9c2b17a3e6d580c1b2a3948f7e6d5c4b3a2918",
+            "note: the latest release is 1.9.0",
+            "Compiling zone_core v0.1.0 (/Users/x/zone/runner/zone_core)",
+            "     Running unittests src/lib.rs (target/debug/deps/zone_core-acf79d25bb672c38)",
+            "GET /api/projects 200 in 4ms",
+            "warning: unused variable: `token`",
+            "https://github.com/abnegate/zone/pull/42",
+            "keyword: password",
+        ] {
+            let redacted = redact(line);
+            assert_eq!(redacted, line, "ordinary output was redacted: {redacted}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Each sample sits in prose rather than an assignment. `export TOKEN=<value>`
+    /// is redacted by the key word alone, whatever the value looks like, so the
+    /// whole prefix table could be emptied with the assertion still holding --
+    /// seven of these families were in fact removable with the suite green.
     #[test]
     fn redacts_every_known_credential_family() {
         let samples = [
@@ -357,10 +640,10 @@ mod tests {
         ];
 
         for sample in samples {
-            let text = format!("export TOKEN={sample}\n");
+            let text = format!("the agent echoed {sample} back into its own output");
             assert_eq!(
                 redact(&text),
-                format!("export TOKEN={REDACTED}\n"),
+                format!("the agent echoed {REDACTED} back into its own output"),
                 "leaked {sample}"
             );
         }

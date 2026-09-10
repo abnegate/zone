@@ -191,6 +191,22 @@ impl Backend {
             Backend::Bubblewrap => false,
         }
     }
+
+    /// Whether the backend can refuse the command a second process at all.
+    ///
+    /// Seatbelt filters `process-fork`, so single-command mode really is one
+    /// process. Bubblewrap has no such primitive: it bounds a sandbox by its
+    /// namespaces, so a fork succeeds and the child lands inside the same mount,
+    /// network and PID namespaces. Containment is identical either way -- the
+    /// child sees the same filesystem, reaches no network, and dies with the
+    /// sandbox through `--die-with-parent` and PID namespace teardown -- but
+    /// only seatbelt can be asked to prevent the second process existing.
+    pub const fn enforces_single_process(self) -> bool {
+        match self {
+            Backend::Seatbelt => true,
+            Backend::Bubblewrap => false,
+        }
+    }
 }
 
 /// A backend executable and the argument vector that runs a command inside it.

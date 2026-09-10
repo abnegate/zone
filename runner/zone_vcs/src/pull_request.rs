@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+/// GitHub's own REST origin, which answers for repositories on `github.com`.
+const GITHUB_API_URL: &str = "https://api.github.com";
+
 /// Rows GitHub returns per page; its maximum for these collections.
 const PAGE_SIZE: usize = 100;
 
@@ -124,41 +127,6 @@ pub struct PullRequestReference {
     pub owner: String,
     pub repository: String,
     pub number: i64,
-}
-
-impl PullRequestReference {
-    /// Parse `https://github.com/owner/repo/pull/123`, with or without a trailing
-    /// segment such as `/files` that a person's copied link often carries.
-    pub fn parse(url: &str) -> PrResult<Self> {
-        let trimmed = url.trim();
-        let path = trimmed
-            .strip_prefix("https://github.com/")
-            .or_else(|| trimmed.strip_prefix("http://github.com/"))
-            .ok_or_else(|| PrError::InvalidRepoUrl(url.to_string()))?;
-
-        let mut segments = path.split('/');
-        let owner = segments.next().unwrap_or_default();
-        let repository = segments.next().unwrap_or_default();
-        let marker = segments.next().unwrap_or_default();
-        let number = segments.next().unwrap_or_default();
-
-        if owner.is_empty() || repository.is_empty() || marker != "pull" {
-            return Err(PrError::InvalidRepoUrl(url.to_string()));
-        }
-
-        let number: i64 = number
-            .parse()
-            .map_err(|_| PrError::InvalidRepoUrl(url.to_string()))?;
-        if number < 1 {
-            return Err(PrError::InvalidRepoUrl(url.to_string()));
-        }
-
-        Ok(Self {
-            owner: owner.to_string(),
-            repository: repository.trim_end_matches(".git").to_string(),
-            number,
-        })
-    }
 }
 
 /// The verdict a reviewer submitted with a review.
@@ -340,7 +308,51 @@ impl Mergeability {
 #[derive(Debug, Clone)]
 pub struct PrService {
     client: Client,
-    base_url: String,
+    origin: Origin,
+}
+
+/// The API origin this service addresses, and the repository host it answers for.
+///
+/// The two are decided together because every request is
+/// `{origin}/repos/{owner}/{repository}/...`: the owner and repository come from
+/// a repository URL, and the origin they are interpolated into has to be the one
+/// that answers for that URL's host. Deciding them apart is what let a
+/// `github.com` repository be accepted while its request -- and the token sent
+/// with it -- went to a configured Enterprise origin.
+#[derive(Debug, Clone)]
+struct Origin {
+    url: String,
+    host: String,
+}
+
+impl Origin {
+    /// The origin an operator configured. It answers for its own host, less the
+    /// `api.` label carried by GitHub's own API host and by a subdomain-isolated
+    /// Enterprise one; an Enterprise install without subdomain isolation answers
+    /// for itself under a `/api/v3` path.
+    fn configured(url: String) -> Self {
+        let authority = url
+            .split_once("://")
+            .map_or(url.as_str(), |(_, rest)| rest)
+            .split('/')
+            .next()
+            .unwrap_or_default();
+        let host = host_of(authority).to_ascii_lowercase();
+        let host = host.strip_prefix("api.").unwrap_or(&host).to_string();
+        Self { url, host }
+    }
+
+    fn standing_in_for(host: &str, url: String) -> Self {
+        Self {
+            url,
+            host: host.to_ascii_lowercase(),
+        }
+    }
+
+    /// Whether a repository on `host` is one this origin can be asked about.
+    fn answers_for(&self, host: &str) -> bool {
+        !self.host.is_empty() && host.eq_ignore_ascii_case(&self.host)
+    }
 }
 
 impl Default for PrService {
@@ -349,49 +361,137 @@ impl Default for PrService {
     }
 }
 
+/// A single path segment that is safe to interpolate into a request URL.
+/// The host of an authority, without userinfo or port.
+fn host_of(authority: &str) -> &str {
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    match host.strip_prefix('[') {
+        Some(tail) => tail.split_once(']').map_or(host, |(inside, _)| inside),
+        None => host.split_once(':').map_or(host, |(host, _)| host),
+    }
+}
+
+fn named(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+}
+
 impl PrService {
-    /// Create a new PR service
+    /// Address GitHub's own API.
     pub fn new() -> Self {
+        Self::configured(GITHUB_API_URL.to_string())
+    }
+
+    /// Address the origin an operator configured, for the repositories it
+    /// answers for.
+    pub fn configured(url: String) -> Self {
         Self {
             client: Client::new(),
-            base_url: "https://api.github.com".to_string(),
+            origin: Origin::configured(url),
         }
     }
 
-    /// Create a client for an explicitly supplied API endpoint.
-    pub fn with_base_url(base_url: String) -> Self {
-        Self {
-            client: Client::new(),
-            base_url,
-        }
-    }
-
-    /// Parse owner and repo from a GitHub URL
+    /// Address `url` as a stand-in for repositories on `host`.
     ///
-    /// Supports formats:
-    /// - https://github.com/owner/repo
-    /// - https://github.com/owner/repo.git
-    /// - git@github.com:owner/repo.git
+    /// No operator setting produces one: a configured origin has to answer for
+    /// a host it can be reached at. Publication tests use this to drive the
+    /// real request path against a mock server.
+    pub fn standing_in_for(host: &str, url: String) -> Self {
+        Self {
+            client: Client::new(),
+            origin: Origin::standing_in_for(host, url),
+        }
+    }
+
+    /// Parse owner and repo from a repository URL.
+    ///
+    /// The host has to be the one this service's origin answers for, so that a
+    /// GitHub Enterprise install parses its own repositories and nothing else.
+    /// Matching `https://github.com/` literally was what made `GITHUB_API_URL`
+    /// insufficient on its own to reach Enterprise; matching nothing at all
+    /// would accept a repository this service cannot open a request against;
+    /// and admitting `github.com` alongside the configured origin sent a
+    /// github.com repository's token to whichever install was configured.
+    ///
+    /// Supports, for the host it answers for:
+    ///
+    /// - `https://host/owner/repo`, with or without `.git`
+    /// - `git@host:owner/repo.git`
+    /// - `ssh://git@host/owner/repo.git`
     pub fn parse_github_url(&self, url: &str) -> PrResult<(String, String)> {
-        // Handle HTTPS URLs
-        if let Some(path) = url.strip_prefix("https://github.com/") {
-            let path = path.trim_end_matches(".git");
-            let parts: Vec<&str> = path.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                return Ok((parts[0].to_string(), parts[1].to_string()));
-            }
+        let invalid = || PrError::InvalidRepoUrl(url.to_string());
+        let url = url.trim();
+
+        // `git@host:owner/repo` is not a URL, so it is split on the colon
+        // rather than parsed. The scp-like form has no scheme to strip.
+        let (authority, path) = if let Some((_, rest)) = url.split_once("://") {
+            rest.split_once('/').ok_or_else(invalid)?
+        } else if let Some((authority, path)) = url.split_once(':') {
+            (authority, path)
+        } else {
+            return Err(invalid());
+        };
+
+        if !self.origin.answers_for(host_of(authority)) {
+            return Err(invalid());
         }
 
-        // Handle SSH URLs
-        if let Some(path) = url.strip_prefix("git@github.com:") {
-            let path = path.trim_end_matches(".git");
-            let parts: Vec<&str> = path.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                return Ok((parts[0].to_string(), parts[1].to_string()));
-            }
+        let path = path.trim_matches('/').trim_end_matches(".git");
+        let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+        let owner = segments.next().ok_or_else(invalid)?;
+        let repository = segments.next().ok_or_else(invalid)?;
+        // The pair is interpolated into `{base}/repos/{owner}/{repo}/...`, so a
+        // third segment or a traversal component would reach a different
+        // endpoint than the caller asked for.
+        if segments.next().is_some() || !named(owner) || !named(repository) {
+            return Err(invalid());
         }
 
-        Err(PrError::InvalidRepoUrl(url.to_string()))
+        Ok((owner.to_string(), repository.to_string()))
+    }
+
+    /// Recover where a pull request lives from the URL a run recorded.
+    ///
+    /// Reads `https://host/owner/repo/pull/123`, with or without a trailing
+    /// segment such as `/files` that a person's copied link often carries. The
+    /// host is held to the same origin as a repository URL, because the pull
+    /// request is read back from `{origin}/repos/{owner}/{repo}/pulls/{number}`
+    /// -- a recorded github.com link would otherwise be read from, and
+    /// authenticated against, whichever install happened to be configured.
+    pub fn pull_request(&self, url: &str) -> PrResult<PullRequestReference> {
+        let invalid = || PrError::InvalidRepoUrl(url.to_string());
+        let (scheme, rest) = url.trim().split_once("://").ok_or_else(invalid)?;
+        let (authority, path) = rest.split_once('/').ok_or_else(invalid)?;
+
+        if !matches!(scheme, "http" | "https") || !self.origin.answers_for(host_of(authority)) {
+            return Err(invalid());
+        }
+
+        let mut segments = path.split('/');
+        let owner = segments.next().unwrap_or_default();
+        let repository = segments.next().unwrap_or_default().trim_end_matches(".git");
+        let marker = segments.next().unwrap_or_default();
+        let number: i64 = segments
+            .next()
+            .unwrap_or_default()
+            .parse()
+            .map_err(|_| invalid())?;
+
+        if marker != "pull" || number < 1 || !named(owner) || !named(repository) {
+            return Err(invalid());
+        }
+
+        Ok(PullRequestReference {
+            owner: owner.to_string(),
+            repository: repository.to_string(),
+            number,
+        })
     }
 
     /// Create a pull request on GitHub
@@ -406,7 +506,7 @@ impl PrService {
         body: &str,
         draft: bool,
     ) -> PrResult<CreatedPr> {
-        let url = format!("{}/repos/{}/{}/pulls", self.base_url, owner, repo);
+        let url = format!("{}/repos/{}/{}/pulls", self.origin.url, owner, repo);
 
         let request = CreatePrRequest {
             title: title.to_string(),
@@ -467,7 +567,7 @@ impl PrService {
         repo: &str,
         token: &str,
     ) -> PrResult<String> {
-        let url = format!("{}/repos/{}/{}", self.base_url, owner, repo);
+        let url = format!("{}/repos/{}/{}", self.origin.url, owner, repo);
 
         let response = self
             .client
@@ -506,7 +606,7 @@ impl PrService {
     ) -> PrResult<Option<String>> {
         let url = format!(
             "{}/repos/{}/{}/pulls?head={}:{}&state=open",
-            self.base_url, owner, repo, owner, head_branch
+            self.origin.url, owner, repo, owner, head_branch
         );
 
         let response = self
@@ -571,7 +671,7 @@ impl PrService {
         for page in 1..=MAXIMUM_PAGES {
             let url = format!(
                 "{}/{}?per_page={}&page={}",
-                self.base_url, path, PAGE_SIZE, page
+                self.origin.url, path, PAGE_SIZE, page
             );
             let batch: Vec<T> = self.get(&url, token).await?;
             let complete = batch.len() < PAGE_SIZE;
@@ -597,7 +697,7 @@ impl PrService {
             .get(
                 &format!(
                     "{}/repos/{}/{}/pulls/{}",
-                    self.base_url, reference.owner, reference.repository, reference.number
+                    self.origin.url, reference.owner, reference.repository, reference.number
                 ),
                 token,
             )
@@ -622,7 +722,7 @@ impl PrService {
 
         let detail: GitHubPullRequestDetail = self
             .get(
-                &format!("{}/{}/pulls/{}", self.base_url, scope, reference.number),
+                &format!("{}/{}/pulls/{}", self.origin.url, scope, reference.number),
                 token,
             )
             .await?;
@@ -689,6 +789,150 @@ mod tests {
             .unwrap();
         assert_eq!(owner, "acme");
         assert_eq!(repo, "project");
+    }
+
+    /// Matching `https://github.com/` meant an Enterprise repository was
+    /// refused as invalid, so `GITHUB_API_URL` alone could not reach one.
+    #[test]
+    fn an_enterprise_repository_parses_like_a_github_one() {
+        let service = PrService::configured("https://github.example.com/api/v3".to_string());
+        for url in [
+            "https://github.example.com/acme/project",
+            "https://github.example.com/acme/project.git",
+            "ssh://git@github.example.com/acme/project.git",
+            "git@github.example.com:acme/project.git",
+            "  https://github.example.com/acme/project/  ",
+        ] {
+            assert_eq!(
+                service.parse_github_url(url).expect(url),
+                ("acme".to_string(), "project".to_string()),
+                "{url}"
+            );
+        }
+    }
+
+    /// A subdomain-isolated Enterprise install serves its API from `api.` on
+    /// the host its repositories live on, exactly as api.github.com does for
+    /// github.com.
+    #[test]
+    fn an_api_subdomain_answers_for_the_host_beneath_it() {
+        for origin in [
+            "https://api.github.example.com",
+            "https://github.example.com/api/v3",
+        ] {
+            assert_eq!(
+                PrService::configured(origin.to_string())
+                    .parse_github_url("https://github.example.com/acme/project")
+                    .expect(origin),
+                ("acme".to_string(), "project".to_string()),
+                "{origin}"
+            );
+        }
+    }
+
+    /// The repository's host picks the origin its owner and repository are
+    /// interpolated into, and only the configured origin's own host has one. A
+    /// github.com repository accepted here would have had its request -- and
+    /// its access token -- sent to the Enterprise install instead.
+    #[test]
+    fn a_github_repository_has_no_origin_while_enterprise_is_configured() {
+        let enterprise = PrService::configured("https://github.example.com/api/v3".to_string());
+        for url in [
+            "https://github.com/acme/project",
+            "https://github.com/acme/project.git",
+            "git@github.com:acme/project.git",
+            "https://github.com/acme/project/pull/7",
+        ] {
+            assert!(
+                enterprise.parse_github_url(url).is_err(),
+                "{url} must not be addressed at an origin that does not answer for github.com"
+            );
+        }
+        assert!(
+            enterprise
+                .pull_request("https://github.com/acme/project/pull/7")
+                .is_err(),
+            "a recorded github.com pull request must not be read from the Enterprise origin"
+        );
+    }
+
+    /// The public path is what almost every deployment runs, so it has to stay
+    /// exactly as it was: GitHub's own origin answers for github.com.
+    #[test]
+    fn githubs_own_origin_answers_for_github_repositories() {
+        for service in [
+            PrService::new(),
+            PrService::configured(GITHUB_API_URL.to_string()),
+        ] {
+            assert_eq!(
+                service
+                    .parse_github_url("https://github.com/acme/project")
+                    .expect("github.com is what api.github.com answers for"),
+                ("acme".to_string(), "project".to_string())
+            );
+            assert_eq!(
+                service
+                    .pull_request("https://github.com/acme/project/pull/7")
+                    .expect("a github.com pull request is read from api.github.com")
+                    .number,
+                7
+            );
+        }
+    }
+
+    /// The endpoint the pair is interpolated into belongs to one host, so a
+    /// repository somewhere else is not this service's to address -- whatever
+    /// its path happens to look like.
+    #[test]
+    fn a_repository_on_another_host_is_refused() {
+        let service = PrService::new();
+        for url in [
+            "https://gitlab.com/acme/project",
+            "https://bitbucket.org/acme/project.git",
+            "git@gitlab.com:acme/project.git",
+            "https://github.com.attacker.test/acme/project",
+            "https://notgithub.com/acme/project",
+            "https://github.example.com/acme/project",
+        ] {
+            assert!(
+                service.parse_github_url(url).is_err(),
+                "{url} was accepted for api.github.com"
+            );
+        }
+
+        let enterprise = PrService::configured("https://github.example.com/api/v3".to_string());
+        for url in [
+            "https://gitlab.com/acme/project",
+            "https://github.example.com.attacker.test/acme/project",
+        ] {
+            assert!(
+                enterprise.parse_github_url(url).is_err(),
+                "a configured enterprise origin does not admit {url}"
+            );
+        }
+    }
+
+    /// The pair is interpolated into `{base}/repos/{owner}/{repo}/pulls`, so
+    /// anything that could reach a different endpoint has to be refused. The
+    /// old parser split into two and kept every remaining slash in `repo`.
+    #[test]
+    fn a_path_that_could_reach_another_endpoint_is_refused() {
+        let service = PrService::new();
+        for url in [
+            "https://github.com/acme/project/extra",
+            "https://github.com/acme/../admin",
+            "https://github.com/../acme",
+            "https://github.com/acme",
+            "https://github.com/",
+            "https://github.com/acme/pro ject",
+            "not-a-url",
+            "",
+        ] {
+            assert!(
+                service.parse_github_url(url).is_err(),
+                "{url:?} must be refused"
+            );
+        }
     }
 
     #[test]
@@ -795,7 +1039,8 @@ mod tests {
 
     #[test]
     fn a_pull_request_url_yields_its_owner_repository_and_number() {
-        let reference = PullRequestReference::parse("https://github.com/acme/project/pull/42")
+        let reference = PrService::new()
+            .pull_request("https://github.com/acme/project/pull/42")
             .expect("a plain pull request URL must parse");
         assert_eq!(reference.owner, "acme");
         assert_eq!(reference.repository, "project");
@@ -804,23 +1049,27 @@ mod tests {
 
     #[test]
     fn a_pull_request_url_parses_past_a_trailing_tab_segment() {
-        let reference =
-            PullRequestReference::parse("https://github.com/acme/project/pull/42/files").unwrap();
+        let reference = PrService::new()
+            .pull_request("https://github.com/acme/project/pull/42/files")
+            .unwrap();
         assert_eq!(reference.number, 42);
     }
 
     #[test]
     fn a_url_that_is_not_a_pull_request_is_refused() {
+        let service = PrService::new();
         for url in [
             "https://github.com/acme/project",
             "https://github.com/acme/project/issues/42",
             "https://github.com/acme/project/pull/zero",
             "https://github.com/acme/project/pull/0",
+            "https://github.com/../project/pull/42",
             "https://example.test/acme/project/pull/42",
+            "git@github.com:acme/project/pull/42",
             "",
         ] {
             assert!(
-                PullRequestReference::parse(url).is_err(),
+                service.pull_request(url).is_err(),
                 "{url} is not a pull request and must not parse as one"
             );
         }
@@ -923,7 +1172,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let service = PrService::with_base_url(server.uri());
+        let service = PrService::standing_in_for("github.com", server.uri());
         let reception = service
             .fetch_reception(
                 &PullRequestReference {
@@ -977,7 +1226,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let reception = PrService::with_base_url(server.uri())
+        let reception = PrService::standing_in_for("github.com", server.uri())
             .fetch_reception(
                 &PullRequestReference {
                     owner: "acme".to_string(),
@@ -1015,7 +1264,7 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            let mergeability = PrService::with_base_url(server.uri())
+            let mergeability = PrService::standing_in_for("github.com", server.uri())
                 .fetch_mergeability(
                     &PullRequestReference {
                         owner: "acme".to_string(),
@@ -1049,7 +1298,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let failure = PrService::with_base_url(server.uri())
+        let failure = PrService::standing_in_for("github.com", server.uri())
             .fetch_reception(
                 &PullRequestReference {
                     owner: "acme".to_string(),

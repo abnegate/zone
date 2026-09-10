@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 const mockSearch = mock();
 const mockClear = mock();
@@ -184,17 +185,18 @@ describe('ContextSearchPage', () => {
     });
   });
 
-  it.skip('should change search mode', async () => {
+  /// The mode selector is a Radix `Tabs`, which changes on the pointer-event
+  /// sequence rather than a bare click, so `userEvent` drives it. The default
+  /// is asserted first, or a selector that did nothing would still look right.
+  it('should change search mode', async () => {
+    const user = userEvent.setup();
     render(<ContextSearchPage />);
 
-    // Wait for component to render
-    await waitFor(() => {
-      expect(screen.getByText('Semantic')).toBeInTheDocument();
-    });
+    const semantic = await waitFor(() => screen.getByRole('tab', { name: 'Semantic' }));
+    expect(screen.getByRole('tab', { name: 'Hybrid' })).toHaveAttribute('aria-selected', 'true');
 
-    // Find and click the Semantic tab by text
-    const semanticTab = screen.getByText('Semantic');
-    fireEvent.click(semanticTab);
+    await user.click(semantic);
+    expect(semantic).toHaveAttribute('aria-selected', 'true');
 
     const input = screen.getByPlaceholderText('Search your knowledge base...');
     fireEvent.change(input, { target: { value: 'test' } });

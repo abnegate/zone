@@ -13,6 +13,20 @@ use super::{
     ToolError, ToolResult, excerpt, reason_property, trim_middle,
 };
 
+/// Programs [`RunCommandTool`] may spawn, resolved on the child's `PATH`.
+///
+/// Matched against the whole `command`, never its last path segment: an agent
+/// may write a file into `cwd`, so a basename match would admit `./cargo` and
+/// then run whatever that file is.
+const ALLOWED_COMMANDS: &[&str] = &[
+    "cargo", "rustc", "npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "make", "cmake",
+    "gradle", "mvn", "maven", "go", "python", "python3", "pip", "pip3", "poetry", "uv", "ruby",
+    "gem", "bundle", "rake", "dotnet", "msbuild", "git", "gh", "hub", "ls", "cat", "head", "tail",
+    "grep", "find", "wc", "sort", "uniq", "diff", "tree", "file", "stat", "pwd", "which",
+    "whereis", "pytest", "jest", "mocha", "rspec", "phpunit", "echo", "printf", "date", "env",
+    "true", "false", "test", "curl", "wget", "jq", "yq", "docker",
+];
+
 /// Run a shell command
 pub struct RunCommandTool;
 
@@ -138,35 +152,9 @@ impl Tool for RunCommandTool {
             "Running tool"
         );
 
-        // Security: Use allowlist approach instead of blocklist
-        // Only allow known safe development commands
-        let allowed_commands = [
-            // Build tools
-            "cargo", "rustc", "npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "make", "cmake",
-            "gradle", "mvn", "maven", "go", "python", "python3", "pip", "pip3", "poetry", "uv",
-            "ruby", "gem", "bundle", "rake", "dotnet", "msbuild", // Version control
-            "git", "gh", "hub", // File utilities (read-only or safe)
-            "ls", "cat", "head", "tail", "grep", "find", "wc", "sort", "uniq", "diff", "tree",
-            "file", "stat", "pwd", "which", "whereis", // Testing
-            "pytest", "jest", "mocha", "rspec", "phpunit", // Other safe utilities
-            "echo", "printf", "date", "env", "true", "false", "test", "curl", "wget", "jq", "yq",
-            // Docker (read operations)
-            "docker",
-        ];
-
-        // Extract base command name (handle both `/path/to/cmd` and `cmd`)
-        let base_cmd = params
-            .command
-            .split('/')
-            .next_back()
-            .unwrap_or(&params.command)
-            .split('\\')
-            .next_back()
-            .unwrap_or(&params.command);
-
-        if !allowed_commands.contains(&base_cmd) {
+        if !ALLOWED_COMMANDS.contains(&params.command.as_str()) {
             return Err(ToolError::Execution(format!(
-                "Command '{}' is not in the allowed list. Allowed commands: cargo, npm, git, python, etc.",
+                "Command '{}' is not in the allowed list. Name a program, not a path: cargo, npm, git, python, etc.",
                 params.command
             )));
         }
@@ -200,7 +188,7 @@ impl Tool for RunCommandTool {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        // Set environment
+        cmd.env_clear();
         for (key, value) in &context.env {
             cmd.env(key, value);
         }
@@ -517,6 +505,56 @@ mod tests {
         }
     }
 
+    /// Both shelling tools hand the child only what the context names.
+    ///
+    /// The context environment *is* the allowlist a caller builds: the server
+    /// narrows it to a fixed set of names precisely because its own process
+    /// holds the database URL, the JWT and encryption keys and the provider
+    /// keys. A child that inherited the parent's environment would print all
+    /// of it into tool output, so `env_clear` is what makes the caller's
+    /// allowlist an allowlist.
+    #[tokio::test]
+    async fn shelling_tools_give_the_child_only_the_context_environment() {
+        const MARKER: &str = "ZONE_COMMAND_ENVIRONMENT_MARKER";
+        unsafe { std::env::set_var(MARKER, "must-not-reach-a-child") };
+
+        let mut context = create_test_context();
+        context.env = HashMap::from([(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        )]);
+
+        let command = RunCommandTool
+            .execute(json!({"command": "env"}), &context)
+            .await
+            .unwrap();
+        let shell = RunShellTool
+            .execute(json!({"command": "env"}), &context)
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var(MARKER) };
+
+        for result in [command, shell] {
+            assert!(result.success, "{result:?}");
+            let output = result.output.unwrap();
+            assert!(output.contains("PATH="), "the tool did not run: {output}");
+            assert!(
+                !output.contains(MARKER),
+                "the process environment reached the child: {output}"
+            );
+            // `sh` computes these from the working directory it was given.
+            const SHELL_OWN: &[&str] = &["PWD", "SHLVL", "_"];
+            for (name, _) in output.lines().filter_map(|line| line.split_once('=')) {
+                assert!(
+                    context.env.contains_key(name)
+                        || name.to_ascii_uppercase().ends_with("_PROXY")
+                        || SHELL_OWN.contains(&name),
+                    "{name} is not on the context environment and must not have survived"
+                );
+            }
+        }
+    }
+
     fn shell_test_context() -> ToolContext {
         let mut context = create_test_context();
         context.unrestricted = true;
@@ -648,6 +686,52 @@ mod tests {
 
         // Should fail because command doesn't exist
         assert!(result.is_err());
+    }
+
+    /// The allowlist was matched against the last path segment while the whole
+    /// string was executed, so a file the agent had just written into `cwd` and
+    /// named `cargo` satisfied the list and then ran.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_allowed_name_on_a_path_is_not_an_allowed_program() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const MARKER: &str = "arbitrary-execution-marker";
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let impostor = directory.path().join("cargo");
+        std::fs::write(&impostor, format!("#!/bin/sh\necho {MARKER}\n")).unwrap();
+        std::fs::set_permissions(&impostor, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let context = ToolContext {
+            cwd: directory.path().canonicalize().unwrap(),
+            env: HashMap::from([(
+                "PATH".to_string(),
+                std::env::var("PATH").unwrap_or_default(),
+            )]),
+            ..ToolContext::default()
+        };
+
+        for command in [
+            "./cargo".to_string(),
+            "cargo/../cargo".to_string(),
+            impostor.to_string_lossy().into_owned(),
+        ] {
+            let error = RunCommandTool
+                .execute(
+                    serde_json::json!({"command": command, "args": []}),
+                    &context,
+                )
+                .await
+                .expect_err("a path must not satisfy the allowlist");
+            assert!(
+                error.to_string().contains("not in the allowed list"),
+                "{command}: {error}"
+            );
+            assert!(
+                !error.to_string().contains(MARKER),
+                "{command} ran: {error}"
+            );
+        }
     }
 
     #[tokio::test]

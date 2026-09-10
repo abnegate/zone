@@ -194,11 +194,7 @@ async fn refresh_entry(state: &AppState, entry: knowledge::KnowledgeRefreshDue) 
 /// Returns the extracted text content and its SHA-256 hash.
 async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
     let url = crate::utils::url::validate_public_url(url)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = crate::utils::url::public_client(Duration::from_secs(HTTP_TIMEOUT_SECS))?;
 
     let response = client
         .get(url)
@@ -213,16 +209,6 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
         return Err(format!("HTTP error: {}", response.status()));
     }
 
-    // Check content length
-    if let Some(len) = response.content_length()
-        && len as usize > MAX_CONTENT_SIZE
-    {
-        return Err(format!(
-            "Content too large: {} bytes (max: {})",
-            len, MAX_CONTENT_SIZE
-        ));
-    }
-
     // Get content type before consuming the response
     let content_type = response
         .headers()
@@ -230,19 +216,9 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read response: {}", e))?;
-
-    // Check actual size
-    if body.len() > MAX_CONTENT_SIZE {
-        return Err(format!(
-            "Content too large: {} bytes (max: {})",
-            body.len(),
-            MAX_CONTENT_SIZE
-        ));
-    }
+    let body =
+        String::from_utf8_lossy(&crate::utils::url::read_capped(response, MAX_CONTENT_SIZE).await?)
+            .into_owned();
 
     let text = if is_html(content_type.as_deref(), &body) {
         extract_text_from_html(&body)

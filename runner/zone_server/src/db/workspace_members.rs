@@ -197,6 +197,67 @@ where
     Ok(id)
 }
 
+/// Outcome of a removal that must leave the workspace administrable.
+#[derive(Debug)]
+pub enum Removal {
+    Removed,
+    Forbidden,
+    Missing,
+    LastAdmin,
+    LastOwner,
+}
+
+/// Remove a member, refusing to unseat the last admin or owner.
+///
+/// The plain [`remove_member`] is the unguarded one, for callers that mean to
+/// strip access. This is the one a route wants: it counts and removes with the
+/// privileged rows locked, so two removals arriving together cannot each read
+/// a count that says one may go.
+pub async fn remove_guarded(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    caller: WorkspaceRole,
+) -> DbResult<Removal> {
+    let mut transaction = pool.begin().await?;
+
+    let privileged = lock_privileged(&mut transaction, workspace_id).await?;
+    let Some(target) = lock_member(&mut transaction, workspace_id, user_id).await? else {
+        return Ok(Removal::Missing);
+    };
+    if !outranks(caller, target) {
+        return Ok(Removal::Forbidden);
+    }
+
+    if privileged.owners.len() <= 1 && privileged.owns(user_id) {
+        return Ok(Removal::LastOwner);
+    }
+
+    if privileged.all.len() <= 1 && privileged.holds(user_id) {
+        return Ok(Removal::LastAdmin);
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE workspace_members
+        SET is_active = FALSE, updated_at = NOW()
+        WHERE workspace_id = $1 AND user_id = $2 AND is_active = TRUE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    if result.rows_affected() > 0 {
+        Ok(Removal::Removed)
+    } else {
+        Ok(Removal::Missing)
+    }
+}
+
 /// Remove a user from a workspace (set inactive)
 pub async fn remove_member(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
     let result = sqlx::query(
@@ -426,6 +487,170 @@ pub async fn can_admin(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbRe
 
 /// Count the number of active admins (admin or owner) in a workspace
 /// Used to prevent removal of the last admin
+/// The workspace's active admins and owners, held for the length of a
+/// transaction so a count taken from them still describes the table when the
+/// update lands.
+struct Privileged {
+    all: Vec<Uuid>,
+    owners: Vec<Uuid>,
+}
+
+impl Privileged {
+    fn holds(&self, user_id: Uuid) -> bool {
+        self.all.contains(&user_id)
+    }
+
+    fn owns(&self, user_id: Uuid) -> bool {
+        self.owners.contains(&user_id)
+    }
+}
+
+/// The target's own role, held for the length of the transaction.
+///
+/// Reading it in the route and acting on it here are two moments: an owner can
+/// promote the target in between, and the request then lands on an admin or
+/// owner the caller was never allowed to touch. Read it under the same lock as
+/// the count.
+async fn lock_member(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<WorkspaceRole>> {
+    let role: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT role FROM workspace_members
+        WHERE workspace_id = $1 AND user_id = $2 AND is_active = TRUE
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(role.map(|role| role.parse().unwrap_or(WorkspaceRole::Viewer)))
+}
+
+/// Whether `caller` outranks what `target` currently holds.
+fn outranks(caller: WorkspaceRole, target: WorkspaceRole) -> bool {
+    target < WorkspaceRole::Admin || caller == WorkspaceRole::Owner
+}
+
+async fn lock_privileged(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+) -> DbResult<Privileged> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT user_id, role FROM workspace_members
+        WHERE workspace_id = $1
+          AND is_active = TRUE
+          AND (role = 'admin' OR role = 'owner')
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+
+    Ok(Privileged {
+        owners: rows
+            .iter()
+            .filter(|(_, role)| role == WorkspaceRole::Owner.as_str())
+            .map(|(user_id, _)| *user_id)
+            .collect(),
+        all: rows.into_iter().map(|(user_id, _)| user_id).collect(),
+    })
+}
+
+/// Outcome of a role change that must leave the workspace administrable.
+#[derive(Debug)]
+pub enum RoleChange {
+    Applied(Box<WorkspaceMemberRow>),
+    Forbidden,
+    Missing,
+    LastAdmin,
+    LastOwner,
+}
+
+/// Change a member's role, refusing to unseat the last admin or owner.
+///
+/// Counting the privileged members and then demoting one of them are two
+/// statements, so two demotions racing each other both read a safe count and
+/// between them leave none -- and every workspace route is reached through a
+/// membership guard, so nobody can repair that. Lock the privileged rows for
+/// the length of the transaction: the second demotion waits, then counts what
+/// the first actually left.
+pub async fn change_role(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role: WorkspaceRole,
+    caller: WorkspaceRole,
+) -> DbResult<RoleChange> {
+    let mut transaction = pool.begin().await?;
+
+    let privileged = lock_privileged(&mut transaction, workspace_id).await?;
+    let Some(target) = lock_member(&mut transaction, workspace_id, user_id).await? else {
+        return Ok(RoleChange::Missing);
+    };
+    if !outranks(caller, target) {
+        return Ok(RoleChange::Forbidden);
+    }
+
+    // The rank being granted, asked here as well as in the route, so a caller
+    // reaching this entry point cannot acquire one guard without the other. A
+    // workspace is stricter than an organization: only an owner grants admin,
+    // not just owner.
+    if role >= WorkspaceRole::Admin && caller != WorkspaceRole::Owner {
+        return Ok(RoleChange::Forbidden);
+    }
+
+    // An owner is not interchangeable with an admin here: only an owner may
+    // delete the workspace or seat another owner, so a workspace whose last
+    // owner steps down -- to admin as readily as to member -- is one nobody can
+    // repair. Counting them together would let an owner leave while an admin
+    // stands, which is the state migration 023 exists to undo.
+    if role != WorkspaceRole::Owner && privileged.owners.len() <= 1 && privileged.owns(user_id) {
+        return Ok(RoleChange::LastOwner);
+    }
+
+    if role < WorkspaceRole::Admin && privileged.all.len() <= 1 && privileged.holds(user_id) {
+        return Ok(RoleChange::LastAdmin);
+    }
+
+    let row = sqlx::query!(
+        r#"
+        UPDATE workspace_members
+        SET role = $3, updated_at = NOW()
+        WHERE workspace_id = $1 AND user_id = $2
+        RETURNING id, workspace_id, user_id, role, is_active,
+                  invited_by, invited_at, accepted_at, created_at, updated_at
+        "#,
+        workspace_id,
+        user_id,
+        role.as_str()
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    let now = chrono::Utc::now().naive_utc();
+    Ok(RoleChange::Applied(Box::new(WorkspaceMemberRow {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        user_id: row.user_id,
+        role: row.role.parse().unwrap_or(WorkspaceRole::Member),
+        is_active: row.is_active,
+        invited_by: row.invited_by,
+        invited_at: row.invited_at,
+        accepted_at: row.accepted_at,
+        created_at: row.created_at.unwrap_or(now),
+        updated_at: row.updated_at.unwrap_or(now),
+    })))
+}
+
 pub async fn count_admins(pool: &PgPool, workspace_id: Uuid) -> DbResult<i64> {
     let count = sqlx::query_scalar::<_, i64>(
         r#"
