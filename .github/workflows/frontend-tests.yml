@@ -50,15 +50,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        browser: [firefox, webkit]
+        browser: [chromium, firefox, webkit]
         shards: [4]
         shard: [1, 2, 3, 4]
-        # Chromium also collects the E2E coverage report, which is one file
-        # per run, so it stays in a single job.
-        include:
-          - browser: chromium
-            shards: 1
-            shard: 1
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -92,7 +86,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ matrix.browser == 'chromium' && !cancelled() }}
         with:
-          name: e2e-coverage-report
+          name: e2e-coverage-report-${{ matrix.shard }}
           path: manager/frontend/coverage-e2e/
           retention-days: 30
 
@@ -138,7 +132,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
         with:
-          name: e2e-coverage-report
+          pattern: e2e-coverage-report-*
           path: manager/frontend/.nyc_output/e2e
 
       - name: Merge coverage reports
@@ -146,7 +140,9 @@ jobs:
         run: |
           mkdir -p .nyc_output/merged
           cp .nyc_output/unit/coverage-final.json .nyc_output/merged/unit.json 2>/dev/null || true
-          cp .nyc_output/e2e/coverage-final.json .nyc_output/merged/e2e.json 2>/dev/null || true
+          for shard in .nyc_output/e2e/*/; do
+            cp "$shard/coverage-final.json" ".nyc_output/merged/e2e-$(basename "$shard").json" 2>/dev/null || true
+          done
           bunx nyc merge .nyc_output/merged .nyc_output/coverage.json
           bunx nyc report --reporter=lcov --reporter=text --reporter=text-summary --reporter=html --report-dir=coverage-merged --temp-dir=.nyc_output
 
