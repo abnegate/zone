@@ -2,6 +2,7 @@
 //!
 //! Tools provide the agent's ability to interact with the environment.
 
+mod beneath;
 mod command;
 mod file;
 mod reason;
