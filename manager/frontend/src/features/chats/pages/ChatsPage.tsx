@@ -873,6 +873,7 @@ export default function ChatsPage() {
                   );
                   const citations = message.metadata?.citations ?? [];
                   const receipts = message.metadata?.action_receipts ?? [];
+                  const links = message.role === 'assistant' ? 'citations' : 'all';
                   const linked = linkedMessageId === message.id;
                   return (
                     <div
@@ -960,7 +961,11 @@ export default function ChatsPage() {
                       {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                       {message.content.trim() ? (
                         <div className="message-content">
-                          <MessageContent content={message.content} />
+                          <MessageContent
+                            content={message.content}
+                            links={links}
+                            citations={citations}
+                          />
                         </div>
                       ) : null}
                       {citations.length > 0 && <Citations citations={citations} />}

@@ -30,6 +30,7 @@ describe('Citations', () => {
       'https://github.com/owner/repository/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     );
     expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     expect(screen.getByText('aaaaaaa')).toBeInTheDocument();
     expect(screen.getByText('Passing')).toBeInTheDocument();
     expect(screen.getByText('GitHub build')).toBeInTheDocument();
@@ -63,6 +64,14 @@ describe('Citations', () => {
     expect(items[0]).not.toHaveTextContent('Passing');
     expect(items[1].querySelector('a')).toHaveAttribute('href', '/wiki');
     expect(screen.getByText('content-hash')).toBeInTheDocument();
+  });
+
+  it('renders a protocol-relative source inert rather than as an in-app link', () => {
+    render(<Citations citations={[citation({ url: '//evil.example/x' })]} />);
+
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    expect(screen.getByTestId('citation').querySelector('a')).toBeNull();
+    expect(screen.getByText('repository main@aaaaaaa')).toBeInTheDocument();
   });
 
   it('marks a model claim and leaves server-proven evidence unmarked', () => {

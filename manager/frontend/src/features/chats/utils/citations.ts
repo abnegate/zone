@@ -58,8 +58,15 @@ export function citationProvenanceLabel(provenance: CitationProvenance): string 
   return provenance === 'model_asserted' ? 'Claimed by the model, not verified' : null;
 }
 
+const ABSOLUTE_URL = /^https?:\/\//i;
+
+/// One leading slash is an in-app route. A second slash — or a backslash, which
+/// browsers fold into one — makes the url protocol-relative, and the caller reads
+/// that off-site destination as internal and renders it without `noopener`.
+const IN_APP_PATH = /^\/(?![/\\])/;
+
 export function citationHref(citation: Pick<Citation, 'url' | 'kind'>): string | null {
-  if (/^https?:\/\//i.test(citation.url) || citation.url.startsWith('/')) return citation.url;
+  if (ABSOLUTE_URL.test(citation.url) || IN_APP_PATH.test(citation.url)) return citation.url;
   if (citation.kind === 'workspace_document' || citation.url.startsWith('knowledge://')) {
     return '/wiki';
   }
