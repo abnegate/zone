@@ -456,3 +456,79 @@ async fn deactivating_an_organization_locks_nobody_out() {
         .await
         .assert_status(StatusCode::OK);
 }
+
+/// `reindex` reads the index status by source id alone, so the read has to sit
+/// behind the workspace binding. A source that is mid-gathering answers 409,
+/// and a stranger who can tell 409 from 404 has learned that another tenant's
+/// source exists and is running -- which is why the sweep above only caught
+/// this on a runner slow enough to still be indexing.
+#[tokio::test]
+async fn a_stranger_is_refused_a_running_source_rather_than_told_it_conflicts() {
+    let client = TestClient::with_db().await;
+    let victim = tenant(&client).await;
+    let attacker = tenant(&client).await;
+
+    let created = client
+        .post_json_auth(
+            &format!("/api/workspaces/{}/sources", victim.workspace),
+            &json!({
+                "name": format!("The tenant's source {}", uuid::Uuid::new_v4()),
+                "source_type": "text",
+                "config": {},
+            }),
+            &victim.token,
+        )
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let body = created.json_value();
+    let source: uuid::Uuid = body["source"]["id"]
+        .as_str()
+        .or_else(|| body["id"].as_str())
+        .expect("source is created")
+        .parse()
+        .expect("the source id is a uuid");
+
+    let pool = common::create_test_pool().await;
+    sqlx::query(
+        "INSERT INTO context_gatherings (workspace_id, status, source_ids) VALUES ($1, 'running', $2)",
+    )
+    .bind(victim.workspace.parse::<uuid::Uuid>().expect("the workspace id is a uuid"))
+    .bind(vec![source])
+    .execute(&pool)
+    .await
+    .expect("the gathering is recorded");
+
+    let response = client
+        .post_json_auth(
+            &format!(
+                "/api/workspaces/{}/sources/{source}/reindex",
+                attacker.workspace
+            ),
+            &json!({}),
+            &attacker.token,
+        )
+        .await;
+    assert!(
+        refused(response.status),
+        "a stranger learned another tenant's source is indexing: {} {}",
+        response.status,
+        response.text()
+    );
+
+    let mine = client
+        .post_json_auth(
+            &format!(
+                "/api/workspaces/{}/sources/{source}/reindex",
+                victim.workspace
+            ),
+            &json!({}),
+            &victim.token,
+        )
+        .await;
+    assert_eq!(
+        mine.status,
+        StatusCode::CONFLICT,
+        "the owner must still be told their own source is already indexing, or \
+         this proves nothing about which check ran"
+    );
+}
