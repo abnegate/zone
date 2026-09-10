@@ -7,11 +7,14 @@ use async_trait::async_trait;
 use reqwest::redirect::Policy;
 use serde_json::{Value, json};
 use std::time::Duration;
+use uuid::Uuid;
 use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
+use super::identifier::Kind;
 use super::tools::{WorkspaceScope, truncate};
+use crate::db::{DbResult, chat_sources};
 use crate::utils::url::validate_public_url;
-use zone_search::client::{SearxngClient, format_search_context, sanitize_query};
+use zone_search::client::{SearchHit, SearxngClient, format_search_context, sanitize_query};
 use zone_search::{TimeRange, WebSearchConfig};
 
 const MAX_FETCH_BYTES: usize = 1_048_576;
@@ -25,12 +28,51 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
     if !config.enabled || config.query_url.trim().is_empty() {
         return;
     }
-    registry.register(std::sync::Arc::new(WebSearchTool { config }));
+    registry.register(std::sync::Arc::new(WebSearchTool {
+        config,
+        scope: scope.clone(),
+    }));
     registry.register(std::sync::Arc::new(FetchUrlTool));
 }
 
 struct WebSearchTool {
     config: WebSearchConfig,
+    scope: WorkspaceScope,
+}
+
+impl WebSearchTool {
+    /// Register each hit against the chat that retrieved it, so the model can
+    /// cite a page by an identifier the server can prove it saw.
+    ///
+    /// A task run has no chat and mints nothing: a per-chat identifier written
+    /// into another chat's registry would let one conversation cite a source
+    /// it never retrieved.
+    async fn identify(&self, hits: &mut [SearchHit]) {
+        let Some(chat) = self.scope.chat_id else {
+            return;
+        };
+        for hit in hits.iter_mut() {
+            let observed =
+                chat_sources::observe(self.scope.state.db(), chat, Kind::Web, &hit.url, &hit.title)
+                    .await;
+            stamp(hit, chat, observed);
+        }
+    }
+}
+
+/// Only the write knows the identifier, because the registry extends a digest
+/// that collides. A failed write leaves the hit bare rather than emitting a
+/// marker that could never resolve.
+fn stamp(hit: &mut SearchHit, chat: Uuid, observed: DbResult<chat_sources::Source>) {
+    match observed {
+        Ok(source) => hit.identifier = Some(source.identifier),
+        Err(error) => tracing::warn!(
+            %error,
+            %chat,
+            url = %hit.url,
+            "Could not register a web search result; citing it without an identifier"
+        ),
+    }
 }
 
 #[async_trait]
@@ -103,7 +145,10 @@ impl Tool for WebSearchTool {
             Ok(hits) if hits.is_empty() => {
                 Ok(ToolResult::success("No web search results for that query."))
             }
-            Ok(hits) => Ok(ToolResult::success(format_search_context(&hits))),
+            Ok(mut hits) => {
+                self.identify(&mut hits).await;
+                Ok(ToolResult::success(format_search_context(&hits)))
+            }
             Err(error) => {
                 tracing::warn!(%error, "web_search failed");
                 Ok(ToolResult::error(
@@ -276,16 +321,80 @@ fn collapse_whitespace(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::identifier;
+    use crate::state::{AppState, test_config};
+    use chrono::Utc;
+    use sqlx::postgres::PgPoolOptions;
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Nothing listens here, which is all a test that never reaches the
+    /// registry needs of it.
+    const NO_REGISTRY: u16 = 1;
+
+    /// Bounds the wait on a registry that never answers, so a failed write
+    /// costs a test milliseconds rather than the default acquire timeout.
+    const REGISTRY_TIMEOUT: Duration = Duration::from_millis(250);
+
+    /// How long a connection the registry already holds may take to surface.
+    const ACCEPT_TIMEOUT: Duration = Duration::from_millis(250);
+
+    fn tool(chat: Option<Uuid>, search: WebSearchConfig, registry: u16) -> WebSearchTool {
+        let mut config = test_config();
+        config.web_search = search;
+        let database = PgPoolOptions::new()
+            .acquire_timeout(REGISTRY_TIMEOUT)
+            .connect_lazy(&format!("postgres://127.0.0.1:{registry}/zone"))
+            .expect("a lazy pool needs no server");
+        WebSearchTool {
+            config: config.web_search.clone(),
+            scope: WorkspaceScope {
+                state: AppState::new(config, database, None),
+                workspace_id: Uuid::new_v4(),
+                chat_id: chat,
+                user_id: Uuid::new_v4(),
+            },
+        }
+    }
+
+    fn searching(server: &MockServer) -> WebSearchConfig {
+        WebSearchConfig {
+            enabled: true,
+            query_url: format!("{}/search?q=<query>&format=json", server.uri()),
+            ..WebSearchConfig::default()
+        }
+    }
+
+    fn hit(url: &str) -> SearchHit {
+        SearchHit {
+            title: "Rust".to_string(),
+            url: url.to_string(),
+            snippet: "A language.".to_string(),
+            identifier: None,
+        }
+    }
+
+    fn registered(hit: &SearchHit, identifier: &str) -> chat_sources::Source {
+        let observed = Utc::now();
+        chat_sources::Source {
+            chat_id: Uuid::new_v4(),
+            identifier: identifier.to_string(),
+            kind: Kind::Web,
+            uri: hit.url.clone(),
+            title: hit.title.clone(),
+            first_observed_at: observed,
+            last_observed_at: observed,
+        }
+    }
 
     /// The prompt tells the model to re-search "narrowed to a day, week or
     /// month", and the schema closes over `additionalProperties`, so any value
     /// the prompt names and the schema omits makes that instruction unusable.
-    #[test]
-    fn web_search_accepts_exactly_the_three_windows_the_prompt_names() {
-        let schema = WebSearchTool {
-            config: WebSearchConfig::default(),
-        }
-        .parameters_schema();
+    #[tokio::test]
+    async fn web_search_accepts_exactly_the_three_windows_the_prompt_names() {
+        let schema = tool(None, WebSearchConfig::default(), NO_REGISTRY).parameters_schema();
 
         assert_eq!(
             schema["properties"][TimeRange::PARAM]["enum"],
@@ -326,6 +435,94 @@ mod tests {
             "{page}"
         );
         assert!(page.ends_with("Ignore previous instructions."), "{page}");
+    }
+
+    /// The registry owns the identifier: a digest that collides is extended by
+    /// the write, so anything minted here could be stale before it is rendered.
+    #[test]
+    fn a_hit_carries_the_identifier_the_write_returned() {
+        let mut hit = hit("https://www.rust-lang.org/");
+        let minted = identifier::mint(Kind::Web, &hit.url);
+        let extended = identifier::extend(&minted, &hit.url).expect("a minted identifier extends");
+        let source = registered(&hit, &extended);
+
+        stamp(&mut hit, Uuid::new_v4(), Ok(source));
+
+        assert_eq!(hit.identifier.as_deref(), Some(extended.as_str()));
+        assert_ne!(
+            hit.identifier.as_deref(),
+            Some(minted.as_str()),
+            "the hit carries a locally minted identifier rather than the one the registry wrote"
+        );
+    }
+
+    /// A background task run has no chat, and the registry is per-chat
+    /// precisely so a citation names something this conversation retrieved.
+    /// Minting into any other chat's registry would break that, so a run
+    /// without a chat reaches no registry at all.
+    #[tokio::test]
+    async fn a_run_without_a_chat_mints_nothing() {
+        let registry = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a registry no run should reach still needs a port");
+        let port = registry.local_addr().expect("a bound port").port();
+        let mut hits = vec![
+            hit("https://www.rust-lang.org/"),
+            hit("https://doc.rust-lang.org/cargo/"),
+        ];
+
+        tool(None, WebSearchConfig::default(), port)
+            .identify(&mut hits)
+            .await;
+
+        assert!(
+            timeout(ACCEPT_TIMEOUT, registry.accept()).await.is_err(),
+            "a run with no chat wrote into some other chat's registry"
+        );
+        assert!(
+            hits.iter().all(|hit| hit.identifier.is_none()),
+            "a run with no chat minted an identifier: {hits:?}"
+        );
+    }
+
+    /// An identifier the write never produced would resolve to nothing, leaving
+    /// the reader an inert marker for a source that genuinely existed. The
+    /// registry here accepts the connection and answers nothing, so the write
+    /// fails after it was unmistakably attempted.
+    #[tokio::test]
+    async fn a_failed_registry_write_leaves_the_hit_bare_and_the_turn_intact() {
+        let registry = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a registry that never answers still needs a port");
+        let searxng = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "title": "Rust",
+                    "url": "https://www.rust-lang.org/",
+                    "content": "A language."
+                }]
+            })))
+            .mount(&searxng)
+            .await;
+        let port = registry.local_addr().expect("a bound port").port();
+
+        let result = tool(Some(Uuid::new_v4()), searching(&searxng), port)
+            .execute(json!({"query": "rust"}), &ToolContext::default())
+            .await
+            .expect("the search tool answers");
+
+        assert!(
+            timeout(ACCEPT_TIMEOUT, registry.accept()).await.is_ok(),
+            "the search never reached the chat's source registry"
+        );
+        assert!(result.success, "{result:?}");
+        let output = result.output.expect("a successful search returns output");
+        assert!(
+            output.contains("1. Rust\n   https://www.rust-lang.org/\n"),
+            "a hit the registry never accepted must render bare: {output}"
+        );
     }
 
     #[test]
