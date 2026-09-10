@@ -4,7 +4,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -14,6 +14,62 @@ use crate::db::{projects, workspace_members};
 use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
+
+/// Refuse a write to `workspace_id`, or `None` when the caller may make it.
+///
+/// A caller who is not a member is told the project does not exist, so the
+/// id-addressed routes cannot be used to enumerate ids across tenants -- the
+/// rule `tasks.rs` already applies to tasks and runs. A member who only reads
+/// is told they need write access, because they can already see the project.
+async fn refuse_unless_writable(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Option<Response> {
+    match workspace_members::is_member(state.db(), user_id, workspace_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Some(
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse::new("Project not found")),
+                )
+                    .into_response(),
+            );
+        }
+        Err(e) => {
+            tracing::error!("Database error checking membership: {}", e);
+            return Some(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response(),
+            );
+        }
+    }
+
+    match workspace_members::can_write(state.db(), workspace_id, user_id).await {
+        Ok(true) => None,
+        Ok(false) => Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse::new("Workspace write access required")),
+            )
+                .into_response(),
+        ),
+        Err(e) => {
+            tracing::error!("Database error checking permissions: {}", e);
+            Some(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response(),
+            )
+        }
+    }
+}
 
 /// Project data
 #[derive(Debug, Serialize)]
@@ -119,8 +175,8 @@ pub async fn list(
         }
         Ok(false) => {
             return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Not a member of this workspace")),
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Workspace not found")),
             )
                 .into_response();
         }
@@ -253,8 +309,8 @@ pub async fn get(
         Some(id) => id,
         None => {
             return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Project has no workspace association")),
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Project not found")),
             )
                 .into_response();
         }
@@ -266,8 +322,8 @@ pub async fn get(
         }
         Ok(false) => {
             return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Not a member of this workspace")),
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Project not found")),
             )
                 .into_response();
         }
@@ -328,32 +384,15 @@ pub async fn update(
         Some(id) => id,
         None => {
             return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Project has no workspace association")),
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Project not found")),
             )
                 .into_response();
         }
     };
 
-    match workspace_members::can_write(state.db(), workspace_id, user_id).await {
-        Ok(true) => {
-            // User can write, proceed
-        }
-        Ok(false) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Workspace write access required")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error checking permissions: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+    if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
+        return refusal;
     }
 
     match projects::update_project(
@@ -425,32 +464,15 @@ pub async fn delete(
         Some(id) => id,
         None => {
             return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Project has no workspace association")),
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Project not found")),
             )
                 .into_response();
         }
     };
 
-    match workspace_members::can_write(state.db(), workspace_id, user_id).await {
-        Ok(true) => {
-            // User can write, proceed
-        }
-        Ok(false) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Workspace write access required")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error checking permissions: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+    if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
+        return refusal;
     }
 
     match projects::delete_project(state.db(), id).await {
@@ -515,32 +537,15 @@ pub async fn link_github(
         Some(id) => id,
         None => {
             return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Project has no workspace association")),
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Project not found")),
             )
                 .into_response();
         }
     };
 
-    match workspace_members::can_write(state.db(), workspace_id, user_id).await {
-        Ok(true) => {
-            // User can write, proceed
-        }
-        Ok(false) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Workspace write access required")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error checking permissions: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+    if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
+        return refusal;
     }
 
     match projects::link_github(state.db(), id, &req.repo_url, req.access_token.as_deref()).await {
@@ -604,32 +609,15 @@ pub async fn unlink_github(
         Some(id) => id,
         None => {
             return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Project has no workspace association")),
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Project not found")),
             )
                 .into_response();
         }
     };
 
-    match workspace_members::can_write(state.db(), workspace_id, user_id).await {
-        Ok(true) => {
-            // User can write, proceed
-        }
-        Ok(false) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Workspace write access required")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error checking permissions: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+    if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
+        return refusal;
     }
 
     match projects::unlink_github(state.db(), id).await {
