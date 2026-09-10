@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { OrganizationMember, WorkspaceMember } from '../types';
 
 // Mock client
@@ -229,7 +230,7 @@ describe('WorkspaceMembersSection', () => {
       });
     });
 
-    it.skip('adds member successfully and refreshes list', async () => {
+    it('adds member successfully and refreshes list', async () => {
       const newMember: WorkspaceMember = {
         id: 'ws-member-5',
         user_id: 'user-5',
@@ -240,9 +241,15 @@ describe('WorkspaceMembersSection', () => {
         joined_at: '2024-01-05T00:00:00Z',
       };
 
-      mockClient.addWorkspaceMember.mockResolvedValueOnce(newMember);
-      mockClient.getWorkspaceMembers.mockResolvedValueOnce({
-        members: [mockOwner, mockAdmin, mockMember, mockViewer, newMember],
+      // The refresh has to be staged from inside the add, not queued up front:
+      // a `mockResolvedValueOnce` here is consumed by the *initial* load, which
+      // would make user-5 an existing workspace member and filter it out of the
+      // very select this test needs to choose from.
+      mockClient.addWorkspaceMember.mockImplementationOnce(async () => {
+        mockClient.getWorkspaceMembers.mockResolvedValue({
+          members: [mockOwner, mockAdmin, mockMember, mockViewer, newMember],
+        });
+        return newMember;
       });
 
       render(<WorkspaceMembersSection workspaceId="ws-123" orgId="org-123" />);
@@ -256,15 +263,14 @@ describe('WorkspaceMembersSection', () => {
         expect(screen.getByText('Add Workspace Member')).toBeInTheDocument();
       });
 
-      // Wait for the select to be populated
-      await waitFor(() => {
-        const userSelect = screen.getByLabelText(/User/i) as HTMLSelectElement;
-        // Check that we have options (org member should be available)
-        expect(userSelect.options.length).toBeGreaterThan(1);
-      });
-
-      const userSelect = screen.getByLabelText(/User/i) as HTMLSelectElement;
-      fireEvent.change(userSelect, { target: { value: 'user-5' } });
+      // `@zone/ui`'s Select is a Radix one: the labelled element is a trigger
+      // button, not a native select, so it has to be opened and its item
+      // chosen rather than assigned a value.
+      const user = userEvent.setup();
+      const dialog = screen.getByRole('dialog');
+      const trigger = await waitFor(() => within(dialog).getByRole('combobox', { name: /User/i }));
+      await user.click(trigger);
+      await user.click(await screen.findByRole('option', { name: /orgmember@test\.com/ }));
 
       // Find all forms (there should be one visible modal form)
       const forms = document.querySelectorAll('form');
@@ -285,6 +291,10 @@ describe('WorkspaceMembersSection', () => {
 
       await waitFor(() => {
         expect(mockClient.getWorkspaceMembers).toHaveBeenCalledTimes(2);
+      });
+      // The refreshed list is what the reader actually sees.
+      await waitFor(() => {
+        expect(screen.getAllByText('orgmember@test.com').length).toBeGreaterThan(0);
       });
     });
 

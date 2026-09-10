@@ -17,6 +17,24 @@ if (typeof globalThis.NodeFilter === 'undefined') {
   };
 }
 
+// Radix's Select and Dropdown probe pointer capture and scroll their item into
+// view when they open. happy-dom implements neither, so without these no test
+// can open one, and every `@zone/ui` Select is unreachable.
+for (const [name, value] of [
+  ['hasPointerCapture', () => false],
+  ['setPointerCapture', () => {}],
+  ['releasePointerCapture', () => {}],
+  ['scrollIntoView', () => {}],
+] as const) {
+  if (!(name in Element.prototype)) {
+    Object.defineProperty(Element.prototype, name, {
+      writable: true,
+      configurable: true,
+      value,
+    });
+  }
+}
+
 function unstubbedConfirm(): never {
   throw new Error(
     'window.confirm was called without a stub. Assign window.confirm in the test to choose the answer, so the confirmed and cancelled branches are each asserted deliberately.'
@@ -129,6 +147,28 @@ expect.extend({
         pass
           ? `expected element not to contain HTML "${html}"`
           : `expected element to contain HTML "${html}"`,
+    };
+  },
+  toHaveStyle(received: Element | null, styles: Record<string, string>) {
+    if (received === null) {
+      return { pass: false, message: () => 'element is null' };
+    }
+    const style = (received as HTMLElement).style;
+    const property = (name: string) => name.replace(/[A-Z]/g, (upper) => `-${upper.toLowerCase()}`);
+    const mismatched = Object.entries(styles).filter(
+      ([name, value]) => style.getPropertyValue(property(name)).trim() !== value.trim()
+    );
+    return {
+      pass: mismatched.length === 0,
+      message: () =>
+        mismatched.length === 0
+          ? `expected element not to have style ${JSON.stringify(styles)}`
+          : mismatched
+              .map(
+                ([name, value]) =>
+                  `expected ${property(name)} to be "${value}", but got "${style.getPropertyValue(property(name))}"`
+              )
+              .join('; '),
     };
   },
   toHaveTextContent(received: Element | null, text: string | RegExp) {
