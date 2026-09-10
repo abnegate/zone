@@ -10,7 +10,7 @@
 //! advisory evidence and can never be a passing result, exactly as incomplete
 //! evidence cannot.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -437,6 +437,40 @@ fn indexed_uri(uri: &str) -> (CitationKind, String, Option<String>) {
     (CitationKind::WorkspaceDocument, uri.to_string(), None)
 }
 
+/// Citation for a source the chat's registry already holds, cited by the
+/// identifier the registry minted for it.
+///
+/// `first_observed_at` is when the server first retrieved the source, never
+/// when a reply got around to citing it. Citing a source again must not
+/// refresh the observation, or a page read days ago silently presents itself
+/// as fresh evidence, and every claim resting on this identifier inherits a
+/// freshness the server never saw.
+///
+/// The outcome is an observation and never a success, so a registry source can
+/// never satisfy [`Citation::passing`]. Retrieving a page proves the server saw
+/// it; it proves nothing about what the page asserts.
+pub fn from_source(
+    kind: CitationKind,
+    identifier: &str,
+    title: &str,
+    url: &str,
+    first_observed_at: DateTime<Utc>,
+) -> Citation {
+    Citation {
+        kind,
+        title: nonempty(title.to_string()).unwrap_or_else(|| url.to_string()),
+        url: url.to_string(),
+        identifier: nonempty(identifier.to_string()),
+        revision: None,
+        observed_at: first_observed_at.to_rfc3339(),
+        complete: true,
+        provenance: Provenance::ServerExecution,
+        outcome: CitationOutcome::Observed,
+        note: None,
+    }
+    .normalize()
+}
+
 fn document_citations(value: &Value, observed_at: &str) -> Vec<Citation> {
     if let Some(document) = value.get("document") {
         return vec![document_citation(document, value, observed_at)];
@@ -579,6 +613,7 @@ mod tests {
     const OBSERVED: &str = "2026-09-05T00:00:00+00:00";
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const IDENTIFIER: &str = "web-1";
+    const SOURCE_URL: &str = "https://example.test/changelog";
 
     fn citations(name: &str, value: Value) -> Vec<Citation> {
         from_tool_at(name, &value.to_string(), OBSERVED)
@@ -1124,7 +1159,7 @@ mod tests {
         let citation = Citation {
             kind: CitationKind::Web,
             title: "Example changelog".into(),
-            url: "https://example.test/changelog".into(),
+            url: SOURCE_URL.into(),
             identifier: Some(IDENTIFIER.into()),
             revision: None,
             observed_at: OBSERVED.into(),
@@ -1163,5 +1198,67 @@ mod tests {
             wire.get("identifier").is_none(),
             "an absent identifier must stay absent rather than be written back as null"
         );
+    }
+
+    fn first_observed() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(OBSERVED)
+            .expect("the fixture observation time is rfc3339")
+            .with_timezone(&Utc)
+    }
+
+    fn cited_source() -> Citation {
+        from_source(
+            CitationKind::Web,
+            IDENTIFIER,
+            "Example changelog",
+            SOURCE_URL,
+            first_observed(),
+        )
+    }
+
+    #[test]
+    fn a_cited_source_carries_when_it_was_first_observed_not_when_it_was_cited() {
+        let citation = cited_source();
+
+        let stamped = DateTime::parse_from_rfc3339(&citation.observed_at)
+            .expect("a citation stamps an rfc3339 observation time")
+            .with_timezone(&Utc);
+
+        assert_eq!(stamped, first_observed());
+        assert_eq!(citation.identifier.as_deref(), Some(IDENTIFIER));
+        assert!(
+            Utc::now().signed_duration_since(stamped) > chrono::TimeDelta::hours(1),
+            "a cited source was stamped at about the current time, so re-citing a stale page \
+             silently refreshes it into fresh evidence"
+        );
+    }
+
+    #[test]
+    fn a_cited_web_source_is_an_observation_and_never_a_pass() {
+        let citation = cited_source();
+
+        assert_eq!(citation.kind, CitationKind::Web);
+        assert_eq!(citation.outcome, CitationOutcome::Observed);
+        assert_eq!(citation.provenance, Provenance::ServerExecution);
+        assert!(citation.complete);
+        assert!(citation.usable());
+        assert!(
+            !citation.passing(),
+            "a retrieved page is something the server saw, not something it verified"
+        );
+    }
+
+    #[test]
+    fn a_cited_source_without_a_stored_title_stays_usable() {
+        let citation = from_source(
+            CitationKind::Web,
+            IDENTIFIER,
+            "   ",
+            SOURCE_URL,
+            first_observed(),
+        );
+
+        assert_eq!(citation.title, SOURCE_URL);
+        assert!(citation.usable());
     }
 }
