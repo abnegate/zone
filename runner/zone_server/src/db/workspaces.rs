@@ -107,6 +107,59 @@ pub async fn create_workspace(
     })
 }
 
+/// Create a workspace and seat `owner_id` in it as one unit.
+///
+/// Every workspace route is reached through a membership guard, so a workspace
+/// whose owner row failed to land cannot be repaired through the API by anyone
+/// -- including the person who just created it. Migration 023 exists to seat
+/// owners in the workspaces this left behind.
+pub async fn create_workspace_with_owner(
+    pool: &PgPool,
+    organization_id: Uuid,
+    name: &str,
+    slug: &str,
+    description: Option<&str>,
+    owner_id: Uuid,
+) -> DbResult<WorkspaceRow> {
+    let mut transaction = pool.begin().await?;
+
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO workspaces (organization_id, name, slug, description)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, organization_id, name, slug, description, is_active, created_at, updated_at
+        "#,
+        organization_id,
+        name,
+        slug,
+        description
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+
+    super::workspace_members::reactivate_member(
+        &mut *transaction,
+        row.id,
+        owner_id,
+        super::workspace_members::WorkspaceRole::Owner,
+        None,
+    )
+    .await?;
+
+    transaction.commit().await?;
+
+    Ok(WorkspaceRow {
+        id: row.id,
+        organization_id: row.organization_id,
+        name: row.name,
+        slug: row.slug,
+        description: row.description,
+        is_active: row.is_active,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
 /// Update a workspace
 pub async fn update_workspace(
     pool: &PgPool,

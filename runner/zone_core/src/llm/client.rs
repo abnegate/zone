@@ -522,15 +522,30 @@ mod tests {
         assert_eq!(cloned.max_tokens, config.max_tokens);
     }
 
+    /// A default config's `api_key` is the empty string, so asserting that its
+    /// debug output merely *mentions* `api_key` is satisfied by a derived
+    /// `Debug` -- the exact defect the hand-written one exists to prevent. The
+    /// key here is a real one, and what is asserted is that its value is absent.
     #[test]
     fn test_llm_config_debug() {
-        let config = LlmConfig::default();
+        const KEY: &str = "sk-test-3f8a1c9e04b27d65";
+        let config = LlmConfig {
+            api_key: KEY.to_string(),
+            ..LlmConfig::default()
+        };
         let debug_str = format!("{:?}", config);
 
         assert!(debug_str.contains("LlmConfig"));
         assert!(debug_str.contains("base_url"));
-        assert!(debug_str.contains("api_key"));
         assert!(debug_str.contains("default_model"));
+        assert!(
+            debug_str.contains("api_key"),
+            "the field should still be named, so its redaction is visible: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains(KEY),
+            "the provider key reached a debug line: {debug_str}"
+        );
     }
 
     #[test]
@@ -581,12 +596,21 @@ mod tests {
 
     #[test]
     fn test_llm_client_debug() {
-        let config = LlmConfig::default();
+        const KEY: &str = "sk-test-6b02da97e15c4f38";
+        let config = LlmConfig {
+            api_key: KEY.to_string(),
+            ..LlmConfig::default()
+        };
         let client = LlmClient::new(config);
         let debug_str = format!("{:?}", client);
 
         assert!(debug_str.contains("LlmClient"));
         assert!(debug_str.contains("config"));
+        // Every worker logs the client, and the config travels inside it.
+        assert!(
+            !debug_str.contains(KEY),
+            "the provider key reached a debug line through the client: {debug_str}"
+        );
     }
 
     #[test]

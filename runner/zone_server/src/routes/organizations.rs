@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{AuthUser, OrgAdmin, OrgMember, OrgOwner, WorkspaceAdmin, WorkspaceMember};
-use crate::db::workspace_members::WorkspaceRole;
-use crate::db::{organization_members, organizations, workspace_members, workspaces};
+use crate::db::{organization_members, organizations, workspaces};
 use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
@@ -347,13 +346,13 @@ pub async fn create_workspace(
     admin: OrgAdmin,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> impl IntoResponse {
-    // Create the workspace
-    let ws = match workspaces::create_workspace(
+    let ws = match workspaces::create_workspace_with_owner(
         state.db(),
         admin.org_id,
         &req.name,
         &req.slug,
         req.description.as_deref(),
+        admin.user_id,
     )
     .await
     {
@@ -367,15 +366,6 @@ pub async fn create_workspace(
                 .into_response();
         }
     };
-
-    // Add the creator as a workspace admin
-    if let Err(e) =
-        workspace_members::add_member(state.db(), ws.id, admin.user_id, WorkspaceRole::Admin, None)
-            .await
-    {
-        tracing::error!("Failed to add creator as workspace member: {}", e);
-        // Still return success since workspace was created - the user can add themselves later
-    }
 
     (
         StatusCode::CREATED,
@@ -501,10 +491,13 @@ impl From<organization_members::OrganizationMemberRow> for OrganizationMemberRes
     }
 }
 
-/// Add member request
+/// Add member request. The console's organization form names the invitee by
+/// email, the workspace form and the API's own callers by id, so either
+/// identifies the member and exactly one must be given.
 #[derive(Debug, Deserialize)]
 pub struct AddMemberRequest {
-    user_id: Uuid,
+    user_id: Option<Uuid>,
+    email: Option<String>,
     role: String,
 }
 
@@ -559,8 +552,53 @@ pub async fn add_member(
         }
     };
 
+    if role >= organization_members::OrgRole::Admin
+        && admin.role != organization_members::OrgRole::Owner
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only owners can grant admin or owner role",
+            )),
+        )
+            .into_response();
+    }
+
+    let target = match (req.user_id, req.email.as_deref()) {
+        (Some(user_id), None) => user_id,
+        (None, Some(email)) => match crate::db::users::get_user_by_email(state.db(), email).await {
+            Ok(Some(user)) => user.id,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse::new(
+                        "No account uses that email. Send an invitation instead.",
+                    )),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!("Database error resolving email: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+        },
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "Name the member by either user_id or email",
+                )),
+            )
+                .into_response();
+        }
+    };
+
     // CRITICAL-7: Check if member already exists (active or inactive)
-    match organization_members::get_member(state.db(), admin.org_id, req.user_id).await {
+    match organization_members::get_member(state.db(), admin.org_id, target).await {
         Ok(Some(existing)) => {
             if existing.is_active {
                 return (
@@ -575,7 +613,7 @@ pub async fn add_member(
                 match organization_members::reactivate_member(
                     state.db(),
                     admin.org_id,
-                    req.user_id,
+                    target,
                     role,
                     Some(admin.user_id),
                 )
@@ -615,7 +653,7 @@ pub async fn add_member(
     match organization_members::add_member(
         state.db(),
         admin.org_id,
-        req.user_id,
+        target,
         role,
         Some(admin.user_id),
     )
@@ -674,10 +712,37 @@ pub async fn update_member_role(
             .into_response();
     }
 
-    match organization_members::update_member_role(state.db(), admin.org_id, path.user_id, role)
-        .await
+    match organization_members::change_role(
+        state.db(),
+        admin.org_id,
+        path.user_id,
+        role,
+        admin.role,
+    )
+    .await
     {
-        Ok(member) => Json(OrganizationMemberResponse::from(member)).into_response(),
+        Ok(organization_members::RoleChange::Applied(member)) => {
+            Json(OrganizationMemberResponse::from(*member)).into_response()
+        }
+        Ok(organization_members::RoleChange::Forbidden) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only owners can change the role of an admin or owner",
+            )),
+        )
+            .into_response(),
+        Ok(organization_members::RoleChange::Missing) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new("Member not found")),
+        )
+            .into_response(),
+        Ok(organization_members::RoleChange::LastOwner) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Cannot demote the last owner of the organization",
+            )),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -695,71 +760,25 @@ pub async fn remove_member(
     admin: OrgAdmin,
     Path(path): Path<MemberPath>,
 ) -> impl IntoResponse {
-    // CRITICAL-6: Get the target member's role to check permissions
-    let target_member =
-        match organization_members::get_member(state.db(), admin.org_id, path.user_id).await {
-            Ok(Some(member)) => member,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new("Member not found")),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                tracing::error!("Database error: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        };
-
-    // CRITICAL-6: Check role hierarchy - can't remove someone with higher or equal role
-    // Owner > Admin > Member
-    if admin.role != organization_members::OrgRole::Owner {
-        // Non-owners cannot remove admins or owners
-        if target_member.role >= organization_members::OrgRole::Admin {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new(
-                    "Only owners can remove admins or owners",
-                )),
-            )
-                .into_response();
-        }
-    }
-
-    // CRITICAL-6: Prevent removal of last owner
-    if target_member.role == organization_members::OrgRole::Owner {
-        match organization_members::count_owners(state.db(), admin.org_id).await {
-            Ok(count) if count <= 1 => {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(ErrorResponse::new(
-                        "Cannot remove the last owner of the organization",
-                    )),
-                )
-                    .into_response();
-            }
-            Ok(_) => {
-                // More than one owner, proceed
-            }
-            Err(e) => {
-                tracing::error!("Database error counting owners: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    match organization_members::remove_member(state.db(), admin.org_id, path.user_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (
+    match organization_members::remove_guarded(state.db(), admin.org_id, path.user_id, admin.role)
+        .await
+    {
+        Ok(organization_members::Removal::Removed) => StatusCode::NO_CONTENT.into_response(),
+        Ok(organization_members::Removal::Forbidden) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only owners can remove admins or owners",
+            )),
+        )
+            .into_response(),
+        Ok(organization_members::Removal::LastOwner) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Cannot remove the last owner of the organization",
+            )),
+        )
+            .into_response(),
+        Ok(organization_members::Removal::Missing) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Member not found")),
         )

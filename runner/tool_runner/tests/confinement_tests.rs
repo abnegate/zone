@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use tool_runner::error::ExecutorError;
 use tool_runner::executor::{
-    Backend, CommandExecutor, Confinement, ConfinementError, ConfinementMode,
+    Backend, CommandExecutor, Confinement, ConfinementError, ConfinementMode, HOST_BACKEND,
 };
 use tool_runner::protocol::{
     Capability, ConfinementRequest, ErrorCode, InboundMessage, OutboundMessage, ProcessTreeRequest,
@@ -1014,8 +1014,14 @@ async fn test_a_confined_tree_really_forks() {
     );
 }
 
+/// Single-command mode asks for one process, and what the host can promise
+/// about that depends on the backend. Seatbelt filters `process-fork`, so the
+/// second process never exists. Bubblewrap has no such primitive, so the fork
+/// succeeds -- and what has to hold there instead is that the child is inside
+/// the same sandbox. Asserting only "no second process" would pass vacuously on
+/// the backend that cannot deliver it, which is the more dangerous of the two.
 #[tokio::test]
-async fn test_single_command_mode_still_cannot_fork() {
+async fn test_single_command_mode_bounds_a_second_process_or_refuses_it() {
     if Confinement::probe(ConfinementMode::SingleCommand)
         .await
         .is_err()
@@ -1024,10 +1030,13 @@ async fn test_single_command_mode_still_cannot_fork() {
     }
 
     let workspace = workspace();
-    write_forking_scripts(&workspace.root, "printf 'ran' > child.marker\n");
+    write_forking_scripts(
+        &workspace.root,
+        &format!("cat {} > child.marker\n", workspace.denied.display()),
+    );
 
     let messages = run_confined(&InboundMessage::RunStart {
-        job_id: "single-cannot-fork".to_string(),
+        job_id: "single-second-process".to_string(),
         workspace: workspace.root.clone(),
         command: SHELL.to_string(),
         args: vec![PARENT_SCRIPT.to_string()],
@@ -1039,11 +1048,25 @@ async fn test_single_command_mode_still_cannot_fork() {
     })
     .await;
 
-    assert_ne!(exit_code(&messages), Some(0), "{messages:?}");
-    assert_eq!(
-        marker(&workspace.root, "child.marker"),
-        None,
-        "single-command mode let its command start a second process"
+    if HOST_BACKEND.is_some_and(Backend::enforces_single_process) {
+        assert_ne!(exit_code(&messages), Some(0), "{messages:?}");
+        assert_eq!(
+            marker(&workspace.root, CHILD_IDENTIFIER),
+            None,
+            "single-command mode let its command start a second process"
+        );
+    } else {
+        assert!(
+            marker(&workspace.root, CHILD_IDENTIFIER).is_some(),
+            "the child never ran, so this proves nothing about its confinement: {messages:?}"
+        );
+    }
+
+    // Whichever way the second process went, it read nothing from outside.
+    assert_ne!(
+        marker(&workspace.root, "child.marker").as_deref(),
+        Some(SECRET.trim()),
+        "a second process read a file outside the sandbox"
     );
 }
 
@@ -1055,7 +1078,11 @@ async fn test_a_confined_tree_cannot_execute_outside_its_execute_roots() {
     {
         return;
     }
-    if !Backend::Seatbelt.enforces_execute_roots() {
+    // The host's backend, not seatbelt's: bubblewrap bounds a tree by its mount
+    // namespace and has no exec filter, so a planted file inside a bound root
+    // does run there. Asking seatbelt lets this run on a Linux host with
+    // bubblewrap installed, where the refusal below cannot hold.
+    if !HOST_BACKEND.is_some_and(Backend::enforces_execute_roots) {
         return;
     }
 

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{AuthUser, OrgAdmin};
-use crate::db::{invitations, organization_members, organizations};
+use crate::db::{invitations, organization_members, organizations, workspaces};
 use crate::state::AppState;
 
 use super::common::Timestamps;
@@ -72,13 +72,23 @@ impl InvitationResponse {
     }
 }
 
-/// Create invitation request
+/// Create invitation request. The console's form names one workspace, the
+/// API's own callers name a list, so either identifies the workspaces and at
+/// most one form may be given. Naming none invites into the organization alone.
 #[derive(Debug, Deserialize)]
 pub struct CreateInvitationRequest {
     email: String,
-    workspace_ids: Vec<Uuid>,
+    #[serde(default)]
+    workspace_ids: Option<Vec<Uuid>>,
+    #[serde(default)]
+    workspace_id: Option<Uuid>,
     org_role: String,
+    #[serde(default = "default_workspace_role")]
     workspace_role: String,
+}
+
+fn default_workspace_role() -> String {
+    "member".to_string()
 }
 
 /// Validates email format with proper checks
@@ -105,7 +115,9 @@ fn is_valid_email(email: &str) -> bool {
 pub async fn create_invitation(
     State(state): State<AppState>,
     OrgAdmin {
-        org_id, user_id, ..
+        org_id,
+        user_id,
+        role: inviter_role,
     }: OrgAdmin,
     Json(req): Json<CreateInvitationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
@@ -116,6 +128,20 @@ pub async fn create_invitation(
             Json(ErrorResponse::new("Invalid email address")),
         ));
     }
+
+    let workspace_ids = match (req.workspace_ids, req.workspace_id) {
+        (Some(ids), None) => ids,
+        (None, Some(id)) => vec![id],
+        (None, None) => Vec::new(),
+        (Some(_), Some(_)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "Name the workspaces by either workspace_id or workspace_ids",
+                )),
+            ));
+        }
+    };
 
     // Validate roles
     let valid_org_roles = ["member", "admin", "owner"];
@@ -139,6 +165,37 @@ pub async fn create_invitation(
                 valid_workspace_roles.join(", ")
             ))),
         ));
+    }
+
+    if (req.org_role == "owner" || req.workspace_role == "owner" || req.workspace_role == "admin")
+        && inviter_role != organization_members::OrgRole::Owner
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only owners can invite owners or workspace admins",
+            )),
+        ));
+    }
+
+    for workspace_id in &workspace_ids {
+        let workspace = workspaces::get_workspace(state.db(), *workspace_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new(format!("Database error: {}", e))),
+                )
+            })?;
+
+        if workspace.is_none_or(|workspace| workspace.organization_id != org_id) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "Workspace does not belong to this organization",
+                )),
+            ));
+        }
     }
 
     // Check if a user with this email already exists
@@ -193,7 +250,7 @@ pub async fn create_invitation(
         state.db(),
         &req.email,
         org_id,
-        req.workspace_ids,
+        workspace_ids,
         &req.org_role,
         &req.workspace_role,
         user_id,

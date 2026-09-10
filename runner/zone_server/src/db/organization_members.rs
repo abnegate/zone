@@ -164,6 +164,103 @@ pub async fn remove_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) 
     Ok(result.rows_affected() > 0)
 }
 
+/// The target's own role, held for the length of the transaction.
+///
+/// Reading it in the route and acting on it here are two moments: an owner can
+/// promote the target in between, and the request then lands on an admin or
+/// owner the caller was never allowed to touch.
+async fn lock_member(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<OrgRole>> {
+    let role: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT role FROM organization_members
+        WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE
+        FOR UPDATE
+        "#,
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(role.map(|role| role.parse().unwrap_or(OrgRole::Member)))
+}
+
+/// Whether `caller` outranks what `target` currently holds.
+fn outranks(caller: OrgRole, target: OrgRole) -> bool {
+    target < OrgRole::Admin || caller == OrgRole::Owner
+}
+
+/// Outcome of a removal that must leave an owner seated.
+#[derive(Debug)]
+pub enum Removal {
+    Removed,
+    Forbidden,
+    Missing,
+    LastOwner,
+}
+
+/// Remove a member, refusing to unseat the organization's last owner.
+///
+/// The plain [`remove_member`] is the unguarded one, for callers that mean to
+/// strip access. This is the one a route wants: it counts and removes with the
+/// owner rows locked, so two removals arriving together cannot each read a
+/// count that says one may go.
+pub async fn remove_guarded(
+    pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+    caller: OrgRole,
+) -> DbResult<Removal> {
+    let mut transaction = pool.begin().await?;
+
+    let owners: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT user_id
+        FROM organization_members
+        WHERE organization_id = $1 AND role = 'owner' AND is_active = TRUE
+        FOR UPDATE
+        "#,
+    )
+    .bind(organization_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    let Some(target) = lock_member(&mut transaction, organization_id, user_id).await? else {
+        return Ok(Removal::Missing);
+    };
+    if !outranks(caller, target) {
+        return Ok(Removal::Forbidden);
+    }
+
+    if owners.len() <= 1 && owners.contains(&user_id) {
+        return Ok(Removal::LastOwner);
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE organization_members
+        SET is_active = FALSE, updated_at = NOW()
+        WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE
+        "#,
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    if result.rows_affected() > 0 {
+        Ok(Removal::Removed)
+    } else {
+        Ok(Removal::Missing)
+    }
+}
+
 /// Get a member by organization and user ID
 pub async fn get_member(
     pool: &PgPool,
@@ -305,6 +402,95 @@ pub async fn update_member_role(
         created_at: row.created_at.unwrap_or(now),
         updated_at: row.updated_at.unwrap_or(now),
     })
+}
+
+/// Outcome of a role change that must leave an owner seated.
+#[derive(Debug)]
+pub enum RoleChange {
+    Applied(Box<OrganizationMemberRow>),
+    Forbidden,
+    Missing,
+    LastOwner,
+}
+
+/// Change a member's role, refusing to unseat the organization's last owner.
+///
+/// Counting the owners and then updating one of them are two statements, so two
+/// demotions racing each other both read a safe count and between them leave
+/// none. Lock the owner rows for the length of the transaction: the second
+/// demotion waits, then counts what the first actually left.
+pub async fn change_role(
+    pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+    role: OrgRole,
+    caller: OrgRole,
+) -> DbResult<RoleChange> {
+    let mut transaction = pool.begin().await?;
+
+    let owners: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT user_id
+        FROM organization_members
+        WHERE organization_id = $1 AND role = 'owner' AND is_active = TRUE
+        FOR UPDATE
+        "#,
+    )
+    .bind(organization_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    let Some(target) = lock_member(&mut transaction, organization_id, user_id).await? else {
+        return Ok(RoleChange::Missing);
+    };
+    if !outranks(caller, target) {
+        return Ok(RoleChange::Forbidden);
+    }
+
+    // The rank being granted is the other half of the same question, and the
+    // route asks it too. Ask it here as well: this is the guarded entry point,
+    // and a caller reaching it should not be able to acquire one guard without
+    // the other. Only an owner seats an owner; an admin seating an admin is
+    // this organization's policy, deliberately, and the route it goes through
+    // says the same.
+    if role == OrgRole::Owner && caller != OrgRole::Owner {
+        return Ok(RoleChange::Forbidden);
+    }
+
+    if role != OrgRole::Owner && owners.len() <= 1 && owners.contains(&user_id) {
+        return Ok(RoleChange::LastOwner);
+    }
+
+    let row = sqlx::query!(
+        r#"
+        UPDATE organization_members
+        SET role = $3, updated_at = NOW()
+        WHERE organization_id = $1 AND user_id = $2
+        RETURNING id, organization_id, user_id, role, is_active,
+                  invited_by, invited_at, accepted_at, created_at, updated_at
+        "#,
+        organization_id,
+        user_id,
+        role.as_str()
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    let now = chrono::Utc::now().naive_utc();
+    Ok(RoleChange::Applied(Box::new(OrganizationMemberRow {
+        id: row.id,
+        organization_id: row.organization_id,
+        user_id: row.user_id,
+        role: row.role.parse().unwrap_or(OrgRole::Member),
+        is_active: row.is_active,
+        invited_by: row.invited_by,
+        invited_at: row.invited_at,
+        accepted_at: row.accepted_at,
+        created_at: row.created_at.unwrap_or(now),
+        updated_at: row.updated_at.unwrap_or(now),
+    })))
 }
 
 /// Check if user is an active member of organization

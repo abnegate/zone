@@ -112,13 +112,18 @@ async fn authorize_workspace(
 
     let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
 
+    // These settings override the organization's, and a base URL written here
+    // is paired with whatever credential the organization set, so writing them
+    // takes the workspace's own administrators -- the rank the organization
+    // route demands for the settings this one overrides. Every member still
+    // reads them, because their chats run under them.
     match role {
-        Some(WorkspaceRole::Owner | WorkspaceRole::Admin | WorkspaceRole::Member) => Ok(()),
-        Some(WorkspaceRole::Viewer) if !write => Ok(()),
-        Some(_) if write => Err(AccessError::Forbidden(
-            "You do not have write access to this workspace",
+        Some(WorkspaceRole::Owner | WorkspaceRole::Admin) => Ok(()),
+        Some(_) if !write => Ok(()),
+        Some(_) => Err(AccessError::Forbidden(
+            "Only workspace admins can change AI settings",
         )),
-        _ => Err(AccessError::NotFound("Workspace not found")),
+        None => Err(AccessError::NotFound("Workspace not found")),
     }
 }
 

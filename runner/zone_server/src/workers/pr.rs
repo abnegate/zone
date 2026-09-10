@@ -19,7 +19,7 @@ use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
 use zone_core::llm::{LlmClient, LlmConfig};
 use zone_vcs::conflict::{BranchName, ConflictService};
 use zone_vcs::git::GitService;
-use zone_vcs::pull_request::{PrService, PullRequestReception, PullRequestReference};
+use zone_vcs::pull_request::{PrService, PullRequestReception};
 
 /// Temperature for a repair: a merge resolution is a mechanical edit, not a draft.
 const REPAIR_TEMPERATURE: f32 = 0.0;
@@ -73,7 +73,7 @@ pub async fn create_pr_for_task(
         baseline,
         git: &git,
         remote: &git,
-        service: PrService::new(),
+        service: PrService::configured(state.config().github_api_url.clone()),
     }
     .run()
     .await
@@ -382,7 +382,8 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
         return ReceptionSyncResult::NoPullRequest;
     };
 
-    let reference = match PullRequestReference::parse(pr_url) {
+    let service = PrService::configured(state.config().github_api_url.clone());
+    let reference = match service.pull_request(pr_url) {
         Ok(reference) => reference,
         Err(error) => {
             return ReceptionSyncResult::Error(format!("Invalid pull request URL: {}", error));
@@ -393,10 +394,7 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
         return ReceptionSyncResult::NoCredentials;
     };
 
-    let reception = match PrService::new()
-        .fetch_reception(&reference, &access_token)
-        .await
-    {
+    let reception = match service.fetch_reception(&reference, &access_token).await {
         Ok(reception) => reception,
         Err(error) => {
             return ReceptionSyncResult::Error(format!("Failed to read reception: {}", error));
@@ -442,7 +440,7 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         return RepairOutcome::Failed("No GitHub repository configured".to_string());
     };
 
-    let pr_service = PrService::new();
+    let pr_service = PrService::configured(state.config().github_api_url.clone());
     let (owner, repo) = match pr_service.parse_github_url(repo_url) {
         Ok(parsed) => parsed,
         Err(error) => return RepairOutcome::Failed(format!("Invalid GitHub URL: {}", error)),
@@ -535,7 +533,7 @@ async fn conflicted(service: &PrService, pr_url: Option<&str>, access_token: &st
         return false;
     };
 
-    let Ok(reference) = PullRequestReference::parse(pr_url) else {
+    let Ok(reference) = service.pull_request(pr_url) else {
         return false;
     };
 
@@ -851,7 +849,7 @@ mod tests {
                 baseline: Some(&baseline),
                 git: &git,
                 remote: &remote,
-                service: PrService::with_base_url(endpoint),
+                service: PrService::standing_in_for("github.com", endpoint),
             }
             .run()
             .await
@@ -1061,7 +1059,7 @@ mod publication_tests {
             baseline: Some(&fixture.baseline),
             git: &git,
             remote,
-            service: PrService::with_base_url(server.uri()),
+            service: PrService::standing_in_for("github.com", server.uri()),
         }
         .run()
         .await
@@ -1128,7 +1126,7 @@ mod publication_tests {
             baseline: None,
             git: &git,
             remote: &remote,
-            service: PrService::with_base_url(server.uri()),
+            service: PrService::standing_in_for("github.com", server.uri()),
         }
         .run()
         .await
