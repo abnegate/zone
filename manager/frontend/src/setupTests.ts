@@ -17,11 +17,20 @@ if (typeof globalThis.NodeFilter === 'undefined') {
   };
 }
 
+function unstubbedConfirm(): never {
+  throw new Error(
+    'window.confirm was called without a stub. Assign window.confirm in the test to choose the answer, so the confirmed and cancelled branches are each asserted deliberately.'
+  );
+}
+
 // Cleanup after each test to prevent DOM accumulation.
 afterEach(() => {
   vi.useRealTimers();
   cleanup();
+  window.confirm = unstubbedConfirm as unknown as typeof window.confirm;
 });
+
+window.confirm = unstubbedConfirm as unknown as typeof window.confirm;
 
 // Extend expect with jest-dom-like matchers
 expect.extend({
