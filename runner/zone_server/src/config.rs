@@ -14,7 +14,8 @@ pub const DEFAULT_GPT4ALL_MODELS_URL: &str =
 pub const DEFAULT_HUGGINGFACE_MODELS_URL: &str = "https://huggingface.co/api/models";
 
 /// GitHub's own REST origin, which `GITHUB_API_URL` overrides for GitHub
-/// Enterprise and for exercising publication against a stand-in.
+/// Enterprise. The origin answers only for repositories on the host it names,
+/// so pointing it elsewhere does not redirect github.com repositories to it.
 pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 
 /// Server configuration loaded from environment variables
@@ -719,7 +720,7 @@ mod tests {
         AllowedOrigins::new(entries.iter().map(|entry| entry.to_string()))
     }
 
-    /// `PrService` carries a `with_base_url` constructor and the App issuer an
+    /// `PrService` carries a configurable-origin constructor and the App issuer an
     /// `at` one, both documented for GitHub Enterprise, and neither was
     /// reachable from configuration -- every production caller hardcoded
     /// github.com. That left Enterprise unusable and the publication path
