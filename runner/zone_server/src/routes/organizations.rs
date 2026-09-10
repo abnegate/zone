@@ -501,10 +501,13 @@ impl From<organization_members::OrganizationMemberRow> for OrganizationMemberRes
     }
 }
 
-/// Add member request
+/// Add member request. The console's organization form names the invitee by
+/// email, the workspace form and the API's own callers by id, so either
+/// identifies the member and exactly one must be given.
 #[derive(Debug, Deserialize)]
 pub struct AddMemberRequest {
-    user_id: Uuid,
+    user_id: Option<Uuid>,
+    email: Option<String>,
     role: String,
 }
 
@@ -571,8 +574,41 @@ pub async fn add_member(
             .into_response();
     }
 
+    let target = match (req.user_id, req.email.as_deref()) {
+        (Some(user_id), None) => user_id,
+        (None, Some(email)) => match crate::db::users::get_user_by_email(state.db(), email).await {
+            Ok(Some(user)) => user.id,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse::new(
+                        "No account uses that email. Send an invitation instead.",
+                    )),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!("Database error resolving email: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+        },
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "Name the member by either user_id or email",
+                )),
+            )
+                .into_response();
+        }
+    };
+
     // CRITICAL-7: Check if member already exists (active or inactive)
-    match organization_members::get_member(state.db(), admin.org_id, req.user_id).await {
+    match organization_members::get_member(state.db(), admin.org_id, target).await {
         Ok(Some(existing)) => {
             if existing.is_active {
                 return (
@@ -587,7 +623,7 @@ pub async fn add_member(
                 match organization_members::reactivate_member(
                     state.db(),
                     admin.org_id,
-                    req.user_id,
+                    target,
                     role,
                     Some(admin.user_id),
                 )
@@ -627,7 +663,7 @@ pub async fn add_member(
     match organization_members::add_member(
         state.db(),
         admin.org_id,
-        req.user_id,
+        target,
         role,
         Some(admin.user_id),
     )
