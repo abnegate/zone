@@ -159,3 +159,34 @@ where
         })
     }
 }
+
+/// Guard that requires workspace owner role
+#[derive(Debug, Clone)]
+pub struct WorkspaceOwner {
+    pub workspace_id: Uuid,
+    pub user_id: Uuid,
+}
+
+impl<S> FromRequestParts<S> for WorkspaceOwner
+where
+    S: Send + Sync,
+    AppState: FromRef<S>,
+{
+    type Rejection = AuthError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let member = WorkspaceMember::from_request_parts(parts, state).await?;
+
+        if member.role != workspace_members::WorkspaceRole::Owner {
+            return Err(AuthError {
+                status: StatusCode::FORBIDDEN,
+                message: "Workspace owner access required".to_string(),
+            });
+        }
+
+        Ok(WorkspaceOwner {
+            workspace_id: member.workspace_id,
+            user_id: member.user_id,
+        })
+    }
+}

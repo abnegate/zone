@@ -9,7 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::{OrgMember, WorkspaceAdmin, WorkspaceMember};
+use crate::auth::{OrgMember, WorkspaceAdmin, WorkspaceMember, WorkspaceOwner};
 use crate::db::{workspace_members, workspaces};
 use crate::state::AppState;
 
@@ -155,12 +155,16 @@ pub async fn update_workspace(
     }
 }
 
-/// DELETE /api/workspaces/:workspace_id - Delete workspace (requires admin)
+/// DELETE /api/workspaces/:workspace_id - Delete workspace (requires owner)
+///
+/// Deleting the workspace unseats every member at once, so it takes the role
+/// `remove_member` demands to unseat a single admin, and the one
+/// `organizations::delete` demands to destroy the organization above it.
 pub async fn delete_workspace(
     State(state): State<AppState>,
-    admin: WorkspaceAdmin,
+    owner: WorkspaceOwner,
 ) -> impl IntoResponse {
-    match workspaces::delete_workspace(state.db(), admin.workspace_id).await {
+    match workspaces::delete_workspace(state.db(), owner.workspace_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
