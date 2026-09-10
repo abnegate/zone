@@ -231,6 +231,9 @@ export default function WorkspaceMembersSection({
     if (member.user_id === user?.id) return false;
     // Cannot modify last owner
     if (member.role === 'owner' && countOwners() === 1) return false;
+    if (currentUserRole !== 'owner' && (member.role === 'admin' || member.role === 'owner')) {
+      return false;
+    }
     return true;
   };
 
@@ -242,9 +245,13 @@ export default function WorkspaceMembersSection({
       return roleOptions.filter((r) => r.value === member.role);
     }
 
-    // Admins can only assign viewer/member/admin roles (not owner)
+    // Only owners may seat or unseat an admin, so an admin is offered neither
+    // the admin role nor the roles of members who already hold it.
     if (currentUserRole === 'admin') {
-      return roleOptions.filter((r) => r.value !== 'owner');
+      if (member.role === 'admin' || member.role === 'owner') {
+        return roleOptions.filter((r) => r.value === member.role);
+      }
+      return roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin');
     }
 
     // Owners can assign any role
@@ -394,7 +401,7 @@ export default function WorkspaceMembersSection({
             onChange={(e) => setAddRole(e.target.value as WorkspaceRole)}
             options={
               currentUserRole === 'admin'
-                ? roleOptions.filter((r) => r.value !== 'owner')
+                ? roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin')
                 : roleOptions
             }
           />

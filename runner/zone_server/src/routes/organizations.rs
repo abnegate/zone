@@ -370,7 +370,7 @@ pub async fn create_workspace(
 
     // Add the creator as a workspace admin
     if let Err(e) =
-        workspace_members::add_member(state.db(), ws.id, admin.user_id, WorkspaceRole::Admin, None)
+        workspace_members::add_member(state.db(), ws.id, admin.user_id, WorkspaceRole::Owner, None)
             .await
     {
         tracing::error!("Failed to add creator as workspace member: {}", e);
@@ -559,6 +559,18 @@ pub async fn add_member(
         }
     };
 
+    if role >= organization_members::OrgRole::Admin
+        && admin.role != organization_members::OrgRole::Owner
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only owners can grant admin or owner role",
+            )),
+        )
+            .into_response();
+    }
+
     // CRITICAL-7: Check if member already exists (active or inactive)
     match organization_members::get_member(state.db(), admin.org_id, req.user_id).await {
         Ok(Some(existing)) => {
@@ -672,6 +684,63 @@ pub async fn update_member_role(
             Json(ErrorResponse::new("Only owners can grant owner role")),
         )
             .into_response();
+    }
+
+    let target =
+        match organization_members::get_member(state.db(), admin.org_id, path.user_id).await {
+            Ok(Some(member)) => member,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse::new("Member not found")),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!("Database error: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+        };
+
+    if target.role >= organization_members::OrgRole::Admin
+        && admin.role != organization_members::OrgRole::Owner
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only owners can change the role of an admin or owner",
+            )),
+        )
+            .into_response();
+    }
+
+    if target.role == organization_members::OrgRole::Owner
+        && role != organization_members::OrgRole::Owner
+    {
+        match organization_members::count_owners(state.db(), admin.org_id).await {
+            Ok(count) if count <= 1 => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse::new(
+                        "Cannot demote the last owner of the organization",
+                    )),
+                )
+                    .into_response();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("Database error counting owners: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+        }
     }
 
     match organization_members::update_member_role(state.db(), admin.org_id, path.user_id, role)

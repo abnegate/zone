@@ -246,30 +246,51 @@ describe('OrgMembersSection', () => {
   });
 
   describe('Role Hierarchy Restrictions', () => {
-    // Note: Tests time out - modal dialog not properly accessible in test env
-    it.skip('shows only member/admin roles to admins (not owner)', async () => {
-      // This test is complex because it requires changing the mocked auth user
-      // For now, we'll test that the role select exists and has options
-      render(<OrgMembersSection orgId="org-123" />);
-      await waitFor(() => {
-        fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
+    const asAdmin = () =>
+      mockUseAuth.mockReturnValue({
+        isAuthenticated: true,
+        user: { id: 'user-2', email: 'admin@test.com' },
+      });
+    const asOwner = () =>
+      mockUseAuth.mockReturnValue({
+        isAuthenticated: true,
+        user: { id: 'user-1', email: 'owner@test.com' },
       });
 
-      await waitFor(() => {
-        // Find the role select in the modal specifically
-        const roleSelects = screen.getAllByRole('combobox');
-        const modalRoleSelect = roleSelects.find((select) => {
-          const modal = select.closest('[role="dialog"]') || select.closest('.ui-modal');
-          return modal !== null;
+    const selectFor = (label: string) =>
+      screen.getByLabelText(`Change role for ${label}`) as HTMLSelectElement;
+
+    const optionsFor = (label: string) =>
+      Array.from(selectFor(label).options).map((option) => option.value);
+
+    it('offers an admin no way to seat or unseat another admin', async () => {
+      asAdmin();
+      try {
+        render(<OrgMembersSection orgId="org-123" />);
+        await waitFor(() => {
+          expect(screen.getByText('Test Admin')).toBeInTheDocument();
         });
 
-        expect(modalRoleSelect).toBeInTheDocument();
+        expect(optionsFor('member@test.com')).toEqual(['member']);
+        expect(optionsFor('Test Admin')).toEqual(['admin']);
+        expect(selectFor('Test Admin')).toBeDisabled();
+        expect(optionsFor('Test Owner')).toEqual(['owner']);
+        expect(selectFor('Test Owner')).toBeDisabled();
+      } finally {
+        asOwner();
+      }
+    });
 
-        if (modalRoleSelect) {
-          const options = Array.from(modalRoleSelect.querySelectorAll('option'));
-          expect(options.length).toBeGreaterThan(0);
-        }
+    it('offers an owner the whole hierarchy, including seating an admin', async () => {
+      asOwner();
+      render(<OrgMembersSection orgId="org-123" />);
+      await waitFor(() => {
+        expect(screen.getByText('Test Admin')).toBeInTheDocument();
       });
+
+      expect(optionsFor('member@test.com')).toEqual(['member', 'admin', 'owner']);
+      expect(optionsFor('Test Admin')).toEqual(['member', 'admin', 'owner']);
+      expect(selectFor('Test Admin')).toBeEnabled();
     });
   });
 

@@ -105,7 +105,9 @@ fn is_valid_email(email: &str) -> bool {
 pub async fn create_invitation(
     State(state): State<AppState>,
     OrgAdmin {
-        org_id, user_id, ..
+        org_id,
+        user_id,
+        role: inviter_role,
     }: OrgAdmin,
     Json(req): Json<CreateInvitationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
@@ -138,6 +140,17 @@ pub async fn create_invitation(
                 "Invalid workspace_role. Must be one of: {}",
                 valid_workspace_roles.join(", ")
             ))),
+        ));
+    }
+
+    if (req.org_role == "owner" || req.workspace_role == "owner" || req.workspace_role == "admin")
+        && inviter_role != organization_members::OrgRole::Owner
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only owners can invite owners or workspace admins",
+            )),
         ));
     }
 

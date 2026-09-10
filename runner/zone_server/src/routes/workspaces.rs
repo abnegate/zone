@@ -270,6 +270,18 @@ pub async fn add_member(
         }
     };
 
+    if role >= workspace_members::WorkspaceRole::Admin
+        && admin.role != workspace_members::WorkspaceRole::Owner
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Only workspace owners can promote users to admin or owner",
+            )),
+        )
+            .into_response();
+    }
+
     // CRITICAL-7: Check if member already exists (active or inactive)
     match workspace_members::get_member(state.db(), admin.workspace_id, req.user_id).await {
         Ok(Some(existing_member)) => {
@@ -426,6 +438,61 @@ pub async fn update_member_role(
             )),
         )
             .into_response();
+    }
+
+    let target =
+        match workspace_members::get_member(state.db(), admin.workspace_id, path.user_id).await {
+            Ok(Some(member)) => member,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse::new("Member not found")),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!("Database error fetching member: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+        };
+
+    if target.role >= workspace_members::WorkspaceRole::Admin {
+        if admin.role != workspace_members::WorkspaceRole::Owner {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse::new(
+                    "Only workspace owners can change the role of an admin or owner",
+                )),
+            )
+                .into_response();
+        }
+
+        if role < workspace_members::WorkspaceRole::Admin {
+            match workspace_members::count_admins(state.db(), admin.workspace_id).await {
+                Ok(count) if count <= 1 => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(ErrorResponse::new(
+                            "Cannot demote the last admin of the workspace",
+                        )),
+                    )
+                        .into_response();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("Database error counting admins: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::new("Internal server error")),
+                    )
+                        .into_response();
+                }
+            }
+        }
     }
 
     match workspace_members::update_member_role(state.db(), admin.workspace_id, path.user_id, role)
