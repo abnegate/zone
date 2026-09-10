@@ -119,7 +119,7 @@ const mockSyncConfigs: SyncConfig[] = [
 ];
 
 // Note: Tests fail because .closest('.project-card') returns null in bun:test environment
-describe.skip('ProjectsPage - Sync Configuration', () => {
+describe('ProjectsPage - Sync Configuration', () => {
   beforeEach(() => {
     mockGetProjects.mockReset();
     mockGetSyncConfigs.mockReset();

@@ -39,6 +39,13 @@ pub use tools::{ChatTools, ToolProfile, WorkspaceScope};
 use serde::{Deserialize, Serialize};
 use zone_core::tools::REASON_PARAM;
 
+/// How much of a title an approval preview quotes.
+pub(crate) const PREVIEW_TITLE_CHARS: usize = 80;
+
+/// How much of a body an approval preview quotes: enough to recognise the
+/// message being sent without reprinting it.
+pub(crate) const PREVIEW_BODY_CHARS: usize = 200;
+
 /// The model's stated reason for a call, read out of the call's own arguments.
 ///
 /// This is the model's prose, not an observation, so every consumer of it has
@@ -74,6 +81,11 @@ pub struct ToolCallRecord {
     /// Model-authored: the console labels it as stated, never as observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// What the call will do, rendered by the server from its arguments while
+    /// it waits to be allowed. Kept on the record so a reader who reloads
+    /// mid-decision is still deciding on the action rather than on raw JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 #[cfg(test)]
@@ -91,6 +103,7 @@ mod tests {
             duration_ms: 42,
             reasoning: Some("Search workspace docs first.".into()),
             reason: Some("The user asked what changed in the deploy.".into()),
+            preview: None,
         };
 
         let json = serde_json::to_value(&record).unwrap();

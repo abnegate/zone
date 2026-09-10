@@ -195,6 +195,18 @@ async fn verify_workspace_access(
     workspace_members::is_member(pool, user_id, workspace_id).await
 }
 
+/// Verify that a user may set work running in a workspace.
+///
+/// A gathering indexes the workspace's sources, which is what
+/// `sources::reindex` does behind a writer check, so it takes the same role.
+async fn verify_workspace_write_access(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    workspace_members::can_write(pool, workspace_id, user_id).await
+}
+
 /// Verify that source IDs belong to a workspace
 async fn verify_source_ownership(
     pool: &PgPool,
@@ -273,11 +285,11 @@ pub async fn gather(
 
     // Verify workspace access
     let db = state.db();
-    match verify_workspace_access(db, user_id, req.workspace_id).await {
+    match verify_workspace_write_access(db, user_id, req.workspace_id).await {
         Ok(has_access) if has_access => {}
         Ok(_) => {
             tracing::warn!(
-                "User {} attempted to access workspace {}",
+                "User {} attempted to gather in workspace {}",
                 user_id,
                 req.workspace_id
             );

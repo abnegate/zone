@@ -212,25 +212,40 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     if (member.user_id === user?.id) return false;
     // Cannot modify last owner
     if (member.role === 'owner' && countOwners() === 1) return false;
+    if (currentUserRole !== 'owner' && (member.role === 'admin' || member.role === 'owner')) {
+      return false;
+    }
     return true;
   };
 
-  const getAssignableRoles = (): Array<{ value: OrgRole; label: string }> => {
+  // `add_member` refuses an admin granting admin or owner; the role route
+  // refuses them granting owner. Offer only what both accept, so nothing on
+  // offer comes back a 403.
+  const grantableRoles = (): Array<{ value: OrgRole; label: string }> => {
     if (!canManageMembers) return [];
-
-    // Admins can only assign member/admin roles (not owner)
     if (currentUserRole === 'admin') {
-      return roleOptions.filter((r) => r.value !== 'owner');
+      return roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin');
     }
-
-    // Owners can assign any role
     return roleOptions;
+  };
+
+  const getAssignableRoles = (
+    member: OrganizationMember
+  ): Array<{ value: OrgRole; label: string }> => {
+    if (!canManageMembers) return [];
+    // Only an owner may re-seat someone already holding admin or owner.
+    if (currentUserRole === 'admin' && (member.role === 'admin' || member.role === 'owner')) {
+      return roleOptions.filter((r) => r.value === member.role);
+    }
+    return grantableRoles();
   };
 
   const getAvailableRoles = (
     member: OrganizationMember
   ): Array<{ value: OrgRole; label: string }> =>
-    canManageMembers ? getAssignableRoles() : roleOptions.filter((r) => r.value === member.role);
+    canManageMembers
+      ? getAssignableRoles(member)
+      : roleOptions.filter((r) => r.value === member.role);
 
   if (loading) {
     return <div className="loading-state">Loading members...</div>;
@@ -369,7 +384,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
             label="Role"
             value={addRole}
             onChange={(e) => setAddRole(e.target.value as OrgRole)}
-            options={getAssignableRoles()}
+            options={grantableRoles()}
           />
           <div className="modal-actions">
             <Button

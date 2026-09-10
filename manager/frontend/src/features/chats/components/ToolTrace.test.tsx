@@ -232,6 +232,128 @@ describe('ToolTrace', () => {
     expect(screen.getByText('Because I must.')).toBeInTheDocument();
   });
 
+  it('shows what the server read the call as doing while it waits to be allowed', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'run_shell',
+            arguments: '{"command":"rm -rf build"}',
+            pending: true,
+            approval: 'pending',
+            detail: 'Waiting for approval…',
+            preview: 'Run `rm -rf build` in /srv/zone.',
+          }),
+        ]}
+        onDecide={() => {}}
+      />
+    );
+
+    expect(screen.getByTestId('tool-call-preview')).toHaveTextContent(
+      'Run `rm -rf build` in /srv/zone.'
+    );
+  });
+
+  it('puts what the call will do above the buttons that allow it', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'write_file',
+            pending: true,
+            approval: 'pending',
+            detail: 'Waiting for approval…',
+            preview: 'Write 12 characters to config.toml, replacing whatever is there.',
+          }),
+        ]}
+        onDecide={() => {}}
+      />
+    );
+
+    expect(screen.getByTestId('tool-call-preview')).toBeInTheDocument();
+    const order = Array.from(
+      screen
+        .getByTestId('tool-call')
+        .closest('li')
+        ?.querySelectorAll<HTMLElement>('[data-testid]') ?? []
+    ).map((element) => element.dataset.testid);
+
+    expect(order.indexOf('tool-call-preview')).toBeLessThan(order.indexOf('tool-approve'));
+    expect(order.indexOf('tool-call-preview')).toBeLessThan(order.indexOf('tool-deny'));
+  });
+
+  it('marks the preview as read from the call, not as another thing the model said', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'write_file',
+            pending: true,
+            approval: 'pending',
+            detail: 'Waiting for approval…',
+            reason: 'The user asked me to save the config.',
+            preview: 'Write 12 characters to config.toml, replacing whatever is there.',
+          }),
+        ]}
+        onDecide={() => {}}
+      />
+    );
+
+    expect(screen.getByTestId('tool-call-preview')).toHaveTextContent(
+      'Effect, read from the call by the server'
+    );
+    expect(screen.getByTestId('tool-call-preview')).not.toHaveTextContent(
+      'Reason, stated by the model'
+    );
+    expect(screen.getByTestId('tool-call-reason')).toHaveTextContent('Reason, stated by the model');
+  });
+
+  it('shows no preview at all for a call that arrived without one', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'write_file',
+            pending: true,
+            approval: 'pending',
+            detail: 'Waiting for approval…',
+            reason: 'The user asked me to save the config.',
+          }),
+        ]}
+        onDecide={() => {}}
+      />
+    );
+
+    expect(screen.queryByTestId('tool-call-preview')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tool-approve')).toBeInTheDocument();
+  });
+
+  it('treats a blank preview as none rather than an empty line', () => {
+    render(<ToolTrace calls={[call({ name: 'apply_patch', preview: '   ' })]} />);
+
+    expect(screen.queryByTestId('tool-call-preview')).not.toBeInTheDocument();
+  });
+
+  it('keeps the preview on the row once the reader has approved it', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'write_file',
+            detail: 'Wrote config.toml',
+            preview: 'Write 12 characters to config.toml, replacing whatever is there.',
+          }),
+        ]}
+        onDecide={() => {}}
+      />
+    );
+
+    expect(screen.getByTestId('tool-call-preview')).toHaveTextContent(
+      'Write 12 characters to config.toml, replacing whatever is there.'
+    );
+    expect(screen.queryByTestId('tool-approve')).not.toBeInTheDocument();
+  });
+
   it('hides approval buttons after the reader has decided', () => {
     render(
       <ToolTrace

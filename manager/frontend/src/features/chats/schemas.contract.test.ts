@@ -209,7 +209,7 @@ describe('a cited identifier survives storage', () => {
  * objects are not passthrough, so an unlisted field is stripped on reload, and
  * `tolerantArray` drops elements that do not conform. Optional survives both.
  */
-describe('a stated reason survives storage', () => {
+describe('a stated reason and an observed preview survive storage', () => {
   const storedCall = {
     id: 'call_1',
     name: 'run_shell',
@@ -248,6 +248,22 @@ describe('a stated reason survives storage', () => {
     ).toHaveProperty('reason', 'The user asked for the run.');
   });
 
+  test('a preview on a tool call is kept rather than stripped', () => {
+    expect(
+      ToolCallRecordSchema.parse({ ...storedCall, preview: 'Run `bun test` in /srv/zone.' })
+    ).toHaveProperty('preview', 'Run `bun test` in /srv/zone.');
+  });
+
+  test('an unreadable preview costs the preview, never the row it sits on', () => {
+    const parsed = MessageMetadataSchema.parse({
+      tool_calls: [{ ...storedCall, preview: 42 }],
+    });
+
+    expect(parsed.tool_calls).toHaveLength(1);
+    expect(parsed.tool_calls?.[0].preview).toBeUndefined();
+    expect(parsed.tool_calls?.[0].detail).toBe('ok');
+  });
+
   test('a reason on a receipt is kept rather than stripped', () => {
     expect(
       ActionReceiptSchema.parse({ ...storedReceipt, reason: 'The user asked me to post it.' })
@@ -262,6 +278,7 @@ describe('a stated reason survives storage', () => {
 
     expect(parsed.tool_calls).toHaveLength(1);
     expect(parsed.tool_calls?.[0].reason).toBeUndefined();
+    expect(parsed.tool_calls?.[0].preview).toBeUndefined();
     expect(parsed.action_receipts).toHaveLength(1);
     expect(parsed.action_receipts?.[0].reason).toBeUndefined();
   });

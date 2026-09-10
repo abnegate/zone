@@ -6,9 +6,10 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 use zone_core::tools::{
-    MAX_TOOL_OUTPUT_CHARS, Tool, ToolContext, ToolError, ToolRegistry, ToolResult,
+    MAX_TOOL_OUTPUT_CHARS, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, excerpt,
 };
 
+use super::PREVIEW_TITLE_CHARS;
 use super::identifier::Kind;
 use super::tools::WorkspaceScope;
 use crate::db::knowledge::{self, Document, DocumentUpdate};
@@ -78,8 +79,43 @@ impl Tool for DocumentTool {
         }
     }
 
-    fn mutating(&self) -> bool {
-        matches!(self.operation, Operation::Create | Operation::Update)
+    /// A workspace document is read by people who were not in this chat, so
+    /// writing one publishes on their behalf whether it is new or a revision.
+    fn tier(&self) -> Tier {
+        match self.operation {
+            Operation::Create | Operation::Update => Tier::Outward,
+            Operation::List | Operation::Read => Tier::Read,
+        }
+    }
+
+    fn preview(&self, params: &Value) -> Option<String> {
+        let title = params["title"].as_str();
+        let characters = params["content"].as_str().map(|body| body.chars().count());
+        match self.operation {
+            Operation::Create => Some(format!(
+                "Publish a workspace document titled \"{}\", {} characters long.",
+                excerpt(title?, PREVIEW_TITLE_CHARS),
+                characters?
+            )),
+            Operation::Update => {
+                let target = params["id"].as_str().unwrap_or("an unnamed document");
+                Some(match (title, characters) {
+                    (Some(title), Some(characters)) => format!(
+                        "Retitle workspace document {target} to \"{}\" and replace its text with {characters} characters.",
+                        excerpt(title, PREVIEW_TITLE_CHARS)
+                    ),
+                    (Some(title), None) => format!(
+                        "Retitle workspace document {target} to \"{}\".",
+                        excerpt(title, PREVIEW_TITLE_CHARS)
+                    ),
+                    (None, Some(characters)) => format!(
+                        "Replace the text of workspace document {target} with {characters} characters."
+                    ),
+                    (None, None) => return None,
+                })
+            }
+            _ => None,
+        }
     }
 
     fn description(&self) -> &str {

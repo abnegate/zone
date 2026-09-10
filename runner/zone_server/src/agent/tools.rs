@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 use zone_core::llm::ToolDefinition;
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::citations::{self, Citation};
 use super::identifier::{self, Kind};
@@ -207,6 +207,10 @@ pub struct ChatTools {
     names: Vec<String>,
     name_set: HashSet<String>,
     definitions: Vec<ToolDefinition>,
+    /// Tiers for a catalog assembled by name rather than from tools, so a
+    /// prompt test is answered by the same declaration production reads.
+    #[cfg(test)]
+    tiers: HashMap<String, Tier>,
     /// Frozen at assembly, like the catalog, so a prompt built from a
     /// hand-written catalog still carries the guidance it was handed.
     mcp_guidance: Option<String>,
@@ -243,6 +247,8 @@ impl ChatTools {
             names: Vec::new(),
             name_set: HashSet::new(),
             definitions: Vec::new(),
+            #[cfg(test)]
+            tiers: HashMap::new(),
             mcp_guidance: None,
             lease: None,
             membership: OnceCell::new(),
@@ -254,10 +260,50 @@ impl ChatTools {
     ///
     /// Mirrors `cache_catalog`: names sort and populate the lookup set,
     /// so `has` answers and section ordering stay what they are in production.
+    /// Host tools carry the tier their own implementation declares; a
+    /// workspace tool has no implementation to ask without a scope, so a test
+    /// that turns on one of those tiers states it through [`Self::with_tiers`].
     #[cfg(test)]
     pub(crate) fn with_names(
         profile: ToolProfile,
         names: &[&str],
+        mcp_guidance: Option<String>,
+    ) -> Self {
+        let host = match profile {
+            ToolProfile::Chat => ToolRegistry::with_host_tools(),
+            ToolProfile::Task => ToolRegistry::with_defaults(),
+        };
+        let tiers = names
+            .iter()
+            .filter_map(|name| Some(((*name).to_string(), host.tier(name)?)))
+            .collect();
+        Self::from_names(profile, names, tiers, mcp_guidance)
+    }
+
+    /// A catalog by name whose tiers are stated outright.
+    ///
+    /// A workspace tool is built from a [`WorkspaceScope`] a prompt test has
+    /// no database for, so the tier it declares in production is repeated
+    /// here rather than defaulted to.
+    #[cfg(test)]
+    pub(crate) fn with_tiers(
+        profile: ToolProfile,
+        tools: &[(&str, Tier)],
+        mcp_guidance: Option<String>,
+    ) -> Self {
+        let names: Vec<&str> = tools.iter().map(|(name, _)| *name).collect();
+        let tiers = tools
+            .iter()
+            .map(|(name, tier)| ((*name).to_string(), *tier))
+            .collect();
+        Self::from_names(profile, &names, tiers, mcp_guidance)
+    }
+
+    #[cfg(test)]
+    fn from_names(
+        profile: ToolProfile,
+        names: &[&str],
+        tiers: HashMap<String, Tier>,
         mcp_guidance: Option<String>,
     ) -> Self {
         let mut sorted: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
@@ -267,6 +313,7 @@ impl ChatTools {
             profile,
             name_set: sorted.iter().cloned().collect(),
             names: sorted,
+            tiers,
             mcp_guidance,
             ..Self::empty()
         }
@@ -368,6 +415,8 @@ impl ChatTools {
         let mcp_guidance = registry.mcp_guidance();
 
         let mut assembled = Self {
+            #[cfg(test)]
+            tiers: HashMap::new(),
             registry,
             context,
             scope,
@@ -423,8 +472,36 @@ impl ChatTools {
         self.mcp_guidance.clone()
     }
 
+    /// What a named call costs. A name the catalog does not hold is treated as
+    /// a write: it mutates for batching, and it dispatches straight to the
+    /// not-found error rather than holding a reader at an approval card for a
+    /// tool that was never going to run.
+    pub fn tier(&self, name: &str) -> Tier {
+        self.registry
+            .tier(name)
+            .or_else(|| self.declared_tier(name))
+            .unwrap_or(Tier::Write)
+    }
+
+    /// The tier a by-name catalog was handed, for prompt tests with no
+    /// registry to ask. Production always has the tool itself.
+    fn declared_tier(&self, _name: &str) -> Option<Tier> {
+        #[cfg(test)]
+        return self.tiers.get(_name).copied();
+        #[cfg(not(test))]
+        return None;
+    }
+
     pub fn mutating(&self, name: &str) -> bool {
         self.registry.mutating(name)
+    }
+
+    /// What a named call will do, for the reader being asked to allow it.
+    ///
+    /// Not `preview`: that constructor previews the *catalog*, while this
+    /// previews one call.
+    pub fn effect(&self, name: &str, arguments: &str) -> Option<String> {
+        self.registry.preview(name, arguments)
     }
 
     /// Run a tool by name, turning every failure mode into a `ToolResult`.

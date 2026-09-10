@@ -330,6 +330,7 @@ services:
       # Belt-and-suspenders HTTP proxy. `make up-vpn` also attaches this
       # container to Gluetun's network so non-HTTP traffic uses the tunnel.
       - MODEL_SEARCH_PROXY_URL=${MODEL_SEARCH_PROXY_URL:-}
+      - GITHUB_API_URL=${GITHUB_API_URL:-}
       - TOOL_RUNNER_PROXY_URL=${TOOL_RUNNER_PROXY_URL:-}
       - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_BASE_URL=${COMFYUI_BASE_URL:-http://host.docker.internal:8188}

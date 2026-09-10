@@ -20,10 +20,16 @@ const DELIVERY: &str = "Zone closes out the run for you: it creates the branch, 
      force-push or rewrite history yourself, and leave the checkout on the branch Zone put \
      it on: a run that moved it or rewrote its history cannot be published.";
 
+const REPORT: &str = "Your closing message is the report. Zone puts it in the commit and in the pull request, \
+     where it is read by someone who was never in this run and has only the diff to go on. \
+     Lead with the outcome, then what changed and why, how you checked it, and any risk you \
+     are leaving behind. One line covers routine checks. Leave out approaches you abandoned, \
+     and say what you did not finish rather than letting the diff say it for you.";
+
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
     match context.surface {
         Surface::Chat => None,
-        Surface::Task => Some(format!("{RUN}\n\n{TESTING}\n\n{DELIVERY}")),
+        Surface::Task => Some(format!("{RUN}\n\n{TESTING}\n\n{DELIVERY}\n\n{REPORT}")),
     }
 }
 
@@ -133,7 +139,36 @@ mod tests {
         );
     }
 
-    /// Wave 3 shares the task budget three ways, so this section's own share is
+    /// The run's own closing message is what a reviewer reads, so the prompt
+    /// has to say so: nothing else tells the model its last paragraph is going
+    /// to be quoted somewhere it cannot answer questions about it.
+    #[test]
+    fn the_closing_message_is_written_for_the_reviewer_it_is_quoted_to() {
+        let tools = task_tools();
+        let environment = environment();
+        let rendered = render(&task_context(&tools, &environment)).unwrap();
+
+        assert!(rendered.contains(REPORT), "{rendered}");
+        assert!(
+            rendered.contains("Zone puts it in the commit and in the pull request"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("read by someone who was never in this run"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Lead with the outcome"), "{rendered}");
+        assert!(
+            rendered.contains("how you checked it, and any risk you are leaving behind"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Leave out approaches you abandoned"),
+            "{rendered}"
+        );
+    }
+
+    /// Wave 3 shares the task budget four ways, so this section's own share is
     /// pinned rather than left to the assembled total to discover.
     #[test]
     fn the_section_stays_inside_its_share_of_the_task_budget() {
@@ -142,7 +177,7 @@ mod tests {
         let rendered = render(&task_context(&tools, &environment)).unwrap();
 
         assert!(
-            rendered.len() + "\n\n".len() <= 900,
+            rendered.len() + "\n\n".len() <= 1_400,
             "the task section adds {} chars",
             rendered.len() + 2
         );

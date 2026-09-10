@@ -201,35 +201,36 @@ fn walk(
             continue;
         };
         for reference in references(&path, &source) {
-            match resolve(roots, tree, &reference, bounds, proofs, &mut total)? {
-                Resolution::Walked(resolved) => pending.push((tree, resolved)),
-                Resolution::Recorded => {}
-                Resolution::Missing => {
-                    return Err(ClosureError::Unresolved {
-                        referrer: path.clone(),
-                        specifier: reference.specifier().to_string(),
-                        tree,
-                    });
-                }
+            if !resolve(
+                roots,
+                tree,
+                &reference,
+                bounds,
+                proofs,
+                &mut total,
+                &mut pending,
+            )? {
+                return Err(ClosureError::Unresolved {
+                    referrer: path.clone(),
+                    specifier: reference.specifier().to_string(),
+                    tree,
+                });
             }
         }
     }
     Ok(())
 }
 
-/// What became of one static reference while walking one tree.
-enum Resolution {
-    /// Present in the tree being walked, so its own references are next.
-    Walked(String),
-    /// Present in another tree but not this one. It is proven and recorded, and
-    /// the rule decides what its absence means — there is nothing here to read.
-    Recorded,
-    /// Present in no tree at all, which leaves a hole in the closure.
-    Missing,
-}
-
-/// Take the first candidate for a reference that exists in any tree, proving it
-/// across every root on the way in.
+/// Prove every candidate for a reference that exists in any tree, and queue the
+/// ones present in the tree being walked.
+///
+/// Which candidate a runtime actually loads follows that runtime's own
+/// resolution order, which this walk does not model: CommonJS `require`
+/// resolves `./helper` to `helper.js` where the candidate order here reaches
+/// `helper.mjs` first. Proving only the first match would let a change leave an
+/// identical decoy at the earlier candidate and edit the file that really runs,
+/// so every candidate that exists is proven. Returns whether the reference
+/// resolved to anything at all.
 fn resolve(
     roots: &Roots,
     tree: Tree,
@@ -237,13 +238,19 @@ fn resolve(
     bounds: &ClosureBounds,
     proofs: &mut BTreeMap<String, FileProof>,
     total: &mut u64,
-) -> Result<Resolution, ClosureError> {
+    pending: &mut Vec<(Tree, String)>,
+) -> Result<bool, ClosureError> {
+    let mut resolved = false;
     for candidate in reference.candidates() {
         if !relative_path(candidate, bounds.path_bytes) {
             continue;
         }
         if let Some(known) = proofs.get(candidate) {
-            return Ok(settled(known, tree, candidate));
+            resolved = true;
+            if known.present(tree) {
+                pending.push((tree, candidate.clone()));
+            }
+            continue;
         }
         let proof = FileProof::read(roots, candidate, bounds)?;
         if proof.absent().len() == Tree::ALL.len() {
@@ -260,18 +267,13 @@ fn resolve(
                 limit: bounds.total_bytes,
             });
         }
-        let resolution = settled(&proof, tree, candidate);
+        resolved = true;
+        if proof.present(tree) {
+            pending.push((tree, candidate.clone()));
+        }
         proofs.insert(candidate.clone(), proof);
-        return Ok(resolution);
     }
-    Ok(Resolution::Missing)
-}
-
-fn settled(proof: &FileProof, tree: Tree, candidate: &str) -> Resolution {
-    if proof.present(tree) {
-        return Resolution::Walked(candidate.to_string());
-    }
-    Resolution::Recorded
+    Ok(resolved)
 }
 
 /// Read a file back for reference extraction, re-checking it against the digest
@@ -810,6 +812,33 @@ mod tests {
         assert_eq!(
             proof.product(),
             &BTreeSet::from([PathBuf::from("src/Cart.php")])
+        );
+    }
+
+    /// The candidate order here reaches `helper.mjs` first, but CommonJS
+    /// `require('./helper')` loads `helper.js`. Proving only the first match
+    /// would let the change leave an identical decoy at the earlier candidate
+    /// and edit the file that really runs.
+    #[test]
+    fn a_decoy_candidate_cannot_hide_the_file_that_actually_loads() {
+        let workspace = holding();
+        workspace.unchanged(
+            "tests/checkout.test.cjs",
+            "require('../src/cart.mjs');\nconst { seed } = require('./helper');\n",
+        );
+        workspace.unchanged("tests/helper.mjs", "module.exports.seed = () => 0;\n");
+        workspace.predecessor("tests/helper.js", "module.exports.seed = () => 0;\n");
+        workspace.target("tests/helper.js", "module.exports.seed = () => 1;\n");
+
+        let proof = workspace
+            .prove("tests/checkout.test.cjs")
+            .expect("the closure is evaluated");
+
+        assert!(!proof.identical());
+        assert_eq!(
+            proof.divergent().map(Divergence::path),
+            Some("tests/helper.js"),
+            "the refusal names the candidate the change edited, not the decoy"
         );
     }
 

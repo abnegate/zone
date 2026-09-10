@@ -19,6 +19,15 @@ export const MessageAttachmentSchema = z.object({
  */
 const statedReason = z.string().optional().catch(undefined);
 
+/**
+ * The server's rendering of what a call will do, stored alongside the reason so
+ * a reader who reloads mid-decision still decides on the action rather than on
+ * raw JSON. Optional and forgiving on the same terms as the reason above: every
+ * record written before the field existed has to keep parsing, and an
+ * unreadable value costs the preview, never the row it sits on.
+ */
+const observedPreview = z.string().optional().catch(undefined);
+
 export const ToolCallRecordSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -28,6 +37,7 @@ export const ToolCallRecordSchema = z.object({
   duration_ms: z.number(),
   reasoning: z.string().optional(),
   reason: statedReason,
+  preview: observedPreview,
 });
 
 /**

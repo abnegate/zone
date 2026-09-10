@@ -1,7 +1,8 @@
 //! Git operations and GitHub pull request creation.
 
 use zone_vcs::git::GitService;
-use zone_vcs::pull_request::PrService;
+use zone_vcs::pull_request::{Description, PrService};
+use zone_vcs::subject::{Kind, Subject};
 
 mod git_service_tests {
     use super::*;
@@ -142,6 +143,43 @@ mod pr_service_tests {
         assert!(result.is_err());
     }
 
+    /// The scheme was discarded before the host was checked, so an address
+    /// nothing here can fetch or publish to still parsed as a repository this
+    /// service answers for.
+    #[test]
+    fn an_address_this_service_does_not_speak_is_not_a_repository() {
+        let service = PrService::new();
+
+        for url in [
+            "ftp://github.com/owner/repo",
+            "http://github.com/owner/repo",
+            "file://github.com/owner/repo",
+            "javascript://github.com/owner/repo",
+        ] {
+            assert!(
+                service.parse_github_url(url).is_err(),
+                "{url} is not an address a repository is published through"
+            );
+        }
+
+        assert!(
+            service
+                .parse_github_url("https://github.com/owner/repo")
+                .is_ok()
+        );
+        assert!(
+            service
+                .parse_github_url("ssh://git@github.com/owner/repo.git")
+                .is_ok()
+        );
+        assert!(
+            service
+                .parse_github_url("git@github.com:owner/repo")
+                .is_ok(),
+            "the scp-like form carries no scheme and is read on its own terms"
+        );
+    }
+
     #[test]
     fn test_parse_github_gitlab_url() {
         let service = PrService::new();
@@ -151,77 +189,69 @@ mod pr_service_tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_generate_pr_title() {
-        let service = PrService::new();
-        let task_id = uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
-
-        let title = service.generate_pr_title("Fix authentication bug", task_id);
-
-        assert!(title.contains("[Zone]"));
-        assert!(title.contains("Fix authentication bug"));
-        assert!(title.contains("12345678"));
+    fn task() -> uuid::Uuid {
+        uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap()
     }
 
+    /// The title is the change's own subject in the format this history uses,
+    /// so a reviewer reads it in a list of pull requests the same way they read
+    /// a list of commits.
     #[test]
-    fn test_generate_pr_body_with_all_fields() {
-        let service = PrService::new();
-        let task_id = uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+    fn a_pull_request_is_titled_with_a_conventional_commit_subject() {
+        let subject = Subject::new(Kind::Fix, "Validate the email before submit.");
 
-        let body = service.generate_pr_body(
-            "Fix authentication bug",
-            "The login form was not validating emails correctly",
-            task_id,
-            Some("- Modified `auth.rs`\n- Updated `login.html`"),
-            Some("https://zone.example.com/tasks/12345678"),
+        assert_eq!(
+            subject.to_string(),
+            "(fix): validate the email before submit"
         );
-
-        assert!(body.contains("## Summary"));
-        assert!(body.contains("Fix authentication bug"));
-        assert!(body.contains("not validating emails"));
-        assert!(body.contains("## Changes"));
-        assert!(body.contains("auth.rs"));
-        assert!(body.contains("View in Zone"));
-        assert!(body.contains("zone.example.com"));
     }
 
     #[test]
-    fn test_generate_pr_body_without_zone_url() {
-        let service = PrService::new();
-        let task_id = uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+    fn a_description_carries_the_problem_the_report_and_the_files() {
+        let body = Description {
+            problem: "The login form was not validating emails correctly",
+            report: Some("Validated the address before submit, and covered it with a test."),
+            changes: Some("- Modified `auth.rs`\n- Updated `login.html`"),
+            task: task(),
+            url: Some("https://zone.example.com/tasks/12345678"),
+        }
+        .render();
 
-        let body = service.generate_pr_body("Task title", "Task description", task_id, None, None);
-
-        // Should include task ID instead of link
-        assert!(body.contains("Zone Task ID"));
-        assert!(body.contains("12345678"));
-        assert!(!body.contains("View in Zone"));
+        assert!(body.contains("## Problem"), "{body}");
+        assert!(body.contains("not validating emails"), "{body}");
+        assert!(body.contains("## What changed"), "{body}");
+        assert!(body.contains("covered it with a test"), "{body}");
+        assert!(body.contains("## Files"), "{body}");
+        assert!(body.contains("auth.rs"), "{body}");
+        assert!(body.contains("zone.example.com"), "{body}");
     }
 
     #[test]
-    fn test_generate_pr_body_without_changes() {
-        let service = PrService::new();
-        let task_id = uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+    fn a_description_without_a_console_link_names_the_task() {
+        let body = Description {
+            problem: "Task description",
+            report: None,
+            changes: None,
+            task: task(),
+            url: None,
+        }
+        .render();
 
-        let body = service.generate_pr_body(
-            "Task title",
-            "Task description",
-            task_id,
-            None,
-            Some("https://zone.example.com/tasks/123"),
-        );
-
-        // Should not have Changes section if no diff summary
-        assert!(!body.contains("## Changes"));
+        assert!(body.contains("12345678"), "{body}");
+        assert!(!body.contains("this task]("), "{body}");
     }
 
     #[test]
-    fn test_generate_pr_body_contains_footer() {
-        let service = PrService::new();
-        let task_id = uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+    fn a_description_without_changes_heads_no_files_section() {
+        let body = Description {
+            problem: "Task description",
+            report: Some("Nothing needed changing."),
+            changes: None,
+            task: task(),
+            url: Some("https://zone.example.com/tasks/123"),
+        }
+        .render();
 
-        let body = service.generate_pr_body("Task", "Description", task_id, None, None);
-
-        assert!(body.contains("automatically created by Zone"));
+        assert!(!body.contains("## Files"), "{body}");
     }
 }

@@ -4,7 +4,6 @@
 //! These tools let the model refine a query or read a cited page afterwards.
 
 use async_trait::async_trait;
-use reqwest::redirect::Policy;
 use serde_json::{Value, json};
 use std::time::Duration;
 use uuid::Uuid;
@@ -13,7 +12,7 @@ use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 use super::identifier::Kind;
 use super::tools::{WorkspaceScope, truncate};
 use crate::db::{DbResult, chat_sources};
-use crate::utils::url::validate_public_url;
+use crate::utils::url::{public_client_builder, read_capped, validate_public_url};
 use zone_search::client::{SearchHit, SearxngClient, format_search_context, sanitize_query};
 use zone_search::{TimeRange, WebSearchConfig};
 
@@ -205,9 +204,7 @@ async fn fetch_public_url(raw: &str) -> ToolResult {
         Err(error) => return ToolResult::error(error),
     };
 
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .redirect(Policy::limited(3))
+    let mut builder = public_client_builder(Duration::from_secs(FETCH_TIMEOUT_SECS))
         .user_agent("zone-server/fetch-url");
     if let Ok(proxy) = std::env::var("TOOL_RUNNER_PROXY_URL")
         && !proxy.trim().is_empty()
@@ -249,16 +246,13 @@ async fn fetch_public_url(raw: &str) -> ToolResult {
         return ToolResult::error("That URL did not return readable text.");
     }
 
-    let bytes = match response.bytes().await {
+    let bytes = match read_capped(response, MAX_FETCH_BYTES).await {
         Ok(bytes) => bytes,
         Err(error) => {
-            tracing::warn!(%error, "fetch_url body failed");
-            return ToolResult::error("Could not read the page body.");
+            tracing::warn!(%error, "fetch_url body refused");
+            return ToolResult::error(error);
         }
     };
-    if bytes.len() > MAX_FETCH_BYTES {
-        return ToolResult::error("The page is larger than 1 MB and was not read.");
-    }
     let raw = String::from_utf8_lossy(&bytes);
     let text = if content_type.contains("html") || looks_like_html(&raw) {
         html_to_text(&raw)

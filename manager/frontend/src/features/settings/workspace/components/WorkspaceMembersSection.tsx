@@ -234,25 +234,39 @@ export default function WorkspaceMembersSection({
     if (member.user_id === user?.id) return false;
     // Cannot modify last owner
     if (member.role === 'owner' && countOwners() === 1) return false;
+    if (currentUserRole !== 'owner' && (member.role === 'admin' || member.role === 'owner')) {
+      return false;
+    }
     return true;
   };
 
-  const getAssignableRoles = (): Array<{ value: WorkspaceRole; label: string }> => {
+  // Both the add route and the role route refuse anyone but an owner granting
+  // admin or owner, so one list serves the form and the rows alike.
+  const grantableRoles = (): Array<{ value: WorkspaceRole; label: string }> => {
     if (!canManageMembers) return [];
-
-    // Admins can only assign viewer/member/admin roles (not owner)
     if (currentUserRole === 'admin') {
-      return roleOptions.filter((r) => r.value !== 'owner');
+      return roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin');
     }
-
-    // Owners can assign any role
     return roleOptions;
+  };
+
+  const getAssignableRoles = (
+    member: WorkspaceMember
+  ): Array<{ value: WorkspaceRole; label: string }> => {
+    if (!canManageMembers) return [];
+    // Only an owner may re-seat someone already holding admin or owner.
+    if (currentUserRole === 'admin' && (member.role === 'admin' || member.role === 'owner')) {
+      return roleOptions.filter((r) => r.value === member.role);
+    }
+    return grantableRoles();
   };
 
   const getAvailableRoles = (
     member: WorkspaceMember
   ): Array<{ value: WorkspaceRole; label: string }> =>
-    canManageMembers ? getAssignableRoles() : roleOptions.filter((r) => r.value === member.role);
+    canManageMembers
+      ? getAssignableRoles(member)
+      : roleOptions.filter((r) => r.value === member.role);
 
   if (loading) {
     return <div className="loading-state">Loading members...</div>;
@@ -395,7 +409,7 @@ export default function WorkspaceMembersSection({
             label="Role"
             value={addRole}
             onChange={(e) => setAddRole(e.target.value as WorkspaceRole)}
-            options={getAssignableRoles()}
+            options={grantableRoles()}
           />
           <div className="modal-actions">
             <Button

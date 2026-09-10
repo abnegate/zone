@@ -22,6 +22,12 @@ export interface ToolCallRecord {
    * for one. Model-authored prose, so it is shown as stated, never as observed.
    */
   reason?: string;
+  /**
+   * What the call will do, rendered by the server from the arguments rather
+   * than from the model's account of them. Observed, so it is what settles a
+   * disagreement with the stated reason above it.
+   */
+  preview?: string;
   /** Client-only: set while the tool is still running. Never sent by the server. */
   pending?: boolean;
   /** Client-only: mutating file/shell tools wait here for the user. */
@@ -70,6 +76,11 @@ export const REASON_LABEL = 'Reason, stated by the model';
 /// Shown instead of a blank when a side-effecting call arrived without one.
 /// Silence must read as an absence the reader notices, not as nothing to say.
 export const REASON_MISSING = 'No reason given';
+
+/// The counterpart to REASON_LABEL, and the reason the two sit apart on the
+/// row: a preview is the server reading the call's own arguments, so it is the
+/// half of an approval a reader can trust when the stated reason disagrees.
+export const PREVIEW_LABEL = 'Effect, read from the call by the server';
 
 /// Tools that change something outside the conversation and are therefore
 /// asked to say why. The trace row is where a reader sees that answer, whether

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 // Mock client
@@ -21,6 +21,56 @@ beforeAll(async () => {
 afterAll(() => {
   mock.restore();
 });
+
+/// Hold every callback scheduled at exactly `delay` so a test can fire it,
+/// while everything scheduled at any other delay keeps its real timer.
+function captureTimer(delay: number) {
+  const callbacks: Array<() => void> = [];
+  const real = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: () => void, ms?: number, ...rest: unknown[]) => {
+    if (ms === delay) {
+      callbacks.push(callback);
+      return 0 as unknown as ReturnType<typeof real>;
+    }
+    return (real as (...args: unknown[]) => unknown)(callback, ms, ...rest);
+  }) as typeof globalThis.setTimeout;
+
+  return {
+    callbacks,
+    fire: () => {
+      for (const callback of callbacks) {
+        callback();
+      }
+    },
+    restore: () => {
+      globalThis.setTimeout = real;
+    },
+  };
+}
+
+function captureInterval(delay: number) {
+  const callbacks: Array<() => void> = [];
+  const real = globalThis.setInterval;
+  globalThis.setInterval = ((callback: () => void, ms?: number, ...rest: unknown[]) => {
+    if (ms === delay) {
+      callbacks.push(callback);
+      return 0 as unknown as ReturnType<typeof real>;
+    }
+    return (real as (...args: unknown[]) => unknown)(callback, ms, ...rest);
+  }) as typeof globalThis.setInterval;
+
+  return {
+    callbacks,
+    fire: () => {
+      for (const callback of callbacks) {
+        callback();
+      }
+    },
+    restore: () => {
+      globalThis.setInterval = real;
+    },
+  };
+}
 
 describe('VerificationPendingBanner', () => {
   const mockEmail = 'test@example.com';
@@ -166,14 +216,55 @@ describe('VerificationPendingBanner', () => {
       });
     });
 
-    // Tests involving fake timers are skipped due to bun:test compatibility issues
-    // with async operations and fake timers
-    it.skip('clears success message after 5 seconds', async () => {
-      // Test skipped - fake timers incompatibility with bun:test
+    // Fake timers fight bun:test's async handling, so rather than skip the two
+    // behaviours that are only reachable through a timer, hold the scheduled
+    // callback and fire it. Anything scheduled at another delay -- userEvent's
+    // own waiting among it -- still runs for real.
+    it('clears the success message once its timer fires', async () => {
+      const scheduled = captureTimer(5000);
+      try {
+        mockResendVerification.mockResolvedValue(undefined);
+        render(<VerificationPendingBanner email={mockEmail} />);
+        await userEvent.click(screen.getByRole('button', { name: /resend verification email/i }));
+        await waitFor(() => {
+          expect(screen.getByText(/verification email sent/i)).toBeInTheDocument();
+        });
+
+        expect(scheduled.callbacks).toHaveLength(1);
+        act(() => {
+          scheduled.fire();
+        });
+
+        await waitFor(() => {
+          expect(screen.queryByText(/verification email sent/i)).not.toBeInTheDocument();
+        });
+      } finally {
+        scheduled.restore();
+      }
     });
 
-    it.skip('shows resend button again after success message clears with cooldown', async () => {
-      // Test skipped - fake timers incompatibility with bun:test
+    it('brings the resend button back under its cooldown when the message clears', async () => {
+      const message = captureTimer(5000);
+      const cooldown = captureInterval(1000);
+      try {
+        mockResendVerification.mockResolvedValue(undefined);
+        render(<VerificationPendingBanner email={mockEmail} />);
+        await userEvent.click(screen.getByRole('button', { name: /resend verification email/i }));
+        await waitFor(() => {
+          expect(screen.getByText(/verification email sent/i)).toBeInTheDocument();
+        });
+
+        act(() => {
+          cooldown.fire();
+          message.fire();
+        });
+
+        const button = await screen.findByRole('button', { name: /resend \(\d+s\)/i });
+        expect(button).toBeDisabled();
+      } finally {
+        message.restore();
+        cooldown.restore();
+      }
     });
   });
 

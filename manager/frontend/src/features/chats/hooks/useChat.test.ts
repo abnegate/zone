@@ -356,6 +356,58 @@ describe('useChat', () => {
     );
   });
 
+  it('carries the observed preview from the approval frame onto the call', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm5', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_approval_required',
+      message_id: 'm5',
+      tool_call_id: 'call_write',
+      name: 'write_file',
+      arguments: '{"path":"config.toml","content":"port = 8080"}',
+      reason: 'The user asked me to set the port.',
+      preview: 'Write 11 characters to config.toml, replacing whatever is there.',
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.approval).toBe(
+        'pending'
+      );
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.preview).toBe(
+      'Write 11 characters to config.toml, replacing whatever is there.'
+    );
+
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: 'm5',
+      tool_call_id: 'call_write',
+      name: 'write_file',
+      success: true,
+      detail: 'Wrote config.toml',
+      duration_ms: 12,
+    });
+
+    // The result frame carries no preview of its own; the finished row must
+    // still show the action the reader was shown when they allowed it.
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.pending).toBe(false);
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.preview).toBe(
+      'Write 11 characters to config.toml, replacing whatever is there.'
+    );
+  });
+
   it('attaches streamed reasoning to the following tool call', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

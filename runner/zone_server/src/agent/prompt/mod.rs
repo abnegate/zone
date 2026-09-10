@@ -29,6 +29,7 @@ type Section = (&'static str, fn(&Context<'_>) -> Option<String>);
 const ORDER: &[Section] = &[
     ("identity", section::identity::render),
     ("boundary", section::boundary::render),
+    ("tiers", section::tiers::render),
     ("conduct", section::conduct::render),
     ("reply", section::reply::render),
     ("refusal", section::refusal::render),
@@ -54,7 +55,7 @@ const PLAIN: &[Section] = &[
     ("session", section::session::render),
 ];
 
-pub const CHAT_MAX_CHARS: usize = 18_000;
+pub const CHAT_MAX_CHARS: usize = 19_000;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 12_000;
 
@@ -266,6 +267,7 @@ mod tests {
             [
                 "identity",
                 "boundary",
+                "tiers",
                 "conduct",
                 "reply",
                 "refusal",

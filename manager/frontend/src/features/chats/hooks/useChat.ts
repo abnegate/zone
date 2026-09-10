@@ -53,6 +53,7 @@ type ServerMessage =
       name: string;
       arguments: string;
       reason?: string;
+      preview?: string;
     }
   | {
       type: 'tool_result';
@@ -660,6 +661,7 @@ export function useChat(
             pending: true,
             approval: 'pending',
             reason: payload.reason,
+            preview: payload.preview,
           });
           break;
         case 'tool_result':

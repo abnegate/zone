@@ -9,9 +9,23 @@ use tokio::time::{Duration, timeout};
 use tool_runner::Proxy;
 
 use super::{
-    ERROR_PREFIX, MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tool, ToolContext, ToolError, ToolResult,
-    reason_property, trim_middle,
+    ERROR_PREFIX, MAX_PREVIEW_CHARS, MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tier, Tool, ToolContext,
+    ToolError, ToolResult, excerpt, reason_property, trim_middle,
 };
+
+/// Programs [`RunCommandTool`] may spawn, resolved on the child's `PATH`.
+///
+/// Matched against the whole `command`, never its last path segment: an agent
+/// may write a file into `cwd`, so a basename match would admit `./cargo` and
+/// then run whatever that file is.
+const ALLOWED_COMMANDS: &[&str] = &[
+    "cargo", "rustc", "npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "make", "cmake",
+    "gradle", "mvn", "maven", "go", "python", "python3", "pip", "pip3", "poetry", "uv", "ruby",
+    "gem", "bundle", "rake", "dotnet", "msbuild", "git", "gh", "hub", "ls", "cat", "head", "tail",
+    "grep", "find", "wc", "sort", "uniq", "diff", "tree", "file", "stat", "pwd", "which",
+    "whereis", "pytest", "jest", "mocha", "rspec", "phpunit", "echo", "printf", "date", "env",
+    "true", "false", "test", "curl", "wget", "jq", "yq", "docker",
+];
 
 /// Run a shell command
 pub struct RunCommandTool;
@@ -79,8 +93,17 @@ impl Tool for RunCommandTool {
         "Execute a shell command. Returns stdout/stderr output. Use for running tests, builds, git commands, etc."
     }
 
-    fn mutating(&self) -> bool {
-        true
+    fn tier(&self) -> Tier {
+        Tier::Host
+    }
+
+    fn preview(&self, params: &Value) -> Option<String> {
+        let params: RunCommandParams = serde_json::from_value(params.clone()).ok()?;
+        let line = std::iter::once(params.command)
+            .chain(params.args)
+            .collect::<Vec<String>>()
+            .join(" ");
+        Some(run_preview(&line, params.cwd.as_deref()))
     }
 
     fn timeout(&self, context: &ToolContext) -> Duration {
@@ -129,35 +152,9 @@ impl Tool for RunCommandTool {
             "Running tool"
         );
 
-        // Security: Use allowlist approach instead of blocklist
-        // Only allow known safe development commands
-        let allowed_commands = [
-            // Build tools
-            "cargo", "rustc", "npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "make", "cmake",
-            "gradle", "mvn", "maven", "go", "python", "python3", "pip", "pip3", "poetry", "uv",
-            "ruby", "gem", "bundle", "rake", "dotnet", "msbuild", // Version control
-            "git", "gh", "hub", // File utilities (read-only or safe)
-            "ls", "cat", "head", "tail", "grep", "find", "wc", "sort", "uniq", "diff", "tree",
-            "file", "stat", "pwd", "which", "whereis", // Testing
-            "pytest", "jest", "mocha", "rspec", "phpunit", // Other safe utilities
-            "echo", "printf", "date", "env", "true", "false", "test", "curl", "wget", "jq", "yq",
-            // Docker (read operations)
-            "docker",
-        ];
-
-        // Extract base command name (handle both `/path/to/cmd` and `cmd`)
-        let base_cmd = params
-            .command
-            .split('/')
-            .next_back()
-            .unwrap_or(&params.command)
-            .split('\\')
-            .next_back()
-            .unwrap_or(&params.command);
-
-        if !allowed_commands.contains(&base_cmd) {
+        if !ALLOWED_COMMANDS.contains(&params.command.as_str()) {
             return Err(ToolError::Execution(format!(
-                "Command '{}' is not in the allowed list. Allowed commands: cargo, npm, git, python, etc.",
+                "Command '{}' is not in the allowed list. Name a program, not a path: cargo, npm, git, python, etc.",
                 params.command
             )));
         }
@@ -191,7 +188,7 @@ impl Tool for RunCommandTool {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        // Set environment
+        cmd.env_clear();
         for (key, value) in &context.env {
             cmd.env(key, value);
         }
@@ -255,6 +252,18 @@ impl Tool for RunCommandTool {
     }
 }
 
+/// The command line as it will run, for an approval card.
+///
+/// The command is what the reader is deciding on, so it keeps the whole budget
+/// and the directory is appended after it rather than put in front of it.
+fn run_preview(line: &str, cwd: Option<&str>) -> String {
+    let command = excerpt(line, MAX_PREVIEW_CHARS);
+    match cwd {
+        Some(cwd) => format!("Run `{command}` in {cwd}."),
+        None => format!("Run `{command}`."),
+    }
+}
+
 /// Run a command through a real shell, with no allow-list.
 ///
 /// [`RunCommandTool`] spawns a binary from a fixed list and rejects shell
@@ -281,6 +290,68 @@ struct RunShellParams {
 /// Longest a single shell command may run, whatever it asks for.
 const MAX_SHELL_TIMEOUT_SECS: u64 = 900;
 
+/// Longest a call may spend blocked on `sleep`.
+///
+/// A run that has produced nothing for this long is announced as stalled, so a
+/// longer sleep reads as a wedged run rather than a waiting one. Waiting past
+/// it belongs between calls, where the loop can still see what is happening.
+pub const MAX_SLEEP_SECS: u64 = 60;
+
+/// Where one command in a line ends and the next begins, plus the grouping
+/// characters a `sleep` can sit behind.
+const COMMAND_BOUNDARIES: [char; 9] = [';', '&', '|', '\n', '(', ')', '{', '}', '`'];
+
+/// Seconds `command` blocks on `sleep` for, adding up every `sleep` it holds.
+///
+/// The sleeps are summed rather than compared: `sleep 40; sleep 40` blocks for
+/// eighty seconds, and a cap that only ever saw the longer of the two would
+/// wave it through. A branch that will not be taken is counted too, which
+/// overstates the wait rather than understating it.
+///
+/// Only a `sleep` in command position is visible here. One reached through a
+/// script, an interpreter or a variable is left to the per-call timeout, which
+/// this sits in front of rather than replaces.
+fn total_sleep(command: &str) -> Option<f64> {
+    let sleeps: Vec<f64> = command
+        .split(COMMAND_BOUNDARIES)
+        .filter_map(|segment| {
+            let mut words = segment
+                .split_whitespace()
+                .skip_while(|word| word.contains('='));
+            let program = words.next()?.rsplit('/').next()?;
+            (program == "sleep").then(|| words.map_while(sleep_seconds).sum::<f64>())
+        })
+        .collect();
+    (!sleeps.is_empty()).then(|| sleeps.iter().sum())
+}
+
+/// One `sleep` operand in seconds: a count with an optional s, m, h or d.
+///
+/// A bare number is seconds and several operands add up, both as `sleep` reads
+/// them. An operand that is not a duration ends the sum rather than the call:
+/// what a variable holds is not knowable from here.
+///
+/// A negative operand counts as nothing. `sleep` rejects one rather than
+/// running time backwards, and letting it subtract would have let a caller pay
+/// for a long wait with a short one that never happens.
+fn sleep_seconds(operand: &str) -> Option<f64> {
+    let scale = match operand.chars().last()? {
+        's' => 1.0,
+        'm' => 60.0,
+        'h' => 3_600.0,
+        'd' => 86_400.0,
+        _ => {
+            return operand
+                .parse::<f64>()
+                .ok()
+                .filter(|seconds| seconds.is_finite())
+                .map(|seconds| seconds.max(0.0));
+        }
+    };
+    let count = operand[..operand.len() - 1].parse::<f64>().ok()?;
+    count.is_finite().then_some((count * scale).max(0.0))
+}
+
 #[async_trait]
 impl Tool for RunShellTool {
     fn name(&self) -> &str {
@@ -292,8 +363,13 @@ impl Tool for RunShellTool {
          so pipes, redirection and chaining work. Use for builds, tests, git and package managers."
     }
 
-    fn mutating(&self) -> bool {
-        true
+    fn tier(&self) -> Tier {
+        Tier::Host
+    }
+
+    fn preview(&self, params: &Value) -> Option<String> {
+        let params: RunShellParams = serde_json::from_value(params.clone()).ok()?;
+        Some(run_preview(&params.command, params.cwd.as_deref()))
     }
 
     fn parameters_schema(&self) -> Value {
@@ -302,7 +378,11 @@ impl Tool for RunShellTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to run, e.g. 'cargo test 2>&1 | tail -40'"
+                    "description": format!(
+                        "Shell command to run, e.g. 'cargo test 2>&1 | tail -40'. It may not \
+                         block on sleep for more than {MAX_SLEEP_SECS} seconds: to wait longer, \
+                         return and check again in a later call."
+                    )
                 },
                 "cwd": {
                     "type": "string",
@@ -339,6 +419,15 @@ impl Tool for RunShellTool {
 
         if params.command.trim().is_empty() {
             return Err(ToolError::InvalidParams("Command is empty".to_string()));
+        }
+
+        if let Some(seconds) = total_sleep(&params.command)
+            && seconds > MAX_SLEEP_SECS as f64
+        {
+            return Err(ToolError::Execution(format!(
+                "This command sleeps for {seconds} seconds, and a call may block on sleep for at \
+                 most {MAX_SLEEP_SECS}. Return without waiting and check again in a later call."
+            )));
         }
 
         let cwd = match &params.cwd {
@@ -424,6 +513,56 @@ mod tests {
             max_file_size: 1024 * 1024,
             command_timeout: 30,
             unrestricted: false,
+        }
+    }
+
+    /// Both shelling tools hand the child only what the context names.
+    ///
+    /// The context environment *is* the allowlist a caller builds: the server
+    /// narrows it to a fixed set of names precisely because its own process
+    /// holds the database URL, the JWT and encryption keys and the provider
+    /// keys. A child that inherited the parent's environment would print all
+    /// of it into tool output, so `env_clear` is what makes the caller's
+    /// allowlist an allowlist.
+    #[tokio::test]
+    async fn shelling_tools_give_the_child_only_the_context_environment() {
+        const MARKER: &str = "ZONE_COMMAND_ENVIRONMENT_MARKER";
+        unsafe { std::env::set_var(MARKER, "must-not-reach-a-child") };
+
+        let mut context = create_test_context();
+        context.env = HashMap::from([(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        )]);
+
+        let command = RunCommandTool
+            .execute(json!({"command": "env"}), &context)
+            .await
+            .unwrap();
+        let shell = RunShellTool
+            .execute(json!({"command": "env"}), &context)
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var(MARKER) };
+
+        for result in [command, shell] {
+            assert!(result.success, "{result:?}");
+            let output = result.output.unwrap();
+            assert!(output.contains("PATH="), "the tool did not run: {output}");
+            assert!(
+                !output.contains(MARKER),
+                "the process environment reached the child: {output}"
+            );
+            // `sh` computes these from the working directory it was given.
+            const SHELL_OWN: &[&str] = &["PWD", "SHLVL", "_"];
+            for (name, _) in output.lines().filter_map(|line| line.split_once('=')) {
+                assert!(
+                    context.env.contains_key(name)
+                        || name.to_ascii_uppercase().ends_with("_PROXY")
+                        || SHELL_OWN.contains(&name),
+                    "{name} is not on the context environment and must not have survived"
+                );
+            }
         }
     }
 
@@ -558,6 +697,52 @@ mod tests {
 
         // Should fail because command doesn't exist
         assert!(result.is_err());
+    }
+
+    /// The allowlist was matched against the last path segment while the whole
+    /// string was executed, so a file the agent had just written into `cwd` and
+    /// named `cargo` satisfied the list and then ran.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_allowed_name_on_a_path_is_not_an_allowed_program() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const MARKER: &str = "arbitrary-execution-marker";
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let impostor = directory.path().join("cargo");
+        std::fs::write(&impostor, format!("#!/bin/sh\necho {MARKER}\n")).unwrap();
+        std::fs::set_permissions(&impostor, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let context = ToolContext {
+            cwd: directory.path().canonicalize().unwrap(),
+            env: HashMap::from([(
+                "PATH".to_string(),
+                std::env::var("PATH").unwrap_or_default(),
+            )]),
+            ..ToolContext::default()
+        };
+
+        for command in [
+            "./cargo".to_string(),
+            "cargo/../cargo".to_string(),
+            impostor.to_string_lossy().into_owned(),
+        ] {
+            let error = RunCommandTool
+                .execute(
+                    serde_json::json!({"command": command, "args": []}),
+                    &context,
+                )
+                .await
+                .expect_err("a path must not satisfy the allowlist");
+            assert!(
+                error.to_string().contains("not in the allowed list"),
+                "{command}: {error}"
+            );
+            assert!(
+                !error.to_string().contains(MARKER),
+                "{command} ran: {error}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -829,6 +1014,130 @@ mod tests {
 
         assert!(result.success, "{:?}", result.error);
         assert!(result.output.unwrap().contains("hello"));
+    }
+
+    /// `sleep` reads a bare number as seconds and a suffix as its unit, and
+    /// adds its operands up. Reading them the same way is what makes the cap
+    /// land on the wait that actually happens.
+    #[test]
+    fn a_sleep_is_measured_the_way_sleep_itself_reads_its_operands() {
+        assert_eq!(total_sleep("sleep 30"), Some(30.0));
+        assert_eq!(total_sleep("sleep 0.5"), Some(0.5));
+        assert_eq!(total_sleep("sleep 2m"), Some(120.0));
+        assert_eq!(total_sleep("sleep 1h"), Some(3_600.0));
+        assert_eq!(total_sleep("sleep 1d"), Some(86_400.0));
+        assert_eq!(total_sleep("sleep 40 40"), Some(80.0));
+        assert_eq!(total_sleep("echo hello"), None);
+        assert_eq!(total_sleep("echo sleep 900"), None);
+    }
+
+    /// The wait is what counts, not the shape of the line it hides in: a
+    /// segment reached by a pipe, a chain, a subshell or a path is still a
+    /// segment whose command is `sleep`, and every one of them adds to the
+    /// wait the caller is about to sit through.
+    #[test]
+    fn a_sleep_is_found_wherever_a_command_can_start() {
+        assert_eq!(total_sleep("cargo build && sleep 300"), Some(300.0));
+        assert_eq!(total_sleep("sleep 300; cargo test"), Some(300.0));
+        assert_eq!(total_sleep("sleep 10 || sleep 300"), Some(310.0));
+        assert_eq!(total_sleep("(sleep 300)"), Some(300.0));
+        assert_eq!(total_sleep("{ sleep 300; }"), Some(300.0));
+        assert_eq!(total_sleep("/bin/sleep 300"), Some(300.0));
+        assert_eq!(total_sleep("DELAY=1 sleep 300"), Some(300.0));
+        assert_eq!(total_sleep("sleep 300 | cat"), Some(300.0));
+        assert_eq!(total_sleep("cargo build & sleep 300"), Some(300.0));
+    }
+
+    /// The cap is on how long the call blocks, and a line blocks for the sum
+    /// of its sleeps. Comparing only the longest one let a call wait for as
+    /// many multiples of the cap as it cared to write out.
+    #[test]
+    fn sleeps_in_sequence_add_up_to_the_wait_the_cap_is_measured_against() {
+        assert_eq!(total_sleep("sleep 40; sleep 40"), Some(80.0));
+        assert_eq!(total_sleep("sleep 30 && sleep 30 && sleep 30"), Some(90.0));
+        assert_eq!(total_sleep("sleep 20 | cat; sleep 50"), Some(70.0));
+    }
+
+    /// An operand this cannot read is not an excuse to reject the call. The
+    /// per-call timeout is still behind it, and refusing what might be a
+    /// one-second wait would cost more than letting it through.
+    #[test]
+    fn an_unreadable_operand_ends_the_sum_rather_than_the_call() {
+        assert_eq!(total_sleep("sleep $DELAY"), Some(0.0));
+        assert_eq!(total_sleep("sleep 30 $DELAY 300"), Some(30.0));
+    }
+
+    /// A negative operand is not a wait to be credited against a real one.
+    /// `sleep -100; sleep 120` summed to twenty and was let through, and then
+    /// `sh` failed the first segment and blocked for the full two minutes on
+    /// the second.
+    #[test]
+    fn a_negative_operand_buys_no_credit_against_a_real_wait() {
+        assert_eq!(total_sleep("sleep -100; sleep 120"), Some(120.0));
+        assert_eq!(total_sleep("sleep -100"), Some(0.0));
+        assert_eq!(total_sleep("sleep -5m"), Some(0.0));
+        assert_eq!(total_sleep("sleep -100 120"), Some(120.0));
+    }
+
+    /// The task loop announces a stall after the same interval, so a call that
+    /// blocks past it would look wedged rather than waiting.
+    ///
+    /// The one-second limit is what makes the refusal visible: without the cap
+    /// the call reaches the shell and fails on the limit instead, so the two
+    /// outcomes cannot be confused for one another.
+    #[tokio::test]
+    async fn a_shell_call_may_not_block_on_sleep_past_the_cap() {
+        let error = RunShellTool
+            .execute(
+                json!({
+                    "command": "sleep 300",
+                    "timeout_secs": 1,
+                    "reason": "Wait for the deploy."
+                }),
+                &shell_test_context(),
+            )
+            .await
+            .expect_err("a sleep past the cap is refused");
+
+        let message = error.to_string();
+        assert!(message.contains("300"), "{message}");
+        assert!(
+            message.contains(&MAX_SLEEP_SECS.to_string()),
+            "the refusal names the cap it enforces: {message}"
+        );
+    }
+
+    /// The cap is on waiting, not on `sleep`: a short one is how a command
+    /// legitimately lets something settle, and it still runs.
+    #[tokio::test]
+    async fn a_shell_call_may_still_sleep_inside_the_cap() {
+        let result = RunShellTool
+            .execute(
+                json!({"command": "sleep 0.01 && echo settled"}),
+                &shell_test_context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.output.unwrap().contains("settled"));
+    }
+
+    /// The model is told the rule in the schema, so the first it hears of the
+    /// cap is not a call that failed on it.
+    #[test]
+    fn the_shell_schema_states_the_sleep_cap() {
+        let schema = RunShellTool.parameters_schema();
+        let described = schema["properties"]["command"]["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert!(
+            described.contains(&MAX_SLEEP_SECS.to_string()),
+            "{described}"
+        );
+        assert!(described.contains("sleep"), "{described}");
     }
 
     /// A reason is the model's own prose and can carry whatever it just read

@@ -848,7 +848,28 @@ pub async fn reindex(
         Err(e) => return e.into_response(),
     };
 
-    // Check for in-progress indexing
+    // The index status is keyed by source alone, so it must not be read for a
+    // source this workspace does not own -- a conflict would answer for another
+    // tenant's source before the check below refuses it.
+    match sources::get_source(state.db(), source_id, workspace_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Source not found")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(source_id = %source_id, workspace_id = %workspace_id, error = %e, "Database error getting source for reindex");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    }
+
     let index_status = sources::get_source_index_status(state.db(), source_id).await;
     if let Ok(status) = &index_status
         && matches!(status.status, sources::IndexStatus::Indexing)
@@ -860,41 +881,22 @@ pub async fn reindex(
             .into_response();
     }
 
-    // Verify source exists
-    match sources::get_source(state.db(), source_id, workspace_id).await {
-        Ok(Some(_)) => {
-            // Spawn re-index
-            crate::workers::indexing::spawn_index_source(
-                state.clone(),
-                source_id,
-                workspace_id,
-                user_id,
-                true, // force re-index
-            );
+    crate::workers::indexing::spawn_index_source(
+        state.clone(),
+        source_id,
+        workspace_id,
+        user_id,
+        true, // force re-index
+    );
 
-            (
-                StatusCode::ACCEPTED,
-                Json(serde_json::json!({
-                    "message": "Re-indexing started",
-                    "source_id": source_id
-                })),
-            )
-                .into_response()
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Source not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!(source_id = %source_id, workspace_id = %workspace_id, error = %e, "Database error getting source for reindex");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "message": "Re-indexing started",
+            "source_id": source_id
+        })),
+    )
+        .into_response()
 }
 
 /// GET /api/sources/types

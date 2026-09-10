@@ -649,6 +649,32 @@
   font-style: italic;
 }
 
+/* What the server read the call as doing, above the decision it is asking for.
+   Set apart from the reason rather than styled as another line of it: the
+   reason is the model's account and this is the observed one, and a reader
+   weighing the two has to be able to see at a glance which is which. */
+
+.tool-call-preview {
+  display: grid;
+  gap: 2px;
+  margin: 0 var(--ui-space-3) var(--ui-space-2);
+  padding: var(--ui-space-2);
+  border-left: 2px solid var(--ui-accent);
+  background: var(--ui-bg-surface);
+  font-size: var(--ui-text-xs);
+}
+
+.tool-call-preview-label {
+  color: var(--ui-text-secondary);
+  letter-spacing: var(--ui-tracking-tight);
+}
+
+.tool-call-preview-text {
+  color: var(--ui-text-primary);
+  font-family: var(--ui-font-mono);
+  overflow-wrap: anywhere;
+}
+
 /* Citations.
    Checkable sources for an agent reply. Incomplete evidence must never read
    as a passing result — that distinction is carried in the label and colour. */

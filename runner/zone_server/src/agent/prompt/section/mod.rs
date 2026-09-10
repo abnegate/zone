@@ -13,5 +13,6 @@ pub(in crate::agent::prompt) mod reply;
 pub(in crate::agent::prompt) mod retrieval;
 pub(in crate::agent::prompt) mod session;
 pub(in crate::agent::prompt) mod task;
+pub(in crate::agent::prompt) mod tiers;
 pub(in crate::agent::prompt) mod web;
 pub(in crate::agent::prompt) mod workspace;

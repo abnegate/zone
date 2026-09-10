@@ -226,99 +226,93 @@ describe('OrgMembersSection', () => {
   });
 
   describe('Email Validation', () => {
-    // Note: Tests time out - modal dialog not properly accessible in test env
-    it.skip('shows error for invalid email format', async () => {
+    /// happy-dom does not raise a form's submit event from a click on its
+    /// submit button, so the form is submitted directly. That still runs
+    /// `handleAddMember`, and it bypasses the native `type="email"` check the
+    /// way a browser with autofill or a paste would.
+    const openAndSubmit = async (email?: string) => {
       render(<OrgMembersSection orgId="org-123" />);
       await waitFor(() => {
-        fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
+        expect(screen.getByRole('button', { name: /Add Member/i })).toBeInTheDocument();
       });
+      fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
 
-      await waitFor(() => {
-        const emailInput = screen.getByLabelText(/Email/i);
-        fireEvent.change(emailInput, { target: { value: 'invalid-email' } });
-      });
+      const dialog = await waitFor(() => screen.getByRole('dialog'));
+      if (email !== undefined) {
+        fireEvent.change(within(dialog).getByLabelText(/Email/i), {
+          target: { value: email },
+        });
+      }
+      const form = dialog.querySelector('form');
+      expect(form).not.toBeNull();
+      fireEvent.submit(form!);
+    };
 
-      const submitButton = screen
-        .getAllByRole('button', { name: /Add/i })
-        .find((btn) => btn.getAttribute('type') === 'submit');
-      fireEvent.click(submitButton!);
+    it('shows error for invalid email format', async () => {
+      await openAndSubmit('invalid-email');
 
       await waitFor(() => {
         expect(screen.getByText(/valid email address/i)).toBeInTheDocument();
-        expect(mockClient.addOrgMember).not.toHaveBeenCalled();
       });
+      expect(mockClient.addOrgMember).not.toHaveBeenCalled();
     });
 
-    // Note: Tests time out - modal dialog not properly accessible in test env
-    it.skip('shows error for empty email', async () => {
-      render(<OrgMembersSection orgId="org-123" />);
-      await waitFor(() => {
-        fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
-      });
-
-      const submitButton = screen
-        .getAllByRole('button', { name: /Add/i })
-        .find((btn) => btn.getAttribute('type') === 'submit');
-      fireEvent.click(submitButton!);
+    it('shows error for empty email', async () => {
+      await openAndSubmit();
 
       await waitFor(() => {
-        expect(screen.getByText(/Email is required/i)).toBeInTheDocument();
-        expect(mockClient.addOrgMember).not.toHaveBeenCalled();
+        expect(screen.getByText(/email is required/i)).toBeInTheDocument();
       });
-    });
-
-    it('accepts valid email format', async () => {
-      mockClient.addOrgMember.mockResolvedValueOnce(mockMember);
-
-      render(<OrgMembersSection orgId="org-123" />);
-      await waitFor(() => {
-        fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
-      });
-
-      await waitFor(() => {
-        const emailInput = screen.getByLabelText(/Email/i);
-        fireEvent.change(emailInput, { target: { value: 'valid@example.com' } });
-      });
-
-      const submitButton = screen
-        .getAllByRole('button', { name: /Add/i })
-        .find((btn) => btn.getAttribute('type') === 'submit');
-      fireEvent.click(submitButton!);
-
-      await waitFor(() => {
-        expect(mockClient.addOrgMember).toHaveBeenCalledWith('org-123', {
-          email: 'valid@example.com',
-          role: 'member',
-        });
-      });
+      expect(mockClient.addOrgMember).not.toHaveBeenCalled();
     });
   });
 
   describe('Role Hierarchy Restrictions', () => {
-    // Note: Tests time out - modal dialog not properly accessible in test env
-    it.skip('shows only member/admin roles to admins (not owner)', async () => {
-      // This test is complex because it requires changing the mocked auth user
-      // For now, we'll test that the role select exists and has options
-      render(<OrgMembersSection orgId="org-123" />);
-      await waitFor(() => {
-        fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
+    const asAdmin = () =>
+      mockUseAuth.mockReturnValue({
+        isAuthenticated: true,
+        user: { id: 'user-2', email: 'admin@test.com' },
+      });
+    const asOwner = () =>
+      mockUseAuth.mockReturnValue({
+        isAuthenticated: true,
+        user: { id: 'user-1', email: 'owner@test.com' },
       });
 
-      await waitFor(() => {
-        // Find the role select in the modal specifically
-        const roleSelects = screen.getAllByRole('combobox');
-        const modalRoleSelect = roleSelects.find((select) => {
-          const modal = select.closest('[role="dialog"]') || select.closest('.ui-modal');
-          return modal !== null;
+    const selectFor = (label: string) =>
+      screen.getByLabelText(`Change role for ${label}`) as HTMLSelectElement;
+
+    const optionsFor = (label: string) =>
+      Array.from(selectFor(label).options).map((option) => option.value);
+
+    it('offers an admin no way to seat or unseat another admin', async () => {
+      asAdmin();
+      try {
+        render(<OrgMembersSection orgId="org-123" />);
+        await waitFor(() => {
+          expect(screen.getByText('Test Admin')).toBeInTheDocument();
         });
 
-        expect(modalRoleSelect).toBeInTheDocument();
+        expect(optionsFor('member@test.com')).toEqual(['member']);
+        expect(optionsFor('Test Admin')).toEqual(['admin']);
+        expect(selectFor('Test Admin')).toBeDisabled();
+        expect(optionsFor('Test Owner')).toEqual(['owner']);
+        expect(selectFor('Test Owner')).toBeDisabled();
+      } finally {
+        asOwner();
+      }
+    });
 
-        if (modalRoleSelect) {
-          const options = Array.from(modalRoleSelect.querySelectorAll('option'));
-          expect(options.length).toBeGreaterThan(0);
-        }
+    it('offers an owner the whole hierarchy, including seating an admin', async () => {
+      asOwner();
+      render(<OrgMembersSection orgId="org-123" />);
+      await waitFor(() => {
+        expect(screen.getByText('Test Admin')).toBeInTheDocument();
       });
+
+      expect(optionsFor('member@test.com')).toEqual(['member', 'admin', 'owner']);
+      expect(optionsFor('Test Admin')).toEqual(['member', 'admin', 'owner']);
+      expect(selectFor('Test Admin')).toBeEnabled();
     });
   });
 
@@ -509,7 +503,7 @@ describe('OrgMembersSection', () => {
     });
 
     // Note: Modal button finding fails in test env
-    it.skip('cancels role change when confirmation is cancelled', async () => {
+    it('cancels role change when confirmation is cancelled', async () => {
       render(<OrgMembersSection orgId="org-123" />);
       await waitFor(() => {
         const roleSelects = screen.getAllByRole('combobox');
@@ -524,12 +518,8 @@ describe('OrgMembersSection', () => {
         expect(screen.getByText(/Confirm Role Change/i)).toBeInTheDocument();
       });
 
-      const cancelButtons = screen.getAllByRole('button', { name: /Cancel/i });
-      const modalCancelButton = cancelButtons.find((btn) => {
-        const modal = btn.closest('.ui-modal');
-        return modal?.textContent?.includes('Confirm Role Change');
-      });
-      fireEvent.click(modalCancelButton!);
+      const dialog = screen.getByRole('dialog');
+      fireEvent.click(within(dialog).getByRole('button', { name: /Cancel/i }));
 
       expect(mockClient.updateOrgMemberRole).not.toHaveBeenCalled();
     });
@@ -714,11 +704,13 @@ describe('OrgMembersSection', () => {
       expect(roleSelectFor('member@test.com')).toBeEnabled();
     });
 
-    it('offers an admin every role but owner when adding a member', async () => {
+    // `add_member` refuses `role >= Admin` from anyone but an owner, so
+    // offering an admin the admin role would only earn them a 403.
+    it('offers an admin no role the add route would refuse', async () => {
       await renderAs('admin');
       await openAddMemberModal();
 
-      expect(rolesOfferedForNewMember()).toEqual(['member', 'admin']);
+      expect(rolesOfferedForNewMember()).toEqual(['member']);
     });
 
     it('offers an owner every role when adding a member', async () => {

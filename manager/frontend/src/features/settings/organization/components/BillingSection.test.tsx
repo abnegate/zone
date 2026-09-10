@@ -241,8 +241,7 @@ describe('BillingSection', () => {
       });
     });
 
-    // Note: toHaveStyle doesn't work correctly with ProgressBar component in test env
-    it.skip('displays progress bars with correct widths', async () => {
+    it('displays progress bars with correct widths', async () => {
       render(<BillingSection orgId={orgId} />);
 
       await waitFor(() => {
@@ -473,12 +472,11 @@ describe('BillingSection', () => {
 
       render(<BillingSection orgId={orgId} />);
 
-      // Note: toHaveStyle doesn't work correctly with ProgressBar component in test env
       await waitFor(() => {
-        // Should cap at 100% even though actual is 120%
-        const progressBar = screen.getAllByRole('progressbar')[0];
-        expect(progressBar).toBeInTheDocument(); // Just verify it exists
+        expect(screen.getAllByRole('progressbar')[0]).toBeInTheDocument();
       });
+      // Capped at 100% even though the metric itself is over.
+      expect(screen.getAllByRole('progressbar')[0]).toHaveStyle({ width: '100%' });
     });
 
     it('handles fractional storage values', async () => {
