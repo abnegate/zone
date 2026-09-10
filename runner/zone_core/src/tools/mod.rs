@@ -56,12 +56,27 @@ pub const MAX_PREVIEW_CHARS: usize = 400;
 
 const TOOL_TRUNCATION_MARKER: &str = "\n[truncated]";
 
+/// Stands in for a line break that has been collapsed away.
+///
+/// A shell runs one command per line, so two lines joined by a space read as a
+/// single command the reader was never shown. The break survives the collapse
+/// as something they can see.
+pub const LINE_BREAK: &str = " ⏎ ";
+
 /// Collapse `text` onto one line and cut it to `max_chars`.
 ///
 /// A command, a message body or a patch arrives with newlines and runs of
-/// whitespace that would push the part worth reading off the card.
+/// whitespace that would push the part worth reading off the card. Runs of
+/// blank space within a line go; a line break becomes [`LINE_BREAK`], because
+/// what separates two commands is the part of a preview a reader is deciding
+/// on.
 pub fn excerpt(text: &str, max_chars: usize) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<&str>>().join(" ");
+    let collapsed = text
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<&str>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<String>>()
+        .join(LINE_BREAK);
     match collapsed.char_indices().nth(max_chars) {
         Some((byte_idx, _)) => format!("{}…", &collapsed[..byte_idx]),
         None => collapsed,
@@ -521,6 +536,38 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A preview a reader approves has to say what will run. `sh -c` runs one
+    /// command per line, so two lines joined by a space showed them a single
+    /// command that was never going to run, and hid the one that was.
+    #[test]
+    fn a_multiline_shell_preview_keeps_the_commands_apart() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(RunShellTool));
+
+        let preview = registry
+            .preview(
+                "run_shell",
+                &serde_json::json!({"command": "cat config.toml\nrm -rf /srv/zone"}).to_string(),
+            )
+            .expect("a shell call previews the line it will run");
+
+        assert!(
+            preview.contains(&format!("cat config.toml{LINE_BREAK}rm -rf /srv/zone")),
+            "the second command stays a second command: {preview}"
+        );
+    }
+
+    /// Blank space inside one line is noise that pushes the readable part off
+    /// the card, so it still collapses.
+    #[test]
+    fn blank_space_inside_a_line_still_collapses() {
+        assert_eq!(excerpt("cargo    test   --all", 400), "cargo test --all");
+        assert_eq!(
+            excerpt("  one\n\n\ntwo  ", 400),
+            format!("one{LINE_BREAK}two")
+        );
+    }
 
     #[test]
     fn test_tool_result_success() {

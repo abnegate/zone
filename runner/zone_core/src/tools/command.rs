@@ -301,22 +301,28 @@ pub const MAX_SLEEP_SECS: u64 = 60;
 /// characters a `sleep` can sit behind.
 const COMMAND_BOUNDARIES: [char; 9] = [';', '&', '|', '\n', '(', ')', '{', '}', '`'];
 
-/// Seconds the longest `sleep` in `command` blocks for, if it holds one.
+/// Seconds `command` blocks on `sleep` for, adding up every `sleep` it holds.
+///
+/// The sleeps are summed rather than compared: `sleep 40; sleep 40` blocks for
+/// eighty seconds, and a cap that only ever saw the longer of the two would
+/// wave it through. A branch that will not be taken is counted too, which
+/// overstates the wait rather than understating it.
 ///
 /// Only a `sleep` in command position is visible here. One reached through a
 /// script, an interpreter or a variable is left to the per-call timeout, which
 /// this sits in front of rather than replaces.
-fn longest_sleep(command: &str) -> Option<f64> {
-    command
+fn total_sleep(command: &str) -> Option<f64> {
+    let sleeps: Vec<f64> = command
         .split(COMMAND_BOUNDARIES)
         .filter_map(|segment| {
             let mut words = segment
                 .split_whitespace()
                 .skip_while(|word| word.contains('='));
             let program = words.next()?.rsplit('/').next()?;
-            (program == "sleep").then(|| words.map_while(sleep_seconds).sum())
+            (program == "sleep").then(|| words.map_while(sleep_seconds).sum::<f64>())
         })
-        .max_by(f64::total_cmp)
+        .collect();
+    (!sleeps.is_empty()).then(|| sleeps.iter().sum())
 }
 
 /// One `sleep` operand in seconds: a count with an optional s, m, h or d.
@@ -410,7 +416,7 @@ impl Tool for RunShellTool {
             return Err(ToolError::InvalidParams("Command is empty".to_string()));
         }
 
-        if let Some(seconds) = longest_sleep(&params.command)
+        if let Some(seconds) = total_sleep(&params.command)
             && seconds > MAX_SLEEP_SECS as f64
         {
             return Err(ToolError::Execution(format!(
@@ -1010,30 +1016,41 @@ mod tests {
     /// land on the wait that actually happens.
     #[test]
     fn a_sleep_is_measured_the_way_sleep_itself_reads_its_operands() {
-        assert_eq!(longest_sleep("sleep 30"), Some(30.0));
-        assert_eq!(longest_sleep("sleep 0.5"), Some(0.5));
-        assert_eq!(longest_sleep("sleep 2m"), Some(120.0));
-        assert_eq!(longest_sleep("sleep 1h"), Some(3_600.0));
-        assert_eq!(longest_sleep("sleep 1d"), Some(86_400.0));
-        assert_eq!(longest_sleep("sleep 40 40"), Some(80.0));
-        assert_eq!(longest_sleep("echo hello"), None);
-        assert_eq!(longest_sleep("echo sleep 900"), None);
+        assert_eq!(total_sleep("sleep 30"), Some(30.0));
+        assert_eq!(total_sleep("sleep 0.5"), Some(0.5));
+        assert_eq!(total_sleep("sleep 2m"), Some(120.0));
+        assert_eq!(total_sleep("sleep 1h"), Some(3_600.0));
+        assert_eq!(total_sleep("sleep 1d"), Some(86_400.0));
+        assert_eq!(total_sleep("sleep 40 40"), Some(80.0));
+        assert_eq!(total_sleep("echo hello"), None);
+        assert_eq!(total_sleep("echo sleep 900"), None);
     }
 
     /// The wait is what counts, not the shape of the line it hides in: a
     /// segment reached by a pipe, a chain, a subshell or a path is still a
-    /// segment whose command is `sleep`.
+    /// segment whose command is `sleep`, and every one of them adds to the
+    /// wait the caller is about to sit through.
     #[test]
     fn a_sleep_is_found_wherever_a_command_can_start() {
-        assert_eq!(longest_sleep("cargo build && sleep 300"), Some(300.0));
-        assert_eq!(longest_sleep("sleep 300; cargo test"), Some(300.0));
-        assert_eq!(longest_sleep("sleep 10 || sleep 300"), Some(300.0));
-        assert_eq!(longest_sleep("(sleep 300)"), Some(300.0));
-        assert_eq!(longest_sleep("{ sleep 300; }"), Some(300.0));
-        assert_eq!(longest_sleep("/bin/sleep 300"), Some(300.0));
-        assert_eq!(longest_sleep("DELAY=1 sleep 300"), Some(300.0));
-        assert_eq!(longest_sleep("sleep 300 | cat"), Some(300.0));
-        assert_eq!(longest_sleep("cargo build & sleep 300"), Some(300.0));
+        assert_eq!(total_sleep("cargo build && sleep 300"), Some(300.0));
+        assert_eq!(total_sleep("sleep 300; cargo test"), Some(300.0));
+        assert_eq!(total_sleep("sleep 10 || sleep 300"), Some(310.0));
+        assert_eq!(total_sleep("(sleep 300)"), Some(300.0));
+        assert_eq!(total_sleep("{ sleep 300; }"), Some(300.0));
+        assert_eq!(total_sleep("/bin/sleep 300"), Some(300.0));
+        assert_eq!(total_sleep("DELAY=1 sleep 300"), Some(300.0));
+        assert_eq!(total_sleep("sleep 300 | cat"), Some(300.0));
+        assert_eq!(total_sleep("cargo build & sleep 300"), Some(300.0));
+    }
+
+    /// The cap is on how long the call blocks, and a line blocks for the sum
+    /// of its sleeps. Comparing only the longest one let a call wait for as
+    /// many multiples of the cap as it cared to write out.
+    #[test]
+    fn sleeps_in_sequence_add_up_to_the_wait_the_cap_is_measured_against() {
+        assert_eq!(total_sleep("sleep 40; sleep 40"), Some(80.0));
+        assert_eq!(total_sleep("sleep 30 && sleep 30 && sleep 30"), Some(90.0));
+        assert_eq!(total_sleep("sleep 20 | cat; sleep 50"), Some(70.0));
     }
 
     /// An operand this cannot read is not an excuse to reject the call. The
@@ -1041,8 +1058,8 @@ mod tests {
     /// one-second wait would cost more than letting it through.
     #[test]
     fn an_unreadable_operand_ends_the_sum_rather_than_the_call() {
-        assert_eq!(longest_sleep("sleep $DELAY"), Some(0.0));
-        assert_eq!(longest_sleep("sleep 30 $DELAY 300"), Some(30.0));
+        assert_eq!(total_sleep("sleep $DELAY"), Some(0.0));
+        assert_eq!(total_sleep("sleep 30 $DELAY 300"), Some(30.0));
     }
 
     /// The task loop announces a stall after the same interval, so a call that

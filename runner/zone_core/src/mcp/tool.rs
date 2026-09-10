@@ -56,12 +56,29 @@ impl Tool for McpTool {
         self.parameters_schema.clone()
     }
 
-    /// An attached server advertises no annotations Zone reads, so a read and
-    /// a publish are indistinguishable here. Write is what that uncertainty
-    /// costs least: the call stays sequential, as it always has, without
-    /// putting a confirmation in front of every remote lookup.
+    /// An attached server is third-party code, and nothing that reaches Zone
+    /// distinguishes a remote lookup from a remote publication. The tool
+    /// annotations that would are hints the server writes about itself, which
+    /// the MCP specification says a client must not make tool use decisions
+    /// from. So every remote method is treated as the one that cannot be
+    /// recalled, and the reader sees it before it runs.
     fn tier(&self) -> Tier {
-        Tier::Write
+        Tier::Outward
+    }
+
+    /// The method and the arguments it was given.
+    ///
+    /// A remote method has no catalog entry for a reader to recognise it by,
+    /// so the call itself is the whole of what there is to show them.
+    fn preview(&self, params: &Value) -> Option<String> {
+        let arguments = params
+            .as_object()
+            .filter(|object| !object.is_empty())
+            .and_then(|object| serde_json::to_string(object).ok());
+        Some(match arguments {
+            Some(arguments) => format!("Call `{}` with {arguments}.", self.qualified_name),
+            None => format!("Call `{}` with no arguments.", self.qualified_name),
+        })
     }
 
     async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {

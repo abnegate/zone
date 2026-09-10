@@ -229,7 +229,7 @@ impl McpSession {
 mod tests {
     use super::*;
     use crate::mcp::McpServerSpec;
-    use crate::tools::{ToolContext, ToolRegistry};
+    use crate::tools::{Tier, ToolContext, ToolRegistry};
     use rmcp::handler::server::wrapper::Parameters;
     use rmcp::{ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
     use serde::Deserialize;
@@ -380,6 +380,60 @@ mod tests {
 
         // Tools hold the session; drop them so the client tears down and the
         // server `waiting()` future can finish.
+        drop(registry);
+        drop(hub);
+        server_task.abort();
+    }
+
+    /// A remote method can write files, spend money or message a stranger, and
+    /// nothing Zone can trust says which one it is. It is therefore gated like
+    /// the calls that cannot be taken back, and the card carries the call
+    /// itself so the reader has something to decide on.
+    #[tokio::test]
+    async fn a_remote_method_is_confirmed_and_shows_the_call_it_will_make() {
+        let (client_to_server, server_from_client) = tokio::io::duplex(64 * 1024);
+        let (server_to_client, client_from_server) = tokio::io::duplex(64 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            let server = Echo
+                .serve((server_from_client, server_to_client))
+                .await
+                .expect("server serve");
+            let _ = server.waiting().await;
+        });
+
+        let client = ().serve((client_from_server, client_to_server)).await.expect("client serve");
+        let remote_tools = client.list_all_tools().await.expect("list tools");
+        let hub = McpHub {
+            sessions: vec![Arc::new(McpSession {
+                name: "echo".to_string(),
+                remote_tools,
+                client: Mutex::new(client),
+            })],
+        };
+
+        let mut registry = ToolRegistry::new();
+        assert_eq!(registry.register_mcp(&hub), 1);
+
+        assert_eq!(
+            registry.tier("echo_ping"),
+            Some(Tier::Outward),
+            "an unannotated remote method is gated as unrecallable"
+        );
+        assert!(
+            Tier::Outward.confirmed(),
+            "and that tier is one the reader is asked about"
+        );
+
+        let preview = registry
+            .preview(
+                "echo_ping",
+                &serde_json::json!({"message": "hi"}).to_string(),
+            )
+            .expect("a confirmed call renders what it will do");
+        assert!(preview.contains("echo_ping"), "{preview}");
+        assert!(preview.contains("\"message\":\"hi\""), "{preview}");
+
         drop(registry);
         drop(hub);
         server_task.abort();

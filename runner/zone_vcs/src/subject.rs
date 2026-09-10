@@ -105,8 +105,13 @@ impl Subject {
     ///
     /// A classifier answers in the format it was asked for or it does not
     /// answer: a line this cannot read is one the caller falls back from,
-    /// rather than one it prefixes a guessed kind onto.
+    /// rather than one it prefixes a guessed kind onto. A reply that runs on
+    /// past one line is a reply that ignored the format, and the explanation
+    /// trailing it would otherwise be folded into the subject.
     pub fn parse(line: &str) -> Option<Self> {
+        let mut lines = line.trim().lines();
+        let line = lines.next()?;
+        lines.next().is_none().then_some(())?;
         let (kind, summary) = line.trim().trim_start_matches('(').split_once("):")?;
         let kind = Kind::parse(kind)?;
         let summary = normalize(summary);
@@ -150,6 +155,26 @@ fn normalize(summary: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A classifier that explains itself did not answer in the format it was
+    /// asked for. Folding the explanation into the summary named the change
+    /// after the model's aside; falling back names it after the task.
+    #[test]
+    fn a_reply_that_runs_past_one_line_is_not_a_subject() {
+        assert_eq!(
+            Subject::parse("(fix): validate input\nExplanation: ..."),
+            None
+        );
+        assert_eq!(
+            Subject::parse("Here is the subject:\n(fix): validate input"),
+            None
+        );
+        assert_eq!(
+            Subject::parse("  (fix): validate input  \n\n"),
+            Some(Subject::new(Kind::Fix, "validate input")),
+            "trailing blank lines are not a second line"
+        );
+    }
 
     #[test]
     fn a_subject_renders_in_the_format_this_history_uses() {
