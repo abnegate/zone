@@ -92,6 +92,23 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
+      # Without bubblewrap the confinement probe reports the backend unusable
+      # and every test that asks the real sandbox to refuse something returns
+      # early, reporting ok. The bubblewrap backend has never executed in CI.
+      - name: Install bubblewrap
+        run: sudo apt-get install -y --no-install-recommends bubblewrap
+
+      # Ubuntu 24.04 confines unprivileged user namespaces with AppArmor, which
+      # bubblewrap needs. Lift it if the knob is present, then prove the backend
+      # works -- a job that cannot sandbox should say so, not skip quietly.
+      - name: Assert the confinement backend is usable
+        run: |
+          bwrap --version
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-all --ro-bind / / --die-with-parent true
+
       - name: Install sqlx-cli
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
