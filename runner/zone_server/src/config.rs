@@ -280,11 +280,20 @@ fn is_port(value: &str) -> bool {
 }
 
 /// Equal to the allowed host, or a subdomain of it on a label boundary.
+/// Whether a host is the allowed host or a subdomain of it.
+///
+/// The prefix has to be whole labels, not merely something ending in a dot:
+/// `.zone.example.com` strips to a bare `"."`, which satisfies "ends with a
+/// dot" while naming an empty label.
 fn within(host: &str, allowed: &str) -> bool {
-    host == allowed
-        || host
-            .strip_suffix(allowed)
-            .is_some_and(|prefix| prefix.ends_with('.'))
+    if host == allowed {
+        return true;
+    }
+    host.strip_suffix(allowed)
+        .and_then(|prefix| prefix.strip_suffix('.'))
+        .is_some_and(|labels| {
+            !labels.is_empty() && labels.split('.').all(|label| !label.is_empty())
+        })
 }
 
 fn env_truthy(name: &str, default: bool) -> bool {
@@ -751,6 +760,28 @@ mod tests {
             ),
             "a scheme-less origin would produce relative request URLs"
         );
+    }
+
+    #[test]
+    fn a_subdomain_prefix_must_be_whole_labels() {
+        let origins = allowed(&["https://zone.example.com"]);
+        for origin in [
+            "https://.zone.example.com",
+            "https://a..zone.example.com",
+            "https://..zone.example.com",
+        ] {
+            assert!(
+                !origins.allows(origin),
+                "{origin} names an empty label and must be rejected"
+            );
+        }
+        for origin in [
+            "https://zone.example.com",
+            "https://manager.zone.example.com",
+            "https://a.b.zone.example.com",
+        ] {
+            assert!(origins.allows(origin), "{origin} must still be allowed");
+        }
     }
 
     #[test]
