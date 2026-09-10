@@ -373,6 +373,11 @@ fn host_of(authority: &str) -> &str {
     }
 }
 
+/// Schemes a repository address may carry.
+///
+/// The scp-like `git@host:owner/repo` has none and is read on its own terms.
+const SCHEMES: [&str; 2] = ["https", "ssh"];
+
 fn named(segment: &str) -> bool {
     !segment.is_empty()
         && segment != "."
@@ -424,13 +429,23 @@ impl PrService {
     /// - `https://host/owner/repo`, with or without `.git`
     /// - `git@host:owner/repo.git`
     /// - `ssh://git@host/owner/repo.git`
+    ///
+    /// A scheme outside [`SCHEMES`] is refused rather than discarded: reading
+    /// the owner and repo out of an `ftp://` or `http://` address treats it as
+    /// a repository this service publishes to, which is not what it is.
     pub fn parse_github_url(&self, url: &str) -> PrResult<(String, String)> {
         let invalid = || PrError::InvalidRepoUrl(url.to_string());
         let url = url.trim();
 
         // `git@host:owner/repo` is not a URL, so it is split on the colon
         // rather than parsed. The scp-like form has no scheme to strip.
-        let (authority, path) = if let Some((_, rest)) = url.split_once("://") {
+        let (authority, path) = if let Some((scheme, rest)) = url.split_once("://") {
+            if !SCHEMES
+                .iter()
+                .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+            {
+                return Err(invalid());
+            }
             rest.split_once('/').ok_or_else(invalid)?
         } else if let Some((authority, path)) = url.split_once(':') {
             (authority, path)
