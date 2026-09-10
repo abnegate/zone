@@ -552,6 +552,10 @@ mod shapes_that_carry_no_prefix {
 mod tests {
     use super::*;
 
+    /// Each sample sits in prose rather than an assignment. `export TOKEN=<value>`
+    /// is redacted by the key word alone, whatever the value looks like, so the
+    /// whole prefix table could be emptied with the assertion still holding --
+    /// seven of these families were in fact removable with the suite green.
     #[test]
     fn redacts_every_known_credential_family() {
         let samples = [
@@ -575,10 +579,10 @@ mod tests {
         ];
 
         for sample in samples {
-            let text = format!("export TOKEN={sample}\n");
+            let text = format!("the agent echoed {sample} back into its own output");
             assert_eq!(
                 redact(&text),
-                format!("export TOKEN={REDACTED}\n"),
+                format!("the agent echoed {REDACTED} back into its own output"),
                 "leaked {sample}"
             );
         }
