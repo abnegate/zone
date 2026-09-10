@@ -10,6 +10,20 @@ use tool_runner::Proxy;
 
 use super::{Tool, ToolContext, ToolError, ToolResult};
 
+/// Programs [`RunCommandTool`] may spawn, resolved on the child's `PATH`.
+///
+/// Matched against the whole `command`, never its last path segment: an agent
+/// may write a file into `cwd`, so a basename match would admit `./cargo` and
+/// then run whatever that file is.
+const ALLOWED_COMMANDS: &[&str] = &[
+    "cargo", "rustc", "npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "make", "cmake",
+    "gradle", "mvn", "maven", "go", "python", "python3", "pip", "pip3", "poetry", "uv", "ruby",
+    "gem", "bundle", "rake", "dotnet", "msbuild", "git", "gh", "hub", "ls", "cat", "head", "tail",
+    "grep", "find", "wc", "sort", "uniq", "diff", "tree", "file", "stat", "pwd", "which",
+    "whereis", "pytest", "jest", "mocha", "rspec", "phpunit", "echo", "printf", "date", "env",
+    "true", "false", "test", "curl", "wget", "jq", "yq", "docker",
+];
+
 /// Run a shell command
 pub struct RunCommandTool;
 
@@ -92,35 +106,9 @@ impl Tool for RunCommandTool {
         let params: RunCommandParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
 
-        // Security: Use allowlist approach instead of blocklist
-        // Only allow known safe development commands
-        let allowed_commands = [
-            // Build tools
-            "cargo", "rustc", "npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "make", "cmake",
-            "gradle", "mvn", "maven", "go", "python", "python3", "pip", "pip3", "poetry", "uv",
-            "ruby", "gem", "bundle", "rake", "dotnet", "msbuild", // Version control
-            "git", "gh", "hub", // File utilities (read-only or safe)
-            "ls", "cat", "head", "tail", "grep", "find", "wc", "sort", "uniq", "diff", "tree",
-            "file", "stat", "pwd", "which", "whereis", // Testing
-            "pytest", "jest", "mocha", "rspec", "phpunit", // Other safe utilities
-            "echo", "printf", "date", "env", "true", "false", "test", "curl", "wget", "jq", "yq",
-            // Docker (read operations)
-            "docker",
-        ];
-
-        // Extract base command name (handle both `/path/to/cmd` and `cmd`)
-        let base_cmd = params
-            .command
-            .split('/')
-            .next_back()
-            .unwrap_or(&params.command)
-            .split('\\')
-            .next_back()
-            .unwrap_or(&params.command);
-
-        if !allowed_commands.contains(&base_cmd) {
+        if !ALLOWED_COMMANDS.contains(&params.command.as_str()) {
             return Err(ToolError::Execution(format!(
-                "Command '{}' is not in the allowed list. Allowed commands: cargo, npm, git, python, etc.",
+                "Command '{}' is not in the allowed list. Name a program, not a path: cargo, npm, git, python, etc.",
                 params.command
             )));
         }
@@ -537,6 +525,52 @@ mod tests {
 
         // Should fail because command doesn't exist
         assert!(result.is_err());
+    }
+
+    /// The allowlist was matched against the last path segment while the whole
+    /// string was executed, so a file the agent had just written into `cwd` and
+    /// named `cargo` satisfied the list and then ran.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_allowed_name_on_a_path_is_not_an_allowed_program() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const MARKER: &str = "arbitrary-execution-marker";
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let impostor = directory.path().join("cargo");
+        std::fs::write(&impostor, format!("#!/bin/sh\necho {MARKER}\n")).unwrap();
+        std::fs::set_permissions(&impostor, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let context = ToolContext {
+            cwd: directory.path().canonicalize().unwrap(),
+            env: HashMap::from([(
+                "PATH".to_string(),
+                std::env::var("PATH").unwrap_or_default(),
+            )]),
+            ..ToolContext::default()
+        };
+
+        for command in [
+            "./cargo".to_string(),
+            "cargo/../cargo".to_string(),
+            impostor.to_string_lossy().into_owned(),
+        ] {
+            let error = RunCommandTool
+                .execute(
+                    serde_json::json!({"command": command, "args": []}),
+                    &context,
+                )
+                .await
+                .expect_err("a path must not satisfy the allowlist");
+            assert!(
+                error.to_string().contains("not in the allowed list"),
+                "{command}: {error}"
+            );
+            assert!(
+                !error.to_string().contains(MARKER),
+                "{command} ran: {error}"
+            );
+        }
     }
 
     #[tokio::test]
