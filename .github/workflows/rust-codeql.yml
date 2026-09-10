@@ -39,17 +39,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            runner/target
-          key: ${{ runner.os }}-cargo-codeql-${{ hashFiles('runner/**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-codeql-
-            ${{ runner.os }}-cargo-
+          workspaces: runner
+          shared-key: codeql
+          cache-on-failure: true
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
