@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{AuthUser, OrgAdmin, OrgMember, OrgOwner, WorkspaceAdmin, WorkspaceMember};
-use crate::db::workspace_members::WorkspaceRole;
-use crate::db::{organization_members, organizations, workspace_members, workspaces};
+use crate::db::{organization_members, organizations, workspaces};
 use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
@@ -347,13 +346,13 @@ pub async fn create_workspace(
     admin: OrgAdmin,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> impl IntoResponse {
-    // Create the workspace
-    let ws = match workspaces::create_workspace(
+    let ws = match workspaces::create_workspace_with_owner(
         state.db(),
         admin.org_id,
         &req.name,
         &req.slug,
         req.description.as_deref(),
+        admin.user_id,
     )
     .await
     {
@@ -367,15 +366,6 @@ pub async fn create_workspace(
                 .into_response();
         }
     };
-
-    // Add the creator as a workspace admin
-    if let Err(e) =
-        workspace_members::add_member(state.db(), ws.id, admin.user_id, WorkspaceRole::Owner, None)
-            .await
-    {
-        tracing::error!("Failed to add creator as workspace member: {}", e);
-        // Still return success since workspace was created - the user can add themselves later
-    }
 
     (
         StatusCode::CREATED,
@@ -754,35 +744,17 @@ pub async fn update_member_role(
             .into_response();
     }
 
-    if target.role == organization_members::OrgRole::Owner
-        && role != organization_members::OrgRole::Owner
-    {
-        match organization_members::count_owners(state.db(), admin.org_id).await {
-            Ok(count) if count <= 1 => {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(ErrorResponse::new(
-                        "Cannot demote the last owner of the organization",
-                    )),
-                )
-                    .into_response();
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::error!("Database error counting owners: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
+    match organization_members::change_role(state.db(), admin.org_id, path.user_id, role).await {
+        Ok(organization_members::RoleChange::Applied(member)) => {
+            Json(OrganizationMemberResponse::from(*member)).into_response()
         }
-    }
-
-    match organization_members::update_member_role(state.db(), admin.org_id, path.user_id, role)
-        .await
-    {
-        Ok(member) => Json(OrganizationMemberResponse::from(member)).into_response(),
+        Ok(organization_members::RoleChange::LastOwner) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Cannot demote the last owner of the organization",
+            )),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
