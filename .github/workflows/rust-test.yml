@@ -13,6 +13,10 @@ on:
       - 'scripts/patch-tauri-android.sh'
       - '.github/workflows/rust-test.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   # Default local-embeddings links ONNX into every test binary; debug symbols
@@ -22,7 +26,7 @@ env:
 
 jobs:
   test:
-    name: Test Suite
+    name: Test Suite (${{ matrix.os }}, ${{ matrix.rust }}, ${{ matrix.partition }}/2)
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -33,6 +37,7 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         rust: [stable, beta]
+        partition: [1, 2]
 
     services:
       postgres:
@@ -60,12 +65,6 @@ jobs:
           - 6379:6379
 
     steps:
-      - name: Free disk space
-        working-directory: ${{ github.workspace }}
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
-          df -h
-
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -74,29 +73,26 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Install mold linker
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            runner/target
-          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-test-${{ hashFiles('runner/**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.rust }}-cargo-test-
-            ${{ runner.os }}-${{ matrix.rust }}-cargo-
-            ${{ runner.os }}-cargo-
+          workspaces: runner
+          shared-key: test-${{ matrix.rust }}
+          cache-on-failure: true
 
       # zone_comfy turns a submitted clip into training frames through ffmpeg.
       # Without it that path's end-to-end test skips itself.
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
-      - name: Install sqlx-cli
+      - name: Install sqlx-cli and cargo-nextest
         if: runner.os == 'Linux'
-        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2.87.9
         with:
-          tool: sqlx-cli@0.9.0
+          tool: sqlx-cli@0.9.0,cargo-nextest@0.9.143
 
       - name: Run database migrations
         if: runner.os == 'Linux'
@@ -108,22 +104,8 @@ jobs:
       - name: Build
         run: cargo build --workspace --exclude zone_desktop --all-targets --no-default-features --features zone_context/test-utils
 
-      - name: Run unit tests
-        run: cargo test --workspace --exclude zone_desktop --lib --no-default-features --features zone_context/test-utils
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
-          REDIS_URL: redis://localhost:6379
-
-      - name: Run server binary unit tests
-        run: cargo test -p zone_server --bin zone-server --no-default-features --features zone_context/test-utils
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
-          REDIS_URL: redis://localhost:6379
-
-      - name: Run integration tests
-        run: cargo test --workspace --exclude zone_desktop --test '*' --no-default-features --features zone_context/test-utils
+      - name: Run tests
+        run: cargo nextest run --workspace --exclude zone_desktop --all-targets --no-fail-fast --test-threads 8 --partition count:${{ matrix.partition }}/2 --no-default-features --features zone_context/test-utils
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
@@ -131,6 +113,7 @@ jobs:
           RUST_BACKTRACE: 1
 
       - name: Run doc tests
+        if: matrix.partition == 1
         run: cargo test --workspace --exclude zone_desktop --doc --no-default-features --features zone_context/test-utils
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
@@ -139,8 +122,12 @@ jobs:
 
   # Service containers are Linux-only, so macOS must be a separate job.
   test-macos:
-    name: Test Suite (macos-latest, stable)
+    name: Test Suite (macos-latest, stable, ${{ matrix.partition }}/2)
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2]
     env:
       DATABASE_URL: postgres://postgres@127.0.0.1:55432/zone_test
       TEST_DATABASE_URL: postgres://postgres@127.0.0.1:55432/zone_test
@@ -158,18 +145,12 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            runner/target
-          key: ${{ runner.os }}-stable-cargo-test-${{ hashFiles('runner/**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-stable-cargo-test-
-            ${{ runner.os }}-stable-cargo-
-            ${{ runner.os }}-cargo-
+          workspaces: runner
+          shared-key: test-stable
+          cache-on-failure: true
 
       - name: Install database services
         run: |
@@ -196,10 +177,10 @@ jobs:
           done
           test "$(redis-cli -h 127.0.0.1 -p 56379 ping)" = PONG
 
-      - name: Install sqlx-cli
-        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+      - name: Install sqlx-cli and cargo-nextest
+        uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2.87.9
         with:
-          tool: sqlx-cli@0.9.0
+          tool: sqlx-cli@0.9.0,cargo-nextest@0.9.143
 
       - name: Run database migrations
         working-directory: runner/zone_server
@@ -208,18 +189,13 @@ jobs:
       - name: Build
         run: cargo build --workspace --exclude zone_desktop --all-targets --no-default-features --features zone_context/test-utils
 
-      - name: Run unit tests
-        run: cargo test --workspace --exclude zone_desktop --lib --no-default-features --features zone_context/test-utils
-
-      - name: Run server binary unit tests
-        run: cargo test -p zone_server --bin zone-server --no-default-features --features zone_context/test-utils
-
-      - name: Run integration tests
-        run: cargo test --workspace --exclude zone_desktop --test '*' --no-default-features --features zone_context/test-utils
+      - name: Run tests
+        run: cargo nextest run --workspace --exclude zone_desktop --all-targets --no-fail-fast --test-threads 8 --partition count:${{ matrix.partition }}/2 --no-default-features --features zone_context/test-utils
         env:
           RUST_BACKTRACE: 1
 
       - name: Run doc tests
+        if: matrix.partition == 1
         run: cargo test --workspace --exclude zone_desktop --doc --no-default-features --features zone_context/test-utils
 
       - name: Stop database services
@@ -247,17 +223,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
 
-      - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            runner/target
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('runner/**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-msrv-
-            ${{ runner.os }}-cargo-
+          workspaces: runner
+          shared-key: msrv
+          cache-on-failure: true
 
       - name: Check MSRV
         run: cargo check --workspace --exclude zone_desktop --all-targets --no-default-features --features zone_context/test-utils

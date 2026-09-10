@@ -84,10 +84,10 @@ export default defineConfig({
   testMatch: '**/*.e2e.ts',
   timeout: 60000, // 60s per test
   expect: { timeout: 10000 }, // 10s for assertions
-  fullyParallel: !collectCoverage, // Run sequentially when collecting coverage
+  fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI && !collectCoverage ? 3 : 0,
-  workers: workerOverride ?? (collectCoverage ? 1 : localWorkers),
+  retries: process.env.CI ? 3 : 0,
+  workers: workerOverride ?? localWorkers,
   reporter: collectCoverage ? coverageReporter : defaultReporters,
   use: {
     baseURL,

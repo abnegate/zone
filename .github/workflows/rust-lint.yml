@@ -32,17 +32,12 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            runner/target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('runner/**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-clippy-
-            ${{ runner.os }}-cargo-
+          workspaces: runner
+          shared-key: clippy
+          cache-on-failure: true
 
       - name: Run Clippy
         run: cargo clippy --workspace --exclude zone_desktop --all-targets --all-features -- -D warnings
