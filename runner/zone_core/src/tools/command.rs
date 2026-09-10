@@ -154,7 +154,7 @@ impl Tool for RunCommandTool {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        // Set environment
+        cmd.env_clear();
         for (key, value) in &context.env {
             cmd.env(key, value);
         }
@@ -363,6 +363,56 @@ mod tests {
             max_file_size: 1024 * 1024,
             command_timeout: 30,
             unrestricted: false,
+        }
+    }
+
+    /// Both shelling tools hand the child only what the context names.
+    ///
+    /// The context environment *is* the allowlist a caller builds: the server
+    /// narrows it to a fixed set of names precisely because its own process
+    /// holds the database URL, the JWT and encryption keys and the provider
+    /// keys. A child that inherited the parent's environment would print all
+    /// of it into tool output, so `env_clear` is what makes the caller's
+    /// allowlist an allowlist.
+    #[tokio::test]
+    async fn shelling_tools_give_the_child_only_the_context_environment() {
+        const MARKER: &str = "ZONE_COMMAND_ENVIRONMENT_MARKER";
+        unsafe { std::env::set_var(MARKER, "must-not-reach-a-child") };
+
+        let mut context = create_test_context();
+        context.env = HashMap::from([(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        )]);
+
+        let command = RunCommandTool
+            .execute(json!({"command": "env"}), &context)
+            .await
+            .unwrap();
+        let shell = RunShellTool
+            .execute(json!({"command": "env"}), &context)
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var(MARKER) };
+
+        for result in [command, shell] {
+            assert!(result.success, "{result:?}");
+            let output = result.output.unwrap();
+            assert!(output.contains("PATH="), "the tool did not run: {output}");
+            assert!(
+                !output.contains(MARKER),
+                "the process environment reached the child: {output}"
+            );
+            // `sh` computes these from the working directory it was given.
+            const SHELL_OWN: &[&str] = &["PWD", "SHLVL", "_"];
+            for (name, _) in output.lines().filter_map(|line| line.split_once('=')) {
+                assert!(
+                    context.env.contains_key(name)
+                        || name.to_ascii_uppercase().ends_with("_PROXY")
+                        || SHELL_OWN.contains(&name),
+                    "{name} is not on the context environment and must not have survived"
+                );
+            }
         }
     }
 
