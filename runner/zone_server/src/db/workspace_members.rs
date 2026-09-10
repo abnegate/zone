@@ -197,6 +197,61 @@ where
     Ok(id)
 }
 
+/// Outcome of a removal that must leave the workspace administrable.
+#[derive(Debug)]
+pub enum Removal {
+    Removed,
+    Missing,
+    LastAdmin,
+}
+
+/// Remove a member, refusing to unseat the last admin or owner.
+///
+/// The plain [`remove_member`] is the unguarded one, for callers that mean to
+/// strip access. This is the one a route wants: it counts and removes with the
+/// privileged rows locked, so two removals arriving together cannot each read
+/// a count that says one may go.
+pub async fn remove_guarded(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<Removal> {
+    let mut transaction = pool.begin().await?;
+
+    let privileged: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT user_id FROM workspace_members
+        WHERE workspace_id = $1
+          AND is_active = TRUE
+          AND (role = 'admin' OR role = 'owner')
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    if privileged.len() <= 1 && privileged.contains(&user_id) {
+        return Ok(Removal::LastAdmin);
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE workspace_members
+        SET is_active = FALSE, updated_at = NOW()
+        WHERE workspace_id = $1 AND user_id = $2 AND is_active = TRUE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    if result.rows_affected() > 0 {
+        Ok(Removal::Removed)
+    } else {
+        Ok(Removal::Missing)
+    }
+}
+
 /// Remove a user from a workspace (set inactive)
 pub async fn remove_member(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
     let result = sqlx::query(

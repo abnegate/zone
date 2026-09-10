@@ -808,35 +808,16 @@ pub async fn remove_member(
         }
     }
 
-    // CRITICAL-6: Prevent removal of last owner
-    if target_member.role == organization_members::OrgRole::Owner {
-        match organization_members::count_owners(state.db(), admin.org_id).await {
-            Ok(count) if count <= 1 => {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(ErrorResponse::new(
-                        "Cannot remove the last owner of the organization",
-                    )),
-                )
-                    .into_response();
-            }
-            Ok(_) => {
-                // More than one owner, proceed
-            }
-            Err(e) => {
-                tracing::error!("Database error counting owners: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    match organization_members::remove_member(state.db(), admin.org_id, path.user_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (
+    match organization_members::remove_guarded(state.db(), admin.org_id, path.user_id).await {
+        Ok(organization_members::Removal::Removed) => StatusCode::NO_CONTENT.into_response(),
+        Ok(organization_members::Removal::LastOwner) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Cannot remove the last owner of the organization",
+            )),
+        )
+            .into_response(),
+        Ok(organization_members::Removal::Missing) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Member not found")),
         )

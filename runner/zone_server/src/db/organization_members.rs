@@ -164,6 +164,64 @@ pub async fn remove_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) 
     Ok(result.rows_affected() > 0)
 }
 
+/// Outcome of a removal that must leave an owner seated.
+#[derive(Debug)]
+pub enum Removal {
+    Removed,
+    Missing,
+    LastOwner,
+}
+
+/// Remove a member, refusing to unseat the organization's last owner.
+///
+/// The plain [`remove_member`] is the unguarded one, for callers that mean to
+/// strip access. This is the one a route wants: it counts and removes with the
+/// owner rows locked, so two removals arriving together cannot each read a
+/// count that says one may go.
+pub async fn remove_guarded(
+    pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Removal> {
+    let mut transaction = pool.begin().await?;
+
+    let owners: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT user_id
+        FROM organization_members
+        WHERE organization_id = $1 AND role = 'owner' AND is_active = TRUE
+        FOR UPDATE
+        "#,
+    )
+    .bind(organization_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    if owners.len() <= 1 && owners.contains(&user_id) {
+        return Ok(Removal::LastOwner);
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE organization_members
+        SET is_active = FALSE, updated_at = NOW()
+        WHERE organization_id = $1 AND user_id = $2 AND is_active = TRUE
+        "#,
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    if result.rows_affected() > 0 {
+        Ok(Removal::Removed)
+    } else {
+        Ok(Removal::Missing)
+    }
+}
+
 /// Get a member by organization and user ID
 pub async fn get_member(
     pool: &PgPool,
