@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Citation } from '../types';
+import { citationAnchorId } from '../utils/citations';
 import { resolvesToCitation } from '../utils/links';
 import { AuthenticatedImage } from './AuthenticatedImage';
 
@@ -37,25 +38,12 @@ const MARKER = new RegExp(`\\[(${MARKER_KINDS.join('|')}):([0-9a-fA-F]{6,32})\\]
 
 const REFERENCE_CLASS = 'message-md-citation-ref';
 const UNRESOLVED_CLASS = 'message-md-citation-unresolved';
-const ANCHOR_PREFIX = 'citation-';
-
-/// Widened here until the shared `Citation` carries `identifier`; the field
-/// stays optional because citations stored before markers existed have none.
-type IdentifiedCitation = Citation & { identifier?: string | null };
-
-/// The id the citations aside puts on a chip, so a marker can link to it.
-export function citationAnchorId(identifier: string): string {
-  return `${ANCHOR_PREFIX}${identifier
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')}`;
-}
 
 /// Markers resolve by identifier, never by position: a citation list's order is
 /// not a contract, and a reordered list would silently re-point every marker.
-function identified(citations: readonly Citation[]): Map<string, IdentifiedCitation> {
-  const index = new Map<string, IdentifiedCitation>();
-  for (const citation of citations as readonly IdentifiedCitation[]) {
+function identified(citations: readonly Citation[]): Map<string, Citation> {
+  const index = new Map<string, Citation>();
+  for (const citation of citations) {
     const identifier = citation.identifier?.trim().toLowerCase();
     if (identifier && !index.has(identifier)) index.set(identifier, citation);
   }
@@ -79,7 +67,7 @@ function markerNode(
   raw: string,
   kind: string,
   digest: string,
-  index: Map<string, IdentifiedCitation>
+  index: Map<string, Citation>
 ): MarkdownNode {
   const key = digest.toLowerCase();
   const citation = index.get(`${kind}:${key}`) ?? index.get(key);

@@ -1,19 +1,13 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen } from '@testing-library/react';
 import type { Citation } from '../types';
-import {
-  citationAnchorId,
-  MessageContent,
-  UNRESOLVED_MARKER_NOTE,
-  UNSOURCED_LINK_NOTE,
-} from './MessageContent';
+import { citationAnchorId } from '../utils/citations';
+import { MessageContent, UNRESOLVED_MARKER_NOTE, UNSOURCED_LINK_NOTE } from './MessageContent';
 
 const CITED = 'https://github.com/owner/repository/pull/12';
 const INVENTED = 'https://example.com/does-not-exist';
 
-type IdentifiedCitation = Citation & { identifier?: string | null };
-
-const citation = (overrides: Partial<IdentifiedCitation> = {}): IdentifiedCitation => ({
+const citation = (overrides: Partial<Citation> = {}): Citation => ({
   kind: 'github_issue',
   title: 'owner/repository#12',
   url: CITED,
@@ -171,7 +165,7 @@ describe('MessageContent links', () => {
 const WEB_MARKER = '[web:a3f21c]';
 const KB_MARKER = '[kb:9F0011AA22]';
 
-const sourced = (identifier: string, title: string): IdentifiedCitation =>
+const sourced = (identifier: string, title: string): Citation =>
   citation({ identifier, title, kind: 'workspace_document', url: `${INVENTED}/${identifier}` });
 
 describe('MessageContent source markers', () => {

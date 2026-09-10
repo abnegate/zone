@@ -22,6 +22,18 @@ export function citationKindLabel(kind: Citation['kind']): string {
   return KIND_LABELS[kind] ?? kind;
 }
 
+const ANCHOR_PREFIX = 'citation-';
+
+/// The id the citations aside puts on a chip, and the target a source marker in
+/// the reply links to. Both sides derive it from the identifier alone, so a
+/// reordered citation list never re-points a marker.
+export function citationAnchorId(identifier: string): string {
+  return `${ANCHOR_PREFIX}${identifier
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')}`;
+}
+
 /// Passing only when the observation is complete, successful, and something
 /// other than the model saw it. The server's own `passing()` requires all
 /// three; dropping the third here would render a claim as proof in the one

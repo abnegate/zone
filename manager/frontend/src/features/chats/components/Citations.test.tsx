@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen } from '@testing-library/react';
 import type { Citation } from '../types';
+import { citationAnchorId } from '../utils/citations';
 import { Citations } from './Citations';
 
 const citation = (overrides: Partial<Citation> = {}): Citation => ({
@@ -16,6 +17,21 @@ const citation = (overrides: Partial<Citation> = {}): Citation => ({
 });
 
 describe('Citations', () => {
+  it('anchors an identified chip so a marker in the reply can link to it', () => {
+    render(
+      <Citations
+        citations={[
+          citation({ identifier: 'web:a3f21c', kind: 'web', url: 'https://example.test/a' }),
+          citation(),
+        ]}
+      />
+    );
+
+    const [identified, plain] = screen.getAllByTestId('citation');
+    expect(identified).toHaveAttribute('id', citationAnchorId('web:a3f21c'));
+    expect(plain).not.toHaveAttribute('id');
+  });
+
   it('renders nothing without sources', () => {
     const { container } = render(<Citations citations={[]} />);
     expect(container.firstChild).toBeNull();
