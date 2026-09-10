@@ -7,8 +7,11 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 use zone_core::tools::{
-    REASON_PARAM, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, reason_property,
+    REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, excerpt,
+    reason_property,
 };
+
+use super::PREVIEW_BODY_CHARS;
 
 #[derive(Clone, Copy)]
 enum Action {
@@ -137,16 +140,44 @@ impl Tool for WorkspaceAction {
         }
     }
 
-    fn mutating(&self) -> bool {
-        matches!(
-            self.action,
+    fn tier(&self) -> Tier {
+        match self.action {
+            // Both speak to somebody: one now, one on a schedule the user is
+            // not watching when it fires.
+            Action::SendMessage | Action::CreateReminder => Tier::Outward,
             Action::CreateTask
-                | Action::UpdateTask
-                | Action::SendMessage
-                | Action::CreateReminder
-                | Action::CancelReminder
-                | Action::StartTask
-        )
+            | Action::UpdateTask
+            | Action::CancelReminder
+            | Action::StartTask => Tier::Write,
+            Action::ListTasks
+            | Action::ListMembers
+            | Action::ListChats
+            | Action::ListReminders
+            | Action::GetTaskRun
+            | Action::TailTaskLog => Tier::Read,
+        }
+    }
+
+    fn preview(&self, params: &Value) -> Option<String> {
+        let content = excerpt(params["content"].as_str()?, PREVIEW_BODY_CHARS);
+        match self.action {
+            Action::SendMessage => {
+                let mentioned = params["mentions"].as_array().map_or(0, Vec::len);
+                let mentions = match mentioned {
+                    0 => String::new(),
+                    named => format!(", mentioning {named}"),
+                };
+                Some(format!(
+                    "Post to chat {}{mentions}: \"{content}\"",
+                    params["chat_id"].as_str().unwrap_or("unnamed")
+                ))
+            }
+            Action::CreateReminder => Some(format!(
+                "Message this chat at {}: \"{content}\"",
+                params["due_at"].as_str().unwrap_or("an unstated time")
+            )),
+            _ => None,
+        }
     }
     fn parameters_schema(&self) -> Value {
         let identifier = json!({"type":"string","format":"uuid"});

@@ -36,6 +36,14 @@ const TASK_TIMEOUT: Duration = Duration::from_secs(TASK_TIMEOUT_SECS);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a run's event stream may go quiet before the log says so.
+///
+/// The lease heartbeat proves the process is alive, which a wedged run is too.
+/// This is the other half: a run that has stopped producing events looks from
+/// outside exactly like one that is working, so the silence gets a line of its
+/// own. Any event resets it, because any event is the run still moving.
+const STALL_AFTER: Duration = Duration::from_secs(zone_core::tools::MAX_SLEEP_SECS);
+
 /// Matches the sampling temperature `session::build` gives an interactive chat.
 const TASK_TEMPERATURE: f32 = 0.7;
 
@@ -907,8 +915,14 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
             ) {
                 return;
             }
-            let publication =
-                create_pr_for_task(state, execution, &workspace_path, checkout.baseline()).await;
+            let publication = create_pr_for_task(
+                state,
+                execution,
+                &workspace_path,
+                checkout.baseline(),
+                &summary,
+            )
+            .await;
             obs.set_status(
                 complete_publication(
                     state,
@@ -1693,6 +1707,36 @@ pub(super) async fn complete_publication(
     status
 }
 
+/// Wait for the next event, announcing every [`STALL_AFTER`] of silence.
+///
+/// A run that has gone quiet looks exactly like one that is working: both
+/// produce nothing. The announcement is what tells them apart while the run is
+/// still going, rather than an hour later when the timeout ends it.
+///
+/// A failed announcement ends the wait rather than being swallowed. The only
+/// way to write that line is through the run's own log, so losing it means the
+/// lease is gone or the run's rows are unwritable, and there is nothing left
+/// to wait for.
+async fn next_or_stall<Announce, Announcing>(
+    events: &mut (impl futures::Stream<Item = AgentEvent> + Unpin),
+    mut announce: Announce,
+) -> Result<Option<AgentEvent>, String>
+where
+    Announce: FnMut(Duration) -> Announcing,
+    Announcing: Future<Output = Result<(), String>>,
+{
+    let mut silent = Duration::ZERO;
+    loop {
+        match tokio::time::timeout(STALL_AFTER, events.next()).await {
+            Ok(event) => return Ok(event),
+            Err(_) => {
+                silent += STALL_AFTER;
+                announce(silent).await?;
+            }
+        }
+    }
+}
+
 async fn run_task_loop(
     llm: LlmClient,
     model: String,
@@ -1715,7 +1759,21 @@ async fn run_task_loop(
         context,
         true
     ));
-    while let Some(event) = events.next().await {
+    while let Some(event) = next_or_stall(&mut events, |silent| async move {
+        let seconds = silent.as_secs();
+        callback
+            .log(
+                "acting",
+                SOURCE_AGENT,
+                LEVEL_WARNING,
+                &format!("Task run has produced nothing for {seconds}s"),
+                Some(serde_json::json!({ "silent_secs": seconds })),
+            )
+            .await
+            .map_err(|error| format!("Could not record a stalled run: {error}"))
+    })
+    .await?
+    {
         match event {
             AgentEvent::Chunk(text) => summary.push_str(&text),
             AgentEvent::ToolCallStarted {
@@ -2693,5 +2751,120 @@ mod retry_tests {
         assert_eq!(completed.attempts, 2);
         assert_eq!(permits.available_permits(), 0, "the loop took a permit");
         drop(held);
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// A run that is working announces nothing: the watchdog is there for the
+    /// silence, and firing on a busy run would bury the log it writes to.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_keeps_producing_events_is_never_announced_as_stalled() {
+        let announced = Arc::new(Mutex::new(Vec::new()));
+        let mut events = futures::stream::iter(vec![
+            AgentEvent::Chunk("one".into()),
+            AgentEvent::Chunk("two".into()),
+        ]);
+
+        for expected in ["one", "two"] {
+            let event = next_or_stall(&mut events, |silent| {
+                let announced = Arc::clone(&announced);
+                async move {
+                    announced.lock().unwrap().push(silent);
+                    Ok(())
+                }
+            })
+            .await
+            .expect("a run that is producing events never announces");
+
+            assert!(matches!(event, Some(AgentEvent::Chunk(text)) if text == expected));
+        }
+
+        assert!(announced.lock().unwrap().is_empty());
+    }
+
+    /// The stall is announced while the run is still going, and keeps being
+    /// announced: one line an hour before the timeout would be a line nobody
+    /// sees the end of.
+    #[tokio::test(start_paused = true)]
+    async fn silence_is_announced_every_interval_until_an_event_arrives() {
+        let announced = Arc::new(Mutex::new(Vec::new()));
+        let quiet = futures::stream::once(async {
+            tokio::time::sleep(STALL_AFTER * 3 + Duration::from_secs(1)).await;
+            AgentEvent::Chunk("finally".into())
+        });
+        let mut events = std::pin::pin!(quiet);
+
+        let event = next_or_stall(&mut events, |silent| {
+            let announced = Arc::clone(&announced);
+            async move {
+                announced.lock().unwrap().push(silent);
+                Ok(())
+            }
+        })
+        .await
+        .expect("announcing silence succeeds here");
+
+        assert!(matches!(event, Some(AgentEvent::Chunk(text)) if text == "finally"));
+        assert_eq!(
+            *announced.lock().unwrap(),
+            vec![STALL_AFTER, STALL_AFTER * 2, STALL_AFTER * 3],
+            "each interval of silence gets its own line, carrying how long it has been"
+        );
+    }
+
+    /// The watchdog wraps the stream, so a stream that has ended still ends the
+    /// loop rather than leaving it announcing silence forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_stream_ends_the_loop_instead_of_stalling_it() {
+        let announced = Arc::new(Mutex::new(Vec::new()));
+        let mut events = futures::stream::empty::<AgentEvent>();
+
+        let event = next_or_stall(&mut events, |silent| {
+            let announced = Arc::clone(&announced);
+            async move {
+                announced.lock().unwrap().push(silent);
+                Ok(())
+            }
+        })
+        .await
+        .expect("announcing silence succeeds here");
+
+        assert!(event.is_none());
+        assert!(announced.lock().unwrap().is_empty());
+    }
+
+    /// Writing the stall line is the run's only contact with its own rows. If
+    /// that write fails the lease is gone or the rows are unwritable, and
+    /// swallowing the error left the run waiting on a stream nobody would ever
+    /// read the result of.
+    #[tokio::test(start_paused = true)]
+    async fn a_stall_that_cannot_be_recorded_ends_the_run() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let quiet = futures::stream::once(async {
+            tokio::time::sleep(STALL_AFTER * 10).await;
+            AgentEvent::Chunk("never read".into())
+        });
+        let mut events = std::pin::pin!(quiet);
+
+        let error = next_or_stall(&mut events, |_| {
+            let attempts = Arc::clone(&attempts);
+            async move {
+                *attempts.lock().unwrap() += 1;
+                Err("task run lease lost".to_string())
+            }
+        })
+        .await
+        .expect_err("a run that cannot record its own stall does not keep waiting");
+
+        assert!(error.contains("task run lease lost"), "{error}");
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            1,
+            "the first failure ends it rather than being retried every interval"
+        );
     }
 }

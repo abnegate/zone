@@ -879,6 +879,93 @@ fn approve(gate: &ApprovalGate, id: &'static str) {
     });
 }
 
+/// The acceptance test for the action tiers: an approval has to describe the
+/// call it gates, from the call, and describe it before the call runs.
+///
+/// The stated reason and the arguments deliberately disagree. A reader
+/// deciding on the reason alone would allow an overwrite believing it was an
+/// append to something else, so the preview is read out of the arguments and is
+/// what settles the two. The file is read at the moment the decision is
+/// answered: what it holds then is what the preview was describing rather than
+/// reporting.
+#[tokio::test]
+async fn an_approval_previews_the_call_from_its_arguments_before_it_runs() {
+    const CLAIM: &str = "Append a note to the changelog the user dictated.";
+    let path = std::env::temp_dir().join(format!("zone-preview-{}.txt", Uuid::new_v4()));
+    std::fs::write(&path, "before").unwrap();
+
+    let gate = ApprovalGate::new();
+    let held = Arc::new(Mutex::new(None::<String>));
+    let observed = Arc::clone(&held);
+    let watched = path.clone();
+    let poll = gate.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            let before = std::fs::read_to_string(&watched).ok();
+            if poll.decide("previewed_write", true) {
+                *observed.lock().unwrap() = before;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    let write = json!({
+        "id": "previewed_write",
+        "name": "write_file",
+        "arguments": {"path": path, "content": "after", "reason": CLAIM},
+    });
+    let (events, _) = exercise_approved(
+        vec![(200, text(&write.to_string())), (200, text("Done."))],
+        vec![Message::user("Record that.")],
+        ApprovalPolicy::required(gate),
+    )
+    .await;
+    let written = std::fs::read_to_string(&path);
+    let _ = std::fs::remove_file(&path);
+
+    let (reason, preview) = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolApprovalRequired {
+                id,
+                reason,
+                preview,
+                ..
+            } if id == "previewed_write" => Some((reason.clone(), preview.clone())),
+            _ => None,
+        })
+        .expect("the write asked for approval");
+    let preview = preview.expect("a confirmed call is previewed for the reader deciding on it");
+
+    assert!(
+        preview.contains(&path.display().to_string()),
+        "the preview does not name the file the call replaces: {preview}"
+    );
+    assert!(
+        preview.contains("replacing whatever is there"),
+        "the preview does not say the write replaces what the file holds: {preview}"
+    );
+    assert_eq!(reason.as_deref(), Some(CLAIM));
+    assert!(
+        !preview.contains("changelog") && !preview.contains("Append"),
+        "the preview repeats the model's claim instead of reading the call: {preview}"
+    );
+
+    assert_eq!(
+        held.lock().unwrap().as_deref(),
+        Some("before"),
+        "the write had already happened by the time its approval was answered"
+    );
+    assert_eq!(
+        written.unwrap(),
+        "after",
+        "the previewed write is not the one that ran"
+    );
+    assert_eq!(answer(&events), "Done.");
+}
+
 /// The decision this PR rests on, first half: a stated reason has to survive
 /// the whole way to the two places a person reads it — the approval frame they
 /// decide on, and the record stored on the message that the console re-renders
@@ -938,6 +1025,7 @@ async fn a_stated_reason_reaches_the_approval_frame_and_the_stored_record() {
         duration_ms: 0,
         reasoning: None,
         reason: zone_server::agent::reason(&arguments),
+        preview: Some("Write 5 characters to the draft, replacing whatever is there.".to_string()),
     };
     assert_eq!(record.reason.as_deref(), Some(WHY));
     let stored = serde_json::to_value(&record).unwrap();

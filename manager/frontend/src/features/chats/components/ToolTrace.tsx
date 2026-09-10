@@ -1,5 +1,11 @@
 import { useState } from 'react';
-import { REASON_LABEL, REASON_MISSING, REASONED_TOOLS, type ToolCallRecord } from '../types';
+import {
+  PREVIEW_LABEL,
+  REASON_LABEL,
+  REASON_MISSING,
+  REASONED_TOOLS,
+  type ToolCallRecord,
+} from '../types';
 import { Reasoning } from './Reasoning';
 
 /// Tool names are written for the model, so the trace gives the reader a plain
@@ -72,6 +78,22 @@ function StatedReason({ call }: { call: ToolCallRecord }) {
   );
 }
 
+/// The server's account of the call, read from the arguments the model wrote
+/// rather than from what it said about them. Absent means the server rendered
+/// none, which is nothing to announce: an unclaimed fact, unlike an unanswered
+/// obligation, leaves no gap for a reader to notice.
+function ObservedPreview({ call }: { call: ToolCallRecord }) {
+  const observed = call.preview?.trim();
+  if (!observed) return null;
+
+  return (
+    <p className="tool-call-preview" data-testid="tool-call-preview">
+      <span className="tool-call-preview-label">{PREVIEW_LABEL}</span>
+      <span className="tool-call-preview-text">{observed}</span>
+    </p>
+  );
+}
+
 function ToolTraceRow({
   call,
   onDecide,
@@ -108,6 +130,7 @@ function ToolTraceRow({
           <span className="tool-call-duration">{formatDuration(call.duration_ms)}</span>
         )}
       </button>
+      <ObservedPreview call={call} />
       <StatedReason call={call} />
       {call.approval === 'pending' && onDecide && (
         <div className="tool-call-approval">

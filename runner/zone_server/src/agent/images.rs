@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
 use crate::config::ComfyUiConfig;
@@ -56,8 +56,8 @@ impl Tool for GenerateImageTool {
         })
     }
 
-    fn mutating(&self) -> bool {
-        true
+    fn tier(&self) -> Tier {
+        Tier::Write
     }
 
     fn timeout(&self, _: &ToolContext) -> Duration {
@@ -110,8 +110,8 @@ impl Tool for EditImageTool {
         })
     }
 
-    fn mutating(&self) -> bool {
-        true
+    fn tier(&self) -> Tier {
+        Tier::Write
     }
 
     fn timeout(&self, _: &ToolContext) -> Duration {
@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(generate.name(), "generate_image");
         assert!(generate.description().contains("ComfyUI"));
         assert_eq!(generate.parameters_schema()["required"], json!(["prompt"]));
-        assert!(generate.mutating());
+        assert!(generate.tier().mutating());
         assert_eq!(generate.timeout(&context), Duration::from_secs(330));
         assert_eq!(edit.name(), "edit_image");
         assert!(edit.description().contains("existing image"));
@@ -349,7 +349,7 @@ mod tests {
             edit.parameters_schema()["properties"]["image_url"]["type"],
             "string"
         );
-        assert!(edit.mutating());
+        assert!(edit.tier().mutating());
         assert_eq!(edit.timeout(&context), Duration::from_secs(330));
     }
 

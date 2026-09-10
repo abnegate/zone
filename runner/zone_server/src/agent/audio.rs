@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::tools::{WorkspaceScope, string_arg};
 use crate::config::ComfyUiConfig;
@@ -51,8 +51,8 @@ impl Tool for GenerateAudioTool {
         })
     }
 
-    fn mutating(&self) -> bool {
-        true
+    fn tier(&self) -> Tier {
+        Tier::Write
     }
 
     fn timeout(&self, _: &ToolContext) -> Duration {
@@ -187,7 +187,7 @@ mod tests {
     async fn generate_audio_takes_a_required_prompt() {
         let tool = GenerateAudioTool(scope(true));
         assert_eq!(tool.name(), "generate_audio");
-        assert!(tool.mutating());
+        assert!(tool.tier().mutating());
 
         let schema = tool.parameters_schema();
         assert_eq!(schema["type"], "object");
