@@ -8,6 +8,17 @@ export const MessageAttachmentSchema = z.object({
   url: z.string(),
 });
 
+/**
+ * The model's stated reason for a side-effecting call.
+ *
+ * Optional, because every record stored before the field existed has to keep
+ * parsing, and these objects are not passthrough: a required field here would
+ * make older entries non-conforming, and `tolerantArray` drops those, silently
+ * deleting the history it exists to protect. Unreadable values fall back to
+ * absent for the same reason — a bad reason costs the reason, never the row.
+ */
+const statedReason = z.string().optional().catch(undefined);
+
 export const ToolCallRecordSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -16,6 +27,7 @@ export const ToolCallRecordSchema = z.object({
   detail: z.string(),
   duration_ms: z.number(),
   reasoning: z.string().optional(),
+  reason: statedReason,
 });
 
 /**
@@ -76,6 +88,7 @@ export const ActionReceiptSchema = z.object({
   success: z.boolean(),
   outcome: z.string(),
   href: z.string(),
+  reason: statedReason,
 });
 
 export const MessageMetadataSchema = z

@@ -36,6 +36,22 @@ pub use runner::{
 pub use tools::{ChatTools, ToolProfile, WorkspaceScope};
 
 use serde::{Deserialize, Serialize};
+use zone_core::tools::REASON_PARAM;
+
+/// The model's stated reason for a call, read out of the call's own arguments.
+///
+/// This is the model's prose, not an observation, so every consumer of it has
+/// to present it as a claim. Absent, blank, or non-string reasons all read as
+/// no reason at all, which the console says out loud rather than leaving blank.
+pub fn reason(arguments: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(arguments.trim())
+        .ok()?
+        .get(REASON_PARAM)?
+        .as_str()
+        .map(str::trim)
+        .filter(|stated| !stated.is_empty())
+        .map(str::to_string)
+}
 
 /// A completed tool call, as streamed to the client and stored on the message.
 ///
@@ -53,6 +69,10 @@ pub struct ToolCallRecord {
     /// Model thinking that immediately preceded this call, shown in the trace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Why the model said it was making this call, for side-effecting tools.
+    /// Model-authored: the console labels it as stated, never as observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[cfg(test)]
@@ -69,15 +89,67 @@ mod tests {
             detail: "3 passages".to_string(),
             duration_ms: 42,
             reasoning: Some("Search workspace docs first.".into()),
+            reason: Some("The user asked what changed in the deploy.".into()),
         };
 
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["name"], "search_knowledge");
         assert_eq!(json["success"], true);
         assert_eq!(json["reasoning"], "Search workspace docs first.");
+        assert_eq!(json["reason"], "The user asked what changed in the deploy.");
 
         let parsed: ToolCallRecord = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, record);
+    }
+
+    #[test]
+    fn tool_call_record_stored_without_a_reason_still_parses() {
+        let stored = serde_json::json!({
+            "id": "call_1",
+            "name": "run_shell",
+            "arguments": r#"{"command":"ls"}"#,
+            "success": true,
+            "detail": "ok",
+            "duration_ms": 7
+        });
+
+        let parsed: ToolCallRecord = serde_json::from_value(stored).unwrap();
+        assert_eq!(parsed.reason, None);
+        assert_eq!(parsed.reasoning, None);
+        assert!(
+            serde_json::to_value(&parsed)
+                .unwrap()
+                .get("reason")
+                .is_none(),
+            "an absent reason must not be written back as null"
+        );
+    }
+
+    #[test]
+    fn a_stated_reason_is_read_from_the_call_arguments() {
+        assert_eq!(
+            reason(r#"{"command":"ls","reason":"List the checkout before patching."}"#),
+            Some("List the checkout before patching.".to_string())
+        );
+        assert_eq!(
+            reason(r#"  {"reason":"  Trimmed to the model's own words.  "}  "#),
+            Some("Trimmed to the model's own words.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_missing_blank_or_unusable_reason_reads_as_none() {
+        for arguments in [
+            r#"{"command":"ls"}"#,
+            r#"{"reason":""}"#,
+            r#"{"reason":"   "}"#,
+            r#"{"reason":42}"#,
+            r#"{"reason":null}"#,
+            "not json at all",
+            "",
+        ] {
+            assert_eq!(reason(arguments), None, "{arguments}");
+        }
     }
 
     #[test]
@@ -94,12 +166,14 @@ mod tests {
             success: true,
             outcome: "Task created".to_string(),
             href: "/tasks?id=task-1".to_string(),
+            reason: Some("The user asked me to track the export.".into()),
         };
 
         let json = serde_json::to_value(&receipt).unwrap();
         assert_eq!(json["action"], "create_task");
         assert_eq!(json["target_type"], "task");
         assert_eq!(json["href"], "/tasks?id=task-1");
+        assert_eq!(json["reason"], "The user asked me to track the export.");
 
         let parsed: ActionReceipt = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, receipt);

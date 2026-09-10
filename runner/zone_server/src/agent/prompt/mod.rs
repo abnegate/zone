@@ -526,6 +526,40 @@ mod tests {
         );
     }
 
+    /// `reason` is in seven schemas' `required` arrays and nothing validates
+    /// that array at dispatch, so this sentence is the whole lever. It is worth
+    /// its bytes exactly once: `files` states it on both surfaces, and the
+    /// sections holding the outward-writing tools are the obvious place for the
+    /// next author to say it again. Counting is what stops that.
+    #[test]
+    fn the_rule_asking_why_a_changing_call_is_needed_is_stated_once_and_only_by_files() {
+        let chat_prompt = chat(&chat_tools(), false, &environment());
+        let task_prompt = task(&task_tools(), &environment());
+        let plain_prompt = plain(&environment());
+
+        for prompt in [&chat_prompt, &task_prompt] {
+            assert_eq!(
+                occurrences(prompt, "Give a reason on any call that changes something"),
+                1,
+                "{prompt}"
+            );
+            assert_eq!(
+                occurrences(prompt, "bound a long log with max_output_chars"),
+                1,
+                "{prompt}"
+            );
+        }
+
+        assert_eq!(
+            occurrences(
+                &plain_prompt,
+                "Give a reason on any call that changes something"
+            ),
+            0,
+            "{plain_prompt}"
+        );
+    }
+
     #[test]
     fn every_prompt_stays_inside_its_budget() {
         let chat_prompt = chat(&chat_tools(), false, &environment());

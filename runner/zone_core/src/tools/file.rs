@@ -6,10 +6,10 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 
-use super::{Tool, ToolContext, ToolError, ToolResult};
+use super::{REASON_PARAM, Tool, ToolContext, ToolError, ToolResult, reason_property};
 
 // Prompt budget; matches `read_repository_file` paging in zone_server.
-const FILE_PAGE_CHARS: usize = 8_000;
+const FILE_PAGE_CHARS: usize = super::MAX_TOOL_OUTPUT_CHARS;
 const LIST_FILES_CAP: usize = 200;
 const SEARCH_MAX_RESULTS: usize = 100;
 
@@ -159,6 +159,8 @@ struct WriteFileParams {
     content: String,
     #[serde(default)]
     append: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[async_trait]
@@ -190,15 +192,22 @@ impl Tool for WriteFileTool {
                 "append": {
                     "type": "boolean",
                     "description": "If true, append to file instead of overwriting"
-                }
+                },
+                REASON_PARAM: reason_property()
             },
-            "required": ["path", "content"]
+            "required": ["path", "content", REASON_PARAM]
         })
     }
 
     async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let params: WriteFileParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+
+        tracing::debug!(
+            tool = self.name(),
+            reason = params.reason.as_deref().unwrap_or_default(),
+            "Running tool"
+        );
 
         // Security: Validate path doesn't contain traversal sequences BEFORE any operations
         // This prevents writing files outside the working directory
@@ -299,6 +308,8 @@ struct ApplyPatchParams {
     hunks: Vec<PatchHunk>,
     #[serde(default)]
     replace_all: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 impl ApplyPatchParams {
@@ -385,9 +396,10 @@ impl Tool for ApplyPatchTool {
                 "replace_all": {
                     "type": "boolean",
                     "description": "Replace every occurrence of each old_string (default false)"
-                }
+                },
+                REASON_PARAM: reason_property()
             },
-            "required": ["path"]
+            "required": ["path", REASON_PARAM]
         })
     }
 
@@ -395,6 +407,12 @@ impl Tool for ApplyPatchTool {
         let params: ApplyPatchParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
         let hunks = params.hunks()?;
+
+        tracing::debug!(
+            tool = self.name(),
+            reason = params.reason.as_deref().unwrap_or_default(),
+            "Running tool"
+        );
 
         let normalized_path = params.path.replace('\\', "/");
         if !context.unrestricted
@@ -1528,6 +1546,128 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.path().join("dup.txt")).unwrap(),
             "bar\nbar\nqux\n"
+        );
+    }
+
+    #[test]
+    fn write_file_params_read_the_reason() {
+        let params: WriteFileParams = serde_json::from_value(serde_json::json!({
+            "path": "src/main.rs",
+            "content": "fn main() {}\n",
+            "reason": "Create the binary entry point the crate is missing."
+        }))
+        .unwrap();
+
+        assert_eq!(
+            params.reason.as_deref(),
+            Some("Create the binary entry point the crate is missing.")
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_accepts_a_call_carrying_a_reason() {
+        let dir = tempdir().unwrap();
+        let context = create_test_context(dir.path());
+
+        let result = WriteFileTool
+            .execute(
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "content": "hello\n",
+                    "reason": "Record the note the user asked for."
+                }),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+            "hello\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_without_a_reason_still_writes() {
+        let dir = tempdir().unwrap();
+        let context = create_test_context(dir.path());
+
+        let result = WriteFileTool
+            .execute(
+                serde_json::json!({"path": "notes.txt", "content": "hello\n"}),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+            "hello\n"
+        );
+    }
+
+    #[test]
+    fn apply_patch_params_read_the_reason() {
+        let params: ApplyPatchParams = serde_json::from_value(serde_json::json!({
+            "path": "src/main.rs",
+            "old_string": "foo",
+            "new_string": "bar",
+            "reason": "Rename the helper the caller now expects."
+        }))
+        .unwrap();
+
+        assert_eq!(
+            params.reason.as_deref(),
+            Some("Rename the helper the caller now expects.")
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_accepts_a_call_carrying_a_reason() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "foo\n").unwrap();
+        let context = create_test_context(dir.path());
+
+        let result = ApplyPatchTool
+            .execute(
+                serde_json::json!({
+                    "path": "a.txt",
+                    "old_string": "foo",
+                    "new_string": "bar",
+                    "reason": "Rename the helper the caller now expects."
+                }),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "bar\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_without_a_reason_still_patches() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "foo\n").unwrap();
+        let context = create_test_context(dir.path());
+
+        let result = ApplyPatchTool
+            .execute(
+                serde_json::json!({"path": "a.txt", "old_string": "foo", "new_string": "bar"}),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "bar\n"
         );
     }
 

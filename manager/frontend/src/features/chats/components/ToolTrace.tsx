@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ToolCallRecord } from '../types';
+import { REASON_LABEL, REASON_MISSING, REASONED_TOOLS, type ToolCallRecord } from '../types';
 import { Reasoning } from './Reasoning';
 
 /// Tool names are written for the model, so the trace gives the reader a plain
@@ -56,6 +56,22 @@ function formatArguments(raw: string): string | null {
   }
 }
 
+/// Shown for every tool that owes a reason, and for any call that volunteered
+/// one, so a tool this client has not heard of still shows what it claimed.
+function StatedReason({ call }: { call: ToolCallRecord }) {
+  const stated = call.reason?.trim();
+  if (!stated && !REASONED_TOOLS.has(call.name)) return null;
+
+  return (
+    <p className="tool-call-reason" data-testid="tool-call-reason">
+      <span className="tool-call-reason-label">{REASON_LABEL}</span>
+      <span className={`tool-call-reason-text${stated ? '' : ' tool-call-reason-text--missing'}`}>
+        {stated || REASON_MISSING}
+      </span>
+    </p>
+  );
+}
+
 function ToolTraceRow({
   call,
   onDecide,
@@ -92,6 +108,7 @@ function ToolTraceRow({
           <span className="tool-call-duration">{formatDuration(call.duration_ms)}</span>
         )}
       </button>
+      <StatedReason call={call} />
       {call.approval === 'pending' && onDecide && (
         <div className="tool-call-approval">
           <button

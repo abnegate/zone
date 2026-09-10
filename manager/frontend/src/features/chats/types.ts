@@ -17,6 +17,11 @@ export interface ToolCallRecord {
   duration_ms: number;
   /** Model thinking that immediately preceded this call. */
   reasoning?: string;
+  /**
+   * Why the model said it was making this call. Side-effecting tools are asked
+   * for one. Model-authored prose, so it is shown as stated, never as observed.
+   */
+  reason?: string;
   /** Client-only: set while the tool is still running. Never sent by the server. */
   pending?: boolean;
   /** Client-only: mutating file/shell tools wait here for the user. */
@@ -52,6 +57,33 @@ export interface Citation {
   note?: string | null;
 }
 
+/// A stated reason is the model's own sentence, not something the server saw.
+/// Citations already draw that line between proof and claim; the same line has
+/// to hold here, because a reason is the only part of a receipt the model wrote.
+export const REASON_LABEL = 'Reason, stated by the model';
+
+/// Shown instead of a blank when a side-effecting call arrived without one.
+/// Silence must read as an absence the reader notices, not as nothing to say.
+export const REASON_MISSING = 'No reason given';
+
+/// Tools that change something outside the conversation and are therefore
+/// asked to say why. The trace row is where a reader sees that answer, whether
+/// the call is still waiting on them or already done, so an absent reason is
+/// called out here rather than passed over in silence.
+///
+/// A copy of the server's list, which is why `schemas.contract.test.ts` reads
+/// the Rust one and compares. An eighth reasoned tool added there and missed
+/// here shows nothing where the absence should have been.
+export const REASONED_TOOLS: ReadonlySet<string> = new Set([
+  'apply_patch',
+  'comment_on_issue',
+  'create_pull_request',
+  'run_command',
+  'run_shell',
+  'send_message',
+  'write_file',
+]);
+
 export type ActionTarget = 'task' | 'document' | 'message' | 'reminder';
 
 /// A workspace write the agent completed. Streamed live and stored on the
@@ -68,6 +100,11 @@ export interface ActionReceipt {
   success: boolean;
   outcome: string;
   href: string;
+  /**
+   * Why the model said it was making this write. The one model-authored field
+   * on an otherwise server-observed record, and absent on older receipts.
+   */
+  reason?: string;
 }
 
 export interface MessageMetadata {

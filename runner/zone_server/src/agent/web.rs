@@ -11,8 +11,8 @@ use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::tools::{WorkspaceScope, truncate};
 use crate::utils::url::validate_public_url;
-use zone_search::WebSearchConfig;
 use zone_search::client::{SearxngClient, format_search_context, sanitize_query};
+use zone_search::{TimeRange, WebSearchConfig};
 
 const MAX_FETCH_BYTES: usize = 1_048_576;
 const MAX_FETCH_CHARS: usize = 8_000;
@@ -51,6 +51,12 @@ impl Tool for WebSearchTool {
                 "query": {
                     "type": "string",
                     "description": "Search query. Keep it short; do not paste files."
+                },
+                TimeRange::PARAM: {
+                    "type": "string",
+                    "enum": TimeRange::ALL,
+                    "description": "Restrict results to this window when the sources you have \
+                                    are stale. Omit for no restriction."
                 }
             },
             "required": ["query"],
@@ -76,11 +82,24 @@ impl Tool for WebSearchTool {
                 "Search query was empty after sanitizing.",
             ));
         }
+        let range = match params.get(TimeRange::PARAM) {
+            None | Some(Value::Null) => None,
+            Some(value) => match serde_json::from_value::<TimeRange>(value.clone()) {
+                Ok(range) => Some(range),
+                Err(_) => {
+                    return Ok(ToolResult::error(format!(
+                        "Invalid '{}'. Use one of: {}.",
+                        TimeRange::PARAM,
+                        TimeRange::ALL.map(TimeRange::as_str).join(", ")
+                    )));
+                }
+            },
+        };
         let client = match SearxngClient::new(self.config.clone()) {
             Ok(client) => client,
             Err(error) => return Ok(ToolResult::error(error.to_string())),
         };
-        match client.search(&query).await {
+        match client.search(&query, range).await {
             Ok(hits) if hits.is_empty() => {
                 Ok(ToolResult::success("No web search results for that query."))
             }
@@ -257,6 +276,42 @@ fn collapse_whitespace(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The prompt tells the model to re-search "narrowed to a day, week or
+    /// month", and the schema closes over `additionalProperties`, so any value
+    /// the prompt names and the schema omits makes that instruction unusable.
+    #[test]
+    fn web_search_accepts_exactly_the_three_windows_the_prompt_names() {
+        let schema = WebSearchTool {
+            config: WebSearchConfig::default(),
+        }
+        .parameters_schema();
+
+        assert_eq!(
+            schema["properties"][TimeRange::PARAM]["enum"],
+            json!(["day", "week", "month"]),
+            "{schema}"
+        );
+        assert_eq!(schema["properties"][TimeRange::PARAM]["type"], "string");
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(
+            schema["required"],
+            json!(["query"]),
+            "the window is optional; an unnarrowed search stays a one-argument call"
+        );
+
+        let mut properties = schema["properties"]
+            .as_object()
+            .expect("properties")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        properties.sort();
+        assert_eq!(
+            properties,
+            vec!["query".to_string(), "time_range".to_string()]
+        );
+    }
 
     /// The boundary section tells the model that anything a tool returns is
     /// data; a page is the easiest of those to read as an instruction, so the

@@ -44,6 +44,7 @@ type ServerMessage =
       name: string;
       arguments: string;
       reasoning?: string;
+      reason?: string;
     }
   | {
       type: 'tool_approval_required';
@@ -51,6 +52,7 @@ type ServerMessage =
       tool_call_id: string;
       name: string;
       arguments: string;
+      reason?: string;
     }
   | {
       type: 'tool_result';
@@ -643,6 +645,7 @@ export function useChat(
             detail: 'Running…',
             pending: true,
             reasoning: preceding,
+            reason: payload.reason,
           });
           if (assistantId === payload.message_id) {
             upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
@@ -656,6 +659,7 @@ export function useChat(
             detail: 'Waiting for approval…',
             pending: true,
             approval: 'pending',
+            reason: payload.reason,
           });
           break;
         case 'tool_result':

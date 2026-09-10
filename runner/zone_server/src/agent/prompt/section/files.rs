@@ -9,7 +9,8 @@ const HOST: &str = "run_shell, run_command, read_file, write_file, apply_patch, 
              - Look before you change: read a file before rewriting it, and check what a \
              directory holds before writing into it.\n\
              - Prefer apply_patch for edits to existing files. Use write_file only to create a file or when the user asked for a full rewrite.\n\
-             - Keep each command narrow and inspectable, and prefer a dry run where one exists.\n\
+             - Keep each command narrow and inspectable, prefer a dry run where one exists, and \
+             bound a long log with max_output_chars.\n\
              - Do not delete, move or overwrite anything the user did not ask you to, and do not \
              touch anything outside what the request is about.\n\
              - Say what you changed on disk in your reply. The user sees the tool trace, but the \
@@ -23,7 +24,13 @@ const APPROVAL_REQUIRED: &str = "wait for the user to approve before they run.";
 const SANDBOX: &str = "read_file, write_file, apply_patch, list_files, search_code and run_command stay inside the \
              sandboxed working directory. Environment is allowlisted. There is no unrestricted shell.\n\
              - Prefer apply_patch for edits. Use write_file to create a file or when a full rewrite is required.\n\
-             - Keep each command narrow and inspectable.";
+             - Keep each command narrow and inspectable, and bound a long log with max_output_chars.";
+
+/// The one place either surface is taught the convention. The parameter is in
+/// every side-effecting schema's `required` array, but nothing validates that
+/// array at dispatch, so this sentence is what actually asks for it.
+const REASON: &str = "Give a reason on any call that changes something: one sentence on why, which the user \
+             reads when reviewing or approving it.";
 
 const READING: &str = "Read only the part of a file you need when you already know where it is, and do not read a \
              file back to check a write you just made: the tool result already said it applied. \
@@ -39,14 +46,16 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
         return None;
     }
     if context.tools.profile() != ToolProfile::Chat {
-        return Some(format!("{SANDBOX}\n- {READING}"));
+        return Some(format!("{SANDBOX}\n- {REASON}\n- {READING}"));
     }
     let approval = if context.auto_approve {
         AUTO_APPROVED
     } else {
         APPROVAL_REQUIRED
     };
-    Some(format!("{HOST}{approval}\n- {READING}\n- {GIT}"))
+    Some(format!(
+        "{HOST}{approval}\n- {REASON}\n- {READING}\n- {GIT}"
+    ))
 }
 
 #[cfg(test)]
@@ -150,6 +159,53 @@ mod tests {
                 "{rendered}"
             );
         }
+    }
+
+    /// The parameter is advertised as required and nothing enforces that, so
+    /// the only thing asking for it is this sentence. A sandboxed run's
+    /// run_command changes the checkout exactly as the host one changes disk,
+    /// so it is taught on both surfaces rather than only where a person waits.
+    #[test]
+    fn both_surfaces_are_asked_to_say_why_a_changing_call_is_needed() {
+        for rendered in [chat(false), chat(true), task()] {
+            assert!(
+                rendered.contains("Give a reason on any call that changes something"),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(
+                    "one sentence on why, which the user reads when reviewing or \
+                     approving it"
+                ),
+                "{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_surfaces_can_bound_a_long_command_log() {
+        for rendered in [chat(false), chat(true), task()] {
+            assert!(
+                rendered.contains("Keep each command narrow and inspectable"),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("bound a long log with max_output_chars"),
+                "{rendered}"
+            );
+        }
+    }
+
+    /// A dry run is a host affordance. The sandbox keeps the narrowness rule
+    /// and the new bound without inheriting the rest of the chat bullet.
+    #[test]
+    fn a_dry_run_is_only_suggested_where_an_unrestricted_shell_exists() {
+        assert!(
+            chat(false).contains("prefer a dry run where one exists"),
+            "{}",
+            chat(false)
+        );
+        assert!(!task().contains("dry run"), "{}", task());
     }
 
     #[test]

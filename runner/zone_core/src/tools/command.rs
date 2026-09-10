@@ -8,7 +8,10 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tool_runner::Proxy;
 
-use super::{Tool, ToolContext, ToolError, ToolResult};
+use super::{
+    MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tool, ToolContext, ToolError, ToolResult, reason_property,
+    trim_middle,
+};
 
 /// Run a shell command
 pub struct RunCommandTool;
@@ -22,25 +25,46 @@ struct RunCommandParams {
     cwd: Option<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    max_output_chars: Option<u64>,
 }
 
-/// Cap on returned output, so one noisy command cannot fill the context
-/// window. The middle is dropped rather than the tail, because the error a
-/// build is being run for is usually at the end.
-const MAX_SHELL_OUTPUT_CHARS: usize = 16_000;
+const MAX_OUTPUT_PARAM: &str = "max_output_chars";
 
-fn trim_middle(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= MAX_SHELL_OUTPUT_CHARS {
-        return text.to_string();
+/// Cap on returned output, so one noisy command cannot fill the context
+/// window. Spends the shared tool budget, which the transcript cap sits above,
+/// so what the tool keeps is what the model is given even once the exit-code
+/// line and the `Error: ` prefix are wrapped around it.
+const MAX_SHELL_OUTPUT_CHARS: usize = MAX_TOOL_OUTPUT_CHARS;
+
+/// Floor for a caller-supplied cap, below which neither end of the output
+/// holds enough to diagnose anything.
+const MIN_SHELL_OUTPUT_CHARS: usize = 500;
+
+/// Resolve `max_output_chars` against the built-in cap.
+///
+/// Reduce-only: a caller may spend fewer characters than the default, never
+/// more, so the constant stays the ceiling on what one call can cost.
+fn clamp_output_chars(requested: Option<u64>) -> usize {
+    match requested {
+        Some(chars) => {
+            chars.clamp(MIN_SHELL_OUTPUT_CHARS as u64, MAX_SHELL_OUTPUT_CHARS as u64) as usize
+        }
+        None => MAX_SHELL_OUTPUT_CHARS,
     }
-    let half = MAX_SHELL_OUTPUT_CHARS / 2;
-    let head: String = chars[..half].iter().collect();
-    let tail: String = chars[chars.len() - half..].iter().collect();
-    format!(
-        "{head}\n\n[… {} characters trimmed …]\n\n{tail}",
-        chars.len() - MAX_SHELL_OUTPUT_CHARS
-    )
+}
+
+fn max_output_property() -> Value {
+    json!({
+        "type": "integer",
+        "description": format!(
+            "Cap returned output at this many characters, keeping head and tail. Default \
+             {MAX_SHELL_OUTPUT_CHARS}; larger values clamp down, values under \
+             {MIN_SHELL_OUTPUT_CHARS} clamp up."
+        )
+    })
 }
 
 #[async_trait]
@@ -82,15 +106,23 @@ impl Tool for RunCommandTool {
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Timeout in seconds (default: 300)"
-                }
+                },
+                MAX_OUTPUT_PARAM: max_output_property(),
+                REASON_PARAM: reason_property()
             },
-            "required": ["command"]
+            "required": ["command", REASON_PARAM]
         })
     }
 
     async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let params: RunCommandParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+
+        tracing::debug!(
+            tool = self.name(),
+            reason = params.reason.as_deref().unwrap_or_default(),
+            "Running tool"
+        );
 
         // Security: Use allowlist approach instead of blocklist
         // Only allow known safe development commands
@@ -198,18 +230,20 @@ impl Tool for RunCommandTool {
             result = "(no output)".to_string();
         }
 
+        let output_chars = clamp_output_chars(params.max_output_chars);
+
         if output.status.success() {
-            Ok(ToolResult::success(trim_middle(&result)))
+            Ok(ToolResult::success(trim_middle(&result, output_chars)))
         } else {
             let code = output
                 .status
                 .code()
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            Ok(ToolResult::error(trim_middle(&format!(
-                "Command exited with code {}\n\n{}",
-                code, result
-            ))))
+            Ok(ToolResult::error(trim_middle(
+                &format!("Command exited with code {}\n\n{}", code, result),
+                output_chars,
+            )))
         }
     }
 }
@@ -231,6 +265,10 @@ struct RunShellParams {
     cwd: Option<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    max_output_chars: Option<u64>,
 }
 
 /// Longest a single shell command may run, whatever it asks for.
@@ -266,9 +304,11 @@ impl Tool for RunShellTool {
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Wall-clock limit in seconds. Default 120, maximum 900."
-                }
+                },
+                MAX_OUTPUT_PARAM: max_output_property(),
+                REASON_PARAM: reason_property()
             },
-            "required": ["command"]
+            "required": ["command", REASON_PARAM]
         })
     }
 
@@ -280,6 +320,12 @@ impl Tool for RunShellTool {
     async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let params: RunShellParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+
+        tracing::debug!(
+            tool = self.name(),
+            reason = params.reason.as_deref().unwrap_or_default(),
+            "Running tool"
+        );
 
         if params.command.trim().is_empty() {
             return Err(ToolError::InvalidParams("Command is empty".to_string()));
@@ -346,13 +392,17 @@ impl Tool for RunShellTool {
 
         // A non-zero exit is an observation, not a tool failure: the model
         // should read the compiler error rather than conclude the tool broke.
-        Ok(ToolResult::success(trim_middle(report.trim_end())))
+        Ok(ToolResult::success(trim_middle(
+            report.trim_end(),
+            clamp_output_chars(params.max_output_chars),
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::MAX_TOOL_MESSAGE_CHARS;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -364,6 +414,16 @@ mod tests {
             command_timeout: 30,
             unrestricted: false,
         }
+    }
+
+    fn shell_test_context() -> ToolContext {
+        let mut context = create_test_context();
+        context.unrestricted = true;
+        context.env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
+        context
     }
 
     #[tokio::test]
@@ -672,15 +732,244 @@ mod tests {
     }
 
     #[test]
-    fn trim_middle_keeps_head_and_tail() {
-        let text = format!("HEAD{}TAIL", "x".repeat(40_000));
-        let trimmed = trim_middle(&text);
-        assert!(trimmed.contains("HEAD"), "{trimmed}");
-        assert!(trimmed.contains("TAIL"), "{trimmed}");
-        assert!(trimmed.contains("characters trimmed"), "{trimmed}");
-        assert!(trimmed.chars().count() <= MAX_SHELL_OUTPUT_CHARS + 64);
-        assert!(trimmed.chars().count() < text.chars().count());
-        assert_eq!(trim_middle("hello"), "hello");
+    fn run_command_params_read_the_reason() {
+        let params: RunCommandParams = serde_json::from_value(json!({
+            "command": "cargo",
+            "args": ["test"],
+            "reason": "Check the suite still passes before committing."
+        }))
+        .unwrap();
+
+        assert_eq!(
+            params.reason.as_deref(),
+            Some("Check the suite still passes before committing.")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_accepts_a_call_carrying_a_reason() {
+        let result = RunCommandTool
+            .execute(
+                json!({
+                    "command": "echo",
+                    "args": ["hello"],
+                    "reason": "Show the user what the tool returns."
+                }),
+                &create_test_context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.output.unwrap().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn run_command_without_a_reason_still_runs() {
+        let result = RunCommandTool
+            .execute(
+                json!({"command": "echo", "args": ["hello"]}),
+                &create_test_context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.output.unwrap().contains("hello"));
+    }
+
+    #[test]
+    fn run_shell_params_read_the_reason() {
+        let params: RunShellParams = serde_json::from_value(json!({
+            "command": "cargo test 2>&1 | tail -40",
+            "reason": "Check the suite still passes before committing."
+        }))
+        .unwrap();
+
+        assert_eq!(
+            params.reason.as_deref(),
+            Some("Check the suite still passes before committing.")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_shell_accepts_a_call_carrying_a_reason() {
+        let result = RunShellTool
+            .execute(
+                json!({
+                    "command": "echo hello",
+                    "reason": "Show the user what the tool returns."
+                }),
+                &shell_test_context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.output.unwrap().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn run_shell_without_a_reason_still_runs() {
+        let result = RunShellTool
+            .execute(json!({"command": "echo hello"}), &shell_test_context())
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.output.unwrap().contains("hello"));
+    }
+
+    fn huge_output_context(body: &str) -> (tempfile::TempDir, ToolContext) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("huge.txt"), body).unwrap();
+        let mut context = shell_test_context();
+        context.cwd = dir.path().to_path_buf();
+        (dir, context)
+    }
+
+    #[tokio::test]
+    async fn run_shell_output_keeps_its_tail_through_to_message() {
+        let body = format!(
+            "HEAD_MARKER{}TAIL_MARKER",
+            "x".repeat(MAX_SHELL_OUTPUT_CHARS * 4)
+        );
+        let (_dir, context) = huge_output_context(&body);
+
+        let result = RunShellTool
+            .execute(json!({"command": "cat huge.txt"}), &context)
+            .await
+            .unwrap();
+
+        let message = result.to_message();
+        assert!(message.contains("HEAD_MARKER"), "{message}");
+        assert!(
+            message.contains("TAIL_MARKER"),
+            "the transcript cut threw away the end of the output: {message}"
+        );
+        assert!(
+            message.chars().count() <= MAX_TOOL_MESSAGE_CHARS,
+            "{}",
+            message.chars().count()
+        );
+    }
+
+    #[test]
+    fn max_output_chars_clamps_into_range() {
+        assert_eq!(clamp_output_chars(None), MAX_SHELL_OUTPUT_CHARS);
+        assert_eq!(clamp_output_chars(Some(2_000)), 2_000);
+        assert_eq!(
+            clamp_output_chars(Some(MAX_SHELL_OUTPUT_CHARS as u64 * 100)),
+            MAX_SHELL_OUTPUT_CHARS,
+            "the knob must never raise the ceiling"
+        );
+        assert_eq!(clamp_output_chars(Some(u64::MAX)), MAX_SHELL_OUTPUT_CHARS);
+        assert_eq!(clamp_output_chars(Some(0)), MIN_SHELL_OUTPUT_CHARS);
+    }
+
+    #[test]
+    fn params_read_an_optional_max_output_chars() {
+        let command: RunCommandParams =
+            serde_json::from_value(json!({"command": "cargo", "max_output_chars": 2_000})).unwrap();
+        assert_eq!(command.max_output_chars, Some(2_000));
+
+        let shell: RunShellParams =
+            serde_json::from_value(json!({"command": "cargo test", "max_output_chars": 2_000}))
+                .unwrap();
+        assert_eq!(shell.max_output_chars, Some(2_000));
+
+        let without: RunShellParams =
+            serde_json::from_value(json!({"command": "cargo test"})).unwrap();
+        assert_eq!(without.max_output_chars, None);
+    }
+
+    #[test]
+    fn shell_schemas_offer_max_output_chars_without_requiring_it() {
+        for schema in [
+            RunCommandTool.parameters_schema(),
+            RunShellTool.parameters_schema(),
+        ] {
+            assert_eq!(schema["properties"][MAX_OUTPUT_PARAM]["type"], "integer");
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .expect("required array")
+                    .iter()
+                    .any(|name| name.as_str() == Some(MAX_OUTPUT_PARAM))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_shell_spends_only_the_requested_max_output_chars() {
+        const REQUESTED: usize = 2_000;
+        let body = format!(
+            "HEAD_MARKER{}TAIL_MARKER",
+            "x".repeat(MAX_SHELL_OUTPUT_CHARS * 4)
+        );
+        let (_dir, context) = huge_output_context(&body);
+
+        let message = RunShellTool
+            .execute(
+                json!({"command": "cat huge.txt", "max_output_chars": REQUESTED}),
+                &context,
+            )
+            .await
+            .unwrap()
+            .to_message();
+
+        assert!(message.contains("HEAD_MARKER"), "{message}");
+        assert!(message.contains("TAIL_MARKER"), "{message}");
+        let chars = message.chars().count();
+        assert!(chars <= REQUESTED, "{chars}");
+        assert!(chars > REQUESTED - 100, "{chars}");
+    }
+
+    #[tokio::test]
+    async fn run_shell_cannot_raise_the_cap_above_the_constant() {
+        let body = format!(
+            "HEAD_MARKER{}TAIL_MARKER",
+            "x".repeat(MAX_SHELL_OUTPUT_CHARS * 4)
+        );
+        let (_dir, context) = huge_output_context(&body);
+
+        let message = RunShellTool
+            .execute(
+                json!({"command": "cat huge.txt", "max_output_chars": 1_000_000}),
+                &context,
+            )
+            .await
+            .unwrap()
+            .to_message();
+
+        let chars = message.chars().count();
+        assert!(chars <= MAX_SHELL_OUTPUT_CHARS, "{chars}");
+        assert!(chars > MAX_SHELL_OUTPUT_CHARS - 100, "{chars}");
+        assert!(message.contains("TAIL_MARKER"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn run_command_honours_a_smaller_max_output_chars() {
+        const REQUESTED: usize = 2_000;
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!("HEAD_MARKER{}TAIL_MARKER", "x".repeat(40_000));
+        std::fs::write(dir.path().join("huge.txt"), &body).unwrap();
+
+        let mut context = create_test_context();
+        context.cwd = dir.path().to_path_buf();
+
+        let message = RunCommandTool
+            .execute(
+                json!({"command": "cat", "args": ["huge.txt"], "max_output_chars": REQUESTED}),
+                &context,
+            )
+            .await
+            .unwrap()
+            .to_message();
+
+        assert!(message.contains("HEAD_MARKER"), "{message}");
+        assert!(message.contains("TAIL_MARKER"), "{message}");
+        assert!(message.chars().count() <= REQUESTED, "{message}");
     }
 
     #[tokio::test]
@@ -705,7 +994,7 @@ mod tests {
         assert!(output.contains("HEAD_MARKER"), "{output}");
         assert!(output.contains("TAIL_MARKER"), "{output}");
         assert!(output.contains("characters trimmed"), "{output}");
-        assert!(output.chars().count() <= MAX_SHELL_OUTPUT_CHARS + 64);
+        assert!(output.chars().count() <= MAX_SHELL_OUTPUT_CHARS);
         assert!(output.chars().count() < body.chars().count());
     }
 
@@ -737,7 +1026,7 @@ mod tests {
         assert!(!result.success);
         let error = result.error.unwrap();
         assert!(error.contains("characters trimmed"), "{error}");
-        assert!(error.chars().count() <= MAX_SHELL_OUTPUT_CHARS + 64);
+        assert!(error.chars().count() <= MAX_SHELL_OUTPUT_CHARS);
         assert!(
             error.contains("HEAD_LEFT") || error.contains("Command exited"),
             "{error}"

@@ -223,6 +223,22 @@ mod tests {
         );
     }
 
+    /// Three of the seven tools asked for a reason write from here, so this is
+    /// the section a later author restates the convention in. `files` owns it,
+    /// on both surfaces; a copy here would say it twice on the chat surface and
+    /// spend budget the chat prompt does not have.
+    #[test]
+    fn no_workspace_bullet_restates_the_rule_that_files_owns() {
+        let rendered = rendered(&catalog());
+
+        for phrase in ["Give a reason", "one sentence on why", "max_output_chars"] {
+            assert!(
+                !rendered.contains(phrase),
+                "{phrase} is restated: {rendered}"
+            );
+        }
+    }
+
     #[test]
     fn a_catalog_without_a_single_workspace_tool_renders_nothing() {
         let tools = ChatTools::with_names(ToolProfile::Task, &["read_file", "run_command"], None);

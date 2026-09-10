@@ -6,7 +6,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use zone_core::tools::{
+    REASON_PARAM, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, reason_property,
+};
 
 #[derive(Clone, Copy)]
 enum Action {
@@ -162,8 +164,8 @@ impl Tool for WorkspaceAction {
                 json!(["task_id"]),
             ),
             Action::SendMessage => (
-                json!({"chat_id":identifier,"content":{"type":"string","minLength":1},"mentions":{"type":"array","items":identifier}}),
-                json!(["chat_id", "content"]),
+                json!({"chat_id":identifier,"content":{"type":"string","minLength":1},"mentions":{"type":"array","items":identifier},REASON_PARAM: reason_property()}),
+                json!(["chat_id", "content", REASON_PARAM]),
             ),
             Action::CreateReminder => (
                 json!({"content":{"type":"string","minLength":1},"due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset"}}),
@@ -311,4 +313,82 @@ impl WorkspaceAction {
 #[serde(deny_unknown_fields)]
 struct RunLookup {
     run_id: Uuid,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use zone_core::tools::REASON_DESCRIPTION;
+
+    const WHY: &str = "The user asked for the team to be told.";
+
+    fn tool(action: Action) -> WorkspaceAction {
+        WorkspaceAction {
+            scope: WorkspaceScope {
+                state: AppState::for_tests(),
+                workspace_id: Uuid::new_v4(),
+                chat_id: Some(Uuid::new_v4()),
+                user_id: Uuid::new_v4(),
+            },
+            action,
+        }
+    }
+
+    #[tokio::test]
+    async fn send_message_asks_for_a_reason_the_message_accepts() {
+        let schema = tool(Action::SendMessage).parameters_schema();
+        assert_eq!(
+            schema["properties"][REASON_PARAM]["description"],
+            REASON_DESCRIPTION
+        );
+        assert!(
+            schema["required"]
+                .as_array()
+                .expect("required is a list")
+                .contains(&json!(REASON_PARAM)),
+            "reason must be advertised as required: {schema}"
+        );
+        let message: actions::Message = serde_json::from_value(json!({
+            "chat_id": Uuid::new_v4(),
+            "content": "Shipped",
+            "mentions": [],
+            REASON_PARAM: WHY,
+        }))
+        .expect("deny_unknown_fields must accept every property the schema advertises");
+        assert_eq!(message.reason.as_deref(), Some(WHY));
+    }
+
+    #[test]
+    fn send_message_without_a_reason_still_decodes() {
+        let message: actions::Message =
+            serde_json::from_value(json!({"chat_id": Uuid::new_v4(), "content": "Shipped"}))
+                .expect("a missing reason must never fail the call");
+        assert!(message.reason.is_none(), "an absent reason stays absent");
+    }
+
+    #[tokio::test]
+    async fn only_send_message_asks_for_a_reason() {
+        for action in [
+            Action::ListTasks,
+            Action::CreateTask,
+            Action::UpdateTask,
+            Action::ListMembers,
+            Action::ListChats,
+            Action::CreateReminder,
+            Action::ListReminders,
+            Action::CancelReminder,
+            Action::StartTask,
+            Action::GetTaskRun,
+            Action::TailTaskLog,
+        ] {
+            let tool = tool(action);
+            let schema = tool.parameters_schema();
+            assert!(
+                schema["properties"].get(REASON_PARAM).is_none(),
+                "{} must not ask for a reason: {schema}",
+                tool.name()
+            );
+        }
+    }
 }
