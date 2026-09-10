@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::ffi::OsStr;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use super::{Tool, ToolContext, ToolError, ToolResult};
 
@@ -12,6 +13,77 @@ use super::{Tool, ToolContext, ToolError, ToolResult};
 const FILE_PAGE_CHARS: usize = 8_000;
 const LIST_FILES_CAP: usize = 200;
 const SEARCH_MAX_RESULTS: usize = 100;
+
+/// Refuse a resolved path that leaves `context.cwd`.
+///
+/// The comparison is against the *canonical* `cwd`: a caller's `cwd` may itself
+/// contain a symlink (`/var` -> `/private/var` on macOS), and a resolved path
+/// compared against an unresolved root refuses every legitimate path in it.
+fn confine(resolved: &Path, context: &ToolContext) -> Result<(), ToolError> {
+    if context.unrestricted {
+        return Ok(());
+    }
+    let root = context
+        .cwd
+        .canonicalize()
+        .unwrap_or_else(|_| context.cwd.clone());
+    if resolved.starts_with(&root) {
+        Ok(())
+    } else {
+        Err(ToolError::Execution(
+            "Path escapes working directory".to_string(),
+        ))
+    }
+}
+
+/// `path` with `.`, `..` and symlinks resolved as far as the filesystem allows.
+///
+/// A path that does not exist cannot be canonicalized, so its deepest existing
+/// ancestor is resolved and the remaining names re-attached. That is what makes
+/// a symlinked ancestor leaving `cwd` visible to [`confine`] *before* the
+/// directories under it are created.
+fn resolve(path: &Path) -> PathBuf {
+    let lexical = normalize(path);
+    let mut names: Vec<&OsStr> = Vec::new();
+    let mut cursor = lexical.as_path();
+
+    loop {
+        if let Ok(canonical) = cursor.canonicalize() {
+            let mut resolved = canonical;
+            resolved.extend(names.iter().rev());
+            return resolved;
+        }
+        match (cursor.parent(), cursor.file_name()) {
+            (Some(parent), Some(name)) => {
+                names.push(name);
+                cursor = parent;
+            }
+            _ => return lexical,
+        }
+    }
+}
+
+fn normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+/// Whether a directory entry may be descended into.
+///
+/// `Path::is_dir` follows symlinks, so a link in the tree pointing outside it
+/// would otherwise be walked as if it were part of the tree.
+fn descendable(path: &Path, context: &ToolContext) -> bool {
+    path.is_dir() && confine(&resolve(path), context).is_ok()
+}
 
 /// Read a file's contents
 pub struct ReadFileTool;
@@ -78,13 +150,7 @@ impl Tool for ReadFileTool {
             .canonicalize()
             .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
 
-        // Security check: ensure path doesn't escape cwd, unless the caller
-        // has deliberately opted out of containment.
-        if !context.unrestricted && !canonical.starts_with(&context.cwd) {
-            return Err(ToolError::Execution(
-                "Path escapes working directory".to_string(),
-            ));
-        }
+        confine(&canonical, context)?;
 
         let metadata = fs::metadata(&canonical)
             .map_err(|e| ToolError::Execution(format!("Cannot read file: {}", e)))?;
@@ -216,42 +282,26 @@ impl Tool for WriteFileTool {
 
         let full_path = context.cwd.join(&params.path);
 
-        // Ensure the canonical cwd is available for comparison
-        let canonical_cwd = context
-            .cwd
-            .canonicalize()
-            .unwrap_or_else(|_| context.cwd.clone());
-
-        // For new files, check that the target path (once normalized) stays within cwd
-        // We check the parent directory since the file doesn't exist yet
+        // Confined before the directories are created, or a refused path still
+        // leaves a directory behind outside cwd.
         if let Some(parent) = full_path.parent() {
-            // Create parent directories if needed
+            confine(&resolve(parent), context)?;
+
             fs::create_dir_all(parent)
                 .map_err(|e| ToolError::Execution(format!("Cannot create directory: {}", e)))?;
 
-            // Now verify the parent stays within cwd
             let canonical_parent = parent
                 .canonicalize()
                 .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
-
-            if !context.unrestricted && !canonical_parent.starts_with(&canonical_cwd) {
-                return Err(ToolError::Execution(
-                    "Path escapes working directory".to_string(),
-                ));
-            }
+            confine(&canonical_parent, context)?;
         }
 
-        // Security check for existing files (additional check for symlinks)
+        // A path inside cwd whose last component is a symlink out of it.
         if full_path.exists() {
             let canonical = full_path
                 .canonicalize()
                 .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
-
-            if !context.unrestricted && !canonical.starts_with(&canonical_cwd) {
-                return Err(ToolError::Execution(
-                    "Path escapes working directory".to_string(),
-                ));
-            }
+            confine(&canonical, context)?;
         }
 
         if params.append {
@@ -412,15 +462,7 @@ impl Tool for ApplyPatchTool {
         let canonical = full_path
             .canonicalize()
             .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
-        let canonical_cwd = context
-            .cwd
-            .canonicalize()
-            .unwrap_or_else(|_| context.cwd.clone());
-        if !context.unrestricted && !canonical.starts_with(&canonical_cwd) {
-            return Err(ToolError::Execution(
-                "Path escapes working directory".to_string(),
-            ));
-        }
+        confine(&canonical, context)?;
 
         let metadata = fs::metadata(&canonical)
             .map_err(|e| ToolError::Execution(format!("Cannot read file: {}", e)))?;
@@ -530,6 +572,11 @@ impl Tool for ListFilesTool {
             )));
         }
 
+        let full_path = full_path
+            .canonicalize()
+            .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
+        confine(&full_path, context)?;
+
         let mut files = Vec::new();
         let mut total = 0;
 
@@ -540,6 +587,7 @@ impl Tool for ListFilesTool {
             pattern: &Option<String>,
             files: &mut Vec<String>,
             total: &mut usize,
+            context: &ToolContext,
         ) -> Result<(), ToolError> {
             let entries = fs::read_dir(dir)
                 .map_err(|e| ToolError::Execution(format!("Cannot read directory: {}", e)))?;
@@ -551,10 +599,10 @@ impl Tool for ListFilesTool {
                 let relative = path.strip_prefix(base).unwrap_or(&path);
 
                 if path.is_dir() {
-                    if recursive {
-                        collect_files(&path, base, recursive, pattern, files, total)?;
-                    } else {
+                    if !recursive {
                         push_listing(files, total, format!("{}/", relative.display()));
+                    } else if descendable(&path, context) {
+                        collect_files(&path, base, recursive, pattern, files, total, context)?;
                     }
                 } else {
                     let name = relative.display().to_string();
@@ -587,6 +635,7 @@ impl Tool for ListFilesTool {
             &params.pattern,
             &mut files,
             &mut total,
+            context,
         )?;
 
         files.sort();
@@ -655,11 +704,11 @@ impl Tool for SearchCodeTool {
         let params: SearchCodeParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
 
-        let search_path = if let Some(p) = &params.path {
-            context.cwd.join(p)
-        } else {
-            context.cwd.clone()
-        };
+        let search_path = resolve(&match &params.path {
+            Some(path) => context.cwd.join(path),
+            None => context.cwd.clone(),
+        });
+        confine(&search_path, context)?;
         let max_results = params
             .max_results
             .unwrap_or(SEARCH_MAX_RESULTS)
@@ -683,6 +732,7 @@ impl Tool for SearchCodeTool {
             params.case_sensitive,
             &mut results,
             max_results,
+            context,
         )?;
         Ok(format_search_results(results, max_results))
     }
@@ -713,6 +763,7 @@ fn search_dir(
     case_sensitive: bool,
     results: &mut Vec<String>,
     max_results: usize,
+    context: &ToolContext,
 ) -> Result<(), ToolError> {
     if results.len() >= max_results {
         return Ok(());
@@ -745,6 +796,9 @@ fn search_dir(
         }
 
         if path.is_dir() {
+            if !descendable(&path, context) {
+                continue;
+            }
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if [
                 "node_modules",
@@ -759,7 +813,15 @@ fn search_dir(
                 continue;
             }
 
-            search_dir(&path, base, pattern, case_sensitive, results, max_results)?;
+            search_dir(
+                &path,
+                base,
+                pattern,
+                case_sensitive,
+                results,
+                max_results,
+                context,
+            )?;
         } else if path.is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let code_exts = [
@@ -1122,6 +1184,289 @@ mod tests {
 
         assert!(result.success);
         assert!(dir.path().join("subdir/nested/file.txt").exists());
+    }
+
+    /// A path with no `..` and no leading `/` passes the string check, so the
+    /// canonical check is the only thing standing between a symlink and an
+    /// escape. Both of `write_file`'s canonical checks were removable with the
+    /// whole suite green, and every `..` test tripped the string check first.
+    #[cfg(unix)]
+    fn symlinked(inside: &Path, name: &str, target: &Path) {
+        std::os::unix::fs::symlink(target, inside.join(name)).expect("a symlink");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_refuses_a_symlink_that_leaves_cwd() {
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join("id_rsa");
+        fs::write(&secret, "PRIVATE KEY BODY").unwrap();
+        let inside = tempdir().unwrap();
+        symlinked(inside.path(), "notes.txt", &secret);
+        let context = create_test_context(inside.path());
+
+        let error = ReadFileTool
+            .execute(serde_json::json!({"path": "notes.txt"}), &context)
+            .await
+            .expect_err("a symlink out of cwd must be refused");
+
+        assert!(
+            error.to_string().contains("escapes working directory"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_refuses_an_absolute_path_outside_cwd() {
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join("id_rsa");
+        fs::write(&secret, "PRIVATE KEY BODY").unwrap();
+        let inside = tempdir().unwrap();
+        let context = create_test_context(inside.path());
+
+        for path in [secret.to_str().unwrap(), "../../../../../../etc/passwd"] {
+            let error = ReadFileTool
+                .execute(serde_json::json!({"path": path}), &context)
+                .await
+                .expect_err("a path outside cwd must be refused");
+            assert!(
+                error.to_string().contains("escapes working directory"),
+                "{path}: {error}"
+            );
+        }
+    }
+
+    /// Every other file tool canonicalizes `cwd` before comparing; `read_file`
+    /// compared against it raw, so a caller whose `cwd` merely contains a
+    /// symlink was refused its own files. `create_test_context` canonicalizes,
+    /// which hid it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_accepts_its_own_file_under_a_symlinked_cwd() {
+        let root = tempdir().unwrap();
+        let real = root.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("inside.txt"), "legitimate content").unwrap();
+        symlinked(root.path(), "link", &real);
+
+        let mut context = create_test_context(root.path());
+        context.cwd = root.path().join("link");
+
+        let result = ReadFileTool
+            .execute(serde_json::json!({"path": "inside.txt"}), &context)
+            .await
+            .expect("a file inside cwd must be readable");
+
+        assert!(result.output.unwrap().contains("legitimate content"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_refuses_a_symlinked_directory_that_leaves_cwd() {
+        let outside = tempdir().unwrap();
+        let inside = tempdir().unwrap();
+        symlinked(inside.path(), "escape", outside.path());
+        let context = create_test_context(inside.path());
+
+        let error = WriteFileTool
+            .execute(
+                serde_json::json!({"path": "escape/pwned.txt", "content": "malicious"}),
+                &context,
+            )
+            .await
+            .expect_err("a write through a symlinked directory must be refused");
+
+        assert!(
+            error.to_string().contains("escapes working directory"),
+            "{error}"
+        );
+        assert!(
+            !outside.path().join("pwned.txt").exists(),
+            "the file was written outside cwd"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_creates_no_directory_outside_cwd_before_refusing() {
+        let outside = tempdir().unwrap();
+        let inside = tempdir().unwrap();
+        symlinked(inside.path(), "escape", outside.path());
+        let context = create_test_context(inside.path());
+
+        let error = WriteFileTool
+            .execute(
+                serde_json::json!({"path": "escape/made/up/pwned.txt", "content": "malicious"}),
+                &context,
+            )
+            .await
+            .expect_err("a write through a symlinked directory must be refused");
+
+        assert!(
+            error.to_string().contains("escapes working directory"),
+            "{error}"
+        );
+        assert!(
+            !outside.path().join("made").exists(),
+            "a directory was created outside cwd on the way to refusing the write"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_refuses_a_symlinked_file_that_leaves_cwd() {
+        let outside = tempdir().unwrap();
+        let target = outside.path().join("authorized_keys");
+        fs::write(&target, "original").unwrap();
+        let inside = tempdir().unwrap();
+        symlinked(inside.path(), "notes.txt", &target);
+        let context = create_test_context(inside.path());
+
+        let error = WriteFileTool
+            .execute(
+                serde_json::json!({"path": "notes.txt", "content": "malicious"}),
+                &context,
+            )
+            .await
+            .expect_err("a write through a symlinked file must be refused");
+
+        assert!(
+            error.to_string().contains("escapes working directory"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "original");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_patch_refuses_a_symlink_that_leaves_cwd() {
+        let outside = tempdir().unwrap();
+        let target = outside.path().join("authorized_keys");
+        fs::write(&target, "original\n").unwrap();
+        let inside = tempdir().unwrap();
+        symlinked(inside.path(), "notes.txt", &target);
+        let context = create_test_context(inside.path());
+
+        let error = ApplyPatchTool
+            .execute(
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "old_string": "original",
+                    "new_string": "malicious",
+                }),
+                &context,
+            )
+            .await
+            .expect_err("a patch through a symlink out of cwd must be refused");
+
+        assert!(
+            error.to_string().contains("escapes working directory"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "original\n");
+    }
+
+    #[tokio::test]
+    async fn list_files_refuses_a_path_outside_cwd() {
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("id_rsa"), "PRIVATE").unwrap();
+        let inside = tempdir().unwrap();
+        let context = create_test_context(inside.path());
+
+        for path in [outside.path().to_str().unwrap(), "../../../../../../etc"] {
+            let error = ListFilesTool
+                .execute(serde_json::json!({"path": path}), &context)
+                .await
+                .expect_err("a directory outside cwd must not be listed");
+            assert!(
+                error.to_string().contains("escapes working directory"),
+                "{path}: {error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_files_does_not_follow_a_symlink_out_of_cwd() {
+        let outside = tempdir().unwrap();
+        fs::create_dir(outside.path().join("private")).unwrap();
+        fs::write(outside.path().join("private/id_rsa"), "PRIVATE").unwrap();
+        let inside = tempdir().unwrap();
+        fs::write(inside.path().join("own.txt"), "mine").unwrap();
+        symlinked(inside.path(), "hop", outside.path());
+        let context = create_test_context(inside.path());
+
+        let result = ListFilesTool
+            .execute(
+                serde_json::json!({"path": ".", "recursive": true}),
+                &context,
+            )
+            .await
+            .expect("listing cwd");
+
+        let output = result.output.unwrap();
+        assert!(output.contains("own.txt"), "{output}");
+        assert!(!output.contains("id_rsa"), "the walk left cwd: {output}");
+    }
+
+    #[tokio::test]
+    async fn search_code_refuses_a_path_outside_cwd() {
+        let outside = tempdir().unwrap();
+        fs::write(
+            outside.path().join("secrets.env"),
+            "DEPLOY_PHRASE=open sesame please\n",
+        )
+        .unwrap();
+        let inside = tempdir().unwrap();
+        let context = create_test_context(inside.path());
+
+        for path in [outside.path().to_str().unwrap(), "../../../../../../etc"] {
+            let error = SearchCodeTool
+                .execute(
+                    serde_json::json!({"pattern": "open sesame please", "path": path}),
+                    &context,
+                )
+                .await
+                .expect_err("a directory outside cwd must not be searched");
+            assert!(
+                error.to_string().contains("escapes working directory"),
+                "{path}: {error}"
+            );
+        }
+    }
+
+    /// Driven against the walker rather than the tool: ripgrep does not follow
+    /// symlinks without `-L`, so a tool-level assertion would hold with the
+    /// guard gone on any host where `rg` is installed.
+    #[cfg(unix)]
+    #[test]
+    fn the_search_walk_does_not_follow_a_symlink_out_of_cwd() {
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("secrets.sh"), "open sesame please\n").unwrap();
+        let inside = tempdir().unwrap();
+        fs::write(inside.path().join("own.sh"), "open sesame please\n").unwrap();
+        symlinked(inside.path(), "hop", outside.path());
+        let context = create_test_context(inside.path());
+        let root = context.cwd.clone();
+
+        let mut results = Vec::new();
+        search_dir(
+            &root,
+            &root,
+            "open sesame please",
+            true,
+            &mut results,
+            SEARCH_MAX_RESULTS,
+            &context,
+        )
+        .expect("a walk of cwd");
+
+        let output = results.join("\n");
+        assert!(output.contains("own.sh"), "{output}");
+        assert!(
+            !output.contains("secrets.sh"),
+            "the walk left cwd: {output}"
+        );
     }
 
     #[tokio::test]
