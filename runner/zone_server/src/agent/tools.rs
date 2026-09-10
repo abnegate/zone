@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 use zone_core::llm::ToolDefinition;
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::citations::{self, Citation};
 use super::receipts::{self, ActionReceipt};
@@ -393,8 +393,24 @@ impl ChatTools {
         self.mcp_guidance.clone()
     }
 
+    /// What a named call costs. A name the catalog does not hold is treated as
+    /// a write: it mutates for batching, and it dispatches straight to the
+    /// not-found error rather than holding a reader at an approval card for a
+    /// tool that was never going to run.
+    pub fn tier(&self, name: &str) -> Tier {
+        self.registry.tier(name).unwrap_or(Tier::Write)
+    }
+
     pub fn mutating(&self, name: &str) -> bool {
         self.registry.mutating(name)
+    }
+
+    /// What a named call will do, for the reader being asked to allow it.
+    ///
+    /// Not `preview`: that constructor previews the *catalog*, while this
+    /// previews one call.
+    pub fn effect(&self, name: &str, arguments: &str) -> Option<String> {
+        self.registry.preview(name, arguments)
     }
 
     /// Run a tool by name, turning every failure mode into a `ToolResult`.

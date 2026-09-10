@@ -9,9 +9,11 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use uuid::Uuid;
 use zone_core::tools::{
-    MAX_TOOL_MESSAGE_CHARS, REASON_PARAM, Tool, ToolContext, ToolError, ToolRegistry, ToolResult,
-    reason_property,
+    MAX_TOOL_MESSAGE_CHARS, REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolRegistry,
+    ToolResult, excerpt, reason_property,
 };
+
+use super::{PREVIEW_BODY_CHARS, PREVIEW_TITLE_CHARS};
 
 use super::readiness::{
     self, CheckEvidence, CommentEvidence, CommitSha, PullEvidence, ReviewComment, ReviewSignals,
@@ -247,7 +249,7 @@ impl Tool for Integration {
             properties["body"] = json!({"type": "string", "description": "Comment markdown."});
             required.extend(["number", "body"]);
         }
-        if self.mutating() {
+        if self.tier().mutating() {
             properties[REASON_PARAM] = reason_property();
             required.push(REASON_PARAM);
         }
@@ -265,8 +267,42 @@ impl Tool for Integration {
         Duration::from_secs(120)
     }
 
-    fn mutating(&self) -> bool {
-        matches!(self.operation, Operation::CreatePull | Operation::Comment)
+    /// Both writes land on a repository other people watch, under the
+    /// workspace's own credential.
+    fn tier(&self) -> Tier {
+        match self.operation {
+            Operation::CreatePull | Operation::Comment => Tier::Outward,
+            Operation::Build
+            | Operation::Deployments
+            | Operation::Issues
+            | Operation::File
+            | Operation::CheckLogs
+            | Operation::PullRequests
+            | Operation::ReleasePipelines => Tier::Read,
+        }
+    }
+
+    fn preview(&self, params: &Value) -> Option<String> {
+        match self.operation {
+            Operation::CreatePull => {
+                let base = params["base"].as_str().unwrap_or("the default branch");
+                let body = params["body"]
+                    .as_str()
+                    .map_or(0, |body| body.chars().count());
+                Some(format!(
+                    "Open a pull request titled \"{}\", merging {} into {base}, with a \
+                     {body}-character description.",
+                    excerpt(params["title"].as_str()?, PREVIEW_TITLE_CHARS),
+                    params["head"].as_str()?
+                ))
+            }
+            Operation::Comment => Some(format!(
+                "Comment on #{}: \"{}\"",
+                params["number"].as_u64()?,
+                excerpt(params["body"].as_str()?, PREVIEW_BODY_CHARS)
+            )),
+            _ => None,
+        }
     }
 }
 

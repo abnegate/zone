@@ -14,7 +14,7 @@ use zone_core::llm::{
 };
 
 use super::Citation;
-use super::approval::{ApprovalPolicy, requires_approval};
+use super::approval::ApprovalPolicy;
 use super::citations;
 use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
@@ -95,14 +95,18 @@ pub enum AgentEvent {
     /// The model produced an image. Carries the raw URL from the provider;
     /// the consumer decides how to store it and whether it is a duplicate.
     Image(String),
-    /// A mutating file or shell tool is waiting for the user to confirm.
-    /// `reason` is the model's own account of why, shown alongside the request
-    /// so the reader is deciding on a stated intent rather than bare arguments.
+    /// A call the user has to allow before it runs: a host write or command,
+    /// or anything that leaves the workspace.
+    ///
+    /// `reason` is the model's own account of why. `preview` is the server's
+    /// account of what the call will do, rendered from its arguments, so the
+    /// reader weighs a described action against the action itself.
     ToolApprovalRequired {
         id: String,
         name: String,
         arguments: String,
         reason: Option<String>,
+        preview: Option<String>,
     },
     /// The turn could not continue. Anything already streamed still stands.
     Failed(String),
@@ -422,7 +426,8 @@ pub fn run_with_context(
                     yield AgentEvent::Canonical(entry);
                     continue;
                 }
-                let mutation = tools.mutating(&call.function.name);
+                let tier = tools.tier(&call.function.name);
+                let mutation = tier.mutating();
                 let mut batch = vec![call];
                 if !mutation {
                     while used + batch.len() < budget.max_tool_calls
@@ -442,22 +447,22 @@ pub fn run_with_context(
                     };
                 }
                 let call = &batch[0];
-                let denied =
-                    if mutation && !approval.is_auto() && requires_approval(&call.function.name) {
-                        // Register before the request goes out: a client that
-                        // answers immediately would otherwise be told the call
-                        // is not waiting for approval.
-                        let pending = approval.expect_decision(&call.id);
-                        yield AgentEvent::ToolApprovalRequired {
-                            id: call.id.clone(),
-                            name: call.function.name.clone(),
-                            arguments: call.function.arguments.clone(),
-                            reason: super::reason(&call.function.arguments),
-                        };
-                        !approval.awaited_decision(&call.id, pending).await
-                    } else {
-                        false
+                let denied = if approval.confirms(tier) {
+                    // Register before the request goes out: a client that
+                    // answers immediately would otherwise be told the call
+                    // is not waiting for approval.
+                    let pending = approval.expect_decision(&call.id);
+                    yield AgentEvent::ToolApprovalRequired {
+                        id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        arguments: call.function.arguments.clone(),
+                        reason: super::reason(&call.function.arguments),
+                        preview: tools.effect(&call.function.name, &call.function.arguments),
                     };
+                    !approval.awaited_decision(&call.id, pending).await
+                } else {
+                    false
+                };
                 // A fresh acknowledgement boundary after potentially long approval waits.
                 yield AgentEvent::Context(context.usage(&model, definitions));
                 let completed = futures::future::join_all(batch.into_iter().map(|call| {

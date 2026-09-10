@@ -459,7 +459,8 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
-    /// A mutating file or shell tool is waiting for the user to confirm.
+    /// A call is waiting for the user to allow it: a host write or command, or
+    /// anything that leaves the workspace.
     ToolApprovalRequired {
         message_id: Uuid,
         tool_call_id: String,
@@ -469,6 +470,11 @@ pub enum ServerMessage {
         /// shows it as a claim the reader is being asked to weigh.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// What the call will do, rendered by the server from the arguments
+        /// themselves. Observed, not claimed, so it is what settles a
+        /// disagreement between the two.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
     },
     /// A tool finished. `detail` is a short outcome for display, not the full
     /// output the model receives.
@@ -2642,9 +2648,10 @@ async fn handle_chat_generation(
                             }
                         }
                     }
-                    Some(AgentEvent::ToolApprovalRequired { id, name, arguments, reason }) => {
+                    Some(AgentEvent::ToolApprovalRequired { id, name, arguments, reason, preview }) => {
                         if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
                             record.detail = "Waiting for approval…".to_string();
+                            record.preview.clone_from(&preview);
                         }
                         let tool_msg = ServerMessage::ToolApprovalRequired {
                             message_id: assistant_message_id,
@@ -2652,6 +2659,7 @@ async fn handle_chat_generation(
                             name,
                             arguments,
                             reason,
+                            preview,
                         };
                         publish(stream, tool_msg).await;
                         persist_now = true;
@@ -2673,6 +2681,7 @@ async fn handle_chat_generation(
                             duration_ms: 0,
                             reasoning: reasoning.clone(),
                             reason: reason.clone(),
+                            preview: None,
                         });
 
                         let tool_msg = ServerMessage::ToolCall {
@@ -3885,6 +3894,7 @@ mod tests {
             duration_ms: 7,
             reasoning: None,
             reason: None,
+            preview: None,
         }];
         let metadata = serde_json::json!({ "tool_calls": records });
 
@@ -3910,6 +3920,7 @@ mod tests {
             duration_ms: 3,
             reasoning: Some("Inspect the workspace first.".to_string()),
             reason: Some("The user asked which tests are failing.".to_string()),
+            preview: None,
         }];
 
         let merged =
@@ -4215,12 +4226,17 @@ mod tests {
             name: "write_file".into(),
             arguments: r#"{"path":"x","reason":"Persist the config the user dictated."}"#.into(),
             reason: Some("Persist the config the user dictated.".into()),
+            preview: Some("Write 12 characters to x, replacing whatever is there.".into()),
         })
         .unwrap();
         assert_eq!(json["type"], "tool_approval_required");
         assert_eq!(json["tool_call_id"], "call_1");
         assert_eq!(json["name"], "write_file");
         assert_eq!(json["reason"], "Persist the config the user dictated.");
+        assert_eq!(
+            json["preview"],
+            "Write 12 characters to x, replacing whatever is there."
+        );
     }
 
     #[test]
@@ -4231,10 +4247,12 @@ mod tests {
             name: "run_shell".into(),
             arguments: r#"{"command":"ls"}"#.into(),
             reason: None,
+            preview: None,
         })
         .unwrap();
         assert_eq!(json["type"], "tool_approval_required");
         assert!(json.get("reason").is_none());
+        assert!(json.get("preview").is_none());
     }
 
     #[test]

@@ -9,8 +9,8 @@ use tokio::time::{Duration, timeout};
 use tool_runner::Proxy;
 
 use super::{
-    ERROR_PREFIX, MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tool, ToolContext, ToolError, ToolResult,
-    reason_property, trim_middle,
+    ERROR_PREFIX, MAX_PREVIEW_CHARS, MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tier, Tool, ToolContext,
+    ToolError, ToolResult, excerpt, reason_property, trim_middle,
 };
 
 /// Run a shell command
@@ -79,8 +79,17 @@ impl Tool for RunCommandTool {
         "Execute a shell command. Returns stdout/stderr output. Use for running tests, builds, git commands, etc."
     }
 
-    fn mutating(&self) -> bool {
-        true
+    fn tier(&self) -> Tier {
+        Tier::Host
+    }
+
+    fn preview(&self, params: &Value) -> Option<String> {
+        let params: RunCommandParams = serde_json::from_value(params.clone()).ok()?;
+        let line = std::iter::once(params.command)
+            .chain(params.args)
+            .collect::<Vec<String>>()
+            .join(" ");
+        Some(run_preview(&line, params.cwd.as_deref()))
     }
 
     fn timeout(&self, context: &ToolContext) -> Duration {
@@ -255,6 +264,18 @@ impl Tool for RunCommandTool {
     }
 }
 
+/// The command line as it will run, for an approval card.
+///
+/// The command is what the reader is deciding on, so it keeps the whole budget
+/// and the directory is appended after it rather than put in front of it.
+fn run_preview(line: &str, cwd: Option<&str>) -> String {
+    let command = excerpt(line, MAX_PREVIEW_CHARS);
+    match cwd {
+        Some(cwd) => format!("Run `{command}` in {cwd}."),
+        None => format!("Run `{command}`."),
+    }
+}
+
 /// Run a command through a real shell, with no allow-list.
 ///
 /// [`RunCommandTool`] spawns a binary from a fixed list and rejects shell
@@ -292,8 +313,13 @@ impl Tool for RunShellTool {
          so pipes, redirection and chaining work. Use for builds, tests, git and package managers."
     }
 
-    fn mutating(&self) -> bool {
-        true
+    fn tier(&self) -> Tier {
+        Tier::Host
+    }
+
+    fn preview(&self, params: &Value) -> Option<String> {
+        let params: RunShellParams = serde_json::from_value(params.clone()).ok()?;
+        Some(run_preview(&params.command, params.cwd.as_deref()))
     }
 
     fn parameters_schema(&self) -> Value {

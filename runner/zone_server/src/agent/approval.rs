@@ -1,7 +1,9 @@
-//! Confirm mutating file and shell tool calls before they run in chat.
+//! Confirm a tool call with the user before it runs in chat.
 //!
-//! Chat tools execute inside the server container with process permissions.
-//! Tasks auto-approve: they already run in a sandboxed cwd.
+//! Which calls wait is the tool's own declaration: anything from
+//! [`zone_core::tools::CONFIRMED_FROM`] up, which is host writes and commands
+//! and everything that leaves the workspace. Tasks auto-approve: they run
+//! unattended in a sandboxed cwd, so nobody is there to answer.
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -10,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::oneshot;
 use uuid::Uuid;
+use zone_core::tools::Tier;
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -42,6 +45,14 @@ impl ApprovalPolicy {
 
     pub fn is_auto(&self) -> bool {
         self.auto.load(Ordering::Acquire)
+    }
+
+    /// Whether a call at this tier is put to the user before it runs.
+    ///
+    /// The tool declares its own tier, so a tool added later is gated by what
+    /// it does rather than by whether somebody remembered to name it here.
+    pub fn confirms(&self, tier: Tier) -> bool {
+        !self.is_auto() && tier.confirmed()
     }
 
     pub fn set_auto(&self, auto: bool) {
@@ -202,14 +213,6 @@ impl ApprovalGate {
     }
 }
 
-/// File and shell tools that change the host or run a command.
-pub fn requires_approval(name: &str) -> bool {
-    matches!(
-        name,
-        "write_file" | "apply_patch" | "run_command" | "run_shell"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,15 +233,34 @@ mod tests {
     }
 
     #[test]
-    fn file_and_shell_tools_require_approval() {
-        assert!(requires_approval("write_file"));
-        assert!(requires_approval("apply_patch"));
-        assert!(requires_approval("run_command"));
-        assert!(requires_approval("run_shell"));
-        assert!(!requires_approval("read_file"));
-        assert!(!requires_approval("generate_image"));
-        assert!(!requires_approval("create_pull_request"));
-        assert!(!requires_approval("comment_on_issue"));
+    fn host_and_outward_calls_wait_and_nothing_below_them_does() {
+        let policy = ApprovalPolicy::required(ApprovalGate::new());
+        assert!(policy.confirms(Tier::Host));
+        assert!(policy.confirms(Tier::Outward));
+        assert!(!policy.confirms(Tier::Write));
+        assert!(!policy.confirms(Tier::Read));
+    }
+
+    /// Auto-approve is the surface saying nobody is waiting to answer, so it
+    /// has to release every tier, including the outward ones.
+    #[test]
+    fn auto_approve_waits_for_nothing() {
+        let policy = ApprovalPolicy::auto();
+        for tier in [Tier::Read, Tier::Write, Tier::Host, Tier::Outward] {
+            assert!(!policy.confirms(tier), "{tier:?}");
+        }
+    }
+
+    /// The tools whose tier decides this, named once so a retiering that
+    /// silently drops a confirmation fails here rather than in production.
+    #[test]
+    fn the_catalog_tiers_the_calls_a_reader_has_to_see_first() {
+        use zone_core::tools::{ApplyPatchTool, ReadFileTool, RunShellTool, Tool, WriteFileTool};
+
+        assert_eq!(WriteFileTool.tier(), Tier::Host);
+        assert_eq!(ApplyPatchTool.tier(), Tier::Host);
+        assert_eq!(RunShellTool.tier(), Tier::Host);
+        assert_eq!(ReadFileTool.tier(), Tier::Read);
     }
 
     #[test]

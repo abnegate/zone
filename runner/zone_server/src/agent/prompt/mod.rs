@@ -29,6 +29,7 @@ type Section = (&'static str, fn(&Context<'_>) -> Option<String>);
 const ORDER: &[Section] = &[
     ("identity", section::identity::render),
     ("boundary", section::boundary::render),
+    ("tiers", section::tiers::render),
     ("conduct", section::conduct::render),
     ("reply", section::reply::render),
     ("refusal", section::refusal::render),
@@ -264,6 +265,7 @@ mod tests {
             [
                 "identity",
                 "boundary",
+                "tiers",
                 "conduct",
                 "reply",
                 "refusal",

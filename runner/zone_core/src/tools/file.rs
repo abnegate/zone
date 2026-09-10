@@ -8,11 +8,13 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::beneath::{self, Access};
-use super::{REASON_PARAM, Tool, ToolContext, ToolError, ToolResult, reason_property};
+use super::{REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolResult, reason_property};
 
 // Prompt budget; matches `read_repository_file` paging in zone_server.
 const FILE_PAGE_CHARS: usize = super::MAX_TOOL_OUTPUT_CHARS;
 const LIST_FILES_CAP: usize = 200;
+/// How much of a patch's first hunk an approval preview quotes.
+const PATCH_HUNK_CHARS: usize = 80;
 const SEARCH_MAX_RESULTS: usize = 100;
 
 /// Read a file's contents
@@ -165,8 +167,20 @@ impl Tool for WriteFileTool {
         "Create a new file or replace an entire file. Prefer apply_patch when editing an existing file. Creates parent directories if needed. Use append=true to append instead of overwrite."
     }
 
-    fn mutating(&self) -> bool {
-        true
+    fn tier(&self) -> Tier {
+        Tier::Host
+    }
+
+    fn preview(&self, params: &Value) -> Option<String> {
+        let params: WriteFileParams = serde_json::from_value(params.clone()).ok()?;
+        let characters = params.content.chars().count();
+        Some(match params.append {
+            true => format!("Append {characters} characters to {}.", params.path),
+            false => format!(
+                "Write {characters} characters to {}, replacing whatever is there.",
+                params.path
+            ),
+        })
     }
 
     fn parameters_schema(&self) -> Value {
@@ -315,8 +329,26 @@ impl Tool for ApplyPatchTool {
         "Edit an existing file by replacing exact text. old_string must match uniquely unless replace_all is true. Prefer this over write_file for changes to existing files. Rejected when the text does not match."
     }
 
-    fn mutating(&self) -> bool {
-        true
+    fn tier(&self) -> Tier {
+        Tier::Host
+    }
+
+    fn preview(&self, params: &Value) -> Option<String> {
+        let params: ApplyPatchParams = serde_json::from_value(params.clone()).ok()?;
+        let hunks = params.hunks().ok()?;
+        let first = super::excerpt(&hunks[0].old_string, PATCH_HUNK_CHARS);
+        let scope = match params.replace_all {
+            true => "every occurrence of ",
+            false => "",
+        };
+        let rest = match hunks.len() {
+            1 => String::new(),
+            all => format!(" and {} more", all - 1),
+        };
+        Some(format!(
+            "Edit {}: replace {scope}\"{first}\"{rest}.",
+            params.path
+        ))
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1439,8 +1471,8 @@ mod tests {
         let patch = ApplyPatchTool;
         let def = patch.to_definition();
         assert_eq!(def.function.name, "apply_patch");
-        assert!(patch.mutating());
-        assert!(!ReadFileTool.mutating());
+        assert_eq!(patch.tier(), Tier::Host);
+        assert_eq!(ReadFileTool.tier(), Tier::Read);
     }
 
     #[tokio::test]

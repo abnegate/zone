@@ -7,11 +7,13 @@ mod command;
 mod file;
 mod reason;
 mod sanitize;
+mod tier;
 
 pub use command::*;
 pub use file::*;
 pub use reason::{REASON_DESCRIPTION, REASON_PARAM, reason_property};
 pub use sanitize::sanitize;
+pub use tier::{CONFIRMED_FROM, Tier};
 
 use async_trait::async_trait;
 use sanitize::sanitize_owned;
@@ -46,7 +48,25 @@ pub const MAX_TOOL_MESSAGE_CHARS: usize = MAX_TOOL_OUTPUT_CHARS + TOOL_FRAMING_C
 /// model reads is longer than the cap it asked for.
 pub(crate) const ERROR_PREFIX: &str = "Error: ";
 
+/// Longest a rendered approval preview may run.
+///
+/// The reader is deciding, not reading. A preview past a screenful is one
+/// nobody finishes, and an unfinished preview is worse than none.
+pub const MAX_PREVIEW_CHARS: usize = 400;
+
 const TOOL_TRUNCATION_MARKER: &str = "\n[truncated]";
+
+/// Collapse `text` onto one line and cut it to `max_chars`.
+///
+/// A command, a message body or a patch arrives with newlines and runs of
+/// whitespace that would push the part worth reading off the card.
+pub fn excerpt(text: &str, max_chars: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<&str>>().join(" ");
+    match collapsed.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => format!("{}…", &collapsed[..byte_idx]),
+        None => collapsed,
+    }
+}
 
 pub(crate) fn truncate_chars(text: &str, max_chars: usize) -> String {
     match text.char_indices().nth(max_chars) {
@@ -239,12 +259,22 @@ pub trait Tool: Send + Sync {
         std::time::Duration::from_secs(30)
     }
 
-    /// Whether this tool changes durable state.
+    /// What a call to this tool costs if it turns out to be the wrong one.
     ///
-    /// Read-only tools may run together in one batch. A mutating tool keeps
-    /// the whole batch sequential so later reads see earlier writes.
-    fn mutating(&self) -> bool {
-        false
+    /// Batching and confirmation both read this, so a tool declares its
+    /// consequences once and every caller agrees about them.
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+
+    /// What this specific call will do, for the reader deciding whether to
+    /// allow it.
+    ///
+    /// Rendered from the call's own arguments, so the reader weighs the action
+    /// rather than the model's account of it. Tools whose tier is never
+    /// confirmed have nobody to render for and leave this alone.
+    fn preview(&self, _params: &Value) -> Option<String> {
+        None
     }
 
     /// Convert to an OpenAI tool definition
@@ -336,12 +366,22 @@ impl ToolRegistry {
         self.tools.keys().map(|s| s.as_str()).collect()
     }
 
+    /// A named tool's tier, or nothing when the catalog has no such tool.
+    pub fn tier(&self, name: &str) -> Option<Tier> {
+        self.tools.get(name).map(|tool| tool.tier())
+    }
+
     /// Whether a named tool mutates state. Unknown names are treated as writes.
     pub fn mutating(&self, name: &str) -> bool {
-        self.tools
-            .get(name)
-            .map(|tool| tool.mutating())
-            .unwrap_or(true)
+        self.tier(name).is_none_or(Tier::mutating)
+    }
+
+    /// What a named call will do, bounded so one enormous argument cannot turn
+    /// an approval card into a wall of text.
+    pub fn preview(&self, name: &str, arguments: &str) -> Option<String> {
+        let params: Value = serde_json::from_str(arguments).ok()?;
+        let rendered = self.tools.get(name)?.preview(&params)?;
+        Some(excerpt(&rendered, MAX_PREVIEW_CHARS))
     }
 
     /// Take the tools out, for folding one registry into another.
