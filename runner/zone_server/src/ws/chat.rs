@@ -3242,7 +3242,7 @@ mod tests {
         }
     }
 
-    fn registered(chat_id: Uuid, hit: &SearchHit, identifier: &str) -> chat_sources::Source {
+    fn written(chat_id: Uuid, hit: &SearchHit, identifier: &str) -> chat_sources::Source {
         let now = chrono::Utc::now();
         chat_sources::Source {
             chat_id,
@@ -3268,7 +3268,7 @@ mod tests {
             "the fixture must differ from a local mint, or it could not tell the two apart"
         );
 
-        let source = registered(chat_id, &hit, &extended);
+        let source = written(chat_id, &hit, &extended);
         stamp(chat_id, &mut hit, Ok(source));
 
         assert_eq!(
@@ -3287,7 +3287,7 @@ mod tests {
         ];
         let identifier = agent::identifier::mint(agent::identifier::Kind::Web, &hits[0].url);
 
-        let source = registered(chat_id, &hits[0], &identifier);
+        let source = written(chat_id, &hits[0], &identifier);
         stamp(chat_id, &mut hits[0], Ok(source));
         stamp(chat_id, &mut hits[1], Err(sqlx::Error::PoolClosed));
 
