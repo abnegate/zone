@@ -539,7 +539,7 @@ mod tests {
 
         for prompt in [&chat_prompt, &task_prompt] {
             assert_eq!(
-                occurrences(prompt, "Give a reason on any call that changes something"),
+                occurrences(prompt, "Where a tool takes a reason, give one"),
                 1,
                 "{prompt}"
             );
@@ -551,10 +551,7 @@ mod tests {
         }
 
         assert_eq!(
-            occurrences(
-                &plain_prompt,
-                "Give a reason on any call that changes something"
-            ),
+            occurrences(&plain_prompt, "Where a tool takes a reason, give one"),
             0,
             "{plain_prompt}"
         );

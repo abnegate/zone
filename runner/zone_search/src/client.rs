@@ -409,10 +409,25 @@ fn has_web_intent(lower: &str) -> bool {
     FRESH_QUESTIONS.iter().any(|phrase| lower.contains(phrase))
 }
 
+/// Add `parameter` to `url`'s query string, ahead of any fragment.
+///
+/// A fragment is never sent in the request, so a parameter appended past the
+/// `#` reaches no engine and the filter is silently dropped. Splitting it off
+/// first also keeps a `?` inside the fragment from being read as a query
+/// string that is already open.
+fn append_parameter(url: &mut String, parameter: &str) {
+    let fragment = url.find('#').map(|hash| url.split_off(hash));
+    url.push(if url.contains('?') { '&' } else { '?' });
+    url.push_str(parameter);
+    if let Some(fragment) = fragment {
+        url.push_str(&fragment);
+    }
+}
+
 /// Substitute `<query>` / `{query}` in the configured template, or append `q=`.
 ///
 /// A template may place the query in the path, so the separator for an
-/// appended `time_range` follows the built URL rather than the template.
+/// appended parameter follows the built URL rather than the template.
 pub fn build_search_url(template: &str, query: &str, range: Option<TimeRange>) -> String {
     let encoded = urlencoding::encode(query);
     let mut url = if template.contains(ANGLE_QUERY_PLACEHOLDER) {
@@ -420,12 +435,12 @@ pub fn build_search_url(template: &str, query: &str, range: Option<TimeRange>) -
     } else if template.contains(BRACE_QUERY_PLACEHOLDER) {
         template.replace(BRACE_QUERY_PLACEHOLDER, encoded.as_ref())
     } else {
-        let separator = if template.contains('?') { '&' } else { '?' };
-        format!("{template}{separator}q={encoded}&format=json")
+        let mut url = template.to_string();
+        append_parameter(&mut url, &format!("q={encoded}&format=json"));
+        url
     };
     if let Some(range) = range {
-        let separator = if url.contains('?') { '&' } else { '?' };
-        url.push_str(&format!("{separator}{}={range}", TimeRange::PARAM));
+        append_parameter(&mut url, &format!("{}={range}", TimeRange::PARAM));
     }
     url
 }
@@ -498,6 +513,55 @@ mod tests {
                 Some(TimeRange::Day)
             ),
             "http://gluetun:8080/search?lang=en&q=hello&format=json&time_range=day"
+        );
+    }
+
+    /// A fragment is never sent to the server, so a parameter appended after
+    /// one reaches nothing and the engine silently ignores the filter. Every
+    /// parameter has to land ahead of the `#`.
+    #[test]
+    fn build_search_url_keeps_a_template_fragment_behind_the_parameters() {
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search?q={query}&format=json#view",
+                "hello",
+                Some(TimeRange::Day)
+            ),
+            "http://gluetun:8080/search?q=hello&format=json&time_range=day#view"
+        );
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search/<query>#view",
+                "hello",
+                Some(TimeRange::Week)
+            ),
+            "http://gluetun:8080/search/hello?time_range=week#view"
+        );
+        assert_eq!(
+            build_search_url("http://gluetun:8080/search#view", "hello", None),
+            "http://gluetun:8080/search?q=hello&format=json#view"
+        );
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search#view",
+                "hello",
+                Some(TimeRange::Month)
+            ),
+            "http://gluetun:8080/search?q=hello&format=json&time_range=month#view"
+        );
+    }
+
+    /// A `?` inside a fragment does not open a query string, so it must not
+    /// decide the separator either.
+    #[test]
+    fn build_search_url_ignores_a_question_mark_inside_a_fragment() {
+        assert_eq!(
+            build_search_url(
+                "http://gluetun:8080/search/<query>#view?tab=all",
+                "hello",
+                Some(TimeRange::Day)
+            ),
+            "http://gluetun:8080/search/hello?time_range=day#view?tab=all"
         );
     }
 

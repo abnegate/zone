@@ -205,7 +205,10 @@ impl Tool for WriteFileTool {
 
         tracing::debug!(
             tool = self.name(),
-            reason = params.reason.as_deref().unwrap_or_default(),
+            reason_given = params
+                .reason
+                .as_deref()
+                .is_some_and(|why| !why.trim().is_empty()),
             "Running tool"
         );
 
@@ -410,7 +413,10 @@ impl Tool for ApplyPatchTool {
 
         tracing::debug!(
             tool = self.name(),
-            reason = params.reason.as_deref().unwrap_or_default(),
+            reason_given = params
+                .reason
+                .as_deref()
+                .is_some_and(|why| !why.trim().is_empty()),
             "Running tool"
         );
 
@@ -913,6 +919,7 @@ fn ripgrep_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::captured_logs;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1669,6 +1676,57 @@ mod tests {
             fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "bar\n"
         );
+    }
+
+    /// A reason is the model's own prose and can carry whatever it just read
+    /// out of a file or a page, so the run log records that one arrived and
+    /// never what it said.
+    #[tokio::test]
+    async fn the_writing_tools_log_that_a_reason_arrived_without_repeating_it() {
+        const LIFTED: &str = "AWS_SECRET_ACCESS_KEY read out of the .env I just opened";
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "foo\n").unwrap();
+        let context = create_test_context(dir.path());
+
+        let (_, write_log) = captured_logs(WriteFileTool.execute(
+            serde_json::json!({"path": "b.txt", "content": "hi", "reason": LIFTED}),
+            &context,
+        ))
+        .await;
+        let (_, patch_log) = captured_logs(ApplyPatchTool.execute(
+            serde_json::json!({
+                "path": "a.txt",
+                "old_string": "foo",
+                "new_string": "bar",
+                "reason": LIFTED
+            }),
+            &context,
+        ))
+        .await;
+
+        for (tool, logged) in [("write_file", write_log), ("apply_patch", patch_log)] {
+            assert!(logged.contains("Running tool"), "{logged}");
+            assert!(logged.contains(tool), "{logged}");
+            assert!(logged.contains("reason_given=true"), "{logged}");
+            assert!(
+                !logged.contains(LIFTED),
+                "{tool} wrote the model's reason to the log: {logged}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_writing_tool_without_a_reason_logs_none_given() {
+        let dir = tempdir().unwrap();
+        let context = create_test_context(dir.path());
+
+        let (_, logged) = captured_logs(WriteFileTool.execute(
+            serde_json::json!({"path": "b.txt", "content": "hi"}),
+            &context,
+        ))
+        .await;
+
+        assert!(logged.contains("reason_given=false"), "{logged}");
     }
 
     #[tokio::test]

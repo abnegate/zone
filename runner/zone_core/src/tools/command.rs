@@ -9,8 +9,8 @@ use tokio::time::{Duration, timeout};
 use tool_runner::Proxy;
 
 use super::{
-    MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tool, ToolContext, ToolError, ToolResult, reason_property,
-    trim_middle,
+    ERROR_PREFIX, MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tool, ToolContext, ToolError, ToolResult,
+    reason_property, trim_middle,
 };
 
 /// Run a shell command
@@ -59,6 +59,8 @@ fn clamp_output_chars(requested: Option<u64>) -> usize {
 fn max_output_property() -> Value {
     json!({
         "type": "integer",
+        // Parsed into a u64, so a negative fails the call instead of clamping.
+        "minimum": 0,
         "description": format!(
             "Cap returned output at this many characters, keeping head and tail. Default \
              {MAX_SHELL_OUTPUT_CHARS}; larger values clamp down, values under \
@@ -120,7 +122,10 @@ impl Tool for RunCommandTool {
 
         tracing::debug!(
             tool = self.name(),
-            reason = params.reason.as_deref().unwrap_or_default(),
+            reason_given = params
+                .reason
+                .as_deref()
+                .is_some_and(|why| !why.trim().is_empty()),
             "Running tool"
         );
 
@@ -240,9 +245,11 @@ impl Tool for RunCommandTool {
                 .code()
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
+            // `to_message` prefixes a failure, so the cap the caller asked for
+            // has to cover that too.
             Ok(ToolResult::error(trim_middle(
                 &format!("Command exited with code {}\n\n{}", code, result),
-                output_chars,
+                output_chars.saturating_sub(ERROR_PREFIX.chars().count()),
             )))
         }
     }
@@ -323,7 +330,10 @@ impl Tool for RunShellTool {
 
         tracing::debug!(
             tool = self.name(),
-            reason = params.reason.as_deref().unwrap_or_default(),
+            reason_given = params
+                .reason
+                .as_deref()
+                .is_some_and(|why| !why.trim().is_empty()),
             "Running tool"
         );
 
@@ -403,6 +413,7 @@ impl Tool for RunShellTool {
 mod tests {
     use super::*;
     use crate::tools::MAX_TOOL_MESSAGE_CHARS;
+    use crate::tools::test_support::captured_logs;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -820,6 +831,52 @@ mod tests {
         assert!(result.output.unwrap().contains("hello"));
     }
 
+    /// A reason is the model's own prose and can carry whatever it just read
+    /// out of a file or a page, so the run log records that one arrived and
+    /// never what it said.
+    #[tokio::test]
+    async fn the_shell_tools_log_that_a_reason_arrived_without_repeating_it() {
+        const LIFTED: &str = "AWS_SECRET_ACCESS_KEY read out of the .env I just opened";
+
+        let (_, command_log) = captured_logs(RunCommandTool.execute(
+            json!({"command": "echo", "args": ["hello"], "reason": LIFTED}),
+            &create_test_context(),
+        ))
+        .await;
+        let (_, shell_log) = captured_logs(RunShellTool.execute(
+            json!({"command": "echo hello", "reason": LIFTED}),
+            &shell_test_context(),
+        ))
+        .await;
+
+        for (tool, logged) in [("run_command", command_log), ("run_shell", shell_log)] {
+            assert!(logged.contains("Running tool"), "{logged}");
+            assert!(logged.contains(tool), "{logged}");
+            assert!(logged.contains("reason_given=true"), "{logged}");
+            assert!(
+                !logged.contains(LIFTED),
+                "{tool} wrote the model's reason to the log: {logged}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_blank_reason_logs_as_none_given() {
+        let (_, missing) = captured_logs(RunCommandTool.execute(
+            json!({"command": "echo", "args": ["hello"]}),
+            &create_test_context(),
+        ))
+        .await;
+        let (_, blank) = captured_logs(RunShellTool.execute(
+            json!({"command": "echo hello", "reason": "   "}),
+            &shell_test_context(),
+        ))
+        .await;
+
+        assert!(missing.contains("reason_given=false"), "{missing}");
+        assert!(blank.contains("reason_given=false"), "{blank}");
+    }
+
     fn huge_output_context(body: &str) -> (tempfile::TempDir, ToolContext) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("huge.txt"), body).unwrap();
@@ -881,6 +938,37 @@ mod tests {
         let without: RunShellParams =
             serde_json::from_value(json!({"command": "cargo test"})).unwrap();
         assert_eq!(without.max_output_chars, None);
+    }
+
+    /// The knob clamps every number it is given, but only after serde has
+    /// parsed one into a `u64`. A bare `"type": "integer"` advertises negatives
+    /// the parser then refuses, which fails the whole call rather than clamping
+    /// it — so the schema has to rule out what the parser cannot take. Zero is
+    /// legal and clamps up, which is why the floor is here and not 500.
+    #[test]
+    fn the_schema_refuses_the_negative_max_output_chars_the_parser_cannot_read() {
+        for schema in [
+            RunCommandTool.parameters_schema(),
+            RunShellTool.parameters_schema(),
+        ] {
+            assert_eq!(schema["properties"][MAX_OUTPUT_PARAM]["minimum"], json!(0));
+        }
+
+        assert!(
+            serde_json::from_value::<RunCommandParams>(
+                json!({"command": "cargo", "max_output_chars": -1})
+            )
+            .is_err(),
+            "a negative would have to clamp rather than fail, so the schema must exclude it"
+        );
+        assert!(
+            serde_json::from_value::<RunShellParams>(
+                json!({"command": "cargo test", "max_output_chars": -1})
+            )
+            .is_err(),
+            "a negative would have to clamp rather than fail, so the schema must exclude it"
+        );
+        assert_eq!(clamp_output_chars(Some(0)), MIN_SHELL_OUTPUT_CHARS);
     }
 
     #[test]
@@ -970,6 +1058,50 @@ mod tests {
         assert!(message.contains("HEAD_MARKER"), "{message}");
         assert!(message.contains("TAIL_MARKER"), "{message}");
         assert!(message.chars().count() <= REQUESTED, "{message}");
+    }
+
+    /// The failed branch trims the body to the cap and `to_message` then
+    /// prepends `Error: `, so what the model reads ran over the cap the caller
+    /// asked for. The framing is paid for out of the budget, the same rule the
+    /// success path and the transcript cap already follow.
+    #[tokio::test]
+    async fn a_failed_command_pays_for_the_error_prefix_out_of_the_requested_cap() {
+        const REQUESTED: usize = 2_000;
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!("HEAD_MARKER{}TAIL_MARKER", "x".repeat(40_000));
+        std::fs::write(dir.path().join("huge.txt"), &body).unwrap();
+
+        let mut context = create_test_context();
+        context.cwd = dir.path().to_path_buf();
+
+        let result = RunCommandTool
+            .execute(
+                json!({
+                    "command": "cat",
+                    "args": ["huge.txt", "missing.txt"],
+                    "max_output_chars": REQUESTED
+                }),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.success, "cat of a missing file exits non-zero");
+        let message = result.to_message();
+        assert!(
+            message.starts_with("Error: Command exited with"),
+            "{message}"
+        );
+        assert!(message.contains("HEAD_MARKER"), "{message}");
+        assert!(message.contains("TAIL_MARKER"), "{message}");
+        assert!(message.contains("characters trimmed"), "{message}");
+
+        let chars = message.chars().count();
+        assert!(
+            chars <= REQUESTED,
+            "the model was handed {chars} characters against a cap of {REQUESTED}"
+        );
+        assert!(chars > REQUESTED - 100, "{chars}");
     }
 
     #[tokio::test]

@@ -39,6 +39,12 @@ const TOOL_FRAMING_CHARS: usize = 1_000;
 /// its middle to a second trim, which is the double cut this exists to avoid.
 pub const MAX_TOOL_MESSAGE_CHARS: usize = MAX_TOOL_OUTPUT_CHARS + TOOL_FRAMING_CHARS;
 
+/// What [`ToolResult::to_message`] puts in front of a failure.
+///
+/// A tool trimming to a caller's cap has to reserve this, or the message the
+/// model reads is longer than the cap it asked for.
+pub(crate) const ERROR_PREFIX: &str = "Error: ";
+
 const TOOL_TRUNCATION_MARKER: &str = "\n[truncated]";
 
 pub(crate) fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -137,7 +143,7 @@ impl ToolResult {
             self.output.clone().unwrap_or_default()
         } else {
             format!(
-                "Error: {}",
+                "{ERROR_PREFIX}{}",
                 self.error.as_deref().unwrap_or("Unknown error")
             )
         };
@@ -399,6 +405,75 @@ pub async fn with_defaults_and_mcp() -> ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::with_defaults()
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::cell::RefCell;
+    use std::future::Future;
+    use std::io;
+    use std::sync::{Arc, Mutex, Once};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// One subscriber for the whole binary, because a scoped one is not
+    /// reliable here: `tracing` caches each callsite's interest globally, and a
+    /// test running in parallel with no subscriber of its own caches
+    /// `Interest::never` for a callsite another test is about to read.
+    static INSTALLED: Once = Once::new();
+
+    thread_local! {
+        static SINK: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
+    }
+
+    /// Routes each line to whichever buffer the emitting thread is collecting
+    /// into, and drops it when that thread is not collecting.
+    struct Sink;
+
+    impl io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            SINK.with(|sink| {
+                if let Some(buffer) = sink.borrow().as_ref() {
+                    buffer.lock().expect("log buffer").extend_from_slice(bytes);
+                }
+            });
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for Sink {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            Sink
+        }
+    }
+
+    /// Run `work` and return it with everything it logged on this thread.
+    ///
+    /// `zone_server` turns `zone_core=debug` on by default, so a debug field is
+    /// a production log line. This is how a test reads one back.
+    pub(crate) async fn captured_logs<T>(work: impl Future<Output = T>) -> (T, String) {
+        INSTALLED.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(Sink)
+                .try_init();
+        });
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        SINK.with(|sink| *sink.borrow_mut() = Some(buffer.clone()));
+        let value = work.await;
+        SINK.with(|sink| sink.borrow_mut().take());
+
+        let logged =
+            String::from_utf8(buffer.lock().expect("log buffer").clone()).expect("logs are utf-8");
+        (value, logged)
     }
 }
 

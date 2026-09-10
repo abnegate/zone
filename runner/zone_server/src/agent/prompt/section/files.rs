@@ -26,11 +26,16 @@ const SANDBOX: &str = "read_file, write_file, apply_patch, list_files, search_co
              - Prefer apply_patch for edits. Use write_file to create a file or when a full rewrite is required.\n\
              - Keep each command narrow and inspectable, and bound a long log with max_output_chars.";
 
-/// The one place either surface is taught the convention. The parameter is in
-/// every side-effecting schema's `required` array, but nothing validates that
-/// array at dispatch, so this sentence is what actually asks for it.
-const REASON: &str = "Give a reason on any call that changes something: one sentence on why, which the user \
-             reads when reviewing or approving it.";
+/// The one place either surface is taught the convention. Seven schemas carry
+/// the parameter and nothing validates their `required` array at dispatch, so
+/// this sentence is what actually asks for it.
+///
+/// It is scoped to where the parameter exists rather than to what a call
+/// changes. The workspace and document writes take no `reason` and set
+/// `additionalProperties: false` over structs that deny unknown fields, so a
+/// broader rule would talk a model into losing those calls before the write.
+const REASON: &str = "Where a tool takes a reason, give one: a sentence on why, which the user reads when \
+             reviewing or approving it.";
 
 const READING: &str = "Read only the part of a file you need when you already know where it is, and do not read a \
              file back to check a write you just made: the tool result already said it applied. \
@@ -169,14 +174,28 @@ mod tests {
     fn both_surfaces_are_asked_to_say_why_a_changing_call_is_needed() {
         for rendered in [chat(false), chat(true), task()] {
             assert!(
-                rendered.contains("Give a reason on any call that changes something"),
+                rendered.contains("Where a tool takes a reason, give one"),
                 "{rendered}"
             );
             assert!(
                 rendered.contains(
-                    "one sentence on why, which the user reads when reviewing or \
-                     approving it"
+                    "a sentence on why, which the user reads when reviewing or approving it"
                 ),
+                "{rendered}"
+            );
+        }
+    }
+
+    /// The mutating tools that take no `reason` — create_task, create_document,
+    /// create_reminder and their siblings — set `additionalProperties: false`
+    /// over structs that deny unknown fields, so a model told to reason on
+    /// everything it changes loses the call before the write runs. The rule has
+    /// to key off the parameter being offered, never off the call mutating.
+    #[test]
+    fn the_reason_rule_keys_off_the_parameter_not_off_changing_something() {
+        for rendered in [chat(false), chat(true), task()] {
+            assert!(
+                !rendered.contains("any call that changes something"),
                 "{rendered}"
             );
         }
