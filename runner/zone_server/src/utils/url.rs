@@ -1,6 +1,11 @@
 //! URL validation for outbound HTTP fetches.
 
 use std::net::IpAddr;
+use std::time::Duration;
+
+/// Redirect hops a caller-supplied fetch may follow. Each one is validated, so
+/// this bounds the chain rather than the trust.
+const MAX_REDIRECTS: usize = 3;
 
 /// Parse `raw` and reject schemes, hosts, and addresses that must not be fetched
 /// by server-side knowledge or tool requests.
@@ -43,6 +48,57 @@ pub fn validate_public_url(raw: &str) -> Result<reqwest::Url, String> {
         return Err("Internal hostnames are not allowed.".to_string());
     }
     Ok(url)
+}
+
+/// A client builder for fetching a caller-supplied URL.
+///
+/// [`validate_public_url`] only answers for the URL it was handed. reqwest
+/// issues the redirect hops itself, so the policy re-checks every hop: reading
+/// the final address back afterwards refuses the disclosure but has already
+/// made the request.
+pub fn public_client_builder(timeout: Duration) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > MAX_REDIRECTS {
+                attempt.error("Too many redirects.".to_string())
+            } else {
+                match validate_public_url(attempt.url().as_str()) {
+                    Ok(_) => attempt.follow(),
+                    Err(error) => attempt.error(error),
+                }
+            }
+        }))
+}
+
+pub fn public_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    public_client_builder(timeout)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+/// Read at most `limit` bytes of `response`, refusing a body that does not fit
+/// rather than buffering it whole and measuring it afterwards.
+pub async fn read_capped(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+    let oversized = || format!("The response body is larger than {limit} bytes.");
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(oversized());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Could not read the response body.".to_string())?
+    {
+        if body.len() + chunk.len() > limit {
+            return Err(oversized());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
