@@ -4,6 +4,7 @@ import {
   citationEvidence,
   citationEvidenceLabel,
   citationHref,
+  citationKindLabel,
   formatRevision,
   mergeCitations,
 } from './citations';
@@ -74,6 +75,26 @@ describe('citation presentation', () => {
     const first = citation();
     expect(mergeCitations([first], [first, citation({ title: 'duplicate' })])).toEqual([first]);
     expect(mergeCitations([first], [citation({ revision: 'bbbb' })])).toHaveLength(2);
+  });
+
+  it('names a web source and links it by the absolute url it was retrieved from', () => {
+    expect(citationKindLabel('web')).toBe('Web page');
+    expect(citationHref({ kind: 'web', url: 'https://example.test/changelog' })).toBe(
+      'https://example.test/changelog'
+    );
+  });
+
+  it('never routes a web source to the wiki when its url is unusable', () => {
+    expect(citationHref({ kind: 'web', url: 'example.test/changelog' })).toBeNull();
+    expect(citationHref({ kind: 'web', url: '//evil.example/x' })).toBeNull();
+  });
+
+  it('keeps the identifier a reply cites a source by', () => {
+    const cited = citation({ kind: 'web', identifier: 'web-1' });
+
+    expect(cited.identifier).toBe('web-1');
+    expect(citation().identifier).toBeUndefined();
+    expect(mergeCitations([], [cited])).toEqual([cited]);
   });
 
   it('will not call a model claim passing, however complete and successful', () => {

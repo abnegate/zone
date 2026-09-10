@@ -14,6 +14,7 @@ const KIND_LABELS: Record<Citation['kind'], string> = {
   github_issue: 'GitHub issue',
   github_file: 'GitHub file',
   workspace_document: 'Workspace document',
+  web: 'Web page',
   behavioral_verification: 'Behavioral verification',
 };
 
