@@ -169,3 +169,62 @@ async fn an_owner_still_steps_down_once_another_owner_stands() {
     );
     assert_eq!(owners(&pool, workspace).await, 1);
 }
+
+/// The rank being granted is guarded in the route as well. It is guarded here
+/// because this is the entry point that calls itself guarded: a caller who
+/// reaches it should not be able to acquire the target check without the grant
+/// check, whichever route brought them.
+#[tokio::test]
+async fn an_admin_cannot_grant_a_rank_only_an_owner_grants() {
+    let pool = create_test_pool().await;
+    let (workspace, _owner, admin) = workspace_with_owner_and_admin(&pool).await;
+    let member = user(&pool).await;
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+    )
+    .bind(workspace)
+    .bind(member)
+    .execute(&pool)
+    .await
+    .expect("a member is seated");
+
+    for granted in [WorkspaceRole::Admin, WorkspaceRole::Owner] {
+        let outcome = change_role(&pool, workspace, member, granted, WorkspaceRole::Admin)
+            .await
+            .expect("the grant is answered");
+        assert!(
+            matches!(outcome, RoleChange::Forbidden),
+            "an admin granted {granted:?}, which only an owner grants: {outcome:?}"
+        );
+    }
+
+    // The floor is not a wall: an owner still grants both, and an admin still
+    // seats the ranks below them.
+    let outcome = change_role(
+        &pool,
+        workspace,
+        member,
+        WorkspaceRole::Admin,
+        WorkspaceRole::Owner,
+    )
+    .await
+    .expect("the grant is answered");
+    assert!(
+        matches!(outcome, RoleChange::Applied(_)),
+        "an owner must still grant admin: {outcome:?}"
+    );
+
+    let outcome = change_role(
+        &pool,
+        workspace,
+        admin,
+        WorkspaceRole::Member,
+        WorkspaceRole::Owner,
+    )
+    .await
+    .expect("the demotion is answered");
+    assert!(
+        matches!(outcome, RoleChange::Applied(_)),
+        "an owner must still demote an admin: {outcome:?}"
+    );
+}

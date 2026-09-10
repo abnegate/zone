@@ -447,6 +447,16 @@ pub async fn change_role(
         return Ok(RoleChange::Forbidden);
     }
 
+    // The rank being granted is the other half of the same question, and the
+    // route asks it too. Ask it here as well: this is the guarded entry point,
+    // and a caller reaching it should not be able to acquire one guard without
+    // the other. Only an owner seats an owner; an admin seating an admin is
+    // this organization's policy, deliberately, and the route it goes through
+    // says the same.
+    if role == OrgRole::Owner && caller != OrgRole::Owner {
+        return Ok(RoleChange::Forbidden);
+    }
+
     if role != OrgRole::Owner && owners.len() <= 1 && owners.contains(&user_id) {
         return Ok(RoleChange::LastOwner);
     }

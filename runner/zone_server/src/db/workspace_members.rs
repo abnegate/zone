@@ -598,6 +598,14 @@ pub async fn change_role(
         return Ok(RoleChange::Forbidden);
     }
 
+    // The rank being granted, asked here as well as in the route, so a caller
+    // reaching this entry point cannot acquire one guard without the other. A
+    // workspace is stricter than an organization: only an owner grants admin,
+    // not just owner.
+    if role >= WorkspaceRole::Admin && caller != WorkspaceRole::Owner {
+        return Ok(RoleChange::Forbidden);
+    }
+
     // An owner is not interchangeable with an admin here: only an owner may
     // delete the workspace or seat another owner, so a workspace whose last
     // owner steps down -- to admin as readily as to member -- is one nobody can
