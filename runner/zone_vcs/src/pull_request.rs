@@ -315,6 +315,17 @@ impl Default for PrService {
 }
 
 /// A single path segment that is safe to interpolate into a request URL.
+/// The host of an authority, without userinfo or port.
+fn host_of(authority: &str) -> &str {
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    match host.strip_prefix('[') {
+        Some(tail) => tail.split_once(']').map_or(host, |(inside, _)| inside),
+        None => host.split_once(':').map_or(host, |(host, _)| host),
+    }
+}
+
 fn named(segment: &str) -> bool {
     !segment.is_empty()
         && segment != "."
@@ -341,32 +352,59 @@ impl PrService {
         }
     }
 
+    /// Whether a repository on this host is one this service can address.
+    fn serves(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        if host == "github.com" {
+            return true;
+        }
+        let configured = self
+            .base_url
+            .split_once("://")
+            .map_or(self.base_url.as_str(), |(_, rest)| {
+                rest.split('/').next().unwrap_or(rest)
+            });
+        let configured = host_of(configured).to_ascii_lowercase();
+        // api.github.com serves github.com, and an Enterprise install answers
+        // for its own host under a /api/v3 path.
+        host == configured || configured == format!("api.{host}")
+    }
+
     /// Parse owner and repo from a repository URL.
     ///
-    /// The host is not matched, so a GitHub Enterprise repository parses the
-    /// same as a github.com one -- matching `https://github.com/` was what made
-    /// `GITHUB_API_URL` insufficient on its own to reach Enterprise.
+    /// The host has to be one this service answers for -- github.com, or the
+    /// host of the configured API origin, so that a GitHub Enterprise install
+    /// parses its own repositories. Matching `https://github.com/` literally
+    /// was what made `GITHUB_API_URL` insufficient on its own to reach
+    /// Enterprise; matching nothing at all would accept a repository this
+    /// service cannot open a request against.
     ///
-    /// Supports:
-    /// - https://github.com/owner/repo, with or without `.git`
-    /// - https://github.example.com/owner/repo
-    /// - git@github.com:owner/repo.git
-    /// - ssh://git@github.example.com/owner/repo.git
+    /// Supports, for a host it answers for:
+    ///
+    /// - `https://host/owner/repo`, with or without `.git`
+    /// - `git@host:owner/repo.git`
+    /// - `ssh://git@host/owner/repo.git`
     pub fn parse_github_url(&self, url: &str) -> PrResult<(String, String)> {
         let invalid = || PrError::InvalidRepoUrl(url.to_string());
         let url = url.trim();
 
         // `git@host:owner/repo` is not a URL, so it is split on the colon
         // rather than parsed. The scp-like form has no scheme to strip.
-        let path = if let Some((_, path)) = url.split_once("://") {
-            path.split_once('/')
-                .map(|(_, path)| path)
-                .ok_or_else(invalid)?
-        } else if let Some((_, path)) = url.split_once(':') {
-            path
+        let (authority, path) = if let Some((_, rest)) = url.split_once("://") {
+            rest.split_once('/').ok_or_else(invalid)?
+        } else if let Some((authority, path)) = url.split_once(':') {
+            (authority, path)
         } else {
             return Err(invalid());
         };
+
+        // The pair is interpolated into this service's own API origin, so a
+        // repository hosted somewhere else is not ours to open a request
+        // against. GitHub Enterprise answers on its own host, hence the
+        // configured origin rather than a hardcoded name.
+        if !self.serves(host_of(authority)) {
+            return Err(invalid());
+        }
 
         let path = path.trim_matches('/').trim_end_matches(".git");
         let mut segments = path.split('/').filter(|segment| !segment.is_empty());
@@ -726,14 +764,15 @@ mod tests {
     /// refused as invalid, so `GITHUB_API_URL` alone could not reach one.
     #[test]
     fn an_enterprise_repository_parses_like_a_github_one() {
-        let service = PrService::new();
+        let service = PrService::with_base_url("https://github.example.com/api/v3".to_string());
         for url in [
             "https://github.example.com/acme/project",
             "https://github.example.com/acme/project.git",
-            "http://127.0.0.1:9099/acme/project.git",
             "ssh://git@github.example.com/acme/project.git",
             "git@github.example.com:acme/project.git",
-            "  https://github.com/acme/project/  ",
+            "  https://github.example.com/acme/project/  ",
+            // github.com stays addressable whatever the configured origin is.
+            "https://github.com/acme/project",
         ] {
             assert_eq!(
                 service.parse_github_url(url).expect(url),
@@ -741,6 +780,35 @@ mod tests {
                 "{url}"
             );
         }
+    }
+
+    /// The endpoint the pair is interpolated into belongs to one host, so a
+    /// repository somewhere else is not this service's to address -- whatever
+    /// its path happens to look like.
+    #[test]
+    fn a_repository_on_another_host_is_refused() {
+        let service = PrService::new();
+        for url in [
+            "https://gitlab.com/acme/project",
+            "https://bitbucket.org/acme/project.git",
+            "git@gitlab.com:acme/project.git",
+            "https://github.com.attacker.test/acme/project",
+            "https://notgithub.com/acme/project",
+            "https://github.example.com/acme/project",
+        ] {
+            assert!(
+                service.parse_github_url(url).is_err(),
+                "{url} was accepted for api.github.com"
+            );
+        }
+
+        let enterprise = PrService::with_base_url("https://github.example.com/api/v3".to_string());
+        assert!(
+            enterprise
+                .parse_github_url("https://gitlab.com/acme/project")
+                .is_err(),
+            "a configured enterprise origin does not admit another host"
+        );
     }
 
     /// The pair is interpolated into `{base}/repos/{owner}/{repo}/pulls`, so
