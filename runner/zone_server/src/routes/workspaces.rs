@@ -474,35 +474,19 @@ pub async fn update_member_role(
             )
                 .into_response();
         }
-
-        if role < workspace_members::WorkspaceRole::Admin {
-            match workspace_members::count_admins(state.db(), admin.workspace_id).await {
-                Ok(count) if count <= 1 => {
-                    return (
-                        StatusCode::FORBIDDEN,
-                        Json(ErrorResponse::new(
-                            "Cannot demote the last admin of the workspace",
-                        )),
-                    )
-                        .into_response();
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!("Database error counting admins: {}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::new("Internal server error")),
-                    )
-                        .into_response();
-                }
-            }
-        }
     }
 
-    match workspace_members::update_member_role(state.db(), admin.workspace_id, path.user_id, role)
-        .await
-    {
-        Ok(member) => Json(WorkspaceMemberResponse::from(member)).into_response(),
+    match workspace_members::change_role(state.db(), admin.workspace_id, path.user_id, role).await {
+        Ok(workspace_members::RoleChange::Applied(member)) => {
+            Json(WorkspaceMemberResponse::from(*member)).into_response()
+        }
+        Ok(workspace_members::RoleChange::LastAdmin) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "Cannot demote the last admin of the workspace",
+            )),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (

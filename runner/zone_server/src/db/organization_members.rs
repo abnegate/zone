@@ -307,6 +307,75 @@ pub async fn update_member_role(
     })
 }
 
+/// Outcome of a role change that must leave an owner seated.
+#[derive(Debug)]
+pub enum RoleChange {
+    Applied(Box<OrganizationMemberRow>),
+    LastOwner,
+}
+
+/// Change a member's role, refusing to unseat the organization's last owner.
+///
+/// Counting the owners and then updating one of them are two statements, so two
+/// demotions racing each other both read a safe count and between them leave
+/// none. Lock the owner rows for the length of the transaction: the second
+/// demotion waits, then counts what the first actually left.
+pub async fn change_role(
+    pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+    role: OrgRole,
+) -> DbResult<RoleChange> {
+    let mut transaction = pool.begin().await?;
+
+    let owners: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT user_id
+        FROM organization_members
+        WHERE organization_id = $1 AND role = 'owner' AND is_active = TRUE
+        FOR UPDATE
+        "#,
+    )
+    .bind(organization_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    if role != OrgRole::Owner && owners.len() <= 1 && owners.contains(&user_id) {
+        return Ok(RoleChange::LastOwner);
+    }
+
+    let row = sqlx::query!(
+        r#"
+        UPDATE organization_members
+        SET role = $3, updated_at = NOW()
+        WHERE organization_id = $1 AND user_id = $2
+        RETURNING id, organization_id, user_id, role, is_active,
+                  invited_by, invited_at, accepted_at, created_at, updated_at
+        "#,
+        organization_id,
+        user_id,
+        role.as_str()
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    let now = chrono::Utc::now().naive_utc();
+    Ok(RoleChange::Applied(Box::new(OrganizationMemberRow {
+        id: row.id,
+        organization_id: row.organization_id,
+        user_id: row.user_id,
+        role: row.role.parse().unwrap_or(OrgRole::Member),
+        is_active: row.is_active,
+        invited_by: row.invited_by,
+        invited_at: row.invited_at,
+        accepted_at: row.accepted_at,
+        created_at: row.created_at.unwrap_or(now),
+        updated_at: row.updated_at.unwrap_or(now),
+    })))
+}
+
 /// Check if user is an active member of organization
 pub async fn is_member(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> DbResult<bool> {
     let result =

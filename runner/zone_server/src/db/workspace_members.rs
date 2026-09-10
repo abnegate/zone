@@ -426,6 +426,78 @@ pub async fn can_admin(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbRe
 
 /// Count the number of active admins (admin or owner) in a workspace
 /// Used to prevent removal of the last admin
+/// Outcome of a role change that must leave the workspace administrable.
+#[derive(Debug)]
+pub enum RoleChange {
+    Applied(Box<WorkspaceMemberRow>),
+    LastAdmin,
+}
+
+/// Change a member's role, refusing to unseat the last admin or owner.
+///
+/// Counting the privileged members and then demoting one of them are two
+/// statements, so two demotions racing each other both read a safe count and
+/// between them leave none -- and every workspace route is reached through a
+/// membership guard, so nobody can repair that. Lock the privileged rows for
+/// the length of the transaction: the second demotion waits, then counts what
+/// the first actually left.
+pub async fn change_role(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role: WorkspaceRole,
+) -> DbResult<RoleChange> {
+    let mut transaction = pool.begin().await?;
+
+    let privileged: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT user_id FROM workspace_members
+        WHERE workspace_id = $1
+          AND is_active = TRUE
+          AND (role = 'admin' OR role = 'owner')
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    if role < WorkspaceRole::Admin && privileged.len() <= 1 && privileged.contains(&user_id) {
+        return Ok(RoleChange::LastAdmin);
+    }
+
+    let row = sqlx::query!(
+        r#"
+        UPDATE workspace_members
+        SET role = $3, updated_at = NOW()
+        WHERE workspace_id = $1 AND user_id = $2
+        RETURNING id, workspace_id, user_id, role, is_active,
+                  invited_by, invited_at, accepted_at, created_at, updated_at
+        "#,
+        workspace_id,
+        user_id,
+        role.as_str()
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    let now = chrono::Utc::now().naive_utc();
+    Ok(RoleChange::Applied(Box::new(WorkspaceMemberRow {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        user_id: row.user_id,
+        role: row.role.parse().unwrap_or(WorkspaceRole::Member),
+        is_active: row.is_active,
+        invited_by: row.invited_by,
+        invited_at: row.invited_at,
+        accepted_at: row.accepted_at,
+        created_at: row.created_at.unwrap_or(now),
+        updated_at: row.updated_at.unwrap_or(now),
+    })))
+}
+
 pub async fn count_admins(pool: &PgPool, workspace_id: Uuid) -> DbResult<i64> {
     let count = sqlx::query_scalar::<_, i64>(
         r#"
