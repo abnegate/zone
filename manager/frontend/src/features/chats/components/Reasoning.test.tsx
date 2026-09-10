@@ -26,4 +26,15 @@ describe('Reasoning', () => {
     expect(container.querySelector('blockquote')).toBeNull();
     expect(container.querySelector('.message-markdown--compact')).not.toBeNull();
   });
+
+  it('renders reasoning links inert, with no rejection marker', () => {
+    const { container } = render(
+      <Reasoning content={'Try https://example.com/a and [the doc](https://example.com/b).'} open />
+    );
+
+    expect(container.querySelector('a')).toBeNull();
+    expect(screen.queryByTestId('unsourced-link')).toBeNull();
+    expect(container.textContent).toContain('https://example.com/a');
+    expect(screen.getByText(/the doc/)).toBeInTheDocument();
+  });
 });
