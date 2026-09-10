@@ -22,6 +22,7 @@ use dashmap::DashMap;
 use futures::{SinkExt, Stream, StreamExt};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
@@ -33,7 +34,9 @@ use zone_core::llm::{Message as LlmMessage, Role as LlmRole};
 
 use crate::agent::{self, ActionReceipt, AgentEvent, AgentRun, Citation, ToolCallRecord};
 use crate::auth::validate_access_token;
-use crate::db::{self, ai_settings, chats, knowledge, sessions, workspace_members, workspaces};
+use crate::db::{
+    self, ai_settings, chat_sources, chats, knowledge, sessions, workspace_members, workspaces,
+};
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
 use crate::services::chat::session::{self, Session};
@@ -42,7 +45,7 @@ use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use zone_chat::history::ReplayMessage;
 use zone_core::context::ContextUsage;
-use zone_search::client::{SearchContext, SearxngClient, sanitize_query};
+use zone_search::client::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
@@ -2268,6 +2271,7 @@ async fn prepare_message(
 
 async fn load_web_search(
     state: &AppState,
+    chat_id: Uuid,
     content: &str,
     web_search_requested: bool,
 ) -> SearchContext {
@@ -2281,7 +2285,10 @@ async fn load_web_search(
     }
     match SearxngClient::new(state.config().web_search.clone()) {
         Ok(client) => match client.search(&query, None).await {
-            Ok(hits) if !hits.is_empty() => SearchContext::Results(hits),
+            Ok(mut hits) if !hits.is_empty() => {
+                identify(state.db(), chat_id, &mut hits).await;
+                SearchContext::Results(hits)
+            }
             Ok(_) => SearchContext::Empty,
             Err(e) => {
                 tracing::warn!("Web search failed: {}", e);
@@ -2292,6 +2299,39 @@ async fn load_web_search(
             tracing::warn!("Failed to create web search client: {}", e);
             SearchContext::Failed
         }
+    }
+}
+
+/// Register each pre-turn hit against the chat and stamp on the identifier the
+/// write returned, which for a URL this chat has already seen is the one it
+/// still holds. The injected message is replaced every turn and never
+/// persisted, so the registry is what outlives it to resolve a citation.
+async fn identify(pool: &PgPool, chat_id: Uuid, hits: &mut [SearchHit]) {
+    for hit in hits {
+        let observed = chat_sources::observe(
+            pool,
+            chat_id,
+            agent::identifier::Kind::Web,
+            &hit.url,
+            &hit.title,
+        )
+        .await;
+        stamp(chat_id, hit, observed);
+    }
+}
+
+/// Only the write knows the final identifier, because the registry lengthens a
+/// digest that collides. A hit it did not accept stays bare rather than carry
+/// one nothing can resolve, and never fails the turn.
+fn stamp(chat_id: Uuid, hit: &mut SearchHit, observed: db::DbResult<chat_sources::Source>) {
+    match observed {
+        Ok(source) => hit.identifier = Some(source.identifier),
+        Err(error) => tracing::warn!(
+            %chat_id,
+            url = %hit.url,
+            %error,
+            "Could not register a search hit; citing it without an identifier"
+        ),
     }
 }
 
@@ -2345,7 +2385,7 @@ async fn prepare_chat(
     }
     let mut preparation =
         session::build(state, &chat, user_id, None, session::Mode::Generation).await?;
-    let search = load_web_search(state, content, web_search_requested).await;
+    let search = load_web_search(state, chat_id, content, web_search_requested).await;
     let agentic = preparation.agentic;
     let character = chat.character.as_ref();
     let mut prompt = session::system_prompt(
@@ -2466,7 +2506,6 @@ async fn prepare_chat(
     }
     preparation.context.entries[0].message = LlmMessage::system(prompt);
     preparation.context.search(&search);
-    let _ = chat_id;
     Ok(preparation)
 }
 
@@ -3067,9 +3106,118 @@ mod tests {
     async fn blank_web_search_requests_do_not_create_a_client() {
         let state = AppState::for_tests();
         assert!(matches!(
-            load_web_search(&state, " \n\t ", true).await,
+            load_web_search(&state, Uuid::new_v4(), " \n\t ", true).await,
             SearchContext::Disabled
         ));
+    }
+
+    fn web_hit(title: &str, url: &str) -> SearchHit {
+        SearchHit {
+            title: title.to_string(),
+            url: url.to_string(),
+            snippet: String::new(),
+            identifier: None,
+        }
+    }
+
+    fn registered(chat_id: Uuid, hit: &SearchHit, identifier: &str) -> chat_sources::Source {
+        let now = chrono::Utc::now();
+        chat_sources::Source {
+            chat_id,
+            identifier: identifier.to_string(),
+            kind: agent::identifier::Kind::Web,
+            uri: hit.url.clone(),
+            title: hit.title.clone(),
+            first_observed_at: now,
+            last_observed_at: now,
+        }
+    }
+
+    #[test]
+    fn a_hit_carries_the_identifier_the_registry_returned() {
+        let chat_id = Uuid::new_v4();
+        let mut hit = web_hit("Tide tables", "https://example.com/tides?day=3");
+
+        let minted = agent::identifier::mint(agent::identifier::Kind::Web, &hit.url);
+        let extended = agent::identifier::extend(&minted, &hit.url)
+            .expect("a freshly minted identifier can still be lengthened");
+        assert_ne!(
+            minted, extended,
+            "the fixture must differ from a local mint, or it could not tell the two apart"
+        );
+
+        let source = registered(chat_id, &hit, &extended);
+        stamp(chat_id, &mut hit, Ok(source));
+
+        assert_eq!(
+            hit.identifier.as_deref(),
+            Some(extended.as_str()),
+            "the hit must carry the identifier the write returned, not one recomputed here"
+        );
+    }
+
+    #[test]
+    fn a_failed_registry_write_leaves_only_that_hit_bare() {
+        let chat_id = Uuid::new_v4();
+        let mut hits = vec![
+            web_hit("Reachable", "https://example.com/one"),
+            web_hit("Unwritable", "https://example.com/two"),
+        ];
+        let identifier = agent::identifier::mint(agent::identifier::Kind::Web, &hits[0].url);
+
+        let source = registered(chat_id, &hits[0], &identifier);
+        stamp(chat_id, &mut hits[0], Ok(source));
+        stamp(chat_id, &mut hits[1], Err(sqlx::Error::PoolClosed));
+
+        assert_eq!(
+            hits[0].identifier.as_deref(),
+            Some(identifier.as_str()),
+            "a neighbouring write that succeeded still stamps its own hit"
+        );
+        assert_eq!(
+            hits[1].identifier, None,
+            "a hit the registry rejected must stay bare rather than cite what cannot resolve"
+        );
+
+        let prompt = SearchContext::Results(hits).prompt();
+        assert!(
+            prompt.contains("Search outcome for this turn: succeeded"),
+            "a failed write must not downgrade the turn's search outcome: {prompt}"
+        );
+        assert!(
+            prompt.contains(&format!("[{identifier}]")),
+            "the identified hit is cited by identifier: {prompt}"
+        );
+        assert!(
+            prompt.contains("2. Unwritable"),
+            "the bare hit keeps a positional ordinal: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_registry_leaves_every_hit_bare_without_failing_the_turn() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(250))
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zone_absent")
+            .expect("a lazy pool needs no server");
+        let mut hits = vec![
+            web_hit("First", "https://example.com/one"),
+            web_hit("Second", "https://example.com/two"),
+        ];
+
+        identify(&pool, Uuid::new_v4(), &mut hits).await;
+
+        assert!(
+            hits.iter().all(|hit| hit.identifier.is_none()),
+            "no hit may carry an identifier the registry never stored: {hits:?}"
+        );
+        assert_eq!(hits.len(), 2, "an unwritable registry drops no hit");
+        assert!(
+            SearchContext::Results(hits)
+                .prompt()
+                .contains("Search outcome for this turn: succeeded"),
+            "the search context still reports the results it retrieved"
+        );
     }
 
     #[tokio::test]
