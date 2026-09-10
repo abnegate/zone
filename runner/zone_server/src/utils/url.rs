@@ -32,7 +32,7 @@ pub fn validate_public_url(raw: &str) -> Result<reqwest::Url, String> {
         .unwrap_or(host);
 
     if let Ok(ip) = literal.parse::<IpAddr>() {
-        if is_private_ip(ip) {
+        if must_not_be_fetched(ip) {
             return Err("Private IP addresses are not allowed.".to_string());
         }
         return Ok(url);
@@ -88,7 +88,7 @@ fn public_only(
     host: &str,
 ) -> Result<Vec<SocketAddr>, String> {
     let public: Vec<SocketAddr> = addresses
-        .filter(|address| !is_private_ip(address.ip()))
+        .filter(|address| !must_not_be_fetched(address.ip()))
         .collect();
 
     if public.is_empty() {
@@ -146,24 +146,53 @@ pub async fn read_capped(mut response: reqwest::Response, limit: usize) -> Resul
     Ok(body)
 }
 
-fn is_private_ip(ip: IpAddr) -> bool {
+/// Whether `ip` is an address a caller-supplied fetch must not reach.
+///
+/// `Ipv4Addr::is_global` would answer this, but it is still unstable, so the
+/// non-global ranges are named here. Enumerating them is the whole point: the
+/// obvious three private blocks leave shared address space (`100.64.0.0/10`,
+/// which a carrier or cloud network routes internally) and benchmarking space
+/// reachable, and those are internal destinations like any other.
+fn must_not_be_fetched(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
+            let octets = ip.octets();
             ip.is_private()
                 || ip.is_loopback()
                 || ip.is_link_local()
-                || ip.octets()[0] == 0
-                || ip.octets() == [169, 254, 169, 254]
+                || ip.is_multicast()
+                || ip.is_broadcast()
+                || octets[0] == 0
+                || octets[0] >= 240
+                // Shared address space, which carrier and cloud networks route.
+                || (octets[0] == 100 && (64..128).contains(&octets[1]))
+                // Benchmarking.
+                || (octets[0] == 198 && (18..20).contains(&octets[1]))
+                // IETF protocol assignments, 6to4 relay anycast, and the three
+                // documentation ranges.
+                || matches!(
+                    [octets[0], octets[1], octets[2]],
+                    [192, 0, 0] | [192, 0, 2] | [192, 88, 99] | [198, 51, 100] | [203, 0, 113]
+                )
         }
         // An IPv4 address written as IPv6 reaches the same host, so it is
         // answered by the IPv4 rules rather than a second, weaker set.
         IpAddr::V6(ip) => match ip.to_ipv4_mapped().or_else(|| ip.to_ipv4()) {
-            Some(ip) => is_private_ip(IpAddr::V4(ip)),
+            Some(ip) => must_not_be_fetched(IpAddr::V4(ip)),
             None => {
+                let segments = ip.segments();
                 ip.is_loopback()
                     || ip.is_unspecified()
                     || ip.is_unique_local()
                     || ip.is_unicast_link_local()
+                    || ip.is_multicast()
+                    // Discard-only.
+                    || (segments[0] == 0x0100 && segments[1..4] == [0, 0, 0])
+                    // IETF protocol assignments, Teredo among them.
+                    || (segments[0] == 0x2001 && segments[1] < 0x0200)
+                    // Documentation.
+                    || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                    || (segments[0] & 0xfff0) == 0x3ff0
             }
         },
     }
@@ -175,6 +204,48 @@ mod tests {
 
     fn address(raw: &str) -> SocketAddr {
         raw.parse().expect("a socket address")
+    }
+
+    /// The three private blocks are not the whole of what is unreachable from
+    /// outside. Shared address space is routed inside carrier and cloud
+    /// networks, and the rest of these are addresses no public name should
+    /// ever answer with.
+    #[test]
+    fn the_non_global_ranges_beyond_the_private_ones_are_refused() {
+        for raw in [
+            "100.64.0.1",      // shared address space
+            "100.127.255.1",   // shared address space, upper edge
+            "198.18.0.1",      // benchmarking
+            "198.19.255.1",    // benchmarking, upper edge
+            "192.0.0.1",       // IETF protocol assignments
+            "192.0.2.1",       // documentation
+            "198.51.100.1",    // documentation
+            "203.0.113.1",     // documentation
+            "192.88.99.1",     // 6to4 relay anycast
+            "224.0.0.1",       // multicast
+            "240.0.0.1",       // reserved
+            "255.255.255.255", // broadcast
+        ] {
+            let ip: IpAddr = raw.parse().expect("an address");
+            assert!(must_not_be_fetched(ip), "{raw} is reachable");
+            assert!(
+                validate_public_url(&format!("http://{raw}/")).is_err(),
+                "{raw} passed the URL check"
+            );
+        }
+    }
+
+    #[test]
+    fn a_globally_routable_address_is_still_reachable() {
+        for raw in [
+            "93.184.216.34",
+            "1.1.1.1",
+            "100.63.255.255",
+            "198.17.255.255",
+        ] {
+            let ip: IpAddr = raw.parse().expect("an address");
+            assert!(!must_not_be_fetched(ip), "{raw} was refused");
+        }
     }
 
     /// `validate_public_url` reads text. Which address a name answers with is
