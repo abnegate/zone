@@ -6,7 +6,8 @@
 //!
 //! * The `regex` crate matches with finite automata, so no pattern can trigger
 //!   catastrophic backtracking. Match time is linear in the subject length.
-//! * A pattern longer than `MAX_PATTERN_LENGTH` is refused before compilation.
+//! * A pattern longer than `MAX_PATTERN_LENGTH` is refused, whatever its match mode.
+//!   A literal pattern is never compiled, but its length still costs at match time.
 //! * Length alone does not bound complexity: `(?s).{0,20000}` is fifteen bytes
 //!   and compiles to megabytes. `COMPILED_SIZE_LIMIT` and `CACHE_SIZE_LIMIT`
 //!   bound the compiled program and the lazy DFA it builds while matching.
@@ -130,6 +131,17 @@ impl RuleSet {
                 continue;
             }
 
+            if rule.pattern.len() > MAX_PATTERN_LENGTH {
+                rejected.push(RejectedRule {
+                    name: rule.name,
+                    rejection: Rejection::PatternTooLong {
+                        length: rule.pattern.len(),
+                        maximum: MAX_PATTERN_LENGTH,
+                    },
+                });
+                continue;
+            }
+
             if rule.mode != MatchMode::Regex {
                 compiled.push(CompiledRule {
                     rule,
@@ -210,12 +222,6 @@ impl RuleSet {
 }
 
 fn build(pattern: &str) -> Result<Regex, Rejection> {
-    if pattern.len() > MAX_PATTERN_LENGTH {
-        return Err(Rejection::PatternTooLong {
-            length: pattern.len(),
-            maximum: MAX_PATTERN_LENGTH,
-        });
-    }
     RegexBuilder::new(pattern)
         .size_limit(COMPILED_SIZE_LIMIT)
         .dfa_size_limit(CACHE_SIZE_LIMIT)
@@ -262,18 +268,16 @@ fn reason(rule: &Rule) -> String {
     }
 }
 
+/// Substring search over `str`, which is linear in the subject. A window-by-window
+/// byte comparison is quadratic, and a rule set full of near-miss literals is the
+/// worst case for it.
 fn contains_ignoring_case(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
     }
-    let haystack = bounded(haystack).as_bytes();
-    let needle = needle.as_bytes();
-    if needle.len() > haystack.len() {
-        return false;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle))
+    bounded(haystack)
+        .to_ascii_lowercase()
+        .contains(needle.to_ascii_lowercase().as_str())
 }
 
 fn bounded(subject: &str) -> &str {
