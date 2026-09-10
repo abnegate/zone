@@ -18,7 +18,7 @@ use super::readiness::{
     ReviewThread, ThreadEvidence,
 };
 use super::releases::{self, Lookup, ReleaseIdentity, ReleasePipeline, RunEvidence};
-use super::tools::{WorkspaceScope, truncate};
+use super::tools::{WorkspaceScope, apply_record_cap, json_chars, take_array, truncate};
 use crate::db::{sources, workspace_members};
 use crate::services::prioritisation::{
     Configuration as Prioritisation, Prioritiser, RiskSignal, pull_request,
@@ -1781,45 +1781,6 @@ fn bound_releases(mut result: Value, pipelines: &[Value], observed_at: &str) -> 
         }
         cap /= 2;
     }
-}
-
-fn json_chars(value: &Value) -> usize {
-    value.to_string().chars().count()
-}
-
-fn take_array(value: &Value, key: &str) -> Vec<Value> {
-    value
-        .get(key)
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn apply_record_cap(
-    result: &mut Value,
-    key: &str,
-    rows: &[Value],
-    cap: usize,
-    priority: fn(&Value) -> u8,
-) {
-    let (capped, omitted) = cap_records(rows, cap, priority);
-    result[key] = Value::Array(capped);
-    let omitted_key = format!("{key}_omitted");
-    if omitted > 0 {
-        result[omitted_key] = json!(omitted);
-    } else if let Some(object) = result.as_object_mut() {
-        object.remove(&omitted_key);
-    }
-}
-
-fn cap_records(rows: &[Value], cap: usize, priority: fn(&Value) -> u8) -> (Vec<Value>, usize) {
-    let total = rows.len();
-    if total <= cap {
-        return (rows.to_vec(), 0);
-    }
-    let mut ranked: Vec<&Value> = rows.iter().collect();
-    ranked.sort_by_key(|row| priority(row));
-    (ranked.into_iter().take(cap).cloned().collect(), total - cap)
 }
 
 fn ci_token(row: &Value) -> &str {
