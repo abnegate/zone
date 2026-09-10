@@ -13,6 +13,41 @@ use uuid::Uuid;
 /// Rows GitHub returns per page; its maximum for these collections.
 const PAGE_SIZE: usize = 100;
 
+/// What a pull request says, for a reviewer who was not in the chat.
+///
+/// The problem comes first because it is what the reviewer judges the change
+/// against, then the run's own report of what it did about it, then the files
+/// it touched. A run that reported nothing leaves its section out rather than
+/// heading an empty one.
+pub struct Description<'a> {
+    pub problem: &'a str,
+    pub report: Option<&'a str>,
+    pub changes: Option<&'a str>,
+    pub task: Uuid,
+    pub url: Option<&'a str>,
+}
+
+impl Description<'_> {
+    pub fn render(&self) -> String {
+        let mut body = format!("## Problem\n\n{}\n\n", self.problem.trim());
+
+        if let Some(report) = self.report.map(str::trim).filter(|it| !it.is_empty()) {
+            body.push_str(&format!("## What changed\n\n{report}\n\n"));
+        }
+
+        if let Some(changes) = self.changes.map(str::trim).filter(|it| !it.is_empty()) {
+            body.push_str(&format!("## Files\n\n{changes}\n\n"));
+        }
+
+        body.push_str("---\n");
+        match self.url {
+            Some(url) => body.push_str(&format!("Opened by Zone from [this task]({url}).\n")),
+            None => body.push_str(&format!("Opened by Zone from task `{}`.\n", self.task)),
+        }
+        body
+    }
+}
+
 /// Pages a paged read will follow before it stops. A pull request with more
 /// review activity than this has long since stopped teaching anything new, and
 /// an unbounded walk would let one pathological change stall the sync.
@@ -425,49 +460,6 @@ impl PrService {
         )))
     }
 
-    /// Generate a PR title from a task
-    pub fn generate_pr_title(&self, task_title: &str, task_id: Uuid) -> String {
-        let short_id = &task_id.to_string()[..8];
-        format!("[Zone] {} ({})", task_title, short_id)
-    }
-
-    /// Generate a PR body from task details
-    pub fn generate_pr_body(
-        &self,
-        task_title: &str,
-        task_description: &str,
-        task_id: Uuid,
-        diff_summary: Option<&str>,
-        zone_task_url: Option<&str>,
-    ) -> String {
-        let mut body = String::new();
-
-        // Summary section
-        body.push_str("## Summary\n\n");
-        body.push_str(&format!("**Task:** {}\n\n", task_title));
-        body.push_str(&format!("{}\n\n", task_description));
-
-        // Zone link
-        if let Some(url) = zone_task_url {
-            body.push_str(&format!("**Zone Task:** [View in Zone]({})\n\n", url));
-        } else {
-            body.push_str(&format!("**Zone Task ID:** `{}`\n\n", task_id));
-        }
-
-        // Changes section
-        if let Some(diff) = diff_summary {
-            body.push_str("## Changes\n\n");
-            body.push_str(diff);
-            body.push_str("\n\n");
-        }
-
-        // Footer
-        body.push_str("---\n");
-        body.push_str("*This PR was automatically created by Zone after task completion.*\n");
-
-        body
-    }
-
     /// Get the default branch for a repository
     pub async fn get_default_branch(
         &self,
@@ -726,45 +718,72 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_generate_pr_title() {
-        let service = PrService::new();
-        let task_id = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
-        let title = service.generate_pr_title("Fix login bug", task_id);
-        assert!(title.contains("[Zone]"));
-        assert!(title.contains("Fix login bug"));
-        assert!(title.contains("12345678"));
+    fn task() -> Uuid {
+        Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap()
     }
 
+    /// The reviewer was not in the chat, so what the change was for comes
+    /// before what it did about it, and the run's own report is the account of
+    /// the second.
     #[test]
-    fn test_generate_pr_body() {
-        let service = PrService::new();
-        let task_id = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+    fn a_description_leads_with_the_problem_and_then_the_run_s_own_report() {
+        let body = Description {
+            problem: "The login form accepts an invalid email.",
+            report: Some("Validated the address before submit. Added a regression test."),
+            changes: Some("- `auth.rs`"),
+            task: task(),
+            url: Some("https://zone.example.com/tasks/123"),
+        }
+        .render();
 
-        let body = service.generate_pr_body(
-            "Fix login bug",
-            "Fixed the authentication issue",
-            task_id,
-            Some("- 3 files changed"),
-            Some("https://zone.example.com/tasks/123"),
+        let problem = body.find("## Problem").expect("{body}");
+        let changed = body.find("## What changed").expect("{body}");
+        let files = body.find("## Files").expect("{body}");
+
+        assert!(problem < changed && changed < files, "{body}");
+        assert!(body.contains("accepts an invalid email"), "{body}");
+        assert!(body.contains("Added a regression test."), "{body}");
+        assert!(body.contains("`auth.rs`"), "{body}");
+        assert!(
+            body.contains("[this task](https://zone.example.com/tasks/123)"),
+            "{body}"
         );
-
-        assert!(body.contains("## Summary"));
-        assert!(body.contains("Fix login bug"));
-        assert!(body.contains("View in Zone"));
-        assert!(body.contains("## Changes"));
     }
 
+    /// A heading over nothing reads as a section the reviewer has missed.
     #[test]
-    fn test_generate_pr_body_no_zone_url() {
-        let service = PrService::new();
-        let task_id = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+    fn a_run_that_reported_nothing_heads_no_empty_section() {
+        for report in [None, Some(""), Some("   \n ")] {
+            let body = Description {
+                problem: "Something was wrong.",
+                report,
+                changes: None,
+                task: task(),
+                url: None,
+            }
+            .render();
 
-        let body =
-            service.generate_pr_body("Fix login bug", "Fixed the issue", task_id, None, None);
+            assert!(!body.contains("## What changed"), "{body}");
+            assert!(!body.contains("## Files"), "{body}");
+            assert!(body.contains("## Problem"), "{body}");
+        }
+    }
 
-        assert!(body.contains("Zone Task ID"));
-        assert!(body.contains(&task_id.to_string()));
+    /// Without a console to link to, the id is what takes a reviewer back to
+    /// the run that opened this.
+    #[test]
+    fn a_description_without_a_console_link_names_the_task_it_came_from() {
+        let body = Description {
+            problem: "Something was wrong.",
+            report: None,
+            changes: None,
+            task: task(),
+            url: None,
+        }
+        .render();
+
+        assert!(body.contains(&task().to_string()), "{body}");
+        assert!(!body.contains("this task]("), "{body}");
     }
 
     fn review(state: &str, reviewer: Option<&str>) -> SubmittedReview {

@@ -914,8 +914,14 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
             ) {
                 return;
             }
-            let publication =
-                create_pr_for_task(state, execution, &workspace_path, checkout.baseline()).await;
+            let publication = create_pr_for_task(
+                state,
+                execution,
+                &workspace_path,
+                checkout.baseline(),
+                &summary,
+            )
+            .await;
             obs.set_status(
                 complete_publication(
                     state,

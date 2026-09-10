@@ -53,7 +53,7 @@ const PLAIN: &[Section] = &[
     ("session", section::session::render),
 ];
 
-pub const CHAT_MAX_CHARS: usize = 18_000;
+pub const CHAT_MAX_CHARS: usize = 19_000;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 12_000;
 

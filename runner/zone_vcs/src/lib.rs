@@ -26,6 +26,7 @@ pub mod conflict;
 pub mod git;
 pub mod pull_request;
 pub mod resolution;
+pub mod subject;
 
 pub use conflict::{
     BranchName, CommitSha, Conflict, ConflictError, ConflictRequest, ConflictService,
@@ -33,7 +34,8 @@ pub use conflict::{
 };
 pub use git::{DiffSummary, GitError, GitService};
 pub use pull_request::{
-    CreatedPr, GitHubBranch, GitHubPullRequest, PrError, PrService, PullRequestReception,
-    PullRequestReference,
+    CreatedPr, Description, GitHubBranch, GitHubPullRequest, PrError, PrService,
+    PullRequestReception, PullRequestReference,
 };
 pub use resolution::{ConflictSide, ResolutionVerdict};
+pub use subject::{Kind, Subject};
