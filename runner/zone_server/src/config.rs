@@ -373,10 +373,26 @@ impl Config {
             .map(|url| url.trim().trim_end_matches('/').to_string())
             .filter(|url| !url.is_empty())
             .unwrap_or_else(|| DEFAULT_GITHUB_API_URL.to_string());
-        if !github_api_url.starts_with("http://") && !github_api_url.starts_with("https://") {
-            return Err(ConfigError::Invalid(
-                "GITHUB_API_URL must be an absolute http or https URL",
-            ));
+        // A prefix is not an origin: `https:///api/v3` passes one and leaves
+        // PrService building request URLs with no host to send them to. Parsing
+        // also refuses embedded credentials, which would otherwise reach any
+        // log that prints this config.
+        match reqwest::Url::parse(&github_api_url) {
+            Ok(url)
+                if matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some_and(|host| !host.is_empty()) =>
+            {
+                if !url.username().is_empty() || url.password().is_some() {
+                    return Err(ConfigError::Invalid(
+                        "GITHUB_API_URL must not carry credentials; set GITHUB_TOKEN instead",
+                    ));
+                }
+            }
+            _ => {
+                return Err(ConfigError::Invalid(
+                    "GITHUB_API_URL must be an absolute http or https URL with a host",
+                ));
+            }
         }
 
         Ok(Self {
@@ -755,10 +771,42 @@ mod tests {
             matches!(
                 Config::from_env(),
                 Err(ConfigError::Invalid(
-                    "GITHUB_API_URL must be an absolute http or https URL"
+                    "GITHUB_API_URL must be an absolute http or https URL with a host"
                 ))
             ),
             "a scheme-less origin would produce relative request URLs"
+        );
+
+        Environment::set("GITHUB_API_URL", "ftp://github.example.com");
+        assert!(
+            matches!(
+                Config::from_env(),
+                Err(ConfigError::Invalid(
+                    "GITHUB_API_URL must be an absolute http or https URL with a host"
+                ))
+            ),
+            "a scheme this client cannot speak is not an origin"
+        );
+
+        Environment::set("GITHUB_API_URL", "https://someone:t0ken@github.example.com");
+        assert!(
+            matches!(
+                Config::from_env(),
+                Err(ConfigError::Invalid(
+                    "GITHUB_API_URL must not carry credentials; set GITHUB_TOKEN instead"
+                ))
+            ),
+            "credentials in the origin reach every log that prints the config"
+        );
+
+        Environment::set("GITHUB_API_URL", "http://localhost:3000");
+        assert_eq!(
+            Config::from_env()
+                .expect("an operator may point this at a host they run")
+                .github_api_url,
+            "http://localhost:3000",
+            "http stays configurable: the origin is operator configuration, and \
+             it is routinely a loopback or LAN host"
         );
     }
 
