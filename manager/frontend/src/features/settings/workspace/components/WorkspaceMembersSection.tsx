@@ -226,7 +226,10 @@ export default function WorkspaceMembersSection({
     return members.filter((m) => m.role === 'owner').length;
   };
 
+  const canManageMembers = currentUserRole === 'admin' || currentUserRole === 'owner';
+
   const canModifyMember = (member: WorkspaceMember): boolean => {
+    if (!canManageMembers) return false;
     // Cannot modify yourself
     if (member.user_id === user?.id) return false;
     // Cannot modify last owner
@@ -237,26 +240,33 @@ export default function WorkspaceMembersSection({
     return true;
   };
 
-  const getAvailableRoles = (
-    member: WorkspaceMember
-  ): Array<{ value: WorkspaceRole; label: string }> => {
-    // Viewers and members can't change roles (already prevented by canModifyMember, but extra safety)
-    if (currentUserRole === 'viewer' || currentUserRole === 'member') {
-      return roleOptions.filter((r) => r.value === member.role);
-    }
-
-    // Only owners may seat or unseat an admin, so an admin is offered neither
-    // the admin role nor the roles of members who already hold it.
+  // Both the add route and the role route refuse anyone but an owner granting
+  // admin or owner, so one list serves the form and the rows alike.
+  const grantableRoles = (): Array<{ value: WorkspaceRole; label: string }> => {
+    if (!canManageMembers) return [];
     if (currentUserRole === 'admin') {
-      if (member.role === 'admin' || member.role === 'owner') {
-        return roleOptions.filter((r) => r.value === member.role);
-      }
       return roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin');
     }
-
-    // Owners can assign any role
     return roleOptions;
   };
+
+  const getAssignableRoles = (
+    member: WorkspaceMember
+  ): Array<{ value: WorkspaceRole; label: string }> => {
+    if (!canManageMembers) return [];
+    // Only an owner may re-seat someone already holding admin or owner.
+    if (currentUserRole === 'admin' && (member.role === 'admin' || member.role === 'owner')) {
+      return roleOptions.filter((r) => r.value === member.role);
+    }
+    return grantableRoles();
+  };
+
+  const getAvailableRoles = (
+    member: WorkspaceMember
+  ): Array<{ value: WorkspaceRole; label: string }> =>
+    canManageMembers
+      ? getAssignableRoles(member)
+      : roleOptions.filter((r) => r.value === member.role);
 
   if (loading) {
     return <div className="loading-state">Loading members...</div>;
@@ -271,7 +281,7 @@ export default function WorkspaceMembersSection({
           <h2 className="section-title">Workspace Members</h2>
           <p className="section-description">Manage members and their roles in this workspace.</p>
         </div>
-        {(currentUserRole === 'admin' || currentUserRole === 'owner') && (
+        {canManageMembers && (
           <Button onClick={() => setShowAddModal(true)} variant="primary">
             Add Member
           </Button>
@@ -399,11 +409,7 @@ export default function WorkspaceMembersSection({
             label="Role"
             value={addRole}
             onChange={(e) => setAddRole(e.target.value as WorkspaceRole)}
-            options={
-              currentUserRole === 'admin'
-                ? roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin')
-                : roleOptions
-            }
+            options={grantableRoles()}
           />
           <div className="modal-actions">
             <Button

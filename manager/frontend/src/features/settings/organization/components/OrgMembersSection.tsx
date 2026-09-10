@@ -204,7 +204,10 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     return members.filter((m) => m.role === 'owner').length;
   };
 
+  const canManageMembers = currentUserRole === 'admin' || currentUserRole === 'owner';
+
   const canModifyMember = (member: OrganizationMember): boolean => {
+    if (!canManageMembers) return false;
     // Cannot modify yourself
     if (member.user_id === user?.id) return false;
     // Cannot modify last owner
@@ -215,26 +218,34 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     return true;
   };
 
-  const getAvailableRoles = (
-    member: OrganizationMember
-  ): Array<{ value: OrgRole; label: string }> => {
-    // Members and viewers can't change roles (already prevented by canModifyMember, but extra safety)
-    if (currentUserRole === 'member') {
-      return roleOptions.filter((r) => r.value === member.role);
-    }
-
-    // Only owners may seat or unseat an admin, so an admin is offered neither
-    // the admin role nor the roles of members who already hold it.
+  // `add_member` refuses an admin granting admin or owner; the role route
+  // refuses them granting owner. Offer only what both accept, so nothing on
+  // offer comes back a 403.
+  const grantableRoles = (): Array<{ value: OrgRole; label: string }> => {
+    if (!canManageMembers) return [];
     if (currentUserRole === 'admin') {
-      if (member.role === 'admin' || member.role === 'owner') {
-        return roleOptions.filter((r) => r.value === member.role);
-      }
       return roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin');
     }
-
-    // Owners can assign any role
     return roleOptions;
   };
+
+  const getAssignableRoles = (
+    member: OrganizationMember
+  ): Array<{ value: OrgRole; label: string }> => {
+    if (!canManageMembers) return [];
+    // Only an owner may re-seat someone already holding admin or owner.
+    if (currentUserRole === 'admin' && (member.role === 'admin' || member.role === 'owner')) {
+      return roleOptions.filter((r) => r.value === member.role);
+    }
+    return grantableRoles();
+  };
+
+  const getAvailableRoles = (
+    member: OrganizationMember
+  ): Array<{ value: OrgRole; label: string }> =>
+    canManageMembers
+      ? getAssignableRoles(member)
+      : roleOptions.filter((r) => r.value === member.role);
 
   if (loading) {
     return <div className="loading-state">Loading members...</div>;
@@ -249,9 +260,11 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
             Manage members and their roles in this organization.
           </p>
         </div>
-        <Button onClick={() => setShowAddModal(true)} variant="primary">
-          Add Member
-        </Button>
+        {canManageMembers && (
+          <Button onClick={() => setShowAddModal(true)} variant="primary">
+            Add Member
+          </Button>
+        )}
       </div>
 
       {error && (
@@ -371,11 +384,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
             label="Role"
             value={addRole}
             onChange={(e) => setAddRole(e.target.value as OrgRole)}
-            options={
-              currentUserRole === 'admin'
-                ? roleOptions.filter((r) => r.value !== 'owner' && r.value !== 'admin')
-                : roleOptions
-            }
+            options={grantableRoles()}
           />
           <div className="modal-actions">
             <Button
