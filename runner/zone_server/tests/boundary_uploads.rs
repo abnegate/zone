@@ -22,8 +22,52 @@ async fn registered(client: &TestClient) -> String {
         .to_string()
 }
 
-/// The frame extractor takes the container format from the submitted name, so
-/// the name is the one part of a video upload an attacker fully controls.
+fn ffmpeg_installed() -> bool {
+    std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// A clip the decoder actually accepts. Submitting bytes that are not media
+/// makes every traversal attempt fail on the bytes, so the name is never
+/// reached and the assertion below holds no matter what the name guard does.
+fn clip_bytes(root: &std::path::Path) -> Vec<u8> {
+    let clip = root.join("source.mp4");
+    let built = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=30",
+            "-t",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&clip)
+        .status()
+        .expect("ffmpeg runs");
+    assert!(built.success(), "could not build the test clip");
+    let bytes = std::fs::read(&clip).expect("the clip is readable");
+    std::fs::remove_file(&clip).expect("the source clip is removed");
+    bytes
+}
+
+/// The submitted name is a label, not a destination: the extractor reads an
+/// extension off it and writes `clip.<extension>` into a fresh temporary
+/// directory. So a hostile name is *accepted* -- what must hold is that no
+/// byte of it reaches a path.
+///
+/// Submitting bytes that are not media hides all of this: every name is then
+/// refused on the bytes, before the name is looked at, and the test passes
+/// whatever the name guard does.
 #[tokio::test]
 async fn a_submitted_clip_name_cannot_choose_where_the_clip_lands() {
     let root = std::env::temp_dir().join(format!("zone-boundary-upload-{}", Uuid::new_v4()));
@@ -32,6 +76,37 @@ async fn a_submitted_clip_name_cannot_choose_where_the_clip_lands() {
     config.comfyui.models_dir = root.clone();
     let client = TestClient::with_config(config).await;
     let token = registered(&client).await;
+
+    if !ffmpeg_installed() {
+        eprintln!("skipping: ffmpeg is not installed");
+        return;
+    }
+    let clip = clip_bytes(&root);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&clip);
+
+    // Positive control: the same bytes under a name nobody objects to must be
+    // accepted, or a refusal below says nothing about the name.
+    let accepted = client
+        .post_json_auth(
+            "/api/models/train/frames",
+            &json!({ "filename": "clip.mp4", "bytes_base64": encoded, "fps": 1 }),
+            &token,
+        )
+        .await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::OK,
+        "the fixture clip must be accepted, or the names below prove nothing: {}",
+        accepted.text()
+    );
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let entry = entry.unwrap().path();
+        if entry.is_dir() {
+            std::fs::remove_dir_all(&entry).unwrap();
+        } else {
+            std::fs::remove_file(&entry).unwrap();
+        }
+    }
 
     let planted = root.join("planted.mp4");
     let escapes = [
@@ -48,18 +123,15 @@ async fn a_submitted_clip_name_cannot_choose_where_the_clip_lands() {
         let response = client
             .post_json_auth(
                 "/api/models/train/frames",
-                &json!({
-                    "filename": filename,
-                    "bytes_base64": base64::engine::general_purpose::STANDARD
-                        .encode(b"not a video at all"),
-                }),
+                &json!({ "filename": filename, "bytes_base64": encoded, "fps": 1 }),
                 &token,
             )
             .await;
-        assert_ne!(
+        assert_eq!(
             response.status,
             StatusCode::OK,
-            "{filename:?} was accepted as a decodable clip: {}",
+            "{filename:?} was refused, so it never reached the name handling \
+             this pins: {}",
             response.text()
         );
         assert!(
