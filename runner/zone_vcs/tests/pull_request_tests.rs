@@ -143,6 +143,43 @@ mod pr_service_tests {
         assert!(result.is_err());
     }
 
+    /// The scheme was discarded before the host was checked, so an address
+    /// nothing here can fetch or publish to still parsed as a repository this
+    /// service answers for.
+    #[test]
+    fn an_address_this_service_does_not_speak_is_not_a_repository() {
+        let service = PrService::new();
+
+        for url in [
+            "ftp://github.com/owner/repo",
+            "http://github.com/owner/repo",
+            "file://github.com/owner/repo",
+            "javascript://github.com/owner/repo",
+        ] {
+            assert!(
+                service.parse_github_url(url).is_err(),
+                "{url} is not an address a repository is published through"
+            );
+        }
+
+        assert!(
+            service
+                .parse_github_url("https://github.com/owner/repo")
+                .is_ok()
+        );
+        assert!(
+            service
+                .parse_github_url("ssh://git@github.com/owner/repo.git")
+                .is_ok()
+        );
+        assert!(
+            service
+                .parse_github_url("git@github.com:owner/repo")
+                .is_ok(),
+            "the scp-like form carries no scheme and is read on its own terms"
+        );
+    }
+
     #[test]
     fn test_parse_github_gitlab_url() {
         let service = PrService::new();

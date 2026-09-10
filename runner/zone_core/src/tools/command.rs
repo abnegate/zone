@@ -330,6 +330,10 @@ fn total_sleep(command: &str) -> Option<f64> {
 /// A bare number is seconds and several operands add up, both as `sleep` reads
 /// them. An operand that is not a duration ends the sum rather than the call:
 /// what a variable holds is not knowable from here.
+///
+/// A negative operand counts as nothing. `sleep` rejects one rather than
+/// running time backwards, and letting it subtract would have let a caller pay
+/// for a long wait with a short one that never happens.
 fn sleep_seconds(operand: &str) -> Option<f64> {
     let scale = match operand.chars().last()? {
         's' => 1.0,
@@ -340,11 +344,12 @@ fn sleep_seconds(operand: &str) -> Option<f64> {
             return operand
                 .parse::<f64>()
                 .ok()
-                .filter(|seconds| seconds.is_finite());
+                .filter(|seconds| seconds.is_finite())
+                .map(|seconds| seconds.max(0.0));
         }
     };
     let count = operand[..operand.len() - 1].parse::<f64>().ok()?;
-    count.is_finite().then_some(count * scale)
+    count.is_finite().then_some((count * scale).max(0.0))
 }
 
 #[async_trait]
@@ -1060,6 +1065,18 @@ mod tests {
     fn an_unreadable_operand_ends_the_sum_rather_than_the_call() {
         assert_eq!(total_sleep("sleep $DELAY"), Some(0.0));
         assert_eq!(total_sleep("sleep 30 $DELAY 300"), Some(30.0));
+    }
+
+    /// A negative operand is not a wait to be credited against a real one.
+    /// `sleep -100; sleep 120` summed to twenty and was let through, and then
+    /// `sh` failed the first segment and blocked for the full two minutes on
+    /// the second.
+    #[test]
+    fn a_negative_operand_buys_no_credit_against_a_real_wait() {
+        assert_eq!(total_sleep("sleep -100; sleep 120"), Some(120.0));
+        assert_eq!(total_sleep("sleep -100"), Some(0.0));
+        assert_eq!(total_sleep("sleep -5m"), Some(0.0));
+        assert_eq!(total_sleep("sleep -100 120"), Some(120.0));
     }
 
     /// The task loop announces a stall after the same interval, so a call that
