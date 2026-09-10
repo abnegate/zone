@@ -1061,6 +1061,12 @@ mod tests {
     /// An operand this cannot read is not an excuse to reject the call. The
     /// per-call timeout is still behind it, and refusing what might be a
     /// one-second wait would cost more than letting it through.
+    #[test]
+    fn an_unreadable_operand_ends_the_sum_rather_than_the_call() {
+        assert_eq!(total_sleep("sleep $DELAY"), Some(0.0));
+        assert_eq!(total_sleep("sleep 30 $DELAY 300"), Some(30.0));
+    }
+
     /// A negative operand is not a wait to be credited against a real one.
     /// `sleep -100; sleep 120` summed to twenty and was let through, and then
     /// `sh` failed the first segment and blocked for the full two minutes on
@@ -1071,12 +1077,6 @@ mod tests {
         assert_eq!(total_sleep("sleep -100"), Some(0.0));
         assert_eq!(total_sleep("sleep -5m"), Some(0.0));
         assert_eq!(total_sleep("sleep -100 120"), Some(120.0));
-    }
-
-    #[test]
-    fn an_unreadable_operand_ends_the_sum_rather_than_the_call() {
-        assert_eq!(total_sleep("sleep $DELAY"), Some(0.0));
-        assert_eq!(total_sleep("sleep 30 $DELAY 300"), Some(30.0));
     }
 
     /// The task loop announces a stall after the same interval, so a call that
