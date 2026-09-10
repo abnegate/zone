@@ -387,6 +387,13 @@ impl Config {
                         "GITHUB_API_URL must not carry credentials; set GITHUB_TOKEN instead",
                     ));
                 }
+                // An origin every caller joins a rooted path onto has no use
+                // for either, and both are places a token gets written down.
+                if url.query().is_some() || url.fragment().is_some() {
+                    return Err(ConfigError::Invalid(
+                        "GITHUB_API_URL must be an origin, without a query or fragment",
+                    ));
+                }
             }
             _ => {
                 return Err(ConfigError::Invalid(
@@ -798,6 +805,22 @@ mod tests {
             ),
             "credentials in the origin reach every log that prints the config"
         );
+
+        for carrier in [
+            "https://github.example.com/api/v3?access_token=t0ken",
+            "https://github.example.com/api/v3#t0ken",
+        ] {
+            Environment::set("GITHUB_API_URL", carrier);
+            assert!(
+                matches!(
+                    Config::from_env(),
+                    Err(ConfigError::Invalid(
+                        "GITHUB_API_URL must be an origin, without a query or fragment"
+                    ))
+                ),
+                "{carrier} would reach every log that prints the config"
+            );
+        }
 
         Environment::set("GITHUB_API_URL", "http://localhost:3000");
         assert_eq!(

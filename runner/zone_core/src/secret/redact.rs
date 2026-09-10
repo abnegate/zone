@@ -235,12 +235,29 @@ fn private_key_at(text: &str, index: usize) -> Option<usize> {
     // this block opened with.
     let label = rest[PEM_BEGIN.len()..line].trim_end_matches('\r');
     let closing = format!("{PEM_END}{label}");
-    let end = rest.find(&closing).map_or(rest.len(), |at| {
+    // The marker has to be the whole line. Matching it anywhere lets a line
+    // that merely starts with it -- `-----END X----- and then some` -- close
+    // the block, which is the same escape one spelling further on.
+    let end = closes_at(rest, &closing).map_or(rest.len(), |at| {
         rest[at..]
             .find('\n')
             .map_or(rest.len(), |newline| at + newline)
     });
     Some(index + end)
+}
+
+/// Where `closing` occurs as a complete line, rather than as a prefix of one.
+fn closes_at(text: &str, closing: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(offset) = text[from..].find(closing) {
+        let at = from + offset;
+        let after = &text[at + closing.len()..];
+        if after.is_empty() || after.starts_with('\n') || after.starts_with('\r') {
+            return Some(at);
+        }
+        from = at + closing.len();
+    }
+    None
 }
 
 /// The password in a `scheme://user:password@host` URL.
@@ -505,6 +522,24 @@ mod shapes_that_carry_no_prefix {
     /// Closing on the first END marker in the text lets an END line for some
     /// other label -- which the same tool output can carry, next to the key or
     /// inside it -- end the redaction early and leave the rest standing.
+    /// One spelling further on: a line that merely *starts* with the closing
+    /// marker is not the closing line, and must not end the redaction.
+    #[test]
+    fn an_end_marker_with_trailing_text_does_not_close_a_private_key() {
+        let key = concat!(
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "MIIEowIBAAKCAQEAx4fW1pQ8mJ7kR2vLnT5cYdB3sHgKqZ0uWpXvNfE1aOiCjMlP\n",
+            "-----END RSA PRIVATE KEY----- not really, keep reading\n",
+            "b2ZuRk9tS3hZd0hqTmRQaVFsY0dYcVJzVHZCa0xtWm5Ob3BBcVJzVHZCa0xtWm4=\n",
+            "-----END RSA PRIVATE KEY-----"
+        );
+        let redacted = redact(key);
+        assert!(
+            !redacted.contains("b2ZuRk9tS3hZd0hq"),
+            "the key material after the partial marker survived: {redacted}"
+        );
+    }
+
     #[test]
     fn an_intervening_end_marker_does_not_close_a_private_key() {
         let key = concat!(
