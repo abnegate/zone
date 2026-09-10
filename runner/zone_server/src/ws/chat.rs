@@ -2862,6 +2862,8 @@ async fn handle_chat_generation(
         full_content = "[Stopped before answering]".to_string();
     }
 
+    merge_cited_sources(state, chat_id, &full_content, &mut citations).await;
+
     // Images, the tool trace, citations, and write receipts share one
     // metadata object, so a turn that produced more than one keeps all of them.
     let assistant_metadata = merge_metadata(
@@ -2955,6 +2957,126 @@ async fn handle_chat_generation(
     }
 
     Ok(())
+}
+
+/// What a reply's source markers resolved to.
+struct CitedSources<'a> {
+    citations: Vec<Citation>,
+    resolved: usize,
+    unresolved: Vec<&'a str>,
+}
+
+/// Turn the source markers a reply wrote into citations for the sources this
+/// chat's registry actually holds.
+///
+/// Resolution is a lookup, never a recompute. Every marker in the reply is
+/// resolved in one query against the registry, so an identifier minted three
+/// turns ago still cites: the row is what makes it real, not a digest the
+/// server would have to re-derive from an input it no longer has.
+///
+/// A marker with no row behind it produces no citation, and the reply text is
+/// left exactly as the model wrote it. An unresolved marker is a fabricated
+/// attribution, and stripping it would leave a confident sentence with nothing
+/// visible left to check, which is the worse of the two failures: a marker a
+/// reader can see resolves to nothing is evidence of the fabrication. The
+/// warning and the counter are what make a fabricating model visible to an
+/// operator.
+async fn merge_cited_sources(
+    state: &AppState,
+    chat_id: Uuid,
+    reply: &str,
+    citations: &mut Vec<Citation>,
+) {
+    let identifiers = cited_identifiers(reply);
+    if identifiers.is_empty() {
+        return;
+    }
+
+    let sources = match db::chat_sources::resolve(state.db(), chat_id, &identifiers).await {
+        Ok(sources) => sources,
+        Err(error) => {
+            tracing::warn!("Failed to resolve sources cited in chat {chat_id}: {error}");
+            return;
+        }
+    };
+
+    let cited = cited_sources(&identifiers, &sources);
+    if !cited.unresolved.is_empty() {
+        tracing::warn!(
+            "Chat {chat_id} cited {} sources it never retrieved: {}",
+            cited.unresolved.len(),
+            cited
+                .unresolved
+                .iter()
+                .map(|identifier| agent::identifier::render(identifier))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    crate::metrics::record_citation_markers(crate::metrics::MARKER_RESOLVED, cited.resolved);
+    crate::metrics::record_citation_markers(
+        crate::metrics::MARKER_UNRESOLVED,
+        cited.unresolved.len(),
+    );
+    agent::citations::merge(citations, cited.citations);
+}
+
+/// Every distinct identifier the reply cites, in the order it first appears.
+fn cited_identifiers(reply: &str) -> Vec<String> {
+    agent::identifier::markers(reply)
+        .into_iter()
+        .map(|(kind, digest)| agent::identifier::token(kind, &digest))
+        .collect()
+}
+
+fn cited_sources<'a>(
+    identifiers: &'a [String],
+    sources: &[db::chat_sources::Source],
+) -> CitedSources<'a> {
+    let registry: std::collections::HashMap<&str, &db::chat_sources::Source> = sources
+        .iter()
+        .map(|source| (source.identifier.as_str(), source))
+        .collect();
+
+    let mut citations = Vec::with_capacity(identifiers.len());
+    let mut unresolved = Vec::new();
+    let mut resolved = 0;
+
+    for identifier in identifiers {
+        let Some(source) = registry.get(identifier.as_str()) else {
+            unresolved.push(identifier.as_str());
+            continue;
+        };
+        resolved += 1;
+        if let Some(kind) = citation_kind(source.kind) {
+            citations.push(agent::citations::from_source(
+                kind,
+                &source.identifier,
+                &source.title,
+                &source.uri,
+                source.first_observed_at,
+            ));
+        }
+    }
+
+    CitedSources {
+        citations,
+        resolved,
+        unresolved,
+    }
+}
+
+/// How a registry source is rendered as a citation.
+///
+/// A registry kind the citation shape cannot express is not guessed at. It
+/// yields no citation rather than one labelled as something it is not.
+const fn citation_kind(kind: agent::identifier::Kind) -> Option<agent::CitationKind> {
+    match kind {
+        agent::identifier::Kind::Web => Some(agent::CitationKind::Web),
+        agent::identifier::Kind::Doc
+        | agent::identifier::Kind::Kb
+        | agent::identifier::Kind::Chat => None,
+    }
 }
 
 #[cfg(test)]
@@ -4254,5 +4376,165 @@ mod tests {
         assert_eq!(json["name"], "create_pull_request");
         assert_eq!(json["reason"], "The user asked me to open it.");
         assert!(json.get("reasoning").is_none());
+    }
+
+    const SOURCE_URI: &str = "https://example.test/changelog";
+    const SOURCE_TITLE: &str = "Example changelog";
+    const UNRETRIEVED: &str = "web:abc123";
+    const FIRST_OBSERVED: &str = "2026-09-05T00:00:00+00:00";
+
+    fn registered(uri: &str, title: &str) -> db::chat_sources::Source {
+        let first_observed_at = chrono::DateTime::parse_from_rfc3339(FIRST_OBSERVED)
+            .expect("the fixture observation time is rfc3339")
+            .with_timezone(&chrono::Utc);
+        db::chat_sources::Source {
+            chat_id: Uuid::nil(),
+            identifier: agent::identifier::mint(agent::identifier::Kind::Web, uri),
+            kind: agent::identifier::Kind::Web,
+            uri: uri.to_string(),
+            title: title.to_string(),
+            first_observed_at,
+            last_observed_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn an_unknown_marker_yields_no_citation() {
+        let reply = format!(
+            "The release shipped on Tuesday {}.",
+            agent::identifier::render(UNRETRIEVED)
+        );
+
+        let identifiers = cited_identifiers(&reply);
+        assert_eq!(identifiers, [UNRETRIEVED]);
+
+        let cited = cited_sources(&identifiers, &[]);
+
+        assert!(
+            cited.citations.is_empty(),
+            "a marker the registry never held became a citation, so a fabricated attribution \
+             reads as evidence"
+        );
+        assert_eq!(cited.resolved, 0);
+        assert_eq!(cited.unresolved, [UNRETRIEVED]);
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_marker_leaves_the_reply_exactly_as_the_model_wrote_it() {
+        let state = AppState::for_tests();
+        let marker = agent::identifier::render(UNRETRIEVED);
+        let reply = format!("The release shipped on Tuesday {marker}.");
+        let mut citations = Vec::new();
+
+        merge_cited_sources(&state, Uuid::new_v4(), &reply, &mut citations).await;
+
+        assert!(
+            citations.is_empty(),
+            "a marker the registry never held became a citation: {citations:?}"
+        );
+        assert_eq!(
+            reply,
+            format!("The release shipped on Tuesday {marker}."),
+            "the reply was rewritten; an unresolved marker must stay visible so the reader \
+             can see there is nothing behind the claim"
+        );
+        assert_eq!(
+            cited_identifiers(&reply),
+            [UNRETRIEVED],
+            "the unresolved marker no longer scans out of the reply, so stripping it left a \
+             confident sentence with nothing to check"
+        );
+    }
+
+    #[test]
+    fn a_stored_identifier_resolves_by_its_row_and_never_by_rehashing_its_uri() {
+        let mut source = registered(SOURCE_URI, SOURCE_TITLE);
+        source.identifier =
+            agent::identifier::mint(agent::identifier::Kind::Web, "https://example.test/other");
+        assert_ne!(
+            source.identifier,
+            agent::identifier::mint(agent::identifier::Kind::Web, SOURCE_URI),
+            "the fixture identifier hashes to its own uri, so this test cannot tell a lookup \
+             from a recompute"
+        );
+
+        let reply = format!(
+            "The notes say so {}.",
+            agent::identifier::render(&source.identifier)
+        );
+        let identifiers = cited_identifiers(&reply);
+
+        let cited = cited_sources(&identifiers, std::slice::from_ref(&source));
+
+        assert_eq!(
+            cited.resolved, 1,
+            "an identifier the registry holds stopped resolving once it no longer matched a \
+             fresh digest of its uri, so resolution is recomputing instead of looking up"
+        );
+        assert!(cited.unresolved.is_empty());
+        assert_eq!(cited.citations.len(), 1, "{:?}", cited.citations);
+        assert_eq!(cited.citations[0].url, SOURCE_URI);
+        assert_eq!(
+            cited.citations[0].identifier.as_deref(),
+            Some(&*source.identifier)
+        );
+    }
+
+    #[test]
+    fn a_source_cited_twice_in_one_reply_produces_one_citation() {
+        let source = registered(SOURCE_URI, SOURCE_TITLE);
+        let marker = agent::identifier::render(&source.identifier);
+        let reply = format!("It shipped {marker}, and the notes agree {marker}.");
+
+        let identifiers = cited_identifiers(&reply);
+        assert_eq!(
+            identifiers,
+            [source.identifier.as_str()],
+            "one source cited twice scanned as two, so the same page is about to be cited twice"
+        );
+
+        let cited = cited_sources(&identifiers, std::slice::from_ref(&source));
+        let mut citations = Vec::new();
+        agent::citations::merge(&mut citations, cited.citations);
+
+        assert_eq!(citations.len(), 1, "{citations:?}");
+        assert_eq!(
+            citations[0].identifier.as_deref(),
+            Some(&*source.identifier)
+        );
+        assert_eq!(citations[0].url, SOURCE_URI);
+        assert_eq!(citations[0].title, SOURCE_TITLE);
+        assert_eq!(citations[0].kind, agent::CitationKind::Web);
+        assert_eq!(
+            citations[0].observed_at,
+            source.first_observed_at.to_rfc3339(),
+            "a cited source must carry when it was first observed, not when it was cited"
+        );
+        assert!(
+            !citations[0].passing(),
+            "a retrieved page is something the server saw, not something it verified"
+        );
+        assert!(cited.unresolved.is_empty());
+        assert_eq!(cited.resolved, 1);
+    }
+
+    #[test]
+    fn a_reply_that_cites_nothing_resolves_nothing() {
+        assert!(cited_identifiers("No markers here, and [web:zz] is not one.").is_empty());
+    }
+
+    #[test]
+    fn a_registry_kind_the_citation_shape_cannot_express_is_not_guessed_at() {
+        assert_eq!(
+            citation_kind(agent::identifier::Kind::Web),
+            Some(agent::CitationKind::Web)
+        );
+        for kind in [
+            agent::identifier::Kind::Doc,
+            agent::identifier::Kind::Kb,
+            agent::identifier::Kind::Chat,
+        ] {
+            assert_eq!(citation_kind(kind), None, "{kind}");
+        }
     }
 }
