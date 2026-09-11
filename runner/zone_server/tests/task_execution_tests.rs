@@ -586,6 +586,11 @@ impl Parked {
     }
 }
 
+/// What the asking turn streams before it stops to ask, and what the turn the
+/// answer buys streams after it.
+const BEFORE_ASKING: &str = "Checking the ledger first.";
+const AFTER_ANSWERING: &str = "Proceeding as answered.";
+
 /// Run a task whose first completion asks `questions`, and stop once it parks.
 async fn park(questions: serde_json::Value) -> Parked {
     use chrono::{Duration, Utc};
@@ -634,14 +639,22 @@ async fn park(questions: serde_json::Value) -> Parked {
     let rounds = Arc::new(AtomicUsize::new(0));
     let asked = questions.to_string();
     Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |_: &Request| {
-        let delta = if rounds.fetch_add(1, Ordering::SeqCst) == 0 {
-            serde_json::json!({"tool_calls":[{"index":0,"id":"ask-call","type":"function","function":{"name":"ask_user","arguments":asked}}]})
+        let deltas = if rounds.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![
+                serde_json::json!({"content": BEFORE_ASKING}),
+                serde_json::json!({"tool_calls":[{"index":0,"id":"ask-call","type":"function","function":{"name":"ask_user","arguments":asked}}]}),
+            ]
         } else {
-            serde_json::json!({"content":"Proceeding as answered."})
+            vec![serde_json::json!({"content": AFTER_ANSWERING})]
         };
-        let chunk = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+        let mut body = String::new();
+        for delta in deltas {
+            let chunk = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+            body.push_str(&format!("data: {chunk}\n\n"));
+        }
         let end = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
-        ResponseTemplate::new(200).insert_header("Content-Type", "text/event-stream").set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+        body.push_str(&format!("data: {end}\n\ndata: [DONE]\n\n"));
+        ResponseTemplate::new(200).insert_header("Content-Type", "text/event-stream").set_body_string(body)
     }).mount(&provider).await;
 
     let mut config = common::test_config();
@@ -749,6 +762,42 @@ async fn an_optional_question_parks_the_run_until_a_member_answers_it() {
     parked.finish().await;
 }
 
+/// The artifacts describe the run, and a run that asked something ran more
+/// than the turn that answered. Reporting only the last turn hides the work
+/// every earlier one did and throws away what it said before it stopped.
+#[tokio::test]
+async fn a_parked_turn_still_counts_towards_the_run_it_belongs_to() {
+    let parked = park(optional()).await;
+
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+
+    let artifacts: serde_json::Value =
+        sqlx::query_scalar("SELECT artifacts FROM task_runs WHERE id = $1")
+            .bind(parked.run)
+            .fetch_one(&parked.pool)
+            .await
+            .unwrap();
+    let summary = artifacts["summary"].as_str().expect("a recorded summary");
+    assert!(
+        summary.contains(BEFORE_ASKING),
+        "the asking turn's prose never reached the run: {summary}"
+    );
+    assert!(
+        summary.contains(AFTER_ANSWERING),
+        "the answering turn's prose never reached the run: {summary}"
+    );
+    assert_eq!(
+        artifacts["tool_calls"], 1,
+        "the question the run asked is a tool call it made"
+    );
+
+    parked.finish().await;
+}
+
 #[tokio::test]
 async fn an_answer_is_refused_unless_it_fits_the_question_that_was_asked() {
     let parked = park(optional()).await;
@@ -780,6 +829,23 @@ async fn an_answer_is_refused_unless_it_fits_the_question_that_was_asked() {
         .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill","Forward only"]}]}))
         .await;
     both.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(parked.status().await, "waiting");
+
+    // The answer becomes an entry compaction can never shed, so a paste that
+    // fits under the body limit would still sit in the window for the rest of
+    // the run and push every later turn into a capacity failure.
+    let paste = "x".repeat(zone_server::agent::question::MAX_FREE_TEXT + 1);
+    let oversized = parked
+        .answer(
+            serde_json::json!({"answers":[{"header":"Scope","labels":["Other"],"other":paste}]}),
+        )
+        .await;
+    oversized.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    assert!(
+        oversized.text().contains("Scope"),
+        "the rejection names the question it came back on: {}",
+        oversized.text()
+    );
     assert_eq!(parked.status().await, "waiting");
 
     for empty in [
@@ -906,6 +972,10 @@ async fn a_required_question_waits_and_a_timeout_can_still_end_the_parked_run() 
     assert_eq!(
         ended.error_message.as_deref(),
         Some("Task execution timed out after 3600 seconds")
+    );
+    assert_eq!(
+        ended.pending_question, None,
+        "a run nobody is waiting on any more must stop offering an answerable card"
     );
 
     parked.finish().await;

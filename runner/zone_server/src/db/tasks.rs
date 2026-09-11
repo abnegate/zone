@@ -878,16 +878,16 @@ pub async fn create_task_run_authorized(
         return Ok(Mutation::NotFound);
     }
 
-    let active = sqlx::query_as::<_, TaskRunRow>(
+    let active = sqlx::query_as::<_, TaskRunRow>(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT id, task_id, triggered_by, status, current_phase, progress_percent,
                started_at, completed_at, error_message, artifacts, pending_question
         FROM task_runs
-        WHERE task_id = $1 AND status IN ('running', 'waiting', 'pending')
+        WHERE task_id = $1 AND status IN {ACTIVE_RUN_STATUSES}
         ORDER BY started_at DESC, id
         LIMIT 1
-        "#,
-    )
+        "#
+    )))
     .bind(task_id)
     .fetch_optional(&mut *transaction)
     .await?;
@@ -1065,7 +1065,7 @@ pub async fn sweep_task_runs(pool: &PgPool) -> DbResult<u64> {
     let locked: Vec<Option<Uuid>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT active_run_id FROM tasks WHERE active_run_id IN (SELECT id FROM task_runs WHERE status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at <= NOW() - INTERVAL '60 seconds') ORDER BY id FOR UPDATE")))
         .fetch_all(&mut *transaction).await?;
     let runs: Vec<Uuid> = locked.into_iter().flatten().collect();
-    let failed: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = 'failed', error_message = 'orphaned', completed_at = NOW() WHERE id = ANY($1) AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at <= NOW() - INTERVAL '60 seconds' RETURNING id, task_id")))
+    let failed: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = 'failed', error_message = 'orphaned', completed_at = NOW(), pending_question = NULL WHERE id = ANY($1) AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at <= NOW() - INTERVAL '60 seconds' RETURNING id, task_id")))
         .bind(&runs).fetch_all(&mut *transaction).await?;
     for (run, task) in &failed {
         sqlx::query("UPDATE tasks SET status = 'blocked', completed_at = NOW(), updated_at = NOW(), active_run_id = NULL WHERE id = $1 AND active_run_id = $2")
@@ -1122,7 +1122,7 @@ pub async fn complete_owned_task_run(
     .bind(run_id)
     .fetch_optional(&mut *transaction)
     .await?;
-    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $3, completed_at = NOW(), error_message = $4, artifacts = COALESCE($5, artifacts), progress_percent = 100 WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds' RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question")))
+    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $3, completed_at = NOW(), error_message = $4, artifacts = COALESCE($5, artifacts), progress_percent = 100, pending_question = NULL WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds' RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question")))
         .bind(run_id).bind(owner).bind(status).bind(error_message).bind(artifacts).fetch_optional(&mut *transaction).await?;
     if let Some(run) = &row {
         let status = if status == "completed" {

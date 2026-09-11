@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 use zone_core::agent::{AgentCallback, AgentPhase};
 use zone_core::context::Entry;
-use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage};
+use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage, Role as LlmRole};
 use zone_core::tools::ToolResult;
 
 use crate::agent::prompt::{self, Environment, Vcs};
@@ -66,6 +66,9 @@ const PHASE_WAITING: &str = "waiting";
 const WAITING_ON_ANSWER: &str = "Task run is waiting on a question";
 const LOST_LEASE: &str = "Task execution lost its lease";
 const ANSWER_WITHDRAWN: &str = "The claim on the answer was withdrawn before one arrived";
+
+/// Between what one turn said and what the turn after the question said.
+const TURN_SEPARATOR: &str = "\n\n";
 
 const SOURCE_AGENT: &str = "agent";
 const SOURCE_TOOL: &str = "tool";
@@ -159,6 +162,17 @@ impl Fault {
             failure: Failure::Terminal,
             status: RUN_FAILED,
             message: LOST_LEASE.to_string(),
+        }
+    }
+
+    /// The claim on the answer went away before one arrived. Terminal, because
+    /// the only thing a retry can do is ask the same question into the same
+    /// silence, and it would spend the backoff with the run unanswerable.
+    fn withdrawn() -> Self {
+        Self {
+            failure: Failure::Terminal,
+            status: RUN_FAILED,
+            message: ANSWER_WITHDRAWN.to_string(),
         }
     }
 }
@@ -1641,24 +1655,25 @@ async fn attempt_run(
     let turns = async {
         let mut tools = tools;
         let mut context = context;
+        let mut carried = TaskOutcome::empty();
         loop {
             match run_task_loop(llm.clone(), model.to_string(), tools, context, &callback).await {
                 Err(error) => return Err(Fault::agent(error)),
-                Ok(TurnOutcome::Finished(outcome)) => return Ok(outcome),
+                Ok(TurnOutcome::Finished(outcome)) => {
+                    carried.absorb(outcome);
+                    return Ok(carried);
+                }
                 Ok(TurnOutcome::Parked {
                     tool_call_id,
                     questions,
                     context: parked,
+                    turn,
                 }) => {
+                    carried.absorb(turn);
                     let answered =
                         park_for_answer(state, run_id, owner, &tool_call_id, &questions).await?;
                     context = parked;
-                    context.entries.push(Entry {
-                        id: Uuid::new_v4().to_string(),
-                        message: LlmMessage::user(answered),
-                        preserve: true,
-                        consumed: true,
-                    });
+                    resume_with(&mut context, answered);
                     tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
                 }
             }
@@ -1763,10 +1778,14 @@ async fn park_for_answer(
     }
 
     let window = answer_window(questions);
-    let answered = match (question::awaited(waiter, window).await, window) {
-        (Some(answers), _) => question::render(questions, &answers).map_err(Fault::agent)?,
-        (None, Some(_)) => proceeding_on_defaults(questions),
-        (None, None) => return Err(Fault::agent(ANSWER_WITHDRAWN.to_string())),
+    // The park is symmetric: every way out of the wait unparks the row before
+    // it propagates. An early return would leave the run reading 'waiting' with
+    // a live card while the retry re-executed it, and answering that card would
+    // find nothing waiting behind it.
+    let window_outcome = match (question::awaited(waiter, window).await, window) {
+        (Some(answers), _) => question::render(questions, &answers).map_err(Fault::agent),
+        (None, Some(_)) => Ok(proceeding_on_defaults(questions)),
+        (None, None) => Err(Fault::withdrawn()),
     };
 
     if !matches!(
@@ -1775,7 +1794,7 @@ async fn park_for_answer(
     ) {
         return Err(Fault::lease());
     }
-    Ok(answered)
+    window_outcome
 }
 
 #[derive(Debug)]
@@ -1784,12 +1803,57 @@ struct TaskOutcome {
     tool_calls: usize,
 }
 
+impl TaskOutcome {
+    fn empty() -> Self {
+        Self {
+            summary: String::new(),
+            tool_calls: 0,
+        }
+    }
+
+    /// Fold one turn into the attempt's running total.
+    ///
+    /// An attempt that parked three times ran four turns, and the artifacts
+    /// describe the attempt: counting only the last turn under-reports the work
+    /// and throws away the prose the parked turns streamed before they asked.
+    fn absorb(&mut self, turn: Self) {
+        let prose = turn.summary.trim();
+        if !prose.is_empty() {
+            if !self.summary.is_empty() {
+                self.summary.push_str(TURN_SEPARATOR);
+            }
+            self.summary.push_str(prose);
+        }
+        self.tool_calls += turn.tool_calls;
+    }
+}
+
+/// Add the answer as the one preserved user message.
+///
+/// [`RunContext::from_messages`] protects only the latest user message, and a
+/// resume has to hold to that: leaving every earlier answer preserved grows a
+/// set of entries compaction can never shed, one per question the run asked.
+fn resume_with(context: &mut RunContext, answered: String) {
+    for entry in &mut context.entries {
+        if entry.message.role == LlmRole::User {
+            entry.preserve = false;
+        }
+    }
+    context.entries.push(Entry {
+        id: Uuid::new_v4().to_string(),
+        message: LlmMessage::user(answered),
+        preserve: true,
+        consumed: true,
+    });
+}
+
 /// How one turn of the agent loop ended.
 ///
 /// A parked turn hands back the consumer's own replay context because the
 /// generator owns the one it was given and cannot give it back. The clone is
 /// maintained event by event, so compaction the generator performed is carried
-/// forward instead of being replayed away.
+/// forward instead of being replayed away. It also hands back what the turn
+/// itself did, which the attempt's artifacts would otherwise lose.
 #[allow(clippy::large_enum_variant)]
 enum TurnOutcome {
     Finished(TaskOutcome),
@@ -1797,6 +1861,7 @@ enum TurnOutcome {
         tool_call_id: String,
         questions: Vec<Question>,
         context: RunContext,
+        turn: TaskOutcome,
     },
 }
 
@@ -1915,8 +1980,15 @@ where
 /// A parked run has to hand the next turn a context, and the generator was
 /// moved the only one it had. Replaying every `Canonical` on its own would put
 /// back the entries a checkpoint superseded and overflow the window on a long
-/// run; applying `Consumed` and `Checkpoint` alongside them is what keeps the
-/// copy equal to the original. The chat socket maintains its replay the same way.
+/// run; applying `Consumed` and `Checkpoint` alongside them is what mirrors
+/// every entry the generator reported, its consumption, and its summary. The
+/// chat socket maintains its replay the same way.
+///
+/// What it does not mirror is the generator's own mid-turn system nudges, which
+/// [`agent::runner::nudge`] deliberately keeps out of the event stream because
+/// a chat commits every `Canonical` to durable turn history. Those correct a
+/// reply that is itself never appended, so a resumed turn loses the pair and
+/// carries no dangling half of it.
 fn accumulate(replay: &mut RunContext, event: &AgentEvent) {
     match event {
         AgentEvent::Canonical(entry) => replay.append(entry),
@@ -2047,6 +2119,10 @@ async fn run_task_loop(
             tool_call_id,
             questions,
             context: replay,
+            turn: TaskOutcome {
+                summary,
+                tool_calls,
+            },
         });
     }
     callback.on_phase_change(AgentPhase::Responding, Some(&summary));
@@ -3318,6 +3394,59 @@ mod watchdog_tests {
         assert_eq!(pending, None);
     }
 
+    /// Every exit from the wait unparks the row, the failing ones included.
+    ///
+    /// A run left reading `'waiting'` while `run_with_policy` slept and retried
+    /// would show the console an answerable card whose answers all miss, and
+    /// the retry's own park would then fail the `'running'` fence and report a
+    /// lost lease. Terminal is what keeps the retry from happening at all.
+    #[tokio::test]
+    async fn a_withdrawn_claim_unparks_the_row_and_stops_the_run() {
+        let (pool, observed, state, run, owner) = parked_fixture().await;
+        let questions = vec![asked("Scope", true, &["Backfill", "Forward only"])];
+
+        let parking = {
+            let state = state.clone();
+            let questions = questions.clone();
+            tokio::spawn(
+                async move { park_for_answer(&state, run, owner, "call-1", &questions).await },
+            )
+        };
+        loop {
+            if parked_row(&observed, run).await.0 == PHASE_WAITING {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        question::forget(run);
+        let fault = parking
+            .await
+            .unwrap()
+            .expect_err("a withdrawn claim has no answer to resume on");
+
+        let (status, pending) = parked_row(&pool, run).await;
+        assert_ne!(
+            status, PHASE_WAITING,
+            "the run still advertises a question nothing is waiting on"
+        );
+        assert_eq!(
+            pending, None,
+            "the envelope outlived the claim it was published for"
+        );
+        assert_eq!(fault.message, ANSWER_WITHDRAWN);
+        assert!(
+            matches!(fault.failure, Failure::Terminal),
+            "a withdrawn claim was classified {}",
+            fault.failure.label()
+        );
+        assert_eq!(
+            RetryPolicy::default().decide(1, fault.failure, 0.0),
+            Decision::Terminal,
+            "re-running the attempt only asks the same question into the same silence"
+        );
+    }
+
     #[test]
     fn an_unanswered_required_question_ends_the_run_without_a_retry() {
         let fault = Fault::timeout();
@@ -3330,6 +3459,64 @@ mod watchdog_tests {
         assert_eq!(
             fault.message,
             format!("Task execution timed out after {TASK_TIMEOUT_SECS} seconds")
+        );
+    }
+
+    /// A run that parked three times ran four turns, and the artifacts report
+    /// the run. Dropping the parked turns under-reports the work it did and
+    /// loses everything it said before it stopped to ask.
+    #[test]
+    fn every_turn_of_an_attempt_counts_towards_its_artifacts() {
+        let mut carried = TaskOutcome::empty();
+        carried.absorb(TaskOutcome {
+            summary: "Read the ledger.".to_string(),
+            tool_calls: 3,
+        });
+        carried.absorb(TaskOutcome {
+            summary: "   ".to_string(),
+            tool_calls: 2,
+        });
+        carried.absorb(TaskOutcome {
+            summary: "Backfilled every row.".to_string(),
+            tool_calls: 4,
+        });
+        assert_eq!(carried.tool_calls, 9);
+        assert_eq!(
+            carried.summary,
+            format!("Read the ledger.{TURN_SEPARATOR}Backfilled every row."),
+            "a turn that streamed nothing must not open a gap in the summary"
+        );
+    }
+
+    /// [`RunContext::from_messages`] preserves the latest user message and no
+    /// earlier one. Every resume has to leave the context that way, or a run
+    /// that asks repeatedly accrues answers compaction can never shed.
+    #[test]
+    fn only_the_newest_answer_stays_preserved_across_resumes() {
+        let mut context = RunContext::from_messages(vec![
+            LlmMessage::system("Task rules"),
+            LlmMessage::user("Backfill the ledger"),
+        ]);
+        resume_with(&mut context, "Scope: Backfill".to_string());
+        resume_with(&mut context, "Branch: main".to_string());
+
+        let preserved: Vec<&str> = context
+            .entries
+            .iter()
+            .filter(|entry| entry.preserve && entry.message.role == LlmRole::User)
+            .filter_map(|entry| entry.message.content.as_deref())
+            .collect();
+        assert_eq!(
+            preserved,
+            vec!["Branch: main"],
+            "exactly one user message is protected, and it is the newest"
+        );
+        assert!(
+            context
+                .entries
+                .iter()
+                .any(|entry| entry.message.role == LlmRole::System && entry.preserve),
+            "clearing the answers must not unprotect the task rules"
         );
     }
 
