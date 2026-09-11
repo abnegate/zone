@@ -16,8 +16,10 @@ import { z } from 'zod';
 
 import {
   ActionReceiptSchema,
+  ChoiceSchema,
   CitationSchema,
   MessageMetadataSchema,
+  QuestionSchema,
   ToolCallRecordSchema,
 } from './schemas';
 import { REASONED_TOOLS } from './types';
@@ -33,6 +35,11 @@ const PROVENANCE_RS = join(
 );
 
 const TOOLS_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/agent/tools.rs');
+
+const QUESTION_RS = join(
+  import.meta.dir,
+  '../../../../../runner/zone_server/src/agent/question.rs'
+);
 
 const REASONED_TOOLS_RS = 'REASONED_TOOLS';
 
@@ -60,6 +67,32 @@ function rustStringArray(source: string, constantName: string): string[] {
     throw new Error(`${constantName} declares ${body[1]} entries and lists ${names.length}`);
   }
   return names.sort();
+}
+
+/// Reads the serialised shape of a `pub struct`: each `pub name: Type` in
+/// declaration order, paired with whether serde may omit it. A field carrying
+/// `skip_serializing_if` is absent from the wire when empty, which is exactly
+/// what the console must model as optional.
+function rustStructFields(source: string, structName: string): Record<string, boolean> {
+  const body = source.match(new RegExp(`pub struct ${structName} \\{([^}]*)\\}`))?.[1];
+  if (!body) throw new Error(`${structName} not found in the Rust source`);
+
+  const fields: Record<string, boolean> = {};
+  let skippable = false;
+  for (const raw of body.split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('#[serde(')) {
+      skippable = line.includes('skip_serializing_if');
+      continue;
+    }
+    const field = line.match(/^pub ([a-z_0-9]+):/);
+    if (field) {
+      fields[field[1]] = skippable;
+      skippable = false;
+    }
+  }
+  if (Object.keys(fields).length === 0) throw new Error(`${structName} declares no public fields`);
+  return fields;
 }
 
 function zodOptions(schema: unknown, key: string): string[] {
@@ -342,5 +375,32 @@ describe('a stated reason and an observed preview survive storage', () => {
     expect(parsed.action_receipts).toHaveLength(1);
     expect(parsed.action_receipts?.[0].reason).toBeUndefined();
     expect(parsed.action_receipts?.[0].outcome).toBe('Message sent');
+  });
+});
+
+/**
+ * A question card is rendered straight from what the server sent. The schema is
+ * not passthrough, so a field the server adds and the console does not declare
+ * is stripped before the card is drawn — a choice that vanishes, or a
+ * `multi_select` that reads as single, and the reader answers a different
+ * question from the one the agent asked. Nothing links the two definitions, so
+ * this reads the Rust struct and asserts the shapes are the same.
+ */
+describe('the question card the console draws is the one the server sent', () => {
+  const source = readFileSync(QUESTION_RS, 'utf8');
+
+  const zodFields = (schema: unknown): Record<string, boolean> => {
+    const shape = (schema as { shape: Record<string, { isOptional(): boolean }> }).shape;
+    return Object.fromEntries(
+      Object.entries(shape).map(([key, value]) => [key, value.isOptional()])
+    );
+  };
+
+  test('Choice carries the same fields on both sides', () => {
+    expect(zodFields(ChoiceSchema)).toEqual(rustStructFields(source, 'Choice'));
+  });
+
+  test('Question carries the same fields on both sides, optional where serde may omit', () => {
+    expect(zodFields(QuestionSchema)).toEqual(rustStructFields(source, 'Question'));
   });
 });
