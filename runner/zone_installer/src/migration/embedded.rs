@@ -45,4 +45,11 @@ pub const EMBEDDED: &[Source] = &[
     source!("022_tenant_admin_permissions.sql"),
     source!("023_workspace_owner_backfill.sql"),
     source!("024_chat_sources.sql"),
+    source!("025_task_run_pending_question.sql"),
+    source!("026_task_run_waiting_status.sql"),
+    source!("027_task_run_active_waiting_index.sql"),
+    source!("028_task_run_heartbeat_waiting_index.sql"),
+    source!("029_task_run_waiting_validation.sql"),
+    source!("030_task_run_legacy_admission_index_drop.sql"),
+    source!("031_task_run_legacy_heartbeat_index_drop.sql"),
 ];
