@@ -48,15 +48,17 @@ async function openChat(page: import('@playwright/test').Page, title: string) {
 /** A real diffusion pass takes minutes on Apple Silicon, so the wait is long. */
 async function send(page: import('@playwright/test').Page, message: string) {
   const assistant = page.locator('.message-assistant');
+  const alerts = page.getByRole('alert');
+  // A turn that fails renders an alert and no assistant message, so waiting on
+  // the reply alone runs the whole media timeout before the alert is read. Both
+  // baselines are taken before the send, so neither a message already on screen
+  // nor a stale alert can satisfy the wait for this turn.
   const before = await assistant.count();
+  const failure = alerts.nth(await alerts.count());
   const box = page.getByPlaceholder(/type a message/i);
   await box.fill(message);
   await box.press('Enter');
   await expect(page.locator('.message-user').filter({ hasText: message })).toBeVisible();
-  // A turn that fails renders an alert and no assistant message, so waiting on
-  // the reply alone runs the whole media timeout before the alert is read.
-  const failures = page.getByRole('alert');
-  const failure = failures.nth(await failures.count());
   await expect(assistant.nth(before).or(failure).first()).toBeVisible({ timeout: 1_500_000 });
   if (await failure.count()) {
     expect(await failure.innerText(), 'the turn reported a failure').toBe('');

@@ -53,7 +53,7 @@ audio_timeout=600
 upscale_timeout=600
 if [ "$real" = 1 ]; then
   models=${COMFYUI_MODELS_DIR:-"$HOME/Library/Application Support/Zone/ComfyUI/models"}
-  comfy_url=${ZONE_LIVE_COMFYUI_URL:-http://127.0.0.1:8188}
+  comfy_url=${ZONE_LIVE_COMFYUI_URL:-$comfy_url}
   train_command=
   generation_timeout=900
   video_timeout=3600
@@ -100,20 +100,20 @@ wait_for() {
 echo "==> fixtures"
 "$root/scripts/live-verify/fixtures.sh" "$work/fixtures" >/dev/null
 
-# A placeholder weight per required file is enough for the recipe catalog to
-# report a trainable base: readiness is a file that exists, and the Train tab
-# needs a base to offer.
 if [ "$real" = 1 ]; then
   echo "==> real models in $models"
 else
-echo "==> models"
-mkdir -p "$models/checkpoints" "$models/diffusion_models" "$models/loras" \
-  "$models/text_encoders" "$models/vae" "$models/upscale_models"
-printf placeholder >"$models/checkpoints/flux1-schnell-fp8.safetensors"
-printf placeholder >"$models/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors"
-printf placeholder >"$models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"
-printf placeholder >"$models/vae/qwen_image_vae.safetensors"
-printf placeholder >"$models/upscale_models/RealESRGAN_x4plus.safetensors"
+  # A placeholder weight per required file is enough for the recipe catalog to
+  # report a trainable base: readiness is a file that exists, and the Train tab
+  # needs a base to offer.
+  echo "==> models"
+  mkdir -p "$models/checkpoints" "$models/diffusion_models" "$models/loras" \
+    "$models/text_encoders" "$models/vae" "$models/upscale_models"
+  printf placeholder >"$models/checkpoints/flux1-schnell-fp8.safetensors"
+  printf placeholder >"$models/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors"
+  printf placeholder >"$models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"
+  printf placeholder >"$models/vae/qwen_image_vae.safetensors"
+  printf placeholder >"$models/upscale_models/RealESRGAN_x4plus.safetensors"
 fi
 
 if [ "$real" = 1 ]; then
