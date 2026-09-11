@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 use zone_core::agent::{AgentCallback, AgentPhase};
 use zone_core::context::Entry;
-use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage, Role as LlmRole};
+use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage};
 use zone_core::tools::ToolResult;
 
 use crate::agent::prompt::{self, Environment, Vcs};
@@ -1655,6 +1655,7 @@ async fn attempt_run(
     let turns = async {
         let mut tools = tools;
         let mut context = context;
+        let mut answers: Vec<String> = Vec::new();
         let mut carried = TaskOutcome::empty();
         loop {
             match run_task_loop(llm.clone(), model.to_string(), tools, context, &callback).await {
@@ -1673,7 +1674,7 @@ async fn attempt_run(
                     let answered =
                         park_for_answer(state, run_id, owner, &tool_call_id, &questions).await?;
                     context = parked;
-                    resume_with(&mut context, answered);
+                    resume_with(&mut context, answered, &mut answers);
                     tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
                 }
             }
@@ -1828,23 +1829,29 @@ impl TaskOutcome {
     }
 }
 
-/// Add the answer as the one preserved user message.
+/// Add the answer as the newest preserved user message, demoting the answers
+/// earlier resumes added and nothing else.
 ///
-/// [`RunContext::from_messages`] protects only the latest user message, and a
-/// resume has to hold to that: leaving every earlier answer preserved grows a
-/// set of entries compaction can never shed, one per question the run asked.
-fn resume_with(context: &mut RunContext, answered: String) {
+/// Leaving every answer preserved grows a set of entries compaction can never
+/// shed, one per question the run asked. Demoting every user entry instead
+/// takes the task prompt with them: it is the run's own specification, pinned
+/// by [`RunContext::from_messages`], and a run that parks once and later
+/// compacts would proceed on the model's paraphrase of what it was asked to do.
+/// `answers` carries the ids this added across the attempt's parks.
+fn resume_with(context: &mut RunContext, answered: String, answers: &mut Vec<String>) {
     for entry in &mut context.entries {
-        if entry.message.role == LlmRole::User {
+        if answers.contains(&entry.id) {
             entry.preserve = false;
         }
     }
+    let id = Uuid::new_v4().to_string();
     context.entries.push(Entry {
-        id: Uuid::new_v4().to_string(),
+        id: id.clone(),
         message: LlmMessage::user(answered),
         preserve: true,
         consumed: true,
     });
+    answers.push(id);
 }
 
 /// How one turn of the agent loop ended.
@@ -3049,6 +3056,7 @@ mod retry_tests {
 mod watchdog_tests {
     use super::*;
     use std::sync::Mutex;
+    use zone_core::llm::Role as LlmRole;
 
     /// A run that is working announces nothing: the watchdog is there for the
     /// silence, and firing on a busy run would bury the log it writes to.
@@ -3488,17 +3496,20 @@ mod watchdog_tests {
         );
     }
 
-    /// [`RunContext::from_messages`] preserves the latest user message and no
-    /// earlier one. Every resume has to leave the context that way, or a run
-    /// that asks repeatedly accrues answers compaction can never shed.
+    /// A resume protects its answer and demotes the answer before it, so a run
+    /// that asks repeatedly does not accrue answers compaction can never shed.
+    /// The task prompt is not one of those answers: it is the specification the
+    /// run is judged against, and a run that parks once and later compacts must
+    /// not be left working from a summary of its own instructions.
     #[test]
-    fn only_the_newest_answer_stays_preserved_across_resumes() {
+    fn a_resume_protects_its_answer_and_never_demotes_the_task_prompt() {
         let mut context = RunContext::from_messages(vec![
             LlmMessage::system("Task rules"),
             LlmMessage::user("Backfill the ledger"),
         ]);
-        resume_with(&mut context, "Scope: Backfill".to_string());
-        resume_with(&mut context, "Branch: main".to_string());
+        let mut answers = Vec::new();
+        resume_with(&mut context, "Scope: Backfill".to_string(), &mut answers);
+        resume_with(&mut context, "Branch: main".to_string(), &mut answers);
 
         let preserved: Vec<&str> = context
             .entries
@@ -3508,8 +3519,8 @@ mod watchdog_tests {
             .collect();
         assert_eq!(
             preserved,
-            vec!["Branch: main"],
-            "exactly one user message is protected, and it is the newest"
+            vec!["Backfill the ledger", "Branch: main"],
+            "the task prompt and the newest answer are protected, and no earlier answer is"
         );
         assert!(
             context
