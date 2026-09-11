@@ -15,18 +15,17 @@ const HEADING: &str = "Asking the user:";
 const RESERVE: &str = "- Reserve ask_user for a decision that changes what you do next; reading or testing \
      settles the rest.";
 
-const CONVERSATION: &str = "- Check the conversation first: it often already answers.";
+const CONVERSATION: &str = "- Check the conversation first: it often answers.";
 
-const NARROWED: &str = "- A detailed request has narrowed it already: state the assumption inline rather than \
-     ask.";
+const NARROWED: &str =
+    "- A detailed request has narrowed it: state the assumption inline rather than ask.";
 
 const COUNT: &str = "- One question is the shape to aim for, three the ceiling.";
 
 const LAST: &str =
     "- Your turn ends on the call: finish everything the answer does not block first.";
 
-const CARD: &str = "- The card is the consent: do not also ask in prose or restate the options in your \
-     reply.";
+const CARD: &str = "- The card is the consent: do not also ask in prose or restate the options.";
 
 /// Only a task run goes ahead on a default, so only a task run can be wrong to;
 /// in a chat the user's next message answers either way.
@@ -75,6 +74,9 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::prompt;
+    use crate::agent::prompt::section::boundary::BOUNDARY;
+    use crate::agent::prompt::section::tiers::FINISH_FIRST;
     use crate::agent::prompt::test_support::{chat_context, environment, task_context};
     use crate::agent::{ChatTools, ToolProfile};
 
@@ -99,77 +101,49 @@ mod tests {
         assert!(render(&task_context(&tools, &environment)).is_none());
     }
 
+    /// Every rule below is asserted whole rather than by a fragment of itself.
+    /// A fragment survives the rule being inverted around it, and rewording ten
+    /// of these constants once cost nine assertion edits; the constant is the
+    /// spec line, so the test reads the constant.
     #[test]
     fn the_question_is_reserved_for_an_answer_that_changes_the_work() {
         for rendered in [chat(), task()] {
-            assert!(
-                rendered.contains("a decision that changes what you do next"),
-                "{rendered}"
-            );
-            assert!(
-                rendered.contains("reading or testing settles the rest"),
-                "{rendered}"
-            );
+            assert!(rendered.contains(RESERVE), "{rendered}");
         }
     }
 
     #[test]
     fn the_conversation_is_read_before_the_user_is_asked_again() {
         for rendered in [chat(), task()] {
-            assert!(
-                rendered.contains("Check the conversation first"),
-                "{rendered}"
-            );
-            assert!(rendered.contains("it often already answers"), "{rendered}");
+            assert!(rendered.contains(CONVERSATION), "{rendered}");
         }
     }
 
     #[test]
     fn a_detailed_request_is_carried_forward_on_a_stated_assumption() {
         for rendered in [chat(), task()] {
-            assert!(
-                rendered.contains("A detailed request has narrowed it already"),
-                "{rendered}"
-            );
-            assert!(
-                rendered.contains("state the assumption inline rather than ask"),
-                "{rendered}"
-            );
+            assert!(rendered.contains(NARROWED), "{rendered}");
         }
     }
 
     #[test]
     fn one_question_is_the_shape_and_three_the_ceiling() {
         for rendered in [chat(), task()] {
-            assert!(
-                rendered.contains("One question is the shape to aim for, three the ceiling."),
-                "{rendered}"
-            );
+            assert!(rendered.contains(COUNT), "{rendered}");
         }
     }
 
     #[test]
     fn the_turn_ends_on_the_call_so_independent_work_is_finished_first() {
         for rendered in [chat(), task()] {
-            assert!(
-                rendered.contains("Your turn ends on the call"),
-                "{rendered}"
-            );
-            assert!(
-                rendered.contains("finish everything the answer does not block first"),
-                "{rendered}"
-            );
+            assert!(rendered.contains(LAST), "{rendered}");
         }
     }
 
     #[test]
     fn the_card_is_the_consent_and_is_not_asked_again_in_prose() {
         for rendered in [chat(), task()] {
-            assert!(rendered.contains("The card is the consent"), "{rendered}");
-            assert!(
-                rendered.contains("do not also ask in prose or restate the options"),
-                "{rendered}"
-            );
+            assert!(rendered.contains(CARD), "{rendered}");
         }
     }
 
@@ -238,6 +212,21 @@ mod tests {
                 !rendered.contains("the message as it will read"),
                 "{rendered}"
             );
+        }
+    }
+
+    /// Those absences are literals, so either owner rewording turns all three
+    /// vacuous and the duplication they exist to catch walks back in. Counting
+    /// the owning constants over the assembled prompt is what still fails:
+    /// whatever they say, the model reads each of them once.
+    #[test]
+    fn each_rule_another_section_owns_reaches_the_prompt_exactly_once() {
+        let tools = ChatTools::with_names(ToolProfile::Chat, &["run_shell", ASK_USER], None);
+        let environment = environment();
+        let rendered = prompt::chat(&tools, false, &environment);
+
+        for owned in [BOUNDARY, FINISH_FIRST] {
+            assert_eq!(rendered.matches(owned).count(), 1, "{owned}");
         }
     }
 }
