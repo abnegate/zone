@@ -107,6 +107,30 @@ describe('a task run that parked on a question', () => {
     expect(screen.queryByRole('button', { name: 'Run Again' })).not.toBeInTheDocument();
   });
 
+  it('names the phase the run is in as waiting, not the one it parked from', async () => {
+    mockGetTaskRun.mockImplementation(() =>
+      Promise.resolve({ ...waiting, current_phase: 'waiting' })
+    );
+    mockGetTaskRunLogs.mockImplementation(() =>
+      Promise.resolve([
+        {
+          id: 'log-1',
+          phase: 'waiting',
+          agent_type: 'agent',
+          level: 'info',
+          message: 'Task run is waiting on a question',
+          metadata: null,
+          created_at: '2026-09-10T00:00:01Z',
+        },
+      ])
+    );
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    expect(await screen.findByText('Waiting for you')).toBeInTheDocument();
+    expect(await screen.findAllByText('Waiting for an answer')).toHaveLength(2);
+    expect(screen.queryByText('Reviewing results')).not.toBeInTheDocument();
+  });
+
   it('asks the question above the log the run stopped in', async () => {
     render(<TaskExecutionView task={task} onClose={() => {}} />);
 

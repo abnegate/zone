@@ -1028,7 +1028,7 @@ pub async fn park_task_run(
     owner: Uuid,
     pending_question: serde_json::Value,
 ) -> DbResult<bool> {
-    Ok(sqlx::query("UPDATE task_runs SET status = 'waiting', pending_question = $3, heartbeat_at = NOW() WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status = 'running' AND heartbeat_at > NOW() - INTERVAL '60 seconds'")
+    Ok(sqlx::query("UPDATE task_runs SET status = 'waiting', current_phase = 'waiting', pending_question = $3, heartbeat_at = NOW() WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status = 'running' AND heartbeat_at > NOW() - INTERVAL '60 seconds'")
         .bind(run).bind(owner).bind(pending_question).execute(pool).await?.rows_affected() == 1)
 }
 
