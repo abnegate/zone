@@ -8,8 +8,7 @@
 //! surface. Only a catalog holding the tool renders this.
 
 use crate::agent::prompt::{Context, Surface};
-
-pub(in crate::agent::prompt) const ASK_USER: &str = "ask_user";
+use crate::agent::question::ASK_USER;
 
 const HEADING: &str = "Asking the user:";
 

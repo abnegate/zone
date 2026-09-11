@@ -6,8 +6,8 @@
 //! on the user having asked for one, `files` says git pushes wait for the same
 //! ask, and `task` says Zone opens the run's own pull request.
 
-use crate::agent::prompt::section::elicitation;
 use crate::agent::prompt::{Context, Surface};
+use crate::agent::question::ASK_USER;
 
 const REPORTING: &str = "Reporting outcomes: report what happened, not what you meant to happen. A claim that \
      something is done, sent, saved, fixed or verified has to rest on a result you observed \
@@ -79,7 +79,7 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
     };
     let surface = match context.surface {
         Surface::Chat => ASSESSMENT.to_string(),
-        Surface::Task if context.tools.has(elicitation::ASK_USER) => {
+        Surface::Task if context.tools.has(ASK_USER) => {
             format!("{ANSWERABLE} {SCOPE} {ASKABLE}")
         }
         Surface::Task => format!("{AUTONOMY} {SCOPE}"),
@@ -114,7 +114,7 @@ mod tests {
     fn task_tools() -> ChatTools {
         ChatTools::with_names(
             ToolProfile::Task,
-            &["read_file", "run_command", elicitation::ASK_USER],
+            &["read_file", "run_command", ASK_USER],
             None,
         )
     }

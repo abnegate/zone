@@ -159,6 +159,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::agent::ToolProfile;
+    use crate::agent::question::ASK_USER;
     use test_support::environment;
     use zone_core::tools::{Tier, ToolRegistry};
 
@@ -264,7 +265,7 @@ mod tests {
         catalog
             .iter()
             .map(|name| {
-                let tier = if *name == section::elicitation::ASK_USER {
+                let tier = if *name == ASK_USER {
                     Tier::Read
                 } else {
                     host.tier(name).unwrap_or(Tier::Write)
@@ -660,8 +661,8 @@ mod tests {
             task_tools().names().len(),
             TASK_HOST.len() + TASK_DOCUMENTS.len()
         );
-        assert!(chat_tools().has(section::elicitation::ASK_USER));
-        assert!(task_tools().has(section::elicitation::ASK_USER));
+        assert!(chat_tools().has(ASK_USER));
+        assert!(task_tools().has(ASK_USER));
     }
 
     /// The section renders off the catalog, so the prompt only carries the
@@ -671,7 +672,7 @@ mod tests {
         let environment = environment();
         let without: Vec<(&str, Tier)> = tiered(ToolProfile::Chat, CHAT_CATALOG)
             .into_iter()
-            .filter(|(name, _)| *name != section::elicitation::ASK_USER)
+            .filter(|(name, _)| *name != ASK_USER)
             .collect();
         let without = ChatTools::with_tiers(ToolProfile::Chat, &without, None);
 
