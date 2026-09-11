@@ -678,11 +678,13 @@ export function useChat(
         // — the card is what is waiting — so it keeps the settled state the
         // tool result gave it, which is what a reload rebuilds it as. The
         // questions are read by the schema the stored record is read by, so
-        // the card this frame draws is the card that reload rebuilds; a frame
-        // that cannot be read at all leaves the call as the result left it.
+        // the card this frame draws is the card that reload rebuilds. A frame
+        // with no readable question on it leaves the call as the result left
+        // it: a row marked as waiting with nothing to answer on is a promise
+        // the card cannot keep.
         case 'question_required': {
           const questions = QuestionsSchema.safeParse(payload.questions);
-          if (!questions.success) break;
+          if (!questions.success || questions.data.length === 0) break;
           patchToolCall(payload.message_id, payload.tool_call_id, {
             questions: questions.data,
             detail: AWAITING_ANSWER_DETAIL,

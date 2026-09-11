@@ -1723,6 +1723,41 @@ describe('useChat', () => {
     expect(asked?.detail).toBe('Asked');
   });
 
+  it('leaves the call as the tool result left it when every question on a live frame is unreadable', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'm6', role: 'assistant' });
+      lastSocket?.emit({
+        type: 'tool_result',
+        message_id: 'm6',
+        tool_call_id: 'call_ask',
+        name: 'ask_user',
+        success: true,
+        detail: 'Asked',
+        duration_ms: 0,
+      });
+      lastSocket?.emit({
+        type: 'question_required',
+        message_id: 'm6',
+        tool_call_id: 'call_ask',
+        questions: [
+          { header: 'Rollout', question: 'How fast?', multi_select: false, required: true },
+        ],
+      });
+    });
+
+    const asked = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(asked?.questions).toBeUndefined();
+    expect(asked?.detail).toBe('Asked');
+  });
+
   it('leaves the call that asked finished, since the card is what is waiting', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
