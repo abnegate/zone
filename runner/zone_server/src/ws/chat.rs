@@ -2968,6 +2968,7 @@ async fn handle_chat_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::PgPool;
 
     #[test]
     fn retrieved_context_helpers_normalize_bound_and_interleave_sources() {
@@ -3359,6 +3360,148 @@ mod tests {
         assert!(
             !CHAT_STREAMS.contains_key(&chat_id),
             "the last holder leaving frees the chat's frames"
+        );
+    }
+
+    async fn seed_chat(pool: &PgPool, secret: &str) -> (String, Uuid) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let user = db::users::create_user(
+            pool,
+            &format!("join-{suffix}@example.com"),
+            "unused-hash",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let organization = db::organizations::create_organization(
+            pool,
+            &format!("Join {suffix}"),
+            &format!("join-org-{suffix}"),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            pool,
+            organization.id,
+            &format!("Join {suffix}"),
+            &format!("join-ws-{suffix}"),
+            None,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Owner,
+            None,
+        )
+        .await
+        .unwrap();
+        let chat = chats::create_chat(
+            pool,
+            Some(workspace.id),
+            "Join",
+            "llama3.2:3b",
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let session = sessions::create_session(
+            pool,
+            user.id,
+            &format!("refresh-{suffix}"),
+            None,
+            None,
+            None,
+            (chrono::Utc::now() + chrono::Duration::hours(1)).naive_utc(),
+        )
+        .await
+        .unwrap();
+        let token = crate::auth::jwt::create_session_access_token(
+            user.id,
+            &user.email,
+            Vec::new(),
+            Vec::new(),
+            false,
+            session.id,
+            secret,
+            chrono::Duration::minutes(15),
+        )
+        .unwrap();
+        (token, chat.id)
+    }
+
+    async fn frame_type(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> String {
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(10), socket.next())
+                .await
+                .expect("a frame within ten seconds")
+                .expect("an open socket")
+                .expect("a readable frame");
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = frame {
+                let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                return frame["type"].as_str().unwrap().to_string();
+            }
+        }
+    }
+
+    /// Holding the live-turn lock stops `join` from completing, so a socket
+    /// that announces `init` while it is held has announced before it could
+    /// receive anything, and a frame published in that gap would never reach it.
+    #[tokio::test]
+    async fn init_is_not_announced_until_the_socket_has_joined_the_stream() {
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://postgres:postgres@localhost:5432/zone_test".to_string()
+        });
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("a migrated test database");
+        let config = crate::state::test_config();
+        let (token, chat_id) = seed_chat(&pool, config.jwt_secret()).await;
+        let state = AppState::new(config, pool, None);
+        state.disable_mcp();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, crate::routes::create_router(state)).await;
+        });
+
+        let stream = ChatStream::of(chat_id);
+        let joining = stream.live.lock().await;
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws/chats/{chat_id}"))
+                .await
+                .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({"type": "auth", "token": token})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), socket.next())
+                .await
+                .is_err(),
+            "init was announced before the socket had joined the chat's stream"
+        );
+
+        drop(joining);
+        assert_eq!(frame_type(&mut socket).await, "init");
+        publish(&stream, started(Uuid::new_v4())).await;
+        assert_eq!(
+            frame_type(&mut socket).await,
+            "message_start",
+            "a frame published after init has to reach the socket"
         );
     }
 
