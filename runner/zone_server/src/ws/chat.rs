@@ -3545,7 +3545,7 @@ mod tests {
         assert!(!CHAT_CANCELLATIONS.contains_key(&key));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn connection_cleanup_removes_only_an_idle_chat_entry() {
         let chat_id = Uuid::new_v4();
         let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS_PER_CHAT));
