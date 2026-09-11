@@ -125,6 +125,13 @@ export const REASON_MISSING = 'No reason given';
 /// half of an approval a reader can trust when the stated reason disagrees.
 export const PREVIEW_LABEL = 'Effect, read from the call by the server';
 
+/// The outcome shown against a call that asked the reader something. A copy of
+/// the server's `AWAITING_ANSWER_DETAIL`, which writes the same string onto the
+/// record it persists: the console labels the live frame and the server labels
+/// the stored one, so `schemas.contract.test.ts` reads the Rust constant and
+/// compares rather than letting a reload relabel the same call.
+export const AWAITING_ANSWER_DETAIL = 'Waiting for your answer…';
+
 /// Tools that change something outside the conversation and are therefore
 /// asked to say why. The trace row is where a reader sees that answer, whether
 /// the call is still waiting on them or already done, so an absent reason is

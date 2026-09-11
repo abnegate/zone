@@ -143,6 +143,11 @@ export interface TaskRunResponse {
   run: TaskRun;
 }
 
+export interface AnswersResponse {
+  run_id: string;
+  answered: number;
+}
+
 export interface TaskRunLogsResponse {
   success?: boolean;
   error?: string;

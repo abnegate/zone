@@ -110,15 +110,15 @@ describe('task runner contract', () => {
     expect(fetch).toHaveBeenCalledTimes(4);
     for (const call of fetch.mock.calls) expect(call[1]?.signal).toBe(controller.signal);
   });
-  it('sends the structured answers to the answering route and returns the resumed run', async () => {
+  it('sends the structured answers to the answering route and reads the confirmation back', async () => {
     const answers = [
       { header: 'Scope', labels: ['Backfill'] },
       { header: 'Timing', labels: ['Other'], other: 'after the release' },
     ];
-    const resumed = { ...run, status: 'running', pending_question: null };
-    fetch.mockResolvedValueOnce(Response.json({ run: resumed }));
+    const accepted = { run_id: 'run/1', answered: 2 };
+    fetch.mockResolvedValueOnce(Response.json(accepted, { status: 202 }));
 
-    expect(await tasksApi.answerRun('run/1', answers)).toEqual(resumed);
+    expect(await tasksApi.answerRun('run/1', answers)).toEqual(accepted);
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining('/api/tasks/runs/run%2F1/answers'),
       expect.objectContaining({

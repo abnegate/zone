@@ -2,7 +2,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode, StrictMode } from 'react';
-import type { ChatWithMessages, ContextUsage, Message, Question } from '../types';
+import {
+  AWAITING_ANSWER_DETAIL,
+  type ChatWithMessages,
+  type ContextUsage,
+  type Message,
+  type Question,
+} from '../types';
 import { renderAnswers } from '../utils/answers';
 
 const mockGetChat = mock();
@@ -1651,7 +1657,51 @@ describe('useChat', () => {
     });
     const asked = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
     expect(asked?.name).toBe('ask_user');
-    expect(asked?.detail).toBe('Waiting for your answer…');
+    expect(asked?.detail).toBe(AWAITING_ANSWER_DETAIL);
+  });
+
+  it('leaves the call that asked finished, since the card is what is waiting', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm6', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: 'm6',
+      tool_call_id: 'call_ask',
+      name: 'ask_user',
+      arguments: '{"questions":[{"header":"Scope"}]}',
+    });
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: 'm6',
+      tool_call_id: 'call_ask',
+      name: 'ask_user',
+      success: true,
+      detail: 'Asked',
+      duration_ms: 0,
+    });
+    lastSocket?.emit({
+      type: 'question_required',
+      message_id: 'm6',
+      tool_call_id: 'call_ask',
+      questions: [scope],
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.questions).toEqual([
+        scope,
+      ]);
+    });
+    const asked = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(asked?.pending).toBe(false);
+    expect(asked?.success).toBe(true);
+    expect(asked?.detail).toBe(AWAITING_ANSWER_DETAIL);
   });
 
   it('sends the rendered answer as an ordinary message rather than a frame of its own', async () => {
@@ -1718,7 +1768,7 @@ describe('useChat', () => {
     const stopped = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
     expect(stopped?.questions).toEqual([scope]);
     expect(stopped?.approval).toBeUndefined();
-    expect(stopped?.detail).toBe('Did not finish');
+    expect(stopped?.detail).toBe(AWAITING_ANSWER_DETAIL);
   });
 });
 

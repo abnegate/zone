@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
-import type { Question, ToolCallRecord } from '../types';
+import { AWAITING_ANSWER_DETAIL, type Question, type ToolCallRecord } from '../types';
 import { ToolTrace } from './ToolTrace';
 
 const call = (overrides: Partial<ToolCallRecord> = {}): ToolCallRecord => ({
@@ -403,8 +403,7 @@ describe('ToolTrace', () => {
     call({
       name: 'ask_user',
       arguments: '{"questions":[{"header":"Scope"}]}',
-      detail: 'Waiting for your answer…',
-      pending: true,
+      detail: AWAITING_ANSWER_DETAIL,
       duration_ms: 0,
       questions,
     });
