@@ -9,16 +9,16 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 use zone_core::agent::{AgentCallback, AgentPhase};
 use zone_core::context::Entry;
-use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage, Role as LlmRole};
+use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage};
 use zone_core::tools::ToolResult;
 
 use crate::agent::prompt::{self, Environment, Vcs};
 use crate::agent::question::{self, Question};
-use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget};
+use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
 use crate::db::{ai_settings, tasks, workspaces};
 use crate::services::chat::session::{self, RunContext};
 use crate::services::stages;
@@ -86,6 +86,45 @@ static TASK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 fn get_semaphore() -> &'static Arc<Semaphore> {
     TASK_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_TASKS)))
+}
+
+/// Serializes every test that takes execution permits out of the shared
+/// semaphore, so none of them measures another's capacity as its own.
+#[cfg(test)]
+static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// One execution slot out of [`MAX_CONCURRENT_TASKS`], given back while the run
+/// it belongs to is parked on a question.
+///
+/// A run waiting on a person is not executing. Held through the wait, five runs
+/// parked on required questions take every slot in the deployment for the hour
+/// a question is allowed to go unanswered, and `required` is the model's to set.
+struct Permit(std::sync::Mutex<Option<OwnedSemaphorePermit>>);
+
+impl Permit {
+    async fn acquire() -> Result<Self, AcquireError> {
+        let permit = get_semaphore().clone().acquire_owned().await?;
+        Ok(Self(std::sync::Mutex::new(Some(permit))))
+    }
+
+    /// Hand the slot back for the length of `waiting`, then queue for it again.
+    ///
+    /// Re-acquisition can itself wait, and that is the point: the run is about
+    /// to execute again and owes the pool a slot before it does. It happens
+    /// before the row leaves `'waiting'`, so a queued run still reads as parked.
+    async fn yielded<T>(&self, waiting: impl Future<Output = T>) -> Result<T, AcquireError> {
+        drop(self.held().take());
+        let value = waiting.await;
+        let reacquired = get_semaphore().clone().acquire_owned().await?;
+        *self.held() = Some(reacquired);
+        Ok(value)
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, Option<OwnedSemaphorePermit>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 /// How a failed attempt may be recovered.
@@ -698,9 +737,8 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     } = execution;
     let mut obs = crate::metrics::TaskObs::new();
 
-    // Acquire semaphore permit to limit concurrent executions
-    let _permit = match get_semaphore().acquire().await {
-        Ok(p) => p,
+    let permit = match Permit::acquire().await {
+        Ok(permit) => permit,
         Err(_) => {
             obs.set_status("semaphore_denied");
             tracing::error!("Task semaphore closed for run {}", run_id);
@@ -890,6 +928,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let task_prompt = task_prompt.as_str();
     let guidance = guidance.as_str();
     let environment = &environment;
+    let permit = &permit;
 
     let result = run_with_policy(
         policy,
@@ -905,6 +944,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 guidance,
                 workspace,
                 environment,
+                permit,
             )
         },
         move |attempt| record_attempt(pool, run_id, policy, attempt),
@@ -1602,6 +1642,7 @@ async fn attempt_run(
     guidance: &str,
     workspace: &Path,
     environment: &Environment,
+    permit: &Permit,
 ) -> Result<TaskOutcome, Fault> {
     let tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
 
@@ -1655,9 +1696,23 @@ async fn attempt_run(
     let turns = async {
         let mut tools = tools;
         let mut context = context;
+        // One budget covers every turn of the attempt. A fresh one per park is
+        // no ceiling at all: a model looping on `ask_user` restarts it as often
+        // as it likes, and an all-optional card answers itself in 30 seconds.
+        let mut budget = LoopBudget::task();
+        let mut answers: Vec<String> = Vec::new();
         let mut carried = TaskOutcome::empty();
         loop {
-            match run_task_loop(llm.clone(), model.to_string(), tools, context, &callback).await {
+            match run_task_loop(
+                llm.clone(),
+                model.to_string(),
+                tools,
+                context,
+                budget,
+                &callback,
+            )
+            .await
+            {
                 Err(error) => return Err(Fault::agent(error)),
                 Ok(TurnOutcome::Finished(outcome)) => {
                     carried.absorb(outcome);
@@ -1668,12 +1723,15 @@ async fn attempt_run(
                     questions,
                     context: parked,
                     turn,
+                    spent,
                 }) => {
                     carried.absorb(turn);
+                    budget = budget.less(spent);
                     let answered =
-                        park_for_answer(state, run_id, owner, &tool_call_id, &questions).await?;
+                        park_for_answer(state, run_id, owner, &tool_call_id, &questions, permit)
+                            .await?;
                     context = parked;
-                    resume_with(&mut context, answered);
+                    resume_with(&mut context, answered, &mut answers);
                     tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
                 }
             }
@@ -1747,6 +1805,7 @@ async fn park_for_answer(
     owner: Uuid,
     tool_call_id: &str,
     questions: &[Question],
+    permit: &Permit,
 ) -> Result<String, Fault> {
     let pending = serde_json::json!({
         "tool_call_id": tool_call_id,
@@ -1782,10 +1841,12 @@ async fn park_for_answer(
     // it propagates. An early return would leave the run reading 'waiting' with
     // a live card while the retry re-executed it, and answering that card would
     // find nothing waiting behind it.
-    let window_outcome = match (question::awaited(waiter, window).await, window) {
-        (Some(answers), _) => question::render(questions, &answers).map_err(Fault::agent),
-        (None, Some(_)) => Ok(proceeding_on_defaults(questions)),
-        (None, None) => Err(Fault::withdrawn()),
+    let waited = permit.yielded(question::awaited(waiter, window)).await;
+    let window_outcome = match (waited, window) {
+        (Ok(Some(answers)), _) => question::render(questions, &answers).map_err(Fault::agent),
+        (Ok(None), Some(_)) => Ok(proceeding_on_defaults(questions)),
+        (Ok(None), None) => Err(Fault::withdrawn()),
+        (Err(_), _) => Err(Fault::overloaded()),
     };
 
     if !matches!(
@@ -1828,23 +1889,29 @@ impl TaskOutcome {
     }
 }
 
-/// Add the answer as the one preserved user message.
+/// Add the answer as the newest preserved user message, demoting the answers
+/// earlier resumes added and nothing else.
 ///
-/// [`RunContext::from_messages`] protects only the latest user message, and a
-/// resume has to hold to that: leaving every earlier answer preserved grows a
-/// set of entries compaction can never shed, one per question the run asked.
-fn resume_with(context: &mut RunContext, answered: String) {
+/// Leaving every answer preserved grows a set of entries compaction can never
+/// shed, one per question the run asked. Demoting every user entry instead
+/// takes the task prompt with them: it is the run's own specification, pinned
+/// by [`RunContext::from_messages`], and a run that parks once and later
+/// compacts would proceed on the model's paraphrase of what it was asked to do.
+/// `answers` carries the ids this added across the attempt's parks.
+fn resume_with(context: &mut RunContext, answered: String, answers: &mut Vec<String>) {
     for entry in &mut context.entries {
-        if entry.message.role == LlmRole::User {
+        if answers.contains(&entry.id) {
             entry.preserve = false;
         }
     }
+    let id = Uuid::new_v4().to_string();
     context.entries.push(Entry {
-        id: Uuid::new_v4().to_string(),
+        id: id.clone(),
         message: LlmMessage::user(answered),
         preserve: true,
         consumed: true,
     });
+    answers.push(id);
 }
 
 /// How one turn of the agent loop ended.
@@ -1862,6 +1929,7 @@ enum TurnOutcome {
         questions: Vec<Question>,
         context: RunContext,
         turn: TaskOutcome,
+        spent: Spend,
     },
 }
 
@@ -2009,12 +2077,13 @@ async fn run_task_loop(
     model: String,
     tools: ChatTools,
     context: RunContext,
+    budget: LoopBudget,
     callback: &DatabaseTaskCallback,
 ) -> Result<TurnOutcome, String> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
     let mut tool_calls = 0usize;
-    let mut parked: Option<(String, Vec<Question>)> = None;
+    let mut parked: Option<(String, Vec<Question>, Spend)> = None;
     let mut replay = context.clone();
     let mut events = std::pin::pin!(agent::run_with_context(
         AgentRun {
@@ -2022,7 +2091,7 @@ async fn run_task_loop(
             model,
             tools,
             messages: Vec::new(),
-            budget: LoopBudget::task(),
+            budget,
             approval: ApprovalPolicy::auto(),
         },
         context,
@@ -2104,7 +2173,8 @@ async fn run_task_loop(
             AgentEvent::QuestionRequired {
                 tool_call_id,
                 questions,
-            } => parked = Some((tool_call_id, questions)),
+                spent,
+            } => parked = Some((tool_call_id, questions, spent)),
             AgentEvent::Consumed(_)
             | AgentEvent::Context(_)
             | AgentEvent::Usage(_)
@@ -2114,7 +2184,7 @@ async fn run_task_loop(
             AgentEvent::Failed(error) => return Err(error),
         }
     }
-    if let Some((tool_call_id, questions)) = parked {
+    if let Some((tool_call_id, questions, spent)) = parked {
         return Ok(TurnOutcome::Parked {
             tool_call_id,
             questions,
@@ -2123,6 +2193,7 @@ async fn run_task_loop(
                 summary,
                 tool_calls,
             },
+            spent,
         });
     }
     callback.on_phase_change(AgentPhase::Responding, Some(&summary));
@@ -2136,8 +2207,6 @@ async fn run_task_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn test_semaphore_initialization() {
@@ -2341,6 +2410,7 @@ mod tests {
                 RunContext::from_messages(vec![LlmMessage::user(
                     "Create a task titled Made by the scoped task with description durable result",
                 )]),
+                LoopBudget::task(),
                 &callback,
             ),
         )
@@ -3049,6 +3119,7 @@ mod retry_tests {
 mod watchdog_tests {
     use super::*;
     use std::sync::Mutex;
+    use zone_core::llm::Role as LlmRole;
 
     /// A run that is working announces nothing: the watchdog is there for the
     /// silence, and firing on a busy run would bury the log it writes to.
@@ -3312,16 +3383,19 @@ mod watchdog_tests {
 
     #[tokio::test]
     async fn an_optional_call_stores_its_envelope_and_proceeds_on_the_default() {
+        let _execution = EXECUTION.lock().await;
         let (pool, observed, state, run, owner) = parked_fixture().await;
         let questions = vec![asked("Scope", false, &["Backfill", "Forward only"])];
+        let permit = Arc::new(Permit::acquire().await.unwrap());
 
         tokio::time::pause();
         let started = tokio::time::Instant::now();
         let carried = {
             let state = state.clone();
             let questions = questions.clone();
+            let permit = permit.clone();
             let parking = tokio::spawn(async move {
-                park_for_answer(&state, run, owner, "call-1", &questions).await
+                park_for_answer(&state, run, owner, "call-1", &questions, &permit).await
             });
             // The row has to carry the envelope while the run is still waiting
             // on it: a console that can only read it afterwards reads nothing.
@@ -3354,14 +3428,25 @@ mod watchdog_tests {
 
     #[tokio::test]
     async fn a_required_call_is_never_raced_against_the_window() {
+        let _execution = EXECUTION.lock().await;
         let (pool, observed, state, run, owner) = parked_fixture().await;
         let questions = vec![asked("Scope", true, &["Backfill", "Forward only"])];
+        let permit = Arc::new(Permit::acquire().await.unwrap());
 
         tokio::time::pause();
         let state_for_park = state.clone();
         let asked_for_park = questions.clone();
+        let permit_for_park = permit.clone();
         let parking = tokio::spawn(async move {
-            park_for_answer(&state_for_park, run, owner, "call-1", &asked_for_park).await
+            park_for_answer(
+                &state_for_park,
+                run,
+                owner,
+                "call-1",
+                &asked_for_park,
+                &permit_for_park,
+            )
+            .await
         });
         loop {
             if parked_row(&observed, run).await.0 == PHASE_WAITING {
@@ -3402,15 +3487,18 @@ mod watchdog_tests {
     /// lost lease. Terminal is what keeps the retry from happening at all.
     #[tokio::test]
     async fn a_withdrawn_claim_unparks_the_row_and_stops_the_run() {
+        let _execution = EXECUTION.lock().await;
         let (pool, observed, state, run, owner) = parked_fixture().await;
         let questions = vec![asked("Scope", true, &["Backfill", "Forward only"])];
+        let permit = Arc::new(Permit::acquire().await.unwrap());
 
         let parking = {
             let state = state.clone();
             let questions = questions.clone();
-            tokio::spawn(
-                async move { park_for_answer(&state, run, owner, "call-1", &questions).await },
-            )
+            let permit = permit.clone();
+            tokio::spawn(async move {
+                park_for_answer(&state, run, owner, "call-1", &questions, &permit).await
+            })
         };
         loop {
             if parked_row(&observed, run).await.0 == PHASE_WAITING {
@@ -3444,6 +3532,324 @@ mod watchdog_tests {
             RetryPolicy::default().decide(1, fault.failure, 0.0),
             Decision::Terminal,
             "re-running the attempt only asks the same question into the same silence"
+        );
+    }
+
+    /// One required question, answered the instant it is published.
+    const ASK_SCOPE: &str = r#"{"questions":[{"header":"Scope","question":"Which scope?","options":[{"label":"Backfill","description":"Do the backfill"},{"label":"Forward only","description":"Skip the backfill"}],"required":true}]}"#;
+    /// Part of `ask_user`'s tool definition, so it appears only when the turn
+    /// is actually offered tools -- never in a finalizing or compacting round,
+    /// and never as a replayed call in the history.
+    const ASK_OFFERED: &str = "Ask the user to decide something you cannot decide for them";
+
+    fn chose_backfill() -> Vec<crate::agent::Answer> {
+        vec![crate::agent::Answer {
+            header: "Scope".to_string(),
+            labels: vec!["Backfill".to_string()],
+            other: None,
+        }]
+    }
+
+    fn streamed(delta: serde_json::Value) -> String {
+        let chunk = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+        let end = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+        format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n")
+    }
+
+    /// A park is not a new run. A budget minted per turn makes every ceiling a
+    /// per-question allowance: a model that keeps calling `ask_user` is handed
+    /// a fresh 50 rounds and 100 calls after each card, so the only thing that
+    /// ends it is [`TASK_TIMEOUT`] -- thousands of tool executions later, under
+    /// a ceiling of 100.
+    #[tokio::test]
+    async fn a_park_carries_its_budget_into_the_turn_that_resumes_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        let _execution = EXECUTION.lock().await;
+        let (pool, _observed, _state, run, owner) = parked_fixture().await;
+        let workspace_id: Uuid = sqlx::query_scalar("SELECT tasks.workspace_id FROM tasks JOIN task_runs ON task_runs.task_id=tasks.id WHERE task_runs.id=$1").bind(run).fetch_one(&pool).await.unwrap();
+
+        let provider = MockServer::start().await;
+        let cards = Arc::new(AtomicUsize::new(0));
+        let asked = cards.clone();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |request: &Request| {
+                let body = String::from_utf8_lossy(&request.body).into_owned();
+                let delta = if body.contains(ASK_OFFERED) {
+                    let card = asked.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({"tool_calls":[{"index":0,"id":format!("ask-{card}"),"type":"function","function":{"name":crate::agent::ASK_USER,"arguments":ASK_SCOPE}}]})
+                } else {
+                    serde_json::json!({"content":"The budget for this run is spent."})
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(streamed(delta))
+            })
+            .mount(&provider)
+            .await;
+
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let answered = delivered.clone();
+        let answering = tokio::spawn(async move {
+            loop {
+                if question::answer(run, chose_backfill()) {
+                    answered.fetch_add(1, Ordering::SeqCst);
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+
+        let mut config = crate::state::test_config();
+        config.litellm_host = provider.uri();
+        config.ollama_host = provider.uri();
+        let state = AppState::new(config, pool.clone(), None);
+        let permit = Permit::acquire().await.unwrap();
+        let workspace = std::env::temp_dir();
+        let environment = Environment {
+            directory: workspace.clone(),
+            ..Environment::here()
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(180),
+            attempt_run(
+                &state,
+                run,
+                owner,
+                workspace_id,
+                None,
+                "gpt-4",
+                "# Task: Budget\n\nKeep asking until something stops you",
+                "",
+                &workspace,
+                &environment,
+                &permit,
+            ),
+        )
+        .await
+        .expect("a run that parks on every turn never ran out of budget")
+        .unwrap();
+        answering.abort();
+
+        let ceiling = LoopBudget::task();
+        assert!(
+            outcome.tool_calls <= ceiling.max_tool_calls,
+            "{} tool calls ran across the parks, under a ceiling of {}",
+            outcome.tool_calls,
+            ceiling.max_tool_calls
+        );
+        // Each turn spends one round on one call, so the round ceiling is the
+        // one that runs out first, and it runs out exactly once.
+        assert_eq!(outcome.tool_calls, ceiling.max_iterations);
+        assert_eq!(
+            delivered.load(Ordering::SeqCst),
+            ceiling.max_iterations,
+            "the run asked a different number of questions than the rounds it was allowed"
+        );
+        assert_eq!(
+            cards.load(Ordering::SeqCst),
+            ceiling.max_iterations,
+            "the turn with nothing left to spend asked again instead of finishing"
+        );
+        assert_eq!(
+            outcome.summary, "The budget for this run is spent.",
+            "an exhausted budget must end the run the way any exhausted budget does"
+        );
+        sqlx::query("DELETE FROM organizations WHERE id=(SELECT organization_id FROM workspaces WHERE id=$1)").bind(workspace_id).execute(&pool).await.unwrap();
+    }
+
+    /// A parked run holds no work, only an answer it is waiting for. Holding
+    /// its execution slot through that wait lets [`MAX_CONCURRENT_TASKS`] runs
+    /// parked on required questions take the whole deployment's task throughput
+    /// to zero for the hour a question may go unanswered -- and `required` is
+    /// the model's to set.
+    #[tokio::test]
+    async fn a_parked_run_gives_its_execution_slot_back_while_it_waits() {
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        let _execution = EXECUTION.lock().await;
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("disposable database"))
+                .await
+                .unwrap();
+        let organization =
+            organizations::create_organization(&pool, "Parked", &Uuid::new_v4().to_string(), None)
+                .await
+                .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Parked",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Parked actor"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut runs = Vec::new();
+        for title in ["Parked asker", "Free runner"] {
+            let task = tasks::create_task_as(
+                &pool,
+                workspace.id,
+                &[],
+                title,
+                "Run",
+                None,
+                None,
+                true,
+                None,
+                Some(user.id),
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE tasks SET model_name='gpt-4' WHERE id=$1")
+                .bind(task.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let run = tasks::create_task_run_as(&pool, task.id, Some(user.id))
+                .await
+                .unwrap();
+            runs.push((task.id, run.id));
+        }
+        let (asking_task, asking_run) = runs[0];
+        let (free_task, free_run) = runs[1];
+
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |request: &Request| {
+                let body = String::from_utf8_lossy(&request.body).into_owned();
+                let delta = if body.contains("# Task: Parked asker")
+                    && body.contains(ASK_OFFERED)
+                    && !body.contains("Scope: Backfill")
+                {
+                    serde_json::json!({"tool_calls":[{"index":0,"id":"ask-1","type":"function","function":{"name":crate::agent::ASK_USER,"arguments":ASK_SCOPE}}]})
+                } else {
+                    serde_json::json!({"content":"Nothing further to do."})
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(streamed(delta))
+            })
+            .mount(&provider)
+            .await;
+        let mut config = crate::state::test_config();
+        config.litellm_host = provider.uri();
+        config.ollama_host = provider.uri();
+        let state = AppState::new(config, pool.clone(), None);
+
+        // Every slot but one, so the parked run is the only thing between the
+        // free run and the pool.
+        let reserved = get_semaphore()
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TASKS as u32 - 1)
+            .await
+            .unwrap();
+        let parking = {
+            let state = state.clone();
+            tokio::spawn(async move { execute_task_run(&state, asking_run, asking_task).await })
+        };
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if parked_row(&pool, asking_run).await.0 == PHASE_WAITING {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the asking run never parked");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while get_semaphore().available_permits() == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a parked run kept the execution slot it is not executing on");
+
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            execute_task_run(&state, free_run, free_task),
+        )
+        .await
+        .expect("a run parked on a question wedged the whole task pool");
+        let free = tasks::get_task_run(&pool, free_run).await.unwrap().unwrap();
+        assert_eq!(free.status, RUN_COMPLETED, "{:?}", free.error_message);
+        assert_eq!(
+            parked_row(&pool, asking_run).await.0,
+            PHASE_WAITING,
+            "the parked run stopped waiting for its answer"
+        );
+
+        assert!(question::answer(asking_run, chose_backfill()));
+        tokio::time::timeout(Duration::from_secs(60), parking)
+            .await
+            .expect("an answered run never took its slot back")
+            .unwrap();
+        let asked = tasks::get_task_run(&pool, asking_run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(asked.status, RUN_COMPLETED, "{:?}", asked.error_message);
+
+        drop(reserved);
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn a_spent_budget_never_goes_below_nothing_left() {
+        let ceiling = LoopBudget::task();
+        assert_eq!(
+            ceiling.less(Spend {
+                iterations: 2,
+                tool_calls: 7,
+            }),
+            LoopBudget {
+                max_iterations: ceiling.max_iterations - 2,
+                max_tool_calls: ceiling.max_tool_calls - 7,
+            }
+        );
+        assert_eq!(
+            ceiling.less(Spend {
+                iterations: ceiling.max_iterations + 1,
+                tool_calls: ceiling.max_tool_calls + 1,
+            }),
+            LoopBudget {
+                max_iterations: 0,
+                max_tool_calls: 0,
+            },
+            "an overspent budget is exhausted, not wrapped around to a fresh one"
         );
     }
 
@@ -3488,17 +3894,20 @@ mod watchdog_tests {
         );
     }
 
-    /// [`RunContext::from_messages`] preserves the latest user message and no
-    /// earlier one. Every resume has to leave the context that way, or a run
-    /// that asks repeatedly accrues answers compaction can never shed.
+    /// A resume protects its answer and demotes the answer before it, so a run
+    /// that asks repeatedly does not accrue answers compaction can never shed.
+    /// The task prompt is not one of those answers: it is the specification the
+    /// run is judged against, and a run that parks once and later compacts must
+    /// not be left working from a summary of its own instructions.
     #[test]
-    fn only_the_newest_answer_stays_preserved_across_resumes() {
+    fn a_resume_protects_its_answer_and_never_demotes_the_task_prompt() {
         let mut context = RunContext::from_messages(vec![
             LlmMessage::system("Task rules"),
             LlmMessage::user("Backfill the ledger"),
         ]);
-        resume_with(&mut context, "Scope: Backfill".to_string());
-        resume_with(&mut context, "Branch: main".to_string());
+        let mut answers = Vec::new();
+        resume_with(&mut context, "Scope: Backfill".to_string(), &mut answers);
+        resume_with(&mut context, "Branch: main".to_string(), &mut answers);
 
         let preserved: Vec<&str> = context
             .entries
@@ -3508,8 +3917,8 @@ mod watchdog_tests {
             .collect();
         assert_eq!(
             preserved,
-            vec!["Branch: main"],
-            "exactly one user message is protected, and it is the newest"
+            vec!["Backfill the ledger", "Branch: main"],
+            "the task prompt and the newest answer are protected, and no earlier answer is"
         );
         assert!(
             context

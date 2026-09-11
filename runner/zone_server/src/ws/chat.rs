@@ -2824,7 +2824,7 @@ async fn handle_chat_generation(
                         }
                         persist_now = true;
                     }
-                    Some(AgentEvent::QuestionRequired { tool_call_id, questions }) => {
+                    Some(AgentEvent::QuestionRequired { tool_call_id, questions, .. }) => {
                         // The live frame log is cleared by the message_end this
                         // turn is about to reach, so a reader who reloads has
                         // only the stored record to rebuild the card from.
