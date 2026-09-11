@@ -212,10 +212,23 @@ minutes, so they skip unless asked for:
 make setup-comfyui-macos                 # pinned native ComfyUI
 PYTHON_BIN=python3.13 ./scripts/setup-comfyui-macos.sh --download-model --bundle upscale
 make vision-model                        # U2-Net, for subject-aware crops
-# then start ComfyUI and, with the rig up:
-make live-real                           # media lanes
-make live-real ARGS=live/real-train.live.ts ZONE_TRAIN_CLIP=/path/to/subject.mp4
+
+# Start that ComfyUI, then bring the rig up against it. ZONE_LIVE_REAL_MODELS=1
+# skips the stand-in, points the server at the weights the installer put in
+# place, leaves training to the server's own path, and sets deadlines a real
+# render fits. Name the ComfyUI with ZONE_LIVE_COMFYUI_URL if it is not on
+# 127.0.0.1:8188.
+ZONE_LIVE_REAL_MODELS=1 ./scripts/live-verify.sh live/real-media.live.ts
+ZONE_LIVE_REAL_MODELS=1 ZONE_TRAIN_CLIP=/path/to/subject.mp4 \
+  ./scripts/live-verify.sh live/real-train.live.ts
+
+# `make live-real` reruns the lanes against a rig that is already up, given a
+# ZONE_LIVE_STATE naming the state file that rig wrote.
 ```
+
+Name the real lanes explicitly rather than running the whole suite in this
+mode: the stand-in lanes drive the stand-in's own control endpoints, which a
+real ComfyUI does not serve.
 
 Adapter quality also has its own measured check that needs no console:
 `make test-lora-live` trains against the running ComfyUI and scores the result

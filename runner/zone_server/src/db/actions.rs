@@ -452,6 +452,39 @@ mod tests {
         (pool, organization, workspace, user, chat)
     }
 
+    /// A single connection announcing itself to `pg_stat_activity` by name.
+    async fn named_pool(application: &str) -> PgPool {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
+            .await
+            .unwrap();
+        sqlx::query_scalar::<_, String>("SELECT set_config('application_name', $1, false)")
+            .bind(application)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    /// Return once the named connection is waiting on a row lock.
+    async fn wait_until_blocked(pool: &PgPool, application: &str) {
+        for _ in 0..1000 {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock')",
+            )
+            .bind(application)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if blocked {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{application} never waited on the row it was meant to block on");
+    }
+
     async fn cleanup(pool: &PgPool, organization: Uuid, user: Uuid) {
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(organization)
@@ -1140,7 +1173,8 @@ mod tests {
                 .fetch_one(&mut *blocker)
                 .await
                 .unwrap();
-            let connection = pool.clone();
+            let reader_name = format!("actions-reader-{}", Uuid::new_v4().simple());
+            let connection = named_pool(&reader_name).await;
             let reader = tokio::spawn(async move {
                 if tail {
                     tail_task_log(
@@ -1158,12 +1192,13 @@ mod tests {
                     get_task_run(&connection, workspace, user, run.id).await
                 }
             });
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let connection = pool.clone();
+            wait_until_blocked(&pool, &reader_name).await;
+            let revocation_name = format!("actions-revocation-{}", Uuid::new_v4().simple());
+            let connection = named_pool(&revocation_name).await;
             let revocation = tokio::spawn(async move {
                 sqlx::query("UPDATE workspace_members SET is_active=false WHERE workspace_id=$1 AND user_id=$2").bind(workspace).bind(user).execute(&connection).await
             });
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            wait_until_blocked(&pool, &revocation_name).await;
             let held = !reader.is_finished() && !revocation.is_finished();
             blocker.commit().await.unwrap();
             reader.await.unwrap().unwrap();

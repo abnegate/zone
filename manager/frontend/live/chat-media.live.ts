@@ -46,10 +46,12 @@ async function attachmentDigest(
 ): Promise<string> {
   const source = await page.locator(selector).nth(index).getAttribute('src');
   expect(source, 'the media element must have resolved a source').toBeTruthy();
+  // A typed array crosses the evaluate boundary as one buffer; a plain array
+  // is serialised element by element.
   const bytes = await page.evaluate(async (url) => {
     const response = await fetch(url as string);
     if (!response.ok) throw new Error(`artifact fetch failed: ${response.status}`);
-    return Array.from(new Uint8Array(await response.arrayBuffer()));
+    return new Uint8Array(await response.arrayBuffer());
   }, source);
   return createHash('sha256').update(Buffer.from(bytes)).digest('hex');
 }
