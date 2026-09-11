@@ -222,7 +222,8 @@ ZONE_LIVE_REAL_MODELS=1 ./scripts/live-verify.sh live/real-media.live.ts
 ZONE_LIVE_REAL_MODELS=1 ZONE_TRAIN_CLIP=/path/to/subject.mp4 \
   ./scripts/live-verify.sh live/real-train.live.ts
 
-# `make live-real` runs the same lanes against a rig already up in that mode.
+# `make live-real` reruns the lanes against a rig that is already up, given a
+# ZONE_LIVE_STATE naming the state file that rig wrote.
 ```
 
 Name the real lanes explicitly rather than running the whole suite in this
