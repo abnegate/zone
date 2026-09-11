@@ -3363,6 +3363,7 @@ mod tests {
         );
     }
 
+    /// A user with a live session, and a chat in a workspace it can write to.
     async fn seed_chat(pool: &PgPool, secret: &str) -> (String, Uuid) {
         let suffix = Uuid::new_v4().simple().to_string();
         let user = db::users::create_user(
@@ -3435,6 +3436,7 @@ mod tests {
         (token, chat.id)
     }
 
+    /// The `type` of the next text frame, ignoring control frames.
     async fn frame_type(
         socket: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -3456,6 +3458,8 @@ mod tests {
     /// Holding the live-turn lock stops `join` from completing, so a socket
     /// that announces `init` while it is held has announced before it could
     /// receive anything, and a frame published in that gap would never reach it.
+    /// The handler takes its own hold of the stream right before it joins, so
+    /// the strong count rising to two is the moment it is parked on the lock.
     #[tokio::test]
     async fn init_is_not_announced_until_the_socket_has_joined_the_stream() {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -3488,6 +3492,14 @@ mod tests {
             ))
             .await
             .unwrap();
+        let arrived = tokio::time::Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&stream) < 2 {
+            assert!(
+                tokio::time::Instant::now() < arrived,
+                "the handler never took hold of the chat's stream"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(
             tokio::time::timeout(Duration::from_millis(500), socket.next())
                 .await
