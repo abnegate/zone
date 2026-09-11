@@ -20,6 +20,14 @@ export function QuestionPrompt({ run, onAnswered }: { run: TaskRun; onAnswered: 
 
   if (!pending) return null;
 
+  /**
+   * An accepted answer stays sent. Refreshing the run is two round trips, and
+   * the card sits on screen for all of them with the run still reading as
+   * waiting, so releasing the button on success offers a second send of a
+   * question the server has already consumed — which the route rejects as a run
+   * it cannot find, reporting a delivered answer as a failure. Only a rejection
+   * hands the card back, because only a rejection leaves something to retry.
+   */
   const submit = async (answers: Answer[]): Promise<void> => {
     if (sending) return;
     setSending(true);
@@ -29,7 +37,6 @@ export function QuestionPrompt({ run, onAnswered }: { run: TaskRun; onAnswered: 
       onAnswered();
     } catch (rejection) {
       setFailure(rejection instanceof Error ? rejection.message : FAILURE_FALLBACK);
-    } finally {
       setSending(false);
     }
   };

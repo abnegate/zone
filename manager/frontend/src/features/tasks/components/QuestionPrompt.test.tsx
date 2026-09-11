@@ -5,7 +5,10 @@ import type { AnswersResponse, TaskRun } from '../types';
 
 const accepted: AnswersResponse = { run_id: 'run-1', answered: 1 };
 
-const mockAnswerRun = mock((_runId: string, _answers: unknown[]) => Promise.resolve(accepted));
+const mockAnswerRun = mock(
+  (_runId: string, _answers: unknown[]): Promise<AnswersResponse | undefined> =>
+    Promise.resolve(accepted)
+);
 
 mock.module('../../../api/tasks', () => ({
   tasksApi: { answerRun: mockAnswerRun },
@@ -129,6 +132,19 @@ describe('QuestionPrompt', () => {
     expect(screen.getByTestId('question-submit')).toBeEnabled();
   });
 
+  it('treats an answer whose confirmation was unreadable as sent, not as rejected', async () => {
+    mockAnswerRun.mockImplementation(() => Promise.resolve(undefined));
+    const onAnswered = mock(() => {});
+    render(<QuestionPrompt run={waiting} onAnswered={onAnswered} />);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Backfill' }));
+    fireEvent.click(screen.getByTestId('question-submit'));
+
+    await waitFor(() => expect(onAnswered).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByTestId('question-submit')).toBeDisabled();
+  });
+
   it('sends one answer while a send is still in flight', async () => {
     let settle!: (confirmation: AnswersResponse) => void;
     mockAnswerRun.mockImplementation(
@@ -137,7 +153,8 @@ describe('QuestionPrompt', () => {
           settle = done;
         })
     );
-    render(<QuestionPrompt run={waiting} onAnswered={() => {}} />);
+    const onAnswered = mock(() => {});
+    render(<QuestionPrompt run={waiting} onAnswered={onAnswered} />);
 
     fireEvent.click(screen.getByRole('radio', { name: 'Backfill' }));
     const submit = screen.getByTestId('question-submit');
@@ -147,6 +164,23 @@ describe('QuestionPrompt', () => {
     fireEvent.click(submit);
     expect(mockAnswerRun).toHaveBeenCalledTimes(1);
     settle(accepted);
-    await waitFor(() => expect(submit).toBeEnabled());
+    await waitFor(() => expect(onAnswered).toHaveBeenCalledTimes(1));
+  });
+
+  it('stays sent after the answer lands, while the refetched run is still on its way', async () => {
+    const onAnswered = mock(() => {});
+    render(<QuestionPrompt run={waiting} onAnswered={onAnswered} />);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Backfill' }));
+    const submit = screen.getByTestId('question-submit');
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(onAnswered).toHaveBeenCalledTimes(1));
+    expect(submit).toBeDisabled();
+    expect(submit).toHaveTextContent('Answered');
+
+    fireEvent.click(submit);
+    expect(mockAnswerRun).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });
