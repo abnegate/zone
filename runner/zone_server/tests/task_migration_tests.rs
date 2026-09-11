@@ -958,3 +958,54 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );
 }
+
+/// sqlx hands a `-- no-transaction` file to the server as one simple query, and
+/// a simple query carrying more than one statement runs inside an implicit
+/// transaction block, which `CONCURRENTLY` is rejected in with 25001. Building
+/// or dropping an index that way is the only reason any of these files gives up
+/// sqlx's transaction, so both halves of the rule stand or fall together.
+#[test]
+fn each_no_transaction_migration_holds_one_concurrent_statement() {
+    const MARKER: &str = "-- no-transaction";
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut checked: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&directory).expect("migrations directory is readable") {
+        let path = entry.expect("migration entry is readable").path();
+        if !path.extension().is_some_and(|extension| extension == "sql") {
+            continue;
+        }
+        let sql = std::fs::read_to_string(&path).expect("migration is readable");
+        if sql.lines().next().map(str::trim) != Some(MARKER) {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .expect("migration path has a file name")
+            .to_string_lossy()
+            .into_owned();
+        let statements = sql
+            .lines()
+            .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let count = statements
+            .split(';')
+            .filter(|statement| !statement.trim().is_empty())
+            .count();
+        assert_eq!(
+            count, 1,
+            "{name} opens on `{MARKER}`, so sqlx sends all {count} of its statements as one \
+             batch: everything after the CONCURRENTLY one fails with 25001"
+        );
+        assert!(
+            statements.to_ascii_uppercase().contains("CONCURRENTLY"),
+            "{name} gives up sqlx's transaction without the CONCURRENTLY that is the only reason \
+             to, so an interrupted run leaves it applied but unrecorded"
+        );
+        checked.push(name);
+    }
+    assert!(
+        !checked.is_empty(),
+        "no migration opens on `{MARKER}`; the walk stopped matching the files it guards"
+    );
+}
