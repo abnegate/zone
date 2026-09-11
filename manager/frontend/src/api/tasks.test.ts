@@ -129,6 +129,22 @@ describe('task runner contract', () => {
     );
   });
 
+  it('keeps an accepted answer accepted when the confirmation is unreadable', async () => {
+    fetch.mockResolvedValueOnce(new Response('<html>proxy ate it</html>', { status: 202 }));
+
+    expect(
+      await tasksApi.answerRun('run-1', [{ header: 'Scope', labels: ['Backfill'] }])
+    ).toBeUndefined();
+  });
+
+  it('keeps an accepted answer accepted when the confirmation is a shape it cannot read', async () => {
+    fetch.mockResolvedValueOnce(Response.json({ run_id: 'run-1' }, { status: 202 }));
+
+    expect(
+      await tasksApi.answerRun('run-1', [{ header: 'Scope', labels: ['Backfill'] }])
+    ).toBeUndefined();
+  });
+
   it('surfaces the server rejection of an answer rather than a bare status', async () => {
     fetch.mockResolvedValueOnce(
       Response.json({ message: 'Answer a required question' }, { status: 400 })
