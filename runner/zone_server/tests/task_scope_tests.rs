@@ -761,3 +761,110 @@ async fn http_admission_preserves_missing_and_conflict_statuses() {
         "the conflict has to name the run holding the slot: {error}"
     );
 }
+
+/// A parked run is idle, not gone: admitting a second one beside it would race
+/// two writers over the same task and violate the admission index.
+#[tokio::test]
+async fn admission_reports_a_parked_run_as_the_active_one() {
+    let (pool, _, organization, workspace, user) = fixture().await;
+    let task = tasks::create_task(
+        &pool,
+        workspace,
+        &[],
+        "Parked run",
+        "Waiting on an answer",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+    let owner = Uuid::new_v4();
+    assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
+    assert!(
+        tasks::park_task_run(
+            &pool,
+            run.id,
+            owner,
+            json!({"tool_call_id": "call_1", "questions": []}),
+        )
+        .await
+        .unwrap()
+    );
+    let admission = tasks::create_task_run_authorized(&pool, user, task.id)
+        .await
+        .unwrap();
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM task_runs WHERE task_id = $1")
+        .bind(task.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    cleanup(&pool, organization, user).await;
+    match admission {
+        tasks::Mutation::Applied(tasks::RunMutation::Active(active)) => {
+            assert_eq!(active.id, run.id);
+            assert_eq!(active.status, "waiting");
+            assert!(active.pending_question.is_some());
+        }
+        other => panic!("a parked run must block admission, got {other:?}"),
+    }
+    assert_eq!(
+        runs, 1,
+        "admission created a second run beside a parked one"
+    );
+}
+
+/// Answering for a run is a write: a viewer may watch one and must not speak
+/// for the workspace, and a stranger may do neither.
+#[tokio::test]
+async fn task_write_access_admits_writers_and_refuses_viewers() {
+    let (pool, _, organization, workspace, user) = fixture().await;
+    let task = tasks::create_task(
+        &pool,
+        workspace,
+        &[],
+        "Answerable run",
+        "Waiting on an answer",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+    for role in ["owner", "admin", "member"] {
+        sqlx::query(
+            "UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace)
+        .bind(user)
+        .bind(role)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let authorized = task_access::write(&pool, run.id, user).await.unwrap();
+        assert_eq!(
+            authorized.map(|authorized| authorized.id),
+            Some(run.id),
+            "a {role} must be able to answer a parked run"
+        );
+    }
+    sqlx::query(
+        "UPDATE workspace_members SET role = 'viewer' WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace)
+    .bind(user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let viewer = task_access::write(&pool, run.id, user).await.unwrap();
+    let stranger = task_access::write(&pool, run.id, Uuid::new_v4())
+        .await
+        .unwrap();
+    cleanup(&pool, organization, user).await;
+    assert!(viewer.is_none(), "a viewer answered for the workspace");
+    assert!(stranger.is_none(), "a non-member answered for a run");
+}

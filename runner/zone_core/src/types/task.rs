@@ -81,6 +81,7 @@ pub struct TaskRun {
 pub enum TaskRunStatus {
     #[default]
     Running,
+    Waiting,
     Completed,
     Failed,
     Cancelled,
