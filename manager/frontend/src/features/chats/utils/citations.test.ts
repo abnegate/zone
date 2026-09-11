@@ -57,7 +57,15 @@ describe('citation presentation', () => {
         kind: 'workspace_document',
         url: 'knowledge://11111111-1111-1111-1111-111111111111',
       })
-    ).toBe('/wiki');
+    ).toBe('/wiki?id=11111111-1111-1111-1111-111111111111');
+    expect(
+      citationHref({
+        kind: 'knowledge_passage',
+        url: 'knowledge://11111111-1111-1111-1111-111111111111',
+      })
+    ).toBe('/wiki?id=11111111-1111-1111-1111-111111111111');
+    expect(citationHref({ kind: 'knowledge_passage', url: 'knowledge://' })).toBe('/wiki');
+    expect(citationHref({ kind: 'knowledge_passage', url: 'notes/guide.md' })).toBe('/wiki');
     expect(citationHref({ kind: 'workspace_document', url: 'src/guide.md' })).toBe('/wiki');
     expect(citationHref({ kind: 'github_file', url: 'src/guide.md' })).toBeNull();
     expect(formatRevision('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toBe('aaaaaaa');

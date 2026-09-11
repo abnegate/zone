@@ -79,10 +79,19 @@ const ABSOLUTE_URL = /^https?:\/\//i;
 /// that off-site destination as internal and renders it without `noopener`.
 const IN_APP_PATH = /^\/(?![/\\])/;
 
+const KNOWLEDGE_SCHEME = 'knowledge://';
+const WIKI_PATH = '/wiki';
+
+/// The wiki opens the entry named by `?id=`, so a knowledge entry citation
+/// lands on the passage a reader came to check rather than on the index.
 export function citationHref(citation: Pick<Citation, 'url' | 'kind'>): string | null {
   if (ABSOLUTE_URL.test(citation.url) || IN_APP_PATH.test(citation.url)) return citation.url;
-  if (citation.kind === 'workspace_document' || citation.url.startsWith('knowledge://')) {
-    return '/wiki';
+  if (citation.url.startsWith(KNOWLEDGE_SCHEME)) {
+    const entry = citation.url.slice(KNOWLEDGE_SCHEME.length);
+    return entry ? `${WIKI_PATH}?id=${encodeURIComponent(entry)}` : WIKI_PATH;
+  }
+  if (citation.kind === 'workspace_document' || citation.kind === 'knowledge_passage') {
+    return WIKI_PATH;
   }
   return null;
 }

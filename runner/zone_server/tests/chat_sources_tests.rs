@@ -58,7 +58,7 @@ async fn a_passage_cited_from_the_registry_and_from_the_envelope_is_one_citation
     citations::merge(
         &mut citations,
         [citations::from_source(
-            CitationKind::WorkspaceDocument,
+            CitationKind::KnowledgePassage,
             &row.identifier,
             &row.title,
             &row.uri,
@@ -72,6 +72,12 @@ async fn a_passage_cited_from_the_registry_and_from_the_envelope_is_one_citation
         "one passage must yield one citation, but the registry and the envelope \
          disagreed about its address: {:?}",
         citations.iter().map(|one| &one.url).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        citations[0].kind,
+        CitationKind::KnowledgePassage,
+        "the envelope's citation is merged first, so it must carry the kind the \
+         registry resolves a [kb:…] marker to"
     );
 }
 
