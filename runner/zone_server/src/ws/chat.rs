@@ -917,24 +917,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
         }
     }
 
-    // Send initial status
+    // Subscribe before announcing the connection, so that `init` tells the
+    // client every later frame reaches it, and catch it up on the turn in
+    // flight so a reload or a dropped socket rejoins the reply mid-sentence.
+    let mut titles = crate::workers::titles::subscribe();
+    let mut actions = crate::db::actions::subscribe();
+    let stream = ChatStream::of(chat_id);
+    let (resume, mut events) = stream.join().await;
+
     let init_msg = ServerMessage::Init {
         chat_id,
         status: STATUS_CONNECTED.to_string(),
     };
-
     if sender.send(init_msg.to_ws_message()).await.is_err() {
         return;
     }
     let _ws_active = crate::metrics::WsActiveGuard::acquire();
     let sender = Arc::new(Mutex::new(sender));
-    let mut titles = crate::workers::titles::subscribe();
-    let mut actions = crate::db::actions::subscribe();
-
-    // Catch this connection up on the turn in flight before it sees any new
-    // frame, so a reload or a dropped socket rejoins the reply mid-sentence.
-    let stream = ChatStream::of(chat_id);
-    let (resume, mut events) = stream.join().await;
     if !forward(&sender, resume).await {
         return;
     }
@@ -2969,6 +2968,7 @@ async fn handle_chat_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::PgPool;
 
     #[test]
     fn retrieved_context_helpers_normalize_bound_and_interleave_sources() {
@@ -3363,6 +3363,160 @@ mod tests {
         );
     }
 
+    /// A user with a live session, and a chat in a workspace it can write to.
+    async fn seed_chat(pool: &PgPool, secret: &str) -> (String, Uuid) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let user = db::users::create_user(
+            pool,
+            &format!("join-{suffix}@example.com"),
+            "unused-hash",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let organization = db::organizations::create_organization(
+            pool,
+            &format!("Join {suffix}"),
+            &format!("join-org-{suffix}"),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            pool,
+            organization.id,
+            &format!("Join {suffix}"),
+            &format!("join-ws-{suffix}"),
+            None,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Owner,
+            None,
+        )
+        .await
+        .unwrap();
+        let chat = chats::create_chat(
+            pool,
+            Some(workspace.id),
+            "Join",
+            "llama3.2:3b",
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let session = sessions::create_session(
+            pool,
+            user.id,
+            &format!("refresh-{suffix}"),
+            None,
+            None,
+            None,
+            (chrono::Utc::now() + chrono::Duration::hours(1)).naive_utc(),
+        )
+        .await
+        .unwrap();
+        let token = crate::auth::jwt::create_session_access_token(
+            user.id,
+            &user.email,
+            Vec::new(),
+            Vec::new(),
+            false,
+            session.id,
+            secret,
+            chrono::Duration::minutes(15),
+        )
+        .unwrap();
+        (token, chat.id)
+    }
+
+    /// The `type` of the next text frame, ignoring control frames.
+    async fn frame_type(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> String {
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(10), socket.next())
+                .await
+                .expect("a frame within ten seconds")
+                .expect("an open socket")
+                .expect("a readable frame");
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = frame {
+                let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                return frame["type"].as_str().unwrap().to_string();
+            }
+        }
+    }
+
+    /// Holding the live-turn lock stops `join` from completing, so a socket
+    /// that announces `init` while it is held has announced before it could
+    /// receive anything, and a frame published in that gap would never reach it.
+    /// The handler takes its own hold of the stream right before it joins, so
+    /// the strong count rising to two is the moment it is parked on the lock.
+    #[tokio::test]
+    async fn init_is_not_announced_until_the_socket_has_joined_the_stream() {
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://postgres:postgres@localhost:5432/zone_test".to_string()
+        });
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("a migrated test database");
+        let config = crate::state::test_config();
+        let (token, chat_id) = seed_chat(&pool, config.jwt_secret()).await;
+        let state = AppState::new(config, pool, None);
+        state.disable_mcp();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, crate::routes::create_router(state)).await;
+        });
+
+        let stream = ChatStream::of(chat_id);
+        let joining = stream.live.lock().await;
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws/chats/{chat_id}"))
+                .await
+                .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({"type": "auth", "token": token})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let arrived = tokio::time::Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&stream) < 2 {
+            assert!(
+                tokio::time::Instant::now() < arrived,
+                "the handler never took hold of the chat's stream"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), socket.next())
+                .await
+                .is_err(),
+            "init was announced before the socket had joined the chat's stream"
+        );
+
+        drop(joining);
+        assert_eq!(frame_type(&mut socket).await, "init");
+        publish(&stream, started(Uuid::new_v4())).await;
+        assert_eq!(
+            frame_type(&mut socket).await,
+            "message_start",
+            "a frame published after init has to reach the socket"
+        );
+    }
+
     #[tokio::test]
     async fn generation_registration_reports_cancellation_and_cleans_up() {
         let chat_id = Uuid::new_v4();
@@ -3391,7 +3545,7 @@ mod tests {
         assert!(!CHAT_CANCELLATIONS.contains_key(&key));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn connection_cleanup_removes_only_an_idle_chat_entry() {
         let chat_id = Uuid::new_v4();
         let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS_PER_CHAT));
