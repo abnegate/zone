@@ -2340,6 +2340,15 @@ async fn test_concurrent_image_sends_are_serialized_per_chat() {
             ))
             .await
             .unwrap();
+        let init = next_frame(&mut socket, Duration::from_secs(10))
+            .await
+            .expect("init");
+        assert_eq!(
+            init["type"].as_str(),
+            Some("init"),
+            "init has to land before either send, so both sockets are subscribed \
+             to the chat for both generations"
+        );
         socket
     };
     let mut first = connect(&token).await;

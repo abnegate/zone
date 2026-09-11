@@ -917,24 +917,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
         }
     }
 
-    // Send initial status
+    // Subscribe before announcing the connection, so that `init` tells the
+    // client every later frame reaches it, and catch it up on the turn in
+    // flight so a reload or a dropped socket rejoins the reply mid-sentence.
+    let mut titles = crate::workers::titles::subscribe();
+    let mut actions = crate::db::actions::subscribe();
+    let stream = ChatStream::of(chat_id);
+    let (resume, mut events) = stream.join().await;
+
     let init_msg = ServerMessage::Init {
         chat_id,
         status: STATUS_CONNECTED.to_string(),
     };
-
     if sender.send(init_msg.to_ws_message()).await.is_err() {
         return;
     }
     let _ws_active = crate::metrics::WsActiveGuard::acquire();
     let sender = Arc::new(Mutex::new(sender));
-    let mut titles = crate::workers::titles::subscribe();
-    let mut actions = crate::db::actions::subscribe();
-
-    // Catch this connection up on the turn in flight before it sees any new
-    // frame, so a reload or a dropped socket rejoins the reply mid-sentence.
-    let stream = ChatStream::of(chat_id);
-    let (resume, mut events) = stream.join().await;
     if !forward(&sender, resume).await {
         return;
     }
