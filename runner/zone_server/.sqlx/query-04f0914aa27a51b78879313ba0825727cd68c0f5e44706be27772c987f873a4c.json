@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO task_runs (task_id, status, triggered_by) VALUES ($1, 'running', $2) RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by",
+  "query": "INSERT INTO task_runs (task_id, status, triggered_by) VALUES ($1, 'running', $2) RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question",
   "describe": {
     "columns": [
       {
@@ -112,6 +112,17 @@
             "name": "triggered_by"
           }
         }
+      },
+      {
+        "ordinal": 10,
+        "name": "pending_question",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "task_runs",
+            "name": "pending_question"
+          }
+        }
       }
     ],
     "parameters": {
@@ -130,8 +141,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "3b523434848059ac4c2b747da9869134220ead1c4bdcf0e2831e5995e180b8f5"
+  "hash": "04f0914aa27a51b78879313ba0825727cd68c0f5e44706be27772c987f873a4c"
 }

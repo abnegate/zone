@@ -81,7 +81,7 @@ pub async fn active_workspaces(pool: &PgPool, since: NaiveDateTime) -> DbResult<
         FROM task_runs run
         JOIN tasks task ON task.id = run.task_id
         JOIN workspaces workspace ON workspace.id = task.workspace_id
-        WHERE run.status <> 'running'
+        WHERE run.status NOT IN ('running', 'waiting')
           AND COALESCE(run.completed_at, run.started_at) >= $1
           AND workspace.is_active IS NOT FALSE
         "#,
@@ -112,7 +112,7 @@ pub async fn load_runs(
         FROM task_runs run
         JOIN tasks task ON task.id = run.task_id
         WHERE task.workspace_id = $1
-          AND run.status <> 'running'
+          AND run.status NOT IN ('running', 'waiting')
           AND COALESCE(run.completed_at, run.started_at) >= $2
         ORDER BY COALESCE(run.completed_at, run.started_at) DESC, run.id DESC
         LIMIT $3

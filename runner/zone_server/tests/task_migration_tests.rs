@@ -2,7 +2,7 @@ use sqlx::migrate::MigrateError;
 use sqlx::{ConnectOptions, PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
 use uuid::Uuid;
-use zone_server::db::migrations;
+use zone_server::db::{migrations, tasks};
 
 struct Database {
     admin: PgPool,
@@ -257,7 +257,8 @@ async fn task_migration_repairs_cancelled_concurrent_build_with_live_writes() {
     );
     first.unwrap();
     second.unwrap();
-    let valid: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_index WHERE indexrelid IN ('task_runs_active'::regclass,'task_runs_heartbeat'::regclass) AND indisvalid").fetch_one(&database.pool).await.unwrap();
+    // 030 and 031 retire the 'running'-only indexes once their supersets exist.
+    let valid: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_index WHERE indexrelid IN ('task_runs_active_waiting'::regclass,'task_runs_heartbeat_waiting'::regclass) AND indisvalid").fetch_one(&database.pool).await.unwrap();
     assert_eq!(valid, 2);
     let fenced: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='task_runs_migration_admission')",
@@ -560,5 +561,231 @@ async fn reconcile_bounds_each_batch() {
     .await
     .unwrap();
     assert_eq!(pending, 0, "tasks remained unreconciled after draining");
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn waiting_runs_hold_the_admission_slot_the_running_index_used_to_hold() {
+    let database = Database::new().await;
+    migrations::run(&database.pool).await.unwrap();
+    let task = database.task().await;
+
+    for legacy in ["task_runs_active", "task_runs_heartbeat"] {
+        let surviving: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+            .bind(format!("public.{legacy}"))
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            surviving, None,
+            "{legacy} still indexes only running runs, so a parked run frees the slot"
+        );
+    }
+
+    sqlx::query("INSERT INTO task_runs(task_id,status) VALUES($1,'waiting')")
+        .bind(task)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    for competitor in ["waiting", "running"] {
+        let rejected = sqlx::query("INSERT INTO task_runs(task_id,status) VALUES($1,$2)")
+            .bind(task)
+            .bind(competitor)
+            .execute(&database.pool)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            rejected.as_database_error().unwrap().code().as_deref(),
+            Some("23505"),
+            "a {competitor} run was admitted beside a parked one"
+        );
+    }
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_run_stores_one_pending_question_and_only_known_statuses() {
+    let database = Database::new().await;
+    migrations::run(&database.pool).await.unwrap();
+    let task = database.task().await;
+    let run = Uuid::new_v4();
+    sqlx::query("INSERT INTO task_runs(id,task_id,status) VALUES($1,$2,'running')")
+        .bind(run)
+        .bind(task)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let unasked: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT pending_question FROM task_runs WHERE id=$1")
+            .bind(run)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(unasked, None, "a fresh run must not look like it is asking");
+
+    let question = serde_json::json!({
+        "tool_call_id": "call_1",
+        "questions": [{"id": "colour", "prompt": "Which colour?", "required": true}],
+    });
+    sqlx::query("UPDATE task_runs SET status='waiting',pending_question=$2 WHERE id=$1")
+        .bind(run)
+        .bind(&question)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT pending_question FROM task_runs WHERE id=$1")
+            .bind(run)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, question);
+
+    let rejected = sqlx::query("UPDATE task_runs SET status='parked' WHERE id=$1")
+        .bind(run)
+        .execute(&database.pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        rejected.as_database_error().unwrap().code().as_deref(),
+        Some("23514"),
+        "the widened status check must still be a closed set"
+    );
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_parked_run_keeps_its_lease_and_gives_it_back_once() {
+    let database = Database::new().await;
+    migrations::run(&database.pool).await.unwrap();
+    let task = database.task().await;
+    let run = tasks::create_task_run(&database.pool, task).await.unwrap();
+    let owner = Uuid::new_v4();
+    assert!(
+        tasks::claim_task_run(&database.pool, run.id, owner)
+            .await
+            .unwrap()
+    );
+    let question = serde_json::json!({"tool_call_id": "call_1", "questions": []});
+    assert!(
+        tasks::park_task_run(&database.pool, run.id, owner, question.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !tasks::park_task_run(&database.pool, run.id, owner, question)
+            .await
+            .unwrap(),
+        "parking an already parked run must not replace the question being answered"
+    );
+
+    // Without these the heartbeat loop cancels the whole pipeline within one tick.
+    assert!(
+        tasks::heartbeat_task_run(&database.pool, run.id, owner)
+            .await
+            .unwrap(),
+        "a parked run lost its lease on the first heartbeat"
+    );
+    let execution = tasks::Execution {
+        task,
+        run: run.id,
+        owner,
+        actor: None,
+    };
+    assert!(
+        execution.authorized(&database.pool, false).await.unwrap(),
+        "a parked run lost its writer authorization"
+    );
+    assert!(
+        tasks::owns_task_run(&database.pool, run.id, Some(owner))
+            .await
+            .unwrap()
+    );
+    assert!(
+        tasks::add_owned_task_run_log(
+            &database.pool,
+            run.id,
+            Some(owner),
+            "acting",
+            "tool",
+            "info",
+            "Waiting on an answer",
+            None,
+        )
+        .await
+        .unwrap(),
+        "a parked run could not announce that it is stalled"
+    );
+
+    assert!(
+        tasks::resume_task_run(&database.pool, run.id, owner)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !tasks::resume_task_run(&database.pool, run.id, owner)
+            .await
+            .unwrap(),
+        "a second answer resumed the run twice"
+    );
+    let resumed = tasks::get_task_run(&database.pool, run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.status, "running");
+    assert_eq!(resumed.pending_question, None);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_sweeper_orphans_a_parked_run_whose_worker_died() {
+    let database = Database::new().await;
+    migrations::run(&database.pool).await.unwrap();
+    let task = database.task().await;
+    let run = tasks::create_task_run(&database.pool, task).await.unwrap();
+    let owner = Uuid::new_v4();
+    assert!(
+        tasks::claim_task_run(&database.pool, run.id, owner)
+            .await
+            .unwrap()
+    );
+    assert!(
+        tasks::park_task_run(
+            &database.pool,
+            run.id,
+            owner,
+            serde_json::json!({"tool_call_id": "call_1", "questions": []}),
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        tasks::sweep_task_runs(&database.pool).await.unwrap(),
+        0,
+        "a waiter that is still heartbeating was swept out from under its question"
+    );
+
+    sqlx::query("UPDATE task_runs SET heartbeat_at=NOW()-INTERVAL '61 seconds' WHERE id=$1")
+        .bind(run.id)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(tasks::sweep_task_runs(&database.pool).await.unwrap(), 1);
+    let swept = tasks::get_task_run(&database.pool, run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(swept.status, "failed");
+    assert_eq!(swept.error_message.as_deref(), Some("orphaned"));
+    let active: Option<Uuid> = sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id=$1")
+        .bind(task)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(active, None, "a swept waiter kept holding the task");
+
+    tasks::create_task_run(&database.pool, task)
+        .await
+        .expect("the swept task must admit a new run");
     database.cleanup().await;
 }
