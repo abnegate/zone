@@ -172,6 +172,38 @@ describe('unrecognised metadata costs one entry, never the message', () => {
 });
 
 /**
+ * The identifier is the handle a reply cites a source by, added after citations
+ * were already being persisted. `CitationSchema` is not passthrough and
+ * `tolerantArray` drops what does not conform, so declaring it optional is what
+ * keeps both the new field and the rows stored without one.
+ */
+describe('a cited identifier survives storage', () => {
+  const web = { ...sample, kind: 'web', identifier: 'web-1' };
+
+  test('a web source parses with the identifier it was cited by', () => {
+    const parsed = MessageMetadataSchema.parse({ citations: [web] });
+
+    expect(parsed.citations).toHaveLength(1);
+    expect(parsed.citations?.[0].kind).toBe('web');
+    expect(parsed.citations?.[0].identifier).toBe('web-1');
+  });
+
+  test('a citation stored before identifiers existed still parses', () => {
+    const parsed = MessageMetadataSchema.parse({ citations: [sample] });
+
+    expect(parsed.citations).toHaveLength(1);
+    expect(parsed.citations?.[0].identifier).toBeUndefined();
+  });
+
+  test('a required identifier would have dropped that history', () => {
+    const required = z.object({ ...CitationSchema.shape, identifier: z.string() });
+
+    expect(required.safeParse(sample).success).toBe(false);
+    expect(CitationSchema.safeParse(sample).success).toBe(true);
+  });
+});
+
+/**
  * A `reason` is model-authored, added after these records were already being
  * persisted. Two things could quietly eat it or the history around it: these
  * objects are not passthrough, so an unlisted field is stripped on reload, and

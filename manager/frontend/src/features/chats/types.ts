@@ -40,6 +40,8 @@ export type CitationKind =
   | 'github_issue'
   | 'github_file'
   | 'workspace_document'
+  | 'knowledge_passage'
+  | 'web'
   | 'behavioral_verification';
 
 export type CitationOutcome = 'success' | 'failure' | 'pending' | 'incomplete' | 'observed';
@@ -55,6 +57,10 @@ export interface Citation {
   kind: CitationKind;
   title: string;
   url: string;
+  /// The stable per-chat handle a reply cites this source by. Absent on
+  /// citations stored before the field existed, matching the server's own
+  /// default.
+  identifier?: string | null;
   revision?: string | null;
   observed_at: string;
   complete: boolean;

@@ -14,6 +14,7 @@ pub mod approval;
 pub mod audio;
 pub mod citations;
 pub mod documents;
+pub mod identifier;
 pub mod images;
 pub mod integrations;
 pub mod monitoring;

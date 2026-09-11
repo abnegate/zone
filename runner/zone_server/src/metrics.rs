@@ -42,6 +42,10 @@ const GATHER_UNCHANGED: &str = "zone_gathering_items_unchanged";
 const WS_CHAT_EVENTS: &str = "zone_ws_chat_connections_total";
 const WS_CHAT_ACTIVE: &str = "zone_ws_chat_connections_active";
 
+const CITATION_MARKERS: &str = "zone_chat_citation_markers_total";
+pub const MARKER_RESOLVED: &str = "resolved";
+pub const MARKER_UNRESOLVED: &str = "unresolved";
+
 const TASK_RUNS: &str = "zone_task_run_total";
 const TASK_DURATION: &str = "zone_task_run_duration_seconds";
 
@@ -114,6 +118,10 @@ fn handle() -> PrometheusHandle {
             describe_histogram!(GATHER_UNCHANGED, "Unchanged items skipped per gather");
             describe_counter!(WS_CHAT_EVENTS, "Chat WebSocket connect outcomes");
             describe_gauge!(WS_CHAT_ACTIVE, "Open chat WebSocket connections");
+            describe_counter!(
+                CITATION_MARKERS,
+                "Source markers a reply cited, by whether the registry held one"
+            );
             describe_counter!(TASK_RUNS, "Background task run outcomes");
             describe_histogram!(TASK_DURATION, "Background task run duration in seconds");
             describe_counter!(SEARXNG_REQUESTS, "Outbound SearXNG searches");
@@ -522,6 +530,17 @@ impl Drop for TaskObs {
 pub fn record_ws_chat(event: &'static str, reason: &'static str) {
     init();
     counter!(WS_CHAT_EVENTS, "event" => event, "reason" => reason).increment(1);
+}
+
+/// Count the source markers a reply cited, split by whether the chat's registry
+/// held the source. A rising unresolved share is a model attributing claims to
+/// sources the server never retrieved.
+pub fn record_citation_markers(status: &'static str, count: usize) {
+    if count == 0 {
+        return;
+    }
+    init();
+    counter!(CITATION_MARKERS, "status" => status).increment(count as u64);
 }
 
 /// Increments the chat WS gauge and decrements it on drop.

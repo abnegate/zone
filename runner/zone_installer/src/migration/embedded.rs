@@ -44,4 +44,5 @@ pub const EMBEDDED: &[Source] = &[
     source!("021_task_validation.sql"),
     source!("022_tenant_admin_permissions.sql"),
     source!("023_workspace_owner_backfill.sql"),
+    source!("024_chat_sources.sql"),
 ];

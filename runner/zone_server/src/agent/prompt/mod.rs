@@ -39,6 +39,7 @@ const ORDER: &[Section] = &[
     ("images", section::images::render),
     ("cluster", section::cluster::render),
     ("web", section::web::render),
+    ("citation", section::citation::render),
     ("task", section::task::render),
     ("mcp", section::mcp::render),
     ("session", section::session::render),
@@ -50,6 +51,7 @@ const PLAIN: &[Section] = &[
     ("boundary", section::boundary::render),
     ("reply", section::reply::render),
     ("refusal", section::refusal::render),
+    ("citation", section::citation::render),
     ("session", section::session::render),
 ];
 
@@ -275,6 +277,7 @@ mod tests {
                 "images",
                 "cluster",
                 "web",
+                "citation",
                 "task",
                 "mcp",
                 "session",
@@ -282,7 +285,9 @@ mod tests {
         );
         assert_eq!(
             names(PLAIN),
-            ["identity", "boundary", "reply", "refusal", "session"]
+            [
+                "identity", "boundary", "reply", "refusal", "citation", "session"
+            ]
         );
         assert_eq!(names(ORDER).last(), Some(&"session"));
         assert_eq!(names(PLAIN).last(), Some(&"session"));
@@ -325,6 +330,7 @@ mod tests {
         assert!(rendered.contains("Images:"), "{rendered}");
         assert!(rendered.contains("Cluster:"), "{rendered}");
         assert!(rendered.contains("Web tools:"), "{rendered}");
+        assert!(rendered.contains("Citing sources:"), "{rendered}");
         assert!(rendered.contains("prefixed with the server"), "{rendered}");
     }
 
@@ -344,6 +350,7 @@ mod tests {
         assert!(!rendered.contains("Images:"), "{rendered}");
         assert!(!rendered.contains("Cluster:"), "{rendered}");
         assert!(!rendered.contains("Web tools:"), "{rendered}");
+        assert!(!rendered.contains("Citing sources:"), "{rendered}");
     }
 
     /// The six host tools are what a run without an authorized actor receives.
@@ -389,6 +396,10 @@ mod tests {
         );
         assert!(
             rendered.contains("A wrong answer about the user's own data"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Cite only identifiers the sources in this prompt arrived with."),
             "{rendered}"
         );
     }
@@ -554,6 +565,52 @@ mod tests {
 
         assert_eq!(
             occurrences(&plain_prompt, "Where a tool takes a reason, give one"),
+            0,
+            "{plain_prompt}"
+        );
+    }
+
+    /// A marker rule reads as advice about writing, so the next author to touch
+    /// `reply` or `web` has every reason to restate one there, and the chat
+    /// prompt has no room to say anything twice. `citation` owns the mechanism
+    /// on both of the surfaces it renders on, and the exemption for a build or
+    /// status result is the one rule that needs a tool to be worth stating.
+    #[test]
+    fn the_rules_for_citing_by_identifier_are_stated_once_and_only_by_citation() {
+        let chat_prompt = chat(&chat_tools(), false, &environment());
+        let plain_prompt = plain(&environment());
+        let task_prompt = task(&task_tools(), &environment());
+
+        for phrase in [
+            "the identifier is the link",
+            "licence to quote at length",
+            "final punctuation of the sentence or table cell",
+            "summarised conversation unchanged",
+        ] {
+            assert_eq!(
+                occurrences(&chat_prompt, phrase),
+                1,
+                "{phrase}: {chat_prompt}"
+            );
+            assert_eq!(
+                occurrences(&plain_prompt, phrase),
+                1,
+                "{phrase}: {plain_prompt}"
+            );
+            assert_eq!(
+                occurrences(&task_prompt, phrase),
+                0,
+                "{phrase}: {task_prompt}"
+            );
+        }
+
+        assert_eq!(
+            occurrences(&chat_prompt, "need no identifier"),
+            1,
+            "{chat_prompt}"
+        );
+        assert_eq!(
+            occurrences(&plain_prompt, "need no identifier"),
             0,
             "{plain_prompt}"
         );

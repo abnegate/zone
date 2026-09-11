@@ -1,4 +1,5 @@
-//! Structured citations for live GitHub observations and workspace documents.
+//! Structured citations for live GitHub observations, retrieved web pages and
+//! workspace documents.
 //!
 //! Tool results already carry source URLs, commit SHAs and freshness. This
 //! module turns those observations into a stable message-metadata shape the
@@ -9,7 +10,7 @@
 //! advisory evidence and can never be a passing result, exactly as incomplete
 //! evidence cannot.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -28,6 +29,8 @@ pub enum CitationKind {
     GithubIssue,
     GithubFile,
     WorkspaceDocument,
+    KnowledgePassage,
+    Web,
     BehavioralVerification,
 }
 
@@ -47,6 +50,11 @@ pub struct Citation {
     pub kind: CitationKind,
     pub title: String,
     pub url: String,
+    /// Stable per-chat handle for this source. A reply cites it by this name
+    /// and the server checks the claim against what it actually retrieved.
+    /// Citations stored before the field existed carry none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
     pub observed_at: String,
@@ -117,14 +125,35 @@ pub fn merge(existing: &mut Vec<Citation>, incoming: impl IntoIterator<Item = Ci
         if !citation.usable() {
             continue;
         }
-        if existing
-            .iter()
-            .any(|seen| seen.url == citation.url && seen.revision == citation.revision)
-        {
+        if existing.iter().any(|seen| same_source(seen, &citation)) {
             continue;
         }
         existing.push(citation);
     }
+}
+
+/// Whether two citations name the same source.
+///
+/// An identifier names a source; an address only says where to read one. One
+/// address can back several registry sources — a document indexed into the
+/// knowledge base is reachable as both — so folding them together by address
+/// would drop an identifier the reply already cites and leave its marker
+/// reading as unresolved. Address equality settles it only for citations minted
+/// before identifiers existed.
+fn same_source(seen: &Citation, incoming: &Citation) -> bool {
+    match (handle(seen), handle(incoming)) {
+        (Some(seen), Some(incoming)) => seen == incoming,
+        _ => seen.url == incoming.url && seen.revision == incoming.revision,
+    }
+}
+
+fn handle(citation: &Citation) -> Option<String> {
+    citation
+        .identifier
+        .as_deref()
+        .map(str::trim)
+        .filter(|identifier| !identifier.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 /// Built-in tools whose citations record an observation the server itself made
@@ -226,6 +255,7 @@ fn build_citation(value: &Value, observed_at: &str) -> Citation {
             first_html_url(value.get("workflows")),
             first_html_url(value.get("checks")),
         ]),
+        identifier: None,
         revision: nonempty(sha),
         observed_at: observed(value, observed_at),
         complete,
@@ -267,6 +297,7 @@ fn deployment_citations(value: &Value, observed_at: &str) -> Vec<Citation> {
                     commit_url(value, revision.as_deref().unwrap_or_default()),
                     text(row, "url"),
                 ]),
+                identifier: None,
                 revision,
                 observed_at: observed_at.clone(),
                 complete: !matches!(outcome, CitationOutcome::Incomplete),
@@ -299,6 +330,7 @@ fn issue_citations(value: &Value, observed_at: &str) -> Vec<Citation> {
                     format!("{number} {title}")
                 },
                 url: text(row, "html_url"),
+                identifier: None,
                 revision: nonempty(text(row, "updated_at")),
                 observed_at: observed_at.clone(),
                 complete: row.get("body").is_some_and(|body| !body.is_null()),
@@ -322,6 +354,7 @@ fn file_citation(value: &Value, observed_at: &str) -> Citation {
             path
         },
         url: first_http([text(value, "url"), commit_url(value, &sha)]),
+        identifier: None,
         revision: nonempty(sha).or_else(|| nonempty(blob)),
         observed_at: observed(value, observed_at),
         complete: value
@@ -355,6 +388,7 @@ pub fn from_verification(
         kind: CitationKind::BehavioralVerification,
         title: nonempty(title.to_string()).unwrap_or_else(|| VERIFICATION_TITLE.to_string()),
         url: url.to_string(),
+        identifier: None,
         revision: revision.and_then(|revision| nonempty(revision.to_string())),
         observed_at: observed_at.to_string(),
         complete: outcome.complete(),
@@ -391,6 +425,7 @@ pub fn from_retrieved(title: &str, uri: &str, complete: bool, observed_at: &str)
             title.to_string()
         },
         url,
+        identifier: None,
         revision,
         observed_at: observed_at.to_string(),
         complete,
@@ -422,6 +457,40 @@ fn indexed_uri(uri: &str) -> (CitationKind, String, Option<String>) {
         return (CitationKind::GithubFile, uri.to_string(), None);
     }
     (CitationKind::WorkspaceDocument, uri.to_string(), None)
+}
+
+/// Citation for a source the chat's registry already holds, cited by the
+/// identifier the registry minted for it.
+///
+/// `first_observed_at` is when the server first retrieved the source, never
+/// when a reply got around to citing it. Citing a source again must not
+/// refresh the observation, or a page read days ago silently presents itself
+/// as fresh evidence, and every claim resting on this identifier inherits a
+/// freshness the server never saw.
+///
+/// The outcome is an observation and never a success, so a registry source can
+/// never satisfy [`Citation::passing`]. Retrieving a page proves the server saw
+/// it; it proves nothing about what the page asserts.
+pub fn from_source(
+    kind: CitationKind,
+    identifier: &str,
+    title: &str,
+    url: &str,
+    first_observed_at: DateTime<Utc>,
+) -> Citation {
+    Citation {
+        kind,
+        title: nonempty(title.to_string()).unwrap_or_else(|| url.to_string()),
+        url: url.to_string(),
+        identifier: nonempty(identifier.to_string()),
+        revision: None,
+        observed_at: first_observed_at.to_rfc3339(),
+        complete: true,
+        provenance: Provenance::ServerExecution,
+        outcome: CitationOutcome::Observed,
+        note: None,
+    }
+    .normalize()
 }
 
 fn document_citations(value: &Value, observed_at: &str) -> Vec<Citation> {
@@ -459,6 +528,7 @@ fn document_citation(document: &Value, parent: &Value, observed_at: &str) -> Cit
             title
         },
         url,
+        identifier: nonempty(text(document, "identifier")),
         revision: nonempty(text(document, "revision"))
             .or_else(|| nonempty(text(document, "updated_at")))
             .or_else(|| nonempty(text(document, "fetched_at"))),
@@ -564,6 +634,8 @@ mod tests {
 
     const OBSERVED: &str = "2026-09-05T00:00:00+00:00";
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const IDENTIFIER: &str = "web-1";
+    const SOURCE_URL: &str = "https://example.test/changelog";
 
     fn citations(name: &str, value: Value) -> Vec<Citation> {
         from_tool_at(name, &value.to_string(), OBSERVED)
@@ -625,6 +697,7 @@ mod tests {
             kind: CitationKind::GithubBuild,
             title: "repository".into(),
             url: "https://github.com/owner/repository/commit/aaa".into(),
+            identifier: None,
             revision: Some(SHA.into()),
             observed_at: OBSERVED.into(),
             complete: false,
@@ -812,6 +885,60 @@ mod tests {
         let original = citations.clone();
         merge(&mut citations, original.clone());
         assert_eq!(citations, original);
+    }
+
+    #[test]
+    fn merge_keeps_two_sources_that_share_an_address_under_different_identifiers() {
+        let observed = chrono::DateTime::parse_from_rfc3339(OBSERVED)
+            .expect("the fixture observation time is rfc3339")
+            .with_timezone(&chrono::Utc);
+        let uri = "knowledge://11111111-1111-1111-1111-111111111111";
+        let document = from_source(
+            CitationKind::WorkspaceDocument,
+            "doc:4a91c2",
+            "Release notes",
+            uri,
+            observed,
+        );
+        let passage = from_source(
+            CitationKind::KnowledgePassage,
+            "kb:9f30ab",
+            "Release notes",
+            uri,
+            observed,
+        );
+
+        let mut citations = vec![document];
+        merge(&mut citations, [passage]);
+
+        assert_eq!(
+            citations
+                .iter()
+                .filter_map(|citation| citation.identifier.as_deref())
+                .collect::<Vec<_>>(),
+            ["doc:4a91c2", "kb:9f30ab"],
+            "one address backed two sources and the second was folded away, so its marker \
+             in the reply renders as a fabrication"
+        );
+    }
+
+    #[test]
+    fn merge_folds_one_source_cited_twice_under_the_same_identifier() {
+        let observed = chrono::DateTime::parse_from_rfc3339(OBSERVED)
+            .expect("the fixture observation time is rfc3339")
+            .with_timezone(&chrono::Utc);
+        let citation = from_source(
+            CitationKind::Web,
+            "web:a3f21c",
+            "Example changelog",
+            "https://example.test/changelog",
+            observed,
+        );
+        let mut citations = vec![citation.clone()];
+
+        merge(&mut citations, [citation]);
+
+        assert_eq!(citations.len(), 1);
     }
 
     #[test]
@@ -1101,5 +1228,113 @@ mod tests {
 
         assert_eq!(stored.provenance, Provenance::ServerExecution);
         assert!(stored.passing());
+    }
+
+    #[test]
+    fn a_web_citation_keeps_its_kind_and_identifier_across_the_wire() {
+        let citation = Citation {
+            kind: CitationKind::Web,
+            title: "Example changelog".into(),
+            url: SOURCE_URL.into(),
+            identifier: Some(IDENTIFIER.into()),
+            revision: None,
+            observed_at: OBSERVED.into(),
+            complete: true,
+            provenance: Provenance::ServerExecution,
+            outcome: CitationOutcome::Observed,
+            note: None,
+        };
+
+        let wire = serde_json::to_value(&citation).expect("a citation serializes");
+        assert_eq!(wire["kind"], "web");
+        assert_eq!(wire["identifier"], IDENTIFIER);
+
+        let read: Citation = serde_json::from_value(wire).expect("a citation deserializes");
+        assert_eq!(read, citation);
+        assert!(read.usable());
+    }
+
+    #[test]
+    fn a_citation_stored_before_identifiers_existed_still_deserializes() {
+        let stored: Citation = serde_json::from_value(json!({
+            "kind": "github_build",
+            "title": "repository main@aaaaaaa",
+            "url": "https://github.com/owner/repository/commit/aaa",
+            "observed_at": OBSERVED,
+            "complete": true,
+            "outcome": "success"
+        }))
+        .expect("a stored citation deserializes");
+
+        assert_eq!(stored.identifier, None);
+        assert!(stored.passing());
+
+        let wire = serde_json::to_value(&stored).expect("a citation serializes");
+        assert!(
+            wire.get("identifier").is_none(),
+            "an absent identifier must stay absent rather than be written back as null"
+        );
+    }
+
+    fn first_observed() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(OBSERVED)
+            .expect("the fixture observation time is rfc3339")
+            .with_timezone(&Utc)
+    }
+
+    fn cited_source() -> Citation {
+        from_source(
+            CitationKind::Web,
+            IDENTIFIER,
+            "Example changelog",
+            SOURCE_URL,
+            first_observed(),
+        )
+    }
+
+    #[test]
+    fn a_cited_source_carries_when_it_was_first_observed_not_when_it_was_cited() {
+        let citation = cited_source();
+
+        let stamped = DateTime::parse_from_rfc3339(&citation.observed_at)
+            .expect("a citation stamps an rfc3339 observation time")
+            .with_timezone(&Utc);
+
+        assert_eq!(stamped, first_observed());
+        assert_eq!(citation.identifier.as_deref(), Some(IDENTIFIER));
+        assert!(
+            Utc::now().signed_duration_since(stamped) > chrono::TimeDelta::hours(1),
+            "a cited source was stamped at about the current time, so re-citing a stale page \
+             silently refreshes it into fresh evidence"
+        );
+    }
+
+    #[test]
+    fn a_cited_web_source_is_an_observation_and_never_a_pass() {
+        let citation = cited_source();
+
+        assert_eq!(citation.kind, CitationKind::Web);
+        assert_eq!(citation.outcome, CitationOutcome::Observed);
+        assert_eq!(citation.provenance, Provenance::ServerExecution);
+        assert!(citation.complete);
+        assert!(citation.usable());
+        assert!(
+            !citation.passing(),
+            "a retrieved page is something the server saw, not something it verified"
+        );
+    }
+
+    #[test]
+    fn a_cited_source_without_a_stored_title_stays_usable() {
+        let citation = from_source(
+            CitationKind::Web,
+            IDENTIFIER,
+            "   ",
+            SOURCE_URL,
+            first_observed(),
+        );
+
+        assert_eq!(citation.title, SOURCE_URL);
+        assert!(citation.usable());
     }
 }

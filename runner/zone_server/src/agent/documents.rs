@@ -5,15 +5,41 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, excerpt};
+use zone_core::tools::{
+    MAX_TOOL_OUTPUT_CHARS, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, excerpt,
+};
 
 use super::PREVIEW_TITLE_CHARS;
+use super::identifier::Kind;
 use super::tools::WorkspaceScope;
-use crate::db::knowledge::{self, DocumentUpdate};
+use crate::db::knowledge::{self, Document, DocumentUpdate};
 use crate::db::workspace_members::{self, WorkspaceRole};
+use crate::db::{DbResult, chat_sources};
 
 const LIST_LIMIT: i64 = 25;
 const PAGE_CHARS: u64 = 8_000;
+
+/// Where a document's registry identifier is rendered: inline on the record,
+/// under the name a citation carries it under.
+///
+/// Never a trailing array. These envelopes are trimmed by whole records, so an
+/// identifier beside its document goes when the document goes, where a list at
+/// the end would outlive the record it names and leave the model a marker for
+/// a document that is no longer in front of it.
+const IDENTIFIER: &str = "identifier";
+
+const DOCUMENT: &str = "document";
+const DOCUMENTS: &str = "documents";
+const OMITTED: &str = "documents_omitted";
+const NOTE: &str = "note";
+const STORED_TEXT: &str = "stored_text";
+const METADATA_ONLY: &str = "metadata_only_content_unavailable";
+const NOT_FOUND: &str = "Document not found in this workspace.";
+
+/// The model is taught that a source arrives with a bracketed identifier, and
+/// a JSON record carries a bare one, so the envelope says how to write it.
+const CITE_NOTE: &str = "Cite a document by its identifier in brackets, such as [doc:6a1f2c]. A \
+                         document with no identifier cannot be cited.";
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -192,12 +218,21 @@ impl DocumentTool {
                     offset,
                 )
                 .await?;
+                let records = self.identify_all(&documents).await;
                 ToolResult::success(
-                    json!({"documents":documents,"offset":offset,"limit":limit,"observed_at":Utc::now().to_rfc3339()}).to_string(),
+                    listing(
+                        json!({
+                            "offset": offset,
+                            "limit": limit,
+                            "observed_at": Utc::now().to_rfc3339()
+                        }),
+                        &records,
+                    )
+                    .to_string(),
                 )
             }
             Operation::Read => {
-                let id = match identifier(params) {
+                let id = match document_id(params) {
                     Ok(value) => value,
                     Err(error) => return Ok(error),
                 };
@@ -209,48 +244,51 @@ impl DocumentTool {
                     Ok(value) => value,
                     Err(error) => return Ok(error),
                 };
-                match knowledge::read_document(
+                let Some(mut document) = knowledge::read_document(
                     scope.state.db(),
                     scope.workspace_id,
                     scope.user_id,
                     id,
                 )
                 .await?
-                {
-                    Some(mut document) => match document.content.take() {
-                        Some(content) => match page_stored(&content, offset, limit) {
-                            Ok((page, complete, next, total)) => {
-                                document.content = Some(page);
-                                ToolResult::success(
-                                    json!({
-                                        "document": document,
-                                        "complete": complete,
-                                        "content_state": "stored_text",
-                                        "offset": offset,
-                                        "next": next,
-                                        "total": total,
-                                        "observed_at": Utc::now().to_rfc3339()
-                                    })
-                                    .to_string(),
-                                )
+                else {
+                    return Ok(ToolResult::error(NOT_FOUND));
+                };
+                let page = match document.content.take() {
+                    Some(content) => match page_stored(&content, offset, limit) {
+                        Ok((page, complete, next, total)) => {
+                            document.content = Some(page);
+                            Page {
+                                complete,
+                                state: STORED_TEXT,
+                                next,
+                                total,
                             }
-                            Err(error) => ToolResult::error(error),
-                        },
-                        None => ToolResult::success(
-                            json!({
-                                "document": document,
-                                "complete": false,
-                                "content_state": "metadata_only_content_unavailable",
-                                "offset": offset,
-                                "next": Value::Null,
-                                "total": 0,
-                                "observed_at": Utc::now().to_rfc3339()
-                            })
-                            .to_string(),
-                        ),
+                        }
+                        Err(error) => return Ok(ToolResult::error(error)),
                     },
-                    None => ToolResult::error("Document not found in this workspace."),
-                }
+                    None => Page {
+                        complete: false,
+                        state: METADATA_ONLY,
+                        next: None,
+                        total: 0,
+                    },
+                };
+                let record = self.identify(&document).await;
+                ToolResult::success(
+                    reading(
+                        json!({
+                            "complete": page.complete,
+                            "content_state": page.state,
+                            "offset": offset,
+                            "next": page.next,
+                            "total": page.total,
+                            "observed_at": Utc::now().to_rfc3339()
+                        }),
+                        record,
+                    )
+                    .to_string(),
+                )
             }
             Operation::Create => {
                 let title = match required_text(params, "title") {
@@ -279,7 +317,7 @@ impl DocumentTool {
                 }
             }
             Operation::Update => {
-                let id = match identifier(params) {
+                let id = match document_id(params) {
                     Ok(value) => value,
                     Err(error) => return Ok(error),
                 };
@@ -315,6 +353,119 @@ impl DocumentTool {
         };
         Ok(result)
     }
+
+    /// Register a document against the chat that read it, so the model can
+    /// cite it by an identifier the server can prove it retrieved.
+    ///
+    /// The document's own URI is what is hashed, verbatim. It is stable across
+    /// turns where a title or a position in a listing is not, which is what
+    /// makes reading the same document twice produce one citation rather than
+    /// two. A document with no URI is left bare: there is nothing to hash, and
+    /// a citation with no url is dropped downstream anyway.
+    ///
+    /// A task run has no chat and mints nothing. A per-chat identifier written
+    /// into another chat's registry would let one conversation cite a document
+    /// it never read.
+    async fn identify(&self, document: &Document) -> Value {
+        let mut record = json!(document);
+        let Some(chat) = self.scope.chat_id else {
+            return record;
+        };
+        if document.uri.is_empty() {
+            return record;
+        }
+        let observed = chat_sources::observe(
+            self.scope.state.db(),
+            chat,
+            Kind::Doc,
+            &document.uri,
+            &document.uri,
+            &document.title,
+        )
+        .await;
+        stamp(&mut record, chat, &document.uri, observed);
+        record
+    }
+
+    async fn identify_all(&self, documents: &[Document]) -> Vec<Value> {
+        let mut records = Vec::with_capacity(documents.len());
+        for document in documents {
+            records.push(self.identify(document).await);
+        }
+        records
+    }
+}
+
+/// What a read hands back about the page it returned.
+struct Page {
+    complete: bool,
+    state: &'static str,
+    next: Option<u64>,
+    total: u64,
+}
+
+/// Only the write knows the identifier, because the registry extends a digest
+/// whose prefix another URI already holds. A failed write leaves that one
+/// document bare rather than rendering a marker that could never resolve.
+fn stamp(record: &mut Value, chat: Uuid, uri: &str, observed: DbResult<chat_sources::Source>) {
+    match observed {
+        Ok(source) => record[IDENTIFIER] = json!(source.identifier),
+        Err(error) => tracing::warn!(
+            %error,
+            %chat,
+            %uri,
+            "Could not register a workspace document; citing it without an identifier"
+        ),
+    }
+}
+
+/// List the documents, trimming them until the whole envelope fits the output
+/// budget.
+///
+/// Cutting the serialised envelope to length instead lands the cut inside the
+/// JSON: the model reads a string that no longer parses, and every citation
+/// derived from this output downstream is lost with it. Whole records go
+/// instead, so a document that no longer fits takes its identifier and its
+/// citation with it. Rows arrive ranked, so the cut keeps the head.
+fn listing(mut envelope: Value, records: &[Value]) -> Value {
+    let mut kept = records.len();
+    loop {
+        let listed = &records[..kept];
+        envelope[DOCUMENTS] = Value::Array(listed.to_vec());
+        if kept < records.len() {
+            envelope[OMITTED] = json!(records.len() - kept);
+        }
+        cite(&mut envelope, listed);
+        if json_chars(&envelope) <= MAX_TOOL_OUTPUT_CHARS || kept <= 1 {
+            return envelope;
+        }
+        kept -= 1;
+    }
+}
+
+fn reading(mut envelope: Value, record: Value) -> Value {
+    cite(&mut envelope, std::slice::from_ref(&record));
+    envelope[DOCUMENT] = record;
+    envelope
+}
+
+/// Tell the model how to write a marker, but only where it has one to write.
+/// Trimming can take the last identified record, and an instruction to cite
+/// what is left would then be an invitation to invent a marker.
+fn cite(envelope: &mut Value, records: &[Value]) {
+    if records.iter().any(identified) {
+        envelope[NOTE] = json!(CITE_NOTE);
+    } else if let Some(object) = envelope.as_object_mut() {
+        object.remove(NOTE);
+    }
+}
+
+fn identified(record: &Value) -> bool {
+    record.get(IDENTIFIER).is_some()
+}
+
+fn json_chars(value: &Value) -> usize {
+    value.to_string().chars().count()
 }
 
 fn integer(params: &Value, key: &str, default: i64, minimum: i64) -> Result<i64, ToolResult> {
@@ -361,7 +512,7 @@ fn page_stored(
     Ok((page, next.is_none() && offset == 0, next, total))
 }
 
-fn identifier(params: &Value) -> Result<Uuid, ToolResult> {
+fn document_id(params: &Value) -> Result<Uuid, ToolResult> {
     required_text(params, "id")?
         .parse()
         .map_err(|_| ToolResult::error("id must be a valid document UUID."))
@@ -384,6 +535,357 @@ fn required_text<'a>(params: &'a Value, key: &str) -> Result<&'a str, ToolResult
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::citations::{self, CitationKind};
+    use crate::agent::identifier;
+    use crate::state::{AppState, test_config};
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
+
+    const URI: &str = "knowledge://0f9e8d7c-6b5a-4d3e-8f1a-2b3c4d5e6f70";
+    const TITLE: &str = "Deployment guide";
+    const OBSERVED: &str = "2026-09-05T00:00:00+00:00";
+    const READ_TOOL: &str = "read_document";
+    const LIST_TOOL: &str = "list_documents";
+
+    /// Bounds the wait on a registry that never answers, so a failed write
+    /// costs a test milliseconds rather than the default acquire timeout.
+    const REGISTRY_TIMEOUT: Duration = Duration::from_millis(250);
+
+    /// How long a connection the registry already holds may take to surface.
+    const ACCEPT_TIMEOUT: Duration = Duration::from_millis(250);
+
+    fn tool(chat: Option<Uuid>, registry: u16) -> DocumentTool {
+        let database = PgPoolOptions::new()
+            .acquire_timeout(REGISTRY_TIMEOUT)
+            .connect_lazy(&format!("postgres://127.0.0.1:{registry}/zone"))
+            .expect("a lazy pool needs no server");
+        DocumentTool {
+            scope: WorkspaceScope {
+                state: AppState::new(test_config(), database, None),
+                workspace_id: Uuid::new_v4(),
+                chat_id: chat,
+                user_id: Uuid::new_v4(),
+            },
+            operation: Operation::Read,
+        }
+    }
+
+    fn document(uri: &str, title: &str) -> Document {
+        Document {
+            id: Uuid::new_v4(),
+            title: title.to_string(),
+            content: None,
+            source: "knowledge".to_string(),
+            source_id: None,
+            uri: uri.to_string(),
+            updated_at: None,
+            fetched_at: None,
+            editable: true,
+            revision: Some("2f6a1b".to_string()),
+        }
+    }
+
+    fn registered(document: &Document, identifier: &str) -> chat_sources::Source {
+        let observed = Utc::now();
+        chat_sources::Source {
+            chat_id: Uuid::new_v4(),
+            identifier: identifier.to_string(),
+            kind: Kind::Doc,
+            key: document.uri.clone(),
+            uri: document.uri.clone(),
+            title: document.title.clone(),
+            first_observed_at: observed,
+            last_observed_at: observed,
+        }
+    }
+
+    /// More documents than one envelope can hold, so a listing of them trims.
+    fn oversized() -> Vec<Document> {
+        (0..LIST_LIMIT)
+            .map(|index| {
+                document(
+                    &format!("knowledge://{index}-{}", "e4b1c9a7".repeat(12)),
+                    &format!("{index} {}", TITLE.repeat(8)),
+                )
+            })
+            .collect()
+    }
+
+    fn identified_record(document: &Document, identifier: &str) -> Value {
+        let mut record = json!(document);
+        stamp(
+            &mut record,
+            Uuid::new_v4(),
+            &document.uri,
+            Ok(registered(document, identifier)),
+        );
+        record
+    }
+
+    /// The registry owns the identifier: a digest whose prefix another URI
+    /// already holds is extended by the write, so anything minted here could be
+    /// stale before it is rendered.
+    #[test]
+    fn a_document_carries_the_identifier_the_registry_returned() {
+        let document = document(URI, TITLE);
+        let minted = identifier::mint(Kind::Doc, &document.uri);
+        let extended =
+            identifier::extend(&minted, &document.uri).expect("a minted identifier extends");
+
+        let record = identified_record(&document, &extended);
+
+        assert_eq!(record[IDENTIFIER], json!(extended));
+        assert_ne!(
+            record[IDENTIFIER],
+            json!(minted),
+            "the record carries a locally minted identifier rather than the one the registry wrote"
+        );
+        assert!(
+            record[IDENTIFIER]
+                .as_str()
+                .is_some_and(|identifier| { identifier.starts_with(&format!("{}:", Kind::Doc)) }),
+            "a document is cited as something other than a document: {record}"
+        );
+    }
+
+    /// The record the model reads and the citation a marker resolves to are the
+    /// same registry row, so a marker written against a document lands on the
+    /// citation beside it rather than on a second, differently named copy of
+    /// the same source.
+    #[test]
+    fn a_documents_citation_carries_the_identifier_the_document_does() {
+        let document = document(URI, TITLE);
+        let source = registered(&document, &identifier::mint(Kind::Doc, &document.uri));
+        let record = identified_record(&document, &source.identifier);
+
+        let citation = citations::from_source(
+            CitationKind::WorkspaceDocument,
+            &source.identifier,
+            &source.title,
+            &source.uri,
+            source.first_observed_at,
+        );
+
+        assert_eq!(
+            record[IDENTIFIER],
+            json!(
+                citation
+                    .identifier
+                    .expect("a cited source carries its identifier")
+            )
+        );
+        assert_eq!(record["uri"], json!(citation.url));
+        assert_eq!(record["title"], json!(citation.title));
+    }
+
+    /// The envelope tells the model to cite a document as `[doc:6a1f2c]`, and
+    /// the console resolves that marker against the identifier its citation
+    /// carries. A citation built without one leaves every document marker
+    /// inert: the server read the document, said so, and still rendered the
+    /// reader an unresolved marker.
+    #[test]
+    fn a_read_document_is_cited_by_the_identifier_its_marker_names() {
+        let document = document(URI, TITLE);
+        let minted = identifier::mint(Kind::Doc, &document.uri);
+        let record = identified_record(&document, &minted);
+        let envelope = reading(json!({"complete": true, "observed_at": OBSERVED}), record);
+
+        let citations = citations::from_tool_at(READ_TOOL, &envelope.to_string(), OBSERVED);
+
+        assert_eq!(
+            citations.len(),
+            1,
+            "one document is one citation: {citations:?}"
+        );
+        assert_eq!(
+            citations[0].identifier.as_deref(),
+            Some(minted.as_str()),
+            "the marker the envelope asks for resolves against this identifier, so the \
+             citation has to carry it"
+        );
+    }
+
+    /// An identifier the write never produced would resolve to nothing, leaving
+    /// the reader an inert marker for a document that genuinely exists. The
+    /// registry here accepts the connection and answers nothing, so the write
+    /// fails after it was unmistakably attempted.
+    #[tokio::test]
+    async fn a_failed_registry_write_leaves_the_document_bare_and_the_turn_intact() {
+        let registry = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a registry that never answers still needs a port");
+        let port = registry.local_addr().expect("a bound port").port();
+        let document = document(URI, TITLE);
+
+        let record = tool(Some(Uuid::new_v4()), port).identify(&document).await;
+
+        assert!(
+            timeout(ACCEPT_TIMEOUT, registry.accept()).await.is_ok(),
+            "the read never reached the chat's source registry"
+        );
+        assert!(
+            !identified(&record),
+            "a document the registry never accepted must render bare: {record}"
+        );
+        let envelope = reading(json!({"complete": true, "observed_at": OBSERVED}), record);
+        assert_eq!(
+            envelope.get(NOTE),
+            None,
+            "the envelope asks for a marker no document in it can supply: {envelope}"
+        );
+        let citations = citations::from_tool_at(READ_TOOL, &envelope.to_string(), OBSERVED);
+        assert_eq!(
+            citations.len(),
+            1,
+            "a failed registry write cost the turn its citation: {citations:?}"
+        );
+        assert_eq!(citations[0].url, URI);
+    }
+
+    /// A background task run has no chat, and the registry is per-chat exactly
+    /// so a citation names something this conversation retrieved. Minting into
+    /// any other chat's registry would break that, so a run without a chat
+    /// reaches no registry at all.
+    #[tokio::test]
+    async fn a_run_without_a_chat_mints_nothing() {
+        let registry = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a registry no run should reach still needs a port");
+        let port = registry.local_addr().expect("a bound port").port();
+        let documents = [
+            document(URI, TITLE),
+            document(
+                "knowledge://8c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+                "Runbook",
+            ),
+        ];
+
+        let records = tool(None, port).identify_all(&documents).await;
+
+        assert!(
+            timeout(ACCEPT_TIMEOUT, registry.accept()).await.is_err(),
+            "a run with no chat wrote into some other chat's registry"
+        );
+        assert!(
+            !records.iter().any(identified),
+            "a run with no chat minted an identifier: {records:?}"
+        );
+        assert_eq!(
+            listing(json!({"observed_at": OBSERVED}), &records).get(NOTE),
+            None,
+            "a run with no chat is told to cite identifiers it was never given"
+        );
+    }
+
+    /// A document that no longer fits the envelope takes its identifier and its
+    /// citation with it. The model must not read a marker for a document that
+    /// is no longer in front of it, and the reply must not carry a citation for
+    /// one either.
+    #[test]
+    fn a_trimmed_document_takes_its_identifier_and_citation_with_it() {
+        let documents = oversized();
+        let records: Vec<Value> = documents
+            .iter()
+            .map(|document| {
+                identified_record(document, &identifier::mint(Kind::Doc, &document.uri))
+            })
+            .collect();
+        let base = json!({"offset": 0, "limit": LIST_LIMIT, "observed_at": OBSERVED});
+
+        let envelope = listing(base.clone(), &records);
+
+        let kept = envelope[DOCUMENTS]
+            .as_array()
+            .expect("a listing carries its documents")
+            .len();
+        let omitted = envelope[OMITTED]
+            .as_u64()
+            .expect("a trimmed listing says how many documents it dropped")
+            as usize;
+        let mut untrimmed = base;
+        untrimmed[DOCUMENTS] = json!(records);
+        assert!(
+            json_chars(&untrimmed) > MAX_TOOL_OUTPUT_CHARS,
+            "the fixture fits the budget whole, so nothing here is ever trimmed"
+        );
+        assert!(omitted > 0 && kept > 0, "{kept} kept, {omitted} omitted");
+        assert_eq!(kept + omitted, records.len());
+        assert!(
+            json_chars(&envelope) <= MAX_TOOL_OUTPUT_CHARS,
+            "a trimmed listing is still over the output budget at {} characters",
+            json_chars(&envelope)
+        );
+
+        let rendered = envelope.to_string();
+        let citations = citations::from_tool_at(LIST_TOOL, &rendered, OBSERVED);
+        assert_eq!(
+            citations.len(),
+            kept,
+            "the trimmed envelope no longer parses, so every citation was lost: {rendered}"
+        );
+        for dropped in &documents[kept..] {
+            let identifier = identifier::mint(Kind::Doc, &dropped.uri);
+            assert!(
+                !rendered.contains(&identifier),
+                "{identifier} outlived the record it named"
+            );
+            assert!(
+                !citations.iter().any(|citation| citation.url == dropped.uri),
+                "a document trimmed out of the envelope kept its citation"
+            );
+        }
+        for surviving in &documents[..kept] {
+            let identifier = identifier::mint(Kind::Doc, &surviving.uri);
+            assert!(
+                rendered.contains(&identifier),
+                "{identifier} was trimmed off a document that survived"
+            );
+            assert!(
+                citations
+                    .iter()
+                    .any(|citation| citation.url == surviving.uri),
+                "a document still in the envelope lost its citation"
+            );
+        }
+    }
+
+    /// Trimming can take the last document that carried an identifier. What is
+    /// left is uncitable, and an envelope that went on asking for a marker
+    /// would be asking the model to invent one.
+    #[test]
+    fn a_listing_that_trims_away_every_identified_document_asks_for_no_marker() {
+        let documents = oversized();
+        let identified_from = documents.len() - 5;
+        let records: Vec<Value> = documents
+            .iter()
+            .enumerate()
+            .map(|(index, document)| {
+                if index < identified_from {
+                    json!(document)
+                } else {
+                    identified_record(document, &identifier::mint(Kind::Doc, &document.uri))
+                }
+            })
+            .collect();
+
+        let envelope = listing(json!({"observed_at": OBSERVED}), &records);
+
+        let listed = envelope[DOCUMENTS]
+            .as_array()
+            .expect("a listing carries its documents");
+        assert!(
+            listed.len() < identified_from,
+            "the fixture kept an identified document, so nothing here trims one away"
+        );
+        assert!(!listed.iter().any(identified));
+        assert_eq!(
+            envelope.get(NOTE),
+            None,
+            "the envelope asks for a marker no document left in it can supply: {envelope}"
+        );
+    }
 
     #[test]
     fn preserves_complete_unicode_text_and_whitespace() {

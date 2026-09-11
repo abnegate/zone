@@ -1,5 +1,6 @@
 import type { Citation } from '../types';
 import {
+  citationAnchorId,
   citationEvidence,
   citationEvidenceLabel,
   citationHref,
@@ -26,6 +27,7 @@ function CitationItem({ citation }: { citation: Citation }) {
     <li
       className={`citation citation--${evidence} citation--${citation.provenance.replace('_', '-')}`}
       data-testid="citation"
+      id={citation.identifier ? citationAnchorId(citation.identifier) : undefined}
     >
       {href ? (
         <a

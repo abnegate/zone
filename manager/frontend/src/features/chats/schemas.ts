@@ -65,10 +65,17 @@ export const CitationSchema = z.object({
     'github_issue',
     'github_file',
     'workspace_document',
+    'knowledge_passage',
+    'web',
     'behavioral_verification',
   ]),
   title: z.string(),
   url: z.string(),
+  // The stable per-chat handle a reply cites this source by. Optional, because
+  // every citation stored before it existed has to keep parsing: these objects
+  // are not passthrough, and `tolerantArray` drops what does not conform, so a
+  // required field here would delete the history it is meant to extend.
+  identifier: z.string().nullish(),
   revision: z.string().nullish(),
   observed_at: z.string(),
   complete: z.boolean(),

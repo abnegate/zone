@@ -14,11 +14,25 @@ const KIND_LABELS: Record<Citation['kind'], string> = {
   github_issue: 'GitHub issue',
   github_file: 'GitHub file',
   workspace_document: 'Workspace document',
+  knowledge_passage: 'Knowledge passage',
+  web: 'Web page',
   behavioral_verification: 'Behavioral verification',
 };
 
 export function citationKindLabel(kind: Citation['kind']): string {
   return KIND_LABELS[kind] ?? kind;
+}
+
+const ANCHOR_PREFIX = 'citation-';
+
+/// The id the citations aside puts on a chip, and the target a source marker in
+/// the reply links to. Both sides derive it from the identifier alone, so a
+/// reordered citation list never re-points a marker.
+export function citationAnchorId(identifier: string): string {
+  return `${ANCHOR_PREFIX}${identifier
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')}`;
 }
 
 /// Passing only when the observation is complete, successful, and something
@@ -85,12 +99,27 @@ export function formatObservedAt(value: string): string {
   return date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+/// An identifier names a source; an address only says where to read one. One
+/// address can back several registry sources — a document indexed into the
+/// knowledge base is reachable as both — so folding them together by address
+/// would drop an identifier the reply already cites and leave its marker
+/// reading as unresolved. Address equality settles it only for citations
+/// stored before identifiers existed.
+function sameSource(seen: Citation, incoming: Citation): boolean {
+  const left = handle(seen);
+  const right = handle(incoming);
+  if (left && right) return left === right;
+  return seen.url === incoming.url && seen.revision === incoming.revision;
+}
+
+function handle(citation: Citation): string | null {
+  return citation.identifier?.trim().toLowerCase() || null;
+}
+
 export function mergeCitations(existing: Citation[] | undefined, incoming: Citation[]): Citation[] {
   const merged = [...(existing ?? [])];
   for (const citation of incoming) {
-    if (merged.some((seen) => seen.url === citation.url && seen.revision === citation.revision)) {
-      continue;
-    }
+    if (merged.some((seen) => sameSource(seen, citation))) continue;
     merged.push(citation);
   }
   return merged;
