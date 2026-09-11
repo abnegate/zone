@@ -14,6 +14,8 @@ use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{
@@ -899,4 +901,251 @@ async fn queued_media_stops_when_its_chat_lease_is_fenced() {
     );
     first.close(None).await.unwrap();
     second.close(None).await.unwrap();
+}
+
+const QUESTION_HEADER: &str = "Scope";
+const RECOMMENDED_LABEL: &str = "Backfill";
+const OTHER_LABEL: &str = "Other";
+const ANSWER: &str = "Scope: Backfill";
+const AWAITING_ANSWER: &str = "[Waiting for your answer]";
+const AWAITING_DETAIL: &str = "Waiting for your answer\u{2026}";
+
+fn ask_user_arguments() -> String {
+    json!({
+        "questions": [{
+            "header": QUESTION_HEADER,
+            "question": "How far back should the backfill run?",
+            "options": [
+                {"label": RECOMMENDED_LABEL, "description": "Rewrite every existing row."},
+                {"label": "Forward only", "description": "Leave existing rows alone."}
+            ],
+            "required": true
+        }]
+    })
+    .to_string()
+}
+
+fn sse(deltas: Vec<Value>) -> String {
+    let mut body = String::new();
+    for delta in deltas {
+        let chunk = json!({
+            "id": "completion", "object": "chat.completion.chunk", "created": 0, "model": "test",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": null}]
+        });
+        body.push_str(&format!("data: {chunk}\n\n"));
+    }
+    let end = json!({
+        "id": "completion", "object": "chat.completion.chunk", "created": 0, "model": "test",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    });
+    body.push_str(&format!("data: {end}\n\ndata: [DONE]\n\n"));
+    body
+}
+
+/// Mirrors `assert_replay` in the agent tests: every call from the parked turn
+/// has to come back with exactly one tool reply, or the provider rejects the
+/// transcript the answer is appended to.
+fn assert_replay(request: &Value, count: usize) {
+    let messages = request["messages"].as_array().unwrap();
+    let calls: Vec<&Value> = messages
+        .iter()
+        .filter(|message| message["tool_calls"].is_array())
+        .collect();
+    assert_eq!(calls.len(), count, "{request}");
+    for message in calls {
+        for call in message["tool_calls"].as_array().unwrap() {
+            let id = call["id"].as_str().unwrap();
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message["role"] == "tool" && message["tool_call_id"] == id)
+                    .count(),
+                1,
+                "call {id} was not answered exactly once: {request}"
+            );
+        }
+    }
+}
+
+async fn drain_turn(socket: &mut Socket) -> Vec<Value> {
+    let mut frames = Vec::new();
+    loop {
+        let frame = next_json(socket).await.expect("the turn must terminate");
+        assert_ne!(frame["type"], "error", "{frame}");
+        assert_ne!(frame["type"], "cancelled", "{frame}");
+        let ended = frame["type"] == "message_end";
+        frames.push(frame);
+        if ended {
+            return frames;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_turn_ending_question_is_published_stored_and_answered_by_an_ordinary_send() {
+    let provider = MockServer::start().await;
+    let rounds = Arc::new(Mutex::new(VecDeque::from(vec![
+        sse(vec![json!({"tool_calls": [{
+            "index": 0,
+            "id": "call_ask",
+            "type": "function",
+            "function": {"name": "ask_user", "arguments": ask_user_arguments()}
+        }]})]),
+        sse(vec![json!({"content": "Backfilling every row."})]),
+    ])));
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(move |_request: &wiremock::Request| {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    rounds
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .expect("extra completion"),
+                )
+        })
+        .mount(&provider)
+        .await;
+
+    let mut config = test_config();
+    config.litellm_host = provider.uri();
+    config.comfyui.enabled = false;
+    config.web_search.enabled = false;
+    let pool = create_test_pool().await;
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, _workspace, chat) = seed(&client).await;
+    client
+        .put_json_auth(
+            &format!("/api/chats/{chat}"),
+            &json!({"agent_enabled": true, "agent_sandboxed": true}),
+            &token,
+        )
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+    let address = spawn(config, pool).await;
+    let mut socket = authenticate(&address, chat, &token).await;
+
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "send", "content": "Change the column type."})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let frames = drain_turn(&mut socket).await;
+
+    let cards: Vec<&Value> = frames
+        .iter()
+        .filter(|frame| frame["type"] == "question_required")
+        .collect();
+    assert_eq!(
+        cards.len(),
+        1,
+        "exactly one card per question turn: {frames:?}"
+    );
+    let card = cards[0];
+    let call = frames
+        .iter()
+        .find(|frame| frame["type"] == "tool_call")
+        .expect("the card follows the call that asked");
+    assert_eq!(card["message_id"], call["message_id"]);
+    assert_eq!(card["tool_call_id"], call["tool_call_id"]);
+    assert_eq!(card["questions"][0]["header"], QUESTION_HEADER);
+    assert_eq!(
+        card["questions"][0]["choices"][0]["label"],
+        RECOMMENDED_LABEL
+    );
+    assert_eq!(card["questions"][0]["choices"][0]["recommended"], true);
+    let last = card["questions"][0]["choices"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    assert_eq!(last["label"], OTHER_LABEL);
+    assert_eq!(last["free_text"], true);
+
+    let position = frames
+        .iter()
+        .position(|frame| frame["type"] == "question_required")
+        .unwrap();
+    assert_eq!(frames.last().unwrap()["type"], "message_end");
+    assert!(
+        frames[position..]
+            .iter()
+            .all(|frame| frame["type"] != "chunk"),
+        "a question ends the turn, so nothing is streamed after it: {frames:?}"
+    );
+
+    let history = client
+        .get_auth(&format!("/api/chats/{chat}"), &token)
+        .await
+        .json_value();
+    let stored = history["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .expect("the parked turn is kept")
+        .clone();
+    let record = &stored["metadata"]["tool_calls"][0];
+    assert_eq!(record["name"], "ask_user");
+    assert_eq!(record["detail"], AWAITING_DETAIL);
+    assert_eq!(record["questions"][0]["header"], QUESTION_HEADER);
+    assert_eq!(record["questions"][0]["choices"][0]["recommended"], true);
+    assert_eq!(
+        stored["content"], AWAITING_ANSWER,
+        "a turn waiting on the reader is not a turn that stopped"
+    );
+
+    // The live frame log is cleared by message_end, so a reader who rejoins
+    // rebuilds the card from the stored message rather than from a replay.
+    let mut rejoined = authenticate(&address, chat, &token).await;
+    assert!(
+        next_json(&mut rejoined).await.is_none(),
+        "a finished question turn replays no frames"
+    );
+    rejoined.close(None).await.unwrap();
+
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "send", "content": ANSWER})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let answered = drain_turn(&mut socket).await;
+    assert!(
+        answered
+            .iter()
+            .all(|frame| frame["type"] != "question_required"),
+        "the answer starts an ordinary turn: {answered:?}"
+    );
+    socket.close(None).await.unwrap();
+
+    let requests: Vec<Value> = provider
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path() == "/chat/completions")
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect();
+    assert_eq!(requests.len(), 2, "one provider round per turn");
+    let second = &requests[1];
+    assert!(
+        second["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "user" && message["content"] == ANSWER),
+        "the answer reaches the model as an ordinary user turn: {second}"
+    );
+    assert_replay(second, 1);
 }

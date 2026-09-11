@@ -88,6 +88,12 @@ pub struct ToolCallRecord {
     /// mid-decision is still deciding on the action rather than on raw JSON.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// The cards a turn-ending question put to the reader. Stored here rather
+    /// than replayed, because the turn ends the moment the question is asked
+    /// and the live frame log is cleared with it: a reload has only the
+    /// message's metadata to rebuild the card from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<Question>,
 }
 
 #[cfg(test)]
@@ -106,6 +112,7 @@ mod tests {
             reasoning: Some("Search workspace docs first.".into()),
             reason: Some("The user asked what changed in the deploy.".into()),
             preview: None,
+            questions: Vec::new(),
         };
 
         let json = serde_json::to_value(&record).unwrap();
@@ -113,6 +120,54 @@ mod tests {
         assert_eq!(json["success"], true);
         assert_eq!(json["reasoning"], "Search workspace docs first.");
         assert_eq!(json["reason"], "The user asked what changed in the deploy.");
+        assert!(
+            json.get("questions").is_none(),
+            "a record that asked nothing must not carry an empty question list"
+        );
+
+        let parsed: ToolCallRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, record);
+    }
+
+    #[test]
+    fn tool_call_record_carries_its_question_cards_through_metadata() {
+        let record = ToolCallRecord {
+            id: "call_9".to_string(),
+            name: ASK_USER.to_string(),
+            arguments: r#"{"questions":[]}"#.to_string(),
+            success: true,
+            detail: "Waiting for your answer…".to_string(),
+            duration_ms: 1,
+            reasoning: None,
+            reason: None,
+            preview: None,
+            questions: vec![Question {
+                header: "Scope".to_string(),
+                question: "How far back should the backfill run?".to_string(),
+                choices: vec![
+                    Choice {
+                        label: "Backfill".to_string(),
+                        description: "Rewrite every existing row.".to_string(),
+                        recommended: true,
+                        free_text: false,
+                    },
+                    Choice {
+                        label: question::OTHER_LABEL.to_string(),
+                        description: question::OTHER_DESCRIPTION.to_string(),
+                        recommended: false,
+                        free_text: true,
+                    },
+                ],
+                preview: None,
+                multi_select: false,
+                required: true,
+            }],
+        };
+
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["questions"][0]["header"], "Scope");
+        assert_eq!(json["questions"][0]["choices"][0]["recommended"], true);
+        assert_eq!(json["questions"][0]["choices"][1]["free_text"], true);
 
         let parsed: ToolCallRecord = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, record);
@@ -133,11 +188,17 @@ mod tests {
         assert_eq!(parsed.reason, None);
         assert_eq!(parsed.reasoning, None);
         assert!(
-            serde_json::to_value(&parsed)
-                .unwrap()
-                .get("reason")
-                .is_none(),
+            parsed.questions.is_empty(),
+            "a record written before questions existed must still parse"
+        );
+        let written = serde_json::to_value(&parsed).unwrap();
+        assert!(
+            written.get("reason").is_none(),
             "an absent reason must not be written back as null"
+        );
+        assert!(
+            written.get("questions").is_none(),
+            "an empty question list must not be written back"
         );
     }
 
