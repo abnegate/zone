@@ -110,6 +110,49 @@ describe('task runner contract', () => {
     expect(fetch).toHaveBeenCalledTimes(4);
     for (const call of fetch.mock.calls) expect(call[1]?.signal).toBe(controller.signal);
   });
+  it('sends the structured answers to the answering route and reads the confirmation back', async () => {
+    const answers = [
+      { header: 'Scope', labels: ['Backfill'] },
+      { header: 'Timing', labels: ['Other'], other: 'after the release' },
+    ];
+    const accepted = { run_id: 'run/1', answered: 2 };
+    fetch.mockResolvedValueOnce(Response.json(accepted, { status: 202 }));
+
+    expect(await tasksApi.answerRun('run/1', answers)).toEqual(accepted);
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/tasks/runs/run%2F1/answers'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ answers }),
+        headers: expect.objectContaining({ Authorization: 'Bearer test-token' }),
+      })
+    );
+  });
+
+  it('keeps an accepted answer accepted when the confirmation is unreadable', async () => {
+    fetch.mockResolvedValueOnce(new Response('<html>proxy ate it</html>', { status: 202 }));
+
+    expect(
+      await tasksApi.answerRun('run-1', [{ header: 'Scope', labels: ['Backfill'] }])
+    ).toBeUndefined();
+  });
+
+  it('keeps an accepted answer accepted when the confirmation is a shape it cannot read', async () => {
+    fetch.mockResolvedValueOnce(Response.json({ run_id: 'run-1' }, { status: 202 }));
+
+    expect(
+      await tasksApi.answerRun('run-1', [{ header: 'Scope', labels: ['Backfill'] }])
+    ).toBeUndefined();
+  });
+
+  it('surfaces the server rejection of an answer rather than a bare status', async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json({ message: 'Answer a required question' }, { status: 400 })
+    );
+
+    await expect(tasksApi.answerRun('run-1', [])).rejects.toThrow('Answer a required question');
+  });
+
   it('preserves runner rejection messages', async () => {
     fetch.mockResolvedValueOnce(
       Response.json({ error: 'Task already has an active run' }, { status: 409 })

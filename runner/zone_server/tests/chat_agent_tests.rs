@@ -10,7 +10,7 @@ use std::time::Duration;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_core::llm::{LlmClient, LlmConfig, Message, Role};
+use zone_core::llm::{FunctionCall, LlmClient, LlmConfig, Message, Role, ToolCall};
 use zone_core::tools::Tool;
 use zone_server::agent::prompt;
 use zone_server::agent::{
@@ -189,6 +189,48 @@ async fn malformed_tool_reply_is_corrected_before_execution() {
             .unwrap()
             .iter()
             .any(|message| message["role"] == "tool")
+    );
+}
+
+/// The corrective steers the rest of this turn and nothing beyond it.
+///
+/// Reporting it as `Canonical` would look like the way to let a consumer that
+/// rebuilds a turn from the events see it, but a chat commits every `Canonical`
+/// to durable turn history: `db::context` refuses a `System` role there, and
+/// anything that did land would come back preserved in every later turn, so a
+/// conversation would carry a complaint about a reply it no longer contains.
+#[tokio::test]
+async fn the_malformed_call_corrective_steers_the_turn_without_outliving_it() {
+    let (events, requests) = exercise(vec![
+        text(MALFORMED),
+        text(&call(Some("call_0"))),
+        text("Please provide the file path."),
+    ])
+    .await;
+
+    let replayed = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| {
+            message["role"] == "system"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("malformed tool call"))
+        });
+    assert!(
+        replayed,
+        "the round after a malformed reply was never told about it: {:?}",
+        requests[1]["messages"]
+    );
+
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            AgentEvent::Canonical(entry) if entry.message.role == Role::System
+        )),
+        "a system nudge reported as canonical is one a chat would persist and \
+         then replay into every later turn: {events:?}"
     );
 }
 
@@ -1026,6 +1068,7 @@ async fn a_stated_reason_reaches_the_approval_frame_and_the_stored_record() {
         reasoning: None,
         reason: zone_server::agent::reason(&arguments),
         preview: Some("Write 5 characters to the draft, replacing whatever is there.".to_string()),
+        questions: Vec::new(),
     };
     assert_eq!(record.reason.as_deref(), Some(WHY));
     let stored = serde_json::to_value(&record).unwrap();
@@ -1114,4 +1157,183 @@ async fn a_side_effecting_call_omitting_its_reason_still_executes() {
     assert_eq!(started(&events), vec!["silent_write"]);
     assert_eq!(requests.len(), 2);
     assert_eq!(answer(&events), "Saved.");
+}
+
+fn ask(id: &str) -> Value {
+    json!({
+        "id": id,
+        "name": "ask_user",
+        "arguments": {
+            "questions": [{
+                "header": "Scope",
+                "question": "How far back should the rewrite run?",
+                "options": [
+                    {"label":"Backfill","description":"Rewrite the existing rows."},
+                    {"label":"Forward only","description":"Leave the existing rows alone."}
+                ]
+            }]
+        }
+    })
+}
+
+fn search(id: &str) -> Value {
+    json!({"id":id,"name":"search_knowledge","arguments":{"query":"deploys"}})
+}
+
+fn read(id: &str) -> Value {
+    json!({"id":id,"name":"read_file","arguments":{"unused":id}})
+}
+
+fn questioned(events: &[AgentEvent]) -> Vec<(&str, usize)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::QuestionRequired {
+                tool_call_id,
+                questions,
+                ..
+            } => Some((tool_call_id.as_str(), questions.len())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_entries(events: &[AgentEvent]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Canonical(entry) if entry.message.role == Role::Tool => Some((
+                entry.message.tool_call_id.clone().unwrap_or_default(),
+                entry.message.content.clone().unwrap_or_default(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every call the model requested, tagged by whether it started or finished,
+/// so a batch is visible as starts that precede the completions.
+fn dispatch(events: &[AgentEvent]) -> Vec<(&str, &str)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolCallStarted { id, .. } => Some(("started", id.as_str())),
+            AgentEvent::ToolCallCompleted { id, .. } => Some(("completed", id.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_question_ends_the_turn_and_strands_the_calls_queued_behind_it() {
+    let (events, requests) = exercise(vec![text(
+        &json!([ask("ask_1"), search("search_1"), search("search_2")]).to_string(),
+    )])
+    .await;
+
+    assert_eq!(questioned(&events), vec![("ask_1", 1)]);
+    assert_eq!(
+        started(&events),
+        vec!["ask_1"],
+        "nothing queued behind the question runs"
+    );
+    let entries = tool_entries(&events);
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    assert_eq!(entries[0].0, "ask_1");
+    assert!(
+        entries[0]
+            .1
+            .contains("the answer arrives as the next user message"),
+        "{entries:?}"
+    );
+    for (id, content) in &entries[1..] {
+        assert!(id == "search_1" || id == "search_2", "{entries:?}");
+        assert_eq!(
+            content,
+            "Not executed: the turn ended when the user was asked a question."
+        );
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Finalizing(_))),
+        "a parked turn asks for no final answer"
+    );
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn the_turn_after_an_answer_replays_the_question_it_answers() {
+    let arguments = ask("ask_1")["arguments"].to_string();
+    let messages = vec![
+        Message::user("Change the tenant column."),
+        Message::assistant_with_tools(vec![ToolCall {
+            id: "ask_1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "ask_user".to_string(),
+                arguments,
+            },
+        }]),
+        Message::tool_result(
+            "ask_1",
+            "The question card was shown. Your turn ends here; the answer arrives as the next user message.",
+        ),
+        Message::user("Scope: Backfill"),
+    ];
+    let (events, requests) =
+        exercise_messages(vec![(200, text("Backfilling now."))], messages).await;
+
+    assert_eq!(answer(&events), "Backfilling now.");
+    assert!(questioned(&events).is_empty());
+    assert_eq!(requests.len(), 1);
+    assert_replay(requests.last().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn reads_queued_ahead_of_a_question_batch_without_it() {
+    let (events, requests) = exercise(vec![text(
+        &json!([read("read_1"), read("read_2"), ask("ask_1")]).to_string(),
+    )])
+    .await;
+
+    assert_eq!(
+        dispatch(&events),
+        vec![
+            ("started", "read_1"),
+            ("started", "read_2"),
+            ("completed", "read_1"),
+            ("completed", "read_2"),
+            ("started", "ask_1"),
+            ("completed", "ask_1"),
+        ]
+    );
+    assert_eq!(questioned(&events), vec![("ask_1", 1)]);
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn a_question_the_schema_rejects_fails_and_the_turn_carries_on() {
+    let malformed = json!({"id":"ask_1","name":"ask_user","arguments":{"questions":[]}});
+    let (events, requests) = exercise(vec![
+        text(&malformed.to_string()),
+        text(&read("read_1").to_string()),
+        text("Never mind."),
+    ])
+    .await;
+
+    assert!(questioned(&events).is_empty());
+    assert_eq!(started(&events), vec!["ask_1", "read_1"]);
+    let failed: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolCallCompleted {
+                id, success: false, ..
+            } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, vec!["ask_1", "read_1"]);
+    assert_eq!(answer(&events), "Never mind.");
+    assert_eq!(requests.len(), 3);
 }

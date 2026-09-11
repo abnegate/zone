@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, task_id, status, current_phase, progress_percent, started_at,\n               completed_at, error_message, artifacts, triggered_by\n        FROM task_runs\n        WHERE task_id = $1\n        ORDER BY started_at DESC\n        ",
+  "query": "\n        SELECT id, task_id, status, current_phase, progress_percent, started_at,\n               completed_at, error_message, artifacts, triggered_by, pending_question\n        FROM task_runs\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -112,6 +112,17 @@
             "name": "triggered_by"
           }
         }
+      },
+      {
+        "ordinal": 10,
+        "name": "pending_question",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "task_runs",
+            "name": "pending_question"
+          }
+        }
       }
     ],
     "parameters": {
@@ -129,8 +140,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "5f6f5930a3827af8cf9f4f2a17d8da6e682956d86cdf5c6fb1b2e0dd11d2be4c"
+  "hash": "3cc7366d27b91f3d560400cbc046b2d9f4851a3fac55ff8ba65079bc48141d8a"
 }

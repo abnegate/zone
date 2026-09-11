@@ -9,14 +9,16 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 use zone_core::agent::{AgentCallback, AgentPhase};
+use zone_core::context::Entry;
 use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage};
 use zone_core::tools::ToolResult;
 
 use crate::agent::prompt::{self, Environment, Vcs};
-use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget};
+use crate::agent::question::{self, Question};
+use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
 use crate::db::{ai_settings, tasks, workspaces};
 use crate::services::chat::session::{self, RunContext};
 use crate::services::stages;
@@ -36,6 +38,16 @@ const TASK_TIMEOUT: Duration = Duration::from_secs(TASK_TIMEOUT_SECS);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a run parked on questions it can proceed without waits before it
+/// proceeds on the option it recommended.
+///
+/// A background run has nobody watching it, so an optional question that
+/// blocked forever would turn every unattended overnight run into a stalled
+/// one. A required question gets no window at all: it is the run's only way
+/// forward, and defaulting past it would decide the thing the model said it
+/// could not decide.
+const OPTIONAL_ANSWER_WINDOW: Duration = Duration::from_secs(30);
+
 /// How long a run's event stream may go quiet before the log says so.
 ///
 /// The lease heartbeat proves the process is alive, which a wedged run is too.
@@ -49,6 +61,14 @@ const TASK_TEMPERATURE: f32 = 0.7;
 
 const RUN_COMPLETED: &str = "completed";
 const RUN_FAILED: &str = "failed";
+
+const PHASE_WAITING: &str = "waiting";
+const WAITING_ON_ANSWER: &str = "Task run is waiting on a question";
+const LOST_LEASE: &str = "Task execution lost its lease";
+const ANSWER_WITHDRAWN: &str = "The claim on the answer was withdrawn before one arrived";
+
+/// Between what one turn said and what the turn after the question said.
+const TURN_SEPARATOR: &str = "\n\n";
 
 const SOURCE_AGENT: &str = "agent";
 const SOURCE_TOOL: &str = "tool";
@@ -66,6 +86,45 @@ static TASK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 fn get_semaphore() -> &'static Arc<Semaphore> {
     TASK_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_TASKS)))
+}
+
+/// Serializes every test that takes execution permits out of the shared
+/// semaphore, so none of them measures another's capacity as its own.
+#[cfg(test)]
+static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// One execution slot out of [`MAX_CONCURRENT_TASKS`], given back while the run
+/// it belongs to is parked on a question.
+///
+/// A run waiting on a person is not executing. Held through the wait, five runs
+/// parked on required questions take every slot in the deployment for the hour
+/// a question is allowed to go unanswered, and `required` is the model's to set.
+struct Permit(std::sync::Mutex<Option<OwnedSemaphorePermit>>);
+
+impl Permit {
+    async fn acquire() -> Result<Self, AcquireError> {
+        let permit = get_semaphore().clone().acquire_owned().await?;
+        Ok(Self(std::sync::Mutex::new(Some(permit))))
+    }
+
+    /// Hand the slot back for the length of `waiting`, then queue for it again.
+    ///
+    /// Re-acquisition can itself wait, and that is the point: the run is about
+    /// to execute again and owes the pool a slot before it does. It happens
+    /// before the row leaves `'waiting'`, so a queued run still reads as parked.
+    async fn yielded<T>(&self, waiting: impl Future<Output = T>) -> Result<T, AcquireError> {
+        drop(self.held().take());
+        let value = waiting.await;
+        let reacquired = get_semaphore().clone().acquire_owned().await?;
+        *self.held() = Some(reacquired);
+        Ok(value)
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, Option<OwnedSemaphorePermit>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 /// How a failed attempt may be recovered.
@@ -131,6 +190,28 @@ impl Fault {
             failure: Failure::Terminal,
             status: "semaphore_denied",
             message: "System overload - semaphore closed".to_string(),
+        }
+    }
+
+    /// A lease this attempt no longer holds. Terminal, because whatever holds
+    /// it now is another execution of the same run, and retrying would put two
+    /// writers on one checkout.
+    fn lease() -> Self {
+        Self {
+            failure: Failure::Terminal,
+            status: RUN_FAILED,
+            message: LOST_LEASE.to_string(),
+        }
+    }
+
+    /// The claim on the answer went away before one arrived. Terminal, because
+    /// the only thing a retry can do is ask the same question into the same
+    /// silence, and it would spend the backoff with the run unanswerable.
+    fn withdrawn() -> Self {
+        Self {
+            failure: Failure::Terminal,
+            status: RUN_FAILED,
+            message: ANSWER_WITHDRAWN.to_string(),
         }
     }
 }
@@ -656,9 +737,8 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     } = execution;
     let mut obs = crate::metrics::TaskObs::new();
 
-    // Acquire semaphore permit to limit concurrent executions
-    let _permit = match get_semaphore().acquire().await {
-        Ok(p) => p,
+    let permit = match Permit::acquire().await {
+        Ok(permit) => permit,
         Err(_) => {
             obs.set_status("semaphore_denied");
             tracing::error!("Task semaphore closed for run {}", run_id);
@@ -848,6 +928,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let task_prompt = task_prompt.as_str();
     let guidance = guidance.as_str();
     let environment = &environment;
+    let permit = &permit;
 
     let result = run_with_policy(
         policy,
@@ -863,6 +944,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 guidance,
                 workspace,
                 environment,
+                permit,
             )
         },
         move |attempt| record_attempt(pool, run_id, policy, attempt),
@@ -1560,10 +1642,9 @@ async fn attempt_run(
     guidance: &str,
     workspace: &Path,
     environment: &Environment,
+    permit: &Permit,
 ) -> Result<TaskOutcome, Fault> {
-    let tools = ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
-        .await
-        .with_task_lease(state.db().clone(), run_id, owner);
+    let tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
 
     let capacity = Resolver::with_context(
         &state.config().litellm_host,
@@ -1609,22 +1690,247 @@ async fn attempt_run(
     context.policy = policy;
     context.reason = capacity.reason;
 
-    match tokio::time::timeout(
-        TASK_TIMEOUT,
-        run_task_loop(llm, model.to_string(), tools, context, &callback),
+    // One timeout covers every turn of the attempt, waiting included: a run
+    // parked on a required question is spending the same budget a wedged one
+    // would, and a second timer around the wait would end it on different terms.
+    let turns = async {
+        let mut tools = tools;
+        let mut context = context;
+        // One budget covers every turn of the attempt. A fresh one per park is
+        // no ceiling at all: a model looping on `ask_user` restarts it as often
+        // as it likes, and an all-optional card answers itself in 30 seconds.
+        let mut budget = LoopBudget::task();
+        let mut answers: Vec<String> = Vec::new();
+        let mut carried = TaskOutcome::empty();
+        loop {
+            match run_task_loop(
+                llm.clone(),
+                model.to_string(),
+                tools,
+                context,
+                budget,
+                &callback,
+            )
+            .await
+            {
+                Err(error) => return Err(Fault::agent(error)),
+                Ok(TurnOutcome::Finished(outcome)) => {
+                    carried.absorb(outcome);
+                    return Ok(carried);
+                }
+                Ok(TurnOutcome::Parked {
+                    tool_call_id,
+                    questions,
+                    context: parked,
+                    turn,
+                    spent,
+                }) => {
+                    carried.absorb(turn);
+                    budget = budget.less(spent);
+                    let answered =
+                        park_for_answer(state, run_id, owner, &tool_call_id, &questions, permit)
+                            .await?;
+                    context = parked;
+                    resume_with(&mut context, answered, &mut answers);
+                    tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
+                }
+            }
+        }
+    };
+
+    match tokio::time::timeout(TASK_TIMEOUT, turns).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(Fault::timeout()),
+    }
+}
+
+/// Build the tool set one turn will consume.
+///
+/// [`ChatTools`] is not `Clone` and [`AgentRun`] takes it by value, so a run
+/// that survives its own question needs a fresh set for the turn after it
+/// rather than a hoisted one the first turn already ate.
+async fn task_tools(
+    state: &AppState,
+    run_id: Uuid,
+    owner: Uuid,
+    workspace_id: Uuid,
+    actor: Option<Uuid>,
+    workspace: &Path,
+) -> ChatTools {
+    ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
+        .await
+        .with_task_lease(state.db().clone(), run_id, owner)
+}
+
+/// No window when any question is required.
+fn answer_window(questions: &[Question]) -> Option<Duration> {
+    questions
+        .iter()
+        .all(|question| !question.required)
+        .then_some(OPTIONAL_ANSWER_WINDOW)
+}
+
+/// What the run tells the model when the window ran out unanswered.
+///
+/// The recommendation is the one the card already put first, so proceeding on
+/// it is the model's own stated default rather than a choice made for it.
+fn proceeding_on_defaults(questions: &[Question]) -> String {
+    questions
+        .iter()
+        .map(|question| {
+            let recommended = question
+                .choices
+                .iter()
+                .find(|choice| choice.recommended)
+                .map(|choice| choice.label.as_str())
+                .unwrap_or_default();
+            format!(
+                "No answer arrived within {} seconds. Proceeding on the stated default \u{2014} {}: {recommended}.",
+                OPTIONAL_ANSWER_WINDOW.as_secs(),
+                question.header
+            )
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+/// Park the run on its questions and come back with the message that resumes it.
+///
+/// The run keeps its lease and its admission slot throughout: the heartbeat
+/// future outside this call is what proves the process is still alive, and the
+/// widened status predicates are what let it keep proving it while parked.
+async fn park_for_answer(
+    state: &AppState,
+    run_id: Uuid,
+    owner: Uuid,
+    tool_call_id: &str,
+    questions: &[Question],
+    permit: &Permit,
+) -> Result<String, Fault> {
+    let pending = serde_json::json!({
+        "tool_call_id": tool_call_id,
+        "questions": questions,
+    });
+    // Registration precedes visibility: an answer posted the instant the row
+    // reads 'waiting' has to find a claim already standing, or it resolves
+    // nothing and the run waits out the whole timeout.
+    let waiter = question::expect(run_id);
+    if !matches!(
+        tasks::park_task_run(state.db(), run_id, owner, pending.clone()).await,
+        Ok(true)
+    ) {
+        return Err(Fault::lease());
+    }
+    if let Err(error) = tasks::add_owned_task_run_log(
+        state.db(),
+        run_id,
+        Some(owner),
+        PHASE_WAITING,
+        SOURCE_AGENT,
+        LEVEL_INFO,
+        WAITING_ON_ANSWER,
+        Some(pending),
     )
     .await
     {
-        Ok(Ok(outcome)) => Ok(outcome),
-        Ok(Err(error)) => Err(Fault::agent(error)),
-        Err(_) => Err(Fault::timeout()),
+        tracing::warn!(%run_id, %error, "Could not record a parked run");
     }
+
+    let window = answer_window(questions);
+    // The park is symmetric: every way out of the wait unparks the row before
+    // it propagates. An early return would leave the run reading 'waiting' with
+    // a live card while the retry re-executed it, and answering that card would
+    // find nothing waiting behind it.
+    let waited = permit.yielded(question::awaited(waiter, window)).await;
+    let window_outcome = match (waited, window) {
+        (Ok(Some(answers)), _) => question::render(questions, &answers).map_err(Fault::agent),
+        (Ok(None), Some(_)) => Ok(proceeding_on_defaults(questions)),
+        (Ok(None), None) => Err(Fault::withdrawn()),
+        (Err(_), _) => Err(Fault::overloaded()),
+    };
+
+    if !matches!(
+        tasks::resume_task_run(state.db(), run_id, owner).await,
+        Ok(true)
+    ) {
+        return Err(Fault::lease());
+    }
+    window_outcome
 }
 
 #[derive(Debug)]
 struct TaskOutcome {
     summary: String,
     tool_calls: usize,
+}
+
+impl TaskOutcome {
+    fn empty() -> Self {
+        Self {
+            summary: String::new(),
+            tool_calls: 0,
+        }
+    }
+
+    /// Fold one turn into the attempt's running total.
+    ///
+    /// An attempt that parked three times ran four turns, and the artifacts
+    /// describe the attempt: counting only the last turn under-reports the work
+    /// and throws away the prose the parked turns streamed before they asked.
+    fn absorb(&mut self, turn: Self) {
+        let prose = turn.summary.trim();
+        if !prose.is_empty() {
+            if !self.summary.is_empty() {
+                self.summary.push_str(TURN_SEPARATOR);
+            }
+            self.summary.push_str(prose);
+        }
+        self.tool_calls += turn.tool_calls;
+    }
+}
+
+/// Add the answer as the newest preserved user message, demoting the answers
+/// earlier resumes added and nothing else.
+///
+/// Leaving every answer preserved grows a set of entries compaction can never
+/// shed, one per question the run asked. Demoting every user entry instead
+/// takes the task prompt with them: it is the run's own specification, pinned
+/// by [`RunContext::from_messages`], and a run that parks once and later
+/// compacts would proceed on the model's paraphrase of what it was asked to do.
+/// `answers` carries the ids this added across the attempt's parks.
+fn resume_with(context: &mut RunContext, answered: String, answers: &mut Vec<String>) {
+    for entry in &mut context.entries {
+        if answers.contains(&entry.id) {
+            entry.preserve = false;
+        }
+    }
+    let id = Uuid::new_v4().to_string();
+    context.entries.push(Entry {
+        id: id.clone(),
+        message: LlmMessage::user(answered),
+        preserve: true,
+        consumed: true,
+    });
+    answers.push(id);
+}
+
+/// How one turn of the agent loop ended.
+///
+/// A parked turn hands back the consumer's own replay context because the
+/// generator owns the one it was given and cannot give it back. The clone is
+/// maintained event by event, so compaction the generator performed is carried
+/// forward instead of being replayed away. It also hands back what the turn
+/// itself did, which the attempt's artifacts would otherwise lose.
+#[allow(clippy::large_enum_variant)]
+enum TurnOutcome {
+    Finished(TaskOutcome),
+    Parked {
+        tool_call_id: String,
+        questions: Vec<Question>,
+        context: RunContext,
+        turn: TaskOutcome,
+        spent: Spend,
+    },
 }
 
 pub(super) async fn complete_publication(
@@ -1737,23 +2043,55 @@ where
     }
 }
 
+/// Keep a consumer-side replay in step with the context the generator owns.
+///
+/// A parked run has to hand the next turn a context, and the generator was
+/// moved the only one it had. Replaying every `Canonical` on its own would put
+/// back the entries a checkpoint superseded and overflow the window on a long
+/// run; applying `Consumed` and `Checkpoint` alongside them is what mirrors
+/// every entry the generator reported, its consumption, and its summary. The
+/// chat socket maintains its replay the same way.
+///
+/// What it does not mirror is the generator's own mid-turn system nudges, which
+/// [`agent::runner::nudge`] deliberately keeps out of the event stream because
+/// a chat commits every `Canonical` to durable turn history. Those correct a
+/// reply that is itself never appended, so a resumed turn loses the pair and
+/// carries no dangling half of it.
+fn accumulate(replay: &mut RunContext, event: &AgentEvent) {
+    match event {
+        AgentEvent::Canonical(entry) => replay.append(entry),
+        AgentEvent::Consumed(ids) => {
+            for entry in &mut replay.entries {
+                if ids.contains(&entry.id) {
+                    entry.consumed = true;
+                }
+            }
+        }
+        AgentEvent::Checkpoint { summary, .. } => replay.summary = Some(summary.clone()),
+        _ => {}
+    }
+}
+
 async fn run_task_loop(
     llm: LlmClient,
     model: String,
     tools: ChatTools,
     context: RunContext,
+    budget: LoopBudget,
     callback: &DatabaseTaskCallback,
-) -> Result<TaskOutcome, String> {
+) -> Result<TurnOutcome, String> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
     let mut tool_calls = 0usize;
+    let mut parked: Option<(String, Vec<Question>, Spend)> = None;
+    let mut replay = context.clone();
     let mut events = std::pin::pin!(agent::run_with_context(
         AgentRun {
             llm,
             model,
             tools,
             messages: Vec::new(),
-            budget: LoopBudget::task(),
+            budget,
             approval: ApprovalPolicy::auto(),
         },
         context,
@@ -1774,6 +2112,7 @@ async fn run_task_loop(
     })
     .await?
     {
+        accumulate(&mut replay, &event);
         match event {
             AgentEvent::Chunk(text) => summary.push_str(&text),
             AgentEvent::ToolCallStarted {
@@ -1820,7 +2159,7 @@ async fn run_task_loop(
                         "agent",
                         "info",
                         "Conversation checkpoint",
-                        Some(serde_json::to_value(summary).map_err(|error| error.to_string())?),
+                        Some(serde_json::to_value(&summary).map_err(|error| error.to_string())?),
                     )
                     .await
                     .map_err(|error| error.to_string())?;
@@ -1828,6 +2167,14 @@ async fn run_task_loop(
             AgentEvent::Finalizing(reason) => {
                 callback.on_phase_change(AgentPhase::Responding, Some(&reason));
             }
+            // The stream still has the unexecuted calls queued behind the
+            // question to emit. Draining it keeps every tool call in the replay
+            // paired with a result, so the resumed turn is not sent a dangling one.
+            AgentEvent::QuestionRequired {
+                tool_call_id,
+                questions,
+                spent,
+            } => parked = Some((tool_call_id, questions, spent)),
             AgentEvent::Consumed(_)
             | AgentEvent::Context(_)
             | AgentEvent::Usage(_)
@@ -1837,19 +2184,29 @@ async fn run_task_loop(
             AgentEvent::Failed(error) => return Err(error),
         }
     }
+    if let Some((tool_call_id, questions, spent)) = parked {
+        return Ok(TurnOutcome::Parked {
+            tool_call_id,
+            questions,
+            context: replay,
+            turn: TaskOutcome {
+                summary,
+                tool_calls,
+            },
+            spent,
+        });
+    }
     callback.on_phase_change(AgentPhase::Responding, Some(&summary));
     callback.on_response(&summary);
-    Ok(TaskOutcome {
+    Ok(TurnOutcome::Finished(TaskOutcome {
         summary,
         tool_calls,
-    })
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn test_semaphore_initialization() {
@@ -2053,12 +2410,16 @@ mod tests {
                 RunContext::from_messages(vec![LlmMessage::user(
                     "Create a task titled Made by the scoped task with description durable result",
                 )]),
+                LoopBudget::task(),
                 &callback,
             ),
         )
         .await
         .unwrap()
         .unwrap();
+        let TurnOutcome::Finished(outcome) = outcome else {
+            panic!("a run that asked nothing finishes its turn");
+        };
         assert_eq!(outcome.tool_calls, 1);
         let receipts: Vec<Value> = sqlx::query_scalar("SELECT metadata->'action_receipt' FROM task_run_logs WHERE task_run_id=$1 AND metadata ? 'action_receipt'").bind(run.id).fetch_all(&pool).await.unwrap();
         assert_eq!(
@@ -2758,6 +3119,7 @@ mod retry_tests {
 mod watchdog_tests {
     use super::*;
     use std::sync::Mutex;
+    use zone_core::llm::Role as LlmRole;
 
     /// A run that is working announces nothing: the watchdog is there for the
     /// silence, and firing on a busy run would bury the log it writes to.
@@ -2865,6 +3227,792 @@ mod watchdog_tests {
             *attempts.lock().unwrap(),
             1,
             "the first failure ends it rather than being retried every interval"
+        );
+    }
+
+    fn asked(header: &str, required: bool, labels: &[&str]) -> Question {
+        Question {
+            header: header.to_string(),
+            question: format!("What about {header}?"),
+            choices: labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| crate::agent::Choice {
+                    label: (*label).to_string(),
+                    description: format!("Choosing {label}"),
+                    recommended: index == 0,
+                    free_text: false,
+                })
+                .collect(),
+            preview: None,
+            multi_select: false,
+            required,
+        }
+    }
+
+    #[test]
+    fn an_all_optional_call_is_raced_against_the_window() {
+        assert_eq!(
+            answer_window(&[
+                asked("Scope", false, &["Backfill", "Forward only"]),
+                asked("Branch", false, &["main", "release"]),
+            ]),
+            Some(OPTIONAL_ANSWER_WINDOW),
+            "nothing here blocks the run, so it may proceed on what it recommended"
+        );
+        assert_eq!(OPTIONAL_ANSWER_WINDOW, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn one_required_question_removes_the_window_for_all_of_them() {
+        assert_eq!(
+            answer_window(&[
+                asked("Scope", false, &["Backfill", "Forward only"]),
+                asked("Branch", true, &["main", "release"]),
+            ]),
+            None,
+            "a required question is the run's only way forward"
+        );
+    }
+
+    #[test]
+    fn the_default_resume_names_the_recommendation_per_question() {
+        assert_eq!(
+            proceeding_on_defaults(&[asked("Scope", false, &["Backfill", "Forward only"])]),
+            "No answer arrived within 30 seconds. Proceeding on the stated default \u{2014} Scope: Backfill."
+        );
+        assert_eq!(
+            proceeding_on_defaults(&[
+                asked("Scope", false, &["Backfill", "Forward only"]),
+                asked("Branch", false, &["main", "release"]),
+            ]),
+            "No answer arrived within 30 seconds. Proceeding on the stated default \u{2014} Scope: Backfill.\nNo answer arrived within 30 seconds. Proceeding on the stated default \u{2014} Branch: main."
+        );
+    }
+
+    /// A pool whose connections are all open, with no reaper timers behind it.
+    ///
+    /// A paused clock auto-advances to the next timer whenever the runtime
+    /// parks with pending I/O. sqlx wraps every acquire in a timeout and ages
+    /// idle connections on a sleep, so a pool that still has to open a
+    /// connection mid-test would let the clock jump a whole answer window into
+    /// its own acquire timeout.
+    async fn warmed(database: &str) -> PgPool {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(600))
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .test_before_acquire(false)
+            .connect(database)
+            .await
+            .unwrap();
+        let mut open = Vec::new();
+        for _ in 0..4 {
+            open.push(pool.acquire().await.unwrap());
+        }
+        drop(open);
+        pool
+    }
+
+    /// A parked run, the lease it holds, and a pool nobody else is queued on.
+    async fn parked_fixture() -> (PgPool, PgPool, AppState, Uuid, Uuid) {
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        let database =
+            std::env::var("TEST_DATABASE_URL").expect("explicit disposable TEST_DATABASE_URL");
+        let pool = warmed(&database).await;
+        let observed = warmed(&database).await;
+        let organization =
+            organizations::create_organization(&pool, "Parked", &Uuid::new_v4().to_string(), None)
+                .await
+                .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Parked",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Parked actor"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Parked run",
+            "Ask before acting",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let owner = Uuid::new_v4();
+        assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
+        let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+        (pool, observed, state, run.id, owner)
+    }
+
+    async fn parked_row(pool: &PgPool, run: Uuid) -> (String, Option<serde_json::Value>) {
+        sqlx::query_as("SELECT status, pending_question FROM task_runs WHERE id = $1")
+            .bind(run)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_optional_call_stores_its_envelope_and_proceeds_on_the_default() {
+        let _execution = EXECUTION.lock().await;
+        let (pool, observed, state, run, owner) = parked_fixture().await;
+        let questions = vec![asked("Scope", false, &["Backfill", "Forward only"])];
+        let permit = Arc::new(Permit::acquire().await.unwrap());
+
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let carried = {
+            let state = state.clone();
+            let questions = questions.clone();
+            let permit = permit.clone();
+            let parking = tokio::spawn(async move {
+                park_for_answer(&state, run, owner, "call-1", &questions, &permit).await
+            });
+            // The row has to carry the envelope while the run is still waiting
+            // on it: a console that can only read it afterwards reads nothing.
+            loop {
+                let (status, pending) = parked_row(&observed, run).await;
+                if status == PHASE_WAITING {
+                    let pending = pending.expect("a parked run stores what it asked");
+                    assert_eq!(pending["tool_call_id"], "call-1");
+                    assert_eq!(pending["questions"][0]["header"], "Scope");
+                    assert_eq!(pending["questions"][0]["choices"][0]["recommended"], true);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            parking.await.unwrap().unwrap()
+        };
+
+        assert_eq!(
+            carried,
+            "No answer arrived within 30 seconds. Proceeding on the stated default \u{2014} Scope: Backfill."
+        );
+        assert!(
+            tokio::time::Instant::now().duration_since(started) >= OPTIONAL_ANSWER_WINDOW,
+            "the run proceeded before its own window elapsed"
+        );
+        let (status, pending) = parked_row(&pool, run).await;
+        assert_eq!(status, "running");
+        assert_eq!(pending, None, "a resumed run is no longer asking anything");
+    }
+
+    #[tokio::test]
+    async fn a_required_call_is_never_raced_against_the_window() {
+        let _execution = EXECUTION.lock().await;
+        let (pool, observed, state, run, owner) = parked_fixture().await;
+        let questions = vec![asked("Scope", true, &["Backfill", "Forward only"])];
+        let permit = Arc::new(Permit::acquire().await.unwrap());
+
+        tokio::time::pause();
+        let state_for_park = state.clone();
+        let asked_for_park = questions.clone();
+        let permit_for_park = permit.clone();
+        let parking = tokio::spawn(async move {
+            park_for_answer(
+                &state_for_park,
+                run,
+                owner,
+                "call-1",
+                &asked_for_park,
+                &permit_for_park,
+            )
+            .await
+        });
+        loop {
+            if parked_row(&observed, run).await.0 == PHASE_WAITING {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !parking.is_finished(),
+            "a required question proceeded on a default it was never allowed"
+        );
+        assert_eq!(parked_row(&observed, run).await.0, PHASE_WAITING);
+
+        assert!(question::answer(
+            run,
+            vec![crate::agent::Answer {
+                header: "Scope".into(),
+                labels: vec!["Forward only".into()],
+                other: None,
+            }]
+        ));
+        assert_eq!(parking.await.unwrap().unwrap(), "Scope: Forward only");
+        let (status, pending) = parked_row(&pool, run).await;
+        assert_eq!(status, "running");
+        assert_eq!(pending, None);
+    }
+
+    /// Every exit from the wait unparks the row, the failing ones included.
+    ///
+    /// A run left reading `'waiting'` while `run_with_policy` slept and retried
+    /// would show the console an answerable card whose answers all miss, and
+    /// the retry's own park would then fail the `'running'` fence and report a
+    /// lost lease. Terminal is what keeps the retry from happening at all.
+    #[tokio::test]
+    async fn a_withdrawn_claim_unparks_the_row_and_stops_the_run() {
+        let _execution = EXECUTION.lock().await;
+        let (pool, observed, state, run, owner) = parked_fixture().await;
+        let questions = vec![asked("Scope", true, &["Backfill", "Forward only"])];
+        let permit = Arc::new(Permit::acquire().await.unwrap());
+
+        let parking = {
+            let state = state.clone();
+            let questions = questions.clone();
+            let permit = permit.clone();
+            tokio::spawn(async move {
+                park_for_answer(&state, run, owner, "call-1", &questions, &permit).await
+            })
+        };
+        loop {
+            if parked_row(&observed, run).await.0 == PHASE_WAITING {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        question::forget(run);
+        let fault = parking
+            .await
+            .unwrap()
+            .expect_err("a withdrawn claim has no answer to resume on");
+
+        let (status, pending) = parked_row(&pool, run).await;
+        assert_ne!(
+            status, PHASE_WAITING,
+            "the run still advertises a question nothing is waiting on"
+        );
+        assert_eq!(
+            pending, None,
+            "the envelope outlived the claim it was published for"
+        );
+        assert_eq!(fault.message, ANSWER_WITHDRAWN);
+        assert!(
+            matches!(fault.failure, Failure::Terminal),
+            "a withdrawn claim was classified {}",
+            fault.failure.label()
+        );
+        assert_eq!(
+            RetryPolicy::default().decide(1, fault.failure, 0.0),
+            Decision::Terminal,
+            "re-running the attempt only asks the same question into the same silence"
+        );
+    }
+
+    /// One required question, answered the instant it is published.
+    const ASK_SCOPE: &str = r#"{"questions":[{"header":"Scope","question":"Which scope?","options":[{"label":"Backfill","description":"Do the backfill"},{"label":"Forward only","description":"Skip the backfill"}],"required":true}]}"#;
+    /// Part of `ask_user`'s tool definition, so it appears only when the turn
+    /// is actually offered tools -- never in a finalizing or compacting round,
+    /// and never as a replayed call in the history.
+    const ASK_OFFERED: &str = "Ask the user to decide something you cannot decide for them";
+
+    fn chose_backfill() -> Vec<crate::agent::Answer> {
+        vec![crate::agent::Answer {
+            header: "Scope".to_string(),
+            labels: vec!["Backfill".to_string()],
+            other: None,
+        }]
+    }
+
+    fn streamed(delta: serde_json::Value) -> String {
+        let chunk = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+        let end = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+        format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n")
+    }
+
+    /// A park is not a new run. A budget minted per turn makes every ceiling a
+    /// per-question allowance: a model that keeps calling `ask_user` is handed
+    /// a fresh 50 rounds and 100 calls after each card, so the only thing that
+    /// ends it is [`TASK_TIMEOUT`] -- thousands of tool executions later, under
+    /// a ceiling of 100.
+    #[tokio::test]
+    async fn a_park_carries_its_budget_into_the_turn_that_resumes_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        let _execution = EXECUTION.lock().await;
+        let (pool, _observed, _state, run, owner) = parked_fixture().await;
+        let workspace_id: Uuid = sqlx::query_scalar("SELECT tasks.workspace_id FROM tasks JOIN task_runs ON task_runs.task_id=tasks.id WHERE task_runs.id=$1").bind(run).fetch_one(&pool).await.unwrap();
+
+        let provider = MockServer::start().await;
+        let cards = Arc::new(AtomicUsize::new(0));
+        let asked = cards.clone();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |request: &Request| {
+                let body = String::from_utf8_lossy(&request.body).into_owned();
+                let delta = if body.contains(ASK_OFFERED) {
+                    let card = asked.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({"tool_calls":[{"index":0,"id":format!("ask-{card}"),"type":"function","function":{"name":crate::agent::ASK_USER,"arguments":ASK_SCOPE}}]})
+                } else {
+                    serde_json::json!({"content":"The budget for this run is spent."})
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(streamed(delta))
+            })
+            .mount(&provider)
+            .await;
+
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let answered = delivered.clone();
+        let answering = tokio::spawn(async move {
+            loop {
+                if question::answer(run, chose_backfill()) {
+                    answered.fetch_add(1, Ordering::SeqCst);
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+
+        let mut config = crate::state::test_config();
+        config.litellm_host = provider.uri();
+        config.ollama_host = provider.uri();
+        let state = AppState::new(config, pool.clone(), None);
+        let permit = Permit::acquire().await.unwrap();
+        let workspace = std::env::temp_dir();
+        let environment = Environment {
+            directory: workspace.clone(),
+            ..Environment::here()
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(180),
+            attempt_run(
+                &state,
+                run,
+                owner,
+                workspace_id,
+                None,
+                "gpt-4",
+                "# Task: Budget\n\nKeep asking until something stops you",
+                "",
+                &workspace,
+                &environment,
+                &permit,
+            ),
+        )
+        .await
+        .expect("a run that parks on every turn never ran out of budget")
+        .unwrap();
+        answering.abort();
+
+        let ceiling = LoopBudget::task();
+        assert!(
+            outcome.tool_calls <= ceiling.max_tool_calls,
+            "{} tool calls ran across the parks, under a ceiling of {}",
+            outcome.tool_calls,
+            ceiling.max_tool_calls
+        );
+        // Each turn spends one round on one call, so the round ceiling is the
+        // one that runs out first, and it runs out exactly once.
+        assert_eq!(outcome.tool_calls, ceiling.max_iterations);
+        assert_eq!(
+            delivered.load(Ordering::SeqCst),
+            ceiling.max_iterations,
+            "the run asked a different number of questions than the rounds it was allowed"
+        );
+        assert_eq!(
+            cards.load(Ordering::SeqCst),
+            ceiling.max_iterations,
+            "the turn with nothing left to spend asked again instead of finishing"
+        );
+        assert_eq!(
+            outcome.summary, "The budget for this run is spent.",
+            "an exhausted budget must end the run the way any exhausted budget does"
+        );
+        sqlx::query("DELETE FROM organizations WHERE id=(SELECT organization_id FROM workspaces WHERE id=$1)").bind(workspace_id).execute(&pool).await.unwrap();
+    }
+
+    /// A parked run holds no work, only an answer it is waiting for. Holding
+    /// its execution slot through that wait lets [`MAX_CONCURRENT_TASKS`] runs
+    /// parked on required questions take the whole deployment's task throughput
+    /// to zero for the hour a question may go unanswered -- and `required` is
+    /// the model's to set.
+    #[tokio::test]
+    async fn a_parked_run_gives_its_execution_slot_back_while_it_waits() {
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        let _execution = EXECUTION.lock().await;
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("disposable database"))
+                .await
+                .unwrap();
+        let organization =
+            organizations::create_organization(&pool, "Parked", &Uuid::new_v4().to_string(), None)
+                .await
+                .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Parked",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Parked actor"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut runs = Vec::new();
+        for title in ["Parked asker", "Free runner"] {
+            let task = tasks::create_task_as(
+                &pool,
+                workspace.id,
+                &[],
+                title,
+                "Run",
+                None,
+                None,
+                true,
+                None,
+                Some(user.id),
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE tasks SET model_name='gpt-4' WHERE id=$1")
+                .bind(task.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let run = tasks::create_task_run_as(&pool, task.id, Some(user.id))
+                .await
+                .unwrap();
+            runs.push((task.id, run.id));
+        }
+        let (asking_task, asking_run) = runs[0];
+        let (free_task, free_run) = runs[1];
+
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |request: &Request| {
+                let body = String::from_utf8_lossy(&request.body).into_owned();
+                let delta = if body.contains("# Task: Parked asker")
+                    && body.contains(ASK_OFFERED)
+                    && !body.contains("Scope: Backfill")
+                {
+                    serde_json::json!({"tool_calls":[{"index":0,"id":"ask-1","type":"function","function":{"name":crate::agent::ASK_USER,"arguments":ASK_SCOPE}}]})
+                } else {
+                    serde_json::json!({"content":"Nothing further to do."})
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(streamed(delta))
+            })
+            .mount(&provider)
+            .await;
+        let mut config = crate::state::test_config();
+        config.litellm_host = provider.uri();
+        config.ollama_host = provider.uri();
+        let state = AppState::new(config, pool.clone(), None);
+
+        // Every slot but one, so the parked run is the only thing between the
+        // free run and the pool.
+        let reserved = get_semaphore()
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TASKS as u32 - 1)
+            .await
+            .unwrap();
+        let parking = {
+            let state = state.clone();
+            tokio::spawn(async move { execute_task_run(&state, asking_run, asking_task).await })
+        };
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if parked_row(&pool, asking_run).await.0 == PHASE_WAITING {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the asking run never parked");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while get_semaphore().available_permits() == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a parked run kept the execution slot it is not executing on");
+
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            execute_task_run(&state, free_run, free_task),
+        )
+        .await
+        .expect("a run parked on a question wedged the whole task pool");
+        let free = tasks::get_task_run(&pool, free_run).await.unwrap().unwrap();
+        assert_eq!(free.status, RUN_COMPLETED, "{:?}", free.error_message);
+        assert_eq!(
+            parked_row(&pool, asking_run).await.0,
+            PHASE_WAITING,
+            "the parked run stopped waiting for its answer"
+        );
+
+        assert!(question::answer(asking_run, chose_backfill()));
+        tokio::time::timeout(Duration::from_secs(60), parking)
+            .await
+            .expect("an answered run never took its slot back")
+            .unwrap();
+        let asked = tasks::get_task_run(&pool, asking_run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(asked.status, RUN_COMPLETED, "{:?}", asked.error_message);
+
+        drop(reserved);
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn a_spent_budget_never_goes_below_nothing_left() {
+        let ceiling = LoopBudget::task();
+        assert_eq!(
+            ceiling.less(Spend {
+                iterations: 2,
+                tool_calls: 7,
+            }),
+            LoopBudget {
+                max_iterations: ceiling.max_iterations - 2,
+                max_tool_calls: ceiling.max_tool_calls - 7,
+            }
+        );
+        assert_eq!(
+            ceiling.less(Spend {
+                iterations: ceiling.max_iterations + 1,
+                tool_calls: ceiling.max_tool_calls + 1,
+            }),
+            LoopBudget {
+                max_iterations: 0,
+                max_tool_calls: 0,
+            },
+            "an overspent budget is exhausted, not wrapped around to a fresh one"
+        );
+    }
+
+    #[test]
+    fn an_unanswered_required_question_ends_the_run_without_a_retry() {
+        let fault = Fault::timeout();
+        assert!(matches!(fault.failure, Failure::Terminal));
+        assert_eq!(
+            RetryPolicy::default().decide(1, fault.failure, 0.0),
+            Decision::Terminal,
+            "a run that timed out waiting has nothing different to try"
+        );
+        assert_eq!(
+            fault.message,
+            format!("Task execution timed out after {TASK_TIMEOUT_SECS} seconds")
+        );
+    }
+
+    /// A run that parked three times ran four turns, and the artifacts report
+    /// the run. Dropping the parked turns under-reports the work it did and
+    /// loses everything it said before it stopped to ask.
+    #[test]
+    fn every_turn_of_an_attempt_counts_towards_its_artifacts() {
+        let mut carried = TaskOutcome::empty();
+        carried.absorb(TaskOutcome {
+            summary: "Read the ledger.".to_string(),
+            tool_calls: 3,
+        });
+        carried.absorb(TaskOutcome {
+            summary: "   ".to_string(),
+            tool_calls: 2,
+        });
+        carried.absorb(TaskOutcome {
+            summary: "Backfilled every row.".to_string(),
+            tool_calls: 4,
+        });
+        assert_eq!(carried.tool_calls, 9);
+        assert_eq!(
+            carried.summary,
+            format!("Read the ledger.{TURN_SEPARATOR}Backfilled every row."),
+            "a turn that streamed nothing must not open a gap in the summary"
+        );
+    }
+
+    /// A resume protects its answer and demotes the answer before it, so a run
+    /// that asks repeatedly does not accrue answers compaction can never shed.
+    /// The task prompt is not one of those answers: it is the specification the
+    /// run is judged against, and a run that parks once and later compacts must
+    /// not be left working from a summary of its own instructions.
+    #[test]
+    fn a_resume_protects_its_answer_and_never_demotes_the_task_prompt() {
+        let mut context = RunContext::from_messages(vec![
+            LlmMessage::system("Task rules"),
+            LlmMessage::user("Backfill the ledger"),
+        ]);
+        let mut answers = Vec::new();
+        resume_with(&mut context, "Scope: Backfill".to_string(), &mut answers);
+        resume_with(&mut context, "Branch: main".to_string(), &mut answers);
+
+        let preserved: Vec<&str> = context
+            .entries
+            .iter()
+            .filter(|entry| entry.preserve && entry.message.role == LlmRole::User)
+            .filter_map(|entry| entry.message.content.as_deref())
+            .collect();
+        assert_eq!(
+            preserved,
+            vec!["Backfill the ledger", "Branch: main"],
+            "the task prompt and the newest answer are protected, and no earlier answer is"
+        );
+        assert!(
+            context
+                .entries
+                .iter()
+                .any(|entry| entry.message.role == LlmRole::System && entry.preserve),
+            "clearing the answers must not unprotect the task rules"
+        );
+    }
+
+    fn canonical(id: &str, message: LlmMessage) -> zone_chat::history::NewEntry {
+        zone_chat::history::NewEntry {
+            id: id.to_string(),
+            message: (&message).into(),
+            mutations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_resume_carries_the_checkpoint_instead_of_what_it_superseded() {
+        let mut replay = RunContext::from_messages(vec![
+            LlmMessage::system("Task rules"),
+            LlmMessage::user("Backfill the ledger"),
+        ]);
+        for event in [
+            AgentEvent::Canonical(canonical(
+                "older",
+                LlmMessage::assistant("Reading the ledger"),
+            )),
+            AgentEvent::Consumed(vec!["older".to_string()]),
+            AgentEvent::Canonical(canonical(
+                "newer",
+                LlmMessage::assistant("Ready to ask about scope"),
+            )),
+        ] {
+            accumulate(&mut replay, &event);
+        }
+        assert_eq!(replay.entries.len(), 4);
+        assert!(
+            replay
+                .entries
+                .iter()
+                .find(|entry| entry.id == "older")
+                .unwrap()
+                .consumed,
+            "a consumed entry is eligible for the checkpoint that replaces it"
+        );
+
+        let summary = zone_core::context::Summary {
+            content: "The ledger was read".to_string(),
+            coverage: zone_core::context::coverage(&replay.entries, &["older".to_string()])
+                .unwrap(),
+            revision: 1,
+        };
+        accumulate(
+            &mut replay,
+            &AgentEvent::Checkpoint {
+                previous: None,
+                summary: summary.clone(),
+            },
+        );
+        assert_eq!(
+            replay.summary.as_ref().map(|kept| &kept.content),
+            Some(&summary.content)
+        );
+
+        replay.entries.push(Entry {
+            id: Uuid::new_v4().to_string(),
+            message: LlmMessage::user("Scope: Backfill"),
+            preserve: true,
+            consumed: true,
+        });
+        let projected = zone_core::context::project(&replay.entries, replay.summary.as_ref())
+            .expect("the resumed turn projects");
+        let carried: Vec<&str> = projected
+            .iter()
+            .filter_map(|message| message.content.as_deref())
+            .collect();
+        assert!(
+            carried
+                .iter()
+                .any(|content| content.contains("The ledger was read")),
+            "the resumed turn sends the checkpoint: {carried:?}"
+        );
+        assert!(
+            !carried
+                .iter()
+                .any(|content| content.contains("Reading the ledger")),
+            "the resumed turn must not replay what the checkpoint superseded: {carried:?}"
+        );
+        assert_eq!(
+            carried.last(),
+            Some(&"Scope: Backfill"),
+            "the answer is the newest turn: {carried:?}"
         );
     }
 }

@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zone_comfy::MediaType;
 use zone_core::llm::{Message as LlmMessage, Role as LlmRole};
 
-use crate::agent::{self, ActionReceipt, AgentEvent, AgentRun, Citation, ToolCallRecord};
+use crate::agent::{self, ActionReceipt, AgentEvent, AgentRun, Citation, Question, ToolCallRecord};
 use crate::auth::validate_access_token;
 use crate::db::{
     self, ai_settings, chat_sources, chats, knowledge, sessions, workspace_members, workspaces,
@@ -479,6 +479,14 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<String>,
     },
+    /// The model put a structured question to the reader, and the turn ends
+    /// here. There is no answering frame: what the reader chooses arrives as
+    /// an ordinary `send`, so this is the last decision point of the turn.
+    QuestionRequired {
+        message_id: Uuid,
+        tool_call_id: String,
+        questions: Vec<Question>,
+    },
     /// A tool finished. `detail` is a short outcome for display, not the full
     /// output the model receives.
     ToolResult {
@@ -714,6 +722,18 @@ fn merge_metadata(
 }
 
 const LIVE_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(300);
+
+/// What a turn that produced neither prose nor an image is stored as.
+const STOPPED_BEFORE_ANSWERING: &str = "[Stopped before answering]";
+
+/// The same, for a turn that ended because the model asked something: it is
+/// waiting on the reader rather than stopped.
+const AWAITING_ANSWER: &str = "[Waiting for your answer]";
+
+/// The outcome shown against the question call in the tool trace. Matches the
+/// string the console writes on the live frame, so a reload does not relabel
+/// the same call.
+const AWAITING_ANSWER_DETAIL: &str = "Waiting for your answer…";
 
 async fn publish_live_assistant(
     session: &session::Session,
@@ -2584,6 +2604,7 @@ async fn handle_chat_generation(
     let mut failure = None;
     let mut blocked = None;
     let mut response_truncated = false;
+    let mut asked = false;
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
     let mut citations: Vec<Citation> = Vec::new();
     let mut action_receipts: Vec<ActionReceipt> = Vec::new();
@@ -2721,6 +2742,7 @@ async fn handle_chat_generation(
                             reasoning: reasoning.clone(),
                             reason: reason.clone(),
                             preview: None,
+                            questions: Vec::new(),
                         });
 
                         let tool_msg = ServerMessage::ToolCall {
@@ -2800,6 +2822,24 @@ async fn handle_chat_generation(
                             action_receipts.push(receipt);
                             publish(stream, receipt_msg).await;
                         }
+                        persist_now = true;
+                    }
+                    Some(AgentEvent::QuestionRequired { tool_call_id, questions, .. }) => {
+                        // The live frame log is cleared by the message_end this
+                        // turn is about to reach, so a reader who reloads has
+                        // only the stored record to rebuild the card from.
+                        // Persist it before the socket can go.
+                        if let Some(record) = tool_calls.iter_mut().find(|r| r.id == tool_call_id) {
+                            record.detail = AWAITING_ANSWER_DETAIL.to_string();
+                            record.questions.clone_from(&questions);
+                        }
+                        asked = true;
+                        let question_msg = ServerMessage::QuestionRequired {
+                            message_id: assistant_message_id,
+                            tool_call_id,
+                            questions,
+                        };
+                        publish(stream, question_msg).await;
                         persist_now = true;
                     }
                     Some(AgentEvent::Failed(message)) => {
@@ -2906,8 +2946,14 @@ async fn handle_chat_generation(
     // worth keeping for its trace, but an assistant message with no content
     // reads as a bug, and providers reject one when it comes back as history.
     // An image is its own answer, so it does not need the placeholder.
+    // A turn that ended on a question is not silent but waiting, and saying so
+    // keeps the card's own bubble from reading as a failure.
     if full_content.trim().is_empty() && generated_images.is_empty() {
-        full_content = "[Stopped before answering]".to_string();
+        full_content = if asked {
+            AWAITING_ANSWER.to_string()
+        } else {
+            STOPPED_BEFORE_ANSWERING.to_string()
+        };
     }
 
     merge_cited_sources(state, chat_id, &full_content, &mut citations).await;
@@ -4326,6 +4372,7 @@ mod tests {
             reasoning: None,
             reason: None,
             preview: None,
+            questions: Vec::new(),
         }];
         let metadata = serde_json::json!({ "tool_calls": records });
 
@@ -4352,6 +4399,7 @@ mod tests {
             reasoning: Some("Inspect the workspace first.".to_string()),
             reason: Some("The user asked which tests are failing.".to_string()),
             preview: None,
+            questions: Vec::new(),
         }];
 
         let merged =

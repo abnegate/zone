@@ -81,6 +81,7 @@ pub struct TaskRun {
 pub enum TaskRunStatus {
     #[default]
     Running,
+    Waiting,
     Completed,
     Failed,
     Cancelled,
@@ -196,6 +197,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&TaskRunStatus::Running).unwrap(),
             "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskRunStatus::Waiting).unwrap(),
+            "\"waiting\""
+        );
+        assert_eq!(
+            serde_json::from_str::<TaskRunStatus>("\"waiting\"").unwrap(),
+            TaskRunStatus::Waiting
         );
         assert_eq!(
             serde_json::to_string(&TaskRunStatus::Completed).unwrap(),

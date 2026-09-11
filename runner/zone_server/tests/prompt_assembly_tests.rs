@@ -12,7 +12,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::path::PathBuf;
 use uuid::Uuid;
 use zone_server::agent::prompt;
-use zone_server::agent::{ChatTools, Environment, WorkspaceScope};
+use zone_server::agent::{ASK_USER, ChatTools, Environment, WorkspaceScope};
 use zone_server::db::knowledge::{
     LearnedCategory, LearnedEntryRow, render_learned_facts, render_standing_instructions,
 };
@@ -63,8 +63,16 @@ async fn a_background_run_reads_the_task_sections_and_none_of_the_chat_ones() {
         "{rendered}"
     );
     assert!(
-        rendered.contains("nobody is watching this run and nobody can answer you mid-task"),
+        rendered.contains("nobody is watching this run, so asking whether to proceed only stops"),
         "{rendered}"
+    );
+    assert!(
+        rendered.contains("An answer you genuinely need comes from ask_user."),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("nobody can answer you mid-task"),
+        "a run offered the question tool can be answered: {rendered}"
     );
     assert!(
         rendered.contains("ships with a regression test that fails without the fix"),
@@ -186,6 +194,27 @@ async fn a_failure_is_reported_ahead_of_anything_that_succeeded() {
     }
 }
 
+/// `conduct` renders the same rules for a failed call on both surfaces, and its
+/// own tests only ever build a chat context, so a surface split there would
+/// leave the run nobody is watching with no rule for a call that came back an
+/// error.
+#[tokio::test]
+async fn both_surfaces_are_told_what_to_do_when_a_call_fails() {
+    for rendered in [
+        prompt::chat(&chat_tools().await, false, &environment()),
+        prompt::task(&task_tools().await, &environment()),
+    ] {
+        for rule in [
+            "a denied tool call means the user declined it",
+            "failed two or three times, stop and report",
+            "three meaningfully different approaches before escalating",
+            "never fall back silently to a slower path",
+        ] {
+            assert!(rendered.contains(rule), "{rule}: {rendered}");
+        }
+    }
+}
+
 /// The rule is about the turn after a tool call, so it renders only where there
 /// is a catalog: a chat with no tools never reaches the situation.
 #[tokio::test]
@@ -275,4 +304,46 @@ async fn every_chat_surface_cites_by_marker_rather_than_by_link() {
         "{plain}"
     );
     assert!(!plain.contains("a tool returned in this chat"), "{plain}");
+}
+
+/// `tiers` names the outward tier off the tier each tool declares, not off a
+/// list of names, so a catalog whose tiers were guessed at says nothing about a
+/// send being final. A chat registers six tools that leave the workspace; a run
+/// with no authorized writer registers none.
+#[tokio::test]
+async fn only_a_catalog_that_reaches_outside_the_workspace_is_told_the_send_is_final() {
+    let chat = prompt::chat(&chat_tools().await, false, &environment());
+    let task = prompt::task(&task_tools().await, &environment());
+
+    assert!(
+        chat.contains("- Outward: anything that reaches a person or leaves this workspace"),
+        "{chat}"
+    );
+    assert!(
+        chat.contains("Sending it publishes it, and nothing you do afterwards recalls it."),
+        "{chat}"
+    );
+    assert!(
+        chat.contains("only when the user asked for it in their own words"),
+        "{chat}"
+    );
+    assert!(!task.contains("- Outward:"), "{task}");
+}
+
+/// The section renders only for a catalog holding the tool, so a surface that
+/// stopped offering it would lose the rules silently rather than fail here.
+#[tokio::test]
+async fn both_surfaces_offer_the_question_tool_and_read_its_rules() {
+    let chat = chat_tools().await;
+    let task = task_tools().await;
+
+    assert!(chat.has(ASK_USER), "a chat catalog must offer {ASK_USER}");
+    assert!(task.has(ASK_USER), "a task catalog must offer {ASK_USER}");
+
+    for rendered in [
+        prompt::chat(&chat, false, &environment()),
+        prompt::task(&task, &environment()),
+    ] {
+        assert!(rendered.contains("Asking the user:"), "{rendered}");
+    }
 }

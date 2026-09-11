@@ -4,6 +4,7 @@ pub(in crate::agent::prompt) mod boundary;
 pub(in crate::agent::prompt) mod citation;
 pub(in crate::agent::prompt) mod cluster;
 pub(in crate::agent::prompt) mod conduct;
+pub(in crate::agent::prompt) mod elicitation;
 pub(in crate::agent::prompt) mod files;
 pub(in crate::agent::prompt) mod identity;
 pub(in crate::agent::prompt) mod images;

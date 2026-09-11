@@ -1,10 +1,10 @@
 import type { z } from 'zod';
-import type { ActionReceipt } from '../chats/types';
+import type { ActionReceipt, Question } from '../chats/types';
 import type { TaskProgressMessageSchema } from './schemas';
 
 // Task Types
 export type TaskStatus = 'created' | 'queued' | 'in_progress' | 'blocked' | 'review' | 'complete';
-export type RunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type RunStatus = 'pending' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 export type LogLevel = 'debug' | 'info' | 'warning' | 'error';
 export type PrStatus = 'pending' | 'open' | 'merged' | 'closed';
 
@@ -45,6 +45,14 @@ export interface Task {
   pr_created_at: string | null;
 }
 
+/// The question a waiting run parked on, carried on the run itself rather than
+/// on a log line: the console can be opened long after the question was asked,
+/// and the reader still has to see what the run is waiting for.
+export interface PendingQuestion {
+  tool_call_id: string;
+  questions: Question[];
+}
+
 export interface TaskRun {
   id: string;
   task_id: string;
@@ -54,6 +62,9 @@ export interface TaskRun {
   error_message: string | null;
   started_at?: string | null;
   completed_at?: string | null;
+  /// Present only while the run is parked, and absent on every run written
+  /// before the field existed, so it is optional as well as nullable.
+  pending_question?: PendingQuestion | null;
 }
 
 export interface TaskRunLog {
@@ -130,6 +141,11 @@ export interface TaskRunResponse {
   success?: boolean;
   error?: string;
   run: TaskRun;
+}
+
+export interface AnswersResponse {
+  run_id: string;
+  answered: number;
 }
 
 export interface TaskRunLogsResponse {

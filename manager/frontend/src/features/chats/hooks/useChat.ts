@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
-import { ContextUsageSchema } from '../schemas';
-import type {
-  ActionReceipt,
-  ChatCharacter,
-  ChatWithMessages,
-  Citation,
-  ContextUsage,
-  Message,
-  MessageMetadata,
-  MessageRole,
-  ReasoningEffort,
-  SendMessageRequest,
-  ToolCallRecord,
-  UpdateChatRequest,
+import { ContextUsageSchema, QuestionsSchema } from '../schemas';
+import {
+  type ActionReceipt,
+  AWAITING_ANSWER_DETAIL,
+  type ChatCharacter,
+  type ChatWithMessages,
+  type Citation,
+  type ContextUsage,
+  type Message,
+  type MessageMetadata,
+  type MessageRole,
+  type Question,
+  type ReasoningEffort,
+  type SendMessageRequest,
+  type ToolCallRecord,
+  type UpdateChatRequest,
 } from '../types';
 import { mergeCitations } from '../utils/citations';
 
@@ -54,6 +56,12 @@ type ServerMessage =
       arguments: string;
       reason?: string;
       preview?: string;
+    }
+  | {
+      type: 'question_required';
+      message_id: string;
+      tool_call_id: string;
+      questions: Question[];
     }
   | {
       type: 'tool_result';
@@ -664,6 +672,25 @@ export function useChat(
             preview: payload.preview,
           });
           break;
+        // The turn ends here: the model asked something and the reply waits on
+        // the reader, whose answer arrives as an ordinary user message rather
+        // than as a decision frame of its own. The call itself already returned
+        // — the card is what is waiting — so it keeps the settled state the
+        // tool result gave it, which is what a reload rebuilds it as. The
+        // questions are read by the schema the stored record is read by, so
+        // the card this frame draws is the card that reload rebuilds. A frame
+        // with no readable question on it leaves the call as the result left
+        // it: a row marked as waiting with nothing to answer on is a promise
+        // the card cannot keep.
+        case 'question_required': {
+          const questions = QuestionsSchema.safeParse(payload.questions);
+          if (!questions.success || questions.data.length === 0) break;
+          patchToolCall(payload.message_id, payload.tool_call_id, {
+            questions: questions.data,
+            detail: AWAITING_ANSWER_DETAIL,
+          });
+          break;
+        }
         case 'tool_result':
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,

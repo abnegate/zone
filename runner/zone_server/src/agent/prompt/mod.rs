@@ -30,6 +30,7 @@ const ORDER: &[Section] = &[
     ("identity", section::identity::render),
     ("boundary", section::boundary::render),
     ("tiers", section::tiers::render),
+    ("elicitation", section::elicitation::render),
     ("conduct", section::conduct::render),
     ("reply", section::reply::render),
     ("refusal", section::refusal::render),
@@ -55,9 +56,9 @@ const PLAIN: &[Section] = &[
     ("session", section::session::render),
 ];
 
-pub const CHAT_MAX_CHARS: usize = 19_000;
+pub const CHAT_MAX_CHARS: usize = 19_500;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
-pub const TASK_MAX_CHARS: usize = 12_000;
+pub const TASK_MAX_CHARS: usize = 12_400;
 
 fn assemble(order: &[Section], context: &Context<'_>) -> String {
     order
@@ -157,12 +158,23 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::ToolProfile;
+    use crate::agent::question::ASK_USER;
+    use crate::agent::{ToolProfile, WorkspaceScope};
+    use crate::state::AppState;
+    use std::collections::HashMap;
+    use std::sync::LazyLock;
     use test_support::environment;
+    use uuid::Uuid;
+    use zone_core::tools::{Tier, ToolRegistry};
+
+    /// The one catalog name production registers no tool for: an MCP tool
+    /// arrives from a server no prompt test starts.
+    const MCP_TOOL: &str = "magents_spawn_session";
 
     /// Every chat tool loaded today, plus one MCP tool, as a worst-case catalog.
     const CHAT_CATALOG: &[&str] = &[
         "apply_patch",
+        "ask_user",
         "assess_pull_requests",
         "assess_release_pipelines",
         "cancel_reminder",
@@ -188,7 +200,7 @@ mod tests {
         "list_reminders",
         "list_sources",
         "list_tasks",
-        "magents_spawn_session",
+        MCP_TOOL,
         "query_prometheus",
         "read_chat_evidence",
         "read_check_logs",
@@ -209,9 +221,11 @@ mod tests {
         "write_file",
     ];
 
-    /// The six sandboxed host tools a task always gets.
+    /// The sandboxed host tools a task always gets, and the question it can
+    /// put to the user while it runs.
     const TASK_HOST: &[&str] = &[
         "apply_patch",
+        "ask_user",
         "list_files",
         "read_file",
         "run_command",
@@ -246,18 +260,93 @@ mod tests {
         })
     }
 
+    /// The tier every tool a chat assembles declares for itself.
+    ///
+    /// A catalog built from names has no tool to ask its tier. Defaulting the
+    /// answer to `Tier::Write` put all six outward tools at a tier none of them
+    /// declares, so the prompts measured below lost the paragraph saying an
+    /// outward action cannot be recalled and nothing failed. `preview` is the
+    /// assembly that starts no MCP child, and nothing it registers reaches the
+    /// database, so the declarations are readable from here and a retiered or
+    /// newly registered tool arrives without anyone editing a table.
+    static DECLARED: LazyLock<HashMap<String, Tier>> = LazyLock::new(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a catalog assembles on a bare runtime")
+            .block_on(async {
+                let catalog = ChatTools::preview(WorkspaceScope {
+                    state: fully_configured(),
+                    workspace_id: Uuid::nil(),
+                    chat_id: Some(Uuid::nil()),
+                    user_id: Uuid::nil(),
+                })
+                .await;
+                catalog
+                    .names()
+                    .iter()
+                    .map(|name| (name.clone(), catalog.tier(name)))
+                    .collect()
+            })
+    });
+
+    /// Server state with every optional tool group switched on.
+    ///
+    /// Images, audio, monitoring and web search each register nothing unless
+    /// their config is enabled, and a catalog assembled with them off leaves
+    /// those tools without a declared tier. The pool is lazy and no tool is
+    /// called, so nothing dials it.
+    fn fully_configured() -> AppState {
+        let mut config = crate::state::test_config();
+        config.comfyui.enabled = true;
+        config.monitoring.enabled = true;
+        config.web_search.enabled = true;
+        let database = config.database_url.clone();
+        let state = AppState::new(
+            config,
+            sqlx::PgPool::connect_lazy(&database).expect("a lazy pool needs no server"),
+            None,
+        );
+        state.disable_mcp();
+        state
+    }
+
+    /// Every catalog name with the tier its tool declares, taken from the host
+    /// registry the profile loads and then from the workspace catalog a chat
+    /// assembles. Only a tool neither of them registers falls back to a write.
+    fn tiered(profile: ToolProfile, catalog: &[&'static str]) -> Vec<(&'static str, Tier)> {
+        let host = match profile {
+            ToolProfile::Chat => ToolRegistry::with_host_tools(),
+            ToolProfile::Task => ToolRegistry::with_defaults(),
+        };
+        catalog
+            .iter()
+            .map(|name| {
+                let tier = host
+                    .tier(name)
+                    .or_else(|| DECLARED.get(*name).copied())
+                    .unwrap_or(Tier::Write);
+                (*name, tier)
+            })
+            .collect()
+    }
+
     fn chat_tools() -> ChatTools {
-        ChatTools::with_names(
+        ChatTools::with_tiers(
             ToolProfile::Chat,
-            CHAT_CATALOG,
-            zone_core::mcp::guidance_for_tools(&["magents_spawn_session"]),
+            &tiered(ToolProfile::Chat, CHAT_CATALOG),
+            zone_core::mcp::guidance_for_tools(&[MCP_TOOL]),
         )
     }
 
     fn task_tools() -> ChatTools {
         let mut catalog = TASK_HOST.to_vec();
         catalog.extend_from_slice(TASK_DOCUMENTS);
-        ChatTools::with_names(ToolProfile::Task, &catalog, None)
+        ChatTools::with_tiers(
+            ToolProfile::Task,
+            &tiered(ToolProfile::Task, &catalog),
+            None,
+        )
     }
 
     #[test]
@@ -268,6 +357,7 @@ mod tests {
                 "identity",
                 "boundary",
                 "tiers",
+                "elicitation",
                 "conduct",
                 "reply",
                 "refusal",
@@ -616,11 +706,105 @@ mod tests {
         );
     }
 
+    /// `with_tiers` states every name outright, where `with_names` keeps only
+    /// the few a host registry knows. Building the worst case out of those
+    /// would leave every budget and ownership test below measuring a prompt no
+    /// user is ever served.
+    #[test]
+    fn the_test_catalogs_carry_every_name_they_list() {
+        assert_eq!(chat_tools().names().len(), CHAT_CATALOG.len());
+        assert_eq!(
+            task_tools().names().len(),
+            TASK_HOST.len() + TASK_DOCUMENTS.len()
+        );
+        assert!(chat_tools().has(ASK_USER));
+        assert!(task_tools().has(ASK_USER));
+    }
+
+    /// A catalog built from names is only worth measuring while it carries the
+    /// tiers production declares, and the outward six are what that is really
+    /// guarding: under the old `Tier::Write` default every one of them was
+    /// described to the model as an ordinary write. Naming the whole outward
+    /// set here is what fails the next tool registered at that tier and left
+    /// out of the catalog below.
+    #[test]
+    fn the_test_catalogs_carry_the_tier_each_tool_declares_in_production() {
+        assert!(
+            DECLARED.values().any(|tier| *tier == Tier::Outward),
+            "production registers no outward tool at all"
+        );
+
+        for name in DECLARED.keys() {
+            assert!(
+                CHAT_CATALOG.contains(&name.as_str()),
+                "a chat registers {name} and the worst-case catalog omits it"
+            );
+        }
+
+        for (name, tier) in tiered(ToolProfile::Chat, CHAT_CATALOG) {
+            match DECLARED.get(name) {
+                Some(declared) => assert_eq!(tier, *declared, "{name}"),
+                None => assert_eq!(name, MCP_TOOL, "{name} is not registered for a chat"),
+            }
+        }
+
+        assert_eq!(DECLARED[ASK_USER], Tier::Read, "a question is a read");
+    }
+
+    /// The paragraph is the only place either prompt says an outward action is
+    /// unrecallable and needs the user's own words. It renders off the declared
+    /// tiers rather than off the names, so a catalog that lost them dropped it
+    /// from the assembled prompt in silence.
+    #[test]
+    fn a_catalog_that_can_reach_outside_the_workspace_says_the_send_is_final() {
+        let environment = environment();
+
+        for rendered in [
+            chat(&chat_tools(), false, &environment),
+            task(&task_tools(), &environment),
+        ] {
+            assert!(
+                rendered.contains(section::tiers::OUTWARD_HEAD),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(section::tiers::OUTWARD_TAIL),
+                "{rendered}"
+            );
+        }
+
+        let inward = ChatTools::with_names(ToolProfile::Task, TASK_HOST, None);
+        let rendered = task(&inward, &environment);
+        assert!(
+            !rendered.contains(section::tiers::OUTWARD_HEAD),
+            "{rendered}"
+        );
+    }
+
+    /// The section renders off the catalog, so the prompt only carries the
+    /// rules for a question when the tool that asks one is there to call.
+    #[test]
+    fn the_elicitation_rules_arrive_with_the_tool_and_not_before() {
+        let environment = environment();
+        let without: Vec<(&str, Tier)> = tiered(ToolProfile::Chat, CHAT_CATALOG)
+            .into_iter()
+            .filter(|(name, _)| *name != ASK_USER)
+            .collect();
+        let without = ChatTools::with_tiers(ToolProfile::Chat, &without, None);
+
+        assert!(!chat(&without, false, &environment).contains("Asking the user:"));
+        assert!(chat(&chat_tools(), false, &environment).contains("Asking the user:"));
+    }
+
     #[test]
     fn every_prompt_stays_inside_its_budget() {
         let chat_prompt = chat(&chat_tools(), false, &environment());
         let plain_prompt = plain(&environment());
         let task_prompt = task(&task_tools(), &environment());
+
+        for prompt in [&chat_prompt, &task_prompt] {
+            assert!(prompt.contains("Asking the user:"), "{prompt}");
+        }
 
         assert!(
             chat_prompt.len() <= CHAT_MAX_CHARS,

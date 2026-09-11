@@ -14,13 +14,16 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
+import { structFields } from '../../test/rust';
 import {
   ActionReceiptSchema,
+  ChoiceSchema,
   CitationSchema,
   MessageMetadataSchema,
+  QuestionSchema,
   ToolCallRecordSchema,
 } from './schemas';
-import { REASONED_TOOLS } from './types';
+import { AWAITING_ANSWER_DETAIL, REASONED_TOOLS } from './types';
 
 const CITATIONS_RS = join(
   import.meta.dir,
@@ -33,6 +36,13 @@ const PROVENANCE_RS = join(
 );
 
 const TOOLS_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/agent/tools.rs');
+
+const QUESTION_RS = join(
+  import.meta.dir,
+  '../../../../../runner/zone_server/src/agent/question.rs'
+);
+
+const CHAT_WS_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/ws/chat.rs');
 
 const REASONED_TOOLS_RS = 'REASONED_TOOLS';
 
@@ -60,6 +70,23 @@ function rustStringArray(source: string, constantName: string): string[] {
     throw new Error(`${constantName} declares ${body[1]} entries and lists ${names.length}`);
   }
   return names.sort();
+}
+
+/// Reads the value of a `const NAME: &str = ".."` literal.
+function rustStringConstant(source: string, constantName: string): string {
+  const value = source.match(new RegExp(`const ${constantName}: &str = "([^"]*)";`))?.[1];
+  if (value === undefined) throw new Error(`${constantName} not found in the Rust source`);
+  return value;
+}
+
+/// The struct's serialised shape as the zod shapes below state it: the name
+/// each field travels under, against whether serde may omit it. A field
+/// carrying `skip_serializing_if` is absent from the wire when empty, which is
+/// exactly what the console must model as optional.
+function rustStructFields(source: string, structName: string): Record<string, boolean> {
+  return Object.fromEntries(
+    structFields(source, structName).map((field) => [field.name, field.optional])
+  );
 }
 
 function zodOptions(schema: unknown, key: string): string[] {
@@ -135,6 +162,20 @@ describe('the console owes a reason for exactly the tools the server asks', () =
 
   test('an eighth reasoned tool the console has not caught up with fails, not passes', () => {
     expect(trace()).not.toEqual([...server(), 'delete_document'].sort());
+  });
+});
+
+/**
+ * The live frame and the stored record label the same call. The console writes
+ * the label as the frame arrives, the server writes it onto the record it
+ * persists, and the reader sees one then the other across a reload. Two copies
+ * of one string, so a changed ellipsis relabels the call on reload.
+ */
+describe('a question call is labelled the same live as it is after a reload', () => {
+  test('the console writes the detail the server persists, ellipsis included', () => {
+    expect(AWAITING_ANSWER_DETAIL).toBe(
+      rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'AWAITING_ANSWER_DETAIL')
+    );
   });
 });
 
@@ -254,6 +295,46 @@ describe('a stated reason and an observed preview survive storage', () => {
     ).toHaveProperty('preview', 'Run `bun test` in /srv/zone.');
   });
 
+  test('questions on a tool call are kept rather than stripped', () => {
+    const questions = [
+      {
+        header: 'Scope',
+        question: 'How far should this go?',
+        choices: [
+          {
+            label: 'Backfill',
+            description: 'Rewrite every existing row.',
+            recommended: true,
+            free_text: false,
+          },
+          {
+            label: 'Other',
+            description: 'Something else — type it below.',
+            recommended: false,
+            free_text: true,
+          },
+        ],
+        multi_select: false,
+        required: true,
+      },
+    ];
+
+    expect(ToolCallRecordSchema.parse({ ...storedCall, questions })).toHaveProperty(
+      'questions',
+      questions
+    );
+  });
+
+  test('unreadable questions cost the questions, never the row they sit on', () => {
+    const parsed = MessageMetadataSchema.parse({
+      tool_calls: [{ ...storedCall, questions: { nope: 1 } }],
+    });
+
+    expect(parsed.tool_calls).toHaveLength(1);
+    expect(parsed.tool_calls?.[0].questions).toBeUndefined();
+    expect(parsed.tool_calls?.[0].detail).toBe('ok');
+  });
+
   test('an unreadable preview costs the preview, never the row it sits on', () => {
     const parsed = MessageMetadataSchema.parse({
       tool_calls: [{ ...storedCall, preview: 42 }],
@@ -302,5 +383,32 @@ describe('a stated reason and an observed preview survive storage', () => {
     expect(parsed.action_receipts).toHaveLength(1);
     expect(parsed.action_receipts?.[0].reason).toBeUndefined();
     expect(parsed.action_receipts?.[0].outcome).toBe('Message sent');
+  });
+});
+
+/**
+ * A question card is rendered straight from what the server sent. The schema is
+ * not passthrough, so a field the server adds and the console does not declare
+ * is stripped before the card is drawn — a choice that vanishes, or a
+ * `multi_select` that reads as single, and the reader answers a different
+ * question from the one the agent asked. Nothing links the two definitions, so
+ * this reads the Rust struct and asserts the shapes are the same.
+ */
+describe('the question card the console draws is the one the server sent', () => {
+  const source = readFileSync(QUESTION_RS, 'utf8');
+
+  const zodFields = (schema: unknown): Record<string, boolean> => {
+    const shape = (schema as { shape: Record<string, { isOptional(): boolean }> }).shape;
+    return Object.fromEntries(
+      Object.entries(shape).map(([key, value]) => [key, value.isOptional()])
+    );
+  };
+
+  test('Choice carries the same fields on both sides', () => {
+    expect(zodFields(ChoiceSchema)).toEqual(rustStructFields(source, 'Choice'));
+  });
+
+  test('Question carries the same fields on both sides, optional where serde may omit', () => {
+    expect(zodFields(QuestionSchema)).toEqual(rustStructFields(source, 'Question'));
   });
 });

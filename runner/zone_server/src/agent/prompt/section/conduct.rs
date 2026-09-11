@@ -7,6 +7,7 @@
 //! ask, and `task` says Zone opens the run's own pull request.
 
 use crate::agent::prompt::{Context, Surface};
+use crate::agent::question::ASK_USER;
 
 const REPORTING: &str = "Reporting outcomes: report what happened, not what you meant to happen. A claim that \
      something is done, sent, saved, fixed or verified has to rest on a result you observed \
@@ -25,17 +26,26 @@ const DELIVERY: &str = "Delivering the work: the requested scope is the delivera
      that you can, at proposing a plan, or at offering to continue, and do not take the \
      shortcut that leaves the task half done to save effort. Finish every part that is not \
      blocked and name explicitly what you left out and why, because scaling the work down is \
-     the user's call and not yours. When the scope is unclear, make progress on everything \
-     that does not depend on the answer and ask while that work continues. A request the \
-     user restates after you have raised a concern is their decision: say so once and \
-     proceed.";
+     the user's call and not yours. A request the user restates after you have raised a \
+     concern is their decision: say so once and proceed.";
 
 const PRIMITIVES: &str = "Carrying the work forward yourself is expected: a branch, a conflict repair, a background \
      task run are all recoverable, so take them rather than asking whether you may.";
 
+const SCOPE: &str = "Proceed on reversible actions that follow from the request, and stop only for a \
+     destructive one or a genuine change of scope.";
+
+/// What an unattended run is told when it has no way to be answered.
 const AUTONOMY: &str = "Working alone: nobody is watching this run and nobody can answer you mid-task, so asking \
-     whether to proceed only stops the work. Proceed on reversible actions that follow from \
-     the request, and stop only for a destructive one or a genuine change of scope.";
+     whether to proceed only stops the work.";
+
+/// And what it is told when it has one. The clause about nobody answering is
+/// false the moment the catalog holds `ask_user`, and a run that believes it
+/// would guess at the fork instead of asking about it.
+const ANSWERABLE: &str = "Working alone: nobody is watching this run, so asking whether to proceed only stops the \
+     work.";
+
+const ASKABLE: &str = "An answer you genuinely need comes from ask_user.";
 
 const ASSESSMENT: &str = "Reading the request: when the user describes a problem, asks a question, or thinks out \
      loud instead of asking for a change, report your assessment and stop there. Do not apply \
@@ -57,9 +67,9 @@ const BACKGROUND: &str = "Never promise background work unless you call start_ta
 
 const CORRECTION: &str = "Being corrected: reconsider the answer and how sure you were of it rather than folding. \
      If you are confident, say why while acknowledging you may be wrong; if you are not, say \
-     so plainly and give the best answer you have. Ask for the one detail that would settle \
-     it. Own a mistake and fix it, with accountability rather than spiralling apology, and \
-     do not grow more submissive as the pressure rises.";
+     so plainly and give the best answer you have. Own a mistake and fix it, with \
+     accountability rather than spiralling apology, and do not grow more submissive as the \
+     pressure rises.";
 
 const CONTINUITY: &str = "Continuing a compacted conversation: when the record has been summarised, it is where the \
      work stands, not a restart. Do not re-derive settled facts, re-litigate a decided \
@@ -71,8 +81,11 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
         _ => DELIVERY.to_string(),
     };
     let surface = match context.surface {
-        Surface::Chat => ASSESSMENT,
-        Surface::Task => AUTONOMY,
+        Surface::Chat => ASSESSMENT.to_string(),
+        Surface::Task if context.tools.has(ASK_USER) => {
+            format!("{ANSWERABLE} {SCOPE} {ASKABLE}")
+        }
+        Surface::Task => format!("{AUTONOMY} {SCOPE}"),
     };
     let capability = if context.tools.has("start_task") {
         format!("{CAPABILITY} {BACKGROUND}")
@@ -99,7 +112,17 @@ mod tests {
         )
     }
 
+    /// What a run gets once the tool that asks a question is in the catalog,
+    /// which is every run that has one.
     fn task_tools() -> ChatTools {
+        ChatTools::with_names(
+            ToolProfile::Task,
+            &["read_file", "run_command", ASK_USER],
+            None,
+        )
+    }
+
+    fn unanswerable_task_tools() -> ChatTools {
         ChatTools::with_names(ToolProfile::Task, &["read_file", "run_command"], None)
     }
 
@@ -152,10 +175,6 @@ mod tests {
         );
         assert!(
             rendered.contains("scaling the work down is the user's call"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("make progress on everything that does not depend on the answer"),
             "{rendered}"
         );
         assert!(
@@ -230,7 +249,7 @@ mod tests {
         let task = render(&task_context(&task_tools(), &environment)).unwrap();
 
         assert!(
-            task.contains("nobody is watching this run and nobody can answer you mid-task"),
+            task.contains("Working alone: nobody is watching this run"),
             "{task}"
         );
         assert!(
@@ -251,6 +270,36 @@ mod tests {
             "{chat}"
         );
         assert!(!chat.contains("nobody is watching this run"), "{chat}");
+    }
+
+    /// Telling a run nobody can answer it while handing it the tool that gets
+    /// an answer is the contradiction that makes it guess at the fork instead
+    /// of asking about it. The old sentence is still true of a catalog without
+    /// the tool, and is still what that run reads.
+    #[test]
+    fn a_run_that_can_be_asked_is_never_told_nobody_can_answer_it() {
+        let environment = environment();
+        let answerable = render(&task_context(&task_tools(), &environment)).unwrap();
+        let alone = render(&task_context(&unanswerable_task_tools(), &environment)).unwrap();
+
+        assert!(
+            !answerable.contains("nobody can answer you mid-task"),
+            "{answerable}"
+        );
+        assert!(
+            answerable.contains("An answer you genuinely need comes from ask_user."),
+            "{answerable}"
+        );
+
+        assert!(
+            alone.contains("nobody is watching this run and nobody can answer you mid-task"),
+            "{alone}"
+        );
+        assert!(!alone.contains("ask_user"), "{alone}");
+        assert!(
+            alone.contains("stop only for a destructive one or a genuine change of scope"),
+            "{alone}"
+        );
     }
 
     #[test]
@@ -315,10 +364,6 @@ mod tests {
         );
         assert!(
             rendered.contains("say why while acknowledging you may be wrong"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("Ask for the one detail that would settle it."),
             "{rendered}"
         );
         assert!(

@@ -16,6 +16,7 @@ use zone_core::llm::{
 use super::Citation;
 use super::approval::ApprovalPolicy;
 use super::citations;
+use super::question::{self, Question};
 use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
 use crate::services::chat::session::RunContext;
@@ -25,6 +26,18 @@ use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
 use zone_core::llm::{RequestOptions, Usage};
 use zone_core::tools::is_vision_url;
+
+/// What the calls queued behind a turn-ending question are told.
+///
+/// Every requested call needs a result of its own or the next replay is a
+/// transcript the provider rejects, and the reason has to be the question
+/// rather than a failure the model would try to work around.
+const NOT_EXECUTED_AFTER_QUESTION: &str =
+    "Not executed: the turn ended when the user was asked a question.";
+
+/// What the model is told after a reply the parser could not read as a call.
+const MALFORMED_CALL: &str = "The last reply contained a malformed tool call; no tools were \
+    executed. Emit valid callable-tool arguments or answer in ordinary prose.";
 
 /// Maximum reason/act rounds for a chat turn. Raised now that old tool
 /// traces are compacted instead of replayed raw.
@@ -54,6 +67,25 @@ impl LoopBudget {
             max_tool_calls: 100,
         }
     }
+
+    /// What is left of this budget once `spend` has been taken out of it.
+    ///
+    /// A turn that ends on a question is not the run's last, and the turn that
+    /// resumes it continues the same work: handing that turn a fresh ceiling
+    /// makes the ceiling a per-question allowance rather than a run's.
+    pub const fn less(self, spend: Spend) -> Self {
+        Self {
+            max_iterations: self.max_iterations.saturating_sub(spend.iterations),
+            max_tool_calls: self.max_tool_calls.saturating_sub(spend.tool_calls),
+        }
+    }
+}
+
+/// What one turn took out of the budget it was given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Spend {
+    pub iterations: usize,
+    pub tool_calls: usize,
 }
 
 /// What the loop reports as it runs.
@@ -107,6 +139,15 @@ pub enum AgentEvent {
         arguments: String,
         reason: Option<String>,
         preview: Option<String>,
+    },
+    /// The model put a structured question to the user, which ends the turn.
+    /// Nothing queued behind the call ran, and no further model round follows:
+    /// the answer arrives as the next user turn. `spent` is what this turn took
+    /// out of its budget, for the turn that resumes it to carry on from.
+    QuestionRequired {
+        tool_call_id: String,
+        questions: Vec<Question>,
+        spent: Spend,
     },
     /// The turn could not continue. Anything already streamed still stands.
     Failed(String),
@@ -184,7 +225,7 @@ pub fn run_with_context(
                     .take()
                     .unwrap_or_else(|| "Tool execution has ended for this turn.".into());
                 yield AgentEvent::Finalizing(reason.clone());
-                context.entries.push(Entry {id:Uuid::new_v4().to_string(),message:LlmMessage::system(finalizing_instruction(&reason)),preserve:true,consumed:true});
+                nudge(&mut context, finalizing_instruction(&reason));
             }
             let definitions = (agentic && !finalizing).then_some(tools.definitions());
             let mut usage = context.usage(&model, definitions);
@@ -332,7 +373,7 @@ pub fn run_with_context(
                 }
                 TextToolCalls::Malformed if !requested.is_empty() => None,
                 TextToolCalls::Malformed if !finalizing => {
-                    context.entries.push(Entry {id:Uuid::new_v4().to_string(),message:LlmMessage::system("The last reply contained a malformed tool call; no tools were executed. Emit valid callable-tool arguments or answer in ordinary prose."),preserve:true,consumed:true});
+                    nudge(&mut context, MALFORMED_CALL.to_string());
                     continue;
                 }
                 TextToolCalls::Malformed => {
@@ -429,11 +470,12 @@ pub fn run_with_context(
                 let tier = tools.tier(&call.function.name);
                 let mutation = tier.mutating();
                 let mut batch = vec![call];
-                if !mutation {
+                if !mutation && !tools.ends_turn(&batch[0].function.name) {
                     while used + batch.len() < budget.max_tool_calls
-                        && requested
-                            .front()
-                            .is_some_and(|call| !tools.mutating(&call.function.name))
+                        && requested.front().is_some_and(|call| {
+                            !tools.mutating(&call.function.name)
+                                && !tools.ends_turn(&call.function.name)
+                        })
                     {
                         batch.push(requested.pop_front().expect("Read batch front exists"));
                     }
@@ -465,6 +507,12 @@ pub fn run_with_context(
                 };
                 // A fresh acknowledgement boundary after potentially long approval waits.
                 yield AgentEvent::Context(context.usage(&model, definitions));
+                // `batch` is consumed below and a finished call carries no
+                // arguments, so the parked call's own are taken while it can
+                // still be reached.
+                let parked = tools
+                    .ends_turn(&batch[0].function.name)
+                    .then(|| (batch[0].id.clone(), batch[0].function.arguments.clone()));
                 let completed = futures::future::join_all(batch.into_iter().map(|call| {
                     let tools = &tools;
                     async move {
@@ -487,6 +535,14 @@ pub fn run_with_context(
                 .await;
                 for (signature, finished) in completed {
                     let digest = hex::encode(Sha256::digest(finished.output.as_bytes()));
+                    let park = parked
+                        .as_ref()
+                        .filter(|(id, _)| *id == finished.id && finished.success)
+                        .and_then(|(id, arguments)| {
+                            question::parse(arguments)
+                                .ok()
+                                .map(|questions| (id.clone(), questions))
+                        });
                     if mutation && finished.success {
                         observations.clear();
                         failures.clear();
@@ -526,6 +582,19 @@ pub fn run_with_context(
                         citations: finished.citations,
                         receipt: finished.receipt,
                     };
+                    if let Some((tool_call_id, questions)) = park {
+                        let spent = Spend { iterations: iteration + 1, tool_calls: used };
+                        yield AgentEvent::QuestionRequired { tool_call_id, questions, spent };
+                        while let Some(call) = requested.pop_front() {
+                            let entry = canonical(
+                                LlmMessage::tool_result(&call.id, NOT_EXECUTED_AFTER_QUESTION),
+                                Vec::new(),
+                            );
+                            context.append(&entry);
+                            yield AgentEvent::Canonical(entry);
+                        }
+                        return;
+                    }
                 }
             }
             if !progress && !finalizing {
@@ -540,6 +609,24 @@ pub fn run_with_context(
             }
         }
     }
+}
+
+/// Steer the model for the rest of this turn, and this turn only.
+///
+/// Deliberately not a `Canonical`: that event is a persistence barrier, and a
+/// chat commits every one of them to the turn. `db::context` rejects a `System`
+/// role there, and `session::build` would reload anything that did land as a
+/// preserved entry of every later turn — replaying "do not call more tools" and
+/// a complaint about a reply that no longer exists into conversations they were
+/// never about. A consumer that rebuilds a turn from the events therefore does
+/// not see these, and [`workers::task::accumulate`] says so.
+fn nudge(context: &mut RunContext, instruction: String) {
+    context.entries.push(Entry {
+        id: Uuid::new_v4().to_string(),
+        message: LlmMessage::system(instruction),
+        preserve: true,
+        consumed: true,
+    });
 }
 
 fn canonical(message: LlmMessage, mutations: Vec<String>) -> NewEntry {

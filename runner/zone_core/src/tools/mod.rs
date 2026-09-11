@@ -282,6 +282,15 @@ pub trait Tool: Send + Sync {
         Tier::Read
     }
 
+    /// Whether the assistant's turn ends the moment this tool is called.
+    ///
+    /// The loop stops after it: nothing queued behind it runs, and no further
+    /// model round follows, because what comes next is the user's reply rather
+    /// than anything the model could say now.
+    fn ends_turn(&self) -> bool {
+        false
+    }
+
     /// What this specific call will do, for the reader deciding whether to
     /// allow it.
     ///
@@ -384,6 +393,12 @@ impl ToolRegistry {
     /// A named tool's tier, or nothing when the catalog has no such tool.
     pub fn tier(&self, name: &str) -> Option<Tier> {
         self.tools.get(name).map(|tool| tool.tier())
+    }
+
+    /// Whether a named tool ends the turn, or nothing when the catalog has no
+    /// such tool.
+    pub fn ends_turn(&self, name: &str) -> Option<bool> {
+        self.tools.get(name).map(|tool| tool.ends_turn())
     }
 
     /// Whether a named tool mutates state. Unknown names are treated as writes.

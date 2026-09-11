@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ActionReceiptSchema } from '../chats/schemas';
+import { ActionReceiptSchema, QuestionSchema } from '../chats/schemas';
 
 export const TaskStatusSchema = z.enum([
   'created',
@@ -10,7 +10,14 @@ export const TaskStatusSchema = z.enum([
   'complete',
 ]);
 
-export const RunStatusSchema = z.enum(['pending', 'running', 'completed', 'failed', 'cancelled']);
+export const RunStatusSchema = z.enum([
+  'pending',
+  'running',
+  'waiting',
+  'completed',
+  'failed',
+  'cancelled',
+]);
 
 export const LogLevelSchema = z.enum(['debug', 'info', 'warning', 'error']);
 
@@ -43,6 +50,11 @@ export const TaskSchema = z.object({
   pr_created_at: z.string().nullable(),
 });
 
+export const PendingQuestionSchema = z.object({
+  tool_call_id: z.string(),
+  questions: z.array(QuestionSchema),
+});
+
 export const TaskRunSchema = z.object({
   id: z.string(),
   task_id: z.string(),
@@ -52,6 +64,15 @@ export const TaskRunSchema = z.object({
   error_message: z.string().nullable(),
   started_at: z.string().nullable().optional(),
   completed_at: z.string().nullable().optional(),
+  /**
+   * Absent on every run written before the field existed and null on every run
+   * that is not parked, so it is optional as well as nullable. Forgiving on the
+   * same terms as the fields it borrows from the chat: a value this client
+   * cannot read costs the card, never the run it sits on — the alternative is a
+   * console that cannot show a run at all because the question on it is one
+   * version newer than the reader's tab.
+   */
+  pending_question: PendingQuestionSchema.nullish().catch(undefined),
 });
 
 const TaskRunMetadataSchema = z
@@ -131,6 +152,16 @@ export const TaskRunResponseSchema = z.object({
   success: z.boolean().optional(),
   error: z.string().optional(),
   run: TaskRunSchema,
+});
+
+/**
+ * What the answering route replies with. The answers are handed to the waiter
+ * the parked worker is blocked on and the run resumes out of band, so the reply
+ * confirms the submission rather than carrying a run that has not moved yet.
+ */
+export const AnswersResponseSchema = z.object({
+  run_id: z.string(),
+  answered: z.number().int().nonnegative(),
 });
 
 export const TaskRunLogsResponseSchema = z.object({

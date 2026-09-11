@@ -1,4 +1,6 @@
+import type { Answer } from '../features/chats/types';
 import {
+  AnswersResponseSchema,
   TaskResponseSchema,
   TaskRunLogsResponseSchema,
   TaskRunResponseSchema,
@@ -6,6 +8,7 @@ import {
   TasksResponseSchema,
 } from '../features/tasks/schemas';
 import type {
+  AnswersResponse,
   CreateTaskRequest,
   Task,
   TaskRun,
@@ -155,6 +158,45 @@ class TasksApi {
     }
     const data = parse(TaskRunResponseSchema, await response.json());
     return data.run;
+  }
+
+  /**
+   * Answers the question a waiting run parked on.
+   *
+   * The structured answers travel, not the string the reader sees: the server
+   * renders the message the agent reads back, so one renderer decides what the
+   * agent was told and the console cannot disagree with it.
+   *
+   * The reply confirms the submission rather than returning the run: resuming
+   * the parked worker happens out of band, so the moved run is read back by
+   * refetching it.
+   *
+   * A 2xx means the waiter has the answers and the run has already moved, so
+   * the confirmation on top of it is a receipt and nothing more. Refusing to
+   * read one would report a delivered answer as a rejected one and invite a
+   * second send of a question that is no longer being asked, so an unreadable
+   * body costs the count, never the acceptance.
+   */
+  async answerRun(
+    runId: string,
+    answers: Answer[],
+    signal?: AbortSignal
+  ): Promise<AnswersResponse | undefined> {
+    const response = await fetch(
+      `${API_BASE}/api/tasks/runs/${encodeURIComponent(runId)}/answers`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ answers }),
+        signal,
+      }
+    );
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to answer task run: ${response.status}`);
+    }
+    const receipt = AnswersResponseSchema.safeParse(await response.json().catch(() => undefined));
+    return receipt.success ? receipt.data : undefined;
   }
 
   async getTaskRunLogs(

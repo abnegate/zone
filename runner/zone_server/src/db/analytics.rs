@@ -59,7 +59,7 @@ pub async fn reportable_workspaces(
         FROM task_runs run
         JOIN tasks task ON task.id = run.task_id
         JOIN workspaces workspace ON workspace.id = task.workspace_id
-        WHERE run.status <> 'running'
+        WHERE run.status NOT IN ('running', 'waiting')
           AND COALESCE(run.completed_at, run.started_at) >= $1
           AND workspace.is_active IS NOT FALSE
         ORDER BY workspace.name, workspace.id
@@ -99,7 +99,7 @@ pub async fn finished_runs(
         FROM task_runs run
         JOIN tasks task ON task.id = run.task_id
         WHERE task.workspace_id = $1
-          AND run.status <> 'running'
+          AND run.status NOT IN ('running', 'waiting')
           AND COALESCE(run.completed_at, run.started_at) >= $2
           AND COALESCE(run.completed_at, run.started_at) < $3
         ORDER BY COALESCE(run.completed_at, run.started_at) DESC, run.id DESC
