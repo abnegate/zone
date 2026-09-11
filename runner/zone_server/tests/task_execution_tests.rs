@@ -782,6 +782,19 @@ async fn an_answer_is_refused_unless_it_fits_the_question_that_was_asked() {
     both.assert_status(axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(parked.status().await, "waiting");
 
+    for empty in [
+        serde_json::json!({"answers":[]}),
+        serde_json::json!({"answers":[{"header":"Scope","labels":[]}]}),
+    ] {
+        let nothing = parked.answer(empty).await;
+        nothing.assert_status(axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            parked.status().await,
+            "waiting",
+            "declining is what letting the window elapse means, not an empty resume"
+        );
+    }
+
     parked
         .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Other"],"other":"Only the last quarter"}]}))
         .await

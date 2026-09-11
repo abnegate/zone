@@ -592,6 +592,7 @@ pub struct AnswersResponse {
 const WAITING: &str = "waiting";
 const NOT_WAITING: &str = "Task run is not waiting on a question";
 const NOT_FOUND: &str = "Task run not found";
+const NOTHING_CHOSEN: &str = "Choose an option for at least one question";
 
 /// POST /api/tasks/runs/:run_id/answers
 ///
@@ -624,8 +625,15 @@ pub async fn answer_run(
         Ok(pending) => pending.questions,
         Err(error) => return *database_error(error),
     };
-    if let Err(rejection) = question::render(&questions, &body.answers) {
-        return *denied(StatusCode::BAD_REQUEST, &rejection);
+    // An empty submission validates but renders to nothing, and resuming a run
+    // with a blank user message tells the model less than never answering does.
+    // Declining is what letting the window elapse already means.
+    match question::render(&questions, &body.answers) {
+        Err(rejection) => return *denied(StatusCode::BAD_REQUEST, &rejection),
+        Ok(rendered) if rendered.trim().is_empty() => {
+            return *denied(StatusCode::BAD_REQUEST, NOTHING_CHOSEN);
+        }
+        Ok(_) => {}
     }
     let answered = body.answers.len();
     if !question::answer(run_id, body.answers) {
