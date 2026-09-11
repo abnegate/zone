@@ -1,0 +1,20 @@
+/* The question a background run parked on, shown above its log.
+   The card inside is the chat's own, so this only has to give it a heading and
+   room to breathe: the reader answering from the task console answers exactly
+   the question the reader in the chat would have. */
+.execution-question {
+  display: grid;
+  gap: var(--ui-space-2);
+  margin-bottom: var(--ui-space-4);
+}
+
+.execution-question h3 {
+  margin: 0;
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+}
+
+.execution-question .question-card {
+  margin: 0;
+}

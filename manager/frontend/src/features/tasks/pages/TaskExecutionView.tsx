@@ -2,6 +2,7 @@ import { Badge, Button, Modal } from '@zone/ui';
 import { useEffect, useRef, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
 import { ActionReceipts } from '../../chats/components';
+import { QuestionPrompt } from '../components';
 import type { Task, TaskRun, TaskRunLog } from '../types';
 
 const ACTIVITIES: Record<string, string> = {
@@ -13,8 +14,16 @@ const ACTIVITIES: Record<string, string> = {
   error: 'Failed',
 };
 
+/**
+ * Whether the run is still this console's to watch.
+ *
+ * A waiting run counts: it has stopped at a question rather than finished, and
+ * dropping it here would stop the poll at the very moment the question arrives,
+ * leaving the reader looking at a run that appears stalled with nothing to
+ * answer.
+ */
 function active(run: TaskRun): boolean {
-  return run.status === 'pending' || run.status === 'running';
+  return run.status === 'pending' || run.status === 'running' || run.status === 'waiting';
 }
 
 export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () => void }) {
@@ -132,6 +141,7 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
         ? {
             pending: 'Queued',
             running: 'Running',
+            waiting: 'Waiting for you',
             completed: 'Completed',
             failed: 'Failed',
             cancelled: 'Cancelled',
@@ -155,7 +165,9 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
               ? 'destructive'
               : run?.status === 'completed'
                 ? 'success'
-                : 'secondary'
+                : run?.status === 'waiting'
+                  ? 'warning'
+                  : 'secondary'
           }
         >
           {status}
@@ -191,6 +203,9 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
       )}
       {run?.status === 'completed' && (
         <p className="execution-hint">Task completed successfully.</p>
+      )}
+      {run?.status === 'waiting' && run.pending_question && (
+        <QuestionPrompt run={run} onAnswered={() => setRevision((value) => value + 1)} />
       )}
       {run && (
         <section className="execution-logs" aria-label="Execution logs">

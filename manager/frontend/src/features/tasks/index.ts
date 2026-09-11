@@ -8,6 +8,7 @@ export { TasksPage } from './pages';
 export {
   CreateTaskRequestSchema,
   LogLevelSchema,
+  PendingQuestionSchema,
   PrStatusSchema,
   RunStatusSchema,
   TaskProgressMessageSchema,
@@ -25,6 +26,7 @@ export {
 export type {
   CreateTaskRequest,
   LogLevel,
+  PendingQuestion,
   PrStatus,
   RunStatus,
   Task,
