@@ -19,6 +19,7 @@ pub mod images;
 pub mod integrations;
 pub mod monitoring;
 pub mod prompt;
+pub mod question;
 pub mod readiness;
 pub mod receipts;
 pub mod releases;
@@ -30,6 +31,7 @@ pub mod web;
 pub use approval::{ApprovalGate, ApprovalPolicy};
 pub use citations::{Citation, CitationKind, CitationOutcome};
 pub use prompt::{Environment, Surface, Vcs, Verbosity};
+pub use question::{ASK_USER, Answer, Choice, Question};
 pub use receipts::{ActionReceipt, ActionTarget};
 pub use runner::{
     AgentEvent, AgentRun, LoopBudget, MAX_ITERATIONS, MAX_TOOL_CALLS, run, run_with_context,

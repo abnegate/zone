@@ -407,6 +407,8 @@ impl ChatTools {
             }
         }
 
+        super::question::register(&mut registry);
+
         let cwd = match profile {
             ToolProfile::Chat => host_root(),
             ToolProfile::Task => task_cwd.unwrap_or_else(host_root),
@@ -494,6 +496,13 @@ impl ChatTools {
 
     pub fn mutating(&self, name: &str) -> bool {
         self.registry.mutating(name)
+    }
+
+    /// Whether a named call ends the turn. A name the catalog does not hold
+    /// ends nothing: it dispatches to the not-found error and the loop carries
+    /// on.
+    pub fn ends_turn(&self, name: &str) -> bool {
+        self.registry.ends_turn(name).unwrap_or(false)
     }
 
     /// What a named call will do, for the reader being asked to allow it.

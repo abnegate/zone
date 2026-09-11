@@ -2802,6 +2802,9 @@ async fn handle_chat_generation(
                         }
                         persist_now = true;
                     }
+                    Some(AgentEvent::QuestionRequired { tool_call_id, questions }) => {
+                        tracing::debug!(chat_id = %chat_id, tool_call_id, questions = questions.len(), "Question card is not delivered to chat clients yet");
+                    }
                     Some(AgentEvent::Failed(message)) => {
                         failure = Some(message);
                         break;

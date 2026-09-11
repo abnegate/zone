@@ -1828,6 +1828,16 @@ async fn run_task_loop(
             AgentEvent::Finalizing(reason) => {
                 callback.on_phase_change(AgentPhase::Responding, Some(&reason));
             }
+            AgentEvent::QuestionRequired {
+                tool_call_id,
+                questions,
+            } => {
+                tracing::debug!(
+                    tool_call_id,
+                    questions = questions.len(),
+                    "Task run does not park on a question card yet"
+                );
+            }
             AgentEvent::Consumed(_)
             | AgentEvent::Context(_)
             | AgentEvent::Usage(_)

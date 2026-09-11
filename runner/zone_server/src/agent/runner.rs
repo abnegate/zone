@@ -16,6 +16,7 @@ use zone_core::llm::{
 use super::Citation;
 use super::approval::ApprovalPolicy;
 use super::citations;
+use super::question::{self, Question};
 use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
 use crate::services::chat::session::RunContext;
@@ -25,6 +26,14 @@ use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
 use zone_core::llm::{RequestOptions, Usage};
 use zone_core::tools::is_vision_url;
+
+/// What the calls queued behind a turn-ending question are told.
+///
+/// Every requested call needs a result of its own or the next replay is a
+/// transcript the provider rejects, and the reason has to be the question
+/// rather than a failure the model would try to work around.
+const NOT_EXECUTED_AFTER_QUESTION: &str =
+    "Not executed: the turn ended when the user was asked a question.";
 
 /// Maximum reason/act rounds for a chat turn. Raised now that old tool
 /// traces are compacted instead of replayed raw.
@@ -107,6 +116,13 @@ pub enum AgentEvent {
         arguments: String,
         reason: Option<String>,
         preview: Option<String>,
+    },
+    /// The model put a structured question to the user, which ends the turn.
+    /// Nothing queued behind the call ran, and no further model round follows:
+    /// the answer arrives as the next user turn.
+    QuestionRequired {
+        tool_call_id: String,
+        questions: Vec<Question>,
     },
     /// The turn could not continue. Anything already streamed still stands.
     Failed(String),
@@ -429,11 +445,12 @@ pub fn run_with_context(
                 let tier = tools.tier(&call.function.name);
                 let mutation = tier.mutating();
                 let mut batch = vec![call];
-                if !mutation {
+                if !mutation && !tools.ends_turn(&batch[0].function.name) {
                     while used + batch.len() < budget.max_tool_calls
-                        && requested
-                            .front()
-                            .is_some_and(|call| !tools.mutating(&call.function.name))
+                        && requested.front().is_some_and(|call| {
+                            !tools.mutating(&call.function.name)
+                                && !tools.ends_turn(&call.function.name)
+                        })
                     {
                         batch.push(requested.pop_front().expect("Read batch front exists"));
                     }
@@ -465,6 +482,12 @@ pub fn run_with_context(
                 };
                 // A fresh acknowledgement boundary after potentially long approval waits.
                 yield AgentEvent::Context(context.usage(&model, definitions));
+                // `batch` is consumed below and a finished call carries no
+                // arguments, so the parked call's own are taken while it can
+                // still be reached.
+                let parked = tools
+                    .ends_turn(&batch[0].function.name)
+                    .then(|| (batch[0].id.clone(), batch[0].function.arguments.clone()));
                 let completed = futures::future::join_all(batch.into_iter().map(|call| {
                     let tools = &tools;
                     async move {
@@ -487,6 +510,14 @@ pub fn run_with_context(
                 .await;
                 for (signature, finished) in completed {
                     let digest = hex::encode(Sha256::digest(finished.output.as_bytes()));
+                    let park = parked
+                        .as_ref()
+                        .filter(|(id, _)| *id == finished.id && finished.success)
+                        .and_then(|(id, arguments)| {
+                            question::parse(arguments)
+                                .ok()
+                                .map(|questions| (id.clone(), questions))
+                        });
                     if mutation && finished.success {
                         observations.clear();
                         failures.clear();
@@ -526,6 +557,18 @@ pub fn run_with_context(
                         citations: finished.citations,
                         receipt: finished.receipt,
                     };
+                    if let Some((tool_call_id, questions)) = park {
+                        yield AgentEvent::QuestionRequired { tool_call_id, questions };
+                        while let Some(call) = requested.pop_front() {
+                            let entry = canonical(
+                                LlmMessage::tool_result(&call.id, NOT_EXECUTED_AFTER_QUESTION),
+                                Vec::new(),
+                            );
+                            context.append(&entry);
+                            yield AgentEvent::Canonical(entry);
+                        }
+                        return;
+                    }
                 }
             }
             if !progress && !finalizing {
