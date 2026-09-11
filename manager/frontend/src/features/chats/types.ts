@@ -6,6 +6,43 @@ export interface MessageAttachment {
   url: string;
 }
 
+/// One option the agent offered in a question. The server writes every choice,
+/// including the free-text one a reader types into, so the client never adds
+/// its own: an option the reader sees is an option the agent offered.
+export interface Choice {
+  label: string;
+  description: string;
+  recommended: boolean;
+  free_text: boolean;
+}
+
+/// A question the agent asked before it could continue. Streamed when the call
+/// happens and stored on the message, so the card survives a reload rather than
+/// leaving a reply that answers a question no longer on screen.
+export interface Question {
+  header: string;
+  question: string;
+  choices: Choice[];
+  /// What the agent says the answer will decide, rendered by the server from
+  /// the call rather than from the model's account of it. Absent when there is
+  /// none, which is nothing to announce.
+  preview?: string;
+  multi_select: boolean;
+  required: boolean;
+}
+
+/// What the reader chose for one question. Sent as an ordinary user message
+/// rather than a frame of its own, so an answer reads back as what it is.
+export interface Answer {
+  header: string;
+  labels: string[];
+  other?: string;
+}
+
+/// The label the server gives the free-text choice. Rendering substitutes the
+/// typed text in place of this label, so the two have to agree.
+export const FREE_TEXT_LABEL = 'Other';
+
 /// One tool the agent ran while producing a reply. Streamed over the socket as
 /// it happens and stored on the message, so the trace survives a reload.
 export interface ToolCallRecord {
@@ -32,6 +69,11 @@ export interface ToolCallRecord {
   pending?: boolean;
   /** Client-only: mutating file/shell tools wait here for the user. */
   approval?: 'pending' | 'approved' | 'denied';
+  /**
+   * What the agent asked the reader before it could carry on. Server-authored
+   * and persisted with the message, unlike the client-only fields above.
+   */
+  questions?: Question[];
 }
 
 export type CitationKind =

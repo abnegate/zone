@@ -1,11 +1,14 @@
 import { useState } from 'react';
 import {
+  type Answer,
   PREVIEW_LABEL,
   REASON_LABEL,
   REASON_MISSING,
   REASONED_TOOLS,
   type ToolCallRecord,
 } from '../types';
+import { renderAnswers } from '../utils/answers';
+import { QuestionCard } from './QuestionCard';
 import { Reasoning } from './Reasoning';
 
 /// Tool names are written for the model, so the trace gives the reader a plain
@@ -40,6 +43,7 @@ const TOOL_LABELS: Record<string, string> = {
   write_file: 'Wrote a file',
   run_shell: 'Ran a shell command',
   run_command: 'Ran a command',
+  ask_user: 'Asked you a question',
 };
 
 function toolLabel(name: string): string {
@@ -96,10 +100,14 @@ function ObservedPreview({ call }: { call: ToolCallRecord }) {
 
 function ToolTraceRow({
   call,
+  answered,
   onDecide,
+  onAnswer,
 }: {
   call: ToolCallRecord;
+  answered: boolean;
   onDecide?: (id: string, approved: boolean) => void;
+  onAnswer?: (content: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const args = formatArguments(call.arguments);
@@ -132,6 +140,13 @@ function ToolTraceRow({
       </button>
       <ObservedPreview call={call} />
       <StatedReason call={call} />
+      {call.questions?.length ? (
+        <QuestionCard
+          questions={call.questions}
+          answered={answered}
+          onSubmit={(answers: Answer[]) => onAnswer?.(renderAnswers(call.questions ?? [], answers))}
+        />
+      ) : null}
       {call.approval === 'pending' && onDecide && (
         <div className="tool-call-approval">
           <button
@@ -159,17 +174,33 @@ function ToolTraceRow({
 
 export function ToolTrace({
   calls,
+  answered = false,
   onDecide,
+  onAnswer,
 }: {
   calls: ToolCallRecord[];
+  /**
+   * Whether a question on this trace has already been answered. An answer is an
+   * ordinary user message, so the caller decides this by looking for a user
+   * message newer than the assistant message the card sits on — no server state
+   * says a question is settled, and none needs to.
+   */
+  answered?: boolean;
   onDecide?: (id: string, approved: boolean) => void;
+  onAnswer?: (content: string) => void;
 }) {
   if (calls.length === 0) return null;
 
   return (
     <ol className="tool-trace" data-testid="tool-trace">
       {calls.map((call) => (
-        <ToolTraceRow key={call.id} call={call} onDecide={onDecide} />
+        <ToolTraceRow
+          key={call.id}
+          call={call}
+          answered={answered}
+          onDecide={onDecide}
+          onAnswer={onAnswer}
+        />
       ))}
     </ol>
   );

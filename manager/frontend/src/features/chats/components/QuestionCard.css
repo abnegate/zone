@@ -1,0 +1,145 @@
+/* A question the agent asked before it could carry on.
+   Sits on the tool row that asked it, stronger than the trace around it: the
+   turn has stopped and nothing moves until the reader answers. The preview
+   inside reuses the trace's own preview treatment, because it is the same kind
+   of claim — read from the call by the server, not stated by the model. */
+.question-card {
+  display: grid;
+  gap: var(--ui-space-3);
+  margin: 0 var(--ui-space-3) var(--ui-space-2);
+  padding: var(--ui-space-3);
+  border: 1px solid var(--ui-border);
+  border-left: 3px solid var(--ui-accent);
+  background: var(--ui-bg-surface);
+}
+
+.question-card--answered {
+  border-left-color: var(--ui-text-tertiary, var(--ui-text-secondary));
+  opacity: 0.7;
+}
+
+.question-card-question {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.question-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  padding: 0;
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+}
+
+.question-card-marker {
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+  font-weight: 400;
+  letter-spacing: var(--ui-tracking-tight);
+}
+
+.question-card-prompt {
+  margin: var(--ui-space-1) 0 var(--ui-space-2);
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+}
+
+.question-card-choices {
+  display: grid;
+  gap: var(--ui-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.question-card-choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: 2px var(--ui-space-2);
+}
+
+.question-card-control {
+  grid-row: 1;
+  accent-color: var(--ui-accent);
+}
+
+.question-card-choice-heading {
+  display: flex;
+  grid-row: 1;
+  grid-column: 2;
+  align-items: center;
+  gap: var(--ui-space-2);
+}
+
+.question-card-choice-label {
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+  cursor: pointer;
+}
+
+/* Set apart rather than folded into the label: the agent's own preference is a
+   claim about the choice, and a reader has to see it as one. */
+.question-card-recommended {
+  padding: 0 var(--ui-space-2);
+  border: 1px solid var(--ui-accent);
+  color: var(--ui-accent);
+  font-size: var(--ui-text-xs);
+  letter-spacing: var(--ui-tracking-tight);
+}
+
+.question-card-choice-description,
+.question-card-text {
+  grid-column: 2 / -1;
+}
+
+.question-card-choice-description {
+  margin: 0;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
+.question-card-text {
+  min-height: var(--ui-control-height-sm);
+  margin-top: var(--ui-space-2);
+  padding: 0 var(--ui-space-2);
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-base);
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+}
+
+.question-card-text:disabled {
+  color: var(--ui-text-secondary);
+  cursor: not-allowed;
+}
+
+.question-card-submit {
+  justify-self: start;
+  min-height: var(--ui-control-height-sm);
+  padding: 0 var(--ui-space-3);
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-base);
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-xs);
+  cursor: pointer;
+}
+
+.question-card-submit:hover:not(:disabled) {
+  background: var(--ui-bg-surface);
+}
+
+.question-card-submit:disabled {
+  color: var(--ui-text-secondary);
+  cursor: not-allowed;
+}
+
+.question-card-submit:focus-visible,
+.question-card-control:focus-visible,
+.question-card-text:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}

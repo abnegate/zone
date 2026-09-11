@@ -9,6 +9,24 @@ export const MessageAttachmentSchema = z.object({
 });
 
 /**
+ * Keeps the elements that validate and drops the ones that do not.
+ *
+ * A citation, tool call or receipt the backend has learned to emit and this
+ * client has not must cost that one chip, never the message it arrived on.
+ * These arrays sit inside the chat response, so a single unrecognised value
+ * would otherwise throw for the whole GET and leave the chat permanently
+ * unopenable, since the value is persisted in messages.metadata.
+ */
+function tolerantArray<T extends z.ZodTypeAny>(element: T) {
+  return z.array(z.unknown()).transform((items) =>
+    items
+      .map((item) => element.safeParse(item))
+      .filter((result): result is { success: true; data: z.infer<T> } => result.success)
+      .map((result) => result.data)
+  );
+}
+
+/**
  * The model's stated reason for a side-effecting call.
  *
  * Optional, because every record stored before the field existed has to keep
@@ -28,6 +46,31 @@ const statedReason = z.string().optional().catch(undefined);
  */
 const observedPreview = z.string().optional().catch(undefined);
 
+export const ChoiceSchema = z.object({
+  label: z.string(),
+  description: z.string(),
+  recommended: z.boolean(),
+  free_text: z.boolean(),
+});
+
+/**
+ * A question the agent asked, stored on the call that asked it.
+ *
+ * The choices are a plain array rather than a tolerant one on purpose: a
+ * question that silently lost one of its options is worse than no question at
+ * all, because the reader then answers a narrower question than the agent
+ * asked. An unreadable choice costs the whole question instead, which the
+ * tolerant array around questions absorbs without touching the rest of the row.
+ */
+export const QuestionSchema = z.object({
+  header: z.string(),
+  question: z.string(),
+  choices: z.array(ChoiceSchema),
+  preview: z.string().optional(),
+  multi_select: z.boolean(),
+  required: z.boolean(),
+});
+
 export const ToolCallRecordSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -38,25 +81,14 @@ export const ToolCallRecordSchema = z.object({
   reasoning: z.string().optional(),
   reason: statedReason,
   preview: observedPreview,
+  /**
+   * Server-authored and persisted, unlike the client-only approval state, so it
+   * has to be declared here or a reloaded card would be stripped away. Forgiving
+   * on the same terms as the reason and preview above: an unreadable value costs
+   * the questions, never the row they sit on.
+   */
+  questions: tolerantArray(QuestionSchema).optional().catch(undefined),
 });
-
-/**
- * Keeps the elements that validate and drops the ones that do not.
- *
- * A citation, tool call or receipt the backend has learned to emit and this
- * client has not must cost that one chip, never the message it arrived on.
- * These arrays sit inside the chat response, so a single unrecognised value
- * would otherwise throw for the whole GET and leave the chat permanently
- * unopenable, since the value is persisted in messages.metadata.
- */
-function tolerantArray<T extends z.ZodTypeAny>(element: T) {
-  return z.array(z.unknown()).transform((items) =>
-    items
-      .map((item) => element.safeParse(item))
-      .filter((result): result is { success: true; data: z.infer<T> } => result.success)
-      .map((result) => result.data)
-  );
-}
 
 export const CitationSchema = z.object({
   kind: z.enum([

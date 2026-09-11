@@ -2,7 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode, StrictMode } from 'react';
-import type { ChatWithMessages, ContextUsage, Message } from '../types';
+import type { ChatWithMessages, ContextUsage, Message, Question } from '../types';
+import { renderAnswers } from '../utils/answers';
 
 const mockGetChat = mock();
 const mockPreviewContext = mock();
@@ -1590,6 +1591,134 @@ describe('useChat', () => {
       expect(result.current.chat?.id).toBe('2');
     });
     expect(result.current.chat?.id).not.toBe('1');
+  });
+
+  const scope: Question = {
+    header: 'Scope',
+    question: 'How far should this go?',
+    choices: [
+      {
+        label: 'Backfill',
+        description: 'Rewrite every existing row.',
+        recommended: true,
+        free_text: false,
+      },
+      {
+        label: 'Forward only',
+        description: 'Leave the existing rows alone.',
+        recommended: false,
+        free_text: false,
+      },
+      {
+        label: 'Other',
+        description: 'Something else — type it below.',
+        recommended: false,
+        free_text: true,
+      },
+    ],
+    multi_select: false,
+    required: true,
+  };
+
+  it('puts the questions the agent asked on the call that asked them', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm6', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: 'm6',
+      tool_call_id: 'call_ask',
+      name: 'ask_user',
+      arguments: '{"questions":[{"header":"Scope"}]}',
+    });
+    lastSocket?.emit({
+      type: 'question_required',
+      message_id: 'm6',
+      tool_call_id: 'call_ask',
+      questions: [scope],
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.questions).toEqual([
+        scope,
+      ]);
+    });
+    const asked = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(asked?.name).toBe('ask_user');
+    expect(asked?.detail).toBe('Waiting for your answer…');
+  });
+
+  it('sends the rendered answer as an ordinary message rather than a frame of its own', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm6', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'question_required',
+      message_id: 'm6',
+      tool_call_id: 'call_ask',
+      questions: [scope],
+    });
+    lastSocket?.emit({ type: 'message_end', message_id: 'm6', content: '' });
+
+    const content = renderAnswers(
+      [scope],
+      [{ header: 'Scope', labels: ['Other'], other: 'Only the backlog' }]
+    );
+    await act(async () => {
+      await result.current.sendMessage({ content });
+    });
+
+    expect(lastSocket?.sent).toContain(
+      JSON.stringify({ type: 'send', content: 'Scope: Other: Only the backlog' })
+    );
+  });
+
+  it('leaves an unanswered question standing when the reader stops the reply', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'm6', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: 'Before I start…', index: 0 });
+      lastSocket?.emit({
+        type: 'question_required',
+        message_id: 'm6',
+        tool_call_id: 'call_ask',
+        questions: [scope],
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.questions).toEqual([
+        scope,
+      ]);
+    });
+
+    act(() => {
+      lastSocket?.emit({ type: 'cancelled', message_id: 'm6' });
+    });
+
+    const stopped = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(stopped?.questions).toEqual([scope]);
+    expect(stopped?.approval).toBeUndefined();
+    expect(stopped?.detail).toBe('Did not finish');
   });
 });
 
