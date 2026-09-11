@@ -22,7 +22,7 @@ import {
   QuestionSchema,
   ToolCallRecordSchema,
 } from './schemas';
-import { REASONED_TOOLS } from './types';
+import { AWAITING_ANSWER_DETAIL, REASONED_TOOLS } from './types';
 
 const CITATIONS_RS = join(
   import.meta.dir,
@@ -40,6 +40,8 @@ const QUESTION_RS = join(
   import.meta.dir,
   '../../../../../runner/zone_server/src/agent/question.rs'
 );
+
+const CHAT_WS_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/ws/chat.rs');
 
 const REASONED_TOOLS_RS = 'REASONED_TOOLS';
 
@@ -67,6 +69,13 @@ function rustStringArray(source: string, constantName: string): string[] {
     throw new Error(`${constantName} declares ${body[1]} entries and lists ${names.length}`);
   }
   return names.sort();
+}
+
+/// Reads the value of a `const NAME: &str = ".."` literal.
+function rustStringConstant(source: string, constantName: string): string {
+  const value = source.match(new RegExp(`const ${constantName}: &str = "([^"]*)";`))?.[1];
+  if (value === undefined) throw new Error(`${constantName} not found in the Rust source`);
+  return value;
 }
 
 /// Reads the serialised shape of a `pub struct`: each `pub name: Type` in
@@ -168,6 +177,20 @@ describe('the console owes a reason for exactly the tools the server asks', () =
 
   test('an eighth reasoned tool the console has not caught up with fails, not passes', () => {
     expect(trace()).not.toEqual([...server(), 'delete_document'].sort());
+  });
+});
+
+/**
+ * The live frame and the stored record label the same call. The console writes
+ * the label as the frame arrives, the server writes it onto the record it
+ * persists, and the reader sees one then the other across a reload. Two copies
+ * of one string, so a changed ellipsis relabels the call on reload.
+ */
+describe('a question call is labelled the same live as it is after a reload', () => {
+  test('the console writes the detail the server persists, ellipsis included', () => {
+    expect(AWAITING_ANSWER_DETAIL).toBe(
+      rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'AWAITING_ANSWER_DETAIL')
+    );
   });
 });
 

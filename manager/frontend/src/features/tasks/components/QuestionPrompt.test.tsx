@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { Question } from '../../chats/types';
-import type { TaskRun } from '../types';
+import type { AnswersResponse, TaskRun } from '../types';
 
-const mockAnswerRun = mock((_runId: string, _answers: unknown[]) => Promise.resolve({} as TaskRun));
+const accepted: AnswersResponse = { run_id: 'run-1', answered: 1 };
+
+const mockAnswerRun = mock((_runId: string, _answers: unknown[]) => Promise.resolve(accepted));
 
 mock.module('../../../api/tasks', () => ({
   tasksApi: { answerRun: mockAnswerRun },
@@ -46,7 +48,7 @@ const waiting: TaskRun = {
 describe('QuestionPrompt', () => {
   beforeEach(() => {
     mockAnswerRun.mockReset();
-    mockAnswerRun.mockImplementation(() => Promise.resolve(waiting));
+    mockAnswerRun.mockImplementation(() => Promise.resolve(accepted));
   });
 
   it('renders the question the run parked on', () => {
@@ -128,10 +130,10 @@ describe('QuestionPrompt', () => {
   });
 
   it('sends one answer while a send is still in flight', async () => {
-    let settle!: (run: TaskRun) => void;
+    let settle!: (confirmation: AnswersResponse) => void;
     mockAnswerRun.mockImplementation(
       () =>
-        new Promise<TaskRun>((done) => {
+        new Promise<AnswersResponse>((done) => {
           settle = done;
         })
     );
@@ -144,7 +146,7 @@ describe('QuestionPrompt', () => {
     await waitFor(() => expect(submit).toBeDisabled());
     fireEvent.click(submit);
     expect(mockAnswerRun).toHaveBeenCalledTimes(1);
-    settle(waiting);
+    settle(accepted);
     await waitFor(() => expect(submit).toBeEnabled());
   });
 });

@@ -1,5 +1,6 @@
 import type { Answer } from '../features/chats/types';
 import {
+  AnswersResponseSchema,
   TaskResponseSchema,
   TaskRunLogsResponseSchema,
   TaskRunResponseSchema,
@@ -7,6 +8,7 @@ import {
   TasksResponseSchema,
 } from '../features/tasks/schemas';
 import type {
+  AnswersResponse,
   CreateTaskRequest,
   Task,
   TaskRun,
@@ -164,8 +166,16 @@ class TasksApi {
    * The structured answers travel, not the string the reader sees: the server
    * renders the message the agent reads back, so one renderer decides what the
    * agent was told and the console cannot disagree with it.
+   *
+   * The reply confirms the submission rather than returning the run: resuming
+   * the parked worker happens out of band, so the moved run is read back by
+   * refetching it.
    */
-  async answerRun(runId: string, answers: Answer[], signal?: AbortSignal): Promise<TaskRun> {
+  async answerRun(
+    runId: string,
+    answers: Answer[],
+    signal?: AbortSignal
+  ): Promise<AnswersResponse> {
     const response = await fetch(
       `${API_BASE}/api/tasks/runs/${encodeURIComponent(runId)}/answers`,
       {
@@ -179,8 +189,7 @@ class TasksApi {
       const errorData = await parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to answer task run: ${response.status}`);
     }
-    const data = parse(TaskRunResponseSchema, await response.json());
-    return data.run;
+    return parse(AnswersResponseSchema, await response.json());
   }
 
   async getTaskRunLogs(

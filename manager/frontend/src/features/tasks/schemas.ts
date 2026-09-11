@@ -154,6 +154,16 @@ export const TaskRunResponseSchema = z.object({
   run: TaskRunSchema,
 });
 
+/**
+ * What the answering route replies with. The answers are handed to the waiter
+ * the parked worker is blocked on and the run resumes out of band, so the reply
+ * confirms the submission rather than carrying a run that has not moved yet.
+ */
+export const AnswersResponseSchema = z.object({
+  run_id: z.string(),
+  answered: z.number().int().nonnegative(),
+});
+
 export const TaskRunLogsResponseSchema = z.object({
   success: z.boolean().optional(),
   error: z.string().optional(),

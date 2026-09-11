@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import { ContextUsageSchema } from '../schemas';
-import type {
-  ActionReceipt,
-  ChatCharacter,
-  ChatWithMessages,
-  Citation,
-  ContextUsage,
-  Message,
-  MessageMetadata,
-  MessageRole,
-  Question,
-  ReasoningEffort,
-  SendMessageRequest,
-  ToolCallRecord,
-  UpdateChatRequest,
+import {
+  type ActionReceipt,
+  AWAITING_ANSWER_DETAIL,
+  type ChatCharacter,
+  type ChatWithMessages,
+  type Citation,
+  type ContextUsage,
+  type Message,
+  type MessageMetadata,
+  type MessageRole,
+  type Question,
+  type ReasoningEffort,
+  type SendMessageRequest,
+  type ToolCallRecord,
+  type UpdateChatRequest,
 } from '../types';
 import { mergeCitations } from '../utils/citations';
 
@@ -673,12 +674,13 @@ export function useChat(
           break;
         // The turn ends here: the model asked something and the reply waits on
         // the reader, whose answer arrives as an ordinary user message rather
-        // than as a decision frame of its own.
+        // than as a decision frame of its own. The call itself already returned
+        // — the card is what is waiting — so it keeps the settled state the
+        // tool result gave it, which is what a reload rebuilds it as.
         case 'question_required':
           patchToolCall(payload.message_id, payload.tool_call_id, {
             questions: payload.questions,
-            detail: 'Waiting for your answer…',
-            pending: true,
+            detail: AWAITING_ANSWER_DETAIL,
           });
           break;
         case 'tool_result':

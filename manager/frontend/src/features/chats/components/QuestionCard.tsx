@@ -23,6 +23,11 @@ function chosenLabels(question: Question, selections: Selections): string[] {
 }
 
 function unanswered(questions: Question[], selections: Selections, texts: Texts): boolean {
+  // A card with nothing chosen on it submits nothing, and the server reads an
+  // empty submission as declining. Optional questions make that reachable with
+  // the button still enabled, so the card is what holds rather than the
+  // question: at least one choice, somewhere, before anything can be sent.
+  if (questions.every((question) => chosenLabels(question, selections).length === 0)) return true;
   return questions.some((question) => {
     const chosen = chosenLabels(question, selections);
     if (question.required && chosen.length === 0) return true;

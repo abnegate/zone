@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
 import type { Answer, Choice, Question } from '../types';
 import { QuestionCard } from './QuestionCard';
@@ -119,16 +119,37 @@ describe('QuestionCard', () => {
     expect(submit()).toBeEnabled();
   });
 
-  it('lets an optional question go unanswered', () => {
+  it('lets an optional question be skipped once another one is answered', () => {
     render(
       <QuestionCard
-        questions={[question({ required: false })]}
+        questions={[question(), question({ header: 'Notify', required: false })]}
         answered={false}
         onSubmit={() => {}}
       />
     );
 
+    fireEvent.click(screen.getAllByRole('radio', { name: 'Backfill' })[0]);
+
     expect(submit()).toBeEnabled();
+  });
+
+  it('will not send a card nothing has been chosen on, optional though it all is', () => {
+    const onSubmit = mock((_answers: Answer[]) => {});
+    render(
+      <QuestionCard
+        questions={[question({ required: false }), question({ header: 'Notify', required: false })]}
+        answered={false}
+        onSubmit={onSubmit}
+      />
+    );
+
+    expect(submit()).toBeDisabled();
+
+    fireEvent.click(screen.getAllByRole('radio', { name: 'Backfill' })[1]);
+
+    expect(submit()).toBeEnabled();
+    fireEvent.click(submit());
+    expect(onSubmit).toHaveBeenCalledWith([{ header: 'Notify', labels: ['Backfill'] }]);
   });
 
   it('will not send an empty answer typed into the free-text box', () => {
