@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::agent::question::{self, Answer, Question};
 use crate::auth::AuthUser;
 use crate::db::{task_access, tasks, workspace_members};
 use crate::state::AppState;
@@ -117,6 +118,11 @@ pub struct TaskRunData {
     current_phase: Option<String>,
     progress_percent: Option<i32>,
     error_message: Option<String>,
+    /// The question envelope a `waiting` run is parked on, or nothing.
+    ///
+    /// Without it the console can see that a run stopped and not what it
+    /// stopped to ask, which is the only thing anyone can act on.
+    pending_question: Option<serde_json::Value>,
 }
 
 /// Task runs list response
@@ -134,6 +140,7 @@ impl From<tasks::TaskRunRow> for TaskRunData {
             current_phase: row.current_phase,
             progress_percent: row.progress_percent,
             error_message: row.error_message,
+            pending_question: row.pending_question,
         }
     }
 }
@@ -560,6 +567,77 @@ pub async fn get_run(
     }
 }
 
+/// What a member sends back for a run parked on a question.
+#[derive(Debug, Deserialize)]
+pub struct AnswersRequest {
+    answers: Vec<Answer>,
+}
+
+/// What the questions were, read back off the parked run itself.
+///
+/// The submission is checked against this rather than against anything the
+/// caller sent, so a stale card cannot answer a question the run is not asking.
+#[derive(Debug, Deserialize)]
+struct Pending {
+    questions: Vec<Question>,
+}
+
+/// Confirmation that the answer reached the run that asked.
+#[derive(Debug, Serialize)]
+pub struct AnswersResponse {
+    run_id: Uuid,
+    answered: usize,
+}
+
+const WAITING: &str = "waiting";
+const NOT_WAITING: &str = "Task run is not waiting on a question";
+const NOT_FOUND: &str = "Task run not found";
+
+/// POST /api/tasks/runs/:run_id/answers
+///
+/// The waiter registry is process-local, so this resolves a question only on
+/// the instance running the parked worker; anywhere else the run reads as
+/// waiting and the answer finds nothing to deliver to. The same single-instance
+/// assumption the run socket already documents holds here.
+pub async fn answer_run(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(run_id): Path<Uuid>,
+    Json(body): Json<AnswersRequest>,
+) -> impl IntoResponse {
+    let actor = match user_id(&auth) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let run = match task_access::write(state.db(), run_id, actor).await {
+        Ok(Some(run)) => run,
+        Ok(None) => return *denied(StatusCode::NOT_FOUND, NOT_FOUND),
+        Err(error) => return *database_error(error),
+    };
+    if run.status != WAITING {
+        return *denied(StatusCode::CONFLICT, NOT_WAITING);
+    }
+    let Some(pending) = run.pending_question else {
+        return *denied(StatusCode::CONFLICT, NOT_WAITING);
+    };
+    let questions = match serde_json::from_value::<Pending>(pending) {
+        Ok(pending) => pending.questions,
+        Err(error) => return *database_error(error),
+    };
+    if let Err(rejection) = question::render(&questions, &body.answers) {
+        return *denied(StatusCode::BAD_REQUEST, &rejection);
+    }
+    let answered = body.answers.len();
+    if !question::answer(run_id, body.answers) {
+        return *denied(StatusCode::NOT_FOUND, NOT_FOUND);
+    }
+    (
+        StatusCode::ACCEPTED,
+        Json(AnswersResponse { run_id, answered }),
+    )
+        .into_response()
+}
+
 /// GET /api/tasks/runs/:run_id/logs
 pub async fn get_run_logs(
     State(state): State<AppState>,
@@ -645,6 +723,44 @@ mod tests {
         assert_eq!(
             serde_json::to_value(list).unwrap()["tasks"][0],
             expected["task"]
+        );
+    }
+
+    fn run(pending: Option<serde_json::Value>) -> tasks::TaskRunRow {
+        tasks::TaskRunRow {
+            id: Uuid::from_u128(6),
+            task_id: Uuid::from_u128(1),
+            triggered_by: None,
+            status: if pending.is_some() {
+                "waiting".into()
+            } else {
+                "running".into()
+            },
+            current_phase: Some("acting".into()),
+            progress_percent: Some(40),
+            started_at: None,
+            completed_at: None,
+            error_message: None,
+            artifacts: None,
+            pending_question: pending,
+        }
+    }
+
+    #[test]
+    fn a_waiting_run_discloses_the_question_it_parked_on() {
+        let asked = serde_json::json!({
+            "tool_call_id": "ask-call",
+            "questions": [{"header": "Scope", "question": "How far back?"}],
+        });
+        let body = serde_json::to_value(TaskRunResponse::from(run(Some(asked.clone())))).unwrap();
+        assert_eq!(body["run"]["status"], "waiting");
+        assert_eq!(
+            body["run"]["pending_question"], asked,
+            "a console that cannot read the question cannot answer it"
+        );
+        assert_eq!(
+            serde_json::to_value(TaskRunResponse::from(run(None))).unwrap()["run"]["pending_question"],
+            Value::Null
         );
     }
 }

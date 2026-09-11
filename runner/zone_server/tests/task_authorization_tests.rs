@@ -383,3 +383,122 @@ async fn pr_worker_rejects_legacy_foreign_project_associations() {
     };
     assert_eq!(error, "Task project belongs to another workspace");
 }
+
+/// Park `run` on one optional question, with a claim standing for its answer.
+///
+/// The waiter is what a live worker would have registered before writing the
+/// row; without it every answer is a miss, and the test would prove nothing
+/// about who was allowed to make it.
+async fn waiting(pool: &sqlx::PgPool, run: Uuid) -> zone_server::agent::question::Waiter {
+    let owner = Uuid::new_v4();
+    assert!(
+        tasks::claim_task_run(pool, run, owner)
+            .await
+            .expect("the run is claimable")
+    );
+    let waiter = zone_server::agent::question::expect(run);
+    assert!(
+        tasks::park_task_run(
+            pool,
+            run,
+            owner,
+            json!({
+                "tool_call_id": "ask-call",
+                "questions": [{
+                    "header": "Scope",
+                    "question": "How far back?",
+                    "choices": [
+                        {"label":"Backfill","description":"Everything","recommended":true,"free_text":false},
+                        {"label":"Forward only","description":"From now","recommended":false,"free_text":false},
+                        {"label":"Other","description":"Something else","recommended":false,"free_text":true}
+                    ],
+                    "multi_select": false,
+                    "required": false
+                }]
+            }),
+        )
+        .await
+        .expect("the claimed run parks")
+    );
+    waiter
+}
+
+fn answer() -> serde_json::Value {
+    json!({"answers":[{"header":"Scope","labels":["Backfill"]}]})
+}
+
+#[tokio::test]
+async fn only_a_workspace_writer_may_answer_a_parked_run() {
+    use zone_server::db::workspace_members::{self, WorkspaceRole};
+
+    let pool = create_test_pool().await;
+    let state = create_test_state(test_config(), pool.clone());
+    let client = TestClient::new(create_test_router(state));
+    let owner = tenant(&client).await;
+    let stranger = tenant(&client).await;
+    let viewer = tenant(&client).await;
+    let member = tenant(&client).await;
+    for (user, role) in [
+        (viewer.user, WorkspaceRole::Viewer),
+        (member.user, WorkspaceRole::Member),
+    ] {
+        workspace_members::add_member(&pool, owner.workspace, user, role, None)
+            .await
+            .expect("the workspace takes the member");
+    }
+
+    let task = task(&client, &owner, project(&client, &owner).await).await;
+    let run = tasks::create_task_run_as(&pool, task, Some(owner.user))
+        .await
+        .expect("the task gets a run")
+        .id;
+    let waiter = waiting(&pool, run).await;
+    let route = format!("/api/tasks/runs/{run}/answers");
+
+    let outsider = client
+        .post_json_auth(&route, &answer(), &stranger.token)
+        .await;
+    assert_task_run_hidden(&outsider);
+
+    let readable = client
+        .get_auth(&format!("/api/tasks/runs/{run}"), &viewer.token)
+        .await;
+    readable.assert_status(StatusCode::OK);
+    assert_eq!(readable.json_value()["run"]["status"], "waiting");
+    let refused = client
+        .post_json_auth(&route, &answer(), &viewer.token)
+        .await;
+    assert_task_run_hidden(&refused);
+    assert_eq!(
+        run_status(&pool, run).await,
+        "waiting",
+        "a reader who cannot answer must not move the run"
+    );
+
+    let accepted = client
+        .post_json_auth(&route, &answer(), &member.token)
+        .await;
+    accepted.assert_status(StatusCode::ACCEPTED);
+    assert_eq!(accepted.json_value()["answered"], 1);
+    let delivered = zone_server::agent::question::awaited(waiter, None)
+        .await
+        .expect("the answer reached the run that asked");
+    assert_eq!(delivered[0].header, "Scope");
+    assert_eq!(delivered[0].labels, vec!["Backfill".to_string()]);
+}
+
+fn assert_task_run_hidden(response: &common::TestResponse) {
+    response.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": "Task run not found" })
+    );
+}
+
+async fn run_status(pool: &sqlx::PgPool, run: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .expect("the run is still stored")
+}
