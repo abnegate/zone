@@ -13,6 +13,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { structFields } from '../../test/rust';
 import { AnswersResponseSchema, PendingQuestionSchema, TaskRunResponseSchema } from './schemas';
 
 const TASK_WORKER_RS = join(
@@ -34,14 +35,12 @@ function jsonLiteralKeys(source: string, binding: string): string[] {
   return [...body.matchAll(/"([a-z_0-9]+)":/g)].map((match) => match[1]).sort();
 }
 
-/// Reads the serialised field names of a `pub struct`, whose own fields are
-/// private where nothing outside the module constructs them.
-function structFields(source: string, structName: string): string[] {
-  const body = source.match(new RegExp(`pub struct ${structName} \\{([^}]*)\\}`))?.[1];
-  if (!body) throw new Error(`${structName} is not a struct in the Rust source`);
-  const fields = [...body.matchAll(/^\s*(?:pub )?([a-z_0-9]+):/gm)].map((match) => match[1]);
-  if (fields.length === 0) throw new Error(`${structName} declares no fields`);
-  return fields.sort();
+/// The names the struct's fields travel under, sorted. Its own fields are
+/// private, since nothing outside the module constructs them.
+function serialisedNames(source: string, structName: string): string[] {
+  return structFields(source, structName)
+    .map((field) => field.name)
+    .sort();
 }
 
 describe('the parked question the console reads is the one the worker wrote', () => {
@@ -65,7 +64,7 @@ describe('the parked question the console reads is the one the worker wrote', ()
  */
 describe('the confirmation the console parses is the one the route sends', () => {
   test('the accepted body carries exactly the fields the schema declares', () => {
-    const rust = structFields(readFileSync(TASKS_ROUTE_RS, 'utf8'), 'AnswersResponse');
+    const rust = serialisedNames(readFileSync(TASKS_ROUTE_RS, 'utf8'), 'AnswersResponse');
 
     expect(rust).toEqual(['answered', 'run_id']);
     expect(rust).toEqual(Object.keys(AnswersResponseSchema.shape).sort());
