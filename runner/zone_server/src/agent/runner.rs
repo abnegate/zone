@@ -35,6 +35,10 @@ use zone_core::tools::is_vision_url;
 const NOT_EXECUTED_AFTER_QUESTION: &str =
     "Not executed: the turn ended when the user was asked a question.";
 
+/// What the model is told after a reply the parser could not read as a call.
+const MALFORMED_CALL: &str = "The last reply contained a malformed tool call; no tools were \
+    executed. Emit valid callable-tool arguments or answer in ordinary prose.";
+
 /// Maximum reason/act rounds for a chat turn. Raised now that old tool
 /// traces are compacted instead of replayed raw.
 pub const MAX_ITERATIONS: usize = 64;
@@ -200,7 +204,7 @@ pub fn run_with_context(
                     .take()
                     .unwrap_or_else(|| "Tool execution has ended for this turn.".into());
                 yield AgentEvent::Finalizing(reason.clone());
-                context.entries.push(Entry {id:Uuid::new_v4().to_string(),message:LlmMessage::system(finalizing_instruction(&reason)),preserve:true,consumed:true});
+                nudge(&mut context, finalizing_instruction(&reason));
             }
             let definitions = (agentic && !finalizing).then_some(tools.definitions());
             let mut usage = context.usage(&model, definitions);
@@ -348,7 +352,7 @@ pub fn run_with_context(
                 }
                 TextToolCalls::Malformed if !requested.is_empty() => None,
                 TextToolCalls::Malformed if !finalizing => {
-                    context.entries.push(Entry {id:Uuid::new_v4().to_string(),message:LlmMessage::system("The last reply contained a malformed tool call; no tools were executed. Emit valid callable-tool arguments or answer in ordinary prose."),preserve:true,consumed:true});
+                    nudge(&mut context, MALFORMED_CALL.to_string());
                     continue;
                 }
                 TextToolCalls::Malformed => {
@@ -583,6 +587,24 @@ pub fn run_with_context(
             }
         }
     }
+}
+
+/// Steer the model for the rest of this turn, and this turn only.
+///
+/// Deliberately not a `Canonical`: that event is a persistence barrier, and a
+/// chat commits every one of them to the turn. `db::context` rejects a `System`
+/// role there, and `session::build` would reload anything that did land as a
+/// preserved entry of every later turn — replaying "do not call more tools" and
+/// a complaint about a reply that no longer exists into conversations they were
+/// never about. A consumer that rebuilds a turn from the events therefore does
+/// not see these, and [`workers::task::accumulate`] says so.
+fn nudge(context: &mut RunContext, instruction: String) {
+    context.entries.push(Entry {
+        id: Uuid::new_v4().to_string(),
+        message: LlmMessage::system(instruction),
+        preserve: true,
+        consumed: true,
+    });
 }
 
 fn canonical(message: LlmMessage, mutations: Vec<String>) -> NewEntry {

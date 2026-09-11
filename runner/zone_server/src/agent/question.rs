@@ -22,6 +22,9 @@ pub const ASK_USER: &str = "ask_user";
 pub const MAX_QUESTIONS: usize = 4;
 pub const MIN_CHOICES: usize = 2;
 pub const MAX_CHOICES: usize = 4;
+/// A resumed run keeps the answer as a preserved entry no compaction can shed,
+/// so free text the card accepts is free text every later turn pays for.
+pub const MAX_FREE_TEXT: usize = 2_000;
 pub const OTHER_LABEL: &str = "Other";
 pub const OTHER_DESCRIPTION: &str = "Something else — type it below.";
 
@@ -235,13 +238,13 @@ pub fn render(questions: &[Question], answers: &[Answer]) -> Result<String, Stri
                 .iter()
                 .find(|answer| answer.header == question.header)
                 .filter(|answer| !answer.labels.is_empty())
-                .map(|answer| line(question, answer))
+                .map(|answer| answer_line(question, answer))
         })
         .collect::<Vec<String>>()
         .join("\n"))
 }
 
-fn line(question: &Question, answer: &Answer) -> String {
+fn answer_line(question: &Question, answer: &Answer) -> String {
     let chosen = answer
         .labels
         .iter()
@@ -261,6 +264,12 @@ fn line(question: &Question, answer: &Answer) -> String {
 }
 
 fn validate(questions: &[Question], answers: &[Answer]) -> Result<(), String> {
+    if answers.len() > MAX_QUESTIONS {
+        return Err(format!(
+            "A card asks at most {MAX_QUESTIONS} questions, and {} answers were sent.",
+            answers.len()
+        ));
+    }
     let mut answered: HashSet<&str> = HashSet::new();
     for answer in answers {
         let Some(question) = questions
@@ -269,6 +278,16 @@ fn validate(questions: &[Question], answers: &[Answer]) -> Result<(), String> {
         else {
             return Err(format!("No question is headed '{}'.", answer.header));
         };
+        if let Some(text) = &answer.other {
+            let length = text.trim().chars().count();
+            if length > MAX_FREE_TEXT {
+                return Err(format!(
+                    "Question '{}' carries {length} characters of free text; keep it to \
+                     {MAX_FREE_TEXT}.",
+                    answer.header
+                ));
+            }
+        }
         if !answered.insert(answer.header.as_str()) {
             return Err(format!("Question '{}' was answered twice.", answer.header));
         }
@@ -434,10 +453,15 @@ pub fn expect(run: Uuid) -> Waiter {
 }
 
 /// Wait on a claim made by [`expect`], up to `window` if one is given.
+///
+/// Polled in order, not at random: an answer delivered in the same poll as the
+/// window elapsing was already accepted with a `202`, so losing that race would
+/// proceed on a default the person had explicitly overridden.
 pub async fn awaited(mut waiter: Waiter, window: Option<Duration>) -> Option<Vec<Answer>> {
     let receiver = waiter.receiver.take()?;
     match window {
         Some(window) => tokio::select! {
+            biased;
             received = receiver => received.ok(),
             _ = tokio::time::sleep(window) => None,
         },
@@ -774,6 +798,54 @@ mod tests {
         }
     }
 
+    /// The answer becomes a preserved entry compaction can never shed, so an
+    /// unbounded paste would sit in the window for every turn that follows it.
+    #[test]
+    fn free_text_longer_than_the_limit_is_rejected() {
+        let rejection = render(
+            &fixture(),
+            &[Answer {
+                header: "Scope".to_string(),
+                labels: vec![OTHER_LABEL.to_string()],
+                other: Some("x".repeat(MAX_FREE_TEXT + 1)),
+            }],
+        )
+        .unwrap_err();
+        assert!(rejection.contains("Scope"), "{rejection}");
+        assert!(
+            rejection.contains(&MAX_FREE_TEXT.to_string()),
+            "the rejection names the limit: {rejection}"
+        );
+    }
+
+    #[test]
+    fn free_text_at_the_limit_is_accepted() {
+        let questions = fixture();
+        let answers = vec![Answer {
+            header: "Scope".to_string(),
+            labels: vec![OTHER_LABEL.to_string()],
+            other: Some(format!("  {}  ", "x".repeat(MAX_FREE_TEXT))),
+        }];
+        assert_eq!(
+            render(&questions, &answers).unwrap(),
+            format!("Scope: Other: {}", "x".repeat(MAX_FREE_TEXT)),
+            "the limit counts the text the run keeps, not the whitespace around it"
+        );
+    }
+
+    #[test]
+    fn more_answers_than_a_card_can_ask_for_are_rejected() {
+        let answers: Vec<Answer> = (0..=MAX_QUESTIONS)
+            .map(|index| Answer {
+                header: format!("Q{index}"),
+                labels: vec!["Backfill".to_string()],
+                other: None,
+            })
+            .collect();
+        let rejection = render(&fixture(), &answers).unwrap_err();
+        assert!(rejection.contains("5 answers were sent"), "{rejection}");
+    }
+
     #[test]
     fn an_answer_no_question_asked_for_is_rejected() {
         let rejection = render(
@@ -905,6 +977,29 @@ mod tests {
             !answer(run, Vec::new()),
             "an elapsed wait leaves nothing to answer"
         );
+    }
+
+    /// A zero window makes both branches ready in the same poll, which is the
+    /// race the endpoint loses when the arms are polled at random: it has
+    /// already answered `202` by the time the run proceeds on a default.
+    /// Repetition is what makes an unbiased `select!` certain to be caught.
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_that_lands_as_the_window_elapses_still_wins() {
+        let given = vec![Answer {
+            header: "Scope".to_string(),
+            labels: vec!["Backfill".to_string()],
+            other: None,
+        }];
+        for _ in 0..256 {
+            let run = Uuid::new_v4();
+            let waiter = expect(run);
+            assert!(answer(run, given.clone()));
+            assert_eq!(
+                awaited(waiter, Some(Duration::ZERO)).await,
+                Some(given.clone()),
+                "a delivered answer lost to the window it was racing"
+            );
+        }
     }
 
     #[test]

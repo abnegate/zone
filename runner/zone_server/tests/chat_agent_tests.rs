@@ -192,6 +192,48 @@ async fn malformed_tool_reply_is_corrected_before_execution() {
     );
 }
 
+/// The corrective steers the rest of this turn and nothing beyond it.
+///
+/// Reporting it as `Canonical` would look like the way to let a consumer that
+/// rebuilds a turn from the events see it, but a chat commits every `Canonical`
+/// to durable turn history: `db::context` refuses a `System` role there, and
+/// anything that did land would come back preserved in every later turn, so a
+/// conversation would carry a complaint about a reply it no longer contains.
+#[tokio::test]
+async fn the_malformed_call_corrective_steers_the_turn_without_outliving_it() {
+    let (events, requests) = exercise(vec![
+        text(MALFORMED),
+        text(&call(Some("call_0"))),
+        text("Please provide the file path."),
+    ])
+    .await;
+
+    let replayed = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| {
+            message["role"] == "system"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("malformed tool call"))
+        });
+    assert!(
+        replayed,
+        "the round after a malformed reply was never told about it: {:?}",
+        requests[1]["messages"]
+    );
+
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            AgentEvent::Canonical(entry) if entry.message.role == Role::System
+        )),
+        "a system nudge reported as canonical is one a chat would persist and \
+         then replay into every later turn: {events:?}"
+    );
+}
+
 #[tokio::test]
 async fn malformed_reply_after_a_tool_does_not_end_the_loop() {
     let (events, requests) = exercise(vec![

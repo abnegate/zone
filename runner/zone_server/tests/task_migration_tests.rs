@@ -641,16 +641,22 @@ async fn a_run_stores_one_pending_question_and_only_known_statuses() {
             .unwrap();
     assert_eq!(stored, question);
 
-    let rejected = sqlx::query("UPDATE task_runs SET status='parked' WHERE id=$1")
+    // 'pending' is in the set because a query once selected for it; the check
+    // has never admitted it, so no predicate may name it either.
+    for unknown in ["parked", "pending"] {
+        let rejected = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE task_runs SET status='{unknown}' WHERE id=$1"
+        )))
         .bind(run)
         .execute(&database.pool)
         .await
         .unwrap_err();
-    assert_eq!(
-        rejected.as_database_error().unwrap().code().as_deref(),
-        Some("23514"),
-        "the widened status check must still be a closed set"
-    );
+        assert_eq!(
+            rejected.as_database_error().unwrap().code().as_deref(),
+            Some("23514"),
+            "the widened status check must still be a closed set, and '{unknown}' is outside it"
+        );
+    }
     database.cleanup().await;
 }
 
@@ -777,6 +783,10 @@ async fn the_sweeper_orphans_a_parked_run_whose_worker_died() {
         .unwrap();
     assert_eq!(swept.status, "failed");
     assert_eq!(swept.error_message.as_deref(), Some("orphaned"));
+    assert_eq!(
+        swept.pending_question, None,
+        "an orphaned run left an answerable card behind for a worker that is gone"
+    );
     let active: Option<Uuid> = sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id=$1")
         .bind(task)
         .fetch_one(&database.pool)
