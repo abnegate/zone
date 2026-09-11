@@ -54,9 +54,11 @@ async function send(page: import('@playwright/test').Page, message: string) {
   await box.press('Enter');
   await expect(page.locator('.message-user').filter({ hasText: message })).toBeVisible();
   // A turn that fails renders an alert and no assistant message, so waiting on
-  // the reply alone runs the whole media timeout before the alert is read.
-  const failures = page.getByRole('alert');
-  const failure = failures.nth(await failures.count());
+  // the reply alone runs the whole media timeout before the alert is read. The
+  // alert has one slot that a send clears and a later failure refills, so the
+  // old one must be gone before the slot means anything.
+  const failure = page.getByRole('alert');
+  await expect(failure).toHaveCount(0);
   await expect(assistant.nth(before).or(failure).first()).toBeVisible({ timeout: 1_500_000 });
   if (await failure.count()) {
     expect(await failure.innerText(), 'the turn reported a failure').toBe('');
