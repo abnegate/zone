@@ -3117,14 +3117,19 @@ fn cited_sources<'a>(
 
 /// How a registry source is rendered as a citation.
 ///
-/// A registry kind the citation shape cannot express is not guessed at. It
-/// yields no citation rather than one labelled as something it is not.
+/// Every kind the registry mints has a citation shape, because dropping one
+/// here does not just lose a chip: the reply still carries the marker, and the
+/// console renders a marker whose citation never arrived as unresolved — a
+/// fabrication notice against a source the server did retrieve.
+///
+/// A chat message mints no registry rows, so it has no shape to render and
+/// yields nothing rather than a citation labelled as something it is not.
 const fn citation_kind(kind: agent::identifier::Kind) -> Option<agent::CitationKind> {
     match kind {
         agent::identifier::Kind::Web => Some(agent::CitationKind::Web),
-        agent::identifier::Kind::Doc
-        | agent::identifier::Kind::Kb
-        | agent::identifier::Kind::Chat => None,
+        agent::identifier::Kind::Doc => Some(agent::CitationKind::WorkspaceDocument),
+        agent::identifier::Kind::Kb => Some(agent::CitationKind::KnowledgePassage),
+        agent::identifier::Kind::Chat => None,
     }
 }
 
@@ -4552,15 +4557,19 @@ mod tests {
     const FIRST_OBSERVED: &str = "2026-09-05T00:00:00+00:00";
 
     fn held(uri: &str, title: &str) -> db::chat_sources::Source {
+        held_as(agent::identifier::Kind::Web, uri, title)
+    }
+
+    fn held_as(kind: agent::identifier::Kind, key: &str, title: &str) -> db::chat_sources::Source {
         let first_observed_at = chrono::DateTime::parse_from_rfc3339(FIRST_OBSERVED)
             .expect("the fixture observation time is rfc3339")
             .with_timezone(&chrono::Utc);
         db::chat_sources::Source {
             chat_id: Uuid::nil(),
-            identifier: agent::identifier::mint(agent::identifier::Kind::Web, uri),
-            kind: agent::identifier::Kind::Web,
-            key: uri.to_string(),
-            uri: uri.to_string(),
+            identifier: agent::identifier::mint(kind, key),
+            kind,
+            key: key.to_string(),
+            uri: key.to_string(),
             title: title.to_string(),
             first_observed_at,
             last_observed_at: chrono::Utc::now(),
@@ -4693,17 +4702,67 @@ mod tests {
     }
 
     #[test]
-    fn a_registry_kind_the_citation_shape_cannot_express_is_not_guessed_at() {
-        assert_eq!(
-            citation_kind(agent::identifier::Kind::Web),
-            Some(agent::CitationKind::Web)
-        );
-        for kind in [
-            agent::identifier::Kind::Doc,
-            agent::identifier::Kind::Kb,
-            agent::identifier::Kind::Chat,
+    fn every_registry_kind_a_reply_can_cite_renders_as_a_citation() {
+        for (kind, expected) in [
+            (agent::identifier::Kind::Web, agent::CitationKind::Web),
+            (
+                agent::identifier::Kind::Doc,
+                agent::CitationKind::WorkspaceDocument,
+            ),
+            (
+                agent::identifier::Kind::Kb,
+                agent::CitationKind::KnowledgePassage,
+            ),
         ] {
-            assert_eq!(citation_kind(kind), None, "{kind}");
+            assert_eq!(
+                citation_kind(kind),
+                Some(expected),
+                "a cited {kind} source must reach the console, or its marker reads as fabricated"
+            );
         }
+    }
+
+    #[test]
+    fn a_registry_kind_the_citation_shape_cannot_express_is_not_guessed_at() {
+        assert_eq!(citation_kind(agent::identifier::Kind::Chat), None);
+    }
+
+    #[test]
+    fn a_cited_document_and_passage_reach_the_console_carrying_their_identifiers() {
+        let document = held_as(
+            agent::identifier::Kind::Doc,
+            "workspace://documents/release-notes",
+            "Release notes",
+        );
+        let passage = held_as(
+            agent::identifier::Kind::Kb,
+            "knowledge:7f2b",
+            "Deployment runbook",
+        );
+        let identifiers = vec![document.identifier.clone(), passage.identifier.clone()];
+
+        let cited = cited_sources(&identifiers, &[document.clone(), passage.clone()]);
+
+        assert_eq!(cited.resolved, 2);
+        assert!(cited.unresolved.is_empty());
+        assert_eq!(
+            cited
+                .citations
+                .iter()
+                .map(|citation| (citation.kind.clone(), citation.identifier.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    agent::CitationKind::WorkspaceDocument,
+                    Some(document.identifier)
+                ),
+                (
+                    agent::CitationKind::KnowledgePassage,
+                    Some(passage.identifier)
+                ),
+            ],
+            "a document or passage the registry resolved produced no citation, so the console \
+             renders the reply's own marker as a fabrication"
+        );
     }
 }

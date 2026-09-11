@@ -40,6 +40,7 @@ export type CitationKind =
   | 'github_issue'
   | 'github_file'
   | 'workspace_document'
+  | 'knowledge_passage'
   | 'web'
   | 'behavioral_verification';
 

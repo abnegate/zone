@@ -77,6 +77,32 @@ describe('citation presentation', () => {
     expect(mergeCitations([first], [citation({ revision: 'bbbb' })])).toHaveLength(2);
   });
 
+  it('keeps two sources that share an address under different identifiers', () => {
+    const url = 'knowledge://11111111-1111-1111-1111-111111111111';
+    const document = citation({ kind: 'workspace_document', identifier: 'doc:4a91c2', url });
+    const passage = citation({ kind: 'knowledge_passage', identifier: 'kb:9f30ab', url });
+
+    expect(mergeCitations([document], [passage]).map((seen) => seen.identifier)).toEqual([
+      'doc:4a91c2',
+      'kb:9f30ab',
+    ]);
+  });
+
+  it('folds one source cited twice under the same identifier', () => {
+    const cited = citation({ kind: 'web', identifier: 'web:a3f21c' });
+    const again = citation({
+      kind: 'web',
+      identifier: 'WEB:A3F21C ',
+      url: 'https://example.test/elsewhere',
+    });
+
+    expect(mergeCitations([cited], [again])).toEqual([cited]);
+  });
+
+  it('names a knowledge passage', () => {
+    expect(citationKindLabel('knowledge_passage')).toBe('Knowledge passage');
+  });
+
   it('names a web source and links it by the absolute url it was retrieved from', () => {
     expect(citationKindLabel('web')).toBe('Web page');
     expect(citationHref({ kind: 'web', url: 'https://example.test/changelog' })).toBe(

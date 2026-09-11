@@ -119,7 +119,11 @@ function citationMarkers(citations: readonly Citation[]) {
     return nodes;
   };
 
+  /// A marker inside a link's own label is left as written. Rewriting it there
+  /// would nest an anchor inside an anchor, which is invalid markup and gives a
+  /// reader two overlapping click targets with no way to reach either reliably.
   const walk = (node: MarkdownNode): void => {
+    if (node.type === 'link' || node.type === 'linkReference') return;
     if (!node.children) return;
     const rewritten: MarkdownNode[] = [];
 
@@ -178,10 +182,11 @@ function UnsourcedLink({ children }: { children: ReactNode }) {
 // invents into one, so they are resolved against the reply's own sources.
 export function MessageContent({ content, links, citations, compact }: MessageContentProps) {
   const sources = citations ?? [];
-  /// Web search mints no citations yet, so resolving against an empty list
-  /// would de-link every legitimate link. Once it mints them, drop the
-  /// `&& sources.length > 0` and the guard becomes unconditional.
-  const resolving = links === 'citations' && sources.length > 0;
+  /// Every retrieval path now registers what it returned and mints a citation
+  /// for it, so an empty list means nothing was retrieved rather than that the
+  /// sources have not caught up. A link on such a reply has nothing behind it
+  /// and is de-linked like any other unsourced one.
+  const resolving = links === 'citations';
   /// Markers are read on assistant replies whether or not the citations have
   /// settled yet, so a streaming marker shows as unresolved and then resolves
   /// in place. Reasoning and user text carry no marker convention.

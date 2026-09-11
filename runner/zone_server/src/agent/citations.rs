@@ -29,6 +29,7 @@ pub enum CitationKind {
     GithubIssue,
     GithubFile,
     WorkspaceDocument,
+    KnowledgePassage,
     Web,
     BehavioralVerification,
 }
@@ -124,14 +125,35 @@ pub fn merge(existing: &mut Vec<Citation>, incoming: impl IntoIterator<Item = Ci
         if !citation.usable() {
             continue;
         }
-        if existing
-            .iter()
-            .any(|seen| seen.url == citation.url && seen.revision == citation.revision)
-        {
+        if existing.iter().any(|seen| same_source(seen, &citation)) {
             continue;
         }
         existing.push(citation);
     }
+}
+
+/// Whether two citations name the same source.
+///
+/// An identifier names a source; an address only says where to read one. One
+/// address can back several registry sources — a document indexed into the
+/// knowledge base is reachable as both — so folding them together by address
+/// would drop an identifier the reply already cites and leave its marker
+/// reading as unresolved. Address equality settles it only for citations minted
+/// before identifiers existed.
+fn same_source(seen: &Citation, incoming: &Citation) -> bool {
+    match (handle(seen), handle(incoming)) {
+        (Some(seen), Some(incoming)) => seen == incoming,
+        _ => seen.url == incoming.url && seen.revision == incoming.revision,
+    }
+}
+
+fn handle(citation: &Citation) -> Option<String> {
+    citation
+        .identifier
+        .as_deref()
+        .map(str::trim)
+        .filter(|identifier| !identifier.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 /// Built-in tools whose citations record an observation the server itself made
@@ -863,6 +885,60 @@ mod tests {
         let original = citations.clone();
         merge(&mut citations, original.clone());
         assert_eq!(citations, original);
+    }
+
+    #[test]
+    fn merge_keeps_two_sources_that_share_an_address_under_different_identifiers() {
+        let observed = chrono::DateTime::parse_from_rfc3339(OBSERVED)
+            .expect("the fixture observation time is rfc3339")
+            .with_timezone(&chrono::Utc);
+        let uri = "knowledge://11111111-1111-1111-1111-111111111111";
+        let document = from_source(
+            CitationKind::WorkspaceDocument,
+            "doc:4a91c2",
+            "Release notes",
+            uri,
+            observed,
+        );
+        let passage = from_source(
+            CitationKind::KnowledgePassage,
+            "kb:9f30ab",
+            "Release notes",
+            uri,
+            observed,
+        );
+
+        let mut citations = vec![document];
+        merge(&mut citations, [passage]);
+
+        assert_eq!(
+            citations
+                .iter()
+                .filter_map(|citation| citation.identifier.as_deref())
+                .collect::<Vec<_>>(),
+            ["doc:4a91c2", "kb:9f30ab"],
+            "one address backed two sources and the second was folded away, so its marker \
+             in the reply renders as a fabrication"
+        );
+    }
+
+    #[test]
+    fn merge_folds_one_source_cited_twice_under_the_same_identifier() {
+        let observed = chrono::DateTime::parse_from_rfc3339(OBSERVED)
+            .expect("the fixture observation time is rfc3339")
+            .with_timezone(&chrono::Utc);
+        let citation = from_source(
+            CitationKind::Web,
+            "web:a3f21c",
+            "Example changelog",
+            "https://example.test/changelog",
+            observed,
+        );
+        let mut citations = vec![citation.clone()];
+
+        merge(&mut citations, [citation]);
+
+        assert_eq!(citations.len(), 1);
     }
 
     #[test]

@@ -65,6 +65,7 @@ export const CitationSchema = z.object({
     'github_issue',
     'github_file',
     'workspace_document',
+    'knowledge_passage',
     'web',
     'behavioral_verification',
   ]),

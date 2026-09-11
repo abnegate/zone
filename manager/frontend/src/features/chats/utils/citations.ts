@@ -14,6 +14,7 @@ const KIND_LABELS: Record<Citation['kind'], string> = {
   github_issue: 'GitHub issue',
   github_file: 'GitHub file',
   workspace_document: 'Workspace document',
+  knowledge_passage: 'Knowledge passage',
   web: 'Web page',
   behavioral_verification: 'Behavioral verification',
 };
@@ -98,12 +99,27 @@ export function formatObservedAt(value: string): string {
   return date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+/// An identifier names a source; an address only says where to read one. One
+/// address can back several registry sources — a document indexed into the
+/// knowledge base is reachable as both — so folding them together by address
+/// would drop an identifier the reply already cites and leave its marker
+/// reading as unresolved. Address equality settles it only for citations
+/// stored before identifiers existed.
+function sameSource(seen: Citation, incoming: Citation): boolean {
+  const left = handle(seen);
+  const right = handle(incoming);
+  if (left && right) return left === right;
+  return seen.url === incoming.url && seen.revision === incoming.revision;
+}
+
+function handle(citation: Citation): string | null {
+  return citation.identifier?.trim().toLowerCase() || null;
+}
+
 export function mergeCitations(existing: Citation[] | undefined, incoming: Citation[]): Citation[] {
   const merged = [...(existing ?? [])];
   for (const citation of incoming) {
-    if (merged.some((seen) => seen.url === citation.url && seen.revision === citation.revision)) {
-      continue;
-    }
+    if (merged.some((seen) => sameSource(seen, citation))) continue;
     merged.push(citation);
   }
   return merged;

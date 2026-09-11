@@ -6,6 +6,8 @@ import { MessageContent, UNRESOLVED_MARKER_NOTE, UNSOURCED_LINK_NOTE } from './M
 
 const CITED = 'https://github.com/owner/repository/pull/12';
 const INVENTED = 'https://example.com/does-not-exist';
+const WEB_MARKER = '[web:a3f21c]';
+const KB_MARKER = '[kb:9F0011AA22]';
 
 const citation = (overrides: Partial<Citation> = {}): Citation => ({
   kind: 'github_issue',
@@ -149,21 +151,35 @@ describe('MessageContent links', () => {
     expect(container.textContent).toContain(INVENTED);
   });
 
-  it('leaves links alone while a reply carries no citations', () => {
+  it('de-links a reply that carries no citations at all', () => {
     const content = `Full details at ${INVENTED} today.`;
 
     const absent = render(<MessageContent content={content} links="citations" />);
-    expect(absent.container.querySelector('a')).toHaveAttribute('href', INVENTED);
+    expect(absent.container.querySelector('a')).toBeNull();
 
     const empty = render(<MessageContent content={content} links="citations" citations={[]} />);
-    expect(empty.container.querySelector('a')).toHaveAttribute('href', INVENTED);
+    expect(empty.container.querySelector('a')).toBeNull();
 
-    expect(screen.queryByTestId('unsourced-link')).toBeNull();
+    expect(screen.getAllByTestId('unsourced-link')).toHaveLength(2);
+  });
+
+  it('never nests a source marker anchor inside a link the model wrote', () => {
+    const { container } = render(
+      <MessageContent
+        content={`Read [the notes ${WEB_MARKER}](${CITED}) again.`}
+        links="citations"
+        citations={[citation({ identifier: 'web:a3f21c', title: 'Changelog' })]}
+      />
+    );
+
+    expect(container.querySelector('a')).toHaveAttribute('href', CITED);
+    expect(
+      container.querySelector('a a'),
+      'a citation marker inside a link label produced an anchor inside an anchor'
+    ).toBeNull();
+    expect(container.textContent).toContain(WEB_MARKER);
   });
 });
-
-const WEB_MARKER = '[web:a3f21c]';
-const KB_MARKER = '[kb:9F0011AA22]';
 
 const sourced = (identifier: string, title: string): Citation =>
   citation({ identifier, title, kind: 'workspace_document', url: `${INVENTED}/${identifier}` });
