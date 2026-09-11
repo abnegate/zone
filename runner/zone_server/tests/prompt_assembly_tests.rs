@@ -285,6 +285,30 @@ async fn every_chat_surface_cites_by_marker_rather_than_by_link() {
     assert!(!plain.contains("a tool returned in this chat"), "{plain}");
 }
 
+/// `tiers` names the outward tier off the tier each tool declares, not off a
+/// list of names, so a catalog whose tiers were guessed at says nothing about a
+/// send being final. A chat registers six tools that leave the workspace; a run
+/// with no authorized writer registers none.
+#[tokio::test]
+async fn only_a_catalog_that_reaches_outside_the_workspace_is_told_the_send_is_final() {
+    let chat = prompt::chat(&chat_tools().await, false, &environment());
+    let task = prompt::task(&task_tools().await, &environment());
+
+    assert!(
+        chat.contains("- Outward: anything that reaches a person or leaves this workspace"),
+        "{chat}"
+    );
+    assert!(
+        chat.contains("Sending it publishes it, and nothing you do afterwards recalls it."),
+        "{chat}"
+    );
+    assert!(
+        chat.contains("only when the user asked for it in their own words"),
+        "{chat}"
+    );
+    assert!(!task.contains("- Outward:"), "{task}");
+}
+
 /// The section renders only for a catalog holding the tool, so a surface that
 /// stopped offering it would lose the rules silently rather than fail here.
 #[tokio::test]
