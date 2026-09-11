@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
-import { ContextUsageSchema } from '../schemas';
+import { ContextUsageSchema, QuestionsSchema } from '../schemas';
 import {
   type ActionReceipt,
   AWAITING_ANSWER_DETAIL,
@@ -676,13 +676,19 @@ export function useChat(
         // the reader, whose answer arrives as an ordinary user message rather
         // than as a decision frame of its own. The call itself already returned
         // — the card is what is waiting — so it keeps the settled state the
-        // tool result gave it, which is what a reload rebuilds it as.
-        case 'question_required':
+        // tool result gave it, which is what a reload rebuilds it as. The
+        // questions are read by the schema the stored record is read by, so
+        // the card this frame draws is the card that reload rebuilds; a frame
+        // that cannot be read at all leaves the call as the result left it.
+        case 'question_required': {
+          const questions = QuestionsSchema.safeParse(payload.questions);
+          if (!questions.success) break;
           patchToolCall(payload.message_id, payload.tool_call_id, {
-            questions: payload.questions,
+            questions: questions.data,
             detail: AWAITING_ANSWER_DETAIL,
           });
           break;
+        }
         case 'tool_result':
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,

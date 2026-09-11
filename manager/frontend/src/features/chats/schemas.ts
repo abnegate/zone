@@ -71,6 +71,15 @@ export const QuestionSchema = z.object({
   required: z.boolean(),
 });
 
+/**
+ * The questions on a call, read the same way from the live frame and from the
+ * stored record. One schema for both is what makes the card a frame draws the
+ * card a reload rebuilds: a question this client cannot read is dropped from
+ * either on the same terms, rather than crashing the trace when it arrives
+ * live and vanishing when it is reloaded.
+ */
+export const QuestionsSchema = tolerantArray(QuestionSchema);
+
 export const ToolCallRecordSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -87,7 +96,7 @@ export const ToolCallRecordSchema = z.object({
    * on the same terms as the reason and preview above: an unreadable value costs
    * the questions, never the row they sit on.
    */
-  questions: tolerantArray(QuestionSchema).optional().catch(undefined),
+  questions: QuestionsSchema.optional().catch(undefined),
 });
 
 export const CitationSchema = z.object({

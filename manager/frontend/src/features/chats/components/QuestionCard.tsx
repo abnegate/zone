@@ -109,6 +109,7 @@ export function QuestionCard({
               {question.choices.map((choice, choiceIndex) => {
                 const inputId = `${group}-${choiceIndex}`;
                 const descriptionId = `${inputId}-description`;
+                const recommendedId = `${inputId}-recommended`;
                 const selected = chosen.includes(choice.label);
                 return (
                   <li className="question-card-choice" key={choice.label}>
@@ -119,7 +120,9 @@ export function QuestionCard({
                       className="question-card-control"
                       checked={selected}
                       disabled={answered}
-                      aria-describedby={descriptionId}
+                      aria-describedby={
+                        choice.recommended ? `${recommendedId} ${descriptionId}` : descriptionId
+                      }
                       onChange={(event) => choose(question, choice.label, event.target.checked)}
                     />
                     <span className="question-card-choice-heading">
@@ -129,6 +132,7 @@ export function QuestionCard({
                       {choice.recommended && (
                         <span
                           className="question-card-recommended"
+                          id={recommendedId}
                           data-testid="question-recommended"
                         >
                           {RECOMMENDED_LABEL}

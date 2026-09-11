@@ -26,6 +26,12 @@ const question = (overrides: Partial<Question> = {}): Question => ({
 
 const submit = () => screen.getByTestId('question-submit');
 
+const describedBy = (input: HTMLElement): string[] =>
+  (input.getAttribute('aria-describedby') ?? '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent ?? '');
+
 describe('QuestionCard', () => {
   it('renders nothing when the call carried no questions', () => {
     const { container } = render(
@@ -57,6 +63,18 @@ describe('QuestionCard', () => {
     expect(marks).toHaveLength(1);
     expect(marks[0].closest('li')).toHaveTextContent('Backfill');
     expect(screen.getAllByRole('radio')[0]).toBe(screen.getByRole('radio', { name: 'Backfill' }));
+  });
+
+  it('tells assistive technology which choice is recommended', () => {
+    render(<QuestionCard questions={[question()]} answered={false} onSubmit={() => {}} />);
+
+    expect(describedBy(screen.getByRole('radio', { name: 'Backfill' }))).toEqual([
+      'Recommended',
+      'Rewrite every existing row.',
+    ]);
+    expect(describedBy(screen.getByRole('radio', { name: 'Forward only' }))).toEqual([
+      'Leave the existing rows alone.',
+    ]);
   });
 
   it('says whether an answer is required or optional', () => {

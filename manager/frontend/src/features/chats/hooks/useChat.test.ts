@@ -1660,6 +1660,69 @@ describe('useChat', () => {
     expect(asked?.detail).toBe(AWAITING_ANSWER_DETAIL);
   });
 
+  it('keeps the questions it can read from a live frame, as a reload would', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm6', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'question_required',
+      message_id: 'm6',
+      tool_call_id: 'call_ask',
+      questions: [
+        { header: 'Rollout', question: 'How fast?', multi_select: false, required: true },
+        scope,
+      ],
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.questions).toEqual([
+        scope,
+      ]);
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.detail).toBe(
+      AWAITING_ANSWER_DETAIL
+    );
+  });
+
+  it('leaves the call as the tool result left it when a live frame cannot be read at all', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'm6', role: 'assistant' });
+      lastSocket?.emit({
+        type: 'tool_result',
+        message_id: 'm6',
+        tool_call_id: 'call_ask',
+        name: 'ask_user',
+        success: true,
+        detail: 'Asked',
+        duration_ms: 0,
+      });
+      lastSocket?.emit({
+        type: 'question_required',
+        message_id: 'm6',
+        tool_call_id: 'call_ask',
+        questions: { nope: 1 },
+      });
+    });
+
+    const asked = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(asked?.questions).toBeUndefined();
+    expect(asked?.detail).toBe('Asked');
+  });
+
   it('leaves the call that asked finished, since the card is what is waiting', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
