@@ -53,7 +53,10 @@ const ASSESSMENT: &str = "Reading the request: when the user describes a problem
 
 const FAILURE: &str = "When something fails: a denied tool call means the user declined it, so adjust rather \
      than retrying it verbatim. Once the same action has failed two or three times, stop and \
-     report what you tried and what came back instead of looping on it.";
+     report what you tried and what came back instead of looping on it. Try three \
+     meaningfully different approaches before escalating; a retry of the same thing is not \
+     one of them. If a tool built for the job errors, debug it or report it, never fall back \
+     silently to a slower path.";
 
 const CAPABILITY: &str = "Capabilities: do not offer work that needs a tool you were not given, and say you are \
      unsure rather than promising an outcome you cannot reach.";
@@ -300,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn a_denied_call_is_adjusted_and_a_repeated_failure_is_reported() {
+    fn a_denied_call_is_adjusted_and_three_approaches_precede_escalation() {
         let tools = chat_tools();
         let environment = environment();
         let rendered = render(&chat_context(&tools, false, &environment)).unwrap();
@@ -311,6 +314,14 @@ mod tests {
         );
         assert!(
             rendered.contains("failed two or three times, stop and report"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("three meaningfully different approaches before escalating"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("never fall back silently to a slower path"),
             "{rendered}"
         );
     }
