@@ -12,7 +12,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::path::PathBuf;
 use uuid::Uuid;
 use zone_server::agent::prompt;
-use zone_server::agent::{ChatTools, Environment, WorkspaceScope};
+use zone_server::agent::{ASK_USER, ChatTools, Environment, WorkspaceScope};
 use zone_server::db::knowledge::{
     LearnedCategory, LearnedEntryRow, render_learned_facts, render_standing_instructions,
 };
@@ -275,4 +275,22 @@ async fn every_chat_surface_cites_by_marker_rather_than_by_link() {
         "{plain}"
     );
     assert!(!plain.contains("a tool returned in this chat"), "{plain}");
+}
+
+/// The section renders only for a catalog holding the tool, so a surface that
+/// stopped offering it would lose the rules silently rather than fail here.
+#[tokio::test]
+async fn both_surfaces_offer_the_question_tool_and_read_its_rules() {
+    let chat = chat_tools().await;
+    let task = task_tools().await;
+
+    assert!(chat.has(ASK_USER), "a chat catalog must offer {ASK_USER}");
+    assert!(task.has(ASK_USER), "a task catalog must offer {ASK_USER}");
+
+    for rendered in [
+        prompt::chat(&chat, false, &environment()),
+        prompt::task(&task, &environment()),
+    ] {
+        assert!(rendered.contains("Asking the user:"), "{rendered}");
+    }
 }
