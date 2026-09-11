@@ -30,6 +30,7 @@ const ORDER: &[Section] = &[
     ("identity", section::identity::render),
     ("boundary", section::boundary::render),
     ("tiers", section::tiers::render),
+    ("elicitation", section::elicitation::render),
     ("conduct", section::conduct::render),
     ("reply", section::reply::render),
     ("refusal", section::refusal::render),
@@ -159,10 +160,12 @@ mod tests {
     use super::*;
     use crate::agent::ToolProfile;
     use test_support::environment;
+    use zone_core::tools::{Tier, ToolRegistry};
 
     /// Every chat tool loaded today, plus one MCP tool, as a worst-case catalog.
     const CHAT_CATALOG: &[&str] = &[
         "apply_patch",
+        "ask_user",
         "assess_pull_requests",
         "assess_release_pipelines",
         "cancel_reminder",
@@ -209,9 +212,11 @@ mod tests {
         "write_file",
     ];
 
-    /// The six sandboxed host tools a task always gets.
+    /// The sandboxed host tools a task always gets, and the question it can
+    /// put to the user while it runs.
     const TASK_HOST: &[&str] = &[
         "apply_patch",
+        "ask_user",
         "list_files",
         "read_file",
         "run_command",
@@ -246,10 +251,33 @@ mod tests {
         })
     }
 
+    /// Every catalog name with the tier it declares, `Tier::Write` standing in
+    /// for the names no host registry knows, which is the fallback
+    /// `ChatTools::tier` applies to them in production. Stating the tiers is
+    /// what keeps `ask_user` a read: left to that fallback it would be
+    /// described to the model as a call an approval gates.
+    fn tiered(profile: ToolProfile, catalog: &[&'static str]) -> Vec<(&'static str, Tier)> {
+        let host = match profile {
+            ToolProfile::Chat => ToolRegistry::with_host_tools(),
+            ToolProfile::Task => ToolRegistry::with_defaults(),
+        };
+        catalog
+            .iter()
+            .map(|name| {
+                let tier = if *name == section::elicitation::ASK_USER {
+                    Tier::Read
+                } else {
+                    host.tier(name).unwrap_or(Tier::Write)
+                };
+                (*name, tier)
+            })
+            .collect()
+    }
+
     fn chat_tools() -> ChatTools {
-        ChatTools::with_names(
+        ChatTools::with_tiers(
             ToolProfile::Chat,
-            CHAT_CATALOG,
+            &tiered(ToolProfile::Chat, CHAT_CATALOG),
             zone_core::mcp::guidance_for_tools(&["magents_spawn_session"]),
         )
     }
@@ -257,7 +285,11 @@ mod tests {
     fn task_tools() -> ChatTools {
         let mut catalog = TASK_HOST.to_vec();
         catalog.extend_from_slice(TASK_DOCUMENTS);
-        ChatTools::with_names(ToolProfile::Task, &catalog, None)
+        ChatTools::with_tiers(
+            ToolProfile::Task,
+            &tiered(ToolProfile::Task, &catalog),
+            None,
+        )
     }
 
     #[test]
@@ -268,6 +300,7 @@ mod tests {
                 "identity",
                 "boundary",
                 "tiers",
+                "elicitation",
                 "conduct",
                 "reply",
                 "refusal",
@@ -616,11 +649,45 @@ mod tests {
         );
     }
 
+    /// `with_tiers` states every name outright, where `with_names` keeps only
+    /// the few a host registry knows. Building the worst case out of those
+    /// would leave every budget and ownership test below measuring a prompt no
+    /// user is ever served.
+    #[test]
+    fn the_test_catalogs_carry_every_name_they_list() {
+        assert_eq!(chat_tools().names().len(), CHAT_CATALOG.len());
+        assert_eq!(
+            task_tools().names().len(),
+            TASK_HOST.len() + TASK_DOCUMENTS.len()
+        );
+        assert!(chat_tools().has(section::elicitation::ASK_USER));
+        assert!(task_tools().has(section::elicitation::ASK_USER));
+    }
+
+    /// The section renders off the catalog, so the prompt only carries the
+    /// rules for a question when the tool that asks one is there to call.
+    #[test]
+    fn the_elicitation_rules_arrive_with_the_tool_and_not_before() {
+        let environment = environment();
+        let without: Vec<(&str, Tier)> = tiered(ToolProfile::Chat, CHAT_CATALOG)
+            .into_iter()
+            .filter(|(name, _)| *name != section::elicitation::ASK_USER)
+            .collect();
+        let without = ChatTools::with_tiers(ToolProfile::Chat, &without, None);
+
+        assert!(!chat(&without, false, &environment).contains("Asking the user:"));
+        assert!(chat(&chat_tools(), false, &environment).contains("Asking the user:"));
+    }
+
     #[test]
     fn every_prompt_stays_inside_its_budget() {
         let chat_prompt = chat(&chat_tools(), false, &environment());
         let plain_prompt = plain(&environment());
         let task_prompt = task(&task_tools(), &environment());
+
+        for prompt in [&chat_prompt, &task_prompt] {
+            assert!(prompt.contains("Asking the user:"), "{prompt}");
+        }
 
         assert!(
             chat_prompt.len() <= CHAT_MAX_CHARS,
