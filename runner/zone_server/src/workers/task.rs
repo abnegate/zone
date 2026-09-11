@@ -18,7 +18,7 @@ use zone_core::tools::ToolResult;
 
 use crate::agent::prompt::{self, Environment, Vcs};
 use crate::agent::question::{self, Question};
-use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget};
+use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
 use crate::db::{ai_settings, tasks, workspaces};
 use crate::services::chat::session::{self, RunContext};
 use crate::services::stages;
@@ -1696,10 +1696,23 @@ async fn attempt_run(
     let turns = async {
         let mut tools = tools;
         let mut context = context;
+        // One budget covers every turn of the attempt. A fresh one per park is
+        // no ceiling at all: a model looping on `ask_user` restarts it as often
+        // as it likes, and an all-optional card answers itself in 30 seconds.
+        let mut budget = LoopBudget::task();
         let mut answers: Vec<String> = Vec::new();
         let mut carried = TaskOutcome::empty();
         loop {
-            match run_task_loop(llm.clone(), model.to_string(), tools, context, &callback).await {
+            match run_task_loop(
+                llm.clone(),
+                model.to_string(),
+                tools,
+                context,
+                budget,
+                &callback,
+            )
+            .await
+            {
                 Err(error) => return Err(Fault::agent(error)),
                 Ok(TurnOutcome::Finished(outcome)) => {
                     carried.absorb(outcome);
@@ -1710,8 +1723,10 @@ async fn attempt_run(
                     questions,
                     context: parked,
                     turn,
+                    spent,
                 }) => {
                     carried.absorb(turn);
+                    budget = budget.less(spent);
                     let answered =
                         park_for_answer(state, run_id, owner, &tool_call_id, &questions, permit)
                             .await?;
@@ -1914,6 +1929,7 @@ enum TurnOutcome {
         questions: Vec<Question>,
         context: RunContext,
         turn: TaskOutcome,
+        spent: Spend,
     },
 }
 
@@ -2061,12 +2077,13 @@ async fn run_task_loop(
     model: String,
     tools: ChatTools,
     context: RunContext,
+    budget: LoopBudget,
     callback: &DatabaseTaskCallback,
 ) -> Result<TurnOutcome, String> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
     let mut tool_calls = 0usize;
-    let mut parked: Option<(String, Vec<Question>)> = None;
+    let mut parked: Option<(String, Vec<Question>, Spend)> = None;
     let mut replay = context.clone();
     let mut events = std::pin::pin!(agent::run_with_context(
         AgentRun {
@@ -2074,7 +2091,7 @@ async fn run_task_loop(
             model,
             tools,
             messages: Vec::new(),
-            budget: LoopBudget::task(),
+            budget,
             approval: ApprovalPolicy::auto(),
         },
         context,
@@ -2156,7 +2173,8 @@ async fn run_task_loop(
             AgentEvent::QuestionRequired {
                 tool_call_id,
                 questions,
-            } => parked = Some((tool_call_id, questions)),
+                spent,
+            } => parked = Some((tool_call_id, questions, spent)),
             AgentEvent::Consumed(_)
             | AgentEvent::Context(_)
             | AgentEvent::Usage(_)
@@ -2166,7 +2184,7 @@ async fn run_task_loop(
             AgentEvent::Failed(error) => return Err(error),
         }
     }
-    if let Some((tool_call_id, questions)) = parked {
+    if let Some((tool_call_id, questions, spent)) = parked {
         return Ok(TurnOutcome::Parked {
             tool_call_id,
             questions,
@@ -2175,6 +2193,7 @@ async fn run_task_loop(
                 summary,
                 tool_calls,
             },
+            spent,
         });
     }
     callback.on_phase_change(AgentPhase::Responding, Some(&summary));
@@ -2391,6 +2410,7 @@ mod tests {
                 RunContext::from_messages(vec![LlmMessage::user(
                     "Create a task titled Made by the scoped task with description durable result",
                 )]),
+                LoopBudget::task(),
                 &callback,
             ),
         )
@@ -3536,6 +3556,110 @@ mod watchdog_tests {
         format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n")
     }
 
+    /// A park is not a new run. A budget minted per turn makes every ceiling a
+    /// per-question allowance: a model that keeps calling `ask_user` is handed
+    /// a fresh 50 rounds and 100 calls after each card, so the only thing that
+    /// ends it is [`TASK_TIMEOUT`] -- thousands of tool executions later, under
+    /// a ceiling of 100.
+    #[tokio::test]
+    async fn a_park_carries_its_budget_into_the_turn_that_resumes_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        let _execution = EXECUTION.lock().await;
+        let (pool, _observed, _state, run, owner) = parked_fixture().await;
+        let workspace_id: Uuid = sqlx::query_scalar("SELECT tasks.workspace_id FROM tasks JOIN task_runs ON task_runs.task_id=tasks.id WHERE task_runs.id=$1").bind(run).fetch_one(&pool).await.unwrap();
+
+        let provider = MockServer::start().await;
+        let cards = Arc::new(AtomicUsize::new(0));
+        let asked = cards.clone();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |request: &Request| {
+                let body = String::from_utf8_lossy(&request.body).into_owned();
+                let delta = if body.contains(ASK_OFFERED) {
+                    let card = asked.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({"tool_calls":[{"index":0,"id":format!("ask-{card}"),"type":"function","function":{"name":crate::agent::ASK_USER,"arguments":ASK_SCOPE}}]})
+                } else {
+                    serde_json::json!({"content":"The budget for this run is spent."})
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(streamed(delta))
+            })
+            .mount(&provider)
+            .await;
+
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let answered = delivered.clone();
+        let answering = tokio::spawn(async move {
+            loop {
+                if question::answer(run, chose_backfill()) {
+                    answered.fetch_add(1, Ordering::SeqCst);
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+
+        let mut config = crate::state::test_config();
+        config.litellm_host = provider.uri();
+        config.ollama_host = provider.uri();
+        let state = AppState::new(config, pool.clone(), None);
+        let permit = Permit::acquire().await.unwrap();
+        let workspace = std::env::temp_dir();
+        let environment = Environment {
+            directory: workspace.clone(),
+            ..Environment::here()
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(180),
+            attempt_run(
+                &state,
+                run,
+                owner,
+                workspace_id,
+                None,
+                "gpt-4",
+                "# Task: Budget\n\nKeep asking until something stops you",
+                "",
+                &workspace,
+                &environment,
+                &permit,
+            ),
+        )
+        .await
+        .expect("a run that parks on every turn never ran out of budget")
+        .unwrap();
+        answering.abort();
+
+        let ceiling = LoopBudget::task();
+        assert!(
+            outcome.tool_calls <= ceiling.max_tool_calls,
+            "{} tool calls ran across the parks, under a ceiling of {}",
+            outcome.tool_calls,
+            ceiling.max_tool_calls
+        );
+        // Each turn spends one round on one call, so the round ceiling is the
+        // one that runs out first, and it runs out exactly once.
+        assert_eq!(outcome.tool_calls, ceiling.max_iterations);
+        assert_eq!(
+            delivered.load(Ordering::SeqCst),
+            ceiling.max_iterations,
+            "the run asked a different number of questions than the rounds it was allowed"
+        );
+        assert_eq!(
+            cards.load(Ordering::SeqCst),
+            ceiling.max_iterations,
+            "the turn with nothing left to spend asked again instead of finishing"
+        );
+        assert_eq!(
+            outcome.summary, "The budget for this run is spent.",
+            "an exhausted budget must end the run the way any exhausted budget does"
+        );
+        sqlx::query("DELETE FROM organizations WHERE id=(SELECT organization_id FROM workspaces WHERE id=$1)").bind(workspace_id).execute(&pool).await.unwrap();
+    }
+
     /// A parked run holds no work, only an answer it is waiting for. Holding
     /// its execution slot through that wait lets [`MAX_CONCURRENT_TASKS`] runs
     /// parked on required questions take the whole deployment's task throughput
@@ -3701,6 +3825,32 @@ mod watchdog_tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn a_spent_budget_never_goes_below_nothing_left() {
+        let ceiling = LoopBudget::task();
+        assert_eq!(
+            ceiling.less(Spend {
+                iterations: 2,
+                tool_calls: 7,
+            }),
+            LoopBudget {
+                max_iterations: ceiling.max_iterations - 2,
+                max_tool_calls: ceiling.max_tool_calls - 7,
+            }
+        );
+        assert_eq!(
+            ceiling.less(Spend {
+                iterations: ceiling.max_iterations + 1,
+                tool_calls: ceiling.max_tool_calls + 1,
+            }),
+            LoopBudget {
+                max_iterations: 0,
+                max_tool_calls: 0,
+            },
+            "an overspent budget is exhausted, not wrapped around to a fresh one"
+        );
     }
 
     #[test]

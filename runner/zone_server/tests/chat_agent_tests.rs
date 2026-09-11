@@ -1191,6 +1191,7 @@ fn questioned(events: &[AgentEvent]) -> Vec<(&str, usize)> {
             AgentEvent::QuestionRequired {
                 tool_call_id,
                 questions,
+                ..
             } => Some((tool_call_id.as_str(), questions.len())),
             _ => None,
         })

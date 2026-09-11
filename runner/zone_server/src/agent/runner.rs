@@ -67,6 +67,25 @@ impl LoopBudget {
             max_tool_calls: 100,
         }
     }
+
+    /// What is left of this budget once `spend` has been taken out of it.
+    ///
+    /// A turn that ends on a question is not the run's last, and the turn that
+    /// resumes it continues the same work: handing that turn a fresh ceiling
+    /// makes the ceiling a per-question allowance rather than a run's.
+    pub const fn less(self, spend: Spend) -> Self {
+        Self {
+            max_iterations: self.max_iterations.saturating_sub(spend.iterations),
+            max_tool_calls: self.max_tool_calls.saturating_sub(spend.tool_calls),
+        }
+    }
+}
+
+/// What one turn took out of the budget it was given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Spend {
+    pub iterations: usize,
+    pub tool_calls: usize,
 }
 
 /// What the loop reports as it runs.
@@ -123,10 +142,12 @@ pub enum AgentEvent {
     },
     /// The model put a structured question to the user, which ends the turn.
     /// Nothing queued behind the call ran, and no further model round follows:
-    /// the answer arrives as the next user turn.
+    /// the answer arrives as the next user turn. `spent` is what this turn took
+    /// out of its budget, for the turn that resumes it to carry on from.
     QuestionRequired {
         tool_call_id: String,
         questions: Vec<Question>,
+        spent: Spend,
     },
     /// The turn could not continue. Anything already streamed still stands.
     Failed(String),
@@ -562,7 +583,8 @@ pub fn run_with_context(
                         receipt: finished.receipt,
                     };
                     if let Some((tool_call_id, questions)) = park {
-                        yield AgentEvent::QuestionRequired { tool_call_id, questions };
+                        let spent = Spend { iterations: iteration + 1, tool_calls: used };
+                        yield AgentEvent::QuestionRequired { tool_call_id, questions, spent };
                         while let Some(call) = requested.pop_front() {
                             let entry = canonical(
                                 LlmMessage::tool_result(&call.id, NOT_EXECUTED_AFTER_QUESTION),

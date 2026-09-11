@@ -34,7 +34,7 @@ pub use prompt::{Environment, Surface, Vcs, Verbosity};
 pub use question::{ASK_USER, Answer, Choice, Question};
 pub use receipts::{ActionReceipt, ActionTarget};
 pub use runner::{
-    AgentEvent, AgentRun, LoopBudget, MAX_ITERATIONS, MAX_TOOL_CALLS, run, run_with_context,
+    AgentEvent, AgentRun, LoopBudget, MAX_ITERATIONS, MAX_TOOL_CALLS, Spend, run, run_with_context,
 };
 pub use tools::{ChatTools, ToolProfile, WorkspaceScope};
 
