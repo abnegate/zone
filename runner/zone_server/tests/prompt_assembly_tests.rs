@@ -194,6 +194,27 @@ async fn a_failure_is_reported_ahead_of_anything_that_succeeded() {
     }
 }
 
+/// `conduct` renders the same rules for a failed call on both surfaces, and its
+/// own tests only ever build a chat context, so a surface split there would
+/// leave the run nobody is watching with no rule for a call that came back an
+/// error.
+#[tokio::test]
+async fn both_surfaces_are_told_what_to_do_when_a_call_fails() {
+    for rendered in [
+        prompt::chat(&chat_tools().await, false, &environment()),
+        prompt::task(&task_tools().await, &environment()),
+    ] {
+        for rule in [
+            "a denied tool call means the user declined it",
+            "failed two or three times, stop and report",
+            "three meaningfully different approaches before escalating",
+            "never fall back silently to a slower path",
+        ] {
+            assert!(rendered.contains(rule), "{rule}: {rendered}");
+        }
+    }
+}
+
 /// The rule is about the turn after a tool call, so it renders only where there
 /// is a catalog: a chat with no tools never reaches the situation.
 #[tokio::test]
