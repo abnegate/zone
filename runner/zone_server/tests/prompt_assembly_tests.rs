@@ -63,8 +63,16 @@ async fn a_background_run_reads_the_task_sections_and_none_of_the_chat_ones() {
         "{rendered}"
     );
     assert!(
-        rendered.contains("nobody is watching this run and nobody can answer you mid-task"),
+        rendered.contains("nobody is watching this run, so asking whether to proceed only stops"),
         "{rendered}"
+    );
+    assert!(
+        rendered.contains("An answer you genuinely need comes from ask_user."),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("nobody can answer you mid-task"),
+        "a run offered the question tool can be answered: {rendered}"
     );
     assert!(
         rendered.contains("ships with a regression test that fails without the fix"),
