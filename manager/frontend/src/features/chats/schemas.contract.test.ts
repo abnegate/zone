@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
+import { structFields } from '../../test/rust';
 import {
   ActionReceiptSchema,
   ChoiceSchema,
@@ -78,30 +79,14 @@ function rustStringConstant(source: string, constantName: string): string {
   return value;
 }
 
-/// Reads the serialised shape of a `pub struct`: each `pub name: Type` in
-/// declaration order, paired with whether serde may omit it. A field carrying
-/// `skip_serializing_if` is absent from the wire when empty, which is exactly
-/// what the console must model as optional.
+/// The struct's serialised shape as the zod shapes below state it: the name
+/// each field travels under, against whether serde may omit it. A field
+/// carrying `skip_serializing_if` is absent from the wire when empty, which is
+/// exactly what the console must model as optional.
 function rustStructFields(source: string, structName: string): Record<string, boolean> {
-  const body = source.match(new RegExp(`pub struct ${structName} \\{([^}]*)\\}`))?.[1];
-  if (!body) throw new Error(`${structName} not found in the Rust source`);
-
-  const fields: Record<string, boolean> = {};
-  let skippable = false;
-  for (const raw of body.split('\n')) {
-    const line = raw.trim();
-    if (line.startsWith('#[serde(')) {
-      skippable = line.includes('skip_serializing_if');
-      continue;
-    }
-    const field = line.match(/^pub ([a-z_0-9]+):/);
-    if (field) {
-      fields[field[1]] = skippable;
-      skippable = false;
-    }
-  }
-  if (Object.keys(fields).length === 0) throw new Error(`${structName} declares no public fields`);
-  return fields;
+  return Object.fromEntries(
+    structFields(source, structName).map((field) => [field.name, field.optional])
+  );
 }
 
 function zodOptions(schema: unknown, key: string): string[] {

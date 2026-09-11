@@ -170,12 +170,18 @@ class TasksApi {
    * The reply confirms the submission rather than returning the run: resuming
    * the parked worker happens out of band, so the moved run is read back by
    * refetching it.
+   *
+   * A 2xx means the waiter has the answers and the run has already moved, so
+   * the confirmation on top of it is a receipt and nothing more. Refusing to
+   * read one would report a delivered answer as a rejected one and invite a
+   * second send of a question that is no longer being asked, so an unreadable
+   * body costs the count, never the acceptance.
    */
   async answerRun(
     runId: string,
     answers: Answer[],
     signal?: AbortSignal
-  ): Promise<AnswersResponse> {
+  ): Promise<AnswersResponse | undefined> {
     const response = await fetch(
       `${API_BASE}/api/tasks/runs/${encodeURIComponent(runId)}/answers`,
       {
@@ -189,7 +195,8 @@ class TasksApi {
       const errorData = await parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to answer task run: ${response.status}`);
     }
-    return parse(AnswersResponseSchema, await response.json());
+    const receipt = AnswersResponseSchema.safeParse(await response.json().catch(() => undefined));
+    return receipt.success ? receipt.data : undefined;
   }
 
   async getTaskRunLogs(
