@@ -110,6 +110,33 @@ describe('task runner contract', () => {
     expect(fetch).toHaveBeenCalledTimes(4);
     for (const call of fetch.mock.calls) expect(call[1]?.signal).toBe(controller.signal);
   });
+  it('sends the structured answers to the answering route and returns the resumed run', async () => {
+    const answers = [
+      { header: 'Scope', labels: ['Backfill'] },
+      { header: 'Timing', labels: ['Other'], other: 'after the release' },
+    ];
+    const resumed = { ...run, status: 'running', pending_question: null };
+    fetch.mockResolvedValueOnce(Response.json({ run: resumed }));
+
+    expect(await tasksApi.answerRun('run/1', answers)).toEqual(resumed);
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/tasks/runs/run%2F1/answers'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ answers }),
+        headers: expect.objectContaining({ Authorization: 'Bearer test-token' }),
+      })
+    );
+  });
+
+  it('surfaces the server rejection of an answer rather than a bare status', async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json({ message: 'Answer a required question' }, { status: 400 })
+    );
+
+    await expect(tasksApi.answerRun('run-1', [])).rejects.toThrow('Answer a required question');
+  });
+
   it('preserves runner rejection messages', async () => {
     fetch.mockResolvedValueOnce(
       Response.json({ error: 'Task already has an active run' }, { status: 409 })

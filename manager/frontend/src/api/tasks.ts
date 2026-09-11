@@ -1,3 +1,4 @@
+import type { Answer } from '../features/chats/types';
 import {
   TaskResponseSchema,
   TaskRunLogsResponseSchema,
@@ -152,6 +153,31 @@ class TasksApi {
     if (!response.ok) {
       const errorData = await parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to fetch task run: ${response.status}`);
+    }
+    const data = parse(TaskRunResponseSchema, await response.json());
+    return data.run;
+  }
+
+  /**
+   * Answers the question a waiting run parked on.
+   *
+   * The structured answers travel, not the string the reader sees: the server
+   * renders the message the agent reads back, so one renderer decides what the
+   * agent was told and the console cannot disagree with it.
+   */
+  async answerRun(runId: string, answers: Answer[], signal?: AbortSignal): Promise<TaskRun> {
+    const response = await fetch(
+      `${API_BASE}/api/tasks/runs/${encodeURIComponent(runId)}/answers`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ answers }),
+        signal,
+      }
+    );
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to answer task run: ${response.status}`);
     }
     const data = parse(TaskRunResponseSchema, await response.json());
     return data.run;
