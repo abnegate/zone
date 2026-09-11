@@ -15,18 +15,17 @@ const HEADING: &str = "Asking the user:";
 const RESERVE: &str = "- Reserve ask_user for a decision that changes what you do next; reading or testing \
      settles the rest.";
 
-const CONVERSATION: &str = "- Check the conversation first: it often already answers.";
+const CONVERSATION: &str = "- Check the conversation first: it often answers.";
 
-const NARROWED: &str = "- A detailed request has narrowed it already: state the assumption inline rather than \
-     ask.";
+const NARROWED: &str =
+    "- A detailed request has narrowed it: state the assumption inline rather than ask.";
 
 const COUNT: &str = "- One question is the shape to aim for, three the ceiling.";
 
 const LAST: &str =
     "- Your turn ends on the call: finish everything the answer does not block first.";
 
-const CARD: &str = "- The card is the consent: do not also ask in prose or restate the options in your \
-     reply.";
+const CARD: &str = "- The card is the consent: do not also ask in prose or restate the options.";
 
 /// Only a task run goes ahead on a default, so only a task run can be wrong to;
 /// in a chat the user's next message answers either way.
