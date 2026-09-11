@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
-import type { ToolCallRecord } from '../types';
+import type { Question, ToolCallRecord } from '../types';
 import { ToolTrace } from './ToolTrace';
 
 const call = (overrides: Partial<ToolCallRecord> = {}): ToolCallRecord => ({
@@ -370,5 +370,114 @@ describe('ToolTrace', () => {
     );
 
     expect(screen.queryByTestId('tool-approve')).not.toBeInTheDocument();
+  });
+
+  const scope: Question = {
+    header: 'Scope',
+    question: 'How far should this go?',
+    choices: [
+      {
+        label: 'Backfill',
+        description: 'Rewrite every existing row.',
+        recommended: true,
+        free_text: false,
+      },
+      {
+        label: 'Forward only',
+        description: 'Leave the existing rows alone.',
+        recommended: false,
+        free_text: false,
+      },
+      {
+        label: 'Other',
+        description: 'Something else — type it below.',
+        recommended: false,
+        free_text: true,
+      },
+    ],
+    multi_select: false,
+    required: true,
+  };
+
+  const asked = (questions: Question[] = [scope]): ToolCallRecord =>
+    call({
+      name: 'ask_user',
+      arguments: '{"questions":[{"header":"Scope"}]}',
+      detail: 'Waiting for your answer…',
+      pending: true,
+      duration_ms: 0,
+      questions,
+    });
+
+  it('describes an asked question in plain language', () => {
+    render(<ToolTrace calls={[asked()]} />);
+
+    expect(screen.getByText('Asked you a question')).toBeInTheDocument();
+    expect(screen.queryByText('ask_user')).not.toBeInTheDocument();
+  });
+
+  it('shows a question loaded from history without the row being opened', () => {
+    render(<ToolTrace calls={[asked()]} onAnswer={() => {}} />);
+
+    expect(screen.getByTestId('question-card')).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Backfill' })).toBeInTheDocument();
+    expect(screen.getByTestId('tool-call')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('leaves the trace alone for a call that asked nothing', () => {
+    render(<ToolTrace calls={[call()]} onAnswer={() => {}} />);
+
+    expect(screen.queryByTestId('question-card')).not.toBeInTheDocument();
+  });
+
+  it('sends the answer as the agreed rendering rather than as raw choices', () => {
+    const sent: string[] = [];
+    render(<ToolTrace calls={[asked()]} onAnswer={(content) => sent.push(content)} />);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Other' }));
+    fireEvent.change(screen.getByTestId('question-free-text'), {
+      target: { value: 'Only the backlog' },
+    });
+    fireEvent.click(screen.getByTestId('question-submit'));
+
+    expect(sent).toEqual(['Scope: Other: Only the backlog']);
+  });
+
+  // A user message newer than the assistant message the card sits on is the
+  // reader's answer, so the caller reads the settled state off the thread.
+  it('settles the card once a later user message has answered it', () => {
+    render(<ToolTrace calls={[asked()]} answered onAnswer={() => {}} />);
+
+    expect(screen.getByTestId('question-submit')).toBeDisabled();
+    expect(screen.getByTestId('question-card')).toHaveClass('question-card--answered');
+  });
+
+  it('still asks while no answer has been sent', () => {
+    render(<ToolTrace calls={[asked()]} onAnswer={() => {}} />);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Backfill' }));
+
+    expect(screen.getByTestId('question-submit')).toBeEnabled();
+  });
+
+  it('keeps the questions beside the reasons rather than behind the toggle', () => {
+    render(
+      <ToolTrace
+        calls={[asked([{ ...scope, preview: 'Decides whether 4,812 rows are rewritten.' }])]}
+        onAnswer={() => {}}
+      />
+    );
+
+    const order = Array.from(
+      screen
+        .getByTestId('tool-call')
+        .closest('li')
+        ?.querySelectorAll<HTMLElement>('[data-testid]') ?? []
+    ).map((element) => element.dataset.testid);
+
+    expect(order.indexOf('question-card')).toBeGreaterThan(order.indexOf('tool-call'));
+    expect(screen.getByTestId('question-preview')).toHaveTextContent(
+      'Decides whether 4,812 rows are rewritten.'
+    );
   });
 });

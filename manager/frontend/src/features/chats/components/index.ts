@@ -5,5 +5,6 @@ export { AuthenticatedVideo } from './AuthenticatedVideo';
 export { Citations } from './Citations';
 export { Generation } from './Generation';
 export { MessageContent } from './MessageContent';
+export { QuestionCard } from './QuestionCard';
 export { Reasoning } from './Reasoning';
 export { ToolTrace } from './ToolTrace';

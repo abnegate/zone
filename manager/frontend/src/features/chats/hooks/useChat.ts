@@ -10,6 +10,7 @@ import type {
   Message,
   MessageMetadata,
   MessageRole,
+  Question,
   ReasoningEffort,
   SendMessageRequest,
   ToolCallRecord,
@@ -54,6 +55,12 @@ type ServerMessage =
       arguments: string;
       reason?: string;
       preview?: string;
+    }
+  | {
+      type: 'question_required';
+      message_id: string;
+      tool_call_id: string;
+      questions: Question[];
     }
   | {
       type: 'tool_result';
@@ -662,6 +669,16 @@ export function useChat(
             approval: 'pending',
             reason: payload.reason,
             preview: payload.preview,
+          });
+          break;
+        // The turn ends here: the model asked something and the reply waits on
+        // the reader, whose answer arrives as an ordinary user message rather
+        // than as a decision frame of its own.
+        case 'question_required':
+          patchToolCall(payload.message_id, payload.tool_call_id, {
+            questions: payload.questions,
+            detail: 'Waiting for your answer…',
+            pending: true,
           });
           break;
         case 'tool_result':

@@ -145,6 +145,13 @@ export default function ChatsPage() {
         }
       : findInstalledModel(models, displayedChat.model_name)
     : undefined;
+  // An answer to an agent's question is sent as an ordinary user message, so a
+  // user message after the assistant message carrying a question card is that
+  // answer and settles the card. Nothing on the server records it.
+  const lastUserIndex = (displayedChat?.messages ?? []).reduce(
+    (last, message, index) => (message.role === 'user' ? index : last),
+    -1
+  );
   const showAgent = displayedChat ? chatShowsAgent(displayedChat, installedForChat) : false;
   const showCharacter = displayedChat ? chatShowsCharacter(displayedChat, installedForChat) : false;
   const showReasoning = displayedChat ? chatShowsReasoning(displayedChat, installedForChat) : false;
@@ -407,6 +414,21 @@ export default function ChatsPage() {
       await refreshChats();
     } catch {
       // The message already left; a stale sidebar is not a failed send.
+    }
+  };
+
+  const handleAnswerQuestions = async (content: string) => {
+    if (!isAuthenticated || !displayedChat || sending || streaming || !content.trim()) return;
+
+    setSending(true);
+    setOperationError(null);
+    stickToBottom.current = true;
+    try {
+      await sendMessageFn({ content });
+    } catch (err) {
+      setOperationError(err instanceof Error ? err.message : 'Failed to send message');
+    } finally {
+      setSending(false);
     }
   };
 
@@ -862,7 +884,7 @@ export default function ChatsPage() {
                   <p>No messages yet. Start a conversation!</p>
                 </div>
               ) : (
-                displayedChat.messages.map((message) => {
+                displayedChat.messages.map((message, index) => {
                   const images = imageAttachments(message.metadata);
                   const videos = videoAttachments(message.metadata);
                   const audios = audioAttachments(message.metadata);
@@ -950,7 +972,12 @@ export default function ChatsPage() {
                         />
                       ) : null}
                       {toolCalls.length > 0 && (
-                        <ToolTrace calls={toolCalls} onDecide={approveTool} />
+                        <ToolTrace
+                          calls={toolCalls}
+                          answered={index < lastUserIndex}
+                          onDecide={approveTool}
+                          onAnswer={handleAnswerQuestions}
+                        />
                       )}
                       {toolsHaveReasoning && leftoverReasoning ? (
                         <Reasoning

@@ -254,6 +254,46 @@ describe('a stated reason and an observed preview survive storage', () => {
     ).toHaveProperty('preview', 'Run `bun test` in /srv/zone.');
   });
 
+  test('questions on a tool call are kept rather than stripped', () => {
+    const questions = [
+      {
+        header: 'Scope',
+        question: 'How far should this go?',
+        choices: [
+          {
+            label: 'Backfill',
+            description: 'Rewrite every existing row.',
+            recommended: true,
+            free_text: false,
+          },
+          {
+            label: 'Other',
+            description: 'Something else — type it below.',
+            recommended: false,
+            free_text: true,
+          },
+        ],
+        multi_select: false,
+        required: true,
+      },
+    ];
+
+    expect(ToolCallRecordSchema.parse({ ...storedCall, questions })).toHaveProperty(
+      'questions',
+      questions
+    );
+  });
+
+  test('unreadable questions cost the questions, never the row they sit on', () => {
+    const parsed = MessageMetadataSchema.parse({
+      tool_calls: [{ ...storedCall, questions: { nope: 1 } }],
+    });
+
+    expect(parsed.tool_calls).toHaveLength(1);
+    expect(parsed.tool_calls?.[0].questions).toBeUndefined();
+    expect(parsed.tool_calls?.[0].detail).toBe('ok');
+  });
+
   test('an unreadable preview costs the preview, never the row it sits on', () => {
     const parsed = MessageMetadataSchema.parse({
       tool_calls: [{ ...storedCall, preview: 42 }],
