@@ -53,6 +53,14 @@ pub const MAX_JOB_LOG_BYTES: u64 = 64 * 1024 * 1024;
 /// shared location would be a new cross-workspace read surface.
 pub const JOB_LOG_DIRECTORY: &str = ".zone/jobs";
 
+/// Longest a session teardown waits for one killed child to be reaped.
+///
+/// The chat's teardown is a single point that holds the chat's generation
+/// permit, and a child wedged in uninterruptible I/O is never reaped at all,
+/// so the wait is bounded and the lag is logged. The kill has already been
+/// sent by then: what is given up is the confirmation, not the signal.
+const KILL_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// What a context with no chat and no run is told when it reaches for a job.
 pub const UNAVAILABLE: &str = "Background jobs are not available in this context.";
 
@@ -328,16 +336,22 @@ impl Jobs {
             .filter(|job| job.session == session)
             .map(|job| job.key().clone())
             .collect();
-        let claimed: Vec<Job> = ids
-            .iter()
-            .filter_map(|id| JOBS.remove(id).map(|(_, job)| job))
-            .collect();
+        let claimed: Vec<(String, Job)> = ids.iter().filter_map(|id| JOBS.remove(id)).collect();
 
         let count = claimed.len();
-        for job in claimed {
+        for (id, job) in claimed {
             let log = job.log;
             let _ = job.kill.send(());
-            ended(job.state).await;
+            if tokio::time::timeout(KILL_TIMEOUT, ended(job.state))
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    job = %id,
+                    seconds = KILL_TIMEOUT.as_secs(),
+                    "A killed job has not been reaped yet; leaving it to the process"
+                );
+            }
             discard(&log).await;
         }
         count
@@ -645,6 +659,7 @@ fn is_job_id(candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::captured_logs;
     use std::process::Command as Process;
     use tempfile::TempDir;
 
@@ -1042,6 +1057,64 @@ mod tests {
         assert!(
             neighbour.exists(),
             "a directory holding somebody else's file is not ours to remove"
+        );
+    }
+
+    /// The chat teardown is one point, and it holds the chat's generation
+    /// permit while it runs. A child wedged in uninterruptible I/O is never
+    /// reaped, so the wait for the reap is bounded: the kill has been sent by
+    /// then and only the confirmation is given up.
+    #[tokio::test(start_paused = true)]
+    async fn a_child_that_never_reports_its_end_does_not_hold_the_teardown() {
+        let cwd = directory();
+        let session = task();
+        let id = mint();
+        let log = log_path(cwd.path(), &id);
+        tokio::fs::create_dir_all(cwd.path().join(JOB_LOG_DIRECTORY))
+            .await
+            .expect("the log directory is created");
+        tokio::fs::write(&log, "wedged")
+            .await
+            .expect("the job wrote something before wedging");
+        let (reports, state) = watch::channel(JobState::Running);
+        let (kill, killed) = oneshot::channel();
+        JOBS.insert(
+            id.clone(),
+            Job {
+                session,
+                log: log.clone(),
+                state,
+                kill,
+            },
+        );
+
+        // The bound is inside the collector, not around it: time is paused and
+        // advances whenever the runtime idles, so a wait for the collector
+        // would spend the bound before the teardown had started.
+        let (ended, logged) = captured_logs(tokio::time::timeout(
+            KILL_TIMEOUT * 4,
+            Jobs::kill_session(session),
+        ))
+        .await;
+
+        assert_eq!(
+            ended.expect("a teardown that cannot confirm a kill still returns"),
+            1
+        );
+        assert!(
+            logged.contains("WARN") && logged.contains(&id),
+            "the lagging reap is reported at warn, naming the job: {logged}"
+        );
+        assert!(
+            Jobs::read(session, &id, 0, 1).await.is_err(),
+            "the registry entry is released whether or not the child was reaped"
+        );
+        assert!(!log.exists(), "and the log goes with it");
+        assert!(killed.await.is_ok(), "the kill itself was still sent");
+        assert_eq!(
+            *reports.borrow(),
+            JobState::Running,
+            "nothing ever reported the child's end, which is the case under test"
         );
     }
 
