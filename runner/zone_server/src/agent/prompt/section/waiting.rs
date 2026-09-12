@@ -19,12 +19,25 @@ use std::sync::LazyLock;
 
 const HEADING: &str = "Waiting for something to finish:";
 
+/// The three reads this section sends a model away from. Their names live in
+/// `Tool::name()` arms on tools a prompt section cannot construct — a
+/// workspace action needs a scope and an integration needs a source — so they
+/// are named here and the rule is built from them rather than spelling them
+/// out mid-sentence.
+const TAIL_TASK_LOG: &str = "tail_task_log";
+const GET_TASK_RUN: &str = "get_task_run";
+const GET_BUILD_STATUS: &str = "get_build_status";
+
 const BACKGROUND: &str = "- Send a long command to the background rather than holding the turn open on it, then \
      wait for the job instead of watching it.";
 
-const NO_POLLING: &str = "- Never call tail_task_log, get_task_run or get_build_status in a loop to learn whether \
-     something finished. Each read spends a round and reports only the instant it ran in; \
-     wait_for returns when the thing itself happens.";
+static NO_POLLING: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "- Never call {TAIL_TASK_LOG}, {GET_TASK_RUN} or {GET_BUILD_STATUS} in a loop to learn \
+         whether something finished. Each read spends a round and reports only the instant it \
+         ran in; {WAIT_FOR} returns when the thing itself happens."
+    )
+});
 
 /// The floor and the default are quoted because a model given no sense of the
 /// window asks for one end of it, and both ends are wrong for most subjects.
@@ -91,7 +104,7 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
     let rules = match context.surface {
         Surface::Chat => vec![
             BACKGROUND,
-            NO_POLLING,
+            NO_POLLING.as_str(),
             SIZE.as_str(),
             NOT_SUCCESS,
             EXCESSIVE.as_str(),
@@ -101,7 +114,7 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
         ],
         Surface::Task => vec![
             BACKGROUND,
-            NO_POLLING,
+            NO_POLLING.as_str(),
             SIZE.as_str(),
             NOT_SUCCESS,
             EXCESSIVE.as_str(),
@@ -144,12 +157,12 @@ mod tests {
         let environment = environment();
         let without = ChatTools::with_names(
             ToolProfile::Chat,
-            &["read_file", "get_task_run", "tail_task_log"],
+            &["read_file", GET_TASK_RUN, TAIL_TASK_LOG],
             None,
         );
         let with = ChatTools::with_names(
             ToolProfile::Chat,
-            &["read_file", "get_task_run", "tail_task_log", WAIT_FOR],
+            &["read_file", GET_TASK_RUN, TAIL_TASK_LOG, WAIT_FOR],
             None,
         );
 
@@ -172,8 +185,22 @@ mod tests {
     #[test]
     fn the_three_status_reads_are_never_called_in_a_loop() {
         for rendered in [chat(), task()] {
-            assert!(rendered.contains(NO_POLLING), "{rendered}");
+            assert!(rendered.contains(NO_POLLING.as_str()), "{rendered}");
         }
+    }
+
+    /// The one rule built from tool names rather than from numbers, so the
+    /// sentence a model reads is pinned here as a literal. A rule asserted
+    /// through its own constant cannot notice a name interpolated wrong, and a
+    /// name a model cannot call teaches it nothing.
+    #[test]
+    fn the_rule_names_the_three_reads_and_the_tool_that_replaces_them() {
+        assert_eq!(
+            *NO_POLLING,
+            "- Never call tail_task_log, get_task_run or get_build_status in a loop to learn \
+             whether something finished. Each read spends a round and reports only the instant \
+             it ran in; wait_for returns when the thing itself happens."
+        );
     }
 
     #[test]
@@ -281,8 +308,8 @@ mod tests {
                 "run_shell",
                 "start_task",
                 "create_task",
-                "get_task_run",
-                "tail_task_log",
+                GET_TASK_RUN,
+                TAIL_TASK_LOG,
                 WAIT_FOR,
             ],
             None,
