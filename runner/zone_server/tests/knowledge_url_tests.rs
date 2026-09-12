@@ -337,6 +337,8 @@ fn test_knowledge_row_has_url_fields() {
         content_hash: Some("abc123".to_string()),
         refresh_interval_minutes: Some(60),
         last_fetch_error: None,
+        created_at: None,
+        updated_at: None,
     };
 
     let _list_row = KnowledgeListRow {
@@ -352,6 +354,124 @@ fn test_knowledge_row_has_url_fields() {
         refresh_interval_minutes: Some(60),
         last_fetch_error: None,
     };
+}
+
+// =============================================================================
+// Reading one entry
+// =============================================================================
+
+/// A citation names one entry, so the console has to be able to read that entry
+/// on its own: the list is a page of a workspace and drops both the content and
+/// the timestamps, so an entry outside it is unreachable without this route.
+#[tokio::test]
+async fn a_knowledge_entry_is_readable_by_id_with_its_content() {
+    let client = TestClient::with_db().await;
+    let (token, workspace_id) = setup_user_and_workspace(&client).await;
+
+    let created = client
+        .post_json_auth(
+            "/api/knowledge",
+            &json!({
+                "workspace_id": workspace_id,
+                "title": "Marlowe-9 regulator",
+                "content": "The retaining collar is torqued to 57 newton-metres.",
+                "tags": ["valve"],
+            }),
+            &token,
+        )
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let entry = created.json_value()["id"].as_str().unwrap().to_string();
+
+    let read = client
+        .get_auth(&format!("/api/knowledge/{entry}"), &token)
+        .await;
+    read.assert_status(StatusCode::OK);
+    let body = read.json_value();
+    assert_eq!(body["id"].as_str(), Some(entry.as_str()));
+    assert_eq!(body["title"].as_str(), Some("Marlowe-9 regulator"));
+    assert_eq!(
+        body["content"].as_str(),
+        Some("The retaining collar is torqued to 57 newton-metres."),
+        "the read has to carry what the list drops: {}",
+        read.text()
+    );
+    assert!(
+        body["created_at"].is_string() && body["updated_at"].is_string(),
+        "the entry read carries its timestamps: {}",
+        read.text()
+    );
+}
+
+/// The route exists because the list cannot answer this question: a workspace
+/// larger than one page hides its older entries, and the citation that names
+/// one of them has nothing else to ask.
+#[tokio::test]
+async fn an_entry_past_the_end_of_the_list_page_is_still_readable() {
+    let client = TestClient::with_db().await;
+    let (token, workspace_id) = setup_user_and_workspace(&client).await;
+
+    let created = client
+        .post_json_auth(
+            "/api/knowledge",
+            &json!({
+                "workspace_id": workspace_id,
+                "title": "The cited entry",
+                "content": "Torque the collar to 57 newton-metres.",
+            }),
+            &token,
+        )
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let entry = created.json_value()["id"].as_str().unwrap().to_string();
+
+    for index in 0..3 {
+        client
+            .post_json_auth(
+                "/api/knowledge",
+                &json!({
+                    "workspace_id": workspace_id,
+                    "title": format!("Newer note {index}"),
+                    "content": "Unrelated.",
+                }),
+                &token,
+            )
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+
+    let page = client
+        .get_auth(
+            &format!("/api/knowledge?workspace_id={workspace_id}&limit=2"),
+            &token,
+        )
+        .await;
+    page.assert_status(StatusCode::OK);
+    assert!(
+        !page.text().contains("The cited entry"),
+        "the entry has to be off the page for this test to mean anything: {}",
+        page.text()
+    );
+
+    let read = client
+        .get_auth(&format!("/api/knowledge/{entry}"), &token)
+        .await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(
+        read.json_value()["content"].as_str(),
+        Some("Torque the collar to 57 newton-metres.")
+    );
+}
+
+#[tokio::test]
+async fn reading_an_unknown_knowledge_entry_is_not_found() {
+    let client = TestClient::with_db().await;
+    let (token, _) = setup_user_and_workspace(&client).await;
+
+    let read = client
+        .get_auth(&format!("/api/knowledge/{}", Uuid::new_v4()), &token)
+        .await;
+    read.assert_status(StatusCode::NOT_FOUND);
 }
 
 // =============================================================================

@@ -1,5 +1,5 @@
 import { Badge, Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { CreateKnowledgeWizard } from '../components';
 import { useKnowledge } from '../hooks';
@@ -9,7 +9,7 @@ import './WikiPage.css';
 type FilterType = 'all' | 'text' | 'url';
 
 export default function WikiPage() {
-  const { entries, loading, error, refreshing, createEntry, deleteEntry, refreshEntry } =
+  const { entries, loading, error, refreshing, createEntry, deleteEntry, refreshEntry, readEntry } =
     useKnowledge();
 
   const [searchParams, setSearchParams] = useSearchParams();
@@ -21,13 +21,35 @@ export default function WikiPage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
 
+  /// A citation names the entry by id, and the list is one page of a workspace
+  /// that carries no content, so the entry is read on its own rather than
+  /// looked up in what happens to be loaded.
   useEffect(() => {
     if (!linkedEntryId) return;
-    const found = entries.find((entry) => entry.id === linkedEntryId);
-    if (found) {
-      setSelectedEntry(found);
-    }
-  }, [linkedEntryId, entries]);
+    let live = true;
+    readEntry(linkedEntryId)
+      .then((entry) => {
+        if (live) setSelectedEntry(entry);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [linkedEntryId, readEntry]);
+
+  /// The card carries what the list gave it; the entry's own content arrives
+  /// with the read, so the reader sees the passage rather than an empty panel.
+  const openEntry = useCallback(
+    (entry: KnowledgeEntry) => {
+      setSelectedEntry(entry);
+      readEntry(entry.id)
+        .then((full) => {
+          setSelectedEntry((shown) => (shown?.id === full.id ? full : shown));
+        })
+        .catch(() => undefined);
+    },
+    [readEntry]
+  );
 
   const closeSelectedEntry = () => {
     setSelectedEntry(null);
@@ -182,11 +204,11 @@ export default function WikiPage() {
               <div
                 key={entry.id}
                 className="knowledge-card"
-                onClick={() => setSelectedEntry(entry)}
+                onClick={() => openEntry(entry)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    setSelectedEntry(entry);
+                    openEntry(entry);
                   }
                 }}
                 role="button"

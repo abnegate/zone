@@ -32,6 +32,8 @@ pub struct KnowledgeRow {
     pub refresh_interval_minutes: Option<i32>,
     /// Last fetch error message
     pub last_fetch_error: Option<String>,
+    pub created_at: Option<NaiveDateTime>,
+    pub updated_at: Option<NaiveDateTime>,
 }
 
 /// Lightweight knowledge entry for list views (without full content)
@@ -59,7 +61,8 @@ pub async fn get_knowledge(pool: &PgPool, id: Uuid) -> DbResult<Option<Knowledge
     sqlx::query_as::<_, KnowledgeRow>(
         r#"
         SELECT id, workspace_id, title, content, category, tags, token_count, is_active,
-               source_url, last_fetched_at, content_hash, refresh_interval_minutes, last_fetch_error
+               source_url, last_fetched_at, content_hash, refresh_interval_minutes, last_fetch_error,
+               created_at, updated_at
         FROM knowledge_entries
         WHERE id = $1
         "#,

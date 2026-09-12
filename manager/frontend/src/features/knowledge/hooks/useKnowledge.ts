@@ -49,6 +49,10 @@ export function useKnowledge() {
     [workspaceId]
   );
 
+  const readEntry = useCallback(async (id: string): Promise<KnowledgeEntry> => {
+    return knowledgeApi.getKnowledgeEntry(id);
+  }, []);
+
   const deleteEntry = useCallback(async (id: string): Promise<void> => {
     await knowledgeApi.deleteKnowledge(id);
     setEntries((prev) => prev.filter((e) => e.id !== id));
@@ -77,6 +81,7 @@ export function useKnowledge() {
     createEntry,
     deleteEntry,
     refreshEntry,
+    readEntry,
     reload,
   };
 }
