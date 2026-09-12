@@ -433,7 +433,11 @@ async fn authenticated_socket_enforces_control_and_input_contracts() {
         ))
         .await
         .unwrap();
-    assert_error(&mut socket, "That tool call is not waiting for approval.").await;
+    let refusal = next_json(&mut socket).await.expect("a refusal frame");
+    assert_eq!(
+        refusal,
+        json!({"type": "tool_approval_closed", "tool_call_id": "unknown"})
+    );
 
     socket
         .send(WsMessage::Text("not-json".to_string().into()))
@@ -463,6 +467,55 @@ async fn authenticated_socket_enforces_control_and_input_contracts() {
         .unwrap();
     assert_error(&mut socket, "Rate limit exceeded").await;
     socket.close(None).await.unwrap();
+}
+
+/// A decision for a call nothing is waiting on is refused to the connection
+/// that sent it, and to that connection alone. It is its own frame rather than
+/// an `Error` because nothing about the turn has gone wrong: a second window
+/// that loses the race to decide a card must not be told the reply died.
+#[tokio::test]
+async fn a_decision_nothing_is_waiting_on_is_refused_to_that_connection_alone() {
+    let pool = create_test_pool().await;
+    let config = test_config();
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, _, chat) = seed(&client).await;
+    let address = spawn(config, pool).await;
+    let mut deciding = authenticate(&address, chat, &token).await;
+    let mut watching = authenticate(&address, chat, &token).await;
+
+    deciding
+        .send(WsMessage::Text(
+            json!({"type": "approve_tool", "tool_call_id": "call_write", "approved": true})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    let refusal = next_json(&mut deciding).await.expect("a refusal frame");
+    assert_eq!(
+        refusal,
+        json!({"type": "tool_approval_closed", "tool_call_id": "call_write"}),
+        "a refused decision names the call it refused and is not an error"
+    );
+    assert!(
+        next_json(&mut watching).await.is_none(),
+        "the refusal reaches the connection that decided and no other"
+    );
+
+    // The refusal closed a card, not the socket, so the connection still
+    // answers for itself afterwards.
+    deciding
+        .send(WsMessage::Text("not-json".to_string().into()))
+        .await
+        .unwrap();
+    assert_error(&mut deciding, "Invalid message format").await;
+
+    deciding.close(None).await.unwrap();
+    watching.close(None).await.unwrap();
 }
 
 #[tokio::test]

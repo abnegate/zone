@@ -852,6 +852,74 @@ describe('useChat', () => {
     );
   });
 
+  it('keeps the turn live when a decision finds nothing waiting', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_approval_required',
+      message_id: 'm4',
+      tool_call_id: 'call_write',
+      name: 'write_file',
+      arguments: '{"path":"x.txt"}',
+    });
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.approval).toBe(
+        'pending'
+      );
+    });
+
+    act(() => {
+      result.current.approveTool('call_write', true);
+    });
+    act(() => {
+      lastSocket?.emit({ type: 'tool_approval_closed', tool_call_id: 'call_write' });
+    });
+
+    // Another window decided first. This one never learns which way, so the
+    // card stops claiming an outcome and stops offering one.
+    await waitFor(() => {
+      expect(
+        result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.approval
+      ).toBeUndefined();
+    });
+    expect(result.current.streaming).toBe(true);
+    expect(result.current.error).toBeNull();
+
+    act(() => {
+      lastSocket?.emit({
+        type: 'tool_result',
+        message_id: 'm4',
+        tool_call_id: 'call_write',
+        name: 'write_file',
+        success: false,
+        detail: 'Denied',
+        duration_ms: 3,
+      });
+      lastSocket?.emit({
+        type: 'message_end',
+        message_id: 'm4',
+        content: 'I left the file alone.',
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('I left the file alone.');
+    });
+    const call = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(call?.detail).toBe('Denied');
+    expect(call?.success).toBe(false);
+    expect(call?.pending).toBe(false);
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.error).toBeNull();
+  });
+
   it('should delete a message', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     mockDeleteMessage.mockResolvedValue(undefined);
