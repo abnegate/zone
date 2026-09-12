@@ -341,7 +341,10 @@ impl ChatTools {
         Self::assemble(scope, ToolProfile::Task, Some(cwd), false).await
     }
 
+    /// The run id reaches the tool context nowhere else, so the session a job
+    /// or a wait is keyed on is taken here rather than at assembly.
     pub fn with_task_lease(mut self, pool: sqlx::PgPool, run: Uuid, owner: Uuid) -> Self {
+        self.context.session = Session::Task(run);
         self.lease = Some(TaskLease { pool, run, owner });
         self
     }
@@ -409,12 +412,16 @@ impl ChatTools {
         }
 
         super::question::register(&mut registry);
+        super::wait::register(&mut registry, scope.as_ref());
 
         let cwd = match profile {
             ToolProfile::Chat => host_root(),
             ToolProfile::Task => task_cwd.unwrap_or_else(host_root),
         };
-        let context = context(profile, cwd);
+        let mut context = context(profile, cwd);
+        if let Some(chat_id) = scope.as_ref().and_then(|scope| scope.chat_id) {
+            context.session = Session::Chat(chat_id);
+        }
         let mcp_guidance = registry.mcp_guidance();
 
         let mut assembled = Self {
@@ -2293,6 +2300,8 @@ mod tests {
             "start_task",
             "get_task_run",
             "tail_task_log",
+            "tail_job",
+            "wait_for",
         ] {
             assert!(
                 tools.names().contains(&name.to_string()),
@@ -2332,11 +2341,39 @@ mod tests {
         assert!(!tools.context.unrestricted);
         assert!(tools.names().contains(&"read_file".to_string()));
         assert!(tools.names().contains(&"apply_patch".to_string()));
+        assert!(tools.names().contains(&"tail_job".to_string()));
+        assert!(tools.names().contains(&"wait_for".to_string()));
         assert!(!tools.names().contains(&"run_shell".to_string()));
         assert!(!tools.names().contains(&"list_projects".to_string()));
         assert!(!tools.names().contains(&"start_task".to_string()));
         assert!(!tools.names().contains(&"generate_image".to_string()));
         assert!(!tools.names().contains(&"query_prometheus".to_string()));
+    }
+
+    /// A job or a wait belongs to the session that opened it, so a placeholder
+    /// session would let any turn read and settle another turn's work.
+    #[tokio::test]
+    async fn a_context_is_keyed_to_the_chat_or_the_run_it_serves() {
+        let scope = scope();
+        let chat_id = scope.chat_id.expect("a chat scope carries its chat");
+        let chat = ChatTools::preview(scope).await;
+
+        assert_eq!(chat.session(), Session::Chat(chat_id));
+
+        let state = AppState::for_tests();
+        let unleased =
+            ChatTools::for_task(&state, std::env::temp_dir(), Uuid::new_v4(), None).await;
+
+        assert_eq!(
+            unleased.session(),
+            Session::Detached,
+            "a task run assembles before its lease is taken"
+        );
+
+        let run = Uuid::new_v4();
+        let leased = unleased.with_task_lease(state.db().clone(), run, Uuid::new_v4());
+
+        assert_eq!(leased.session(), Session::Task(run));
     }
 
     #[tokio::test]
