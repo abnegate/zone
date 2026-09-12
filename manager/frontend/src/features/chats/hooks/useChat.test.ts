@@ -1440,6 +1440,43 @@ describe('useChat', () => {
     unmount();
   });
 
+  it('a socket the server refuses before init is not reopened', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+    const refused = lastSocket;
+    act(() => refused?.onopen?.());
+    act(() => refused?.emit({ type: 'error', message: 'Access denied' }));
+    act(() => refused?.onclose?.());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(lastSocket, 'a refused connection must not be retried').toBe(refused);
+    expect(result.current.error).toBe('Access denied');
+    unmount();
+  });
+
+  it('only a connection the server announced resets the reconnect backoff', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+    const first = lastSocket;
+    act(() => first?.onopen?.());
+    act(() => first?.onclose?.());
+    await waitFor(() => expect(lastSocket).not.toBe(first));
+    const second = lastSocket;
+    act(() => second?.onopen?.());
+    act(() => second?.onclose?.());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(lastSocket, 'a second drop before init waits out the backoff').toBe(second);
+    await waitFor(() => expect(lastSocket).not.toBe(second), { timeout: 2_000 });
+    unmount();
+  });
+
   it('should handle sending message with error', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
