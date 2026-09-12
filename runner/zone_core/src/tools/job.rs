@@ -284,6 +284,9 @@ impl Jobs {
         session: Session,
         id: &str,
     ) -> Result<impl Future<Output = JobExited> + use<>, String> {
+        if session == Session::Detached {
+            return Err(UNAVAILABLE.to_string());
+        }
         let state = {
             let job = JOBS
                 .get(id)
@@ -696,8 +699,11 @@ mod tests {
             .count()
     }
 
+    /// Every entry point refuses a detached context in the same words. Saying
+    /// it three ways would have a wait report a job it is not allowed to reach
+    /// as one that merely went away.
     #[tokio::test]
-    async fn a_detached_context_can_neither_start_nor_read_a_job() {
+    async fn a_detached_context_can_neither_start_nor_read_nor_wait_on_a_job() {
         let cwd = directory();
         assert_eq!(
             Jobs::spawn(
@@ -712,6 +718,11 @@ mod tests {
         assert_eq!(
             Jobs::read(Session::Detached, "job_9f3c1a7b2e04", 0, 500).await,
             Err(UNAVAILABLE.to_string())
+        );
+        assert_eq!(
+            Jobs::settled(Session::Detached, "job_9f3c1a7b2e04").err(),
+            Some(UNAVAILABLE.to_string()),
+            "a wait is the third way in and must refuse it as the other two do"
         );
         assert!(
             !cwd.path().join(JOB_LOG_DIRECTORY).exists(),
