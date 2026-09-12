@@ -145,11 +145,19 @@ pub fn checks_settled(reference: &str, sha: &str, assessment: &str, elapsed: Dur
     )
 }
 
+/// How [`checks_unknown`] opens.
+///
+/// Named because the console matches on it to keep an outcome that begins this
+/// way from being drawn as a settle, and a hand copy of a phrase is a contract
+/// nothing checks: `chats/schemas.contract.test.ts` reads this constant and
+/// compares it against the console's own.
+pub const CHECKS_UNKNOWN_PREFIX: &str = "No checks are configured or reporting on";
+
 /// A commit nothing is reporting on, after [`CHECK_SETTLE_GRACE`]. Deliberately
 /// says out loud that it is not a pass.
 pub fn checks_unknown(reference: &str, elapsed: Duration) -> String {
     format!(
-        "No checks are configured or reporting on {reference} after {}s. This is not a pass.",
+        "{CHECKS_UNKNOWN_PREFIX} {reference} after {}s. This is not a pass.",
         elapsed.as_secs()
     )
 }

@@ -27,7 +27,7 @@ import {
   WaitingSchema,
   WaitSettledSchema,
 } from './schemas';
-import { AWAITING_ANSWER_DETAIL, REASONED_TOOLS } from './types';
+import { AWAITING_ANSWER_DETAIL, REASONED_TOOLS, UNKNOWN_CHECKS_OUTCOME_PREFIX } from './types';
 
 const CITATIONS_RS = join(
   import.meta.dir,
@@ -192,6 +192,21 @@ describe('a question call is labelled the same live as it is after a reload', ()
   test('the console writes the detail the server persists, ellipsis included', () => {
     expect(AWAITING_ANSWER_DETAIL).toBe(
       rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'AWAITING_ANSWER_DETAIL')
+    );
+  });
+});
+
+/**
+ * A commit nothing reported on for the whole grace period ends the wait with an
+ * outcome that says out loud it is not a pass, and the card is held to the same
+ * rule: a settle beginning this way is never drawn as one. The console owns a
+ * copy of the opening words, so a reword on the server alone turns the match
+ * vacuous and the card reads "Finished waiting".
+ */
+describe('a commit nothing reported on is never drawn as a settled check', () => {
+  test('the console matches the words the server actually writes', () => {
+    expect(UNKNOWN_CHECKS_OUTCOME_PREFIX).toBe(
+      rustStringConstant(readFileSync(WAIT_RS, 'utf8'), 'CHECKS_UNKNOWN_PREFIX')
     );
   });
 });
