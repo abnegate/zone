@@ -133,7 +133,9 @@ function handle(citation: Citation): string | null {
 /// then read in full is complete evidence: leaving the listing's citation in
 /// place tells the reader the content was unavailable for a passage the reply
 /// is quoting. Only an incomplete citation gives way, so a later listing never
-/// takes back what a read proved, and the observation keeps its first time.
+/// takes back what a read proved, and the observation keeps its first time. It
+/// also keeps the identifier it already had, because a source can match by
+/// address alone and the reply may already be citing that handle.
 export function mergeCitations(existing: Citation[] | undefined, incoming: Citation[]): Citation[] {
   const merged = [...(existing ?? [])];
   for (const citation of incoming) {
@@ -142,8 +144,13 @@ export function mergeCitations(existing: Citation[] | undefined, incoming: Citat
       merged.push(citation);
       continue;
     }
-    if (!merged[seen].complete && citation.complete) {
-      merged[seen] = { ...citation, observed_at: merged[seen].observed_at };
+    const known = merged[seen];
+    if (!known.complete && citation.complete) {
+      merged[seen] = {
+        ...citation,
+        observed_at: known.observed_at,
+        identifier: known.identifier ?? citation.identifier,
+      };
     }
   }
   return merged;

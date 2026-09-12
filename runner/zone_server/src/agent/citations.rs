@@ -143,14 +143,21 @@ pub fn merge(existing: &mut Vec<Citation>, incoming: impl IntoIterator<Item = Ci
 ///
 /// Only an incomplete citation gives way, so a later listing never takes back
 /// what a read proved, and the observation keeps its first time: retrieving a
-/// source again does not make the earlier sighting fresher.
+/// source again does not make the earlier sighting fresher. It also keeps the
+/// identifier it already had, because a source can match by address alone and
+/// the reply may already be citing that handle.
 fn prove(seen: &mut Citation, incoming: Citation) {
     if seen.complete || !incoming.complete {
         return;
     }
     let observed_at = std::mem::take(&mut seen.observed_at);
+    let identifier = seen
+        .identifier
+        .take()
+        .or_else(|| incoming.identifier.clone());
     *seen = incoming;
     seen.observed_at = observed_at;
+    seen.identifier = identifier;
 }
 
 /// Whether two citations name the same source.
@@ -989,6 +996,46 @@ mod tests {
         assert_eq!(
             merged[0].observed_at, OBSERVED,
             "reading a source again does not make the first sighting fresher"
+        );
+    }
+
+    #[test]
+    fn a_source_proved_complete_keeps_the_identifier_the_reply_cites() {
+        let observed = chrono::DateTime::parse_from_rfc3339(OBSERVED)
+            .expect("the fixture observation time is rfc3339")
+            .with_timezone(&chrono::Utc);
+        let uri = "knowledge://11111111-1111-1111-1111-111111111111";
+        let mut listed = from_source(
+            CitationKind::WorkspaceDocument,
+            "doc:8846fb",
+            "Guide",
+            uri,
+            observed,
+        );
+        listed.complete = false;
+        listed.outcome = CitationOutcome::Incomplete;
+
+        let read = citations(
+            "read_document",
+            json!({
+                "complete": true,
+                "content_state": "stored_text",
+                "observed_at": OBSERVED,
+                "document": { "title": "Guide", "uri": uri, "content": "full text" }
+            }),
+        )
+        .remove(0);
+        assert_eq!(read.identifier, None, "this envelope mints no identifier");
+
+        let mut merged = vec![listed];
+        merge(&mut merged, [read]);
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].complete);
+        assert_eq!(
+            merged[0].identifier.as_deref(),
+            Some("doc:8846fb"),
+            "dropping the handle would leave the reply's marker reading as a fabrication"
         );
     }
 

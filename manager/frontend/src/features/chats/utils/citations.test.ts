@@ -154,6 +154,31 @@ describe('citation presentation', () => {
     expect(merged[0].observed_at).toBe('2026-09-05T00:00:00+00:00');
   });
 
+  it('keeps the identifier the reply cites when a source is proved complete', () => {
+    const url = 'knowledge://11111111-1111-1111-1111-111111111111';
+    const listed = citation({
+      kind: 'workspace_document',
+      identifier: 'doc:8846fb',
+      url,
+      revision: null,
+      complete: false,
+      outcome: 'incomplete',
+    });
+    const read = citation({
+      kind: 'workspace_document',
+      identifier: undefined,
+      url,
+      revision: null,
+      complete: true,
+      outcome: 'observed',
+    });
+
+    const merged = mergeCitations([listed], [read]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].complete).toBe(true);
+    expect(merged[0].identifier).toBe('doc:8846fb');
+  });
+
   it('does not let a later listing take back what a read proved', () => {
     const url = 'knowledge://11111111-1111-1111-1111-111111111111';
     const read = citation({
