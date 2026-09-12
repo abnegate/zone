@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::pull::PullRegistry;
 use crate::sync::SyncRegistry;
 use crate::utils::rate_limit::{RateLimitConfig, RateLimiter};
+use crate::ws::task_run::{self, TaskProgressBroadcaster};
 use zone_email::EmailService;
 
 /// Maximum concurrent indexing operations
@@ -52,6 +53,10 @@ struct AppStateInner {
     pub train_semaphore: Arc<Semaphore>,
     /// Process-wide MCP hub. Connected once, shared across chat turns.
     pub mcp: OnceCell<McpHub>,
+    /// Terminal frames for task runs, for sockets and waits to subscribe to.
+    /// The process's one instance, which the writers that finish a run also
+    /// publish to, so a state built per test observes the same runs.
+    pub task_progress: Arc<TaskProgressBroadcaster>,
 }
 
 impl AppState {
@@ -92,6 +97,7 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 mcp: OnceCell::new(),
+                task_progress: task_run::progress(),
             }),
         }
     }
@@ -140,6 +146,7 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 mcp: OnceCell::new(),
+                task_progress: task_run::progress(),
             }),
         }
     }
@@ -189,6 +196,7 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 mcp: OnceCell::new(),
+                task_progress: task_run::progress(),
             }),
         }
     }
@@ -261,6 +269,12 @@ impl AppState {
     /// MCP servers for this process. Connected once on first chat or task use.
     pub async fn mcp_hub(&self) -> &McpHub {
         self.inner.mcp.get_or_init(McpHub::connect_from_env).await
+    }
+
+    /// Terminal frames for task runs. A waiter subscribes here; the writers
+    /// that finish a run publish here.
+    pub fn task_progress(&self) -> &Arc<TaskProgressBroadcaster> {
+        &self.inner.task_progress
     }
 
     pub fn existing_mcp(&self) -> Option<&McpHub> {

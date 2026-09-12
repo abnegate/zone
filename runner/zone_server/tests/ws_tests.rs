@@ -6,11 +6,15 @@ mod common;
 
 use std::net::SocketAddr;
 
+use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use zone_server::agent::wait::{KIND_TASK_RUN, Waiting};
+use zone_server::db::tasks::{self, Mutation, RunMutation};
+use zone_server::db::workspace_members::{self, WorkspaceRole};
 use zone_server::ws::{ProgressMessage, TaskProgressBroadcaster};
 
 /// Start a test server and return the address
@@ -856,4 +860,434 @@ async fn test_ws_task_with_many_logs() {
 
     let _ = timeout.await;
     assert_eq!(log_count, 10, "Should receive all 10 logs");
+}
+
+/// A workspace whose owner may both read and answer its runs.
+struct Tenant {
+    token: String,
+    workspace: uuid::Uuid,
+}
+
+/// Register an account and give it an organization and a workspace of its own.
+///
+/// `setup_test_data` writes the same three rows directly, but the answer route
+/// authenticates its caller, and only the register endpoint mints a session a
+/// bearer token resolves to.
+async fn tenant(client: &common::TestClient) -> Tenant {
+    let response = client
+        .post_json(
+            "/api/auth/register",
+            &json!({ "email": common::test_email(), "password": common::test_password() }),
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    let token = response.json_value()["access_token"]
+        .as_str()
+        .expect("access token is returned")
+        .to_owned();
+
+    let organization = client
+        .post_json_auth(
+            "/api/organizations",
+            &json!({ "name": "Pending wait", "slug": uuid::Uuid::new_v4().to_string() }),
+            &token,
+        )
+        .await;
+    organization.assert_status(StatusCode::CREATED);
+    let organization = organization.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization id is returned")
+        .to_owned();
+
+    let workspace = client
+        .post_json_auth(
+            &format!("/api/organizations/{organization}/workspaces"),
+            &json!({ "name": "Pending wait", "slug": uuid::Uuid::new_v4().to_string() }),
+            &token,
+        )
+        .await;
+    workspace.assert_status(StatusCode::CREATED);
+    let workspace = uuid::Uuid::parse_str(
+        workspace.json_value()["workspace"]["id"]
+            .as_str()
+            .expect("workspace id is returned"),
+    )
+    .expect("workspace id is a UUID");
+
+    Tenant { token, workspace }
+}
+
+/// One task in `workspace`, named for the test that asked for it.
+async fn task(pool: &sqlx::PgPool, workspace: uuid::Uuid, title: &str) -> uuid::Uuid {
+    tasks::create_task(
+        pool,
+        workspace,
+        &[],
+        title,
+        "Regression",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .expect("the workspace takes a task")
+    .id
+}
+
+/// A claimed run, which is what every park and every completion is fenced on.
+async fn claimed(pool: &sqlx::PgPool, task_id: uuid::Uuid) -> (uuid::Uuid, uuid::Uuid) {
+    let run = tasks::create_task_run(pool, task_id)
+        .await
+        .expect("the task gets a run")
+        .id;
+    let owner = uuid::Uuid::new_v4();
+    assert!(
+        tasks::claim_task_run(pool, run, owner)
+            .await
+            .expect("the run is claimable")
+    );
+    (run, owner)
+}
+
+/// What a worker parks a run on when it waits for something outside the loop.
+fn waiting(run: uuid::Uuid) -> serde_json::Value {
+    serde_json::to_value(Waiting {
+        kind: KIND_TASK_RUN.to_string(),
+        id: run.to_string(),
+        reference: None,
+        deadline: "2026-09-12T10:15:00Z".to_string(),
+    })
+    .expect("a wait serializes")
+}
+
+/// Age a run's lease past the sweeper's window.
+async fn expire(pool: &sqlx::PgPool, run: uuid::Uuid) {
+    sqlx::query("UPDATE task_runs SET heartbeat_at = NOW() - INTERVAL '61 seconds' WHERE id = $1")
+        .bind(run)
+        .execute(pool)
+        .await
+        .expect("the lease ages");
+}
+
+/// The worker path: an owner finishing its own run. Whoever is waiting on that
+/// run learns it finished from the run itself, not from a sampler of its own.
+#[tokio::test]
+async fn completing_a_run_publishes_a_terminal_frame_and_releases_its_channel() {
+    let pool = common::create_test_pool().await;
+    let state = common::create_test_state(common::test_config(), pool.clone());
+    let (_, workspace, _) = common::setup_test_data(&pool).await;
+    let task = task(&pool, workspace, "Completed frame").await;
+    let (run, owner) = claimed(&pool, task).await;
+
+    let mut subscription = state.task_progress().subscribe(run);
+    assert!(
+        state.task_progress().tracks(run),
+        "a subscription registers the run's channel"
+    );
+
+    tasks::complete_owned_task_run(&pool, run, Some(owner), "completed", None, None)
+        .await
+        .expect("the owner completes its run")
+        .expect("the completion applied");
+
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.recv())
+        .await
+        .expect("a terminal frame arrives before the timeout")
+        .expect("the frame is readable");
+    match frame {
+        ProgressMessage::Completed { status } => assert_eq!(status, "completed"),
+        other => panic!("a completed run must publish Completed, got {other:?}"),
+    }
+
+    assert!(
+        !state.task_progress().tracks(run),
+        "the channel is released as soon as the run is reported finished"
+    );
+    assert!(
+        matches!(
+            subscription.recv().await,
+            Err(tokio::sync::broadcast::error::RecvError::Closed)
+        ),
+        "releasing the channel closes the subscription rather than leaking it"
+    );
+}
+
+/// A run whose worker died never reaches `complete_owned_task_run`, so without
+/// this the sweeper's reap would leave a waiter hanging until its own deadline.
+#[tokio::test]
+async fn sweeping_an_expired_lease_publishes_a_failure_and_releases_its_channel() {
+    let pool = common::create_test_pool().await;
+    let state = common::create_test_state(common::test_config(), pool.clone());
+    let (_, workspace, _) = common::setup_test_data(&pool).await;
+    let task = task(&pool, workspace, "Swept frame").await;
+    let (run, _) = claimed(&pool, task).await;
+
+    let mut subscription = state.task_progress().subscribe(run);
+    expire(&pool, run).await;
+    tasks::sweep_task_runs(&pool).await.expect("the sweep runs");
+
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.recv())
+        .await
+        .expect("a terminal frame arrives before the timeout")
+        .expect("the frame is readable");
+    match frame {
+        ProgressMessage::Failed { error } => assert_eq!(error, "orphaned"),
+        other => panic!("a reaped run must publish Failed, got {other:?}"),
+    }
+
+    assert!(
+        !state.task_progress().tracks(run),
+        "the channel is released as soon as the run is reported finished"
+    );
+}
+
+/// The broadcaster the writers publish to is the one the state hands out, or
+/// every subscriber would be listening to a second instance nothing writes to.
+#[tokio::test]
+async fn the_state_hands_out_the_broadcaster_the_writers_publish_to() {
+    let pool = common::create_test_pool().await;
+    let state = common::create_test_state(common::test_config(), pool);
+    let run = uuid::Uuid::new_v4();
+
+    let _subscription = state.task_progress().subscribe(run);
+    assert!(
+        zone_server::ws::task_run::progress().tracks(run),
+        "the process broadcaster sees what a state subscription registered"
+    );
+    zone_server::ws::task_run::progress().remove(run);
+    assert!(!state.task_progress().tracks(run));
+}
+
+/// `SQLX_OFFLINE` cannot check a runtime `query_as`, so a SELECT list that
+/// forgot the column would build green and fail in production with
+/// `no column found for name: pending_wait`. Every path that reads a run is
+/// therefore read here against a row that actually has one.
+#[tokio::test]
+async fn every_path_that_reads_a_run_carries_its_pending_wait() {
+    let pool = common::create_test_pool().await;
+    let (_, workspace, user) = common::setup_test_data(&pool).await;
+    workspace_members::add_member(&pool, workspace, user, WorkspaceRole::Owner, None)
+        .await
+        .expect("the workspace takes its owner");
+    let fresh = task(&pool, workspace, "Fresh run").await;
+    let task = task(&pool, workspace, "Every read path").await;
+    let (run, owner) = claimed(&pool, task).await;
+    let wait = waiting(run);
+    assert!(
+        tasks::park_task_run_waiting(&pool, run, owner, wait.clone())
+            .await
+            .expect("the claimed run parks on a wait")
+    );
+
+    let fetched = tasks::get_task_run(&pool, run)
+        .await
+        .expect("the run is readable")
+        .expect("the run exists");
+    assert_eq!(fetched.pending_wait.as_ref(), Some(&wait), "get_task_run");
+    assert!(fetched.pending_question.is_none());
+
+    let listed = tasks::list_task_runs(&pool, task)
+        .await
+        .expect("the task's runs are listable");
+    assert_eq!(
+        listed
+            .iter()
+            .find(|row| row.id == run)
+            .and_then(|row| row.pending_wait.as_ref()),
+        Some(&wait),
+        "list_task_runs_as"
+    );
+
+    // The active-run lookup is a runtime query_as, and a parked run is exactly
+    // what it returns instead of admitting a second one.
+    match tasks::create_task_run_authorized(&pool, user, task)
+        .await
+        .expect("the admission check runs")
+    {
+        Mutation::Applied(RunMutation::Active(active)) => {
+            assert_eq!(active.id, run);
+            assert_eq!(
+                active.pending_wait.as_ref(),
+                Some(&wait),
+                "the active-run lookup at create_task_run_authorized"
+            );
+        }
+        other => panic!("a parked run must block a second admission, got {other:?}"),
+    }
+
+    assert!(
+        tasks::resume_task_run(&pool, run, owner)
+            .await
+            .expect("the parked run resumes")
+    );
+    let progressed =
+        tasks::update_owned_task_run_progress(&pool, run, Some(owner), Some("acting"), Some(40))
+            .await
+            .expect("the resumed run takes progress")
+            .expect("the progress applied");
+    assert!(
+        progressed.pending_wait.is_none(),
+        "update_owned_task_run_progress, on a run whose wait resume cleared"
+    );
+
+    let created = tasks::create_task_run(&pool, fresh)
+        .await
+        .expect("a fresh run inserts");
+    assert!(created.pending_wait.is_none(), "insert_task_run");
+
+    let completed =
+        tasks::complete_owned_task_run(&pool, run, Some(owner), "completed", None, None)
+            .await
+            .expect("the owner completes its run")
+            .expect("the completion applied");
+    assert!(completed.pending_wait.is_none(), "complete_owned_task_run");
+}
+
+/// A wait is the run's own state, so it has to survive the round trip through
+/// the column intact -- the loop reads back what it parked on, not a summary.
+#[tokio::test]
+async fn a_wait_round_trips_through_the_column_and_resume_clears_it() {
+    let pool = common::create_test_pool().await;
+    let (_, workspace, _) = common::setup_test_data(&pool).await;
+    let task = task(&pool, workspace, "Wait round trip").await;
+    let (run, owner) = claimed(&pool, task).await;
+    let wait = Waiting {
+        kind: KIND_TASK_RUN.to_string(),
+        id: run.to_string(),
+        reference: Some("main".to_string()),
+        deadline: "2026-09-12T10:15:00Z".to_string(),
+    };
+
+    assert!(
+        tasks::park_task_run_waiting(
+            &pool,
+            run,
+            owner,
+            serde_json::to_value(&wait).expect("a wait serializes"),
+        )
+        .await
+        .expect("the claimed run parks on a wait")
+    );
+    let parked = tasks::get_task_run(&pool, run)
+        .await
+        .expect("the run is readable")
+        .expect("the run exists");
+    assert_eq!(parked.status, "waiting");
+    assert_eq!(
+        serde_json::from_value::<Waiting>(parked.pending_wait.expect("the run holds its wait"))
+            .expect("the stored wait is a wait"),
+        wait
+    );
+
+    assert!(
+        tasks::resume_task_run(&pool, run, owner)
+            .await
+            .expect("the parked run resumes")
+    );
+    let resumed = tasks::get_task_run(&pool, run)
+        .await
+        .expect("the run is readable")
+        .expect("the run exists");
+    assert_eq!(resumed.status, "running");
+    assert!(
+        resumed.pending_wait.is_none(),
+        "resuming clears what the run waited on"
+    );
+}
+
+/// A run parked on a wait is finished by its owner, not answered, so the
+/// column has to be clear on the terminal row too.
+#[tokio::test]
+async fn completing_a_run_parked_on_a_wait_clears_the_column() {
+    let pool = common::create_test_pool().await;
+    let (_, workspace, _) = common::setup_test_data(&pool).await;
+    let task = task(&pool, workspace, "Completed park").await;
+    let (run, owner) = claimed(&pool, task).await;
+    assert!(
+        tasks::park_task_run_waiting(&pool, run, owner, waiting(run))
+            .await
+            .expect("the claimed run parks on a wait")
+    );
+
+    let completed =
+        tasks::complete_owned_task_run(&pool, run, Some(owner), "completed", None, None)
+            .await
+            .expect("the owner completes its parked run")
+            .expect("the completion applied");
+    assert!(completed.pending_wait.is_none());
+    assert!(
+        tasks::get_task_run(&pool, run)
+            .await
+            .expect("the run is readable")
+            .expect("the run exists")
+            .pending_wait
+            .is_none(),
+        "the stored terminal row carries no wait either"
+    );
+}
+
+/// The sweeper writes its own terminal row with its own statement, so clearing
+/// the column in the owner's path would not cover a run nobody finished.
+#[tokio::test]
+async fn sweeping_a_run_parked_on_a_wait_clears_the_column() {
+    let pool = common::create_test_pool().await;
+    let (_, workspace, _) = common::setup_test_data(&pool).await;
+    let task = task(&pool, workspace, "Swept park").await;
+    let (run, owner) = claimed(&pool, task).await;
+    assert!(
+        tasks::park_task_run_waiting(&pool, run, owner, waiting(run))
+            .await
+            .expect("the claimed run parks on a wait")
+    );
+
+    expire(&pool, run).await;
+    tasks::sweep_task_runs(&pool).await.expect("the sweep runs");
+
+    let swept = tasks::get_task_run(&pool, run)
+        .await
+        .expect("the run is readable")
+        .expect("the run exists");
+    assert_eq!(swept.status, "failed");
+    assert_eq!(swept.error_message.as_deref(), Some("orphaned"));
+    assert!(
+        swept.pending_wait.is_none(),
+        "the sweeper clears what the run waited on"
+    );
+}
+
+/// A wait park leaves `pending_question` NULL on purpose: there is nothing for
+/// a person to answer, and the answer route's own guard is what makes that
+/// hold. Parking on a wait must not open a route that was never meant for it.
+#[tokio::test]
+async fn a_run_parked_on_a_wait_cannot_be_answered() {
+    let pool = common::create_test_pool().await;
+    let state = common::create_test_state(common::test_config(), pool.clone());
+    let client = common::TestClient::new(common::create_test_router(state));
+    let owner = tenant(&client).await;
+    let task = task(&pool, owner.workspace, "Unanswerable park").await;
+    let (run, lease) = claimed(&pool, task).await;
+    assert!(
+        tasks::park_task_run_waiting(&pool, run, lease, waiting(run))
+            .await
+            .expect("the claimed run parks on a wait")
+    );
+
+    let refused = client
+        .post_json_auth(
+            &format!("/api/tasks/runs/{run}/answers"),
+            &json!({"answers": [{"header": "Scope", "labels": ["Backfill"]}]}),
+            &owner.token,
+        )
+        .await;
+    refused.assert_status(StatusCode::CONFLICT);
+    assert_eq!(
+        tasks::get_task_run(&pool, run)
+            .await
+            .expect("the run is readable")
+            .expect("the run exists")
+            .status,
+        "waiting",
+        "a refused answer must not move the run"
+    );
 }

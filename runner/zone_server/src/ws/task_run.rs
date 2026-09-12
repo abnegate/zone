@@ -16,7 +16,9 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt, stream::SplitSink};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -26,6 +28,12 @@ use crate::state::AppState;
 
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The status a finished run reports as a success; anything else is a failure.
+const COMPLETED: &str = "completed";
+
+/// What a failed run is reported as when it recorded no reason of its own.
+const UNKNOWN_ERROR: &str = "Unknown error";
 
 type LogCursor = (Option<chrono::NaiveDateTime>, Uuid);
 
@@ -134,12 +142,53 @@ impl TaskProgressBroadcaster {
     pub fn remove(&self, run_id: Uuid) {
         self.senders.remove(&run_id);
     }
+
+    /// Whether a run still holds a channel here.
+    ///
+    /// A terminal frame drops it, so this is how a caller distinguishes a run
+    /// nobody has finished from one whose channel has already been released.
+    /// Reading it does not create one, which [`Self::get_sender`] would.
+    pub fn tracks(&self, run_id: Uuid) -> bool {
+        self.senders.contains_key(&run_id)
+    }
 }
 
 impl Default for TaskProgressBroadcaster {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The process's one broadcaster, so the writers that finish a run can publish
+/// without a handle threaded through every worker and route that finishes one.
+/// `AppState` holds this same instance rather than a second of its own.
+static PROGRESS: Lazy<Arc<TaskProgressBroadcaster>> =
+    Lazy::new(|| Arc::new(TaskProgressBroadcaster::new()));
+
+pub fn progress() -> Arc<TaskProgressBroadcaster> {
+    PROGRESS.clone()
+}
+
+/// Announce that a run reached a terminal status, then drop its channel.
+///
+/// Called from both writers that can end a run -- the owner completing it and
+/// the sweeper reaping its lease -- because a waiter subscribed to a run the
+/// sweeper reaps would otherwise hang until its own deadline. Removing the
+/// sender right after the send keeps the map from growing one entry per run for
+/// the life of the process; a receiver already holding the frame still reads it.
+pub fn publish_terminal(run: Uuid, status: &str, error: Option<&str>) {
+    let message = if status == COMPLETED {
+        ProgressMessage::Completed {
+            status: status.to_string(),
+        }
+    } else {
+        ProgressMessage::Failed {
+            error: error.unwrap_or(UNKNOWN_ERROR).to_string(),
+        }
+    };
+    let broadcaster = progress();
+    broadcaster.broadcast(run, message);
+    broadcaster.remove(run);
 }
 
 /// WebSocket upgrade handler for task run progress

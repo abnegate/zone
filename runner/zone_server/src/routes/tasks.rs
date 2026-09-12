@@ -751,6 +751,7 @@ mod tests {
             error_message: None,
             artifacts: None,
             pending_question: pending,
+            pending_wait: None,
         }
     }
 
