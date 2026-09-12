@@ -180,6 +180,16 @@ pub fn too_many_waits() -> String {
     )
 }
 
+/// Returned as a tool error for the same reason as [`too_many_waits`]: a
+/// window the surface cannot hold would be acknowledged with a receipt, time
+/// out the moment it was awaited, and spend one of the allowances on nothing.
+pub fn no_window_left() -> String {
+    format!(
+        "Less than {MIN_WAIT_SECS}s of this turn remains, which is too little to wait in. \
+         Act on what you already have."
+    )
+}
+
 pub fn task_run_wait_unavailable() -> String {
     format!(
         "Waiting on another task run is not available from a task run. Use kind={KIND_JOB} or \
@@ -562,15 +572,20 @@ pub fn reset_session(session: Session) {
 
 /// How long a wait may run, clamped to what the schema advertises and then to
 /// whatever the surface still has left.
-fn window(requested: Option<u64>, session: Session) -> Duration {
+///
+/// Nothing when what the surface has left is under the floor: clamping to it
+/// would mint a window that expires the moment it is awaited, and a wait
+/// shorter than [`MIN_WAIT_SECS`] is what this tool exists to replace.
+fn window(requested: Option<u64>, session: Session) -> Option<Duration> {
     let seconds = requested
         .unwrap_or(DEFAULT_WAIT_SECS)
         .clamp(MIN_WAIT_SECS, MAX_WAIT_SECS);
     let window = Duration::from_secs(seconds);
-    match ceiling(session) {
-        Some(ceiling) => window.min(ceiling.saturating_duration_since(Instant::now())),
-        None => window,
-    }
+    let Some(ceiling) = ceiling(session) else {
+        return Some(window);
+    };
+    let remaining = ceiling.saturating_duration_since(Instant::now());
+    (remaining >= Duration::from_secs(MIN_WAIT_SECS)).then(|| window.min(remaining))
 }
 
 /// When a registered wait runs out, as a deadline this process can sleep to.
@@ -744,7 +759,9 @@ impl WaitForTool {
         if waits_taken(context.session) >= MAX_WAITS_PER_ATTEMPT {
             return Err(too_many_waits());
         }
-        let window = window(request.timeout_secs, context.session);
+        let Some(window) = window(request.timeout_secs, context.session) else {
+            return Err(no_window_left());
+        };
         let started = Instant::now();
 
         let (subject, reference, subscription) = match request.kind.as_str() {
@@ -1228,14 +1245,17 @@ mod tests {
         let session = chat();
         assert_eq!(
             window(None, session),
-            Duration::from_secs(DEFAULT_WAIT_SECS)
+            Some(Duration::from_secs(DEFAULT_WAIT_SECS))
         );
-        assert_eq!(window(Some(1), session), Duration::from_secs(MIN_WAIT_SECS));
+        assert_eq!(
+            window(Some(1), session),
+            Some(Duration::from_secs(MIN_WAIT_SECS))
+        );
         assert_eq!(
             window(Some(u64::MAX), session),
-            Duration::from_secs(MAX_WAIT_SECS)
+            Some(Duration::from_secs(MAX_WAIT_SECS))
         );
-        assert_eq!(window(Some(900), session), Duration::from_secs(900));
+        assert_eq!(window(Some(900), session), Some(Duration::from_secs(900)));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1244,13 +1264,22 @@ mod tests {
         set_ceiling(session, Instant::now() + Duration::from_secs(60));
         assert_eq!(
             window(None, session),
-            Duration::from_secs(60),
+            Some(Duration::from_secs(60)),
             "a chat turn cannot outlast its own stream deadline"
+        );
+        set_ceiling(
+            session,
+            Instant::now() + Duration::from_secs(MIN_WAIT_SECS - 1),
+        );
+        assert_eq!(
+            window(None, session),
+            None,
+            "a window under the floor is refused rather than clamped to nothing"
         );
         reset_session(session);
         assert_eq!(
             window(None, session),
-            Duration::from_secs(DEFAULT_WAIT_SECS),
+            Some(Duration::from_secs(DEFAULT_WAIT_SECS)),
             "resetting clears the ceiling with the counter"
         );
     }
@@ -1451,6 +1480,40 @@ mod tests {
             await_outcome(session, "call_9", Instant::now()).await,
             timed_out(LOST_SUBJECT, Duration::ZERO),
             "settling a wait releases it, so a second await cannot resolve it again"
+        );
+        reset_session(session);
+    }
+
+    /// A surface whose own deadline has all but elapsed leaves no window to
+    /// wait in. Clamping to what is left would mint one that expires the
+    /// moment it is awaited, and the receipt acknowledging it reads as a
+    /// success while spending one of the ten allowances.
+    #[tokio::test]
+    async fn a_wait_the_surface_has_no_window_left_for_is_refused() {
+        let directory = TempDir::new().expect("a temporary working directory");
+        let session = chat();
+        let job = spawned(session, "exit 0", directory.path()).await;
+        settles(session, &job.id).await;
+        set_ceiling(
+            session,
+            Instant::now() + Duration::from_secs(MIN_WAIT_SECS - 1),
+        );
+
+        let refusal = tool()
+            .execute(json!({"kind": KIND_JOB, "id": &job.id}), &context(session))
+            .await
+            .expect("wait_for reports refusals as tool errors");
+
+        assert_eq!(refused(&refusal), no_window_left());
+        assert_eq!(
+            waits_taken(session),
+            0,
+            "a refused wait must not spend an allowance"
+        );
+        assert_eq!(
+            bind(session, CALL),
+            None,
+            "a refused wait must leave nothing staged for the loop to park on"
         );
         reset_session(session);
     }
