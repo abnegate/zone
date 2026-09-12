@@ -722,6 +722,9 @@ export function useChat(
           });
           break;
         }
+        // The result settles the call for every window. One that never decided
+        // it stops offering a decision it can no longer make, so nothing here
+        // is left to click after another window has answered the card.
         case 'tool_result':
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
@@ -729,6 +732,7 @@ export function useChat(
             detail: payload.detail,
             duration_ms: payload.duration_ms,
             pending: false,
+            approval: undefined,
           });
           if (payload.citations?.length) {
             appendCitations(payload.message_id, payload.citations);
@@ -1042,7 +1046,12 @@ export function useChat(
     const assistant = chat?.messages.find((message) =>
       message.metadata?.tool_calls?.some((call) => call.id === toolCallId)
     );
-    if (assistant) {
+    // An outcome is assumed only while the card is still open here: a call
+    // that already carries its result keeps saying what the server said.
+    const open = assistant?.metadata?.tool_calls?.some(
+      (call) => call.id === toolCallId && call.approval === 'pending'
+    );
+    if (assistant && open) {
       patchToolCall(assistant.id, toolCallId, {
         approval: approved ? 'approved' : 'denied',
         detail: approved ? 'Approved. Running…' : 'Denied',
