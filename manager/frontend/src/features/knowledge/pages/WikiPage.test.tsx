@@ -111,6 +111,7 @@ describe('WikiPage', () => {
       fetched_content: null,
       tags: ['tag1', 'tag2'],
       last_refreshed_at: null,
+      indexed: true,
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-01T00:00:00Z',
     },
@@ -123,6 +124,7 @@ describe('WikiPage', () => {
       fetched_content: 'Fetched content from URL',
       tags: ['documentation'],
       last_refreshed_at: '2024-01-02T00:00:00Z',
+      indexed: true,
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-02T00:00:00Z',
     },
@@ -632,6 +634,7 @@ describe('WikiPage', () => {
         ...defaultEntries[1],
         fetched_content: 'Updated fetched content',
         last_refreshed_at: '2024-01-03T00:00:00Z',
+        indexed: true,
       };
       mockRefreshEntry.mockResolvedValueOnce(refreshedEntry);
       renderWikiPage();
@@ -678,6 +681,7 @@ describe('WikiPage', () => {
         fetched_content: null,
         tags: [],
         last_refreshed_at: null,
+        indexed: true,
         created_at: '2024-01-01T00:00:00Z',
         updated_at: '2024-01-01T00:00:00Z',
       }));
@@ -762,6 +766,42 @@ describe('WikiPage', () => {
       }
       expect(screen.getAllByText('Text Entry').length).toBeGreaterThan(1);
       expect(screen.queryByRole('button', { name: 'Refresh Content' })).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Indexing state', () => {
+    const unindexed: KnowledgeEntry = {
+      ...defaultEntries[0],
+      id: 'kb-outage',
+      title: 'Outage Entry',
+      indexed: false,
+    };
+
+    it('marks an entry semantic search cannot see', () => {
+      getMockState = () => ({ entries: [unindexed], loading: false, error: null });
+      renderWikiPage();
+
+      const card = screen.getByText('Outage Entry').closest('.knowledge-card');
+      expect(card).not.toBeNull();
+      expect(within(card as HTMLElement).getByText('Not indexed')).toBeInTheDocument();
+    });
+
+    it('leaves an indexed entry unmarked', () => {
+      renderWikiPage();
+
+      const card = screen.getByText('Text Entry').closest('.knowledge-card');
+      expect(within(card as HTMLElement).queryByText('Not indexed')).not.toBeInTheDocument();
+    });
+
+    it('says nothing when the server did not report indexing state', () => {
+      getMockState = () => ({
+        entries: [{ ...unindexed, indexed: null }],
+        loading: false,
+        error: null,
+      });
+      renderWikiPage();
+
+      expect(screen.queryByText('Not indexed')).not.toBeInTheDocument();
     });
   });
 

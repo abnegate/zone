@@ -15,8 +15,12 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
+use zone_context::adapters::{AdapterRegistry, TextAdapter};
+use zone_context::context::ContextService;
+use zone_context::embeddings::EmbeddingService;
 
 use zone_server::config::Config;
 use zone_server::routes::create_router;
@@ -111,12 +115,16 @@ pub fn create_test_router(state: AppState) -> Router {
 /// Test client for making HTTP requests to the test router
 pub struct TestClient {
     router: Router,
+    state: Option<AppState>,
 }
 
 impl TestClient {
     /// Create a new test client
     pub fn new(router: Router) -> Self {
-        Self { router }
+        Self {
+            router,
+            state: None,
+        }
     }
 
     /// Create a test client with a database connection
@@ -129,8 +137,41 @@ impl TestClient {
     pub async fn with_config(config: Config) -> Self {
         let pool = create_test_pool().await;
         let state = create_test_state(config, pool);
-        let router = create_test_router(state);
-        Self::new(router)
+        let router = create_test_router(state.clone());
+        Self {
+            router,
+            state: Some(state),
+        }
+    }
+
+    /// Create a test client whose state embeds through the given service, for
+    /// a test that has to see what the routes do when embedding fails.
+    pub async fn with_embedding(embedding: Arc<dyn EmbeddingService>) -> Self {
+        let pool = create_test_pool().await;
+        let mut adapters = AdapterRegistry::new();
+        adapters.register(TextAdapter::new());
+        let adapters = Arc::new(adapters);
+        let context = Arc::new(ContextService::new(
+            pool.clone(),
+            Arc::clone(&adapters),
+            Arc::clone(&embedding),
+        ));
+        let state =
+            AppState::new_with_services(test_config(), pool, None, adapters, embedding, context);
+        state.disable_mcp();
+        let router = create_test_router(state.clone());
+        Self {
+            router,
+            state: Some(state),
+        }
+    }
+
+    /// The state the router was built over, for a test that drives a worker as
+    /// well as the routes.
+    pub fn state(&self) -> &AppState {
+        self.state
+            .as_ref()
+            .expect("this client was built from a bare router and has no state")
     }
 
     /// Make a GET request
