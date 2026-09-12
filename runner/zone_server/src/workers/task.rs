@@ -2205,6 +2205,9 @@ async fn run_task_loop(
                 questions,
                 spent,
             } => parked = Some((tool_call_id, questions, spent)),
+            // Placeholder: subtask 13 replaces this with the wait park, which
+            // hands the admission slot back for the length of the wait.
+            AgentEvent::WaitRequired { .. } => {}
             AgentEvent::Consumed(_)
             | AgentEvent::Context(_)
             | AgentEvent::Usage(_)

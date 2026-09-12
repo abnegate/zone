@@ -454,6 +454,15 @@ impl ChatTools {
         self.profile
     }
 
+    /// Which chat or run these tools act for.
+    ///
+    /// The loop binds a staged wait to the call that opened it with this. A
+    /// tool is handed `&self.context` and never its own call id, so the tool
+    /// stages under this same value and the two sides cannot disagree.
+    pub fn session(&self) -> Session {
+        self.context.session
+    }
+
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }

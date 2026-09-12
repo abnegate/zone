@@ -2844,6 +2844,9 @@ async fn handle_chat_generation(
                         publish(stream, question_msg).await;
                         persist_now = true;
                     }
+                    // Placeholder: subtask 14a replaces this with the wait frame
+                    // and the second run that resumes the turn once it settles.
+                    Some(AgentEvent::WaitRequired { .. }) => {}
                     Some(AgentEvent::Failed(message)) => {
                         failure = Some(message);
                         break;
