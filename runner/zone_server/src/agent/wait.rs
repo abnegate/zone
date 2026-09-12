@@ -25,12 +25,16 @@ use std::time::Duration;
 use tokio::sync::{Mutex, broadcast};
 use tokio::time::Instant;
 use uuid::Uuid;
+use zone_chat::history;
+use zone_core::context::Entry;
+use zone_core::llm::{FunctionCall, Message as LlmMessage, ToolCall};
 use zone_core::tools::job::{JobExited, Jobs};
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::integrations::{Configuration, Github, SETTLED_ASSESSMENTS};
 use super::tools::WorkspaceScope;
 use crate::db::{sources, task_access, tasks, workspace_members};
+use crate::services::chat::session::RunContext;
 use crate::ws::task_run::ProgressMessage;
 
 pub const WAIT_FOR: &str = "wait_for";
@@ -202,6 +206,13 @@ const RUN_UNKNOWN_ERROR: &str = "Unknown error";
 /// right after a push it is indistinguishable from a repository with no CI.
 const UNKNOWN_ASSESSMENT: &str = "unknown";
 
+const FUNCTION_CALL: &str = "function";
+
+/// The suffix that tells the injected envelope apart from the call that opened
+/// the wait. The receipt already claimed the original id, and both the context's
+/// uniqueness check and the store's duplicate-result check reject a second use.
+const SETTLED_SUFFIX: &str = "#settled";
+
 const INVALID_ARGUMENTS: &str = "wait_for takes kind, id, an optional ref and an optional \
     timeout_secs.";
 
@@ -228,6 +239,25 @@ const LOST_SUBJECT: &str = "This wait";
 
 fn unknown_kind(kind: &str) -> String {
     format!("kind must be {KIND_JOB}, {KIND_TASK_RUN} or {KIND_CHECK}, not {kind:?}.")
+}
+
+/// The call that waited, and what it waited for.
+///
+/// The pair travels together from the turn-ending event to the injection that
+/// resumes the run, because the outcome entry is minted from both.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Waited {
+    pub tool_call_id: String,
+    pub waiting: Waiting,
+}
+
+impl Waited {
+    pub fn new(tool_call_id: impl Into<String>, waiting: Waiting) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            waiting,
+        }
+    }
 }
 
 /// What one poll of a commit's checks reports.
@@ -571,6 +601,57 @@ pub async fn await_outcome(tool_call_id: &str, deadline: Instant) -> String {
     }
 }
 
+fn settled_call_id(tool_call_id: &str) -> String {
+    format!("{tool_call_id}{SETTLED_SUFFIX}")
+}
+
+/// Add the outcome as the newest preserved evidence, demoting the outcomes
+/// earlier waits added and nothing else.
+///
+/// It arrives as an envelope and its result rather than as a bare message
+/// because those are the only shapes a turn accepts: a chat store takes no
+/// other role, the call that opened the wait has already claimed its one
+/// result, and compaction groups an envelope with the results that immediately
+/// follow it. Returns the pair, for a caller with somewhere durable to put it.
+pub fn resume_with_outcome(
+    context: &mut RunContext,
+    waited: &Waited,
+    outcome: String,
+    waits: &mut Vec<String>,
+) -> [history::NewEntry; 2] {
+    for entry in &mut context.entries {
+        if waits.contains(&entry.id) {
+            entry.preserve = false;
+        }
+    }
+    let call = settled_call_id(&waited.tool_call_id);
+    let envelope = LlmMessage::assistant_with_tools(vec![ToolCall {
+        id: call.clone(),
+        call_type: FUNCTION_CALL.to_string(),
+        function: FunctionCall {
+            name: WAIT_FOR.to_string(),
+            arguments: serde_json::to_string(&waited.waiting)
+                .unwrap_or_else(|_| json!({}).to_string()),
+        },
+    }]);
+    let result = LlmMessage::tool_result(call, outcome);
+    let pair = [envelope, result].map(|message| history::NewEntry {
+        id: Uuid::new_v4().to_string(),
+        message: (&message).into(),
+        mutations: Vec::new(),
+    });
+    for entry in &pair {
+        context.entries.push(Entry {
+            id: entry.id.clone(),
+            message: entry.message.clone().into_message(),
+            preserve: true,
+            consumed: false,
+        });
+        waits.push(entry.id.clone());
+    }
+    pair
+}
+
 pub fn register(registry: &mut ToolRegistry, scope: Option<&WorkspaceScope>) {
     registry.register(Arc::new(WaitForTool {
         scope: scope.cloned(),
@@ -816,6 +897,8 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex as Lock;
     use tempfile::TempDir;
+    use zone_core::context;
+    use zone_core::llm::Role;
     use zone_core::tools::job::{JobCommand, JobStarted};
 
     const POLL: Duration = Duration::from_millis(20);
@@ -1408,6 +1491,104 @@ mod tests {
             await_outcome("call_that_never_waited", Instant::now() + FAR).await,
             timed_out(LOST_SUBJECT, Duration::ZERO)
         );
+    }
+
+    fn outcome_pair(context: &mut RunContext, waits: &mut Vec<String>, call: &str, outcome: &str) {
+        let waited = Waited::new(
+            call,
+            Waiting {
+                kind: KIND_JOB.to_string(),
+                id: "job_9f3c1a7b2e04".to_string(),
+                reference: None,
+                deadline: "2026-09-12T10:15:00Z".to_string(),
+            },
+        );
+        resume_with_outcome(context, &waited, outcome.to_string(), waits);
+    }
+
+    #[test]
+    fn an_outcome_arrives_as_an_envelope_and_the_result_that_follows_it() {
+        let mut context = RunContext::from_messages(vec![LlmMessage::user("Ship it.")]);
+        let mut waits = Vec::new();
+        let pair = {
+            let waited = Waited::new(
+                CALL,
+                Waiting {
+                    kind: KIND_JOB.to_string(),
+                    id: "job_9f3c1a7b2e04".to_string(),
+                    reference: None,
+                    deadline: "2026-09-12T10:15:00Z".to_string(),
+                },
+            );
+            resume_with_outcome(
+                &mut context,
+                &waited,
+                job_exited("job_9f3c1a7b2e04", 0, Duration::from_secs(214)),
+                &mut waits,
+            )
+        };
+
+        let envelope = &pair[0].message;
+        assert_eq!(envelope.role, Role::Assistant);
+        let calls = envelope.tool_calls.as_ref().expect("a one-call envelope");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, format!("{CALL}{SETTLED_SUFFIX}"));
+        assert_eq!(calls[0].function.name, WAIT_FOR);
+        assert_eq!(
+            serde_json::from_str::<Waiting>(&calls[0].function.arguments)
+                .expect("the registered wait travels as the call's arguments")
+                .id,
+            "job_9f3c1a7b2e04"
+        );
+
+        let result = &pair[1].message;
+        assert_eq!(result.role, Role::Tool);
+        assert_eq!(
+            result.tool_call_id.as_deref(),
+            Some(format!("{CALL}{SETTLED_SUFFIX}").as_str())
+        );
+        assert_eq!(
+            result.content.as_deref(),
+            Some("job_9f3c1a7b2e04 exited with code 0 after 214s.")
+        );
+
+        let injected: Vec<&Entry> = context
+            .entries
+            .iter()
+            .filter(|entry| waits.contains(&entry.id))
+            .collect();
+        assert_eq!(injected.len(), 2);
+        for entry in injected {
+            assert!(entry.preserve, "the newest outcome survives compaction");
+            assert!(
+                !entry.consumed,
+                "the store records it unconsumed, and the next request reconciles both sides"
+            );
+        }
+    }
+
+    #[test]
+    fn two_successive_outcome_pairs_group_cleanly_and_the_older_one_is_demoted() {
+        let mut context = RunContext::from_messages(vec![LlmMessage::user("Ship it.")]);
+        let mut waits = Vec::new();
+        outcome_pair(&mut context, &mut waits, "call_1", "First outcome.");
+        let older: Vec<String> = waits.clone();
+        outcome_pair(&mut context, &mut waits, "call_2", "Second outcome.");
+
+        context::validate(&context.entries, None)
+            .expect("an envelope and the result that follows it is a complete group");
+
+        for entry in &context.entries {
+            if older.contains(&entry.id) {
+                assert!(
+                    !entry.preserve,
+                    "the previous outcome is demoted so preserved evidence does not grow per park"
+                );
+            } else if waits.contains(&entry.id) {
+                assert!(entry.preserve, "the newest outcome stays preserved");
+            }
+        }
+        assert_eq!(waits.len(), 4, "both pairs are recorded: {waits:?}");
     }
 
     #[tokio::test]
