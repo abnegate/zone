@@ -3419,6 +3419,22 @@ mod watchdog_tests {
             .unwrap()
     }
 
+    /// Status, envelope and phase from one row read: under paused time the
+    /// window can elapse between two queries, and a resumed row has already
+    /// shed the phase this is meant to observe.
+    async fn parked_state(
+        pool: &PgPool,
+        run: Uuid,
+    ) -> (String, Option<serde_json::Value>, Option<String>) {
+        sqlx::query_as(
+            "SELECT status, pending_question, current_phase FROM task_runs WHERE id = $1",
+        )
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
     /// The rows the wait itself wrote, in order: the park and how it ended.
     async fn waiting_rows(pool: &PgPool, run: Uuid) -> Vec<(String, Option<serde_json::Value>)> {
         sqlx::query_as(
@@ -3450,14 +3466,14 @@ mod watchdog_tests {
             // The row has to carry the envelope while the run is still waiting
             // on it: a console that can only read it afterwards reads nothing.
             loop {
-                let (status, pending) = parked_row(&observed, run).await;
+                let (status, pending, phase) = parked_state(&observed, run).await;
                 if status == PHASE_WAITING {
                     let pending = pending.expect("a parked run stores what it asked");
                     assert_eq!(pending["tool_call_id"], "call-1");
                     assert_eq!(pending["questions"][0]["header"], "Scope");
                     assert_eq!(pending["questions"][0]["choices"][0]["recommended"], true);
                     assert_eq!(
-                        parked_phase(&observed, run).await.as_deref(),
+                        phase.as_deref(),
                         Some(PHASE_WAITING),
                         "the phase shown beside the badge must say the run is waiting"
                     );
@@ -3479,6 +3495,11 @@ mod watchdog_tests {
         let (status, pending) = parked_row(&pool, run).await;
         assert_eq!(status, "running");
         assert_eq!(pending, None, "a resumed run is no longer asking anything");
+        assert_eq!(
+            parked_phase(&pool, run).await,
+            None,
+            "a resumed run must not go on reading as waiting"
+        );
         // The card vanishing is the only thing a reader of the log would
         // otherwise see; the line the model was handed is what explains it.
         let rows = waiting_rows(&pool, run).await;
