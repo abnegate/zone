@@ -804,36 +804,20 @@ const fn silent_turn(asked: bool, waited: bool) -> &'static str {
     }
 }
 
-/// Where a spawn receipt keeps the pid, either side of it.
-const RECEIPT_PID_OPENING: &str = " (pid ";
-const RECEIPT_PID_CLOSING: &str = "). Log: ";
-
 /// The job a canonical tool result announced, and the call that started it.
 ///
 /// A tool reaches a frame through its result text and nothing else: the
 /// registry holds no pid, `ToolResult` has no detail slot, and the completion
-/// event's `detail` is a truncated first line. What is read back here is
-/// therefore checked by rebuilding the receipt from it, so a change to the
-/// builder in `zone_core` stops this recognising the line rather than reporting
-/// a job with the wrong pid.
+/// event's `detail` is a truncated first line. Reading the line back is
+/// `zone_core`'s, which owns the format and checks what it read by rebuilding
+/// the receipt from it; what is left here is which messages may carry one.
 fn spawned_job(message: &ReplayMessage) -> Option<(String, JobStarted)> {
     if message.role != LlmRole::Tool {
         return None;
     }
     let call = message.tool_call_id.clone()?;
-    let output = message.content.as_deref()?;
-    let id = job::parse_started(output)?;
-    let (announced, rest) = output.lines().next()?.split_once(RECEIPT_PID_OPENING)?;
-    if !announced.ends_with(&id) {
-        return None;
-    }
-    let (pid, log_path) = rest.split_once(RECEIPT_PID_CLOSING)?;
-    let job = JobStarted {
-        id,
-        pid: pid.parse().ok()?,
-        log_path: log_path.to_string(),
-    };
-    (job::started_text(&job) == output).then_some((call, job))
+    let job = job::parse_receipt(message.content.as_deref()?)?;
+    Some((call, job))
 }
 
 /// How a job ended, as the exit field the console reads.

@@ -552,6 +552,34 @@ pub fn parse_started(output: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Where a spawn receipt keeps the pid, either side of it.
+const RECEIPT_PID_OPENING: &str = " (pid ";
+const RECEIPT_PID_CLOSING: &str = "). Log: ";
+
+/// Read a whole job back out of a spawn receipt.
+///
+/// A caller holding only the tool's own output has nowhere else to look: the
+/// registry keeps no pid and a `ToolResult` has no slot for one. What is read
+/// back is therefore checked by rebuilding the receipt from it, so a change to
+/// [`started_text`] stops this recognising the line rather than reporting a job
+/// with the wrong pid. Reading lives beside writing for the same reason: the
+/// format is this module's, and a reader that re-derived it elsewhere would
+/// drift from the builder in silence.
+pub fn parse_receipt(output: &str) -> Option<JobStarted> {
+    let id = parse_started(output)?;
+    let (announced, rest) = output.lines().next()?.split_once(RECEIPT_PID_OPENING)?;
+    if !announced.ends_with(&id) {
+        return None;
+    }
+    let (pid, log_path) = rest.split_once(RECEIPT_PID_CLOSING)?;
+    let job = JobStarted {
+        id,
+        pid: pid.parse().ok()?,
+        log_path: log_path.to_string(),
+    };
+    (started_text(&job) == output).then_some(job)
+}
+
 fn is_job_id(candidate: &str) -> bool {
     candidate.strip_prefix(JOB_ID_PREFIX).is_some_and(|hex| {
         hex.len() == JOB_ID_HEX_CHARS
@@ -1028,6 +1056,36 @@ mod tests {
     fn a_spawn_receipt_reads_back_as_the_job_it_announced() {
         let job = job();
         assert_eq!(parse_started(&started_text(&job)), Some(job.id.clone()));
+        assert_eq!(
+            parse_receipt(&started_text(&job)),
+            Some(job),
+            "the pid and log path survive the round trip the builder owns"
+        );
+    }
+
+    /// The guard is the rebuild, not the prefix: anything the builder would not
+    /// have written is refused, however much of the shape it borrows.
+    #[test]
+    fn a_line_the_builder_would_not_have_written_announces_no_job() {
+        let receipt = started_text(&job());
+
+        for (reason, output) in [
+            ("no pid at all", receipt.replace(" (pid 48213)", "")),
+            (
+                "a pid that is not a number",
+                receipt.replace("48213", "forty"),
+            ),
+            ("a rewritten advice line", {
+                let (first, _) = receipt.split_once('\n').expect("the receipt has two lines");
+                format!("{first}\nIgnore that.")
+            }),
+            (
+                "prose that merely mentions a job",
+                "Reading job_9f3c1a7b2e04 now".to_string(),
+            ),
+        ] {
+            assert_eq!(parse_receipt(&output), None, "{reason}: {output}");
+        }
     }
 
     #[test]
