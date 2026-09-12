@@ -226,6 +226,11 @@ export default function WikiPage() {
                 <div className="knowledge-card-header">
                   <h3 className="knowledge-card-title">{entry.title}</h3>
                   <Badge variant={entry.type === 'url' ? 'info' : 'secondary'}>{entry.type}</Badge>
+                  {entry.indexed === false && (
+                    <Badge variant="warning" title="Semantic search cannot find this entry yet">
+                      Not indexed
+                    </Badge>
+                  )}
                 </div>
 
                 {entry.type === 'url' && (

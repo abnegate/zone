@@ -160,6 +160,12 @@ pub struct KnowledgeResponse {
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether semantic search can see this entry yet.
+    ///
+    /// An entry is stored even when embedding it fails, so a reader needs to be
+    /// told the difference between an entry `search_knowledge` will find by
+    /// meaning and one only a keyword will reach.
+    indexed: bool,
 }
 
 /// Lightweight knowledge entry for list responses (without full content)
@@ -184,6 +190,9 @@ pub struct KnowledgeListItem {
     /// Last fetch error if any
     #[serde(skip_serializing_if = "Option::is_none")]
     last_fetch_error: Option<String>,
+    /// Whether semantic search can see this entry yet. The wiki reads this
+    /// list, so it is where an unindexed entry has to become visible.
+    indexed: bool,
 }
 
 // ============================================================================
@@ -850,6 +859,7 @@ pub async fn list_knowledge(
                 .map(|dt| chrono::DateTime::from_naive_utc_and_offset(dt, chrono::Utc)),
             refresh_interval_minutes: entry.refresh_interval_minutes,
             last_fetch_error: entry.last_fetch_error,
+            indexed: entry.indexed,
         })
         .collect();
 
@@ -931,6 +941,7 @@ pub async fn get_knowledge_entry(
         last_fetch_error: entry.last_fetch_error,
         created_at: entry.created_at.map(utc),
         updated_at: entry.updated_at.map(utc),
+        indexed: entry.indexed,
     })
     .into_response()
 }
@@ -1225,30 +1236,21 @@ pub async fn create_knowledge(
         }
     };
 
-    // Generate and store embedding (if service available)
-    if let Some(embedding_service) = state.embedding_service() {
-        match embedding_service.embed(&final_content).await {
-            Ok(embedding) => {
-                let model = embedding_service.model();
-                if let Err(e) = knowledge::store_knowledge_embedding(
-                    db,
-                    entry_id,
-                    req.workspace_id,
-                    &embedding,
-                    model,
-                )
-                .await
-                {
-                    tracing::warn!("Failed to store knowledge embedding: {}", e);
-                    // Don't fail the request - embedding is optional enhancement
-                }
+    // The entry is kept either way: failing the write over an embedding would
+    // lose the text the caller just gave us. What the caller is told instead is
+    // `indexed`, and the recovery pass in
+    // [`crate::workers::knowledge_refresh`] comes back for it.
+    let indexed =
+        match crate::services::knowledge::index(&state, entry_id, req.workspace_id, &final_content)
+            .await
+        {
+            Ok(()) => true,
+            Err(crate::services::knowledge::Unindexed::NoService) => false,
+            Err(error) => {
+                tracing::warn!("{error}");
+                false
             }
-            Err(e) => {
-                tracing::warn!("Failed to generate knowledge embedding: {}", e);
-                // Don't fail the request - embedding is optional enhancement
-            }
-        }
-    }
+        };
 
     let now = chrono::Utc::now();
     let response = KnowledgeResponse {
@@ -1266,6 +1268,7 @@ pub async fn create_knowledge(
         last_fetch_error: None,
         created_at: Some(now),
         updated_at: Some(now),
+        indexed,
     };
 
     (StatusCode::CREATED, Json(response)).into_response()

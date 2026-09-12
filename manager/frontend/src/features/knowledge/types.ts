@@ -10,6 +10,8 @@ export interface KnowledgeEntry {
   fetched_content: string | null;
   tags: string[];
   last_refreshed_at: string | null;
+  /** Whether semantic search can see this entry; null if the server did not say. */
+  indexed: boolean | null;
   created_at: string;
   updated_at: string;
 }

@@ -34,6 +34,9 @@ pub struct KnowledgeRow {
     pub last_fetch_error: Option<String>,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
+    /// Whether the entry has a stored vector, and so can be found by meaning
+    /// rather than by keyword alone.
+    pub indexed: bool,
 }
 
 /// Lightweight knowledge entry for list views (without full content)
@@ -54,15 +57,28 @@ pub struct KnowledgeListRow {
     pub refresh_interval_minutes: Option<i32>,
     /// Last fetch error (indicates failed state)
     pub last_fetch_error: Option<String>,
+    /// Whether the entry has a stored vector, and so can be found by meaning
+    /// rather than by keyword alone.
+    pub indexed: bool,
 }
 
 /// Get a knowledge entry by ID
+///
+/// `indexed` is whether the entry has a `knowledge_embeddings` row.
+/// `knowledge_entry_id` is unique there, so the check is an index probe once
+/// the table is large enough for the planner to prefer one. Every projection of
+/// an entry spells the same `EXISTS` out, because sqlx takes only literal SQL
+/// and a shared fragment would have to be assembled at run time.
 pub async fn get_knowledge(pool: &PgPool, id: Uuid) -> DbResult<Option<KnowledgeRow>> {
     sqlx::query_as::<_, KnowledgeRow>(
         r#"
         SELECT id, workspace_id, title, content, category, tags, token_count, is_active,
                source_url, last_fetched_at, content_hash, refresh_interval_minutes, last_fetch_error,
-               created_at, updated_at
+               created_at, updated_at,
+               EXISTS (
+                   SELECT 1 FROM knowledge_embeddings stored
+                   WHERE stored.knowledge_entry_id = knowledge_entries.id
+               ) AS indexed
         FROM knowledge_entries
         WHERE id = $1
         "#,
@@ -84,7 +100,11 @@ pub async fn list_knowledge(
         sqlx::query_as::<_, KnowledgeListRow>(
             r#"
             SELECT id, workspace_id, title, category, tags, token_count, is_active,
-                   source_url, last_fetched_at, refresh_interval_minutes, last_fetch_error
+                   source_url, last_fetched_at, refresh_interval_minutes, last_fetch_error,
+                   EXISTS (
+                       SELECT 1 FROM knowledge_embeddings stored
+                       WHERE stored.knowledge_entry_id = knowledge_entries.id
+                   ) AS indexed
             FROM knowledge_entries
             WHERE workspace_id = $1 AND category = $2 AND is_active = TRUE
             ORDER BY created_at DESC
@@ -101,7 +121,11 @@ pub async fn list_knowledge(
         sqlx::query_as::<_, KnowledgeListRow>(
             r#"
             SELECT id, workspace_id, title, category, tags, token_count, is_active,
-                   source_url, last_fetched_at, refresh_interval_minutes, last_fetch_error
+                   source_url, last_fetched_at, refresh_interval_minutes, last_fetch_error,
+                   EXISTS (
+                       SELECT 1 FROM knowledge_embeddings stored
+                       WHERE stored.knowledge_entry_id = knowledge_entries.id
+                   ) AS indexed
             FROM knowledge_entries
             WHERE workspace_id = $1 AND is_active = TRUE
             ORDER BY created_at DESC
@@ -408,6 +432,49 @@ pub async fn list_entries_due_for_refresh(
         "#,
     )
     .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// An active entry with no stored vector, and the text to embed for it.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct KnowledgeUnindexed {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub content: String,
+}
+
+/// Find active entries that semantic search cannot see, oldest first.
+///
+/// Storing an entry whose embedding failed is deliberate -- losing the text the
+/// user just gave us to an embedding outage would be worse. Leaving it out of
+/// the index forever is not: these are the rows a recovery pass embeds.
+///
+/// Blank content is excluded because there is nothing to embed, and a row that
+/// can never succeed would otherwise be a candidate on every pass for the life
+/// of the workspace. `offset` is how a caller whose last bite failed asks for
+/// the next one instead of the same rows again.
+pub async fn list_entries_missing_embeddings(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+) -> DbResult<Vec<KnowledgeUnindexed>> {
+    sqlx::query_as::<_, KnowledgeUnindexed>(
+        r#"
+        SELECT id, workspace_id, content
+        FROM knowledge_entries
+        WHERE is_active = TRUE
+          AND btrim(content) <> ''
+          AND NOT EXISTS (
+              SELECT 1 FROM knowledge_embeddings stored
+              WHERE stored.knowledge_entry_id = knowledge_entries.id
+          )
+        ORDER BY created_at ASC, id ASC
+        LIMIT $1 OFFSET $2
+        "#,
+    )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
 }

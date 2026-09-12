@@ -31,6 +31,7 @@ describe('KnowledgeApi', () => {
             fetched_content: null,
             tags: ['tag1'],
             last_refreshed_at: null,
+            indexed: true,
             created_at: '2024-01-01T00:00:00Z',
             updated_at: '2024-01-01T00:00:00Z',
           },
@@ -66,6 +67,7 @@ describe('KnowledgeApi', () => {
           is_active: true,
           source_url: 'https://example.com/docs',
           last_fetched_at: '2024-01-02T00:00:00Z',
+          indexed: false,
         },
       ];
 
@@ -83,6 +85,7 @@ describe('KnowledgeApi', () => {
         content: 'https://example.com/docs',
         tags: ['guide'],
         last_refreshed_at: '2024-01-02T00:00:00Z',
+        indexed: false,
       });
     });
 
@@ -124,6 +127,7 @@ describe('KnowledgeApi', () => {
         fetched_content: null,
         tags: ['tag1'],
         last_refreshed_at: null,
+        indexed: true,
         created_at: '2024-01-01T00:00:00Z',
         updated_at: '2024-01-01T00:00:00Z',
       };
@@ -264,6 +268,7 @@ describe('KnowledgeApi', () => {
         fetched_content: 'Updated content',
         tags: [],
         last_refreshed_at: '2024-01-02T00:00:00Z',
+        indexed: true,
         created_at: '2024-01-01T00:00:00Z',
         updated_at: '2024-01-02T00:00:00Z',
       };

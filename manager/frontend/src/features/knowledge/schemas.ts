@@ -23,6 +23,7 @@ export const KnowledgeEntrySchema = z
     last_refreshed_at: z.string().nullable().optional(),
     refresh_interval_minutes: z.number().nullable().optional(),
     last_fetch_error: z.string().nullable().optional(),
+    indexed: z.boolean().nullable().optional(),
     created_at: z.string().optional(),
     updated_at: z.string().optional(),
   })
@@ -37,6 +38,10 @@ export const KnowledgeEntrySchema = z
       fetched_content: entry.fetched_content ?? null,
       tags: entry.tags ?? [],
       last_refreshed_at: entry.last_refreshed_at ?? entry.last_fetched_at ?? null,
+      // Null, not true, when the server did not say: an entry is only shown as
+      // missing from the index on the server's word for it, so a payload from
+      // before the field existed does not flag every entry.
+      indexed: entry.indexed ?? null,
       created_at: entry.created_at ?? '',
       updated_at: entry.updated_at ?? '',
     };
