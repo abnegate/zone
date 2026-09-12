@@ -4617,11 +4617,16 @@ mod watchdog_tests {
         })
         .await
         .expect("the run never read as parked on its wait");
-        assert_eq!(
-            get_semaphore().available_permits(),
-            MAX_CONCURRENT_TASKS,
-            "a parked run kept the execution slot it is not executing on"
-        );
+        // The row is written before the slot is handed back, so the release is
+        // waited for rather than read the instant the row appears -- the same
+        // poll the question park's own slot assertion uses.
+        tokio::time::timeout(WAIT_TICK, async {
+            while get_semaphore().available_permits() != MAX_CONCURRENT_TASKS {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("a parked run kept the execution slot it is not executing on");
         assert!(
             tasks::heartbeat_task_run(&observed, run, owner)
                 .await
