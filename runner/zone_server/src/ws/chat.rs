@@ -34,8 +34,11 @@ use zone_core::llm::{Message as LlmMessage, Role as LlmRole};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
-use crate::agent::wait::{self, WaitSettled, Waiting};
-use crate::agent::{self, ActionReceipt, AgentEvent, AgentRun, Citation, Question, ToolCallRecord};
+use crate::agent::wait::{self, WaitSettled, Waited, Waiting};
+use crate::agent::{
+    self, ActionReceipt, AgentEvent, AgentRun, ChatTools, Citation, Question, Spend,
+    ToolCallRecord, WorkspaceScope,
+};
 use crate::auth::validate_access_token;
 use crate::db::{
     self, ai_settings, chat_sources, chats, knowledge, sessions, workspace_members, workspaces,
@@ -768,6 +771,19 @@ const STOPPED_AFTER_WAITING: &str = "[Stopped while waiting]";
 /// the same call.
 const AWAITING_ANSWER_DETAIL: &str = "Waiting for your answer…";
 
+/// Another writer took the chat's lease, so this turn may no longer persist.
+const OWNERSHIP_LOST: &str = "Chat generation ownership was lost";
+
+/// The turn's own wall clock ran out, wherever it was spent.
+const GENERATION_TIMED_OUT: &str = "Response generation timed out";
+
+/// How a wait outcome that is a timeout begins.
+///
+/// The registry builds every outcome string, and a timeout is the one the model
+/// must not read as a result, so the console is told which it got rather than
+/// left to guess from prose. Pinned against the builder by its own test.
+const TIMED_OUT_PREFIX: &str = "Timed out after ";
+
 /// What a turn that produced neither prose nor an image is stored as.
 ///
 /// A question outranks a wait: a turn that waited and then asked is waiting on
@@ -828,6 +844,42 @@ async fn job_exit(chat_id: Uuid, id: &str) -> JobExited {
             Ok(JobState::Exited(code)) => Some(code),
             _ => None,
         },
+    }
+}
+
+/// How a wait the model opened came to an end.
+#[derive(Debug, PartialEq)]
+enum WaitEnd {
+    Settled(String),
+    Cancelled,
+    Lost,
+    Expired,
+}
+
+/// The first of the four things that can end a wait.
+///
+/// Cancellation and the lease guard are passed in rather than awaited inside
+/// the turn's own event arm, where neither would ever be reached: those arms
+/// are biased and only re-read when the select is re-entered. It matters most
+/// to the turn a disconnected socket leaves running, where a reconnected
+/// client's cancel is the only thing that can stop the wait before the turn's
+/// own clock does.
+///
+/// Polled in the order written: an outcome landing in the same tick as the
+/// deadline has happened, and reporting it as a timeout would tell the model
+/// nothing had.
+async fn settle_wait(
+    outcome: impl Future<Output = String>,
+    lost: impl Future<Output = ()>,
+    cancel: &mut broadcast::Receiver<()>,
+    stream_deadline: tokio::time::Instant,
+) -> WaitEnd {
+    tokio::select! {
+        biased;
+        outcome = outcome => WaitEnd::Settled(outcome),
+        () = lost => WaitEnd::Lost,
+        _ = cancel.recv() => WaitEnd::Cancelled,
+        _ = tokio::time::sleep_until(stream_deadline) => WaitEnd::Expired,
     }
 }
 
@@ -1344,7 +1396,7 @@ async fn wait_media(
 {
     tokio::select! {
         biased;
-        _ = session.guard.lost() => Err("Chat generation ownership was lost".into()),
+        _ = session.guard.lost() => Err(OWNERSHIP_LOST.into()),
         error = watch_lease(&session.store, &session.lease) => Err(error.into()),
         _ = generation.cancel.recv() => {
             session.close().await?;
@@ -1377,7 +1429,7 @@ async fn await_media<T>(
             let _ = cancellation.send(());
             let _ = operation.await;
             progress.abort();
-            Err("Chat generation ownership was lost".into())
+            Err(OWNERSHIP_LOST.into())
         }
         result = &mut operation => Ok(result),
     }
@@ -2220,7 +2272,7 @@ async fn handle_send_message(
     let mut jobs: Vec<String> = Vec::new();
     let preparation = tokio::select! {
         biased;
-        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:"Chat generation ownership was lost".into()}).await; return; }
+        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:OWNERSHIP_LOST.into()}).await; return; }
         _ = request.cancel.recv() => {
             let _=session.close().await;
                         request.cancelled(stream).await;
@@ -2313,10 +2365,10 @@ async fn handle_send_message(
                         request.cancelled(stream).await;
                         return Ok(());
                     }
-                    _ = session.guard.lost() => { return Err("Chat generation ownership was lost".into()); }
+                    _ = session.guard.lost() => { return Err(OWNERSHIP_LOST.into()); }
                     result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, web_search_requested) => result?,
                 };
-                handle_chat_generation(state, stream, chat_id, preparation, &mut request, &mut session, &mut jobs).await
+                handle_chat_generation(state, stream, chat_id, workspace_id, user_id, preparation, &mut request, &mut session, &mut jobs).await
             }
         }
     }.await;
@@ -2657,6 +2709,8 @@ async fn handle_chat_generation(
     state: &AppState,
     stream: &ChatStream,
     chat_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
     preparation: ChatPreparation,
     generation: &mut Generation,
     session: &mut Session,
@@ -2666,11 +2720,11 @@ async fn handle_chat_generation(
         model,
         agentic,
         auto_approve,
-        tools,
-        context,
+        mut tools,
+        mut context,
         llm: llm_client,
         stop,
-        budget,
+        mut budget,
         timeout,
         environment: _,
     } = preparation;
@@ -2697,22 +2751,6 @@ async fn handle_chat_generation(
     .await;
     generation.started = true;
 
-    let mut events: Pin<Box<dyn Stream<Item = AgentEvent> + Send>> =
-        Box::pin(agent::run_with_context(
-            AgentRun {
-                llm: llm_client,
-                model: model_name.to_string(),
-                tools,
-                messages: Vec::new(),
-                budget,
-                approval: {
-                    generation.approvals.set_auto(auto_approve);
-                    generation.approvals.clone()
-                },
-            },
-            context,
-            agentic,
-        ));
     let mut full_content = String::new();
     let mut pending_content = String::new();
     let mut round_reasoning = String::new();
@@ -2729,319 +2767,432 @@ async fn handle_chat_generation(
     let mut citations: Vec<Citation> = Vec::new();
     let mut action_receipts: Vec<ActionReceipt> = Vec::new();
     let mut last_snapshot: Option<Instant> = None;
+    let mut waits: Vec<String> = Vec::new();
 
     loop {
-        tokio::select! {
-            biased;
-            _ = session.guard.lost() => { failure=Some("Chat generation ownership was lost".into()); break; }
-            // Check for cancellation before polling another event.
-            _ = generation.cancel.recv() => {
-                cancelled = true;
-                tracing::debug!("Stream cancelled for message {}", assistant_message_id);
-                break;
-            }
+        wait::set_ceiling(ToolSession::Chat(chat_id), stream_deadline);
+        let mut events: Pin<Box<dyn Stream<Item = AgentEvent> + Send>> =
+            Box::pin(agent::run_with_context(
+                AgentRun {
+                    llm: llm_client.clone(),
+                    model: model_name.to_string(),
+                    tools,
+                    messages: Vec::new(),
+                    budget,
+                    approval: {
+                        generation.approvals.set_auto(auto_approve);
+                        generation.approvals.clone()
+                    },
+                },
+                context,
+                agentic,
+            ));
+        let mut pending_wait: Option<(Waited, Spend)> = None;
 
-            _ = tokio::time::sleep_until(stream_deadline) => {
-                tracing::warn!("LLM stream timeout for chat {}, message {}", chat_id, assistant_message_id);
-                failure = Some("Response generation timed out".to_string());
-                break;
-            }
+        loop {
+            tokio::select! {
+                biased;
+                _ = session.guard.lost() => { failure=Some(OWNERSHIP_LOST.into()); break; }
+                // Check for cancellation before polling another event.
+                _ = generation.cancel.recv() => {
+                    cancelled = true;
+                    tracing::debug!("Stream cancelled for message {}", assistant_message_id);
+                    break;
+                }
 
-            // Process agent events
-            event = events.next() => {
-                let mut persist = false;
-                let mut persist_now = false;
-                let mut stop_stream = false;
-                match event {
-                    Some(AgentEvent::Canonical(entry)) => {
-                        if entry.message.role == LlmRole::Assistant {
-                            let leftover=token_filter.finish();
-                            if !leftover.is_empty() {
-                                pending_content.push_str(&leftover);
-                                let _=emit_chunk(stream,&mut full_content,&mut chunk_index,leftover,&mut response_truncated).await;
-                                persist = true;
+                _ = tokio::time::sleep_until(stream_deadline) => {
+                    tracing::warn!("LLM stream timeout for chat {}, message {}", chat_id, assistant_message_id);
+                    failure = Some(GENERATION_TIMED_OUT.to_string());
+                    break;
+                }
+
+                // Process agent events
+                event = events.next() => {
+                    let mut persist = false;
+                    let mut persist_now = false;
+                    let mut stop_stream = false;
+                    match event {
+                        Some(AgentEvent::Canonical(entry)) => {
+                            if entry.message.role == LlmRole::Assistant {
+                                let leftover=token_filter.finish();
+                                if !leftover.is_empty() {
+                                    pending_content.push_str(&leftover);
+                                    let _=emit_chunk(stream,&mut full_content,&mut chunk_index,leftover,&mut response_truncated).await;
+                                    persist = true;
+                                }
+                            }
+                            if let Err(error)=session.store.append(&session.lease,session.turn,std::slice::from_ref(&entry)).await {failure=Some(error.to_string());break;}
+                            pending_images.retain(|image| !entry.message.images.contains(image) && !entry.message.generated_images.contains(image));
+                            replay.append(&entry);
+                            pending_content.clear();
+                            if let Some((call, job)) = spawned_job(&entry.message) {
+                                if let Some(record) = tool_calls.iter_mut().find(|record| record.id == call) {
+                                    record.job = Some(job.clone());
+                                }
+                                jobs.push(job.id.clone());
+                                let job_msg = ServerMessage::JobStarted {
+                                    message_id: assistant_message_id,
+                                    tool_call_id: call,
+                                    job,
+                                };
+                                publish(stream, job_msg).await;
+                                persist_now = true;
                             }
                         }
-                        if let Err(error)=session.store.append(&session.lease,session.turn,std::slice::from_ref(&entry)).await {failure=Some(error.to_string());break;}
-                        pending_images.retain(|image| !entry.message.images.contains(image) && !entry.message.generated_images.contains(image));
-                        replay.append(&entry);
-                        pending_content.clear();
-                        if let Some((call, job)) = spawned_job(&entry.message) {
-                            if let Some(record) = tool_calls.iter_mut().find(|record| record.id == call) {
-                                record.job = Some(job.clone());
-                            }
-                            jobs.push(job.id.clone());
-                            let job_msg = ServerMessage::JobStarted {
-                                message_id: assistant_message_id,
-                                tool_call_id: call,
-                                job,
+                        Some(AgentEvent::Consumed(ids)) => {
+                            if let Err(error)=session.store.consumed(&session.lease,&ids).await {failure=Some(error.to_string());break;}
+                            for entry in &mut replay.entries {if ids.contains(&entry.id){entry.consumed=true;}}
+                        }
+                        Some(AgentEvent::Checkpoint {previous,summary}) => {
+                            let expected=previous.as_ref().map(session::stored_summary);
+                            if let Err(error)=session.store.checkpoint(&session.lease,expected.as_ref(),&session::stored_summary(&summary)).await {failure=Some(error.to_string());break;}
+                            replay.summary=Some(summary);
+                        }
+                        Some(AgentEvent::Context(usage)) => {
+                            if usage.status==zone_core::context::ContextStatus::Blocked { blocked=Some(usage.clone()); }
+                            if let Err(error)=session.store.assert_current(&session.lease).await {failure=Some(error.to_string());break;}
+                            publish(stream,ServerMessage::Context {chat_id,message_id:Some(assistant_message_id),usage}).await;
+                        }
+                        Some(AgentEvent::Usage(usage)) => {tracing::debug!(prompt_tokens=usage.prompt_tokens,completion_tokens=usage.completion_tokens,"Observed provider usage");}
+                        Some(AgentEvent::Finalizing(message)) => { publish(stream,ServerMessage::Status {message}).await; }
+                        Some(AgentEvent::Reasoning(content)) => {
+                            round_reasoning.push_str(&content);
+                            publish(stream, ServerMessage::Reasoning { content }).await;
+                            persist = true;
+                        }
+                        Some(AgentEvent::Chunk(content)) => {
+                            let filtered = match token_filter.push(&content) {
+                                FilterStep::Hold => continue,
+                                FilterStep::Emit(text) => text,
+                                FilterStep::Halt(text) => {
+                                    pending_content.push_str(&text);
+                                    if !text.is_empty() {
+                                        let _ = emit_chunk(
+                                            stream,
+                                            &mut full_content,
+                                            &mut chunk_index,
+                                            text,
+                                            &mut response_truncated,
+                                        )
+                                        .await;
+                                    }
+                                    persist_now = true;
+                                    stop_stream = true;
+                                    String::new()
+                                }
                             };
-                            publish(stream, job_msg).await;
+                            if !stop_stream {
+                                pending_content.push_str(&filtered);
+                                if !emit_chunk(
+                                    stream,
+                                    &mut full_content,
+                                    &mut chunk_index,
+                                    filtered,
+                                    &mut response_truncated,
+                                )
+                                .await
+                                {
+                                    pending_content.clone_from(&full_content);
+                                    persist_now = true;
+                                    stop_stream = true;
+                                } else {
+                                    persist = true;
+                                }
+                            }
+                        }
+                        Some(AgentEvent::ToolApprovalRequired { id, name, arguments, reason, preview }) => {
+                            if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
+                                record.detail = "Waiting for approval…".to_string();
+                                record.preview.clone_from(&preview);
+                            }
+                            let tool_msg = ServerMessage::ToolApprovalRequired {
+                                message_id: assistant_message_id,
+                                tool_call_id: id,
+                                name,
+                                arguments,
+                                reason,
+                                preview,
+                            };
+                            publish(stream, tool_msg).await;
                             persist_now = true;
                         }
-                    }
-                    Some(AgentEvent::Consumed(ids)) => {
-                        if let Err(error)=session.store.consumed(&session.lease,&ids).await {failure=Some(error.to_string());break;}
-                        for entry in &mut replay.entries {if ids.contains(&entry.id){entry.consumed=true;}}
-                    }
-                    Some(AgentEvent::Checkpoint {previous,summary}) => {
-                        let expected=previous.as_ref().map(session::stored_summary);
-                        if let Err(error)=session.store.checkpoint(&session.lease,expected.as_ref(),&session::stored_summary(&summary)).await {failure=Some(error.to_string());break;}
-                        replay.summary=Some(summary);
-                    }
-                    Some(AgentEvent::Context(usage)) => {
-                        if usage.status==zone_core::context::ContextStatus::Blocked { blocked=Some(usage.clone()); }
-                        if let Err(error)=session.store.assert_current(&session.lease).await {failure=Some(error.to_string());break;}
-                        publish(stream,ServerMessage::Context {chat_id,message_id:Some(assistant_message_id),usage}).await;
-                    }
-                    Some(AgentEvent::Usage(usage)) => {tracing::debug!(prompt_tokens=usage.prompt_tokens,completion_tokens=usage.completion_tokens,"Observed provider usage");}
-                    Some(AgentEvent::Finalizing(message)) => { publish(stream,ServerMessage::Status {message}).await; }
-                    Some(AgentEvent::Reasoning(content)) => {
-                        round_reasoning.push_str(&content);
-                        publish(stream, ServerMessage::Reasoning { content }).await;
-                        persist = true;
-                    }
-                    Some(AgentEvent::Chunk(content)) => {
-                        let filtered = match token_filter.push(&content) {
-                            FilterStep::Hold => continue,
-                            FilterStep::Emit(text) => text,
-                            FilterStep::Halt(text) => {
-                                pending_content.push_str(&text);
-                                if !text.is_empty() {
-                                    let _ = emit_chunk(
-                                        stream,
-                                        &mut full_content,
-                                        &mut chunk_index,
-                                        text,
-                                        &mut response_truncated,
-                                    )
-                                    .await;
-                                }
-                                persist_now = true;
-                                stop_stream = true;
-                                String::new()
-                            }
-                        };
-                        if !stop_stream {
-                            pending_content.push_str(&filtered);
-                            if !emit_chunk(
-                                stream,
-                                &mut full_content,
-                                &mut chunk_index,
-                                filtered,
-                                &mut response_truncated,
-                            )
-                            .await
-                            {
-                                pending_content.clone_from(&full_content);
-                                persist_now = true;
-                                stop_stream = true;
-                            } else {
-                                persist = true;
-                            }
-                        }
-                    }
-                    Some(AgentEvent::ToolApprovalRequired { id, name, arguments, reason, preview }) => {
-                        if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
-                            record.detail = "Waiting for approval…".to_string();
-                            record.preview.clone_from(&preview);
-                        }
-                        let tool_msg = ServerMessage::ToolApprovalRequired {
-                            message_id: assistant_message_id,
-                            tool_call_id: id,
-                            name,
-                            arguments,
-                            reason,
-                            preview,
-                        };
-                        publish(stream, tool_msg).await;
-                        persist_now = true;
-                    }
-                    Some(AgentEvent::ToolCallStarted { id, name, arguments }) => {
-                        // Recorded before the tool runs so a turn cancelled
-                        // mid-call still shows what it was doing.
-                        let reasoning = {
-                            let text = std::mem::take(&mut round_reasoning);
-                            (!text.is_empty()).then_some(text)
-                        };
-                        let reason = crate::agent::reason(&arguments);
-                        tool_calls.push(ToolCallRecord {
-                            id: id.clone(),
-                            name: name.clone(),
-                            arguments: arguments.clone(),
-                            success: false,
-                            detail: "Did not finish".to_string(),
-                            duration_ms: 0,
-                            reasoning: reasoning.clone(),
-                            reason: reason.clone(),
-                            preview: None,
-                            questions: Vec::new(),
-                            job: None,
-                            waiting: None,
-                        });
-
-                        let tool_msg = ServerMessage::ToolCall {
-                            message_id: assistant_message_id,
-                            tool_call_id: id,
-                            name,
-                            arguments,
-                            reasoning,
-                            reason,
-                        };
-                        publish(stream, tool_msg).await;
-                        persist_now = true;
-                    }
-                    Some(AgentEvent::Image(url)) => {
-                        // Images arrive as deltas and repeat, so the cap and
-                        // the duplicate check both have to live here rather
-                        // than in whichever stream produced the event.
-                        if generated_images.len() >= MAX_GENERATED_IMAGES
-                            || generated_images
-                                .iter()
-                                .any(|existing: &ChatImageAttachment| existing.url == url)
-                        {
-                            continue;
-                        }
-
-                        let Some(attachment) =
-                            generated_image_attachment(&url, generated_images.len())
-                        else {
-                            tracing::warn!(
-                                "Ignored invalid generated image for message {}",
-                                assistant_message_id
-                            );
-                            continue;
-                        };
-
-                        if zone_core::tools::is_vision_url(&url) && !replay.entries.iter().any(|entry|entry.message.images.contains(&url) || entry.message.generated_images.iter().any(|image|image.image_url.url==url)) {
-                            pending_images.push(url);
-                        }
-                        let media_msg = if attachment.mime.starts_with("audio/") {
-                            ServerMessage::Audio {
-                                message_id: assistant_message_id,
-                                attachment: attachment.clone(),
-                            }
-                        } else {
-                            ServerMessage::Image {
-                                message_id: assistant_message_id,
-                                attachment: attachment.clone(),
-                            }
-                        };
-                        generated_images.push(attachment);
-                        publish(stream, media_msg).await;
-                        persist_now = true;
-                    }
-                    Some(AgentEvent::ToolCallCompleted { id, name, success, detail, duration_ms, citations: observed, receipt }) => {
-                        if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
-                            record.success = success;
-                            record.detail = detail.clone();
-                            record.duration_ms = duration_ms;
-                        }
-                        crate::agent::citations::merge(&mut citations, observed.clone());
-
-                        let tool_msg = ServerMessage::ToolResult {
-                            message_id: assistant_message_id,
-                            tool_call_id: id,
-                            name,
-                            success,
-                            detail,
-                            duration_ms,
-                            citations: observed,
-                        };
-                        publish(stream, tool_msg).await;
-                        if let Some(receipt) = receipt {
-                            let receipt_msg = ServerMessage::ActionReceipt {
-                                message_id: assistant_message_id,
-                                receipt: receipt.clone(),
+                        Some(AgentEvent::ToolCallStarted { id, name, arguments }) => {
+                            // Recorded before the tool runs so a turn cancelled
+                            // mid-call still shows what it was doing.
+                            let reasoning = {
+                                let text = std::mem::take(&mut round_reasoning);
+                                (!text.is_empty()).then_some(text)
                             };
-                            action_receipts.push(receipt);
-                            publish(stream, receipt_msg).await;
+                            let reason = crate::agent::reason(&arguments);
+                            tool_calls.push(ToolCallRecord {
+                                id: id.clone(),
+                                name: name.clone(),
+                                arguments: arguments.clone(),
+                                success: false,
+                                detail: "Did not finish".to_string(),
+                                duration_ms: 0,
+                                reasoning: reasoning.clone(),
+                                reason: reason.clone(),
+                                preview: None,
+                                questions: Vec::new(),
+                                job: None,
+                                waiting: None,
+                            });
+
+                            let tool_msg = ServerMessage::ToolCall {
+                                message_id: assistant_message_id,
+                                tool_call_id: id,
+                                name,
+                                arguments,
+                                reasoning,
+                                reason,
+                            };
+                            publish(stream, tool_msg).await;
+                            persist_now = true;
                         }
-                        persist_now = true;
-                    }
-                    Some(AgentEvent::QuestionRequired { tool_call_id, questions, .. }) => {
-                        // The live frame log is cleared by the message_end this
-                        // turn is about to reach, so a reader who reloads has
-                        // only the stored record to rebuild the card from.
-                        // Persist it before the socket can go.
-                        if let Some(record) = tool_calls.iter_mut().find(|r| r.id == tool_call_id) {
-                            record.detail = AWAITING_ANSWER_DETAIL.to_string();
-                            record.questions.clone_from(&questions);
+                        Some(AgentEvent::Image(url)) => {
+                            // Images arrive as deltas and repeat, so the cap and
+                            // the duplicate check both have to live here rather
+                            // than in whichever stream produced the event.
+                            if generated_images.len() >= MAX_GENERATED_IMAGES
+                                || generated_images
+                                    .iter()
+                                    .any(|existing: &ChatImageAttachment| existing.url == url)
+                            {
+                                continue;
+                            }
+
+                            let Some(attachment) =
+                                generated_image_attachment(&url, generated_images.len())
+                            else {
+                                tracing::warn!(
+                                    "Ignored invalid generated image for message {}",
+                                    assistant_message_id
+                                );
+                                continue;
+                            };
+
+                            if zone_core::tools::is_vision_url(&url) && !replay.entries.iter().any(|entry|entry.message.images.contains(&url) || entry.message.generated_images.iter().any(|image|image.image_url.url==url)) {
+                                pending_images.push(url);
+                            }
+                            let media_msg = if attachment.mime.starts_with("audio/") {
+                                ServerMessage::Audio {
+                                    message_id: assistant_message_id,
+                                    attachment: attachment.clone(),
+                                }
+                            } else {
+                                ServerMessage::Image {
+                                    message_id: assistant_message_id,
+                                    attachment: attachment.clone(),
+                                }
+                            };
+                            generated_images.push(attachment);
+                            publish(stream, media_msg).await;
+                            persist_now = true;
                         }
-                        asked = true;
-                        let question_msg = ServerMessage::QuestionRequired {
-                            message_id: assistant_message_id,
-                            tool_call_id,
-                            questions,
-                        };
-                        publish(stream, question_msg).await;
-                        persist_now = true;
-                    }
-                    Some(AgentEvent::WaitRequired { tool_call_id, waiting, .. }) => {
-                        // Persisted before the wait rather than after it, for
-                        // the reason the question arm gives: the live frame log
-                        // is cleared by the message_end this turn reaches, and
-                        // a reader who reloads mid-wait has only the stored
-                        // record to rebuild the card from.
-                        if let Some(record) = tool_calls.iter_mut().find(|r| r.id == tool_call_id) {
-                            record.waiting = Some(waiting.clone());
+                        Some(AgentEvent::ToolCallCompleted { id, name, success, detail, duration_ms, citations: observed, receipt }) => {
+                            if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
+                                record.success = success;
+                                record.detail = detail.clone();
+                                record.duration_ms = duration_ms;
+                            }
+                            crate::agent::citations::merge(&mut citations, observed.clone());
+
+                            let tool_msg = ServerMessage::ToolResult {
+                                message_id: assistant_message_id,
+                                tool_call_id: id,
+                                name,
+                                success,
+                                detail,
+                                duration_ms,
+                                citations: observed,
+                            };
+                            publish(stream, tool_msg).await;
+                            if let Some(receipt) = receipt {
+                                let receipt_msg = ServerMessage::ActionReceipt {
+                                    message_id: assistant_message_id,
+                                    receipt: receipt.clone(),
+                                };
+                                action_receipts.push(receipt);
+                                publish(stream, receipt_msg).await;
+                            }
+                            persist_now = true;
                         }
-                        waited = true;
-                        let wait_msg = ServerMessage::WaitStarted {
-                            message_id: assistant_message_id,
-                            tool_call_id,
-                            waiting,
-                        };
-                        publish(stream, wait_msg).await;
-                        persist_now = true;
-                        stop_stream = true;
+                        Some(AgentEvent::QuestionRequired { tool_call_id, questions, .. }) => {
+                            // The live frame log is cleared by the message_end this
+                            // turn is about to reach, so a reader who reloads has
+                            // only the stored record to rebuild the card from.
+                            // Persist it before the socket can go.
+                            if let Some(record) = tool_calls.iter_mut().find(|r| r.id == tool_call_id) {
+                                record.detail = AWAITING_ANSWER_DETAIL.to_string();
+                                record.questions.clone_from(&questions);
+                            }
+                            asked = true;
+                            let question_msg = ServerMessage::QuestionRequired {
+                                message_id: assistant_message_id,
+                                tool_call_id,
+                                questions,
+                            };
+                            publish(stream, question_msg).await;
+                            persist_now = true;
+                        }
+                        Some(AgentEvent::WaitRequired { tool_call_id, waiting, spent }) => {
+                            // Persisted before the wait rather than after it, for
+                            // the reason the question arm gives: the live frame log
+                            // is cleared by the message_end this turn reaches, and
+                            // a reader who reloads mid-wait has only the stored
+                            // record to rebuild the card from.
+                            if let Some(record) = tool_calls.iter_mut().find(|r| r.id == tool_call_id) {
+                                record.waiting = Some(waiting.clone());
+                            }
+                            waited = true;
+                            let wait_msg = ServerMessage::WaitStarted {
+                                message_id: assistant_message_id,
+                                tool_call_id: tool_call_id.clone(),
+                                waiting: waiting.clone(),
+                            };
+                            publish(stream, wait_msg).await;
+                            pending_wait = Some((Waited::new(tool_call_id, waiting), spent));
+                            persist_now = true;
+                            stop_stream = true;
+                        }
+                        Some(AgentEvent::Failed(message)) => {
+                            failure = Some(message);
+                            break;
+                        }
+                        None => {
+                            // Stream ended
+                            break;
+                        }
                     }
-                    Some(AgentEvent::Failed(message)) => {
-                        failure = Some(message);
-                        break;
-                    }
-                    None => {
-                        // Stream ended
-                        break;
-                    }
-                }
-                if persist_now
-                    || (persist
-                        && last_snapshot
-                            .map(|instant| instant.elapsed() >= LIVE_SNAPSHOT_INTERVAL)
-                            .unwrap_or(true))
-                {
-                    match publish_live_assistant(
-                        session,
-                        &full_content,
-                        &tool_calls,
-                        &citations,
-                        &action_receipts,
-                        &generated_images,
-                        &round_reasoning,
-                    )
-                    .await
+                    if persist_now
+                        || (persist
+                            && last_snapshot
+                                .map(|instant| instant.elapsed() >= LIVE_SNAPSHOT_INTERVAL)
+                                .unwrap_or(true))
                     {
-                        Ok(()) => last_snapshot = Some(Instant::now()),
-                        Err(error) => {
-                            tracing::warn!("Failed to persist live assistant snapshot: {error}");
-                            if error.contains("ownership") || error.contains("expired") {
-                                failure = Some(error);
-                                break;
+                        match publish_live_assistant(
+                            session,
+                            &full_content,
+                            &tool_calls,
+                            &citations,
+                            &action_receipts,
+                            &generated_images,
+                            &round_reasoning,
+                        )
+                        .await
+                        {
+                            Ok(()) => last_snapshot = Some(Instant::now()),
+                            Err(error) => {
+                                tracing::warn!("Failed to persist live assistant snapshot: {error}");
+                                if error.contains("ownership") || error.contains("expired") {
+                                    failure = Some(error);
+                                    break;
+                                }
                             }
                         }
                     }
-                }
-                if stop_stream {
-                    break;
+                    if stop_stream {
+                        break;
+                    }
                 }
             }
         }
-    }
 
-    // Drop the producer before acknowledging cancellation so it cannot emit
-    // more events after the terminal frame.
-    drop(events);
+        // Drop the producer before acknowledging cancellation so it cannot emit
+        // more events after the terminal frame.
+        drop(events);
+
+        if cancelled || failure.is_some() {
+            break;
+        }
+        let Some((opened, spent)) = pending_wait else {
+            break;
+        };
+        let outcome = match settle_wait(
+            wait::await_outcome(&opened.tool_call_id, wait::deadline(&opened.waiting)),
+            session.guard.lost(),
+            &mut generation.cancel,
+            stream_deadline,
+        )
+        .await
+        {
+            WaitEnd::Settled(outcome) => outcome,
+            WaitEnd::Cancelled => {
+                cancelled = true;
+                break;
+            }
+            WaitEnd::Lost => {
+                failure = Some(OWNERSHIP_LOST.to_string());
+                break;
+            }
+            WaitEnd::Expired => {
+                failure = Some(GENERATION_TIMED_OUT.to_string());
+                break;
+            }
+        };
+        if opened.waiting.kind == wait::KIND_JOB {
+            jobs.retain(|id| id != &opened.waiting.id);
+            let job = job_exit(chat_id, &opened.waiting.id).await;
+            let job_msg = ServerMessage::JobExited {
+                message_id: assistant_message_id,
+                job,
+            };
+            publish(stream, job_msg).await;
+        }
+        let settled = ServerMessage::WaitSettled {
+            message_id: assistant_message_id,
+            settled: WaitSettled {
+                tool_call_id: opened.tool_call_id.clone(),
+                outcome: outcome.clone(),
+                timed_out: outcome.starts_with(TIMED_OUT_PREFIX),
+            },
+        };
+        publish(stream, settled).await;
+
+        // The console has the outcome from that frame; the model needs it in
+        // its context, and a turn started later rebuilds context from
+        // canonical entries alone, so the pair is stored as well as mirrored.
+        let resumed = wait::resume_with_outcome(&mut replay, &opened, outcome, &mut waits);
+        if let Err(error) = session
+            .store
+            .append(&session.lease, session.turn, &resumed)
+            .await
+        {
+            failure = Some(error.to_string());
+            break;
+        }
+        if let Err(error) = publish_live_assistant(
+            session,
+            &full_content,
+            &tool_calls,
+            &citations,
+            &action_receipts,
+            &generated_images,
+            &round_reasoning,
+        )
+        .await
+        {
+            tracing::warn!("Failed to persist the wait that settled: {error}");
+            if error.contains("ownership") || error.contains("expired") {
+                failure = Some(error);
+                break;
+            }
+        }
+        last_snapshot = Some(Instant::now());
+
+        // ChatTools is not Clone and the run took the set it was given by
+        // value, so the run that resumes the turn needs one of its own.
+        tools = ChatTools::build(WorkspaceScope {
+            state: state.clone(),
+            workspace_id,
+            chat_id: Some(chat_id),
+            user_id,
+        })
+        .await;
+        context = replay.clone();
+        budget = budget.less(spent);
+    }
 
     let leftover = token_filter.finish();
     if !leftover.is_empty() {
@@ -5153,6 +5304,174 @@ mod tests {
                 "chunk"
             ],
             "a second message_start would have cleared everything before it"
+        );
+    }
+
+    #[test]
+    fn only_a_timeout_reads_as_one() {
+        assert!(
+            wait::timed_out(JOB_ID, Duration::from_secs(300)).starts_with(TIMED_OUT_PREFIX),
+            "the console is told which outcome it got rather than left to read prose"
+        );
+        for happened in [
+            wait::job_exited(JOB_ID, 0, Duration::from_secs(1)),
+            wait::job_killed(JOB_ID, Duration::from_secs(900)),
+            wait::task_run_completed(Uuid::new_v4(), Duration::from_secs(1)),
+            wait::task_run_failed(Uuid::new_v4(), Duration::from_secs(1), "the runner died"),
+            wait::checks_settled("main", "abc1234", "success", Duration::from_secs(1)),
+            wait::checks_unknown("main", Duration::from_secs(120)),
+        ] {
+            assert!(
+                !happened.starts_with(TIMED_OUT_PREFIX),
+                "an outcome that happened is not a timeout: {happened}"
+            );
+        }
+    }
+
+    fn cancellation() -> (broadcast::Sender<()>, broadcast::Receiver<()>) {
+        broadcast::channel(1)
+    }
+
+    fn unreachable_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(3600)
+    }
+
+    #[tokio::test]
+    async fn a_cancel_during_a_wait_stops_it() {
+        let (sender, mut cancel) = cancellation();
+        sender.send(()).unwrap();
+
+        let end = settle_wait(
+            std::future::pending(),
+            std::future::pending(),
+            &mut cancel,
+            unreachable_deadline(),
+        )
+        .await;
+        assert_eq!(
+            end,
+            WaitEnd::Cancelled,
+            "a reconnected client's stop is the only escape from an orphaned wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wait_the_turn_has_no_time_left_for_ends_the_turn() {
+        let (_sender, mut cancel) = cancellation();
+
+        let end = settle_wait(
+            std::future::pending(),
+            std::future::pending(),
+            &mut cancel,
+            tokio::time::Instant::now(),
+        )
+        .await;
+        assert_eq!(
+            end,
+            WaitEnd::Expired,
+            "a wait clamped by the turn's deadline times out rather than hanging"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_lease_during_a_wait_outranks_a_cancel() {
+        let (sender, mut cancel) = cancellation();
+        sender.send(()).unwrap();
+
+        let end = settle_wait(
+            std::future::pending(),
+            std::future::ready(()),
+            &mut cancel,
+            tokio::time::Instant::now(),
+        )
+        .await;
+        assert_eq!(end, WaitEnd::Lost);
+    }
+
+    #[tokio::test]
+    async fn an_outcome_landing_with_everything_else_is_still_an_outcome() {
+        let (sender, mut cancel) = cancellation();
+        sender.send(()).unwrap();
+        let outcome = wait::job_exited(JOB_ID, 0, Duration::from_secs(214));
+
+        let end = settle_wait(
+            std::future::ready(outcome.clone()),
+            std::future::ready(()),
+            &mut cancel,
+            tokio::time::Instant::now(),
+        )
+        .await;
+        assert_eq!(
+            end,
+            WaitEnd::Settled(outcome),
+            "a settle in the same tick as the deadline is not a timeout"
+        );
+    }
+
+    #[test]
+    fn the_outcome_the_resumed_turn_reads_is_the_one_that_was_stored() {
+        let mut replay = session::RunContext::from_messages(vec![LlmMessage::user("build it")]);
+        let carried = replay.entries.len();
+        let mut waits = Vec::new();
+        let outcome = wait::job_exited(JOB_ID, 0, Duration::from_secs(214));
+
+        let stored = wait::resume_with_outcome(
+            &mut replay,
+            &Waited::new("call_2", waiting()),
+            outcome.clone(),
+            &mut waits,
+        );
+
+        let added = &replay.entries[carried..];
+        assert_eq!(
+            added.iter().map(|entry| &entry.id).collect::<Vec<_>>(),
+            stored.iter().map(|entry| &entry.id).collect::<Vec<_>>(),
+            "what the store is handed and what the resumed run reads are one pair"
+        );
+        assert!(
+            added
+                .iter()
+                .any(|entry| entry.message.content.as_deref() == Some(outcome.as_str())),
+            "the resumed run reads the outcome, not just the receipt: {added:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finished_job_reports_its_code_and_one_killed_with_the_turn_does_not() {
+        let chat_id = Uuid::new_v4();
+        let cwd = tempfile::tempdir().unwrap();
+        let session = ToolSession::Chat(chat_id);
+        let finished = Jobs::spawn(
+            session,
+            &job::JobCommand::shell("exit 3"),
+            cwd.path(),
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        for _ in 0..500 {
+            if Jobs::read(session, &finished.id, 0, 0)
+                .await
+                .is_ok_and(|tail| tail.state.settled())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(
+            job_exit(chat_id, &finished.id).await.exit_code,
+            Some(3),
+            "a job that finished on its own reports what it exited with"
+        );
+        assert_eq!(
+            Jobs::kill_session(session).await,
+            1,
+            "the turn's teardown claims the job it started"
+        );
+        assert!(
+            job_exit(chat_id, &finished.id).await.exit_code.is_none(),
+            "a job the turn took with it is gone, not exited"
         );
     }
 
