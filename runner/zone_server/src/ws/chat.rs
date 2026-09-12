@@ -31,7 +31,10 @@ use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_comfy::MediaType;
 use zone_core::llm::{Message as LlmMessage, Role as LlmRole};
+use zone_core::tools::Session as ToolSession;
+use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
+use crate::agent::wait::{self, WaitSettled, Waiting};
 use crate::agent::{self, ActionReceipt, AgentEvent, AgentRun, Citation, Question, ToolCallRecord};
 use crate::auth::validate_access_token;
 use crate::db::{
@@ -487,6 +490,31 @@ pub enum ServerMessage {
         tool_call_id: String,
         questions: Vec<Question>,
     },
+    /// A background job started. `tool_call_id` is the call that spawned it, so
+    /// the console can hang the job card off that call.
+    JobStarted {
+        message_id: Uuid,
+        tool_call_id: String,
+        job: JobStarted,
+    },
+    /// A background job is no longer running. Matched to its card by `job.id`
+    /// rather than by a call, because the call that observes an exit is rarely
+    /// the call that started the job.
+    JobExited { message_id: Uuid, job: JobExited },
+    /// The model opened a wait, and the turn is suspended on it. Unlike a
+    /// question this is not the last frame of the turn: a second run resumes
+    /// the same message once the wait settles.
+    WaitStarted {
+        message_id: Uuid,
+        tool_call_id: String,
+        waiting: Waiting,
+    },
+    /// How a wait ended. The model is told the same thing through the outcome
+    /// entry injected into its context, never through this frame.
+    WaitSettled {
+        message_id: Uuid,
+        settled: WaitSettled,
+    },
     /// A tool finished. `detail` is a short outcome for display, not the full
     /// output the model receives.
     ToolResult {
@@ -730,10 +758,78 @@ const STOPPED_BEFORE_ANSWERING: &str = "[Stopped before answering]";
 /// waiting on the reader rather than stopped.
 const AWAITING_ANSWER: &str = "[Waiting for your answer]";
 
+/// The same again, for a turn whose wait was cut short by cancellation, a lost
+/// lease or the turn's own deadline. It stopped waiting rather than gave up,
+/// and the two read very differently to whoever comes back to the chat.
+const STOPPED_AFTER_WAITING: &str = "[Stopped while waiting]";
+
 /// The outcome shown against the question call in the tool trace. Matches the
 /// string the console writes on the live frame, so a reload does not relabel
 /// the same call.
 const AWAITING_ANSWER_DETAIL: &str = "Waiting for your answer…";
+
+/// What a turn that produced neither prose nor an image is stored as.
+///
+/// A question outranks a wait: a turn that waited and then asked is waiting on
+/// the reader, which is the one of the two they can do something about.
+const fn silent_turn(asked: bool, waited: bool) -> &'static str {
+    if asked {
+        AWAITING_ANSWER
+    } else if waited {
+        STOPPED_AFTER_WAITING
+    } else {
+        STOPPED_BEFORE_ANSWERING
+    }
+}
+
+/// Where a spawn receipt keeps the pid, either side of it.
+const RECEIPT_PID_OPENING: &str = " (pid ";
+const RECEIPT_PID_CLOSING: &str = "). Log: ";
+
+/// The job a canonical tool result announced, and the call that started it.
+///
+/// A tool reaches a frame through its result text and nothing else: the
+/// registry holds no pid, `ToolResult` has no detail slot, and the completion
+/// event's `detail` is a truncated first line. What is read back here is
+/// therefore checked by rebuilding the receipt from it, so a change to the
+/// builder in `zone_core` stops this recognising the line rather than reporting
+/// a job with the wrong pid.
+fn spawned_job(message: &ReplayMessage) -> Option<(String, JobStarted)> {
+    if message.role != LlmRole::Tool {
+        return None;
+    }
+    let call = message.tool_call_id.clone()?;
+    let output = message.content.as_deref()?;
+    let id = job::parse_started(output)?;
+    let (announced, rest) = output.lines().next()?.split_once(RECEIPT_PID_OPENING)?;
+    if !announced.ends_with(&id) {
+        return None;
+    }
+    let (pid, log_path) = rest.split_once(RECEIPT_PID_CLOSING)?;
+    let job = JobStarted {
+        id,
+        pid: pid.parse().ok()?,
+        log_path: log_path.to_string(),
+    };
+    (job::started_text(&job) == output).then_some((call, job))
+}
+
+/// How a job ended, as the exit field the console reads.
+///
+/// No code means killed, which is what a job still running at teardown is
+/// about to be, so this is read before anything kills it.
+async fn job_exit(chat_id: Uuid, id: &str) -> JobExited {
+    let state = Jobs::read(ToolSession::Chat(chat_id), id, 0, 0)
+        .await
+        .map(|tail| tail.state);
+    JobExited {
+        id: id.to_string(),
+        exit_code: match state {
+            Ok(JobState::Exited(code)) => Some(code),
+            _ => None,
+        },
+    }
+}
 
 async fn publish_live_assistant(
     session: &session::Session,
@@ -2121,6 +2217,7 @@ async fn handle_send_message(
         return;
     }
     crate::agent::ApprovalPolicy::register(chat_id, request.approvals.clone());
+    let mut jobs: Vec<String> = Vec::new();
     let preparation = tokio::select! {
         biased;
         _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:"Chat generation ownership was lost".into()}).await; return; }
@@ -2219,10 +2316,29 @@ async fn handle_send_message(
                     _ = session.guard.lost() => { return Err("Chat generation ownership was lost".into()); }
                     result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, web_search_requested) => result?,
                 };
-                handle_chat_generation(state, stream, chat_id, preparation, &mut request, &mut session).await
+                handle_chat_generation(state, stream, chat_id, preparation, &mut request, &mut session, &mut jobs).await
             }
         }
     }.await;
+    // The one exit every path takes, including the one a disconnected socket
+    // leaves running: a background job belongs to the turn that started it, and
+    // a wait's registration and allowance belong to the turn that opened them.
+    let mut exits = Vec::with_capacity(jobs.len());
+    for id in &jobs {
+        exits.push(job_exit(chat_id, id).await);
+    }
+    Jobs::kill_session(ToolSession::Chat(chat_id)).await;
+    wait::reset_session(ToolSession::Chat(chat_id));
+    for job in exits {
+        publish(
+            stream,
+            ServerMessage::JobExited {
+                message_id: request.message_id,
+                job,
+            },
+        )
+        .await;
+    }
     if let Err(error) = session.close().await {
         tracing::warn!(%error,"Could not close interrupted generation");
     }
@@ -2535,6 +2651,8 @@ async fn prepare_chat(
     Ok(preparation)
 }
 
+/// `jobs` collects the background jobs this turn started and has not yet
+/// reported as exited, so the teardown that kills them can say each one is gone.
 async fn handle_chat_generation(
     state: &AppState,
     stream: &ChatStream,
@@ -2542,6 +2660,7 @@ async fn handle_chat_generation(
     preparation: ChatPreparation,
     generation: &mut Generation,
     session: &mut Session,
+    jobs: &mut Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ChatPreparation {
         model,
@@ -2605,6 +2724,7 @@ async fn handle_chat_generation(
     let mut blocked = None;
     let mut response_truncated = false;
     let mut asked = false;
+    let mut waited = false;
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
     let mut citations: Vec<Citation> = Vec::new();
     let mut action_receipts: Vec<ActionReceipt> = Vec::new();
@@ -2646,6 +2766,19 @@ async fn handle_chat_generation(
                         pending_images.retain(|image| !entry.message.images.contains(image) && !entry.message.generated_images.contains(image));
                         replay.append(&entry);
                         pending_content.clear();
+                        if let Some((call, job)) = spawned_job(&entry.message) {
+                            if let Some(record) = tool_calls.iter_mut().find(|record| record.id == call) {
+                                record.job = Some(job.clone());
+                            }
+                            jobs.push(job.id.clone());
+                            let job_msg = ServerMessage::JobStarted {
+                                message_id: assistant_message_id,
+                                tool_call_id: call,
+                                job,
+                            };
+                            publish(stream, job_msg).await;
+                            persist_now = true;
+                        }
                     }
                     Some(AgentEvent::Consumed(ids)) => {
                         if let Err(error)=session.store.consumed(&session.lease,&ids).await {failure=Some(error.to_string());break;}
@@ -2844,9 +2977,25 @@ async fn handle_chat_generation(
                         publish(stream, question_msg).await;
                         persist_now = true;
                     }
-                    // Placeholder: subtask 14a replaces this with the wait frame
-                    // and the second run that resumes the turn once it settles.
-                    Some(AgentEvent::WaitRequired { .. }) => {}
+                    Some(AgentEvent::WaitRequired { tool_call_id, waiting, .. }) => {
+                        // Persisted before the wait rather than after it, for
+                        // the reason the question arm gives: the live frame log
+                        // is cleared by the message_end this turn reaches, and
+                        // a reader who reloads mid-wait has only the stored
+                        // record to rebuild the card from.
+                        if let Some(record) = tool_calls.iter_mut().find(|r| r.id == tool_call_id) {
+                            record.waiting = Some(waiting.clone());
+                        }
+                        waited = true;
+                        let wait_msg = ServerMessage::WaitStarted {
+                            message_id: assistant_message_id,
+                            tool_call_id,
+                            waiting,
+                        };
+                        publish(stream, wait_msg).await;
+                        persist_now = true;
+                        stop_stream = true;
+                    }
                     Some(AgentEvent::Failed(message)) => {
                         failure = Some(message);
                         break;
@@ -2951,14 +3100,10 @@ async fn handle_chat_generation(
     // worth keeping for its trace, but an assistant message with no content
     // reads as a bug, and providers reject one when it comes back as history.
     // An image is its own answer, so it does not need the placeholder.
-    // A turn that ended on a question is not silent but waiting, and saying so
-    // keeps the card's own bubble from reading as a failure.
+    // A turn that ended on a question or a wait is not silent but waiting, and
+    // saying so keeps the card's own bubble from reading as a failure.
     if full_content.trim().is_empty() && generated_images.is_empty() {
-        full_content = if asked {
-            AWAITING_ANSWER.to_string()
-        } else {
-            STOPPED_BEFORE_ANSWERING.to_string()
-        };
+        full_content = silent_turn(asked, waited).to_string();
     }
 
     merge_cited_sources(state, chat_id, &full_content, &mut citations).await;
@@ -3497,6 +3642,38 @@ mod tests {
         }
     }
 
+    fn frame_kinds(frames: &[ServerMessage]) -> Vec<String> {
+        frames
+            .iter()
+            .map(|frame| {
+                serde_json::to_value(frame).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn waiting() -> Waiting {
+        Waiting {
+            kind: wait::KIND_JOB.to_string(),
+            id: JOB_ID.to_string(),
+            reference: None,
+            deadline: "2026-09-13T00:05:00+00:00".to_string(),
+        }
+    }
+
+    const JOB_ID: &str = "job_9f3c1a7b2e04";
+    const JOB_LOG: &str = "/w/.zone/jobs/job_9f3c1a7b2e04.log";
+
+    fn spawned() -> JobStarted {
+        JobStarted {
+            id: JOB_ID.to_string(),
+            pid: 48213,
+            log_path: JOB_LOG.to_string(),
+        }
+    }
+
     #[test]
     fn a_turn_in_flight_replays_as_resumed() {
         let message_id = Uuid::new_v4();
@@ -3549,18 +3726,8 @@ mod tests {
         });
         turn.record(&chunk("Found it", 0));
 
-        let kinds: Vec<_> = turn
-            .replay()
-            .iter()
-            .map(|frame| {
-                serde_json::to_value(frame).unwrap()["type"]
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
         assert_eq!(
-            kinds,
+            frame_kinds(&turn.replay()),
             vec!["message_start", "reasoning", "tool_call", "chunk"],
             "thinking still sits with the call it preceded"
         );
@@ -4760,6 +4927,233 @@ mod tests {
         assert_eq!(json["name"], "create_pull_request");
         assert_eq!(json["reason"], "The user asked me to open it.");
         assert!(json.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn the_job_and_wait_frames_carry_the_tags_and_keys_the_console_reads() {
+        let message_id = Uuid::new_v4();
+        let started = serde_json::to_value(ServerMessage::JobStarted {
+            message_id,
+            tool_call_id: "call_1".into(),
+            job: spawned(),
+        })
+        .unwrap();
+        assert_eq!(started["type"], "job_started");
+        assert_eq!(started["message_id"], message_id.to_string());
+        assert_eq!(started["tool_call_id"], "call_1");
+        assert_eq!(started["job"]["id"], JOB_ID);
+        assert_eq!(started["job"]["pid"], 48213);
+        assert_eq!(started["job"]["log_path"], JOB_LOG);
+
+        let exited = serde_json::to_value(ServerMessage::JobExited {
+            message_id,
+            job: JobExited {
+                id: JOB_ID.into(),
+                exit_code: Some(1),
+            },
+        })
+        .unwrap();
+        assert_eq!(exited["type"], "job_exited");
+        assert_eq!(exited["message_id"], message_id.to_string());
+        assert_eq!(exited["job"]["id"], JOB_ID);
+        assert_eq!(exited["job"]["exit_code"], 1);
+
+        let opened = serde_json::to_value(ServerMessage::WaitStarted {
+            message_id,
+            tool_call_id: "call_2".into(),
+            waiting: waiting(),
+        })
+        .unwrap();
+        assert_eq!(opened["type"], "wait_started");
+        assert_eq!(opened["message_id"], message_id.to_string());
+        assert_eq!(opened["tool_call_id"], "call_2");
+        assert_eq!(opened["waiting"]["kind"], "job");
+        assert_eq!(opened["waiting"]["id"], JOB_ID);
+        assert_eq!(opened["waiting"]["deadline"], "2026-09-13T00:05:00+00:00");
+        assert!(
+            opened["waiting"].get("reference").is_none(),
+            "a job wait has no ref to report: {opened}"
+        );
+
+        let settled = serde_json::to_value(ServerMessage::WaitSettled {
+            message_id,
+            settled: WaitSettled {
+                tool_call_id: "call_2".into(),
+                outcome: wait::job_exited(JOB_ID, 0, Duration::from_secs(214)),
+                timed_out: false,
+            },
+        })
+        .unwrap();
+        assert_eq!(settled["type"], "wait_settled");
+        assert_eq!(settled["message_id"], message_id.to_string());
+        assert_eq!(settled["settled"]["tool_call_id"], "call_2");
+        assert_eq!(
+            settled["settled"]["outcome"],
+            "job_9f3c1a7b2e04 exited with code 0 after 214s."
+        );
+        assert_eq!(settled["settled"]["timed_out"], false);
+    }
+
+    #[test]
+    fn a_job_killed_with_its_turn_reports_no_exit_code() {
+        let json = serde_json::to_value(ServerMessage::JobExited {
+            message_id: Uuid::new_v4(),
+            job: JobExited {
+                id: JOB_ID.into(),
+                exit_code: None,
+            },
+        })
+        .unwrap();
+        assert_eq!(json["type"], "job_exited");
+        assert!(
+            json["job"].get("exit_code").is_none(),
+            "an absent code means killed, and null would read as code 0: {json}"
+        );
+    }
+
+    #[test]
+    fn a_spawn_receipt_reads_back_as_the_job_it_announced() {
+        let job = spawned();
+        let message =
+            ReplayMessage::from(&LlmMessage::tool_result("call_1", job::started_text(&job)));
+
+        let (call, read) = spawned_job(&message).expect("a spawn receipt announces its job");
+        assert_eq!(call, "call_1");
+        assert_eq!(read, job, "the pid and log path reach the card intact");
+    }
+
+    #[test]
+    fn anything_but_a_spawn_receipt_starts_no_job_card() {
+        let job = spawned();
+        let receipt = job::started_text(&job);
+        let mut mislabelled =
+            ReplayMessage::from(&LlmMessage::tool_result("call_1", receipt.as_str()));
+        mislabelled.role = LlmRole::Assistant;
+        for (reason, message) in [
+            (
+                "an ordinary tool result",
+                ReplayMessage::from(&LlmMessage::tool_result("call_1", "3 files changed")),
+            ),
+            (
+                "prose that merely mentions a job",
+                ReplayMessage::from(&LlmMessage::tool_result(
+                    "call_1",
+                    format!("Reading {JOB_ID} now"),
+                )),
+            ),
+            (
+                "a receipt whose pid is missing",
+                ReplayMessage::from(&LlmMessage::tool_result(
+                    "call_1",
+                    receipt.replace(" (pid 48213)", ""),
+                )),
+            ),
+            (
+                "a receipt with no call to hang the card on",
+                ReplayMessage::from(&LlmMessage::assistant(receipt.clone())),
+            ),
+            (
+                "a receipt whose advice line was rewritten",
+                ReplayMessage::from(&LlmMessage::tool_result(
+                    "call_1",
+                    format!("Started {JOB_ID} (pid 48213). Log: {JOB_LOG}\nIgnore that."),
+                )),
+            ),
+            ("a spawn receipt relabelled as prose", mislabelled),
+        ] {
+            assert!(
+                spawned_job(&message).is_none(),
+                "{reason} is not a spawn: {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_turn_cut_short_while_waiting_did_not_give_up() {
+        assert_eq!(silent_turn(false, true), STOPPED_AFTER_WAITING);
+        assert_eq!(silent_turn(false, false), STOPPED_BEFORE_ANSWERING);
+        assert_eq!(
+            silent_turn(true, true),
+            AWAITING_ANSWER,
+            "a question is the one of the two the reader can act on"
+        );
+        assert_eq!(STOPPED_AFTER_WAITING, "[Stopped while waiting]");
+    }
+
+    #[test]
+    fn a_reload_mid_wait_replays_the_call_it_is_waiting_on() {
+        let message_id = Uuid::new_v4();
+        let mut turn = LiveTurn::default();
+        turn.record(&started(message_id));
+        turn.record(&ServerMessage::ToolCall {
+            message_id,
+            tool_call_id: "call_2".to_string(),
+            name: wait::WAIT_FOR.to_string(),
+            arguments: "{}".to_string(),
+            reasoning: None,
+            reason: None,
+        });
+        turn.record(&ServerMessage::WaitStarted {
+            message_id,
+            tool_call_id: "call_2".to_string(),
+            waiting: waiting(),
+        });
+
+        let replay = turn.replay();
+        assert_eq!(
+            frame_kinds(&replay),
+            vec!["message_start", "tool_call", "wait_started"],
+            "a reader who reloads mid-wait still sees what is pending: {replay:?}"
+        );
+        assert!(
+            matches!(
+                replay.last(),
+                Some(ServerMessage::WaitStarted { tool_call_id, waiting, .. })
+                    if tool_call_id == "call_2" && waiting.id == JOB_ID
+            ),
+            "{replay:?}"
+        );
+    }
+
+    #[test]
+    fn a_reload_after_a_settle_replays_how_the_wait_ended() {
+        let message_id = Uuid::new_v4();
+        let mut turn = LiveTurn::default();
+        turn.record(&started(message_id));
+        turn.record(&ServerMessage::WaitStarted {
+            message_id,
+            tool_call_id: "call_2".to_string(),
+            waiting: waiting(),
+        });
+        turn.record(&ServerMessage::JobExited {
+            message_id,
+            job: JobExited {
+                id: JOB_ID.into(),
+                exit_code: Some(0),
+            },
+        });
+        turn.record(&ServerMessage::WaitSettled {
+            message_id,
+            settled: WaitSettled {
+                tool_call_id: "call_2".to_string(),
+                outcome: wait::job_exited(JOB_ID, 0, Duration::from_secs(214)),
+                timed_out: false,
+            },
+        });
+        // The second run continues the same message, so nothing clears the log.
+        turn.record(&chunk("The build passed", 0));
+
+        assert_eq!(
+            frame_kinds(&turn.replay()),
+            vec![
+                "message_start",
+                "wait_started",
+                "job_exited",
+                "wait_settled",
+                "chunk"
+            ],
+            "a second message_start would have cleared everything before it"
+        );
     }
 
     const SOURCE_URI: &str = "https://example.test/changelog";
