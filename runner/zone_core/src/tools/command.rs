@@ -440,7 +440,7 @@ impl Tool for RunShellTool {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Directory to run in. Absolute, or relative to the working directory."
+                    "description": "Directory to run in, relative to the project root."
                 },
                 "timeout_secs": {
                     "type": "integer",
