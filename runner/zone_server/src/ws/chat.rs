@@ -820,21 +820,51 @@ fn spawned_job(message: &ReplayMessage) -> Option<(String, JobStarted)> {
     Some((call, job))
 }
 
-/// How a job ended, as the exit field the console reads.
-///
-/// No code means killed, which is what a job still running at teardown is
-/// about to be, so this is read before anything kills it.
-async fn job_exit(chat_id: Uuid, id: &str) -> JobExited {
-    let state = Jobs::read(ToolSession::Chat(chat_id), id, 0, 0)
+/// Where a job has got to, or nothing once the registry has let it go.
+async fn job_state(chat_id: Uuid, id: &str) -> Option<JobState> {
+    Jobs::read(ToolSession::Chat(chat_id), id, 0, 0)
         .await
-        .map(|tail| tail.state);
+        .ok()
+        .map(|tail| tail.state)
+}
+
+/// How a job ended, as the exit field the console reads. No code means killed.
+fn job_exit(id: &str, state: Option<JobState>) -> JobExited {
     JobExited {
         id: id.to_string(),
         exit_code: match state {
-            Ok(JobState::Exited(code)) => Some(code),
+            Some(JobState::Exited(code)) => Some(code),
             _ => None,
         },
     }
+}
+
+/// The exits the turn reports for the jobs it still tracks at teardown.
+///
+/// A job still running here is about to be killed with the turn, so the state
+/// is read before anything kills it: that is what tells a job that finished
+/// apart from one the turn took with it.
+async fn job_exits(chat_id: Uuid, tracked: &[String]) -> Vec<JobExited> {
+    let mut exits = Vec::with_capacity(tracked.len());
+    for id in tracked {
+        exits.push(job_exit(id, job_state(chat_id, id).await));
+    }
+    exits
+}
+
+/// A job wait's end, reported only once the job itself reached one.
+///
+/// A settled wait is not a settled job: [`wait::await_outcome`]'s deadline arm
+/// hands its timeout back as an ordinary outcome, and a lost wait reads the
+/// same way. Announcing an exit for either would draw a kill that never
+/// happened, and taking the id out of `tracked` would silence the real end.
+async fn job_wait_exit(chat_id: Uuid, id: &str, tracked: &mut Vec<String>) -> Option<JobExited> {
+    let state = job_state(chat_id, id).await?;
+    if !state.settled() {
+        return None;
+    }
+    tracked.retain(|held| held != id);
+    Some(job_exit(id, Some(state)))
 }
 
 /// How a wait the model opened came to an end.
@@ -2362,10 +2392,7 @@ async fn handle_send_message(
     // The one exit every path takes, including the one a disconnected socket
     // leaves running: a background job belongs to the turn that started it, and
     // a wait's registration and allowance belong to the turn that opened them.
-    let mut exits = Vec::with_capacity(jobs.len());
-    for id in &jobs {
-        exits.push(job_exit(chat_id, id).await);
-    }
+    let exits = job_exits(chat_id, &jobs).await;
     Jobs::kill_session(ToolSession::Chat(chat_id)).await;
     wait::reset_session(ToolSession::Chat(chat_id));
     for job in exits {
@@ -3122,14 +3149,14 @@ async fn handle_chat_generation(
                 break;
             }
         };
-        if opened.waiting.kind == wait::KIND_JOB {
-            jobs.retain(|id| id != &opened.waiting.id);
-            let job = job_exit(chat_id, &opened.waiting.id).await;
-            let job_msg = ServerMessage::JobExited {
+        if opened.waiting.kind == wait::KIND_JOB
+            && let Some(job) = job_wait_exit(chat_id, &opened.waiting.id, jobs).await
+        {
+            let exited = ServerMessage::JobExited {
                 message_id: assistant_message_id,
                 job,
             };
-            publish(stream, job_msg).await;
+            publish(stream, exited).await;
         }
         let settled = ServerMessage::WaitSettled {
             message_id: assistant_message_id,
@@ -5427,31 +5454,40 @@ mod tests {
         );
     }
 
+    async fn background(session: ToolSession, cwd: &std::path::Path, script: &str) -> JobStarted {
+        Jobs::spawn(
+            session,
+            &job::JobCommand::shell(script),
+            cwd,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn settles(session: ToolSession, id: &str) {
+        for _ in 0..500 {
+            if Jobs::read(session, id, 0, 0)
+                .await
+                .is_ok_and(|tail| tail.state.settled())
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the job never reached a state the registry calls settled");
+    }
+
     #[tokio::test]
     async fn a_finished_job_reports_its_code_and_one_killed_with_the_turn_does_not() {
         let chat_id = Uuid::new_v4();
         let cwd = tempfile::tempdir().unwrap();
         let session = ToolSession::Chat(chat_id);
-        let finished = Jobs::spawn(
-            session,
-            &job::JobCommand::shell("exit 3"),
-            cwd.path(),
-            &std::collections::HashMap::new(),
-        )
-        .await
-        .unwrap();
-        for _ in 0..500 {
-            if Jobs::read(session, &finished.id, 0, 0)
-                .await
-                .is_ok_and(|tail| tail.state.settled())
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let finished = background(session, cwd.path(), "exit 3").await;
+        settles(session, &finished.id).await;
 
         assert_eq!(
-            job_exit(chat_id, &finished.id).await.exit_code,
+            job_exit(&finished.id, job_state(chat_id, &finished.id).await).exit_code,
             Some(3),
             "a job that finished on its own reports what it exited with"
         );
@@ -5461,9 +5497,73 @@ mod tests {
             "the turn's teardown claims the job it started"
         );
         assert!(
-            job_exit(chat_id, &finished.id).await.exit_code.is_none(),
+            job_exit(&finished.id, job_state(chat_id, &finished.id).await)
+                .exit_code
+                .is_none(),
             "a job the turn took with it is gone, not exited"
         );
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_job_wait_leaves_the_job_for_the_teardown_to_report() {
+        let chat_id = Uuid::new_v4();
+        let cwd = tempfile::tempdir().unwrap();
+        let session = ToolSession::Chat(chat_id);
+        let running = background(session, cwd.path(), "sleep 30").await;
+        let mut tracked = vec![running.id.clone()];
+
+        assert_eq!(
+            job_wait_exit(chat_id, &running.id, &mut tracked).await,
+            None,
+            "a wait that ran out of time has not seen the job end, so nothing is announced"
+        );
+        assert_eq!(
+            tracked,
+            std::slice::from_ref(&running.id),
+            "the job the wait gave up on is still the turn's to report"
+        );
+
+        assert_eq!(
+            job_exits(chat_id, &tracked).await,
+            [JobExited {
+                id: running.id.clone(),
+                exit_code: None,
+            }],
+            "the teardown reports the real end, exactly once, for the job still running"
+        );
+        assert_eq!(
+            Jobs::kill_session(session).await,
+            1,
+            "the job outlived the wait and the turn is what ends it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settled_job_wait_reports_the_code_and_takes_the_job_off_the_turn() {
+        let chat_id = Uuid::new_v4();
+        let cwd = tempfile::tempdir().unwrap();
+        let session = ToolSession::Chat(chat_id);
+        let finished = background(session, cwd.path(), "exit 5").await;
+        settles(session, &finished.id).await;
+        let mut tracked = vec![finished.id.clone()];
+
+        assert_eq!(
+            job_wait_exit(chat_id, &finished.id, &mut tracked).await,
+            Some(JobExited {
+                id: finished.id.clone(),
+                exit_code: Some(5),
+            }),
+            "a wait the job's own exit settled reports the code it exited with"
+        );
+        assert!(
+            tracked.is_empty(),
+            "the wait announced the end, so the teardown must not announce it again"
+        );
+        assert!(
+            job_exits(chat_id, &tracked).await.is_empty(),
+            "the teardown has nothing left to report"
+        );
+        Jobs::kill_session(session).await;
     }
 
     const SOURCE_URI: &str = "https://example.test/changelog";
