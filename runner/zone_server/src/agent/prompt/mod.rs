@@ -59,7 +59,7 @@ const PLAIN: &[Section] = &[
 
 pub const CHAT_MAX_CHARS: usize = 19_500;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
-pub const TASK_MAX_CHARS: usize = 12_400;
+pub const TASK_MAX_CHARS: usize = 12_500;
 
 fn assemble(order: &[Section], context: &Context<'_>) -> String {
     order
