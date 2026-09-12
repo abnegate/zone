@@ -317,7 +317,8 @@ impl Jobs {
         Ok(async move { ended(state).await.exited(id) })
     }
 
-    /// End every job this session started, and wait for each child to go.
+    /// End every job this session started, take its log with it, and wait for
+    /// each child to go.
     ///
     /// A job belongs to the turn or the run that started it, so this is the
     /// last thing either one does. Returns how many jobs it ended.
@@ -334,8 +335,10 @@ impl Jobs {
 
         let count = claimed.len();
         for job in claimed {
+            let log = job.log;
             let _ = job.kill.send(());
             ended(job.state).await;
+            discard(&log).await;
         }
         count
     }
@@ -450,6 +453,30 @@ async fn flooded(log: &Path, ceiling: u64, interval: Duration) {
         {
             return;
         }
+    }
+}
+
+/// Take a job's log with it, and the directories it needed once they are
+/// empty.
+///
+/// Nothing can read the log after this: the registry entry it was reached
+/// through is already gone, and a chat's logs sit in the operator's own
+/// checkout, where the exclude write is skipped by design. A job the reaper
+/// killed for its lifetime or for flooding keeps its log until here, so a
+/// `tail_job` in the meantime still reports how it ended.
+///
+/// `remove_dir` on a directory something else is using fails, which is the
+/// whole of the emptiness check.
+async fn discard(log: &Path) {
+    let _ = tokio::fs::remove_file(log).await;
+    let Some(jobs) = log.parent() else {
+        return;
+    };
+    if tokio::fs::remove_dir(jobs).await.is_err() {
+        return;
+    }
+    if let Some(zone) = jobs.parent() {
+        let _ = tokio::fs::remove_dir(zone).await;
     }
 }
 
@@ -623,6 +650,14 @@ mod tests {
 
     const POLL: Duration = Duration::from_millis(20);
     const POLL_LIMIT: usize = 500;
+
+    /// The directory [`JOB_LOG_DIRECTORY`] sits in, which a teardown takes too
+    /// when the logs were the only thing in it.
+    fn zone_directory() -> &'static Path {
+        Path::new(JOB_LOG_DIRECTORY)
+            .parent()
+            .expect("the log directory sits inside one of ours")
+    }
 
     fn job() -> JobStarted {
         JobStarted {
@@ -951,6 +986,63 @@ mod tests {
         assert_eq!((second.output.as_str(), second.next), ("éb", 4));
 
         Jobs::kill_session(session).await;
+    }
+
+    /// A log outlives the call that wrote it but not the session that could
+    /// read it: the registry entry it was reached through goes at teardown,
+    /// and a chat's logs sit in the operator's own checkout, where nothing
+    /// excludes them and nothing else would ever clear them.
+    #[tokio::test]
+    async fn a_session_teardown_takes_the_logs_and_the_emptied_directory_with_them() {
+        let cwd = directory();
+        let session = chat();
+        let first = spawned(session, "printf first", cwd.path()).await;
+        let second = spawned(session, "printf second", cwd.path()).await;
+        settles(session, &first.id).await;
+        settles(session, &second.id).await;
+        let logs = [&first, &second].map(|started| PathBuf::from(&started.log_path));
+        for log in &logs {
+            assert!(log.exists(), "the job wrote no log at all: {log:?}");
+        }
+
+        assert_eq!(Jobs::kill_session(session).await, 2);
+
+        for log in &logs {
+            assert!(
+                !log.exists(),
+                "a job log outlived the session that started it: {log:?}"
+            );
+        }
+        assert!(
+            !cwd.path().join(JOB_LOG_DIRECTORY).exists(),
+            "the log directory outlived every log in it"
+        );
+        assert!(
+            !cwd.path().join(zone_directory()).exists(),
+            "the directory the logs needed is empty and still there"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_teardown_leaves_a_directory_that_is_not_only_ours() {
+        let cwd = directory();
+        let session = chat();
+        let started = spawned(session, "printf kept", cwd.path()).await;
+        settles(session, &started.id).await;
+        let neighbour = cwd.path().join(zone_directory()).join("settings");
+        std::fs::write(&neighbour, "somebody else's").expect("a neighbour is written");
+
+        Jobs::kill_session(session).await;
+
+        assert!(!PathBuf::from(&started.log_path).exists());
+        assert!(
+            !cwd.path().join(JOB_LOG_DIRECTORY).exists(),
+            "the log directory held only logs and is ours to remove"
+        );
+        assert!(
+            neighbour.exists(),
+            "a directory holding somebody else's file is not ours to remove"
+        );
     }
 
     /// The log and the exclude write are the session's, and a directory the
