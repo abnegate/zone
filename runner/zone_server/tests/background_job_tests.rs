@@ -18,7 +18,7 @@ use uuid::Uuid;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::tools::Session;
-use zone_core::tools::job::{JobCommand, Jobs, TAIL_JOB, UNAVAILABLE};
+use zone_core::tools::job::{self, JobCommand, Jobs, TAIL_JOB, UNAVAILABLE};
 use zone_server::agent::{ChatTools, WorkspaceScope};
 use zone_server::db::tasks;
 use zone_server::state::AppState;
@@ -96,6 +96,20 @@ async fn reader_is_gone(gate: &Path) -> bool {
         let _ = sender.send(std::fs::OpenOptions::new().write(true).open(path).is_ok());
     });
     tokio::time::timeout(READER_PROBE, receiver).await.is_err()
+}
+
+/// Wait until `job` has stopped, as its own session sees it.
+async fn settled(session: Session, job: &str) {
+    tokio::time::timeout(SETTLE, async {
+        while !Jobs::read(session, job, 0, 1)
+            .await
+            .is_ok_and(|tail| tail.state.settled())
+        {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{job} never finished"));
 }
 
 /// Wait until the registry no longer holds `job` for `session`.
@@ -279,16 +293,7 @@ async fn a_job_is_readable_through_tail_job_only_from_the_session_that_started_i
     )
     .await
     .expect("a job the run owns");
-    tokio::time::timeout(SETTLE, async {
-        while !Jobs::read(Session::Task(owning.run), &started.id, 0, 1)
-            .await
-            .is_ok_and(|tail| tail.state.settled())
-        {
-            tokio::time::sleep(POLL).await;
-        }
-    })
-    .await
-    .expect("the job never finished");
+    settled(Session::Task(owning.run), &started.id).await;
 
     let reading = leased_tools(&state, root.path(), &owning).await;
     let read = reading.execute(TAIL_JOB, &tail(&started.id)).await;
@@ -433,6 +438,77 @@ async fn a_chat_spawn_leaves_the_exclude_file_alone_and_a_task_spawn_writes_it_o
     for log in &logs {
         assert!(!log.exists(), "a job log outlived its test: {log:?}");
     }
+    assert!(
+        !chat_root().join(EXCLUDED).exists(),
+        "a job wrote its log into the server's own working directory"
+    );
+}
+
+/// Whatever directory a call names, a spawn writes into the session's own
+/// checkout and into no other — and takes the log away again when the session
+/// ends.
+///
+/// A task run naming the host checkout is the case that matters: its `.git`
+/// may be a pointer into a directory every worktree of the repository shares,
+/// so an exclude write there reaches all of them. The log is keyed to the
+/// tree the session gave the tool, and the directory the call named moves the
+/// child alone.
+#[tokio::test]
+async fn a_task_spawn_naming_another_checkout_writes_only_into_its_own() {
+    let checkout = repository();
+    let stranger = repository();
+    let session = Session::Task(Uuid::new_v4());
+
+    let started = Jobs::spawn(
+        session,
+        &JobCommand::new("pwd", Vec::new()).within(stranger.path()),
+        checkout.path(),
+        &environment(),
+    )
+    .await
+    .expect("a job keyed to the run");
+    settled(session, &started.id).await;
+
+    let log = PathBuf::from(&started.log_path);
+    assert_eq!(
+        log,
+        job::log_path(checkout.path(), &started.id),
+        "the log belongs to the session's own tree"
+    );
+    assert!(log.exists(), "the job wrote no log at all: {log:?}");
+    let ran_in = Jobs::read(session, &started.id, 0, 500)
+        .await
+        .expect("the log reads")
+        .output;
+    assert_eq!(
+        std::fs::canonicalize(ran_in.trim()).ok(),
+        std::fs::canonicalize(stranger.path()).ok(),
+        "the child is the one thing the named directory moves: {ran_in}"
+    );
+    assert!(
+        !stranger.path().join(EXCLUDED).exists(),
+        "a log tree was written into a checkout the run does not own"
+    );
+    assert_eq!(
+        excluded_lines(&exclude_path(stranger.path())).await,
+        0,
+        "a checkout the run does not own is not its to append to"
+    );
+    assert_eq!(
+        excluded_lines(&exclude_path(checkout.path())).await,
+        1,
+        "the run's own checkout still keeps its job logs out of its diff"
+    );
+
+    assert_eq!(Jobs::kill_session(session).await, 1);
+    assert!(
+        !log.exists(),
+        "a job log outlived the run that started it: {log:?}"
+    );
+    assert!(
+        !checkout.path().join(EXCLUDED).exists(),
+        "the emptied log directory is still in the checkout"
+    );
     assert!(
         !chat_root().join(EXCLUDED).exists(),
         "a job wrote its log into the server's own working directory"

@@ -141,16 +141,22 @@ impl JobState {
     }
 }
 
-/// What a background job runs.
+/// What a background job runs, and where.
 ///
 /// A program and its arguments rather than a shell line, so that backgrounding
 /// keeps `run_command`'s allow-list and metacharacter checks meaning what they
 /// mean in the foreground: an argument inspected whole must not be word-split
 /// on its way to a child.
+///
+/// The directory is the child's, and carried here rather than passed beside
+/// the session's own tree so that the only path [`Jobs::spawn`] takes is the
+/// tree it keys a job's log to. A caller naming a directory the model chose
+/// can move the child and nothing else.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JobCommand {
     pub program: String,
     pub arguments: Vec<String>,
+    pub directory: Option<PathBuf>,
 }
 
 impl JobCommand {
@@ -159,6 +165,7 @@ impl JobCommand {
         Self {
             program: SHELL.to_string(),
             arguments: vec![SHELL_COMMAND_FLAG.to_string(), line.into()],
+            directory: None,
         }
     }
 
@@ -167,7 +174,14 @@ impl JobCommand {
         Self {
             program: program.into(),
             arguments,
+            directory: None,
         }
+    }
+
+    /// Run the child somewhere other than the session's own working tree.
+    pub fn within(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.directory = Some(directory.into());
+        self
     }
 }
 
@@ -216,13 +230,18 @@ pub struct Jobs;
 
 impl Jobs {
     /// Start a job, and hand back the receipt the model is shown.
+    ///
+    /// `checkout` is the session's own working tree, and it is the only thing
+    /// the log directory and the exclude write are ever derived from. Where the
+    /// child runs is [`JobCommand::within`]'s to say, because that is the part
+    /// a model chooses.
     pub async fn spawn(
         session: Session,
         command: &JobCommand,
-        cwd: &Path,
+        checkout: &Path,
         env: &HashMap<String, String>,
     ) -> Result<JobStarted, String> {
-        Self::start(session, command, cwd, env, Limits::default()).await
+        Self::start(session, command, checkout, env, Limits::default()).await
     }
 
     /// Read a job's log from `since`, and say where the job has got to.
@@ -327,7 +346,7 @@ impl Jobs {
     async fn start(
         session: Session,
         command: &JobCommand,
-        cwd: &Path,
+        checkout: &Path,
         env: &HashMap<String, String>,
         limits: Limits,
     ) -> Result<JobStarted, String> {
@@ -335,15 +354,15 @@ impl Jobs {
             return Err(UNAVAILABLE.to_string());
         }
 
-        tokio::fs::create_dir_all(cwd.join(JOB_LOG_DIRECTORY))
+        tokio::fs::create_dir_all(checkout.join(JOB_LOG_DIRECTORY))
             .await
             .map_err(|error| format!("Cannot create {JOB_LOG_DIRECTORY}: {error}"))?;
         if matches!(session, Session::Task(_)) {
-            exclude(cwd).await;
+            exclude(checkout).await;
         }
 
         let id = mint();
-        let log = log_path(cwd, &id);
+        let log = log_path(checkout, &id);
         let file = std::fs::File::create(&log)
             .map_err(|error| format!("Cannot create the job log: {error}"))?;
         let errors = file
@@ -353,7 +372,7 @@ impl Jobs {
         let mut process = Command::new(&command.program);
         process
             .args(&command.arguments)
-            .current_dir(cwd)
+            .current_dir(command.directory.as_deref().unwrap_or(checkout))
             .stdin(Stdio::null())
             .stdout(Stdio::from(file))
             .stderr(Stdio::from(errors))
@@ -449,17 +468,20 @@ async fn ended(mut state: watch::Receiver<JobState>) -> JobState {
 
 /// Keep job logs out of a task run's diff.
 ///
-/// Task runs only: a chat works in the host checkout, whose `.git` may be a
-/// pointer into a directory every worktree of the repository shares, and one
-/// chat's job must not write into all of them. Every failure — not a checkout,
-/// no git, an unwritable file — is a silent skip, because a background job is
-/// worth more to the caller than a tidy diff.
-async fn exclude(cwd: &Path) {
+/// Task runs only, and only in the run's own checkout: a chat works in the
+/// host checkout, whose `.git` may be a pointer into a directory every
+/// worktree of the repository shares, and one chat's job must not write into
+/// all of them. It is also why the directory asked about is the session's own
+/// tree and never one the command named — a run naming somebody else's
+/// checkout would otherwise write into a repository it does not own. Every
+/// failure — not a checkout, no git, an unwritable file — is a silent skip,
+/// because a background job is worth more to the caller than a tidy diff.
+async fn exclude(checkout: &Path) {
     let Ok(resolved) = Command::new("git")
         .arg("rev-parse")
         .arg("--git-path")
         .arg(EXCLUDE_PATH)
-        .current_dir(cwd)
+        .current_dir(checkout)
         .stdin(Stdio::null())
         .output()
         .await
@@ -472,7 +494,7 @@ async fn exclude(cwd: &Path) {
     let Ok(resolved) = std::str::from_utf8(&resolved.stdout) else {
         return;
     };
-    let path = cwd.join(resolved.trim());
+    let path = checkout.join(resolved.trim());
 
     let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
     if existing.lines().any(|line| line.trim() == EXCLUDED) {
@@ -528,9 +550,10 @@ pub fn mint() -> String {
     format!("{JOB_ID_PREFIX}{}", &hex[..JOB_ID_HEX_CHARS])
 }
 
-/// Where the log for `id` belongs, under the session's working directory.
-pub fn log_path(cwd: &Path, id: &str) -> PathBuf {
-    cwd.join(JOB_LOG_DIRECTORY)
+/// Where the log for `id` belongs, under the session's own working tree.
+pub fn log_path(checkout: &Path, id: &str) -> PathBuf {
+    checkout
+        .join(JOB_LOG_DIRECTORY)
         .join(format!("{id}.{JOB_LOG_EXTENSION}"))
 }
 
@@ -926,6 +949,66 @@ mod tests {
             .await
             .expect("the log reads");
         assert_eq!((second.output.as_str(), second.next), ("éb", 4));
+
+        Jobs::kill_session(session).await;
+    }
+
+    /// The log and the exclude write are the session's, and a directory the
+    /// command names moves neither.
+    ///
+    /// `Path::join` neither normalises `..` nor resists an absolute argument,
+    /// so a directory taken from a model used to take the log tree with it —
+    /// and on a task run the exclude write too, into whatever repository that
+    /// landed in.
+    #[tokio::test]
+    async fn a_directory_the_command_names_moves_the_child_and_nothing_else() {
+        let root = directory();
+        let checkout = root.path().join("checkout");
+        let stranger = root.path().join("stranger");
+        std::fs::create_dir(&checkout).expect("the run's own checkout is created");
+        std::fs::create_dir(&stranger).expect("a checkout the run does not own is created");
+        repository(&checkout);
+        repository(&stranger);
+
+        let session = task();
+        let started = Jobs::spawn(
+            session,
+            &JobCommand::shell("pwd").within(&stranger),
+            &checkout,
+            &environment(),
+        )
+        .await
+        .expect("the job starts");
+        assert_eq!(settles(session, &started.id).await, JobState::Exited(0));
+
+        assert_eq!(
+            started.log_path,
+            log_path(&checkout, &started.id).to_string_lossy(),
+            "the log belongs to the session's tree, whatever directory the command named"
+        );
+        let ran_in = Jobs::read(session, &started.id, 0, 500)
+            .await
+            .expect("the log reads")
+            .output;
+        assert_eq!(
+            std::fs::canonicalize(ran_in.trim()).ok(),
+            std::fs::canonicalize(&stranger).ok(),
+            "the child is the one thing a named directory moves: {ran_in}"
+        );
+        assert!(
+            !stranger.join(JOB_LOG_DIRECTORY).exists(),
+            "a log tree was written into a checkout the session does not own"
+        );
+        assert_eq!(
+            excluded_lines(&exclude_path(&stranger)),
+            0,
+            "a stranger checkout's exclude file is not the session's to append to"
+        );
+        assert_eq!(
+            excluded_lines(&exclude_path(&checkout)),
+            1,
+            "the run's own checkout still keeps its job logs out of its diff"
+        );
 
         Jobs::kill_session(session).await;
     }

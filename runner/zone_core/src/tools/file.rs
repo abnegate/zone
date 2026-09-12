@@ -23,7 +23,7 @@ const SEARCH_MAX_RESULTS: usize = 100;
 /// The comparison is against the *canonical* `cwd`: a caller's `cwd` may itself
 /// contain a symlink (`/var` -> `/private/var` on macOS), and a resolved path
 /// compared against an unresolved root refuses every legitimate path in it.
-fn confine(resolved: &Path, context: &ToolContext) -> Result<(), ToolError> {
+pub(super) fn confine(resolved: &Path, context: &ToolContext) -> Result<(), ToolError> {
     if context.unrestricted {
         return Ok(());
     }
@@ -46,7 +46,7 @@ fn confine(resolved: &Path, context: &ToolContext) -> Result<(), ToolError> {
 /// ancestor is resolved and the remaining names re-attached. That is what makes
 /// a symlinked ancestor leaving `cwd` visible to [`confine`] *before* the
 /// directories under it are created.
-fn resolve(path: &Path) -> PathBuf {
+pub(super) fn resolve(path: &Path) -> PathBuf {
     let lexical = normalize(path);
     let mut names: Vec<&OsStr> = Vec::new();
     let mut cursor = lexical.as_path();

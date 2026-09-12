@@ -3,12 +3,13 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tool_runner::Proxy;
 
+use super::file::{confine, resolve};
 use super::job::{self, JobCommand, Jobs};
 use super::{
     ERROR_PREFIX, MAX_PREVIEW_CHARS, MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tier, Tool, ToolContext,
@@ -103,16 +104,30 @@ fn background_property() -> Value {
     })
 }
 
+/// Where the command runs, resolved and confined the way every other
+/// model-supplied path in these tools is.
+///
+/// `Path::join` alone neither normalises `..` nor resists an absolute
+/// argument, so a joined directory names whatever the caller asked for. Both
+/// tools and both modes resolve it here, so the foreground and the background
+/// cannot drift on what a directory is allowed to be.
+fn working_directory(context: &ToolContext, directory: Option<&str>) -> Result<PathBuf, ToolError> {
+    let Some(directory) = directory else {
+        return Ok(context.cwd.clone());
+    };
+    let resolved = resolve(&context.cwd.join(directory));
+    confine(&resolved, context)?;
+    Ok(resolved)
+}
+
 /// Start a detached job, and hand back the receipt the model reads it by.
 ///
 /// Reached only once the tool's own checks have passed, so backgrounding buys
-/// a command nothing the foreground would have refused it.
-async fn background(
-    command: &JobCommand,
-    cwd: &Path,
-    context: &ToolContext,
-) -> Result<ToolResult, ToolError> {
-    Jobs::spawn(context.session, command, cwd, &context.env)
+/// a command nothing the foreground would have refused it. The job is keyed to
+/// the session's own working tree and the command carries the directory the
+/// child runs in, so where the model pointed the command cannot move the log.
+async fn background(command: &JobCommand, context: &ToolContext) -> Result<ToolResult, ToolError> {
+    Jobs::spawn(context.session, command, &context.cwd, &context.env)
         .await
         .map(|started| ToolResult::success(job::started_text(&started)))
         .map_err(ToolError::Execution)
@@ -209,16 +224,11 @@ impl Tool for RunCommandTool {
             }
         }
 
-        // Determine working directory
-        let cwd = if let Some(dir) = &params.cwd {
-            context.cwd.join(dir)
-        } else {
-            context.cwd.clone()
-        };
+        let cwd = working_directory(context, params.cwd.as_deref())?;
 
         if params.background {
-            let command = JobCommand::new(&params.command, params.args.clone());
-            return background(&command, &cwd, context).await;
+            let command = JobCommand::new(&params.command, params.args.clone()).within(&cwd);
+            return background(&command, context).await;
         }
 
         // Build command
@@ -476,14 +486,11 @@ impl Tool for RunShellTool {
             )));
         }
 
-        let cwd = match &params.cwd {
-            Some(dir) => context.cwd.join(dir),
-            None => context.cwd.clone(),
-        };
+        let cwd = working_directory(context, params.cwd.as_deref())?;
 
         if params.background {
-            let command = JobCommand::shell(&params.command);
-            return background(&command, &cwd, context).await;
+            let command = JobCommand::shell(&params.command).within(&cwd);
+            return background(&command, context).await;
         }
 
         let limit = Duration::from_secs(
@@ -1722,6 +1729,119 @@ mod tests {
         assert!(!dir.path().join(job::JOB_LOG_DIRECTORY).exists());
 
         Jobs::kill_session(session).await;
+    }
+
+    /// A checkout and a directory beside it, which is what a `..` in the
+    /// model's `cwd` reaches for.
+    fn neighbours() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().expect("a temporary root");
+        let checkout = root.path().join("checkout");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&checkout).expect("the session's own tree is created");
+        std::fs::create_dir(&elsewhere).expect("a directory beside it is created");
+        (root, checkout, elsewhere)
+    }
+
+    /// The directory a call names is the child's, and nothing else's.
+    ///
+    /// A chat's context is unrestricted, so `..` is the chat's to name — and
+    /// the receipt still has to promise a log under the tree the session gave
+    /// the tool, because that tree is the one `tail_job` reads and the one a
+    /// teardown clears.
+    #[tokio::test]
+    async fn a_directory_outside_the_tree_moves_the_child_and_not_the_log() {
+        let (_root, checkout, elsewhere) = neighbours();
+        let session = Session::Chat(uuid::Uuid::new_v4());
+        let mut context = shell_test_context();
+        context.cwd = checkout.clone();
+        context.session = session;
+        let call = json!({
+            "command": "pwd",
+            "cwd": "../elsewhere",
+            "reason": "Look next door."
+        });
+
+        let inline = RunShellTool
+            .execute(call.clone(), &context)
+            .await
+            .expect("the command runs");
+        let ran_in = inline.output.expect("output");
+        assert_eq!(
+            std::fs::canonicalize(ran_in.lines().nth(1).unwrap_or_default()).ok(),
+            std::fs::canonicalize(&elsewhere).ok(),
+            "the foreground runs where the call said: {ran_in}"
+        );
+
+        let mut detached = call;
+        detached["background"] = json!(true);
+        let started = RunShellTool
+            .execute(detached, &context)
+            .await
+            .expect("the job starts");
+        let receipt = started.output.expect("a receipt");
+        let id = job::parse_started(&receipt).expect("the receipt names the job");
+
+        assert!(
+            receipt.contains(&job::log_path(&checkout, &id).display().to_string()),
+            "the receipt names a log outside the session's tree: {receipt}"
+        );
+        assert!(
+            job::log_path(&checkout, &id).exists(),
+            "the log is not where the receipt says it is: {receipt}"
+        );
+        assert!(
+            !elsewhere.join(job::JOB_LOG_DIRECTORY).exists(),
+            "the log tree followed the directory the call named"
+        );
+
+        Jobs::kill_session(session).await;
+    }
+
+    /// Both tools confine the directory they are given the way they confine
+    /// every other path a model supplies, and both modes answer the same:
+    /// backgrounding is not a way to run where the foreground would not.
+    #[tokio::test]
+    async fn a_directory_outside_the_tree_is_refused_the_same_way_in_both_modes() {
+        let (_root, checkout, elsewhere) = neighbours();
+        let mut context = create_test_context();
+        context.cwd = checkout.clone();
+        context.session = Session::Task(uuid::Uuid::new_v4());
+        context.env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
+
+        for named in [
+            elsewhere.to_string_lossy().into_owned(),
+            "../elsewhere".to_string(),
+        ] {
+            for background in [false, true] {
+                let call = json!({
+                    "command": "ls",
+                    "cwd": named,
+                    "background": background,
+                    "reason": "Look next door."
+                });
+                for tool in ["run_command", "run_shell"] {
+                    let refused = match tool {
+                        "run_command" => RunCommandTool.execute(call.clone(), &context).await,
+                        _ => RunShellTool.execute(call.clone(), &context).await,
+                    }
+                    .expect_err("a directory outside the tree is refused");
+                    assert!(
+                        refused.to_string().contains("escapes working directory"),
+                        "{tool} answered {named} with background={background} in other words: \
+                         {refused}"
+                    );
+                }
+            }
+        }
+
+        assert!(
+            !elsewhere.join(job::JOB_LOG_DIRECTORY).exists()
+                && !checkout.join(job::JOB_LOG_DIRECTORY).exists(),
+            "a refusal came after something was already spawned"
+        );
     }
 
     #[tokio::test]
