@@ -123,6 +123,15 @@ pub struct TaskRunData {
     /// Without it the console can see that a run stopped and not what it
     /// stopped to ask, which is the only thing anyone can act on.
     pending_question: Option<serde_json::Value>,
+    /// What a `waiting` run is waiting for, and until when, or nothing.
+    ///
+    /// The sibling of `pending_question`: a run parks on one or the other, and
+    /// which field arrived is how a reader tells a question nobody has answered
+    /// from a wait nobody can. The column keeps `pending_wait` beside its
+    /// sibling; the wire says what the run is doing. Absent rather than null,
+    /// so a reader that has the key knows there is a wait to describe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waiting_on: Option<serde_json::Value>,
 }
 
 /// Task runs list response
@@ -141,6 +150,7 @@ impl From<tasks::TaskRunRow> for TaskRunData {
             progress_percent: row.progress_percent,
             error_message: row.error_message,
             pending_question: row.pending_question,
+            waiting_on: row.pending_wait,
         }
     }
 }
@@ -755,6 +765,15 @@ mod tests {
         }
     }
 
+    /// The same run, parked on a wait instead of a question.
+    fn parked_on_wait(waiting: serde_json::Value) -> tasks::TaskRunRow {
+        tasks::TaskRunRow {
+            status: "waiting".into(),
+            pending_wait: Some(waiting),
+            ..run(None)
+        }
+    }
+
     #[test]
     fn a_waiting_run_discloses_the_question_it_parked_on() {
         let asked = serde_json::json!({
@@ -770,6 +789,39 @@ mod tests {
         assert_eq!(
             serde_json::to_value(TaskRunResponse::from(run(None))).unwrap()["run"]["pending_question"],
             Value::Null
+        );
+    }
+
+    /// A wait park reaches the console or it does not exist: the column went in
+    /// with the park and nothing carried it to the wire, so a console rendering
+    /// `waiting` had a badge and no subject. The absence on a plain row is half
+    /// the contract -- the key is what says there is a wait at all, which is
+    /// how a reader tells this park from the question beside it.
+    #[test]
+    fn a_run_parked_on_a_wait_discloses_what_it_waits_for() {
+        let waiting = serde_json::json!({
+            "kind": "job",
+            "id": "job_9f3c1a7b2e04",
+            "deadline": "2026-09-13T09:41:00Z",
+        });
+        let body =
+            serde_json::to_value(TaskRunResponse::from(parked_on_wait(waiting.clone()))).unwrap();
+
+        assert_eq!(body["run"]["status"], "waiting");
+        assert_eq!(
+            body["run"]["waiting_on"], waiting,
+            "a console that cannot read the wait cannot say what the run is doing"
+        );
+        assert_eq!(
+            body["run"]["pending_question"],
+            Value::Null,
+            "a wait is not a question and answering it must stay refused"
+        );
+
+        let running = serde_json::to_value(TaskRunResponse::from(run(None))).unwrap();
+        assert!(
+            running["run"].get("waiting_on").is_none(),
+            "a run waiting for nothing carries no key: {running}"
         );
     }
 }
