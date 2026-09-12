@@ -1022,6 +1022,57 @@ describe('useChat', () => {
     expect(result.current.error).toBeNull();
   });
 
+  it('keeps a result that lands in the same tick as the decision', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_approval_required',
+      message_id: 'm4',
+      tool_call_id: 'call_write',
+      name: 'write_file',
+      arguments: '{"path":"x.txt"}',
+    });
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.approval).toBe(
+        'pending'
+      );
+    });
+
+    // The result and the click queue before React renders either: the card
+    // this window drew still says pending, but the state the updaters see
+    // does not, and the result must be what survives.
+    act(() => {
+      lastSocket?.emit({
+        type: 'tool_result',
+        message_id: 'm4',
+        tool_call_id: 'call_write',
+        name: 'write_file',
+        success: false,
+        detail: 'Error: The user denied this tool call.',
+        duration_ms: 0,
+      });
+      result.current.approveTool('call_write', true);
+    });
+
+    const call = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(call?.detail).toBe('Error: The user denied this tool call.');
+    expect(call?.pending).toBe(false);
+    expect(call?.success).toBe(false);
+    expect(call?.approval).toBeUndefined();
+    expect(JSON.parse(lastSocket?.sent.at(-1) ?? '{}')).toEqual({
+      type: 'approve_tool',
+      tool_call_id: 'call_write',
+      approved: true,
+    });
+  });
+
   it('should delete a message', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     mockDeleteMessage.mockResolvedValue(undefined);

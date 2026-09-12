@@ -1043,21 +1043,39 @@ export function useChat(
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return;
     }
-    const assistant = chat?.messages.find((message) =>
-      message.metadata?.tool_calls?.some((call) => call.id === toolCallId)
-    );
-    // An outcome is assumed only while the card is still open here: a call
-    // that already carries its result keeps saying what the server said.
-    const open = assistant?.metadata?.tool_calls?.some(
-      (call) => call.id === toolCallId && call.approval === 'pending'
-    );
-    if (assistant && open) {
-      patchToolCall(assistant.id, toolCallId, {
-        approval: approved ? 'approved' : 'denied',
-        detail: approved ? 'Approved. Running…' : 'Denied',
-        pending: approved,
-      });
-    }
+    // An outcome is assumed only while the card is still open, judged on the
+    // state the updater sees rather than the render that drew the buttons: a
+    // result that lands in the same tick as the click keeps the row it
+    // settled, and a call that already carries its result keeps saying what
+    // the server said.
+    setChat((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        messages: prev.messages.map((message) => {
+          const calls = message.metadata?.tool_calls;
+          if (!calls?.some((call) => call.id === toolCallId && call.approval === 'pending')) {
+            return message;
+          }
+          return {
+            ...message,
+            metadata: {
+              ...message.metadata,
+              tool_calls: calls.map((call) =>
+                call.id === toolCallId
+                  ? {
+                      ...call,
+                      approval: approved ? ('approved' as const) : ('denied' as const),
+                      detail: approved ? 'Approved. Running…' : 'Denied',
+                      pending: approved,
+                    }
+                  : call
+              ),
+            },
+          };
+        }),
+      };
+    });
     socket.send(
       JSON.stringify({
         type: 'approve_tool',
