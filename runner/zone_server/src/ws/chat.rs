@@ -2844,12 +2844,12 @@ async fn handle_chat_generation(
                                     record.job = Some(job.clone());
                                 }
                                 jobs.push(job.id.clone());
-                                let job_msg = ServerMessage::JobStarted {
+                                let job_started = ServerMessage::JobStarted {
                                     message_id: assistant_message_id,
                                     tool_call_id: call,
                                     job,
                                 };
-                                publish(stream, job_msg).await;
+                                publish(stream, job_started).await;
                                 persist_now = true;
                             }
                         }
@@ -3060,12 +3060,12 @@ async fn handle_chat_generation(
                                 record.waiting = Some(waiting.clone());
                             }
                             waited = true;
-                            let wait_msg = ServerMessage::WaitStarted {
+                            let wait_started = ServerMessage::WaitStarted {
                                 message_id: assistant_message_id,
                                 tool_call_id: tool_call_id.clone(),
                                 waiting: waiting.clone(),
                             };
-                            publish(stream, wait_msg).await;
+                            publish(stream, wait_started).await;
                             pending_wait = Some((Waited::new(tool_call_id, waiting), spent));
                             persist_now = true;
                             stop_stream = true;
