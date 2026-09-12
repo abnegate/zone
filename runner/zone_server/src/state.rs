@@ -11,9 +11,9 @@ use zone_core::mcp::McpHub;
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::pull::PullRegistry;
+use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
 use crate::utils::rate_limit::{RateLimitConfig, RateLimiter};
-use crate::ws::task_run::{self, TaskProgressBroadcaster};
 use zone_email::EmailService;
 
 /// Maximum concurrent indexing operations
@@ -97,7 +97,7 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 mcp: OnceCell::new(),
-                task_progress: task_run::progress(),
+                task_progress: task_progress::progress(),
             }),
         }
     }
@@ -146,7 +146,7 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 mcp: OnceCell::new(),
-                task_progress: task_run::progress(),
+                task_progress: task_progress::progress(),
             }),
         }
     }
@@ -196,7 +196,7 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 mcp: OnceCell::new(),
-                task_progress: task_run::progress(),
+                task_progress: task_progress::progress(),
             }),
         }
     }

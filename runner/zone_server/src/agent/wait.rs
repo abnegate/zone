@@ -35,7 +35,7 @@ use super::integrations::{Configuration, Github, SETTLED_ASSESSMENTS};
 use super::tools::WorkspaceScope;
 use crate::db::{sources, task_access, tasks, workspace_members};
 use crate::services::chat::session::RunContext;
-use crate::ws::task_run::ProgressMessage;
+use crate::services::task_progress::ProgressMessage;
 
 pub const WAIT_FOR: &str = "wait_for";
 
@@ -1832,7 +1832,7 @@ mod tests {
 
         tokio::spawn(async move {
             tokio::time::sleep(POLL).await;
-            crate::ws::task_run::publish_terminal(run, "completed", None);
+            crate::services::task_progress::publish_terminal(run, "completed", None);
         });
         let outcome = await_outcome(session, CALL, Instant::now() + FAR).await;
         assert_eq!(outcome, task_run_completed(run, Duration::ZERO));

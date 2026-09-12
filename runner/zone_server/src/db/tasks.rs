@@ -5,7 +5,7 @@ use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::ws::task_run;
+use crate::services::task_progress;
 
 use super::{
     DbResult,
@@ -1106,7 +1106,7 @@ pub async fn sweep_task_runs(pool: &PgPool) -> DbResult<u64> {
     }
     transaction.commit().await?;
     for (run, _) in &failed {
-        task_run::publish_terminal(*run, FAILED, Some(ORPHANED));
+        task_progress::publish_terminal(*run, FAILED, Some(ORPHANED));
     }
     Ok(failed.len() as u64)
 }
@@ -1170,7 +1170,7 @@ pub async fn complete_owned_task_run(
     }
     transaction.commit().await?;
     if let Some(run) = &row {
-        task_run::publish_terminal(run.id, &run.status, run.error_message.as_deref());
+        task_progress::publish_terminal(run.id, &run.status, run.error_message.as_deref());
     }
     Ok(row)
 }

@@ -15,7 +15,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use zone_server::agent::wait::{KIND_TASK_RUN, Waiting};
 use zone_server::db::tasks::{self, Mutation, RunMutation};
 use zone_server::db::workspace_members::{self, WorkspaceRole};
-use zone_server::ws::{ProgressMessage, TaskProgressBroadcaster};
+use zone_server::services::task_progress::{ProgressMessage, TaskProgressBroadcaster};
 
 /// Start a test server and return the address
 async fn start_test_server() -> SocketAddr {
@@ -1052,10 +1052,10 @@ async fn the_state_hands_out_the_broadcaster_the_writers_publish_to() {
 
     let _subscription = state.task_progress().subscribe(run);
     assert!(
-        zone_server::ws::task_run::progress().tracks(run),
+        zone_server::services::task_progress::progress().tracks(run),
         "the process broadcaster sees what a state subscription registered"
     );
-    zone_server::ws::task_run::progress().remove(run);
+    zone_server::services::task_progress::progress().remove(run);
     assert!(!state.task_progress().tracks(run));
 }
 
