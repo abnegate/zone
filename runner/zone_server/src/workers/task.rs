@@ -4772,6 +4772,7 @@ mod watchdog_tests {
     async fn a_background_job_the_run_left_running_dies_with_the_run() {
         let run = Uuid::new_v4();
         let session = Session::Task(run);
+        let checkout = tempfile::tempdir().expect("a temporary checkout");
         // A program rather than a shell line: a job runs with a cleared
         // environment, and this way the pid the registry reports is the
         // long-running process itself rather than a shell in front of it.
@@ -4781,7 +4782,7 @@ mod watchdog_tests {
                 "/bin/sleep",
                 vec![TASK_TIMEOUT.as_secs().to_string()],
             ),
-            &std::env::temp_dir(),
+            checkout.path(),
             &std::collections::HashMap::new(),
         )
         .await
