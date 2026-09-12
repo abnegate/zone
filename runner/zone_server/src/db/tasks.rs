@@ -1098,8 +1098,8 @@ pub async fn sweep_task_runs(pool: &PgPool) -> DbResult<u64> {
     let locked: Vec<Option<Uuid>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT active_run_id FROM tasks WHERE active_run_id IN (SELECT id FROM task_runs WHERE status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at <= NOW() - INTERVAL '60 seconds') ORDER BY id FOR UPDATE")))
         .fetch_all(&mut *transaction).await?;
     let runs: Vec<Uuid> = locked.into_iter().flatten().collect();
-    let failed: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = 'failed', error_message = '{ORPHANED}', completed_at = NOW(), current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL WHERE id = ANY($1) AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at <= NOW() - INTERVAL '60 seconds' RETURNING id, task_id")))
-        .bind(&runs).fetch_all(&mut *transaction).await?;
+    let failed: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = 'failed', error_message = $2, completed_at = NOW(), current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL WHERE id = ANY($1) AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at <= NOW() - INTERVAL '60 seconds' RETURNING id, task_id")))
+        .bind(&runs).bind(ORPHANED).fetch_all(&mut *transaction).await?;
     for (run, task) in &failed {
         sqlx::query("UPDATE tasks SET status = 'blocked', completed_at = NOW(), updated_at = NOW(), active_run_id = NULL WHERE id = $1 AND active_run_id = $2")
             .bind(task).bind(run).execute(&mut *transaction).await?;
