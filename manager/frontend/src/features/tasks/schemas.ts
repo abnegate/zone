@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ActionReceiptSchema, QuestionSchema } from '../chats/schemas';
+import { ActionReceiptSchema, QuestionSchema, WaitingSchema } from '../chats/schemas';
 
 export const TaskStatusSchema = z.enum([
   'created',
@@ -62,6 +62,11 @@ export const TaskRunSchema = z.object({
   current_phase: z.string().nullable(),
   progress_percent: z.number().nullable(),
   error_message: z.string().nullable(),
+  /**
+   * On the row, and formatted for a task by the same route, but not yet on the
+   * run it sends. `schemas.contract.test.ts` names these two as what the route
+   * still owes and fails the day it pays, so the allowance goes with the debt.
+   */
   started_at: z.string().nullable().optional(),
   completed_at: z.string().nullable().optional(),
   /**
@@ -73,6 +78,11 @@ export const TaskRunSchema = z.object({
    * version newer than the reader's tab.
    */
   pending_question: PendingQuestionSchema.nullish().catch(undefined),
+  /**
+   * The sibling of the question, on the same terms: sent only while the run is
+   * parked on a wait, and an unreadable one costs the subject, never the run.
+   */
+  waiting_on: WaitingSchema.nullish().catch(undefined),
 });
 
 const TaskRunMetadataSchema = z

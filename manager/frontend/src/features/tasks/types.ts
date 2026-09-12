@@ -1,5 +1,5 @@
 import type { z } from 'zod';
-import type { ActionReceipt, Question } from '../chats/types';
+import type { ActionReceipt, Question, Waiting } from '../chats/types';
 import type { TaskProgressMessageSchema } from './schemas';
 
 // Task Types
@@ -65,6 +65,10 @@ export interface TaskRun {
   /// Present only while the run is parked, and absent on every run written
   /// before the field existed, so it is optional as well as nullable.
   pending_question?: PendingQuestion | null;
+  /// The sibling of the question: a run parks on one or the other, and which
+  /// arrived is how the reader tells a wait nobody can answer from a question
+  /// nobody has. Sent only while the run is parked on it.
+  waiting_on?: Waiting | null;
 }
 
 export interface TaskRunLog {
