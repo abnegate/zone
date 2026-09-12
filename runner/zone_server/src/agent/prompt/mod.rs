@@ -215,6 +215,7 @@ mod tests {
         "search_knowledge",
         "send_message",
         "start_task",
+        "tail_job",
         "tail_task_log",
         "update_document",
         "update_task",
@@ -231,6 +232,7 @@ mod tests {
         "read_file",
         "run_command",
         "search_code",
+        "tail_job",
         "write_file",
     ];
 
