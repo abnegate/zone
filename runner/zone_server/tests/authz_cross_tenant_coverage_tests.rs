@@ -489,10 +489,19 @@ async fn a_stranger_is_refused_a_running_source_rather_than_told_it_conflicts() 
         .expect("the source id is a uuid");
 
     let pool = common::create_test_pool().await;
+    // Creating the source spawned its initial index, which records a gathering of
+    // its own. The index status is the newest row alone, so a staged gathering that
+    // does not outrank that job's row reads as whatever the job last wrote.
     sqlx::query(
-        "INSERT INTO context_gatherings (workspace_id, status, source_ids) VALUES ($1, 'running', $2)",
+        "INSERT INTO context_gatherings (workspace_id, status, source_ids, created_at) \
+         VALUES ($1, 'running', $2, NOW() + INTERVAL '1 hour')",
     )
-    .bind(victim.workspace.parse::<uuid::Uuid>().expect("the workspace id is a uuid"))
+    .bind(
+        victim
+            .workspace
+            .parse::<uuid::Uuid>()
+            .expect("the workspace id is a uuid"),
+    )
     .bind(vec![source])
     .execute(&pool)
     .await
