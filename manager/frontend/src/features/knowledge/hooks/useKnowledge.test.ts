@@ -67,6 +67,7 @@ describe('useKnowledge', () => {
       fetched_content: null,
       tags: ['test'],
       last_refreshed_at: null,
+      indexed: true,
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-01T00:00:00Z',
     },
@@ -79,6 +80,7 @@ describe('useKnowledge', () => {
       fetched_content: 'Fetched content',
       tags: [],
       last_refreshed_at: '2024-01-02T00:00:00Z',
+      indexed: true,
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-02T00:00:00Z',
     },
@@ -234,6 +236,7 @@ describe('useKnowledge', () => {
         ...mockEntries[1],
         fetched_content: 'Updated content',
         last_refreshed_at: '2024-01-03T00:00:00Z',
+        indexed: true,
       };
 
       mockGetKnowledge.mockResolvedValue({ entries: mockEntries });

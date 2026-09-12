@@ -3811,6 +3811,7 @@ describe('Client', () => {
       fetched_content: null,
       tags: ['tag1', 'tag2'],
       last_refreshed_at: null,
+      indexed: true,
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-01T00:00:00Z',
     };

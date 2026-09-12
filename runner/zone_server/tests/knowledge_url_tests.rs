@@ -339,6 +339,7 @@ fn test_knowledge_row_has_url_fields() {
         last_fetch_error: None,
         created_at: None,
         updated_at: None,
+        indexed: true,
     };
 
     let _list_row = KnowledgeListRow {
@@ -353,6 +354,7 @@ fn test_knowledge_row_has_url_fields() {
         last_fetched_at: None,
         refresh_interval_minutes: Some(60),
         last_fetch_error: None,
+        indexed: true,
     };
 }
 

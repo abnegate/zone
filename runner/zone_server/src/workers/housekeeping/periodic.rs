@@ -188,12 +188,14 @@ pub fn periodic(state: AppState) -> Registry {
 
 fn refresh_knowledge(schedule: Schedule, state: AppState) -> Sweep {
     let permits = knowledge_refresh::permits();
+    let recovery = knowledge_refresh::recovery();
 
     Sweep::new(Periodic::KnowledgeRefresh.name(), schedule, move || {
         let state = state.clone();
         let permits = Arc::clone(&permits);
+        let recovery = Arc::clone(&recovery);
         async move {
-            knowledge_refresh::run_cycle(&state, &permits)
+            knowledge_refresh::run_cycle(&state, &permits, &recovery)
                 .await
                 .map_err(Failure::new)
         }
