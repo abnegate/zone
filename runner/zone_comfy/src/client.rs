@@ -1336,6 +1336,8 @@ mod tests {
         matchers::{method, path},
     };
 
+    const REQUEST_WAIT: Duration = Duration::from_secs(10);
+
     #[test]
     fn workflow_mutates_only_approved_inputs() {
         let workflow =
@@ -1870,13 +1872,23 @@ mod tests {
         })
         .unwrap();
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
-        let (progress_tx, _) = mpsc::unbounded_channel();
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
             client
                 .generate("a fox", None, &mut cancel_rx, progress_tx)
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        // A cancel that lands before the client holds a prompt id returns `Cancelled`
+        // having sent nothing. The queued progress message is emitted on the statement
+        // after the id is bound, which is what makes it this test's fence.
+        let queued = tokio::time::timeout(REQUEST_WAIT, progress_rx.recv())
+            .await
+            .expect("the client should report the prompt queued before the cancel is sent")
+            .expect("the client should report progress, not drop the channel");
+        assert_eq!(
+            queued, "Image queued...",
+            "the queued message must stay the first progress message the client sends"
+        );
         cancel_tx.send(()).unwrap();
         assert!(matches!(task.await.unwrap(), Err(Error::Cancelled)));
         assert!(
@@ -1887,6 +1899,23 @@ mod tests {
                 .iter()
                 .all(|request| request.url.path() != "/interrupt")
         );
+    }
+
+    async fn wait_for_request(server: &MockServer, expected: &str) {
+        let deadline = tokio::time::Instant::now() + REQUEST_WAIT;
+        while tokio::time::Instant::now() < deadline {
+            let seen = server
+                .received_requests()
+                .await
+                .expect("the mock server should record the requests it receives")
+                .iter()
+                .any(|request| request.url.path() == expected);
+            if seen {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the client never sent a request to {expected} within {REQUEST_WAIT:?}");
     }
 
     #[tokio::test]
@@ -1915,7 +1944,9 @@ mod tests {
                 .generate("a fox", None, &mut cancel_rx, progress_tx)
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        // What is under test is cancelling a request already in flight, so the cancel
+        // waits until the server has the request rather than until a clock says so.
+        wait_for_request(&server, "/prompt").await;
         cancel_tx.send(()).unwrap();
         assert!(matches!(task.await.unwrap(), Err(Error::Cancelled)));
     }
