@@ -5,6 +5,7 @@
 mod beneath;
 mod command;
 mod file;
+pub mod job;
 mod reason;
 mod sanitize;
 mod tier;
@@ -22,6 +23,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::llm::ToolDefinition;
 
@@ -218,6 +220,17 @@ pub fn is_vision_url(url: &str) -> bool {
         .any(|extension| path.ends_with(extension))
 }
 
+/// Which conversation or task run a tool call belongs to.
+///
+/// Background jobs and waits are keyed on it: a job started by one session is
+/// unreadable from another, and a detached context can start neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Session {
+    Detached,
+    Chat(Uuid),
+    Task(Uuid),
+}
+
 /// Context passed to tools during execution
 #[derive(Debug, Clone)]
 pub struct ToolContext {
@@ -236,6 +249,8 @@ pub struct ToolContext {
     /// directly and paths are taken at face value. Only turn this on where
     /// the caller has asked for it and knows what it means.
     pub unrestricted: bool,
+    /// Which chat or task run this tool call belongs to.
+    pub session: Session,
 }
 
 impl Default for ToolContext {
@@ -246,6 +261,7 @@ impl Default for ToolContext {
             max_file_size: 10 * 1024 * 1024, // 10MB
             command_timeout: 300,            // 5 minutes
             unrestricted: false,
+            session: Session::Detached,
         }
     }
 }

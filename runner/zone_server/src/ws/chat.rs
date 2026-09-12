@@ -2743,6 +2743,8 @@ async fn handle_chat_generation(
                             reason: reason.clone(),
                             preview: None,
                             questions: Vec::new(),
+                            job: None,
+                            waiting: None,
                         });
 
                         let tool_msg = ServerMessage::ToolCall {
@@ -4373,6 +4375,8 @@ mod tests {
             reason: None,
             preview: None,
             questions: Vec::new(),
+            job: None,
+            waiting: None,
         }];
         let metadata = serde_json::json!({ "tool_calls": records });
 
@@ -4400,6 +4404,8 @@ mod tests {
             reason: Some("The user asked which tests are failing.".to_string()),
             preview: None,
             questions: Vec::new(),
+            job: None,
+            waiting: None,
         }];
 
         let merged =

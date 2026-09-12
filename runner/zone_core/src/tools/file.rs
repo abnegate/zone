@@ -989,6 +989,7 @@ fn ripgrep_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::Session;
     use crate::tools::test_support::captured_logs;
     use std::fs;
     use std::path::PathBuf;
@@ -1017,6 +1018,7 @@ mod tests {
             max_file_size: 1024 * 1024,
             command_timeout: 30,
             unrestricted: false,
+            session: Session::Detached,
         }
     }
 

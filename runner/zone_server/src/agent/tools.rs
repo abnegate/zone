@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 use zone_core::llm::ToolDefinition;
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::citations::{self, Citation};
 use super::identifier::{self, Kind};
@@ -177,6 +177,7 @@ fn context(profile: ToolProfile, cwd: std::path::PathBuf) -> ToolContext {
         max_file_size: MAX_TOOL_FILE_BYTES,
         command_timeout: TOOL_COMMAND_TIMEOUT_SECS,
         unrestricted: profile == ToolProfile::Chat,
+        session: Session::Detached,
     }
 }
 

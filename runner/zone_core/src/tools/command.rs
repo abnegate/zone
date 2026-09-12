@@ -288,7 +288,7 @@ struct RunShellParams {
 }
 
 /// Longest a single shell command may run, whatever it asks for.
-const MAX_SHELL_TIMEOUT_SECS: u64 = 900;
+pub(crate) const MAX_SHELL_TIMEOUT_SECS: u64 = 900;
 
 /// Longest a call may spend blocked on `sleep`.
 ///
@@ -502,6 +502,7 @@ impl Tool for RunShellTool {
 mod tests {
     use super::*;
     use crate::tools::MAX_TOOL_MESSAGE_CHARS;
+    use crate::tools::Session;
     use crate::tools::test_support::captured_logs;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -513,6 +514,7 @@ mod tests {
             max_file_size: 1024 * 1024,
             command_timeout: 30,
             unrestricted: false,
+            session: Session::Detached,
         }
     }
 
