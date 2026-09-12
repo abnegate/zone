@@ -80,6 +80,37 @@ export const QuestionSchema = z.object({
  */
 export const QuestionsSchema = tolerantArray(QuestionSchema);
 
+/**
+ * A background job as the server reports its start, read the same way from the
+ * live frame and from the stored record so the card a frame draws is the card
+ * a reload rebuilds.
+ */
+export const JobStartedSchema = z.object({
+  id: z.string(),
+  pid: z.number().int().nonnegative(),
+  log_path: z.string(),
+});
+
+/// Absent exit code means killed, so it is optional rather than nullable: the
+/// server omits the key rather than writing null.
+export const JobExitedSchema = z.object({
+  id: z.string(),
+  exit_code: z.number().int().optional(),
+});
+
+export const WaitingSchema = z.object({
+  kind: z.string(),
+  id: z.string(),
+  reference: z.string().optional(),
+  deadline: z.string(),
+});
+
+export const WaitSettledSchema = z.object({
+  tool_call_id: z.string(),
+  outcome: z.string(),
+  timed_out: z.boolean(),
+});
+
 export const ToolCallRecordSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -97,6 +128,13 @@ export const ToolCallRecordSchema = z.object({
    * the questions, never the row they sit on.
    */
   questions: QuestionsSchema.optional().catch(undefined),
+  /**
+   * Both persisted for the console's cards, and declared for the same reason
+   * as the questions: this object is not passthrough, so an undeclared field is
+   * stripped on reload. An unreadable value costs the card, never the row.
+   */
+  job: JobStartedSchema.optional().catch(undefined),
+  waiting: WaitingSchema.optional().catch(undefined),
 });
 
 export const CitationSchema = z.object({

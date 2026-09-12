@@ -74,6 +74,50 @@ export interface ToolCallRecord {
    * and persisted with the message, unlike the client-only fields above.
    */
   questions?: Question[];
+  /** The background job this call started. Server-authored and persisted. */
+  job?: JobStarted;
+  /** What this call is waiting for, and until when. Server-authored and persisted. */
+  waiting?: Waiting;
+  /**
+   * Client-only: how the job ended, from the live exit frame. A job dies with
+   * the turn that started it, so nothing durable records the exit and a reload
+   * has only the start to rebuild from.
+   */
+  exited?: JobExited;
+  /** Client-only: how the wait ended, from the live settle frame. */
+  settled?: WaitSettled;
+}
+
+/// A background job, as reported when a shell call detaches it. The log path
+/// is what a reader opens to see what it is doing.
+export interface JobStarted {
+  id: string;
+  pid: number;
+  log_path: string;
+}
+
+/// A background job that is no longer running. No exit code means it was
+/// killed rather than allowed to finish, which is never a pass.
+export interface JobExited {
+  id: string;
+  exit_code?: number;
+}
+
+/// What one registered wait is waiting for. The deadline is RFC 3339 and
+/// already clamped by the server, so the card counts down to it as given.
+export interface Waiting {
+  kind: string;
+  id: string;
+  reference?: string;
+  deadline: string;
+}
+
+/// How a wait ended. The outcome is the prose the model is told, so the card
+/// shows it as written; the flag is what the card judges on.
+export interface WaitSettled {
+  tool_call_id: string;
+  outcome: string;
+  timed_out: boolean;
 }
 
 export type CitationKind =
@@ -131,6 +175,13 @@ export const PREVIEW_LABEL = 'Effect, read from the call by the server';
 /// the stored one, so `schemas.contract.test.ts` reads the Rust constant and
 /// compares rather than letting a reload relabel the same call.
 export const AWAITING_ANSWER_DETAIL = 'Waiting for your answer…';
+
+/// How the server's `wait::checks_unknown` outcome begins: a commit nothing
+/// reported on for the whole grace period. The string says out loud that it is
+/// not a pass, and the card is held to the same rule — a settle that starts
+/// this way is never drawn as one. A copy of the Rust builder's text, which is
+/// why `schemas.contract.test.ts` is where it gets pinned.
+export const UNKNOWN_CHECKS_OUTCOME_PREFIX = 'No checks are configured or reporting on';
 
 /// Tools that change something outside the conversation and are therefore
 /// asked to say why. The trace row is where a reader sees that answer, whether

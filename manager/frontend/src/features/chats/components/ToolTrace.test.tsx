@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
-import { AWAITING_ANSWER_DETAIL, type Question, type ToolCallRecord } from '../types';
+import { ToolCallRecordSchema } from '../schemas';
+import {
+  AWAITING_ANSWER_DETAIL,
+  type JobStarted,
+  type Question,
+  type ToolCallRecord,
+  UNKNOWN_CHECKS_OUTCOME_PREFIX,
+  type Waiting,
+} from '../types';
 import { ToolTrace } from './ToolTrace';
 
 const call = (overrides: Partial<ToolCallRecord> = {}): ToolCallRecord => ({
@@ -478,5 +486,221 @@ describe('ToolTrace', () => {
     expect(screen.getByTestId('question-preview')).toHaveTextContent(
       'Decides whether 4,812 rows are rewritten.'
     );
+  });
+
+  const job: JobStarted = {
+    id: 'job_9f3c1a7b2e04',
+    pid: 48213,
+    log_path: '/srv/zone/.zone/jobs/job_9f3c1a7b2e04.log',
+  };
+
+  const waiting: Waiting = {
+    kind: 'job',
+    id: 'job_9f3c1a7b2e04',
+    deadline: '2099-01-01T00:00:00Z',
+  };
+
+  it('describes the job tools in plain language', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({ id: 'a', name: 'tail_job', detail: '[job running; next=512]' }),
+          call({ id: 'b', name: 'wait_for', detail: 'Waiting for job_9f3c1a7b2e04 until…' }),
+        ]}
+      />
+    );
+
+    expect(screen.getByText('Read a job log')).toBeInTheDocument();
+    expect(screen.getByText('Waited for something to finish')).toBeInTheDocument();
+    expect(screen.queryByText('tail_job')).not.toBeInTheDocument();
+    expect(screen.queryByText('wait_for')).not.toBeInTheDocument();
+  });
+
+  it('shows the job a call started beside the row rather than behind the toggle', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'run_shell',
+            arguments: '{"command":"bun test","background":true}',
+            detail: 'Started job_9f3c1a7b2e04 (pid 48213).',
+            job,
+          }),
+        ]}
+      />
+    );
+
+    expect(screen.getByTestId('job-card')).toHaveClass('job-card--running');
+    expect(screen.getByTestId('tool-call')).toHaveAttribute('aria-expanded', 'false');
+    const order = Array.from(
+      screen
+        .getByTestId('tool-call')
+        .closest('li')
+        ?.querySelectorAll<HTMLElement>('[data-testid]') ?? []
+    ).map((element) => element.dataset.testid);
+    expect(order.indexOf('job-card')).toBeGreaterThan(order.indexOf('tool-call'));
+  });
+
+  it('shows an exit that reached the trace as a row of its own, with no start to sit on', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            id: 'job_9f3c1a7b2e04',
+            name: '',
+            arguments: '',
+            success: false,
+            detail: '',
+            duration_ms: 0,
+            exited: { id: 'job_9f3c1a7b2e04' },
+          }),
+        ]}
+      />
+    );
+
+    expect(screen.getByTestId('job-card')).toHaveClass('job-card--failed');
+    expect(screen.getByText('Job killed without exiting')).toBeInTheDocument();
+  });
+
+  it('keys the cards on what the record carries, not on the name of the tool', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({ id: 'a', name: 'a_tool_from_a_later_release', job }),
+          call({ id: 'b', name: 'run_shell', detail: 'ok' }),
+          call({ id: 'c', name: 'wait_for', detail: 'Refused: limit reached', success: false }),
+        ]}
+      />
+    );
+
+    expect(screen.getAllByTestId('job-card')).toHaveLength(1);
+    expect(screen.queryByTestId('wait-card')).not.toBeInTheDocument();
+  });
+
+  it('shows what a call is waiting for, and until when', () => {
+    render(<ToolTrace calls={[call({ name: 'wait_for', waiting })]} />);
+
+    const card = screen.getByTestId('wait-card');
+    expect(card).toHaveClass('job-card--waiting');
+    expect(card.querySelector('time')).toHaveAttribute('datetime', '2099-01-01T00:00:00Z');
+    expect(screen.getByTestId('wait-countdown')).toBeInTheDocument();
+  });
+
+  it('shows a wait that timed out as a timeout, not a success', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'wait_for',
+            waiting,
+            settled: {
+              tool_call_id: 'call_1',
+              outcome: 'Timed out after 300s. job_9f3c1a7b2e04 has not finished.',
+              timed_out: true,
+            },
+          }),
+        ]}
+      />
+    );
+
+    const card = screen.getByTestId('wait-card');
+    expect(card).toHaveClass('job-card--timed-out');
+    expect(card).not.toHaveClass('job-card--ok');
+    expect(screen.getByText('Timed out — not a result')).toBeInTheDocument();
+  });
+
+  it('shows a settle nothing reported on as not a pass', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'wait_for',
+            waiting: {
+              kind: 'check',
+              id: '8c4d21fa',
+              reference: 'main',
+              deadline: waiting.deadline,
+            },
+            settled: {
+              tool_call_id: 'call_1',
+              outcome: `${UNKNOWN_CHECKS_OUTCOME_PREFIX} main after 120s. This is not a pass.`,
+              timed_out: false,
+            },
+          }),
+        ]}
+      />
+    );
+
+    const card = screen.getByTestId('wait-card');
+    expect(card).toHaveClass('job-card--unknown');
+    expect(card).not.toHaveClass('job-card--ok');
+    expect(screen.getByText('Nothing reported — not a pass')).toBeInTheDocument();
+  });
+
+  // The stored record is not passthrough, so a card is only as durable as the
+  // schema that reads it back: these render what a reload rebuilds.
+  describe('a card rebuilt from a stored record', () => {
+    const stored = {
+      id: 'call_1',
+      name: 'run_shell',
+      arguments: '{"command":"bun test","background":true}',
+      success: true,
+      detail: 'Started job_9f3c1a7b2e04 (pid 48213).',
+      duration_ms: 3,
+    };
+
+    it('keeps the job and the wait beside everything it kept before', () => {
+      const parsed = ToolCallRecordSchema.parse({
+        ...stored,
+        reasoning: 'Run it detached.',
+        reason: 'The user asked for the suite.',
+        preview: 'Run `bun test` in /srv/zone.',
+        questions: [scope],
+        job,
+        waiting,
+      });
+
+      expect(parsed).toMatchObject({
+        reasoning: 'Run it detached.',
+        reason: 'The user asked for the suite.',
+        preview: 'Run `bun test` in /srv/zone.',
+        questions: [scope],
+        job,
+        waiting,
+      });
+    });
+
+    it('draws the job card a reload rebuilds', () => {
+      render(<ToolTrace calls={[ToolCallRecordSchema.parse({ ...stored, job })]} />);
+
+      expect(screen.getByTestId('job-card')).toHaveClass('job-card--running');
+      expect(screen.getByText('/srv/zone/.zone/jobs/job_9f3c1a7b2e04.log')).toBeInTheDocument();
+    });
+
+    it('draws the wait card a reload rebuilds', () => {
+      render(
+        <ToolTrace calls={[ToolCallRecordSchema.parse({ ...stored, name: 'wait_for', waiting })]} />
+      );
+
+      expect(screen.getByTestId('wait-card')).toHaveClass('job-card--waiting');
+    });
+
+    it('lets an unreadable job or wait cost the card, never the row', () => {
+      render(
+        <ToolTrace
+          calls={[
+            ToolCallRecordSchema.parse({
+              ...stored,
+              job: { id: 'job_9f3c1a7b2e04' },
+              waiting: { kind: 'job', id: 'job_9f3c1a7b2e04' },
+            }),
+          ]}
+        />
+      );
+
+      expect(screen.getByText('Ran a shell command')).toBeInTheDocument();
+      expect(screen.queryByTestId('job-card')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('wait-card')).not.toBeInTheDocument();
+    });
   });
 });
