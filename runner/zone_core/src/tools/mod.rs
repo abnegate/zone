@@ -542,11 +542,20 @@ pub(crate) mod test_support {
         }
     }
 
+    /// One collector at a time.
+    ///
+    /// The sink is per-thread but the subscriber and `tracing`'s interest
+    /// cache are not, and two tests collecting at once have found an empty
+    /// buffer. Serialising here rather than at each call site means a test
+    /// added later cannot forget to.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Run `work` and return it with everything it logged on this thread.
     ///
     /// `zone_server` turns `zone_core=debug` on by default, so a debug field is
     /// a production log line. This is how a test reads one back.
     pub(crate) async fn captured_logs<T>(work: impl Future<Output = T>) -> (T, String) {
+        let _collecting = SERIAL.lock().await;
         INSTALLED.call_once(|| {
             let _ = tracing_subscriber::fmt()
                 .with_max_level(tracing::Level::DEBUG)
