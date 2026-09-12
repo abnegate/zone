@@ -1050,7 +1050,8 @@ pub async fn park_task_run(
 /// Park a live run on something outside the loop, without giving up its lease
 /// or its slot.
 ///
-/// The sibling of [`park_task_run`], fenced identically, and deliberately
+/// The sibling of [`park_task_run`], fenced identically, taking the phase with
+/// it so nothing reads a stale one beside a waiting run, and deliberately
 /// leaving `pending_question` NULL: a run waiting on a job or a check has
 /// nothing to answer, so `answer_run` keeps refusing it.
 pub async fn park_task_run_waiting(
@@ -1059,7 +1060,7 @@ pub async fn park_task_run_waiting(
     owner: Uuid,
     pending_wait: serde_json::Value,
 ) -> DbResult<bool> {
-    Ok(sqlx::query("UPDATE task_runs SET status = 'waiting', pending_wait = $3, heartbeat_at = NOW() WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status = 'running' AND heartbeat_at > NOW() - INTERVAL '60 seconds'")
+    Ok(sqlx::query("UPDATE task_runs SET status = 'waiting', current_phase = 'waiting', pending_wait = $3, heartbeat_at = NOW() WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status = 'running' AND heartbeat_at > NOW() - INTERVAL '60 seconds'")
         .bind(run).bind(owner).bind(pending_wait).execute(pool).await?.rows_affected() == 1)
 }
 
