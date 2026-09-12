@@ -78,7 +78,10 @@ describe('Citations', () => {
     expect(items[0]).toHaveClass('citation--incomplete');
     expect(items[0]).toHaveTextContent('Incomplete evidence');
     expect(items[0]).not.toHaveTextContent('Passing');
-    expect(items[1].querySelector('a')).toHaveAttribute('href', '/wiki');
+    expect(items[1].querySelector('a')).toHaveAttribute(
+      'href',
+      '/wiki?id=11111111-1111-1111-1111-111111111111'
+    );
     expect(screen.getByText('content-hash')).toBeInTheDocument();
   });
 

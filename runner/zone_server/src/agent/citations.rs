@@ -456,7 +456,7 @@ fn indexed_uri(uri: &str) -> (CitationKind, String, Option<String>) {
         }
         return (CitationKind::GithubFile, uri.to_string(), None);
     }
-    (CitationKind::WorkspaceDocument, uri.to_string(), None)
+    (CitationKind::KnowledgePassage, uri.to_string(), None)
 }
 
 /// Citation for a source the chat's registry already holds, cited by the
@@ -959,15 +959,19 @@ mod tests {
         assert!(citation.usable());
     }
 
+    /// The registry resolves a `[kb:…]` marker to a knowledge passage, and the
+    /// envelope's citation for the same passage is merged first, so the kind
+    /// minted here is the one a reader sees. A workspace document is what
+    /// `read_document` returns; a passage search_knowledge retrieved is not one.
     #[test]
-    fn retrieved_knowledge_uri_stays_a_workspace_document() {
+    fn retrieved_knowledge_uri_is_a_knowledge_passage() {
         let citation = from_retrieved(
             "Guide",
             "knowledge://11111111-1111-1111-1111-111111111111",
             true,
             OBSERVED,
         );
-        assert_eq!(citation.kind, CitationKind::WorkspaceDocument);
+        assert_eq!(citation.kind, CitationKind::KnowledgePassage);
         assert_eq!(
             citation.url,
             "knowledge://11111111-1111-1111-1111-111111111111"

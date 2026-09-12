@@ -1712,6 +1712,39 @@ mod tests {
         assert!(fused[1].key.starts_with("source:"));
     }
 
+    /// The registry resolves every `[kb:…]` marker to a knowledge passage, and
+    /// `merge` keeps the first citation seen for an identifier, which is the
+    /// envelope's. If the two disagree the reader is shown the envelope's kind,
+    /// so it has to be the registry's.
+    #[test]
+    fn a_passage_citation_carries_the_kind_its_marker_resolves_to() {
+        let observed = "2026-09-05T00:00:00+00:00";
+        let passage = passage_citation(
+            &json!({
+                "title": "Guide",
+                "uri": "knowledge://11111111-1111-1111-1111-111111111111",
+                "snippet": "Torque to 41 newton-metres.",
+                PASSAGE_IDENTIFIER: "[kb:583d19]",
+            }),
+            observed,
+        );
+        let registry = citations::from_source(
+            citations::CitationKind::KnowledgePassage,
+            "kb:583d19",
+            "Guide",
+            "knowledge://11111111-1111-1111-1111-111111111111",
+            chrono::Utc::now(),
+        );
+
+        assert_eq!(passage.kind, registry.kind);
+        assert_eq!(passage.identifier.as_deref(), Some("kb:583d19"));
+
+        let mut merged = vec![passage];
+        citations::merge(&mut merged, [registry]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].kind, citations::CitationKind::KnowledgePassage);
+    }
+
     #[test]
     fn search_knowledge_json_is_citable() {
         let observed = "2026-09-05T00:00:00+00:00";
