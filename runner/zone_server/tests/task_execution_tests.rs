@@ -977,6 +977,10 @@ async fn a_required_question_waits_and_a_timeout_can_still_end_the_parked_run() 
         ended.pending_question, None,
         "a run nobody is waiting on any more must stop offering an answerable card"
     );
+    assert_eq!(
+        ended.current_phase, None,
+        "a run that ended while parked must not go on reading as waiting for an answer"
+    );
 
     parked.finish().await;
 }

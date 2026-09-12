@@ -9,6 +9,7 @@ const ACTIVITIES: Record<string, string> = {
   thinking: 'Thinking',
   acting: 'Using tools',
   observing: 'Reviewing results',
+  waiting: 'Waiting for an answer',
   responding: 'Writing response',
   complete: 'Completed',
   error: 'Failed',

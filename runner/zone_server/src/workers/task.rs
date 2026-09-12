@@ -64,6 +64,7 @@ const RUN_FAILED: &str = "failed";
 
 const PHASE_WAITING: &str = "waiting";
 const WAITING_ON_ANSWER: &str = "Task run is waiting on a question";
+const RESUMED_ON_ANSWER: &str = "Task run resumed on an answer";
 const LOST_LEASE: &str = "Task execution lost its lease";
 const ANSWER_WITHDRAWN: &str = "The claim on the answer was withdrawn before one arrived";
 
@@ -1842,9 +1843,11 @@ async fn park_for_answer(
     // a live card while the retry re-executed it, and answering that card would
     // find nothing waiting behind it.
     let waited = permit.yielded(question::awaited(waiter, window)).await;
-    let window_outcome = match (waited, window) {
-        (Ok(Some(answers)), _) => question::render(questions, &answers).map_err(Fault::agent),
-        (Ok(None), Some(_)) => Ok(proceeding_on_defaults(questions)),
+    let resumed = match (waited, window) {
+        (Ok(Some(answers)), _) => question::render(questions, &answers)
+            .map(|answer| (answer, true))
+            .map_err(Fault::agent),
+        (Ok(None), Some(_)) => Ok((proceeding_on_defaults(questions), false)),
         (Ok(None), None) => Err(Fault::withdrawn()),
         (Err(_), _) => Err(Fault::overloaded()),
     };
@@ -1855,7 +1858,34 @@ async fn park_for_answer(
     ) {
         return Err(Fault::lease());
     }
-    window_outcome
+    let (resume, answered) = resumed?;
+    log_resume(state, run_id, owner, &resume, answered).await;
+    Ok(resume)
+}
+
+/// Say in the run's own log how the wait ended.
+///
+/// The text handed to the model is the only record of what the run went ahead
+/// on, and a reader of the execution view otherwise sees the card vanish
+/// between `waiting` and the next `thinking` with nothing to explain it. The
+/// elapsed-window line is the message itself; an answer is named as one, with
+/// what was chosen alongside it.
+async fn log_resume(state: &AppState, run_id: Uuid, owner: Uuid, resume: &str, answered: bool) {
+    let message = if answered { RESUMED_ON_ANSWER } else { resume };
+    if let Err(error) = tasks::add_owned_task_run_log(
+        state.db(),
+        run_id,
+        Some(owner),
+        PHASE_WAITING,
+        SOURCE_AGENT,
+        LEVEL_INFO,
+        message,
+        Some(serde_json::json!({ "resume": resume })),
+    )
+    .await
+    {
+        tracing::warn!(%run_id, %error, "Could not record how a parked run resumed");
+    }
 }
 
 #[derive(Debug)]
@@ -3381,6 +3411,42 @@ mod watchdog_tests {
             .unwrap()
     }
 
+    async fn parked_phase(pool: &PgPool, run: Uuid) -> Option<String> {
+        sqlx::query_scalar("SELECT current_phase FROM task_runs WHERE id = $1")
+            .bind(run)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Status, envelope and phase from one row read: under paused time the
+    /// window can elapse between two queries, and a resumed row has already
+    /// shed the phase this is meant to observe.
+    async fn parked_state(
+        pool: &PgPool,
+        run: Uuid,
+    ) -> (String, Option<serde_json::Value>, Option<String>) {
+        sqlx::query_as(
+            "SELECT status, pending_question, current_phase FROM task_runs WHERE id = $1",
+        )
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The rows the wait itself wrote, in order: the park and how it ended.
+    async fn waiting_rows(pool: &PgPool, run: Uuid) -> Vec<(String, Option<serde_json::Value>)> {
+        sqlx::query_as(
+            "SELECT message, metadata FROM task_run_logs WHERE task_run_id = $1 AND phase = $2 ORDER BY created_at",
+        )
+        .bind(run)
+        .bind(PHASE_WAITING)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn an_optional_call_stores_its_envelope_and_proceeds_on_the_default() {
         let _execution = EXECUTION.lock().await;
@@ -3400,12 +3466,17 @@ mod watchdog_tests {
             // The row has to carry the envelope while the run is still waiting
             // on it: a console that can only read it afterwards reads nothing.
             loop {
-                let (status, pending) = parked_row(&observed, run).await;
+                let (status, pending, phase) = parked_state(&observed, run).await;
                 if status == PHASE_WAITING {
                     let pending = pending.expect("a parked run stores what it asked");
                     assert_eq!(pending["tool_call_id"], "call-1");
                     assert_eq!(pending["questions"][0]["header"], "Scope");
                     assert_eq!(pending["questions"][0]["choices"][0]["recommended"], true);
+                    assert_eq!(
+                        phase.as_deref(),
+                        Some(PHASE_WAITING),
+                        "the phase shown beside the badge must say the run is waiting"
+                    );
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -3424,6 +3495,18 @@ mod watchdog_tests {
         let (status, pending) = parked_row(&pool, run).await;
         assert_eq!(status, "running");
         assert_eq!(pending, None, "a resumed run is no longer asking anything");
+        assert_eq!(
+            parked_phase(&pool, run).await,
+            None,
+            "a resumed run must not go on reading as waiting"
+        );
+        // The card vanishing is the only thing a reader of the log would
+        // otherwise see; the line the model was handed is what explains it.
+        let rows = waiting_rows(&pool, run).await;
+        assert_eq!(rows.len(), 2, "a park and its ending: {rows:?}");
+        assert_eq!(rows[0].0, WAITING_ON_ANSWER);
+        assert_eq!(rows[1].0, carried);
+        assert_eq!(rows[1].1.as_ref().unwrap()["resume"], carried);
     }
 
     #[tokio::test]
@@ -3477,6 +3560,10 @@ mod watchdog_tests {
         let (status, pending) = parked_row(&pool, run).await;
         assert_eq!(status, "running");
         assert_eq!(pending, None);
+        let rows = waiting_rows(&pool, run).await;
+        assert_eq!(rows.len(), 2, "a park and its ending: {rows:?}");
+        assert_eq!(rows[1].0, RESUMED_ON_ANSWER);
+        assert_eq!(rows[1].1.as_ref().unwrap()["resume"], "Scope: Forward only");
     }
 
     /// Every exit from the wait unparks the row, the failing ones included.

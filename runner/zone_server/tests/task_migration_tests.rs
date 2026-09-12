@@ -784,6 +784,10 @@ async fn the_sweeper_orphans_a_parked_run_whose_worker_died() {
     assert_eq!(swept.status, "failed");
     assert_eq!(swept.error_message.as_deref(), Some("orphaned"));
     assert_eq!(
+        swept.current_phase, None,
+        "an orphaned run must not go on reading as waiting for an answer"
+    );
+    assert_eq!(
         swept.pending_question, None,
         "an orphaned run left an answerable card behind for a worker that is gone"
     );
