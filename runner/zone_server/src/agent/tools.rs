@@ -215,7 +215,9 @@ pub struct ChatTools {
     /// hand-written catalog still carries the guidance it was handed.
     mcp_guidance: Option<String>,
     lease: Option<TaskLease>,
-    membership: OnceCell<bool>,
+    /// A display name for receipts, not an authorization decision, so it is
+    /// the one thing here worth caching: a stale name costs nothing, a stale
+    /// grant would. Membership is re-read per call in `authorize_workspace`.
     actor_name: OnceCell<String>,
 }
 
@@ -251,7 +253,6 @@ impl ChatTools {
             tiers: HashMap::new(),
             mcp_guidance: None,
             lease: None,
-            membership: OnceCell::new(),
             actor_name: OnceCell::new(),
         }
     }
@@ -429,7 +430,6 @@ impl ChatTools {
             definitions: Vec::new(),
             mcp_guidance,
             lease: None,
-            membership: OnceCell::new(),
             actor_name: OnceCell::new(),
         };
         assembled.cache_catalog();
@@ -590,6 +590,18 @@ impl ChatTools {
         )
     }
 
+    /// Re-read the caller's membership and the chat's workspace on every
+    /// workspace tool call.
+    ///
+    /// This is the only membership gate the chat profile's workspace tools
+    /// have, so it is deliberately uncached, as the task profile's
+    /// `task_writer` check already is. A tool set outlives any one call and a
+    /// turn is not short — one that parks on a background job runs to the chat
+    /// timeout — so a grant cached at first use would keep serving a
+    /// workspace's projects, documents and members to someone removed minutes
+    /// earlier. The recheck is two index lookups in one round trip, around
+    /// 0.05ms against a warm local Postgres, on a call that already costs a
+    /// round trip of its own.
     async fn authorize_workspace(&self) -> Result<(), ToolResult> {
         let Some(scope) = self.scope.as_ref() else {
             return Err(ToolResult::error("Workspace access denied."));
@@ -601,30 +613,21 @@ impl ChatTools {
                 Err(ToolResult::error("Workspace write access denied."))
             };
         }
-        match self
-            .membership
-            .get_or_try_init(|| async {
-                match sqlx::query_scalar::<_, bool>(
-                    "SELECT check_workspace_membership($1, $2) AND EXISTS(SELECT 1 FROM chats WHERE id = $3 AND workspace_id = $2)",
-                )
-                .bind(scope.user_id)
-                .bind(scope.workspace_id)
-                .bind(scope.chat_id)
-                .fetch_one(scope.state.db())
-                .await
-                {
-                    Ok(ok) => Ok(ok),
-                    Err(error) => {
-                        tracing::warn!(%error, "Workspace authorization failed");
-                        Err(ToolResult::error("Could not verify workspace access."))
-                    }
-                }
-            })
-            .await
+        match sqlx::query_scalar::<_, bool>(
+            "SELECT check_workspace_membership($1, $2) AND EXISTS(SELECT 1 FROM chats WHERE id = $3 AND workspace_id = $2)",
+        )
+        .bind(scope.user_id)
+        .bind(scope.workspace_id)
+        .bind(scope.chat_id)
+        .fetch_one(scope.state.db())
+        .await
         {
             Ok(true) => Ok(()),
             Ok(false) => Err(ToolResult::error("Workspace access denied.")),
-            Err(error) => Err(error.clone()),
+            Err(error) => {
+                tracing::warn!(%error, "Workspace authorization failed");
+                Err(ToolResult::error("Could not verify workspace access."))
+            }
         }
     }
 
@@ -2401,13 +2404,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires migrated PostgreSQL DATABASE_URL"]
     async fn workspace_tools_recheck_actor_and_chat_scope() {
         use crate::db::{organizations, users, workspace_members, workspaces};
         use crate::state::test_config;
-        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-            .await
-            .unwrap();
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&database_url).await else {
+            return;
+        };
         let user = users::create_user(
             &pool,
             &format!("{}@example.com", Uuid::new_v4()),
@@ -2453,7 +2458,11 @@ mod tests {
             user_id: user.id,
         };
         let tools = ChatTools::build(scope.clone()).await;
-        for name in [
+        // The workspace reads a viewer can serve without a connected provider,
+        // so one list covers both the authorized and the restored pass.
+        // `get_build_status` joins them for the denial pass only, where the
+        // gate answers before the tool would reach GitHub.
+        let readable = [
             "list_projects",
             "list_sources",
             "list_tasks",
@@ -2461,7 +2470,8 @@ mod tests {
             "list_members",
             "list_chats",
             "list_reminders",
-        ] {
+        ];
+        for name in readable {
             let result = tools.execute(name, "{}").await;
             assert!(result.success, "{name}: {:?}", result.error);
         }
@@ -2473,22 +2483,36 @@ mod tests {
         })
         .await;
         assert!(!invalid.execute("list_sources", "{}").await.success);
+        // `tools` was built and used while the caller was still a member, so
+        // every assertion past here is about the recheck rather than the build:
+        // a tool set that read authorization once would keep serving this
+        // workspace for the rest of the turn.
         workspace_members::remove_member(&pool, workspace.id, user.id)
             .await
             .unwrap();
-        for name in [
-            "list_projects",
-            "list_sources",
-            "list_tasks",
-            "list_documents",
-            "list_members",
-            "list_chats",
-            "list_reminders",
-            "get_build_status",
-        ] {
+        for name in readable.into_iter().chain(["get_build_status"]) {
             let result = tools.execute(name, "{}").await;
             assert!(!result.success, "{name} must deny revoked membership");
             assert_eq!(result.error.as_deref(), Some("Workspace access denied."));
+        }
+        // And the recheck reads the current row rather than remembering a
+        // denial, so a membership restored mid-turn is served too.
+        workspace_members::reactivate_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Viewer,
+            None,
+        )
+        .await
+        .unwrap();
+        for name in readable {
+            let result = tools.execute(name, "{}").await;
+            assert!(
+                result.success,
+                "{name} must serve restored membership: {:?}",
+                result.error
+            );
         }
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(organization.id)
