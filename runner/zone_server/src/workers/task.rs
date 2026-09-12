@@ -1959,6 +1959,7 @@ async fn park_for_wait(
     // watching, and the retry's own park would fail the 'running' fence.
     let settled = permit
         .yielded(wait::await_outcome(
+            Session::Task(run_id),
             &waited.tool_call_id,
             wait::deadline(&waited.waiting),
         ))
@@ -4863,7 +4864,11 @@ mod watchdog_tests {
 
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
-            wait::await_outcome(&waited.tool_call_id, wait::deadline(&waited.waiting)),
+            wait::await_outcome(
+                Session::Task(run),
+                &waited.tool_call_id,
+                wait::deadline(&waited.waiting),
+            ),
         )
         .await
         .expect("a wait the new attempt no longer holds ends at once, not at its deadline");

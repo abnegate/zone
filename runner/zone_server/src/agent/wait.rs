@@ -420,24 +420,37 @@ impl Subscription {
 struct Registration {
     waiting: Waiting,
     subject: String,
-    session: Session,
     started: Instant,
     subscription: Mutex<Subscription>,
 }
 
-/// Every open wait on this instance, keyed by the tool call that opened it.
+/// What one open wait is filed under.
+///
+/// A tool-call id is unique inside a session and nothing makes it unique
+/// across them — a local model mints `call_1` for the first call of every turn
+/// — so the session is half the identity. Keyed by the id alone, one session's
+/// registration replaced another's and each then settled with the other's
+/// subject.
+type Key = (Session, String);
+
+fn key(session: Session, tool_call_id: &str) -> Key {
+    (session, tool_call_id.to_string())
+}
+
+/// Every open wait on this instance, keyed by the session and the tool call
+/// that opened it.
 ///
 /// Process-local and not persisted, the same single-instance assumption the run
 /// socket and the question waiter already document: what is being waited on is
 /// a child process or a subscription this process holds, so a surviving row
 /// would claim a durability the thing does not have.
-static REGISTERED: Lazy<DashMap<String, Registration>> = Lazy::new(DashMap::new);
+static REGISTERED: Lazy<DashMap<Key, Registration>> = Lazy::new(DashMap::new);
 
 /// Waits opened but not yet tied to the call that opened them.
 ///
 /// `Tool::execute` is never told the id of the call it is serving, so the tool
-/// claims its wait under the only identity it has. [`registered`] then binds it
-/// to the call id. One session can hold exactly one unclaimed wait: an
+/// claims its wait under the only identity it has. [`bind`] then binds it to
+/// the call id. One session can hold exactly one unclaimed wait: an
 /// ends-turn tool is never batched with anything and the loop returns the
 /// moment one completes.
 static PENDING: Lazy<DashMap<Session, Registration>> = Lazy::new(DashMap::new);
@@ -469,11 +482,10 @@ fn stage(session: Session, registration: Registration) {
 /// at its own deadline.
 pub fn claim(tool_call_id: &str, waiting: Waiting, session: Session) {
     REGISTERED.insert(
-        tool_call_id.to_string(),
+        key(session, tool_call_id),
         Registration {
             subject: subject(&waiting),
             waiting,
-            session,
             started: Instant::now(),
             subscription: Mutex::new(Subscription::Deadline),
         },
@@ -497,36 +509,16 @@ fn subject(waiting: &Waiting) -> String {
     }
 }
 
-/// What a tool call is waiting for, for a caller that holds only its id.
+/// Tie a session's unclaimed wait to the call that opened it, and say what it
+/// is waiting for.
 ///
-/// The loop reads the clamped deadline from here rather than re-parsing the
-/// call's arguments, because the clamp is `wait_for::execute`'s to apply. The
-/// first lookup also binds the session's unclaimed wait to the call id.
-pub fn registered(tool_call_id: &str) -> Option<Waiting> {
-    if let Some(entry) = REGISTERED.get(tool_call_id) {
-        return Some(entry.waiting.clone());
-    }
-    let session = sole_pending()?;
-    bind(session, tool_call_id)
-}
-
-/// Tie a session's unclaimed wait to the call that opened it.
+/// The loop reads the clamped deadline from the answer rather than re-parsing
+/// the call's arguments, because the clamp is `wait_for::execute`'s to apply.
 pub fn bind(session: Session, tool_call_id: &str) -> Option<Waiting> {
     let (_, registration) = PENDING.remove(&session)?;
     let waiting = registration.waiting.clone();
-    REGISTERED.insert(tool_call_id.to_string(), registration);
+    REGISTERED.insert(key(session, tool_call_id), registration);
     Some(waiting)
-}
-
-/// The one session holding an unclaimed wait, when exactly one does.
-///
-/// A caller that knows whose call it is holding should use [`bind`]: this is
-/// how a caller that does not gets the same answer, and it declines rather than
-/// guesses when two sessions have parked in the same instant.
-fn sole_pending() -> Option<Session> {
-    let mut sessions = PENDING.iter().map(|entry| *entry.key());
-    let first = sessions.next()?;
-    sessions.next().is_none().then_some(first)
 }
 
 /// How many waits this session has already opened.
@@ -557,7 +549,7 @@ fn ceiling(session: Session) -> Option<Instant> {
 pub fn reset_session(session: Session) {
     SESSIONS.remove(&session);
     PENDING.remove(&session);
-    REGISTERED.retain(|_, registration| registration.session != session);
+    REGISTERED.retain(|(owner, _), _| *owner != session);
 }
 
 /// How long a wait may run, clamped to what the schema advertises and then to
@@ -587,8 +579,8 @@ pub fn deadline(waiting: &Waiting) -> Instant {
 /// Polled in order, not at random: something that settles in the same tick as
 /// the deadline elapses has settled, and reporting that as a timeout would tell
 /// the model nothing had happened when it had.
-pub async fn await_outcome(tool_call_id: &str, deadline: Instant) -> String {
-    let Some((_, registration)) = REGISTERED.remove(tool_call_id) else {
+pub async fn await_outcome(session: Session, tool_call_id: &str, deadline: Instant) -> String {
+    let Some((_, registration)) = REGISTERED.remove(&key(session, tool_call_id)) else {
         return timed_out(LOST_SUBJECT, Duration::ZERO);
     };
     let started = registration.started;
@@ -766,7 +758,6 @@ impl WaitForTool {
             Registration {
                 waiting,
                 subject,
-                session: context.session,
                 started,
                 subscription: Mutex::new(subscription),
             },
@@ -904,11 +895,11 @@ mod tests {
     const POLL: Duration = Duration::from_millis(20);
     const POLL_LIMIT: usize = 500;
     const CALL: &str = "call_7";
-    const FAR: Duration = Duration::from_secs(30);
 
-    /// The pending slot is process-wide and [`sole_pending`] declines when two
-    /// sessions hold one, so tests that open a wait observe it one at a time.
-    static EXCLUSIVE: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+    /// The id a local model mints for the first call of a turn, which is why
+    /// two sessions can hand the registry the same one.
+    const SHARED_CALL: &str = "call_1";
+    const FAR: Duration = Duration::from_secs(30);
 
     fn chat() -> Session {
         Session::Chat(Uuid::new_v4())
@@ -964,16 +955,22 @@ mod tests {
         panic!("{id} never settled");
     }
 
-    /// Open a wait and tie it to [`CALL`], the way the loop does.
-    async fn opened(tool: &WaitForTool, session: Session, request: Value) -> ToolResult {
+    /// Open a wait and tie it to [`CALL`] under the session that opened it, the
+    /// way the loop does. Answers with what the bound wait is for, which is
+    /// the only place the clamped deadline is readable from.
+    async fn opened(
+        tool: &WaitForTool,
+        session: Session,
+        request: Value,
+    ) -> (ToolResult, Option<Waiting>) {
         let result = tool
             .execute(request, &context(session))
             .await
             .expect("wait_for reports refusals as tool errors");
-        if result.success {
-            registered(CALL).expect("execute registered the wait it acknowledged");
-        }
-        result
+        let waiting = result
+            .success
+            .then(|| bind(session, CALL).expect("execute registered the wait it acknowledged"));
+        (result, waiting)
     }
 
     fn refused(result: &ToolResult) -> String {
@@ -1252,25 +1249,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_job_that_exits_during_the_wait_reports_its_code() {
-        let _exclusive = EXCLUSIVE.lock().await;
         let directory = TempDir::new().expect("a temporary working directory");
         let session = chat();
         let job = spawned(session, "sleep 0.2; exit 0", directory.path()).await;
 
-        let opened = opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
+        let (opened, waiting) =
+            opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
+        let deadline = waiting.expect("a receipt means a bound wait").deadline;
         assert_eq!(
             receipted(&opened),
-            receipt(&job_subject(&job.id), &registered(CALL).unwrap().deadline)
+            receipt(&job_subject(&job.id), &deadline)
         );
 
-        let outcome = await_outcome(CALL, Instant::now() + FAR).await;
+        let outcome = await_outcome(session, CALL, Instant::now() + FAR).await;
         assert_eq!(outcome, job_exited(&job.id, 0, Duration::ZERO));
         reset_session(session);
     }
 
     #[tokio::test]
     async fn a_job_that_had_already_exited_is_reported_at_once() {
-        let _exclusive = EXCLUSIVE.lock().await;
         let directory = TempDir::new().expect("a temporary working directory");
         let session = chat();
         let job = spawned(session, "exit 1", directory.path()).await;
@@ -1278,7 +1275,7 @@ mod tests {
 
         opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
         let started = std::time::Instant::now();
-        let outcome = await_outcome(CALL, Instant::now() + FAR).await;
+        let outcome = await_outcome(session, CALL, Instant::now() + FAR).await;
         assert_eq!(outcome, job_exited(&job.id, 1, Duration::ZERO));
         assert!(
             started.elapsed() < Duration::from_secs(1),
@@ -1289,13 +1286,12 @@ mod tests {
 
     #[tokio::test]
     async fn opening_a_job_wait_returns_well_inside_the_tool_timeout() {
-        let _exclusive = EXCLUSIVE.lock().await;
         let directory = TempDir::new().expect("a temporary working directory");
         let session = chat();
         let job = spawned(session, "sleep 30", directory.path()).await;
 
         let started = std::time::Instant::now();
-        let opened = opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
+        let (opened, _) = opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
         let elapsed = started.elapsed();
         assert!(opened.success, "{opened:?}");
         assert!(
@@ -1308,13 +1304,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_wait_that_runs_out_reports_a_timeout_rather_than_a_result() {
-        let _exclusive = EXCLUSIVE.lock().await;
         let directory = TempDir::new().expect("a temporary working directory");
         let session = chat();
         let job = spawned(session, "sleep 30", directory.path()).await;
 
         opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
-        let outcome = await_outcome(CALL, Instant::now()).await;
+        let outcome = await_outcome(session, CALL, Instant::now()).await;
         assert_eq!(outcome, timed_out(&job_subject(&job.id), Duration::ZERO));
         assert_unphrasable_as_success(&outcome);
         reset_session(session);
@@ -1323,7 +1318,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_job_from_another_session_is_refused() {
-        let _exclusive = EXCLUSIVE.lock().await;
         let directory = TempDir::new().expect("a temporary working directory");
         let owner = chat();
         let stranger = chat();
@@ -1353,7 +1347,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_eleventh_wait_in_an_attempt_is_an_error_rather_than_a_park() {
-        let _exclusive = EXCLUSIVE.lock().await;
         let directory = TempDir::new().expect("a temporary working directory");
         let session = chat();
         let job = spawned(session, "sleep 30", directory.path()).await;
@@ -1431,8 +1424,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_directly_registered_wait_is_found_under_its_call_and_ends_at_its_deadline() {
-        let _exclusive = EXCLUSIVE.lock().await;
+    async fn a_directly_registered_wait_settles_under_its_call_and_ends_at_its_deadline() {
         let session = chat();
         let run = Uuid::new_v4();
         let waiting = Waiting {
@@ -1441,23 +1433,98 @@ mod tests {
             reference: None,
             deadline: "2026-09-12T10:15:00Z".to_string(),
         };
-        claim("call_9", waiting.clone(), session);
+        claim("call_9", waiting, session);
         assert_eq!(
-            registered("call_9"),
-            Some(waiting),
-            "the loop reads what a wait is for from its call id"
-        );
-        assert_eq!(
-            await_outcome("call_9", Instant::now()).await,
+            await_outcome(session, "call_9", Instant::now()).await,
             timed_out(&task_run_subject(run), Duration::ZERO),
             "a wait with nothing behind it still ends, and says it did not finish"
         );
         assert_eq!(
-            registered("call_9"),
-            None,
+            await_outcome(session, "call_9", Instant::now()).await,
+            timed_out(LOST_SUBJECT, Duration::ZERO),
             "settling a wait releases it, so a second await cannot resolve it again"
         );
         reset_session(session);
+    }
+
+    /// Nothing makes a tool-call id unique across sessions: a local model emits
+    /// `call_1` for the first call of every turn, so two concurrent sessions
+    /// hand the registry one id and each must still settle its own subject.
+    #[tokio::test]
+    async fn two_sessions_waiting_under_one_call_id_each_settle_their_own() {
+        let directory = TempDir::new().expect("a temporary working directory");
+        let first = chat();
+        let second = chat();
+        let theirs = spawned(first, "exit 3", directory.path()).await;
+        let other = spawned(second, "exit 4", directory.path()).await;
+        settles(first, &theirs.id).await;
+        settles(second, &other.id).await;
+
+        for (session, job) in [(first, &theirs), (second, &other)] {
+            let opened = tool()
+                .execute(json!({"kind": KIND_JOB, "id": &job.id}), &context(session))
+                .await
+                .expect("wait_for reports refusals as tool errors");
+            assert!(opened.success, "{opened:?}");
+            assert_eq!(
+                bind(session, SHARED_CALL)
+                    .map(|waiting| waiting.id)
+                    .as_deref(),
+                Some(job.id.as_str()),
+                "a session binds the wait it opened, never another session's"
+            );
+        }
+
+        assert_eq!(
+            await_outcome(first, SHARED_CALL, Instant::now() + FAR).await,
+            job_exited(&theirs.id, 3, Duration::ZERO),
+            "the first waiter was handed the other session's subject"
+        );
+        assert_eq!(
+            await_outcome(second, SHARED_CALL, Instant::now() + FAR).await,
+            job_exited(&other.id, 4, Duration::ZERO),
+            "the second waiter lost its own wait to the first"
+        );
+        reset_session(first);
+        reset_session(second);
+    }
+
+    /// A session's teardown clears the waits that session opened. Under one
+    /// key per call id it cleared whatever another session held under the same
+    /// id, having already replaced it.
+    #[tokio::test]
+    async fn resetting_one_session_leaves_another_waiting_under_the_same_id() {
+        let directory = TempDir::new().expect("a temporary working directory");
+        let waiting = chat();
+        let torn_down = chat();
+        let job = spawned(waiting, "exit 5", directory.path()).await;
+        settles(waiting, &job.id).await;
+
+        let opened = tool()
+            .execute(json!({"kind": KIND_JOB, "id": &job.id}), &context(waiting))
+            .await
+            .expect("wait_for reports refusals as tool errors");
+        assert!(opened.success, "{opened:?}");
+        bind(waiting, SHARED_CALL).expect("the wait binds under the call that opened it");
+
+        claim(
+            SHARED_CALL,
+            Waiting {
+                kind: KIND_JOB.to_string(),
+                id: "job_0e5a1c93b746".to_string(),
+                reference: None,
+                deadline: "2026-09-12T10:15:00Z".to_string(),
+            },
+            torn_down,
+        );
+        reset_session(torn_down);
+
+        assert_eq!(
+            await_outcome(waiting, SHARED_CALL, Instant::now() + FAR).await,
+            job_exited(&job.id, 5, Duration::ZERO),
+            "another session's teardown took this wait with it"
+        );
+        reset_session(waiting);
     }
 
     #[test]
@@ -1485,10 +1552,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_wait_nobody_registered_settles_as_a_timeout() {
-        let _exclusive = EXCLUSIVE.lock().await;
-        assert_eq!(registered("call_that_never_waited"), None);
         assert_eq!(
-            await_outcome("call_that_never_waited", Instant::now() + FAR).await,
+            await_outcome(chat(), "call_that_never_waited", Instant::now() + FAR).await,
             timed_out(LOST_SUBJECT, Duration::ZERO)
         );
     }
@@ -1594,13 +1659,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated PostgreSQL via TEST_DATABASE_URL"]
     async fn a_task_run_settles_from_the_event_its_writers_publish() {
-        let _exclusive = EXCLUSIVE.lock().await;
         let fixture = Fixture::create().await;
         let run = fixture.run(fixture.workspace).await;
         let session = chat();
 
         let started = std::time::Instant::now();
-        let opened = opened(
+        let (opened, _) = opened(
             &fixture.tool(),
             session,
             json!({"kind": KIND_TASK_RUN, "id": run.to_string()}),
@@ -1618,7 +1682,7 @@ mod tests {
             tokio::time::sleep(POLL).await;
             crate::ws::task_run::publish_terminal(run, "completed", None);
         });
-        let outcome = await_outcome(CALL, Instant::now() + FAR).await;
+        let outcome = await_outcome(session, CALL, Instant::now() + FAR).await;
         assert_eq!(outcome, task_run_completed(run, Duration::ZERO));
         reset_session(session);
     }
@@ -1626,7 +1690,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated PostgreSQL via TEST_DATABASE_URL"]
     async fn a_task_run_that_had_already_finished_is_reported_at_once() {
-        let _exclusive = EXCLUSIVE.lock().await;
         let fixture = Fixture::create().await;
         let run = fixture.run(fixture.workspace).await;
         fixture.finish(run, "failed", Some("the build broke")).await;
@@ -1639,7 +1702,7 @@ mod tests {
         )
         .await;
         let started = std::time::Instant::now();
-        let outcome = await_outcome(CALL, Instant::now() + FAR).await;
+        let outcome = await_outcome(session, CALL, Instant::now() + FAR).await;
         assert_eq!(
             outcome,
             task_run_failed(run, Duration::ZERO, "the build broke")
@@ -1654,7 +1717,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires migrated PostgreSQL via TEST_DATABASE_URL"]
     async fn a_run_in_another_workspace_is_refused_to_one_of_its_own_members() {
-        let _exclusive = EXCLUSIVE.lock().await;
         let fixture = Fixture::create().await;
         let foreign = fixture.workspace("foreign").await;
         workspace_members::add_member(

@@ -3097,7 +3097,11 @@ async fn handle_chat_generation(
             break;
         };
         let outcome = match settle_wait(
-            wait::await_outcome(&opened.tool_call_id, wait::deadline(&opened.waiting)),
+            wait::await_outcome(
+                ToolSession::Chat(chat_id),
+                &opened.tool_call_id,
+                wait::deadline(&opened.waiting),
+            ),
             session.guard.lost(),
             &mut generation.cancel,
             stream_deadline,
