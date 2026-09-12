@@ -27,7 +27,7 @@ import {
   WaitingSchema,
   WaitSettledSchema,
 } from './schemas';
-import { AWAITING_ANSWER_DETAIL, REASONED_TOOLS, UNKNOWN_CHECKS_OUTCOME_PREFIX } from './types';
+import { AWAITING_ANSWER_DETAIL, REASONED_TOOLS } from './types';
 
 const CITATIONS_RS = join(
   import.meta.dir,
@@ -197,17 +197,39 @@ describe('a question call is labelled the same live as it is after a reload', ()
 });
 
 /**
- * A commit nothing reported on for the whole grace period ends the wait with an
- * outcome that says out loud it is not a pass, and the card is held to the same
- * rule: a settle beginning this way is never drawn as one. The console owns a
- * copy of the opening words, so a reword on the server alone turns the match
- * vacuous and the card reads "Finished waiting".
+ * How a wait ended is a value the server sends, not something to be read back
+ * out of the outcome's prose. The card draws on this alone, so a variant added
+ * or respelled on the server that this console cannot parse must not be able to
+ * reach it as anything — least of all as a pass.
  */
-describe('a commit nothing reported on is never drawn as a settled check', () => {
-  test('the console matches the words the server actually writes', () => {
-    expect(UNKNOWN_CHECKS_OUTCOME_PREFIX).toBe(
-      rustStringConstant(readFileSync(WAIT_RS, 'utf8'), 'CHECKS_UNKNOWN_PREFIX')
-    );
+describe('the console reads which way a wait ended rather than the words it ended with', () => {
+  test('the verdicts the console accepts are the ones the server declares', () => {
+    const rust = rustVariants(readFileSync(WAIT_RS, 'utf8'), 'Verdict')
+      .filter((variant) => !variant.startsWith('#['))
+      .sort();
+
+    expect(rust).toEqual(['settled', 'silent', 'timed_out', 'unreadable']);
+    expect(zodOptions(WaitSettledSchema, 'verdict')).toEqual(rust);
+  });
+
+  /**
+   * Nothing here falls back to a value, unlike every other tolerant read in
+   * these schemas: there is no safe default for whether something passed. A
+   * verdict this console cannot read fails the whole parse, the frame is
+   * dropped where it is read, and the card stays drawn as the wait it still
+   * was — which is not a claim that anything finished.
+   */
+  test('an unreadable verdict fails the parse rather than defaulting to one', () => {
+    const settled = {
+      tool_call_id: 'call_1',
+      outcome: 'The checks on main could not be read after 120s, so this is not a pass: offline.',
+    };
+
+    for (const verdict of ['', 'ok', 'passed', 'unknown', 'timed-out', null, undefined, 7]) {
+      const parsed = WaitSettledSchema.safeParse({ ...settled, verdict });
+      expect(parsed.success).toBe(false);
+    }
+    expect(WaitSettledSchema.safeParse({ ...settled, verdict: 'unreadable' }).success).toBe(true);
   });
 });
 
@@ -332,7 +354,7 @@ describe('a stated reason and an observed preview survive storage', () => {
     const parsed = ToolCallRecordSchema.parse({
       ...storedCall,
       exited: { id: 'job_0123456789ab', exit_code: 0 },
-      settled: { tool_call_id: 'call_1', outcome: 'Job exited 0.', timed_out: false },
+      settled: { tool_call_id: 'call_1', outcome: 'Job exited 0.', verdict: 'settled' },
     }) as Record<string, unknown>;
 
     expect(parsed.exited).toBeUndefined();

@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen } from '@testing-library/react';
-import {
-  type JobExited,
-  type JobStarted,
-  UNKNOWN_CHECKS_OUTCOME_PREFIX,
-  type Waiting,
-  type WaitSettled,
-} from '../types';
+import type { JobExited, JobStarted, Waiting, WaitSettled } from '../types';
 import { JobCard } from './JobCard';
 
 const FAR_FUTURE = '2099-01-01T00:00:00Z';
@@ -33,7 +27,7 @@ const waiting = (overrides: Partial<Waiting> = {}): Waiting => ({
 const settled = (overrides: Partial<WaitSettled> = {}): WaitSettled => ({
   tool_call_id: 'call_wait',
   outcome: 'job_9f3c1a7b2e04 exited with code 0 after 214s.',
-  timed_out: false,
+  verdict: 'settled',
   ...overrides,
 });
 
@@ -147,7 +141,7 @@ describe('JobCard', () => {
     const outcome =
       'Timed out after 300s. job_9f3c1a7b2e04 has not finished — this is a timeout, not a result. Check again or wait longer.';
     render(
-      <JobCard call={{ waiting: waiting(), settled: settled({ outcome, timed_out: true }) }} />
+      <JobCard call={{ waiting: waiting(), settled: settled({ outcome, verdict: 'timed_out' }) }} />
     );
 
     const card = screen.getByTestId('wait-card');
@@ -159,12 +153,12 @@ describe('JobCard', () => {
   });
 
   it('renders a commit nothing reported on as not a pass', () => {
-    const outcome = `${UNKNOWN_CHECKS_OUTCOME_PREFIX} main after 120s. This is not a pass.`;
+    const outcome = 'No checks are configured or reporting on main after 120s. This is not a pass.';
     render(
       <JobCard
         call={{
           waiting: waiting({ kind: 'check', id: '8c4d21fa', reference: 'main' }),
-          settled: settled({ outcome }),
+          settled: settled({ outcome, verdict: 'silent' }),
         }}
       />
     );
@@ -174,6 +168,46 @@ describe('JobCard', () => {
     expectNotAPass(card);
     expect(screen.getByText('Nothing reported — not a pass')).toBeInTheDocument();
     expect(screen.getByTestId('wait-outcome')).toHaveTextContent(outcome);
+  });
+
+  /// The outcome the server actually writes, word for word. It opens with the
+  /// same three words as a settled check, so a card deciding on the prose drew
+  /// it as a finished wait — the one outcome whose whole job is to say the
+  /// checks are not known to have passed.
+  it('renders checks that could not be read as not a pass, though the words open like a settle', () => {
+    const outcome =
+      'The checks on main could not be read after 120s, so this is not a pass: GitHub request failed or timed out.';
+    render(
+      <JobCard
+        call={{
+          waiting: waiting({ kind: 'check', id: '8c4d21fa', reference: 'main' }),
+          settled: settled({ outcome, verdict: 'unreadable' }),
+        }}
+      />
+    );
+
+    const card = screen.getByTestId('wait-card');
+    expect(card).toHaveClass('job-card--unreadable');
+    expect(card).not.toHaveClass('job-card--settled');
+    expectNotAPass(card);
+    expect(screen.getByText('Checks could not be read — not a pass')).toBeInTheDocument();
+    expect(screen.queryByText('Finished waiting')).not.toBeInTheDocument();
+    expect(screen.getByTestId('wait-outcome')).toHaveTextContent(outcome);
+  });
+
+  /// The prose of a settle says nothing the card acts on: the same words under
+  /// a verdict that is not a pass are never drawn as one.
+  it('draws the verdict it is given rather than the words beside it', () => {
+    const outcome = 'Checks on main (8c4d21f) settled to success after 380s.';
+    const { rerender } = render(
+      <JobCard call={{ settled: settled({ outcome, verdict: 'settled' }) }} />
+    );
+    expect(screen.getByTestId('wait-card')).toHaveClass('job-card--settled');
+
+    rerender(<JobCard call={{ settled: settled({ outcome, verdict: 'unreadable' }) }} />);
+    const card = screen.getByTestId('wait-card');
+    expect(card).toHaveClass('job-card--unreadable');
+    expectNotAPass(card);
   });
 
   it('shows any other settle in its own words without reading a pass out of them', () => {
@@ -189,7 +223,7 @@ describe('JobCard', () => {
   });
 
   it('still shows a settle that arrived without the wait it belongs to', () => {
-    render(<JobCard call={{ settled: settled({ timed_out: true }) }} />);
+    render(<JobCard call={{ settled: settled({ verdict: 'timed_out' }) }} />);
 
     expect(screen.getByTestId('wait-card')).toHaveClass('job-card--timed-out');
     expect(screen.getByTestId('wait-outcome')).toBeInTheDocument();

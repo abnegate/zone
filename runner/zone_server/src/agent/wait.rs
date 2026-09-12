@@ -73,6 +73,68 @@ pub const CHECK_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// grace period a wait opened straight after a push would settle on nothing.
 pub const CHECK_SETTLE_GRACE: Duration = Duration::from_secs(120);
 
+/// Which way a wait ended.
+///
+/// The outcome beside it is prose written for the model, and prose is not a
+/// contract: the console once decided what to draw by reading the opening
+/// words, and the one outcome that says out loud "this is not a pass" began
+/// with the same three words as an ordinary settle, so it was drawn as a
+/// finished wait. Every outcome is built with its verdict here instead, and the
+/// card reads nothing but this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// The subject reached an end of its own: a job exited or was killed, a run
+    /// finished, a commit's checks concluded pass or fail.
+    Settled,
+    /// The window ran out with the subject still going, or with nothing left
+    /// holding the wait open.
+    TimedOut,
+    /// The grace period elapsed with nothing reporting on the commit.
+    Silent,
+    /// The grace period elapsed with the commit's checks unreadable.
+    Unreadable,
+}
+
+/// An outcome as both the things it has to be: prose the model reads, and the
+/// verdict the console draws on. Built together so neither can be derived from
+/// the other after the fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    pub verdict: Verdict,
+    pub text: String,
+}
+
+impl Outcome {
+    fn settled(text: String) -> Self {
+        Self {
+            verdict: Verdict::Settled,
+            text,
+        }
+    }
+
+    fn timed_out(text: String) -> Self {
+        Self {
+            verdict: Verdict::TimedOut,
+            text,
+        }
+    }
+
+    fn silent(text: String) -> Self {
+        Self {
+            verdict: Verdict::Silent,
+            text,
+        }
+    }
+
+    fn unreadable(text: String) -> Self {
+        Self {
+            verdict: Verdict::Unreadable,
+            text,
+        }
+    }
+}
+
 /// What one registered wait is waiting for, for the console's card and for the
 /// loop's own turn-ending event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,7 +153,7 @@ pub struct Waiting {
 pub struct WaitSettled {
     pub tool_call_id: String,
     pub outcome: String,
-    pub timed_out: bool,
+    pub verdict: Verdict,
 }
 
 /// What the subject of a wait is called, mid-sentence.
@@ -112,45 +174,43 @@ pub fn receipt(subject: &str, deadline: &str) -> String {
     format!("Waiting for {subject} until {deadline}.")
 }
 
-pub fn job_exited(id: &str, exit_code: i32, elapsed: Duration) -> String {
-    format!(
+pub fn job_exited(id: &str, exit_code: i32, elapsed: Duration) -> Outcome {
+    Outcome::settled(format!(
         "{id} exited with code {exit_code} after {}s.",
         elapsed.as_secs()
-    )
+    ))
 }
 
-pub fn job_killed(id: &str, elapsed: Duration) -> String {
-    format!(
+pub fn job_killed(id: &str, elapsed: Duration) -> Outcome {
+    Outcome::settled(format!(
         "{id} was killed after {}s without exiting.",
         elapsed.as_secs()
-    )
+    ))
 }
 
-pub fn task_run_completed(run: Uuid, elapsed: Duration) -> String {
-    format!("Task run {run} completed after {}s.", elapsed.as_secs())
+pub fn task_run_completed(run: Uuid, elapsed: Duration) -> Outcome {
+    Outcome::settled(format!(
+        "Task run {run} completed after {}s.",
+        elapsed.as_secs()
+    ))
 }
 
-pub fn task_run_failed(run: Uuid, elapsed: Duration, error: &str) -> String {
-    format!(
+pub fn task_run_failed(run: Uuid, elapsed: Duration, error: &str) -> Outcome {
+    Outcome::settled(format!(
         "Task run {run} failed after {}s: {error}",
         elapsed.as_secs()
-    )
+    ))
 }
 
-pub fn checks_settled(reference: &str, sha: &str, assessment: &str, elapsed: Duration) -> String {
-    format!(
+pub fn checks_settled(reference: &str, sha: &str, assessment: &str, elapsed: Duration) -> Outcome {
+    Outcome::settled(format!(
         "Checks on {reference} ({}) settled to {assessment} after {}s.",
         short(sha),
         elapsed.as_secs()
-    )
+    ))
 }
 
 /// How [`checks_unknown`] opens.
-///
-/// Named because the console matches on it to keep an outcome that begins this
-/// way from being drawn as a settle, and a hand copy of a phrase is a contract
-/// nothing checks: `chats/schemas.contract.test.ts` reads this constant and
-/// compares it against the console's own.
 pub const CHECKS_UNKNOWN_PREFIX: &str = "No checks are configured or reporting on";
 
 /// A commit whose checks could not be read, after [`CHECK_SETTLE_GRACE`].
@@ -159,30 +219,30 @@ pub const CHECKS_UNKNOWN_PREFIX: &str = "No checks are configured or reporting o
 /// repository for GitHub being unreachable and hides the only thing that would
 /// tell a model to try again, so the two are separate strings — both of which
 /// have to be unphrasable as a pass.
-pub fn checks_unreadable(reference: &str, reason: &str, elapsed: Duration) -> String {
-    format!(
+pub fn checks_unreadable(reference: &str, reason: &str, elapsed: Duration) -> Outcome {
+    Outcome::unreadable(format!(
         "The checks on {reference} could not be read after {}s, so this is not a pass: {reason}",
         elapsed.as_secs()
-    )
+    ))
 }
 
 /// A commit nothing is reporting on, after [`CHECK_SETTLE_GRACE`]. Deliberately
 /// says out loud that it is not a pass.
-pub fn checks_unknown(reference: &str, elapsed: Duration) -> String {
-    format!(
+pub fn checks_unknown(reference: &str, elapsed: Duration) -> Outcome {
+    Outcome::silent(format!(
         "{CHECKS_UNKNOWN_PREFIX} {reference} after {}s. This is not a pass.",
         elapsed.as_secs()
-    )
+    ))
 }
 
 /// The wait ran out. Says what did *not* happen, because a model handed a bare
 /// "finished" would act as though it had.
-pub fn timed_out(subject: &str, waited: Duration) -> String {
-    format!(
+pub fn timed_out(subject: &str, waited: Duration) -> Outcome {
+    Outcome::timed_out(format!(
         "Timed out after {}s. {subject} has not finished — this is a timeout, not a result. \
          Check again or wait longer.",
         waited.as_secs()
-    )
+    ))
 }
 
 /// Returned as a tool error, so the turn never ends and nothing parks.
@@ -333,7 +393,7 @@ impl Finished {
         })
     }
 
-    fn outcome(&self, run: Uuid, elapsed: Duration) -> String {
+    fn outcome(&self, run: Uuid, elapsed: Duration) -> Outcome {
         if self.completed {
             task_run_completed(run, elapsed)
         } else {
@@ -354,7 +414,7 @@ struct Run {
 }
 
 impl Run {
-    async fn settle(mut self, started: Instant) -> String {
+    async fn settle(mut self, started: Instant) -> Outcome {
         if let Some(finished) = self.finished {
             return finished.outcome(self.run, started.elapsed());
         }
@@ -394,7 +454,7 @@ struct Commit {
 }
 
 impl Commit {
-    async fn settle(mut self, started: Instant) -> String {
+    async fn settle(mut self, started: Instant) -> Outcome {
         let mut unknown_since = None;
         let mut unreadable: Option<String> = None;
         loop {
@@ -441,7 +501,7 @@ enum Subscription {
 }
 
 impl Subscription {
-    async fn settle(self, started: Instant) -> String {
+    async fn settle(self, started: Instant) -> Outcome {
         match self {
             Self::Deadline => std::future::pending().await,
             Self::Job(exit) => {
@@ -628,7 +688,7 @@ pub fn deadline(waiting: &Waiting) -> Instant {
 /// Polled in order, not at random: something that settles in the same tick as
 /// the deadline elapses has settled, and reporting that as a timeout would tell
 /// the model nothing had happened when it had.
-pub async fn await_outcome(session: Session, tool_call_id: &str, deadline: Instant) -> String {
+pub async fn await_outcome(session: Session, tool_call_id: &str, deadline: Instant) -> Outcome {
     let Some((_, registration)) = REGISTERED.remove(&key(session, tool_call_id)) else {
         return timed_out(LOST_SUBJECT, Duration::ZERO);
     };
@@ -1123,11 +1183,11 @@ mod tests {
     #[test]
     fn a_job_outcome_reports_the_exit_code_and_the_time_it_took() {
         assert_eq!(
-            job_exited("job_9f3c1a7b2e04", 0, Duration::from_secs(214)),
+            job_exited("job_9f3c1a7b2e04", 0, Duration::from_secs(214)).text,
             "job_9f3c1a7b2e04 exited with code 0 after 214s."
         );
         assert_eq!(
-            job_exited("job_9f3c1a7b2e04", 1, Duration::from_secs(214)),
+            job_exited("job_9f3c1a7b2e04", 1, Duration::from_secs(214)).text,
             "job_9f3c1a7b2e04 exited with code 1 after 214s."
         );
     }
@@ -1136,21 +1196,21 @@ mod tests {
     fn a_killed_job_says_it_never_exited() {
         let outcome = job_killed("job_9f3c1a7b2e04", Duration::from_secs(900));
         assert_eq!(
-            outcome,
+            outcome.text,
             "job_9f3c1a7b2e04 was killed after 900s without exiting."
         );
-        assert_unphrasable_as_success(&outcome);
+        assert_unphrasable_as_success(&outcome.text);
     }
 
     #[test]
     fn a_task_run_outcome_reports_the_status_and_any_error() {
         let run = Uuid::parse_str("2f1c9e8a-0b44-4d7e-9c31-5a6b7c8d9e0f").unwrap();
         assert_eq!(
-            task_run_completed(run, Duration::from_secs(512)),
+            task_run_completed(run, Duration::from_secs(512)).text,
             "Task run 2f1c9e8a-0b44-4d7e-9c31-5a6b7c8d9e0f completed after 512s."
         );
         assert_eq!(
-            task_run_failed(run, Duration::from_secs(512), "the build broke"),
+            task_run_failed(run, Duration::from_secs(512), "the build broke").text,
             "Task run 2f1c9e8a-0b44-4d7e-9c31-5a6b7c8d9e0f failed after 512s: the build broke"
         );
     }
@@ -1163,7 +1223,8 @@ mod tests {
                 "8c4d21fa9b7e6053",
                 "success",
                 Duration::from_secs(380)
-            ),
+            )
+            .text,
             "Checks on main (8c4d21f) settled to success after 380s."
         );
         assert_eq!(
@@ -1172,7 +1233,8 @@ mod tests {
                 "8c4d21fa9b7e6053",
                 "failure",
                 Duration::from_secs(380)
-            ),
+            )
+            .text,
             "Checks on main (8c4d21f) settled to failure after 380s."
         );
     }
@@ -1181,21 +1243,21 @@ mod tests {
     fn a_commit_nothing_reports_on_is_not_a_pass() {
         let outcome = checks_unknown("main", CHECK_SETTLE_GRACE);
         assert_eq!(
-            outcome,
+            outcome.text,
             "No checks are configured or reporting on main after 120s. This is not a pass."
         );
-        assert_unphrasable_as_success(&outcome);
+        assert_unphrasable_as_success(&outcome.text);
     }
 
     #[test]
     fn a_timeout_says_it_is_not_a_result() {
         let outcome = timed_out(&job_subject("job_9f3c1a7b2e04"), Duration::from_secs(300));
         assert_eq!(
-            outcome,
+            outcome.text,
             "Timed out after 300s. job_9f3c1a7b2e04 has not finished — this is a timeout, \
              not a result. Check again or wait longer."
         );
-        assert_unphrasable_as_success(&outcome);
+        assert_unphrasable_as_success(&outcome.text);
     }
 
     #[test]
@@ -1206,7 +1268,7 @@ mod tests {
             task_run_subject(run),
             check_subject("main", "8c4d21fa9b7e6053"),
         ] {
-            assert_unphrasable_as_success(&timed_out(&subject, Duration::from_secs(300)));
+            assert_unphrasable_as_success(&timed_out(&subject, Duration::from_secs(300)).text);
         }
     }
 
@@ -1245,19 +1307,40 @@ mod tests {
         );
     }
 
+    /// The console is told which way the wait ended rather than left to read it
+    /// out of the sentence, so the verdict has to survive the wire as a value
+    /// of its own.
     #[test]
-    fn a_settled_wait_says_whether_it_timed_out() {
+    fn a_settled_wait_says_which_way_it_ended() {
+        let outcome = timed_out(&job_subject("job_9f3c1a7b2e04"), Duration::from_secs(300));
         let settled = WaitSettled {
             tool_call_id: "call_7".to_string(),
-            outcome: timed_out(&job_subject("job_9f3c1a7b2e04"), Duration::from_secs(300)),
-            timed_out: true,
+            outcome: outcome.text,
+            verdict: outcome.verdict,
         };
         let json = serde_json::to_value(&settled).unwrap();
-        assert_eq!(json["timed_out"], true, "{json}");
+        assert_eq!(json["verdict"], "timed_out", "{json}");
         assert_eq!(
             serde_json::from_value::<WaitSettled>(json).unwrap(),
             settled
         );
+    }
+
+    /// Every value the console models, in the spelling it models them in. A
+    /// variant renamed on this side alone parses as nothing on that one, and a
+    /// card that cannot read the verdict stays drawn as a wait still running.
+    #[test]
+    fn every_verdict_travels_as_the_console_spells_it() {
+        for (verdict, wire) in [
+            (Verdict::Settled, "settled"),
+            (Verdict::TimedOut, "timed_out"),
+            (Verdict::Silent, "silent"),
+            (Verdict::Unreadable, "unreadable"),
+        ] {
+            let json = serde_json::to_value(verdict).unwrap();
+            assert_eq!(json, wire);
+            assert_eq!(serde_json::from_value::<Verdict>(json).unwrap(), verdict);
+        }
     }
 
     #[test]
@@ -1398,7 +1481,7 @@ mod tests {
         opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
         let outcome = await_outcome(session, CALL, Instant::now()).await;
         assert_eq!(outcome, timed_out(&job_subject(&job.id), Duration::ZERO));
-        assert_unphrasable_as_success(&outcome);
+        assert_unphrasable_as_success(&outcome.text);
         reset_session(session);
         Jobs::kill_session(session).await;
     }
@@ -1488,7 +1571,7 @@ mod tests {
     async fn a_commit_nothing_reports_on_ends_the_wait_without_reading_as_a_pass() {
         let outcome = commit(UNKNOWN_ASSESSMENT, &[]).settle(Instant::now()).await;
         assert_eq!(outcome, checks_unknown("main", CHECK_SETTLE_GRACE));
-        assert_unphrasable_as_success(&outcome);
+        assert_unphrasable_as_success(&outcome.text);
     }
 
     /// A poll GitHub refused is not a commit nothing is reporting on. Ending
@@ -1505,7 +1588,7 @@ mod tests {
             outcome,
             checks_unreadable("main", UNREADABLE_REASON, CHECK_SETTLE_GRACE)
         );
-        assert_unphrasable_as_success(&outcome);
+        assert_unphrasable_as_success(&outcome.text);
     }
 
     /// Which of the two a wait ends with is the *last* poll's answer: an
@@ -1740,7 +1823,7 @@ mod tests {
             resume_with_outcome(
                 &mut context,
                 &waited,
-                job_exited("job_9f3c1a7b2e04", 0, Duration::from_secs(214)),
+                job_exited("job_9f3c1a7b2e04", 0, Duration::from_secs(214)).text,
                 &mut waits,
             )
         };

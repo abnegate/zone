@@ -6,7 +6,6 @@ import {
   type JobStarted,
   type Question,
   type ToolCallRecord,
-  UNKNOWN_CHECKS_OUTCOME_PREFIX,
   type Waiting,
 } from '../types';
 import { ToolTrace } from './ToolTrace';
@@ -617,7 +616,7 @@ describe('ToolTrace', () => {
             settled: {
               tool_call_id: 'call_1',
               outcome: 'Timed out after 300s. job_9f3c1a7b2e04 has not finished.',
-              timed_out: true,
+              verdict: 'timed_out',
             },
           }),
         ]}
@@ -644,8 +643,9 @@ describe('ToolTrace', () => {
             },
             settled: {
               tool_call_id: 'call_1',
-              outcome: `${UNKNOWN_CHECKS_OUTCOME_PREFIX} main after 120s. This is not a pass.`,
-              timed_out: false,
+              outcome:
+                'No checks are configured or reporting on main after 120s. This is not a pass.',
+              verdict: 'silent',
             },
           }),
         ]}

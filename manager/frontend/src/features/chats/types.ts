@@ -112,12 +112,20 @@ export interface Waiting {
   deadline: string;
 }
 
+/// Which way a wait ended, as the server decided when it built the outcome.
+/// `silent` is a commit nothing reported on for the whole grace period and
+/// `unreadable` one whose checks could not be read; neither is a pass, and
+/// neither is `timed_out`.
+export type WaitVerdict = 'settled' | 'timed_out' | 'silent' | 'unreadable';
+
 /// How a wait ended. The outcome is the prose the model is told, so the card
-/// shows it as written; the flag is what the card judges on.
+/// shows it as written and judges nothing on it: reading the verdict out of the
+/// sentence is what once drew an outcome saying "this is not a pass" as a
+/// finished wait. The verdict beside it is what the card judges on.
 export interface WaitSettled {
   tool_call_id: string;
   outcome: string;
-  timed_out: boolean;
+  verdict: WaitVerdict;
 }
 
 export type CitationKind =
@@ -175,13 +183,6 @@ export const PREVIEW_LABEL = 'Effect, read from the call by the server';
 /// the stored one, so `schemas.contract.test.ts` reads the Rust constant and
 /// compares rather than letting a reload relabel the same call.
 export const AWAITING_ANSWER_DETAIL = 'Waiting for your answer…';
-
-/// How the server's `wait::checks_unknown` outcome begins: a commit nothing
-/// reported on for the whole grace period. The string says out loud that it is
-/// not a pass, and the card is held to the same rule — a settle that starts
-/// this way is never drawn as one. A copy of the Rust builder's text, which is
-/// why `schemas.contract.test.ts` is where it gets pinned.
-export const UNKNOWN_CHECKS_OUTCOME_PREFIX = 'No checks are configured or reporting on';
 
 /// Tools that change something outside the conversation and are therefore
 /// asked to say why. The trace row is where a reader sees that answer, whether

@@ -1,8 +1,9 @@
 /* Background work behind a tool call: a job the call detached or a wait it
    opened. Sits on the tool row like the question card, in the same frame, and
    settles into the trace's own status colours. Only a clean exit is green;
-   a wait that ran out and a commit nothing reported on are drawn as warnings
-   with their own words, because silence is not success. */
+   a wait that ran out, a commit nothing reported on and checks that could not
+   be read are drawn as warnings with their own words, because silence is not
+   success. */
 .job-card {
   display: grid;
   gap: var(--ui-space-2);
@@ -28,7 +29,8 @@
 }
 
 .job-card--timed-out,
-.job-card--unknown {
+.job-card--unknown,
+.job-card--unreadable {
   border-left-color: var(--ui-warning, #b45309);
 }
 
@@ -62,7 +64,8 @@
 }
 
 .job-card--timed-out .job-card-status,
-.job-card--unknown .job-card-status {
+.job-card--unknown .job-card-status,
+.job-card--unreadable .job-card-status {
   background: var(--ui-warning, #b45309);
 }
 
@@ -73,7 +76,8 @@
 }
 
 .job-card--timed-out .job-card-title,
-.job-card--unknown .job-card-title {
+.job-card--unknown .job-card-title,
+.job-card--unreadable .job-card-title {
   color: var(--ui-warning, #b45309);
 }
 

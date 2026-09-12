@@ -34,7 +34,7 @@ use zone_core::llm::{Message as LlmMessage, Role as LlmRole};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
-use crate::agent::wait::{self, WaitSettled, Waited, Waiting};
+use crate::agent::wait::{self, Outcome, WaitSettled, Waited, Waiting};
 use crate::agent::{
     self, ActionReceipt, AgentEvent, AgentRun, ChatTools, Citation, Question, Spend,
     ToolCallRecord, WorkspaceScope,
@@ -783,13 +783,6 @@ const OWNERSHIP_LOST: &str = "Chat generation ownership was lost";
 /// The turn's own wall clock ran out, wherever it was spent.
 const GENERATION_TIMED_OUT: &str = "Response generation timed out";
 
-/// How a wait outcome that is a timeout begins.
-///
-/// The registry builds every outcome string, and a timeout is the one the model
-/// must not read as a result, so the console is told which it got rather than
-/// left to guess from prose. Pinned against the builder by its own test.
-const TIMED_OUT_PREFIX: &str = "Timed out after ";
-
 /// What a turn that produced neither prose nor an image is stored as.
 ///
 /// A question outranks a wait: a turn that waited and then asked is waiting on
@@ -870,7 +863,7 @@ async fn job_wait_exit(chat_id: Uuid, id: &str, tracked: &mut Vec<String>) -> Op
 /// How a wait the model opened came to an end.
 #[derive(Debug, PartialEq)]
 enum WaitEnd {
-    Settled(String),
+    Settled(Outcome),
     Cancelled,
     Lost,
     Expired,
@@ -889,7 +882,7 @@ enum WaitEnd {
 /// deadline has happened, and reporting it as a timeout would tell the model
 /// nothing had.
 async fn settle_wait(
-    outcome: impl Future<Output = String>,
+    outcome: impl Future<Output = Outcome>,
     lost: impl Future<Output = ()>,
     cancel: &mut broadcast::Receiver<()>,
     stream_deadline: tokio::time::Instant,
@@ -3158,12 +3151,13 @@ async fn handle_chat_generation(
             };
             publish(stream, exited).await;
         }
+        let Outcome { verdict, text } = outcome;
         let settled = ServerMessage::WaitSettled {
             message_id: assistant_message_id,
             settled: WaitSettled {
                 tool_call_id: opened.tool_call_id.clone(),
-                outcome: outcome.clone(),
-                timed_out: outcome.starts_with(TIMED_OUT_PREFIX),
+                outcome: text.clone(),
+                verdict,
             },
         };
         publish(stream, settled).await;
@@ -3171,7 +3165,7 @@ async fn handle_chat_generation(
         // The console has the outcome from that frame; the model needs it in
         // its context, and a turn started later rebuilds context from
         // canonical entries alone, so the pair is stored as well as mirrored.
-        let resumed = wait::resume_with_outcome(&mut replay, &opened, outcome, &mut waits);
+        let resumed = wait::resume_with_outcome(&mut replay, &opened, text, &mut waits);
         if let Err(error) = session
             .store
             .append(&session.lease, session.turn, &resumed)
@@ -5144,12 +5138,13 @@ mod tests {
             "a job wait has no ref to report: {opened}"
         );
 
+        let exit = wait::job_exited(JOB_ID, 0, Duration::from_secs(214));
         let settled = serde_json::to_value(ServerMessage::WaitSettled {
             message_id,
             settled: WaitSettled {
                 tool_call_id: "call_2".into(),
-                outcome: wait::job_exited(JOB_ID, 0, Duration::from_secs(214)),
-                timed_out: false,
+                outcome: exit.text,
+                verdict: exit.verdict,
             },
         })
         .unwrap();
@@ -5160,7 +5155,7 @@ mod tests {
             settled["settled"]["outcome"],
             "job_9f3c1a7b2e04 exited with code 0 after 214s."
         );
-        assert_eq!(settled["settled"]["timed_out"], false);
+        assert_eq!(settled["settled"]["verdict"], "settled");
     }
 
     #[test]
@@ -5301,12 +5296,13 @@ mod tests {
                 exit_code: Some(0),
             },
         });
+        let exit = wait::job_exited(JOB_ID, 0, Duration::from_secs(214));
         turn.record(&ServerMessage::WaitSettled {
             message_id,
             settled: WaitSettled {
                 tool_call_id: "call_2".to_string(),
-                outcome: wait::job_exited(JOB_ID, 0, Duration::from_secs(214)),
-                timed_out: false,
+                outcome: exit.text,
+                verdict: exit.verdict,
             },
         });
         // The second run continues the same message, so nothing clears the log.
@@ -5325,23 +5321,61 @@ mod tests {
         );
     }
 
+    /// The console draws a settled wait on the verdict and nothing else, so
+    /// every outcome has to be built with the one its meaning requires. Each
+    /// builder is listed here: one added without a verdict of its own reaches
+    /// the card as an ordinary settle, which is how the outcome that says out
+    /// loud "this is not a pass" came to be drawn as a finished wait.
     #[test]
-    fn only_a_timeout_reads_as_one() {
-        assert!(
-            wait::timed_out(JOB_ID, Duration::from_secs(300)).starts_with(TIMED_OUT_PREFIX),
-            "the console is told which outcome it got rather than left to read prose"
+    fn every_outcome_carries_the_verdict_its_meaning_requires() {
+        use crate::agent::wait::Verdict;
+
+        let silent = wait::checks_unknown("main", Duration::from_secs(120));
+        let unreadable = wait::checks_unreadable(
+            "main",
+            "GitHub request failed or timed out.",
+            Duration::from_secs(120),
         );
-        for happened in [
-            wait::job_exited(JOB_ID, 0, Duration::from_secs(1)),
-            wait::job_killed(JOB_ID, Duration::from_secs(900)),
-            wait::task_run_completed(Uuid::new_v4(), Duration::from_secs(1)),
-            wait::task_run_failed(Uuid::new_v4(), Duration::from_secs(1), "the runner died"),
-            wait::checks_settled("main", "abc1234", "success", Duration::from_secs(1)),
-            wait::checks_unknown("main", Duration::from_secs(120)),
+        let ran_out = wait::timed_out(JOB_ID, Duration::from_secs(300));
+
+        for (outcome, verdict) in [
+            (
+                wait::job_exited(JOB_ID, 0, Duration::from_secs(1)),
+                Verdict::Settled,
+            ),
+            (
+                wait::job_killed(JOB_ID, Duration::from_secs(900)),
+                Verdict::Settled,
+            ),
+            (
+                wait::task_run_completed(Uuid::new_v4(), Duration::from_secs(1)),
+                Verdict::Settled,
+            ),
+            (
+                wait::task_run_failed(Uuid::new_v4(), Duration::from_secs(1), "the runner died"),
+                Verdict::Settled,
+            ),
+            (
+                wait::checks_settled("main", "abc1234", "success", Duration::from_secs(1)),
+                Verdict::Settled,
+            ),
+            (silent.clone(), Verdict::Silent),
+            (unreadable.clone(), Verdict::Unreadable),
+            (ran_out.clone(), Verdict::TimedOut),
         ] {
-            assert!(
-                !happened.starts_with(TIMED_OUT_PREFIX),
-                "an outcome that happened is not a timeout: {happened}"
+            assert_eq!(outcome.verdict, verdict, "{}", outcome.text);
+        }
+
+        // Said a second way, because the table above and the builders it reads
+        // can be changed together: whatever the spelling, none of the three
+        // that report nothing having passed may arrive as the verdict the card
+        // draws neutrally.
+        for outcome in [silent, unreadable, ran_out] {
+            assert_ne!(
+                outcome.verdict,
+                Verdict::Settled,
+                "an outcome that says it is not a pass is never drawn as one: {}",
+                outcome.text
             );
         }
     }
@@ -5431,7 +5465,7 @@ mod tests {
         let mut replay = session::RunContext::from_messages(vec![LlmMessage::user("build it")]);
         let carried = replay.entries.len();
         let mut waits = Vec::new();
-        let outcome = wait::job_exited(JOB_ID, 0, Duration::from_secs(214));
+        let outcome = wait::job_exited(JOB_ID, 0, Duration::from_secs(214)).text;
 
         let stored = wait::resume_with_outcome(
             &mut replay,

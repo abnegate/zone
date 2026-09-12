@@ -30,7 +30,7 @@ use wiremock::{
 };
 use zone_core::tools::job::{JobExited, JobStarted};
 use zone_server::{
-    agent::wait::{WaitSettled, Waiting},
+    agent::wait::{Verdict, WaitSettled, Waiting},
     auth::validate_access_token,
     config::Config,
     db::{actions, chats},
@@ -1333,7 +1333,7 @@ fn a_wait_settled_frame_carries_the_call_it_settles_inside_its_own_payload() {
         settled: WaitSettled {
             tool_call_id: WAITING_CALL.to_string(),
             outcome: "Job job_0123456789ab exited 0.".to_string(),
-            timed_out: false,
+            verdict: Verdict::Settled,
         },
     })
     .expect("the frame serialises");
@@ -1346,7 +1346,7 @@ fn a_wait_settled_frame_carries_the_call_it_settles_inside_its_own_payload() {
             "settled": {
                 "tool_call_id": WAITING_CALL,
                 "outcome": "Job job_0123456789ab exited 0.",
-                "timed_out": false,
+                "verdict": "settled",
             },
         }),
         "the call id rides inside settled, not beside it: the console matches the card on it"

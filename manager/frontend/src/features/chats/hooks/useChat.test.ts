@@ -2201,7 +2201,7 @@ describe('useChat', () => {
       tool_call_id: 'call_wait',
       outcome:
         'Timed out after 300s. job_9f3c1a7b2e04 has not finished — this is a timeout, not a result. Check again or wait longer.',
-      timed_out: true,
+      verdict: 'timed_out' as const,
     };
     act(() => {
       lastSocket?.emit({ type: 'wait_settled', message_id: 'm8', settled });
@@ -2225,7 +2225,7 @@ describe('useChat', () => {
     const settled = {
       tool_call_id: 'call_wait',
       outcome: 'No checks are configured or reporting on main after 120s. This is not a pass.',
-      timed_out: false,
+      verdict: 'silent' as const,
     };
     act(() => {
       lastSocket?.emit({ type: 'message_start', message_id: 'm8', role: 'assistant' });

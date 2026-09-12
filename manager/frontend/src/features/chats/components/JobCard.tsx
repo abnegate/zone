@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import {
-  type JobExited,
-  type JobStarted,
-  type ToolCallRecord,
-  UNKNOWN_CHECKS_OUTCOME_PREFIX,
-  type Waiting,
-  type WaitSettled,
+import type {
+  JobExited,
+  JobStarted,
+  ToolCallRecord,
+  Waiting,
+  WaitSettled,
+  WaitVerdict,
 } from '../types';
 import './JobCard.css';
 
@@ -16,6 +16,7 @@ const WAITING_LABEL = 'Waiting for';
 const SETTLED_LABEL = 'Finished waiting';
 const TIMED_OUT_LABEL = 'Timed out — not a result';
 const UNKNOWN_LABEL = 'Nothing reported — not a pass';
+const UNREADABLE_LABEL = 'Checks could not be read — not a pass';
 const DEADLINE_PASSED_LABEL = 'Deadline passed';
 
 const KIND_JOB = 'job';
@@ -25,7 +26,14 @@ const KIND_CHECK = 'check';
 const SUCCESSFUL_EXIT_CODE = 0;
 
 type JobState = 'running' | 'ok' | 'failed';
-type WaitState = 'waiting' | 'settled' | 'timed-out' | 'unknown';
+type WaitState = 'waiting' | 'settled' | 'timed-out' | 'unknown' | 'unreadable';
+
+const WAIT_STATES: Record<WaitVerdict, WaitState> = {
+  settled: 'settled',
+  timed_out: 'timed-out',
+  silent: 'unknown',
+  unreadable: 'unreadable',
+};
 
 /// A job that has not reported an exit is running as far as this client knows;
 /// one that exited is a pass only on a clean code. A killed job has no code,
@@ -41,14 +49,13 @@ function jobTitle(exited?: JobExited): string {
   return `${EXITED_LABEL} ${exited.exit_code}`;
 }
 
-/// The outcome is prose written for the model, so the card does not read a
-/// pass out of it. What it does read is the two things that must never be
-/// drawn as one: a wait that ran out, and a commit nothing reported on.
+/// The outcome is prose written for the model, so the card reads nothing out of
+/// it: the server says which way the wait ended, and this draws that. Deciding
+/// from the words is how an outcome opening "The checks on…" — the one that
+/// exists to say the checks are not known to have passed — was drawn with the
+/// same neutral title as a check that came back green.
 function waitState(settled?: WaitSettled): WaitState {
-  if (!settled) return 'waiting';
-  if (settled.timed_out) return 'timed-out';
-  if (settled.outcome.startsWith(UNKNOWN_CHECKS_OUTCOME_PREFIX)) return 'unknown';
-  return 'settled';
+  return settled ? WAIT_STATES[settled.verdict] : 'waiting';
 }
 
 function waitSubject(waiting: Waiting): string {
@@ -70,6 +77,8 @@ function waitTitle(state: WaitState, waiting?: Waiting): string {
       return TIMED_OUT_LABEL;
     case 'unknown':
       return UNKNOWN_LABEL;
+    case 'unreadable':
+      return UNREADABLE_LABEL;
     case 'settled':
       return SETTLED_LABEL;
     case 'waiting':

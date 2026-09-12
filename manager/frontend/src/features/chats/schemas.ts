@@ -105,10 +105,18 @@ export const WaitingSchema = z.object({
   deadline: z.string(),
 });
 
+/**
+ * Strict on the verdict, with no `.catch` to fall back on.
+ *
+ * Every other tolerant read here defaults to something; there is nothing safe
+ * to default to when the question is whether something passed. A verdict this
+ * console cannot read fails the parse, the frame is dropped, and the card is
+ * left drawn as the wait it still was — which claims nothing.
+ */
 export const WaitSettledSchema = z.object({
   tool_call_id: z.string(),
   outcome: z.string(),
-  timed_out: z.boolean(),
+  verdict: z.enum(['settled', 'timed_out', 'silent', 'unreadable']),
 });
 
 export const ToolCallRecordSchema = z.object({

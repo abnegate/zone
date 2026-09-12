@@ -1638,11 +1638,12 @@ async fn a_wait_that_ended_without_its_event_is_never_reported_as_a_result() {
             wait::timed_out(
                 &wait::job_subject(JOB),
                 Duration::from_secs(wait::DEFAULT_WAIT_SECS),
-            ),
+            )
+            .text,
             "this is a timeout, not a result",
         ),
         (
-            wait::checks_unknown("main", wait::CHECK_SETTLE_GRACE),
+            wait::checks_unknown("main", wait::CHECK_SETTLE_GRACE).text,
             "This is not a pass.",
         ),
     ] {

@@ -1971,7 +1971,9 @@ async fn park_for_wait(
     ) {
         return Err(Fault::lease());
     }
-    let outcome = settled.map_err(|_| Fault::overloaded())?;
+    // The verdict rides with the outcome for the console's card; a run has no
+    // card, and its log and the model both read the prose.
+    let outcome = settled.map_err(|_| Fault::overloaded())?.text;
     log_resume(state, run_id, owner, &outcome, None).await;
     Ok(outcome)
 }
@@ -4876,7 +4878,8 @@ mod watchdog_tests {
             ),
         )
         .await
-        .expect("a wait the new attempt no longer holds ends at once, not at its deadline");
+        .expect("a wait the new attempt no longer holds ends at once, not at its deadline")
+        .text;
         assert!(
             !outcome.contains(WAITED_JOB),
             "the new attempt inherited the wait the one before it staged: {outcome}"

@@ -1358,7 +1358,7 @@ async fn a_settled_wait_runs_a_second_agent_run_in_the_same_turn_and_message() {
     assert_eq!(settled[0]["message_id"], message);
     assert_eq!(settled[0]["settled"]["tool_call_id"], "wait-same-turn");
     assert_eq!(
-        settled[0]["settled"]["timed_out"], false,
+        settled[0]["settled"]["verdict"], "settled",
         "a run that had already finished is not a timeout"
     );
     let outcome = settled[0]["settled"]["outcome"]
