@@ -250,6 +250,49 @@ async fn a_stranger_cannot_reach_another_tenants_source_through_their_own_worksp
 }
 
 #[tokio::test]
+async fn a_stranger_cannot_read_another_tenants_knowledge_entry() {
+    let client = TestClient::with_db().await;
+    let victim = tenant(&client).await;
+    let attacker = tenant(&client).await;
+
+    let created = client
+        .post_json_auth(
+            "/api/knowledge",
+            &json!({
+                "workspace_id": victim.workspace,
+                "title": "The tenant's note",
+                "content": "Something only the tenant should read.",
+            }),
+            &victim.token,
+        )
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let entry = created.json_value()["id"]
+        .as_str()
+        .expect("knowledge is created")
+        .to_string();
+
+    let read = client
+        .get_auth(&format!("/api/knowledge/{entry}"), &attacker.token)
+        .await;
+    // Not forbidden: a 403 would confirm the id names a real entry.
+    assert_eq!(
+        read.status,
+        StatusCode::NOT_FOUND,
+        "a stranger learned something about another tenant's knowledge entry: {} {}",
+        read.status,
+        read.text()
+    );
+    assert!(
+        !read
+            .text()
+            .contains("Something only the tenant should read."),
+        "the refusal leaked the content: {}",
+        read.text()
+    );
+}
+
+#[tokio::test]
 async fn a_stranger_cannot_delete_another_tenants_knowledge() {
     let client = TestClient::with_db().await;
     let victim = tenant(&client).await;

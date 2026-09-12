@@ -61,6 +61,17 @@ class KnowledgeApi {
     return parse(KnowledgeResponseSchema, await response.json());
   }
 
+  async getKnowledgeEntry(id: string): Promise<KnowledgeEntry> {
+    const response = await fetch(`${API_BASE}/api/knowledge/${encodeURIComponent(id)}`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch knowledge entry: ${response.status}`);
+    }
+    return parse(KnowledgeEntrySchema, await response.json());
+  }
+
   async createKnowledge(request: CreateKnowledgeRequest): Promise<KnowledgeEntry> {
     const response = await fetch(`${API_BASE}/api/knowledge`, {
       method: 'POST',

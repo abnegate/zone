@@ -253,7 +253,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/knowledge",
             get(context::list_knowledge).post(context::create_knowledge),
         )
-        .route("/api/knowledge/{id}", delete(context::delete_knowledge))
+        .route(
+            "/api/knowledge/{id}",
+            get(context::get_knowledge_entry).delete(context::delete_knowledge),
+        )
         // Models
         .route("/api/models", get(models::list))
         .route("/api/models/disk", get(models::disk))
