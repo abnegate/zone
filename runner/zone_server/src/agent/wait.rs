@@ -12,11 +12,26 @@
 //! timeout and a commit nothing is reporting on both have to be unphrasable as
 //! a pass, or a model reads "no news" as "green".
 
+use async_trait::async_trait;
+use chrono::{DateTime, SecondsFormat, Utc};
 use dashmap::DashMap;
+use futures::future::BoxFuture;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{Mutex, broadcast};
+use tokio::time::Instant;
 use uuid::Uuid;
+use zone_core::tools::job::{JobExited, Jobs};
+use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+
+use super::integrations::{Configuration, Github, SETTLED_ASSESSMENTS};
+use super::tools::WorkspaceScope;
+use crate::db::{sources, task_access, tasks, workspace_members};
+use crate::ws::task_run::ProgressMessage;
 
 pub const WAIT_FOR: &str = "wait_for";
 
@@ -168,25 +183,747 @@ fn short(sha: &str) -> &str {
     sha.get(..SHA_CHARS).unwrap_or(sha)
 }
 
+/// What `wait_for` tells the model it is for.
+const DESCRIPTION: &str = "Wait for something outside this loop to finish: a background job, \
+    another task run, or the checks on a commit. Your turn ends the moment you call this and \
+    resumes with the outcome, so call it alone, size the timeout to what you are waiting for, \
+    and do not use it to re-read something that has not changed.";
+
+/// The two statuses a run that has not finished can hold, and the one that says
+/// it finished well.
+const RUN_RUNNING: &str = "running";
+const RUN_WAITING: &str = "waiting";
+const RUN_COMPLETED: &str = "completed";
+
+/// What a failed run is called when it recorded no message of its own.
+const RUN_UNKNOWN_ERROR: &str = "Unknown error";
+
+/// A commit GitHub has registered no run for at all. Never a settle on its own:
+/// right after a push it is indistinguishable from a repository with no CI.
+const UNKNOWN_ASSESSMENT: &str = "unknown";
+
+const INVALID_ARGUMENTS: &str = "wait_for takes kind, id, an optional ref and an optional \
+    timeout_secs.";
+
+/// A tool set with no workspace can still wait on its own jobs, but a run and a
+/// source are a workspace's to read.
+const WORKSPACE_REQUIRED: &str =
+    "Waiting on a task run or a check is not available in this context.";
+
+const RUN_ID_INVALID: &str = "id must be a task run id for kind=task_run.";
+const SOURCE_ID_INVALID: &str = "id must be a source id for kind=check.";
+const RUN_UNREADABLE: &str = "Could not read the task run.";
+const RUN_FOREIGN: &str = "Task run not found in this workspace.";
+const SOURCE_UNREADABLE: &str = "Could not read the source.";
+const SOURCE_FOREIGN: &str = "Source not found in this workspace or inactive.";
+const SOURCE_NOT_GITHUB: &str = "Waiting on checks currently supports connected GitHub sources \
+    only.";
+const SOURCE_CONFIGURATION_INVALID: &str = "The GitHub source configuration is invalid.";
+const SOURCE_CREDENTIALS_INVALID: &str = "The source credentials could not be decrypted.";
+const WORKSPACE_UNREADABLE: &str = "You cannot read this workspace.";
+
+/// What a wait nobody registered is called, so even that reads as a timeout
+/// rather than as anything having happened.
+const LOST_SUBJECT: &str = "This wait";
+
+fn unknown_kind(kind: &str) -> String {
+    format!("kind must be {KIND_JOB}, {KIND_TASK_RUN} or {KIND_CHECK}, not {kind:?}.")
+}
+
+/// What one poll of a commit's checks reports.
+///
+/// A trait rather than the client directly so the grace period and the settle
+/// rule can be proven without a network, which the client's fixed origin
+/// otherwise requires.
+#[async_trait]
+trait Checks: Send + Sync {
+    async fn assess(&self, sha: &str) -> Option<&'static str>;
+}
+
+#[async_trait]
+impl Checks for Github {
+    /// Polled against the resolved SHA rather than the reference, so a branch
+    /// that moves mid-wait does not silently change what is being waited on.
+    async fn assess(&self, sha: &str) -> Option<&'static str> {
+        self.settled(Some(sha))
+            .await
+            .ok()
+            .map(|(_, _, assessment)| assessment)
+    }
+}
+
+/// A task run that already reached a terminal status.
+struct Finished {
+    completed: bool,
+    error: Option<String>,
+}
+
+impl Finished {
+    fn read(row: &tasks::TaskRunRow) -> Option<Self> {
+        if matches!(row.status.as_str(), RUN_RUNNING | RUN_WAITING) {
+            return None;
+        }
+        Some(Self {
+            completed: row.status == RUN_COMPLETED,
+            error: row.error_message.clone(),
+        })
+    }
+
+    fn outcome(&self, run: Uuid, elapsed: Duration) -> String {
+        if self.completed {
+            task_run_completed(run, elapsed)
+        } else {
+            task_run_failed(
+                run,
+                elapsed,
+                self.error.as_deref().unwrap_or(RUN_UNKNOWN_ERROR),
+            )
+        }
+    }
+}
+
+struct Run {
+    run: Uuid,
+    events: broadcast::Receiver<ProgressMessage>,
+    finished: Option<Finished>,
+    database: PgPool,
+}
+
+impl Run {
+    async fn settle(mut self, started: Instant) -> String {
+        if let Some(finished) = self.finished {
+            return finished.outcome(self.run, started.elapsed());
+        }
+        loop {
+            match self.events.recv().await {
+                Ok(ProgressMessage::Completed { .. }) => {
+                    return task_run_completed(self.run, started.elapsed());
+                }
+                Ok(ProgressMessage::Failed { error }) => {
+                    return task_run_failed(self.run, started.elapsed(), &error);
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {
+                    // The terminal writer drops the channel right after it
+                    // publishes, so a closed channel means the run ended and
+                    // the row is the only place left to read the ending from.
+                    return match self.terminal().await {
+                        Some(finished) => finished.outcome(self.run, started.elapsed()),
+                        None => std::future::pending().await,
+                    };
+                }
+            }
+        }
+    }
+
+    async fn terminal(&self) -> Option<Finished> {
+        let row = tasks::get_task_run(&self.database, self.run).await.ok()??;
+        Finished::read(&row)
+    }
+}
+
+struct Commit {
+    checks: Box<dyn Checks>,
+    reference: String,
+    sha: String,
+    assessment: &'static str,
+}
+
+impl Commit {
+    async fn settle(mut self, started: Instant) -> String {
+        let mut unknown_since = None;
+        loop {
+            if SETTLED_ASSESSMENTS.contains(&self.assessment) {
+                return checks_settled(
+                    &self.reference,
+                    &self.sha,
+                    self.assessment,
+                    started.elapsed(),
+                );
+            }
+            if self.assessment == UNKNOWN_ASSESSMENT {
+                let since = *unknown_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= CHECK_SETTLE_GRACE {
+                    return checks_unknown(&self.reference, started.elapsed());
+                }
+            } else {
+                unknown_since = None;
+            }
+            tokio::time::sleep(CHECK_POLL_INTERVAL).await;
+            if let Some(assessment) = self.checks.assess(&self.sha).await {
+                self.assessment = assessment;
+            }
+        }
+    }
+}
+
+/// The already-open handle a registered wait sits on.
+enum Subscription {
+    Job(BoxFuture<'static, JobExited>),
+    Run(Run),
+    Commit(Commit),
+    /// Nothing to observe, so the deadline is the only way this ends.
+    Deadline,
+}
+
+impl Subscription {
+    async fn settle(self, started: Instant) -> String {
+        match self {
+            Self::Deadline => std::future::pending().await,
+            Self::Job(exit) => {
+                let JobExited { id, exit_code } = exit.await;
+                match exit_code {
+                    Some(code) => job_exited(&id, code, started.elapsed()),
+                    None => job_killed(&id, started.elapsed()),
+                }
+            }
+            Self::Run(run) => run.settle(started).await,
+            Self::Commit(commit) => commit.settle(started).await,
+        }
+    }
+}
+
+/// One open wait: what it is for, what it sits on, and when it started.
+///
+/// The clock starts at registration rather than at the await, so the elapsed
+/// time an outcome reports is how long since the model asked.
+struct Registration {
+    waiting: Waiting,
+    subject: String,
+    session: Session,
+    started: Instant,
+    subscription: Mutex<Subscription>,
+}
+
 /// Every open wait on this instance, keyed by the tool call that opened it.
 ///
 /// Process-local and not persisted, the same single-instance assumption the run
 /// socket and the question waiter already document: what is being waited on is
 /// a child process or a subscription this process holds, so a surviving row
 /// would claim a durability the thing does not have.
-static REGISTERED: Lazy<DashMap<String, Waiting>> = Lazy::new(DashMap::new);
+static REGISTERED: Lazy<DashMap<String, Registration>> = Lazy::new(DashMap::new);
+
+/// Waits opened but not yet tied to the call that opened them.
+///
+/// `Tool::execute` is never told the id of the call it is serving, so the tool
+/// claims its wait under the only identity it has. [`registered`] then binds it
+/// to the call id. One session can hold exactly one unclaimed wait: an
+/// ends-turn tool is never batched with anything and the loop returns the
+/// moment one completes.
+static PENDING: Lazy<DashMap<Session, Registration>> = Lazy::new(DashMap::new);
+
+/// How many waits a session has opened, and how far out any of them may reach.
+#[derive(Default)]
+struct Allowance {
+    taken: usize,
+    ceiling: Option<Instant>,
+}
+
+static SESSIONS: Lazy<DashMap<Session, Allowance>> = Lazy::new(DashMap::new);
+
+/// Claim the wait before the receipt is written.
+///
+/// The receipt is appended and streamed before the turn-ending event fires, so
+/// a wait registered any later could be settled by something that happened
+/// while the receipt was still in flight, with nobody subscribed to notice.
+fn stage(session: Session, registration: Registration) {
+    PENDING.insert(session, registration);
+}
+
+/// Register an open wait under the call that opened it.
+///
+/// The direct form, for a caller holding both the call id and what is being
+/// waited for. `wait_for::execute` cannot use it: `Tool::execute` is never told
+/// which call it is serving, so it claims by session and the loop binds the two
+/// together. A wait registered here has nothing subscribed behind it and ends
+/// at its own deadline.
+pub fn claim(tool_call_id: &str, waiting: Waiting, session: Session) {
+    REGISTERED.insert(
+        tool_call_id.to_string(),
+        Registration {
+            subject: subject(&waiting),
+            waiting,
+            session,
+            started: Instant::now(),
+            subscription: Mutex::new(Subscription::Deadline),
+        },
+    );
+}
+
+/// What a wait is called mid-sentence, from the wait alone.
+///
+/// A commit's subject quotes the SHA its reference resolved to, which only the
+/// call that resolved it holds, so that one is built there instead.
+fn subject(waiting: &Waiting) -> String {
+    match waiting.kind.as_str() {
+        KIND_TASK_RUN => {
+            Uuid::parse_str(&waiting.id).map_or_else(|_| waiting.id.clone(), task_run_subject)
+        }
+        KIND_CHECK => format!(
+            "checks on {}",
+            waiting.reference.as_deref().unwrap_or(&waiting.id)
+        ),
+        _ => job_subject(&waiting.id),
+    }
+}
 
 /// What a tool call is waiting for, for a caller that holds only its id.
 ///
 /// The loop reads the clamped deadline from here rather than re-parsing the
-/// call's arguments, because the clamp is `wait_for::execute`'s to apply.
+/// call's arguments, because the clamp is `wait_for::execute`'s to apply. The
+/// first lookup also binds the session's unclaimed wait to the call id.
 pub fn registered(tool_call_id: &str) -> Option<Waiting> {
-    REGISTERED.get(tool_call_id).map(|entry| entry.clone())
+    if let Some(entry) = REGISTERED.get(tool_call_id) {
+        return Some(entry.waiting.clone());
+    }
+    let session = sole_pending()?;
+    bind(session, tool_call_id)
+}
+
+/// Tie a session's unclaimed wait to the call that opened it.
+pub fn bind(session: Session, tool_call_id: &str) -> Option<Waiting> {
+    let (_, registration) = PENDING.remove(&session)?;
+    let waiting = registration.waiting.clone();
+    REGISTERED.insert(tool_call_id.to_string(), registration);
+    Some(waiting)
+}
+
+/// The one session holding an unclaimed wait, when exactly one does.
+///
+/// A caller that knows whose call it is holding should use [`bind`]: this is
+/// how a caller that does not gets the same answer, and it declines rather than
+/// guesses when two sessions have parked in the same instant.
+fn sole_pending() -> Option<Session> {
+    let mut sessions = PENDING.iter().map(|entry| *entry.key());
+    let first = sessions.next()?;
+    sessions.next().is_none().then_some(first)
+}
+
+/// How many waits this session has already opened.
+pub fn waits_taken(session: Session) -> usize {
+    SESSIONS.get(&session).map_or(0, |entry| entry.taken)
+}
+
+/// Hold this session's waits inside a deadline the surface owns.
+///
+/// Chat's whole turn is bounded by its stream deadline, which is computed after
+/// the tool set exists, so it reaches the tool here rather than through the
+/// context the tool set already froze. Tasks set none: the attempt timeout
+/// already covers every wait inside it.
+pub fn set_ceiling(session: Session, ceiling: Instant) {
+    SESSIONS.entry(session).or_default().ceiling = Some(ceiling);
+}
+
+fn ceiling(session: Session) -> Option<Instant> {
+    SESSIONS.get(&session).and_then(|entry| entry.ceiling)
+}
+
+/// Forget what a session spent and how far it could reach.
+///
+/// Called once per chat turn and at the top of each pass of a task's attempt
+/// loop, so a retried attempt does not inherit a spent counter. Unclaimed waits
+/// go with it: a turn cancelled between the receipt and the park would
+/// otherwise leave its subscription open for the life of the process.
+pub fn reset_session(session: Session) {
+    SESSIONS.remove(&session);
+    PENDING.remove(&session);
+    REGISTERED.retain(|_, registration| registration.session != session);
+}
+
+/// How long a wait may run, clamped to what the schema advertises and then to
+/// whatever the surface still has left.
+fn window(requested: Option<u64>, session: Session) -> Duration {
+    let seconds = requested
+        .unwrap_or(DEFAULT_WAIT_SECS)
+        .clamp(MIN_WAIT_SECS, MAX_WAIT_SECS);
+    let window = Duration::from_secs(seconds);
+    match ceiling(session) {
+        Some(ceiling) => window.min(ceiling.saturating_duration_since(Instant::now())),
+        None => window,
+    }
+}
+
+/// When a registered wait runs out, as a deadline this process can sleep to.
+pub fn deadline(waiting: &Waiting) -> Instant {
+    let remaining = DateTime::parse_from_rfc3339(&waiting.deadline)
+        .ok()
+        .and_then(|deadline| (deadline.with_timezone(&Utc) - Utc::now()).to_std().ok())
+        .unwrap_or_default();
+    Instant::now() + remaining
+}
+
+/// Wait for what `tool_call_id` registered, or for its deadline.
+///
+/// Polled in order, not at random: something that settles in the same tick as
+/// the deadline elapses has settled, and reporting that as a timeout would tell
+/// the model nothing had happened when it had.
+pub async fn await_outcome(tool_call_id: &str, deadline: Instant) -> String {
+    let Some((_, registration)) = REGISTERED.remove(tool_call_id) else {
+        return timed_out(LOST_SUBJECT, Duration::ZERO);
+    };
+    let started = registration.started;
+    let subject = registration.subject;
+    let subscription = registration.subscription.into_inner();
+    tokio::select! {
+        biased;
+        outcome = subscription.settle(started) => outcome,
+        _ = tokio::time::sleep_until(deadline) => timed_out(&subject, started.elapsed()),
+    }
+}
+
+pub fn register(registry: &mut ToolRegistry, scope: Option<&WorkspaceScope>) {
+    registry.register(Arc::new(WaitForTool {
+        scope: scope.cloned(),
+    }));
+}
+
+#[derive(Debug, Deserialize)]
+struct Request {
+    kind: String,
+    id: String,
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+    timeout_secs: Option<u64>,
+}
+
+struct WaitForTool {
+    scope: Option<WorkspaceScope>,
+}
+
+#[async_trait]
+impl Tool for WaitForTool {
+    fn name(&self) -> &str {
+        WAIT_FOR
+    }
+
+    fn description(&self) -> &str {
+        DESCRIPTION
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": [KIND_JOB, KIND_TASK_RUN, KIND_CHECK]},
+                "id": {
+                    "type": "string",
+                    "description": format!(
+                        "Job id for kind={KIND_JOB}, run id for kind={KIND_TASK_RUN}, \
+                         source id for kind={KIND_CHECK}."
+                    )
+                },
+                "ref": {
+                    "type": "string",
+                    "description": format!(
+                        "kind={KIND_CHECK} only: branch, tag or commit. Defaults to the source \
+                         branch."
+                    )
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "minimum": MIN_WAIT_SECS,
+                    "maximum": MAX_WAIT_SECS,
+                    "description": format!(
+                        "How long to wait. Default {DEFAULT_WAIT_SECS}. Size it to what you are \
+                         waiting for."
+                    )
+                }
+            },
+            "required": ["kind", "id"],
+            "additionalProperties": false
+        })
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+
+    fn ends_turn(&self) -> bool {
+        true
+    }
+
+    /// Authorize, resolve and register — never await.
+    ///
+    /// The receipt is appended and streamed strictly before the turn-ending
+    /// event fires, so at the moment it is written the thing being waited for
+    /// has not happened. The outcome is injected on resume instead. That is
+    /// also why the trait's own timeout is left alone: nothing here waits.
+    async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        Ok(match self.open(params, context).await {
+            Ok(receipt) => ToolResult::success(receipt),
+            Err(refusal) => ToolResult::error(refusal),
+        })
+    }
+}
+
+impl WaitForTool {
+    async fn open(&self, params: Value, context: &ToolContext) -> Result<String, String> {
+        let request: Request =
+            serde_json::from_value(params).map_err(|_| INVALID_ARGUMENTS.to_string())?;
+        if waits_taken(context.session) >= MAX_WAITS_PER_ATTEMPT {
+            return Err(too_many_waits());
+        }
+        let window = window(request.timeout_secs, context.session);
+        let started = Instant::now();
+
+        let (subject, reference, subscription) = match request.kind.as_str() {
+            KIND_JOB => self.job(&request, context)?,
+            KIND_TASK_RUN => self.run(&request, context).await?,
+            KIND_CHECK => self.commit(&request).await?,
+            other => return Err(unknown_kind(other)),
+        };
+
+        let waiting = Waiting {
+            kind: request.kind,
+            id: request.id,
+            reference,
+            deadline: (Utc::now() + window).to_rfc3339_opts(SecondsFormat::Secs, true),
+        };
+        let receipt = receipt(&subject, &waiting.deadline);
+        stage(
+            context.session,
+            Registration {
+                waiting,
+                subject,
+                session: context.session,
+                started,
+                subscription: Mutex::new(subscription),
+            },
+        );
+        SESSIONS.entry(context.session).or_default().taken += 1;
+        Ok(receipt)
+    }
+
+    fn job(
+        &self,
+        request: &Request,
+        context: &ToolContext,
+    ) -> Result<(String, Option<String>, Subscription), String> {
+        let exit = Jobs::settled(context.session, &request.id)?;
+        Ok((
+            job_subject(&request.id),
+            None,
+            Subscription::Job(Box::pin(exit)),
+        ))
+    }
+
+    /// A run is readable to every member of the workspace that owns it, which
+    /// is not necessarily the caller's own, so membership is proven and then
+    /// the run's workspace is checked against the one this tool set speaks for.
+    async fn run(
+        &self,
+        request: &Request,
+        context: &ToolContext,
+    ) -> Result<(String, Option<String>, Subscription), String> {
+        if matches!(context.session, Session::Task(_)) {
+            return Err(task_run_wait_unavailable());
+        }
+        let scope = self.scope.as_ref().ok_or(WORKSPACE_REQUIRED)?;
+        let run = Uuid::parse_str(&request.id).map_err(|_| RUN_ID_INVALID.to_string())?;
+        let database = scope.state.db();
+        let snapshot = task_access::read(database, run, scope.user_id)
+            .await
+            .map_err(|_| RUN_UNREADABLE.to_string())?
+            .ok_or(RUN_FOREIGN)?;
+        tasks::get_task(database, snapshot.run.task_id)
+            .await
+            .map_err(|_| RUN_UNREADABLE.to_string())?
+            .filter(|task| task.workspace_id == scope.workspace_id)
+            .ok_or(RUN_FOREIGN)?;
+
+        let broadcaster = scope.state.task_progress().clone();
+        let fresh = !broadcaster.tracks(run);
+        let events = broadcaster.subscribe(run);
+        // Read the status only once subscribed: a run that ends in between
+        // would otherwise publish its ending to nobody and hang until the
+        // deadline.
+        let row = tasks::get_task_run(database, run)
+            .await
+            .map_err(|_| RUN_UNREADABLE.to_string())?
+            .ok_or(RUN_FOREIGN)?;
+        let finished = Finished::read(&row);
+        if finished.is_some() && fresh {
+            broadcaster.remove(run);
+        }
+        Ok((
+            task_run_subject(run),
+            None,
+            Subscription::Run(Run {
+                run,
+                events,
+                finished,
+                database: database.clone(),
+            }),
+        ))
+    }
+
+    /// Resolve the reference now, so a typo costs a tool error rather than a
+    /// park, and settle now if the commit's checks are already in.
+    async fn commit(
+        &self,
+        request: &Request,
+    ) -> Result<(String, Option<String>, Subscription), String> {
+        let scope = self.scope.as_ref().ok_or(WORKSPACE_REQUIRED)?;
+        let source = Uuid::parse_str(&request.id).map_err(|_| SOURCE_ID_INVALID.to_string())?;
+        let github = self.github(scope, source).await?;
+        let (reference, sha, assessment) = github.settled(request.reference.as_deref()).await?;
+        Ok((
+            check_subject(&reference, &sha),
+            Some(reference.clone()),
+            Subscription::Commit(Commit {
+                checks: Box::new(github),
+                reference,
+                sha,
+                assessment,
+            }),
+        ))
+    }
+
+    async fn github(&self, scope: &WorkspaceScope, source: Uuid) -> Result<Github, String> {
+        let database = scope.state.db();
+        if !workspace_members::can_read(database, scope.workspace_id, scope.user_id)
+            .await
+            .map_err(|_| WORKSPACE_UNREADABLE.to_string())?
+        {
+            return Err(WORKSPACE_UNREADABLE.to_string());
+        }
+        let source = sources::get_source(database, source, scope.workspace_id)
+            .await
+            .map_err(|_| SOURCE_UNREADABLE.to_string())?
+            .filter(|source| source.is_active.unwrap_or(true))
+            .ok_or(SOURCE_FOREIGN)?;
+        if source.source_type != "github" {
+            return Err(SOURCE_NOT_GITHUB.to_string());
+        }
+        let mut configuration: Configuration = serde_json::from_value(source.config)
+            .map_err(|_| SOURCE_CONFIGURATION_INVALID.to_string())?;
+        if let Some(encrypted) = source.credentials_encrypted {
+            configuration.token = Some(
+                crate::crypto::decrypt(scope.state.encryption_key(), &encrypted)
+                    .map_err(|_| SOURCE_CREDENTIALS_INVALID.to_string())?,
+            );
+        }
+        Github::new(configuration)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::state::{AppState, test_config};
+    use std::collections::{HashMap, VecDeque};
+    use std::path::Path;
+    use std::sync::Mutex as Lock;
+    use tempfile::TempDir;
+    use zone_core::tools::job::{JobCommand, JobStarted};
+
+    const POLL: Duration = Duration::from_millis(20);
+    const POLL_LIMIT: usize = 500;
+    const CALL: &str = "call_7";
+    const FAR: Duration = Duration::from_secs(30);
+
+    /// The pending slot is process-wide and [`sole_pending`] declines when two
+    /// sessions hold one, so tests that open a wait observe it one at a time.
+    static EXCLUSIVE: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+
+    fn chat() -> Session {
+        Session::Chat(Uuid::new_v4())
+    }
+
+    fn tool() -> WaitForTool {
+        WaitForTool { scope: None }
+    }
+
+    fn scoped(state: AppState, workspace: Uuid, user: Uuid) -> WaitForTool {
+        WaitForTool {
+            scope: Some(WorkspaceScope {
+                state,
+                workspace_id: workspace,
+                chat_id: Some(Uuid::new_v4()),
+                user_id: user,
+            }),
+        }
+    }
+
+    fn context(session: Session) -> ToolContext {
+        ToolContext {
+            session,
+            ..Default::default()
+        }
+    }
+
+    fn environment() -> HashMap<String, String> {
+        HashMap::from([(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        )])
+    }
+
+    async fn spawned(session: Session, line: &str, cwd: &Path) -> JobStarted {
+        Jobs::spawn(session, &JobCommand::shell(line), cwd, &environment())
+            .await
+            .expect("the job starts")
+    }
+
+    async fn settles(session: Session, id: &str) {
+        for _ in 0..POLL_LIMIT {
+            if Jobs::read(session, id, 0, 1)
+                .await
+                .expect("its own session reads it")
+                .state
+                .settled()
+            {
+                return;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        panic!("{id} never settled");
+    }
+
+    /// Open a wait and tie it to [`CALL`], the way the loop does.
+    async fn opened(tool: &WaitForTool, session: Session, request: Value) -> ToolResult {
+        let result = tool
+            .execute(request, &context(session))
+            .await
+            .expect("wait_for reports refusals as tool errors");
+        if result.success {
+            registered(CALL).expect("execute registered the wait it acknowledged");
+        }
+        result
+    }
+
+    fn refused(result: &ToolResult) -> String {
+        assert!(!result.success, "expected a refusal, got {result:?}");
+        result.error.clone().expect("a refusal carries its reason")
+    }
+
+    fn receipted(result: &ToolResult) -> String {
+        assert!(result.success, "expected a receipt, got {result:?}");
+        result.output.clone().expect("a receipt carries its text")
+    }
+
+    /// A commit whose checks answer from a script rather than from GitHub.
+    struct Scripted(Lock<VecDeque<&'static str>>);
+
+    #[async_trait]
+    impl Checks for Scripted {
+        async fn assess(&self, _sha: &str) -> Option<&'static str> {
+            self.0
+                .lock()
+                .expect("the script is not poisoned")
+                .pop_front()
+        }
+    }
+
+    fn commit(assessment: &'static str, polls: &[&'static str]) -> Commit {
+        Commit {
+            checks: Box::new(Scripted(Lock::new(polls.iter().copied().collect()))),
+            reference: "main".to_string(),
+            sha: "8c4d21fa9b7e6053".to_string(),
+            assessment,
+        }
+    }
 
     /// Anything a model could read as "it passed".
     const SUCCESS_WORDS: [&str; 5] = ["success", "succeeded", "completed", "passed", "done"];
@@ -337,11 +1074,6 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_nobody_registered_is_not_found() {
-        assert_eq!(registered("call_that_never_waited"), None);
-    }
-
-    #[test]
     fn a_waiting_card_omits_a_reference_it_does_not_have() {
         let waiting = Waiting {
             kind: KIND_JOB.to_string(),
@@ -371,5 +1103,523 @@ mod tests {
             serde_json::from_value::<WaitSettled>(json).unwrap(),
             settled
         );
+    }
+
+    #[test]
+    fn the_schema_publishes_the_window_it_clamps_to() {
+        let schema = tool().parameters_schema();
+        let timeout = &schema["properties"]["timeout_secs"];
+        assert_eq!(
+            timeout["minimum"], MIN_WAIT_SECS,
+            "a model that cannot see the minimum will ask for a poll: {schema}"
+        );
+        assert_eq!(timeout["maximum"], MAX_WAIT_SECS, "{schema}");
+        assert_eq!(
+            schema["properties"]["kind"]["enum"],
+            json!([KIND_JOB, KIND_TASK_RUN, KIND_CHECK]),
+            "{schema}"
+        );
+        assert_eq!(schema["required"], json!(["kind", "id"]), "{schema}");
+        assert_eq!(schema["additionalProperties"], json!(false), "{schema}");
+    }
+
+    #[test]
+    fn a_wait_ends_the_turn_and_keeps_the_default_tool_timeout() {
+        let tool = tool();
+        assert!(tool.ends_turn());
+        assert_eq!(tool.tier(), Tier::Read);
+        assert_eq!(
+            tool.timeout(&context(chat())),
+            Duration::from_secs(30),
+            "execute only registers, so the outer bound has nothing to accommodate"
+        );
+    }
+
+    #[test]
+    fn a_requested_window_is_clamped_to_what_the_schema_advertises() {
+        let session = chat();
+        assert_eq!(
+            window(None, session),
+            Duration::from_secs(DEFAULT_WAIT_SECS)
+        );
+        assert_eq!(window(Some(1), session), Duration::from_secs(MIN_WAIT_SECS));
+        assert_eq!(
+            window(Some(u64::MAX), session),
+            Duration::from_secs(MAX_WAIT_SECS)
+        );
+        assert_eq!(window(Some(900), session), Duration::from_secs(900));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_window_is_clamped_again_to_the_ceiling_the_surface_owns() {
+        let session = chat();
+        set_ceiling(session, Instant::now() + Duration::from_secs(60));
+        assert_eq!(
+            window(None, session),
+            Duration::from_secs(60),
+            "a chat turn cannot outlast its own stream deadline"
+        );
+        reset_session(session);
+        assert_eq!(
+            window(None, session),
+            Duration::from_secs(DEFAULT_WAIT_SECS),
+            "resetting clears the ceiling with the counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_that_exits_during_the_wait_reports_its_code() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        let directory = TempDir::new().expect("a temporary working directory");
+        let session = chat();
+        let job = spawned(session, "sleep 0.2; exit 0", directory.path()).await;
+
+        let opened = opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
+        assert_eq!(
+            receipted(&opened),
+            receipt(&job_subject(&job.id), &registered(CALL).unwrap().deadline)
+        );
+
+        let outcome = await_outcome(CALL, Instant::now() + FAR).await;
+        assert_eq!(outcome, job_exited(&job.id, 0, Duration::ZERO));
+        reset_session(session);
+    }
+
+    #[tokio::test]
+    async fn a_job_that_had_already_exited_is_reported_at_once() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        let directory = TempDir::new().expect("a temporary working directory");
+        let session = chat();
+        let job = spawned(session, "exit 1", directory.path()).await;
+        settles(session, &job.id).await;
+
+        opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
+        let started = std::time::Instant::now();
+        let outcome = await_outcome(CALL, Instant::now() + FAR).await;
+        assert_eq!(outcome, job_exited(&job.id, 1, Duration::ZERO));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a job that ended before the wait was issued must not wait out its deadline"
+        );
+        reset_session(session);
+    }
+
+    #[tokio::test]
+    async fn opening_a_job_wait_returns_well_inside_the_tool_timeout() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        let directory = TempDir::new().expect("a temporary working directory");
+        let session = chat();
+        let job = spawned(session, "sleep 30", directory.path()).await;
+
+        let started = std::time::Instant::now();
+        let opened = opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
+        let elapsed = started.elapsed();
+        assert!(opened.success, "{opened:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "execute authorizes and registers only, but took {elapsed:?}"
+        );
+        reset_session(session);
+        Jobs::kill_session(session).await;
+    }
+
+    #[tokio::test]
+    async fn a_wait_that_runs_out_reports_a_timeout_rather_than_a_result() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        let directory = TempDir::new().expect("a temporary working directory");
+        let session = chat();
+        let job = spawned(session, "sleep 30", directory.path()).await;
+
+        opened(&tool(), session, json!({"kind": KIND_JOB, "id": &job.id})).await;
+        let outcome = await_outcome(CALL, Instant::now()).await;
+        assert_eq!(outcome, timed_out(&job_subject(&job.id), Duration::ZERO));
+        assert_unphrasable_as_success(&outcome);
+        reset_session(session);
+        Jobs::kill_session(session).await;
+    }
+
+    #[tokio::test]
+    async fn a_job_from_another_session_is_refused() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        let directory = TempDir::new().expect("a temporary working directory");
+        let owner = chat();
+        let stranger = chat();
+        let job = spawned(owner, "sleep 30", directory.path()).await;
+
+        let refusal = tool()
+            .execute(json!({"kind": KIND_JOB, "id": &job.id}), &context(stranger))
+            .await
+            .unwrap();
+        assert!(refused(&refusal).contains(&job.id));
+        assert_eq!(waits_taken(stranger), 0, "a refused wait is not a wait");
+        Jobs::kill_session(owner).await;
+    }
+
+    #[tokio::test]
+    async fn waiting_on_a_task_run_is_refused_from_inside_a_task_run() {
+        let session = Session::Task(Uuid::new_v4());
+        let refusal = tool()
+            .execute(
+                json!({"kind": KIND_TASK_RUN, "id": Uuid::new_v4().to_string()}),
+                &context(session),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused(&refusal), task_run_wait_unavailable());
+    }
+
+    #[tokio::test]
+    async fn the_eleventh_wait_in_an_attempt_is_an_error_rather_than_a_park() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        let directory = TempDir::new().expect("a temporary working directory");
+        let session = chat();
+        let job = spawned(session, "sleep 30", directory.path()).await;
+        let request = json!({"kind": KIND_JOB, "id": &job.id});
+
+        for taken in 0..MAX_WAITS_PER_ATTEMPT {
+            assert_eq!(waits_taken(session), taken);
+            let opened = tool()
+                .execute(request.clone(), &context(session))
+                .await
+                .unwrap();
+            assert!(opened.success, "wait {taken} was refused: {opened:?}");
+        }
+        let refusal = tool()
+            .execute(request.clone(), &context(session))
+            .await
+            .unwrap();
+        assert_eq!(refused(&refusal), too_many_waits());
+
+        reset_session(session);
+        assert_eq!(waits_taken(session), 0);
+        let after = tool().execute(request, &context(session)).await.unwrap();
+        assert!(after.success, "a reset attempt starts over: {after:?}");
+        reset_session(session);
+        Jobs::kill_session(session).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_commit_whose_checks_settle_reports_what_they_settled_to() {
+        for assessment in SETTLED_ASSESSMENTS {
+            let started = Instant::now();
+            let outcome = commit("pending", &[assessment]).settle(started).await;
+            assert_eq!(
+                outcome,
+                checks_settled("main", "8c4d21fa9b7e6053", assessment, CHECK_POLL_INTERVAL)
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_commit_whose_checks_had_already_settled_is_reported_at_once() {
+        let started = Instant::now();
+        let outcome = commit("success", &[]).settle(started).await;
+        assert_eq!(
+            outcome,
+            checks_settled("main", "8c4d21fa9b7e6053", "success", Duration::ZERO),
+            "a commit already green when the wait opened must not wait out a poll"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_commit_nothing_reports_on_ends_the_wait_without_reading_as_a_pass() {
+        let outcome = commit(UNKNOWN_ASSESSMENT, &[]).settle(Instant::now()).await;
+        assert_eq!(outcome, checks_unknown("main", CHECK_SETTLE_GRACE));
+        assert_unphrasable_as_success(&outcome);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_commit_that_starts_reporting_again_restarts_the_grace_period() {
+        let unknown = UNKNOWN_ASSESSMENT;
+        let polls = [
+            unknown, unknown, "pending", unknown, unknown, unknown, "success",
+        ];
+        let outcome = commit(unknown, &polls).settle(Instant::now()).await;
+        assert_eq!(
+            outcome,
+            checks_settled(
+                "main",
+                "8c4d21fa9b7e6053",
+                "success",
+                CHECK_POLL_INTERVAL * polls.len() as u32
+            ),
+            "the grace period measures continuous silence, so one reporting poll restarts it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_directly_registered_wait_is_found_under_its_call_and_ends_at_its_deadline() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        let session = chat();
+        let run = Uuid::new_v4();
+        let waiting = Waiting {
+            kind: KIND_TASK_RUN.to_string(),
+            id: run.to_string(),
+            reference: None,
+            deadline: "2026-09-12T10:15:00Z".to_string(),
+        };
+        claim("call_9", waiting.clone(), session);
+        assert_eq!(
+            registered("call_9"),
+            Some(waiting),
+            "the loop reads what a wait is for from its call id"
+        );
+        assert_eq!(
+            await_outcome("call_9", Instant::now()).await,
+            timed_out(&task_run_subject(run), Duration::ZERO),
+            "a wait with nothing behind it still ends, and says it did not finish"
+        );
+        assert_eq!(
+            registered("call_9"),
+            None,
+            "settling a wait releases it, so a second await cannot resolve it again"
+        );
+        reset_session(session);
+    }
+
+    #[test]
+    fn a_subject_is_readable_from_the_wait_alone() {
+        let run = Uuid::parse_str("2f1c9e8a-0b44-4d7e-9c31-5a6b7c8d9e0f").unwrap();
+        let waiting = |kind: &str, id: &str, reference: Option<&str>| Waiting {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            reference: reference.map(str::to_string),
+            deadline: "2026-09-12T10:15:00Z".to_string(),
+        };
+        assert_eq!(
+            subject(&waiting(KIND_JOB, "job_9f3c1a7b2e04", None)),
+            "job_9f3c1a7b2e04"
+        );
+        assert_eq!(
+            subject(&waiting(KIND_TASK_RUN, &run.to_string(), None)),
+            task_run_subject(run)
+        );
+        assert_eq!(
+            subject(&waiting(KIND_CHECK, "a-source", Some("main"))),
+            "checks on main"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wait_nobody_registered_settles_as_a_timeout() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        assert_eq!(registered("call_that_never_waited"), None);
+        assert_eq!(
+            await_outcome("call_that_never_waited", Instant::now() + FAR).await,
+            timed_out(LOST_SUBJECT, Duration::ZERO)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated PostgreSQL via TEST_DATABASE_URL"]
+    async fn a_task_run_settles_from_the_event_its_writers_publish() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        let fixture = Fixture::create().await;
+        let run = fixture.run(fixture.workspace).await;
+        let session = chat();
+
+        let started = std::time::Instant::now();
+        let opened = opened(
+            &fixture.tool(),
+            session,
+            json!({"kind": KIND_TASK_RUN, "id": run.to_string()}),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(opened.success, "{opened:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "execute subscribes rather than waiting, but took {elapsed:?}"
+        );
+        assert!(receipted(&opened).contains(&task_run_subject(run)));
+
+        tokio::spawn(async move {
+            tokio::time::sleep(POLL).await;
+            crate::ws::task_run::publish_terminal(run, "completed", None);
+        });
+        let outcome = await_outcome(CALL, Instant::now() + FAR).await;
+        assert_eq!(outcome, task_run_completed(run, Duration::ZERO));
+        reset_session(session);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated PostgreSQL via TEST_DATABASE_URL"]
+    async fn a_task_run_that_had_already_finished_is_reported_at_once() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        let fixture = Fixture::create().await;
+        let run = fixture.run(fixture.workspace).await;
+        fixture.finish(run, "failed", Some("the build broke")).await;
+        let session = chat();
+
+        opened(
+            &fixture.tool(),
+            session,
+            json!({"kind": KIND_TASK_RUN, "id": run.to_string()}),
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let outcome = await_outcome(CALL, Instant::now() + FAR).await;
+        assert_eq!(
+            outcome,
+            task_run_failed(run, Duration::ZERO, "the build broke")
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a run that ended before the wait was issued must not wait out its deadline"
+        );
+        reset_session(session);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated PostgreSQL via TEST_DATABASE_URL"]
+    async fn a_run_in_another_workspace_is_refused_to_one_of_its_own_members() {
+        let _exclusive = EXCLUSIVE.lock().await;
+        let fixture = Fixture::create().await;
+        let foreign = fixture.workspace("foreign").await;
+        workspace_members::add_member(
+            &fixture.pool,
+            foreign,
+            fixture.user,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .expect("the caller joins the workspace that owns the run");
+        let run = fixture.run(foreign).await;
+
+        assert!(
+            task_access::read(&fixture.pool, run, fixture.user)
+                .await
+                .expect("the membership read succeeds")
+                .is_some(),
+            "membership of the run's own workspace is exactly what must not be enough"
+        );
+        let refusal = fixture
+            .tool()
+            .execute(
+                json!({"kind": KIND_TASK_RUN, "id": run.to_string()}),
+                &context(chat()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused(&refusal), RUN_FOREIGN);
+    }
+
+    /// A workspace, a member, and runs to wait on.
+    struct Fixture {
+        pool: PgPool,
+        state: AppState,
+        workspace: Uuid,
+        user: Uuid,
+        organization: Uuid,
+        identifier: Uuid,
+    }
+
+    impl Fixture {
+        async fn create() -> Self {
+            use crate::db::{organizations, users, workspaces};
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL required"),
+            )
+            .await
+            .expect("the test database accepts connections");
+            let identifier = Uuid::new_v4();
+            let organization = organizations::create_organization(
+                &pool,
+                "Wait test",
+                &format!("wait-{identifier}"),
+                None,
+            )
+            .await
+            .unwrap()
+            .id;
+            let user = users::create_user(
+                &pool,
+                &format!("wait-{identifier}@example.test"),
+                "hash",
+                None,
+                false,
+            )
+            .await
+            .unwrap()
+            .id;
+            let workspace = workspaces::create_workspace(
+                &pool,
+                organization,
+                "Own",
+                &format!("own-{identifier}"),
+                None,
+            )
+            .await
+            .unwrap()
+            .id;
+            workspace_members::add_member(
+                &pool,
+                workspace,
+                user,
+                workspace_members::WorkspaceRole::Member,
+                None,
+            )
+            .await
+            .unwrap();
+            let state = AppState::new(test_config(), pool.clone(), None);
+            Self {
+                pool,
+                state,
+                workspace,
+                user,
+                organization,
+                identifier,
+            }
+        }
+
+        fn tool(&self) -> WaitForTool {
+            scoped(self.state.clone(), self.workspace, self.user)
+        }
+
+        async fn workspace(&self, name: &str) -> Uuid {
+            crate::db::workspaces::create_workspace(
+                &self.pool,
+                self.organization,
+                name,
+                &format!("{name}-{}", self.identifier),
+                None,
+            )
+            .await
+            .unwrap()
+            .id
+        }
+
+        async fn run(&self, workspace: Uuid) -> Uuid {
+            let task = tasks::create_task(
+                &self.pool,
+                workspace,
+                &[],
+                "Wait",
+                "Wait for something",
+                None,
+                None,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            tasks::create_task_run_as(&self.pool, task.id, None)
+                .await
+                .unwrap()
+                .id
+        }
+
+        async fn finish(&self, run: Uuid, status: &str, error: Option<&str>) {
+            sqlx::query(
+                "UPDATE task_runs SET status = $2, error_message = $3, completed_at = NOW() WHERE id = $1",
+            )
+            .bind(run)
+            .bind(status)
+            .bind(error)
+            .execute(&self.pool)
+            .await
+            .expect("the fixture ends the run");
+        }
     }
 }
