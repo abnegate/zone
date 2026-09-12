@@ -128,11 +128,23 @@ function handle(citation: Citation): string | null {
   return citation.identifier?.trim().toLowerCase() || null;
 }
 
+/// One source retrieved twice in a turn is one citation, and it has to read as
+/// the most the server actually saw. A document listed without its content and
+/// then read in full is complete evidence: leaving the listing's citation in
+/// place tells the reader the content was unavailable for a passage the reply
+/// is quoting. Only an incomplete citation gives way, so a later listing never
+/// takes back what a read proved, and the observation keeps its first time.
 export function mergeCitations(existing: Citation[] | undefined, incoming: Citation[]): Citation[] {
   const merged = [...(existing ?? [])];
   for (const citation of incoming) {
-    if (merged.some((seen) => sameSource(seen, citation))) continue;
-    merged.push(citation);
+    const seen = merged.findIndex((known) => sameSource(known, citation));
+    if (seen === -1) {
+      merged.push(citation);
+      continue;
+    }
+    if (!merged[seen].complete && citation.complete) {
+      merged[seen] = { ...citation, observed_at: merged[seen].observed_at };
+    }
   }
   return merged;
 }

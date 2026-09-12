@@ -125,11 +125,32 @@ pub fn merge(existing: &mut Vec<Citation>, incoming: impl IntoIterator<Item = Ci
         if !citation.usable() {
             continue;
         }
-        if existing.iter().any(|seen| same_source(seen, &citation)) {
-            continue;
+        match existing
+            .iter_mut()
+            .find(|seen| same_source(seen, &citation))
+        {
+            Some(seen) => prove(seen, citation),
+            None => existing.push(citation),
         }
-        existing.push(citation);
     }
+}
+
+/// One source retrieved twice in a turn is one citation, and it has to read as
+/// the most the server actually saw. A document listed without its content and
+/// then read in full is complete evidence: leaving the listing's citation in
+/// place tells the reader the content was unavailable for a passage the reply
+/// is quoting.
+///
+/// Only an incomplete citation gives way, so a later listing never takes back
+/// what a read proved, and the observation keeps its first time: retrieving a
+/// source again does not make the earlier sighting fresher.
+fn prove(seen: &mut Citation, incoming: Citation) {
+    if seen.complete || !incoming.complete {
+        return;
+    }
+    let observed_at = std::mem::take(&mut seen.observed_at);
+    *seen = incoming;
+    seen.observed_at = observed_at;
 }
 
 /// Whether two citations name the same source.
@@ -920,6 +941,94 @@ mod tests {
             "one address backed two sources and the second was folded away, so its marker \
              in the reply renders as a fabrication"
         );
+    }
+
+    #[test]
+    fn merge_lets_a_document_that_was_read_answer_for_the_one_that_was_listed() {
+        let listed = citations(
+            "list_documents",
+            json!({
+                "observed_at": OBSERVED,
+                "documents": [{
+                    "title": "Guide",
+                    "uri": "knowledge://11111111-1111-1111-1111-111111111111",
+                    "identifier": "doc:8846fb",
+                    "content": null
+                }]
+            }),
+        )
+        .remove(0);
+        assert!(!listed.complete, "the list sends no content");
+
+        let read = citations(
+            "read_document",
+            json!({
+                "complete": true,
+                "content_state": "stored_text",
+                "observed_at": "2026-09-05T00:00:30+00:00",
+                "document": {
+                    "title": "Guide",
+                    "uri": "knowledge://11111111-1111-1111-1111-111111111111",
+                    "identifier": "doc:8846fb",
+                    "content": "The release captain is Ilse Tarrant."
+                }
+            }),
+        )
+        .remove(0);
+
+        let mut merged = vec![listed];
+        merge(&mut merged, [read]);
+
+        assert_eq!(merged.len(), 1, "one document, one citation");
+        assert!(
+            merged[0].complete,
+            "the server read this document in the same turn, so the reply's chip must not              tell the reader its content was unavailable"
+        );
+        assert_eq!(merged[0].outcome, CitationOutcome::Observed);
+        assert_eq!(merged[0].note, None);
+        assert_eq!(
+            merged[0].observed_at, OBSERVED,
+            "reading a source again does not make the first sighting fresher"
+        );
+    }
+
+    #[test]
+    fn merge_does_not_let_a_later_listing_take_back_what_a_read_proved() {
+        let read = citations(
+            "read_document",
+            json!({
+                "complete": true,
+                "content_state": "stored_text",
+                "observed_at": OBSERVED,
+                "document": {
+                    "title": "Guide",
+                    "uri": "knowledge://11111111-1111-1111-1111-111111111111",
+                    "identifier": "doc:8846fb",
+                    "content": "The release captain is Ilse Tarrant."
+                }
+            }),
+        )
+        .remove(0);
+        let listed = citations(
+            "list_documents",
+            json!({
+                "observed_at": "2026-09-05T00:00:30+00:00",
+                "documents": [{
+                    "title": "Guide",
+                    "uri": "knowledge://11111111-1111-1111-1111-111111111111",
+                    "identifier": "doc:8846fb",
+                    "content": null
+                }]
+            }),
+        )
+        .remove(0);
+
+        let mut merged = vec![read];
+        merge(&mut merged, [listed]);
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].complete);
+        assert_eq!(merged[0].note, None);
     }
 
     #[test]

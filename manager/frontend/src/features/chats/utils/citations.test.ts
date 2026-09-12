@@ -125,6 +125,61 @@ describe('citation presentation', () => {
     expect(mergeCitations([cited], [again])).toEqual([cited]);
   });
 
+  it('lets a document that was read answer for the one that was listed', () => {
+    const url = 'knowledge://11111111-1111-1111-1111-111111111111';
+    const listed = citation({
+      kind: 'workspace_document',
+      identifier: 'doc:8846fb',
+      url,
+      revision: null,
+      complete: false,
+      outcome: 'incomplete',
+      note: 'Stored content was unavailable; this is not a complete document.',
+    });
+    const read = citation({
+      kind: 'workspace_document',
+      identifier: 'doc:8846fb',
+      url,
+      revision: null,
+      complete: true,
+      outcome: 'observed',
+      observed_at: '2026-09-05T00:00:30+00:00',
+    });
+
+    const merged = mergeCitations([listed], [read]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].complete).toBe(true);
+    expect(merged[0].outcome).toBe('observed');
+    expect(merged[0].note).toBeUndefined();
+    expect(merged[0].observed_at).toBe('2026-09-05T00:00:00+00:00');
+  });
+
+  it('does not let a later listing take back what a read proved', () => {
+    const url = 'knowledge://11111111-1111-1111-1111-111111111111';
+    const read = citation({
+      kind: 'workspace_document',
+      identifier: 'doc:8846fb',
+      url,
+      revision: null,
+      complete: true,
+      outcome: 'observed',
+    });
+    const listed = citation({
+      kind: 'workspace_document',
+      identifier: 'doc:8846fb',
+      url,
+      revision: null,
+      complete: false,
+      outcome: 'incomplete',
+      note: 'Stored content was unavailable; this is not a complete document.',
+    });
+
+    const merged = mergeCitations([read], [listed]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].complete).toBe(true);
+    expect(merged[0].note).toBeUndefined();
+  });
+
   it('names a knowledge passage', () => {
     expect(citationKindLabel('knowledge_passage')).toBe('Knowledge passage');
   });
