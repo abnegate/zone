@@ -1396,6 +1396,7 @@ const WAIT_FOR: &str = "wait_for";
 const WAIT_FOR_PLACEHOLDER: &str = "{WAIT_FOR_TOOL}";
 const WAIT_FOR_BINDING: &str = "const WAIT_FOR_TOOL: &str = \"wait_for\";";
 const COMMAND_RS: &str = "runner/zone_core/src/tools/command.rs";
+const JOB_RS: &str = "runner/zone_core/src/tools/job.rs";
 const ACTIONS_RS: &str = "runner/zone_server/src/agent/actions.rs";
 const LITERAL_END: &str = "\";";
 const FORMAT_END: &str = ")";
@@ -1547,5 +1548,12 @@ fn every_rewritten_string_points_the_model_at_the_wait_tool() {
         command.contains(WAIT_FOR_BINDING),
         "the two schema strings name the tool through a constant, and that constant is what \
          binds the placeholder to {WAIT_FOR}"
+    );
+
+    let job = fs::read_to_string(repository.join(JOB_RS)).expect("job.rs is readable");
+    assert!(
+        job.contains(WAIT_FOR_BINDING),
+        "the spawn receipt points the model at the tool through a second copy of the constant, \
+         and that copy binds it to {WAIT_FOR} too"
     );
 }
