@@ -5,7 +5,8 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::{HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
@@ -125,12 +126,53 @@ fn stream(status: u16, deltas: Vec<Value>) -> ResponseTemplate {
 /// costs a test milliseconds rather than the default acquire timeout.
 const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// Where a chat tool set in this binary has its session checkout, and so where
+/// a job started through one writes its log.
+///
+/// A chat takes its checkout from the process environment, which under `cargo
+/// test` is this crate's own directory: a suite that lets a job reach the
+/// filesystem would write `.zone/jobs/` into the source tree. Cargo's
+/// integration temp directory is outside the tree, is stable between runs so
+/// nothing accumulates, and is already ignored.
+///
+/// Set once for the whole binary rather than per test, because every tool set
+/// here is assembled through [`chat_catalog`], which forces this first: an
+/// environment written while another test thread is reading one is the reason
+/// the call is unsafe at all.
+static CHECKOUT: LazyLock<PathBuf> = LazyLock::new(|| {
+    let checkout = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("chat-agent-checkout");
+    std::fs::create_dir_all(&checkout).expect("a checkout for the chat tool sets to root in");
+    unsafe { std::env::set_var("ZONE_CHAT_AGENT_CWD", &checkout) };
+    checkout
+});
+
+/// This crate's own directory — the tree a job log must never reach.
+fn crate_directory() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The source tree carries no job log tree, from this suite or an earlier run.
+///
+/// A tripwire, not the proof: it cannot know whether the test that could write
+/// one has run yet, so the job test asserts this for itself once its job
+/// exists. This one catches residue any run of this binary left behind.
+#[test]
+fn no_job_log_tree_stands_in_the_source_checkout() {
+    let zone = crate_directory().join(".zone");
+    assert!(
+        !zone.exists(),
+        "a run of this suite left a job log tree at {}",
+        zone.display()
+    );
+}
+
 /// The catalog the server assembles for one chat turn.
 ///
 /// The chat id is a parameter because a job or a wait is keyed on the session
 /// the tool set carries, and a caller that has to clean either up afterwards
 /// needs to name the same session the tools staged under.
 async fn chat_catalog(chat_id: Uuid) -> ChatTools {
+    LazyLock::force(&CHECKOUT);
     let pool = PgPoolOptions::new()
         .acquire_timeout(ACQUIRE_TIMEOUT)
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
@@ -1695,6 +1737,8 @@ async fn a_wait_hands_its_round_back_while_a_question_spends_it() {
     const QUEUED: &str = "queued_1";
     const JOB_CALL: &str = "background_1";
 
+    // The command's own directory, deliberately not the session's checkout:
+    // where the model points a command must not move the job's log.
     let directory = tempfile::TempDir::new().unwrap();
     let cwd = directory.path().to_string_lossy().into_owned();
     let chat = Uuid::new_v4();
@@ -1771,10 +1815,20 @@ async fn a_wait_hands_its_round_back_while_a_question_spends_it() {
         killed, 1,
         "the job the turn started was not this chat session's to end"
     );
+    let log = Path::new(&receipt.log_path);
     assert!(
-        receipt.log_path.starts_with(&cwd),
-        "the job log landed outside the call's own directory: {}",
+        log.starts_with(&*CHECKOUT),
+        "the job log landed outside the session's own checkout: {}",
         receipt.log_path
+    );
+    assert!(
+        !log.starts_with(&cwd),
+        "the directory the call named moved the job's log: {}",
+        receipt.log_path
+    );
+    assert!(
+        !crate_directory().join(".zone").exists(),
+        "a chat job wrote its log tree into the source checkout"
     );
     assert_eq!(waiting.kind, KIND_JOB);
     assert_eq!(waiting.id, receipt.id);
