@@ -252,7 +252,7 @@ async fn an_entry_stored_while_embedding_is_unreachable_says_so_and_is_recovered
     knowledge_refresh::recover_unindexed(
         client.state(),
         &knowledge_refresh::permits(),
-        &knowledge_refresh::backoff(),
+        &knowledge_refresh::recovery(),
     )
     .await
     .expect("a recovery pass");
@@ -300,9 +300,9 @@ async fn a_recovery_pass_is_bounded_and_backs_off_while_embedding_stays_down() {
     sort_first(&client, &ids, "1970-01-01 00:00:02").await;
 
     let permits = knowledge_refresh::permits();
-    let backoff = knowledge_refresh::backoff();
+    let recovery = knowledge_refresh::recovery();
 
-    knowledge_refresh::recover_unindexed(client.state(), &permits, &backoff)
+    knowledge_refresh::recover_unindexed(client.state(), &permits, &recovery)
         .await
         .expect("the first pass");
     let after_first = embedding.calls();
@@ -319,7 +319,7 @@ async fn a_recovery_pass_is_bounded_and_backs_off_while_embedding_stays_down() {
         ids.len()
     );
 
-    knowledge_refresh::recover_unindexed(client.state(), &permits, &backoff)
+    knowledge_refresh::recover_unindexed(client.state(), &permits, &recovery)
         .await
         .expect("the second pass");
 

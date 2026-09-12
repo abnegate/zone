@@ -440,11 +440,10 @@ pub async fn list_entries_due_for_refresh(
 pub struct KnowledgeUnindexed {
     pub id: Uuid,
     pub workspace_id: Uuid,
-    pub title: String,
     pub content: String,
 }
 
-/// Find active entries that semantic search cannot see.
+/// Find active entries that semantic search cannot see, oldest first.
 ///
 /// Storing an entry whose embedding failed is deliberate -- losing the text the
 /// user just gave us to an embedding outage would be worse. Leaving it out of
@@ -452,14 +451,16 @@ pub struct KnowledgeUnindexed {
 ///
 /// Blank content is excluded because there is nothing to embed, and a row that
 /// can never succeed would otherwise be a candidate on every pass for the life
-/// of the workspace.
+/// of the workspace. `offset` is how a caller whose last bite failed asks for
+/// the next one instead of the same rows again.
 pub async fn list_entries_missing_embeddings(
     pool: &PgPool,
     limit: i64,
+    offset: i64,
 ) -> DbResult<Vec<KnowledgeUnindexed>> {
     sqlx::query_as::<_, KnowledgeUnindexed>(
         r#"
-        SELECT id, workspace_id, title, content
+        SELECT id, workspace_id, content
         FROM knowledge_entries
         WHERE is_active = TRUE
           AND btrim(content) <> ''
@@ -467,11 +468,12 @@ pub async fn list_entries_missing_embeddings(
               SELECT 1 FROM knowledge_embeddings stored
               WHERE stored.knowledge_entry_id = knowledge_entries.id
           )
-        ORDER BY created_at ASC
-        LIMIT $1
+        ORDER BY created_at ASC, id ASC
+        LIMIT $1 OFFSET $2
         "#,
     )
     .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
 }
