@@ -63,9 +63,9 @@ export const TaskRunSchema = z.object({
   progress_percent: z.number().nullable(),
   error_message: z.string().nullable(),
   /**
-   * On the row, and formatted for a task by the same route, but not yet on the
-   * run it sends. `schemas.contract.test.ts` names these two as what the route
-   * still owes and fails the day it pays, so the allowance goes with the debt.
+   * Null until the run starts and until it finishes. Optional as well, so a
+   * reply from a server older than the route that began sending them still
+   * parses rather than costing the run its card.
    */
   started_at: z.string().nullable().optional(),
   completed_at: z.string().nullable().optional(),

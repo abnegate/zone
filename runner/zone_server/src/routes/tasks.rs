@@ -117,6 +117,13 @@ pub struct TaskRunData {
     status: String,
     current_phase: Option<String>,
     progress_percent: Option<i32>,
+    /// When the run began and when it finished, in RFC 3339, as `TaskData` in
+    /// this file sends the same two columns.
+    ///
+    /// The console orders a task's earlier runs by `started_at`, so a run that
+    /// travelled without one sorted as though it had never started.
+    started_at: Option<String>,
+    completed_at: Option<String>,
     error_message: Option<String>,
     /// The question envelope a `waiting` run is parked on, or nothing.
     ///
@@ -148,6 +155,12 @@ impl From<tasks::TaskRunRow> for TaskRunData {
             status: row.status,
             current_phase: row.current_phase,
             progress_percent: row.progress_percent,
+            started_at: row
+                .started_at
+                .map(|timestamp| timestamp.and_utc().to_rfc3339()),
+            completed_at: row
+                .completed_at
+                .map(|timestamp| timestamp.and_utc().to_rfc3339()),
             error_message: row.error_message,
             pending_question: row.pending_question,
             waiting_on: row.pending_wait,
@@ -823,5 +836,38 @@ mod tests {
             running["run"].get("waiting_on").is_none(),
             "a run waiting for nothing carries no key: {running}"
         );
+    }
+
+    /// The row has carried both columns since before this route existed and the
+    /// run it sends carried neither, so the console ordering a task's earlier
+    /// runs by `started_at` compared two blanks and kept whatever order the
+    /// list arrived in. Both travel formatted as `TaskData` formats them.
+    #[test]
+    fn a_run_discloses_when_it_started_and_when_it_finished() {
+        let started = NaiveDateTime::parse_from_str("2026-09-13 09:41:00", "%Y-%m-%d %H:%M:%S")
+            .expect("valid timestamp");
+        let completed = NaiveDateTime::parse_from_str("2026-09-13 09:44:30", "%Y-%m-%d %H:%M:%S")
+            .expect("valid timestamp");
+        let finished = tasks::TaskRunRow {
+            status: "completed".into(),
+            started_at: Some(started),
+            completed_at: Some(completed),
+            ..run(None)
+        };
+
+        let body = serde_json::to_value(TaskRunResponse::from(finished)).unwrap();
+        assert_eq!(
+            body["run"]["started_at"], "2026-09-13T09:41:00+00:00",
+            "a console sorting runs by when they started needs the value, not the column"
+        );
+        assert_eq!(body["run"]["completed_at"], "2026-09-13T09:44:30+00:00");
+
+        let running = serde_json::to_value(TaskRunResponse::from(run(None))).unwrap();
+        assert_eq!(
+            running["run"]["started_at"],
+            Value::Null,
+            "a run that has not started sends the key as null, as a task does"
+        );
+        assert_eq!(running["run"]["completed_at"], Value::Null);
     }
 }

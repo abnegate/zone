@@ -34,14 +34,6 @@ const TASKS_ROUTE_RS = join(
 
 const WAIT_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/agent/wait.rs');
 
-/**
- * On the row, and formatted for a task by the same route, but not on the run it
- * sends. The console keeps its model of a run whole; this is what the route
- * still owes it, and the test that reads it fails the day the route pays so the
- * allowance goes with the debt.
- */
-const OWED_BY_THE_ROUTE = ['completed_at', 'started_at'];
-
 const running = {
   id: 'run-1',
   task_id: 'task-1',
@@ -159,9 +151,7 @@ describe('the wait the console describes is the one the worker parked on', () =>
  */
 describe('the run the console reads is the one the route sends', () => {
   test('every field the route sends has a schema entry, and none is declared that it does not send', () => {
-    const declared = Object.keys(TaskRunSchema.shape)
-      .filter((name) => !OWED_BY_THE_ROUTE.includes(name))
-      .sort();
+    const declared = Object.keys(TaskRunSchema.shape).sort();
 
     expect(serialisedNames(readFileSync(TASKS_ROUTE_RS, 'utf8'), 'TaskRunData')).toEqual(declared);
   });
@@ -181,13 +171,22 @@ describe('the run the console reads is the one the route sends', () => {
     }
   });
 
-  test('the route owes exactly the two timestamps the row carries, and no more', () => {
+  test('the two timestamps the row carries reach the run, and parse as the route sends them', () => {
     const sent = serialisedNames(readFileSync(TASKS_ROUTE_RS, 'utf8'), 'TaskRunData');
-    const declared = zodFields(TaskRunSchema);
 
-    for (const name of OWED_BY_THE_ROUTE) {
-      expect(sent).not.toContain(name);
-      expect(declared[name]).toBe(true);
-    }
+    expect(sent).toContain('started_at');
+    expect(sent).toContain('completed_at');
+
+    const finished = {
+      ...running,
+      status: 'completed',
+      started_at: '2026-09-13T09:41:00+00:00',
+      completed_at: '2026-09-13T09:44:30+00:00',
+    };
+    expect(TaskRunSchema.parse(finished)).toMatchObject({
+      started_at: '2026-09-13T09:41:00+00:00',
+      completed_at: '2026-09-13T09:44:30+00:00',
+    });
+    expect(TaskRunSchema.parse({ ...running, started_at: null }).started_at).toBeNull();
   });
 });
