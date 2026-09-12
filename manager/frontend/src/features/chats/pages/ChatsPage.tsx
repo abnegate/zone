@@ -992,6 +992,7 @@ export default function ChatsPage() {
                             content={message.content}
                             links={links}
                             citations={citations}
+                            breaks={message.role === 'user'}
                           />
                         </div>
                       ) : null}
