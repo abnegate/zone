@@ -11,8 +11,10 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::{FunctionCall, LlmClient, LlmConfig, Message, Role, ToolCall};
-use zone_core::tools::Tool;
+use zone_core::tools::job::{self, Jobs};
+use zone_core::tools::{Session, Tool};
 use zone_server::agent::prompt;
+use zone_server::agent::wait::{self, KIND_JOB, WAIT_FOR};
 use zone_server::agent::{
     AgentEvent, AgentRun, ApprovalGate, ApprovalPolicy, ChatTools, Environment, MAX_ITERATIONS,
     ToolCallRecord, WorkspaceScope, run,
@@ -20,6 +22,31 @@ use zone_server::agent::{
 
 const MALFORMED: &str =
     r#"{"id":"call_0","type":"function","function":{"name":"read_file","arguments":{}}"#;
+
+/// What each of the six model-facing strings said before `wait_for` existed,
+/// lowercased, reduced to the half no replacement could contain.
+///
+/// A fragment rather than the whole string because the whole string is gone: an
+/// absence asserted against text nothing ever says again is vacuous the moment
+/// its owner rewords anything. These are the words that mandated the poll, so a
+/// revert restores them whatever else it changes around them.
+const SUPERSEDED_POLL_WORDING: [&str; 6] = [
+    "do not claim the runner finished; poll",
+    "does not wait for completion — poll",
+    "use to monitor start_task progress",
+    "runner started. poll",
+    "to wait longer, return and check again in a later call",
+    "return without waiting and check again in a later call",
+];
+
+/// Fixed, so a rendered prompt is the same bytes on every run.
+fn environment() -> Environment {
+    Environment::at(
+        chrono::DateTime::parse_from_rfc3339("2026-09-09T09:30:00+12:00").unwrap(),
+        "Pacific/Auckland",
+        std::path::PathBuf::from("/srv/zone"),
+    )
+}
 
 fn text(content: &str) -> Vec<Value> {
     vec![json!({"content": content})]
@@ -60,43 +87,88 @@ async fn exercise_approved(
     messages: Vec<Message>,
     approval: ApprovalPolicy,
 ) -> (Vec<AgentEvent>, Vec<Value>) {
+    let responses = Arc::new(Mutex::new(VecDeque::from(rounds)));
+    exercise_scripted(
+        chat_catalog(Uuid::new_v4()).await,
+        move |_request: &Request| {
+            let (status, deltas) = responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected extra completion");
+            stream(status, deltas)
+        },
+        messages,
+        approval,
+    )
+    .await
+}
+
+/// One scripted round, as the provider streams it back.
+fn stream(status: u16, deltas: Vec<Value>) -> ResponseTemplate {
+    if status != 200 {
+        return ResponseTemplate::new(status).set_body_json(&deltas[0]);
+    }
+    let mut body = String::new();
+    for delta in deltas {
+        let chunk = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+        body.push_str(&format!("data: {chunk}\n\n"));
+    }
+    let end = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+    body.push_str(&format!("data: {end}\n\ndata: [DONE]\n\n"));
+    ResponseTemplate::new(200)
+        .insert_header("Content-Type", "text/event-stream")
+        .set_body_string(body)
+}
+
+/// Bounds the wait on a database nothing answers on, so a call that reaches it
+/// costs a test milliseconds rather than the default acquire timeout.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// The catalog the server assembles for one chat turn.
+///
+/// The chat id is a parameter because a job or a wait is keyed on the session
+/// the tool set carries, and a caller that has to clean either up afterwards
+/// needs to name the same session the tools staged under.
+async fn chat_catalog(chat_id: Uuid) -> ChatTools {
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(ACQUIRE_TIMEOUT)
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    let state = common::create_test_state(common::test_config(), pool);
+    ChatTools::build(WorkspaceScope {
+        user_id: Uuid::new_v4(),
+        state,
+        workspace_id: Uuid::new_v4(),
+        chat_id: Some(chat_id),
+    })
+    .await
+}
+
+/// Run the real loop against a script that may read the request it answers.
+///
+/// A round whose call names something an earlier round produced — a job id, say
+/// — cannot be queued up in advance, so the script is a function of the request
+/// rather than a list.
+async fn exercise_scripted<S>(
+    tools: ChatTools,
+    script: S,
+    messages: Vec<Message>,
+    approval: ApprovalPolicy,
+) -> (Vec<AgentEvent>, Vec<Value>)
+where
+    S: Fn(&Request) -> ResponseTemplate + Send + Sync + 'static,
+{
     // LlmClient shares its HTTP pool across tests, but each Tokio test owns a
     // separate runtime. A pooled mock can reuse a connection whose I/O driver
     // belongs to a paused or shutting-down test runtime. Give each provider its
     // own listener instead, while retaining keep-alives within this agent run.
     let provider = MockServer::builder().start().await;
-    let responses = Arc::new(Mutex::new(VecDeque::from(rounds)));
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(move |_request: &Request| {
-            let (status, deltas) = responses.lock().unwrap().pop_front().expect("unexpected extra completion");
-            if status != 200 {
-                return ResponseTemplate::new(status).set_body_json(&deltas[0]);
-            }
-            let mut body = String::new();
-            for delta in deltas {
-                let chunk = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
-                body.push_str(&format!("data: {chunk}\n\n"));
-            }
-            let end = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
-            body.push_str(&format!("data: {end}\n\ndata: [DONE]\n\n"));
-            ResponseTemplate::new(200)
-                .insert_header("Content-Type", "text/event-stream")
-                .set_body_string(body)
-        })
+        .respond_with(script)
         .mount(&provider)
         .await;
-    let pool = PgPoolOptions::new()
-        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
-        .unwrap();
-    let state = common::create_test_state(common::test_config(), pool);
-    let tools = ChatTools::build(WorkspaceScope {
-        user_id: Uuid::new_v4(),
-        state,
-        workspace_id: Uuid::new_v4(),
-        chat_id: Some(Uuid::new_v4()),
-    })
-    .await;
     // Missing `path` fails validation before read_file accesses the filesystem.
     let events = tokio::time::timeout(
         Duration::from_secs(10),
@@ -837,22 +909,8 @@ fn provider_connections_do_not_depend_on_another_test_runtime() {
 /// Relative offsets rather than a snapshot, so rewording a rule cannot fail it.
 #[tokio::test]
 async fn the_assembled_system_prompt_reaches_the_provider_in_section_order() {
-    let pool = PgPoolOptions::new()
-        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
-        .unwrap();
-    let state = common::create_test_state(common::test_config(), pool);
-    let tools = ChatTools::build(WorkspaceScope {
-        user_id: Uuid::new_v4(),
-        state,
-        workspace_id: Uuid::new_v4(),
-        chat_id: Some(Uuid::new_v4()),
-    })
-    .await;
-    let environment = Environment::at(
-        chrono::DateTime::parse_from_rfc3339("2026-09-09T09:30:00+12:00").unwrap(),
-        "Pacific/Auckland",
-        std::path::PathBuf::from("/srv/zone"),
-    );
+    let tools = chat_catalog(Uuid::new_v4()).await;
+    let environment = environment();
 
     let (_, requests) = exercise_messages(
         vec![(200, text("Ready."))],
@@ -904,6 +962,115 @@ async fn the_assembled_system_prompt_reaches_the_provider_in_section_order() {
         1,
         "{prompt}"
     );
+}
+
+/// The whole instruction surface of one turn, as the provider receives it: the
+/// assembled prompt, every tool definition offered beside it, and the refusal
+/// the model reads when it tries to hold the turn open on a sleep.
+///
+/// The point of PR 6 is not that a section teaches `wait_for`; it is that
+/// nothing still tells the model to poll instead. The nearest instruction is
+/// the one that wins, and only one of the six strings that used to ask for a
+/// poll is in a prompt at all: the rest arrive as a tool description, a schema
+/// or a tool result, places no prompt test can see. So the absences are
+/// asserted over the serialized body, where all four kinds sit together.
+///
+/// The one the body cannot carry is the reply `start_task` itself returns,
+/// which needs a workspace this turn has no database for. The crate's own tests
+/// pin that string beside the other three the prompt layer owns.
+#[tokio::test]
+async fn the_turn_offers_the_wait_and_carries_no_surviving_poll_instruction() {
+    /// Over `MAX_SLEEP_SECS`, so the sleep cap refuses it and the model reads
+    /// what it is told to do instead.
+    const OVER_CAP: &str = "sleep 120";
+
+    let tools = chat_catalog(Uuid::new_v4()).await;
+    let blocked = json!({
+        "id": "sleep_1",
+        "name": "run_shell",
+        "arguments": {
+            "command": OVER_CAP,
+            "reason": "Hold the turn open until the build lands.",
+        },
+    });
+    let (_, requests) = exercise_messages(
+        vec![
+            (200, text(&blocked.to_string())),
+            (200, text("Backgrounded it instead.")),
+        ],
+        vec![
+            Message::system(prompt::chat(&tools, false, &environment())),
+            Message::user("Wait for the build to finish."),
+        ],
+    )
+    .await;
+
+    let prompt = requests[0]["messages"][0]["content"]
+        .as_str()
+        .expect("a system prompt");
+    assert!(prompt.contains(WAIT_FOR), "{prompt}");
+    assert!(
+        prompt.contains("Waiting for something to finish:"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Never call tail_task_log, get_task_run or get_build_status in a loop"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("A wait that ends without its event is a timeout, not a result."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("A wait is not a way to re-read something that has not changed."),
+        "{prompt}"
+    );
+
+    let offered = |name: &str| {
+        requests[0]["tools"]
+            .as_array()
+            .expect("a tool catalog")
+            .iter()
+            .find(|tool| tool["function"]["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the catalog"))
+            .to_string()
+    };
+    assert!(offered(WAIT_FOR).contains("Wait for something outside this loop to finish"));
+    assert!(
+        offered("run_shell").contains("wait for it with wait_for"),
+        "{}",
+        offered("run_shell")
+    );
+    assert!(
+        offered("start_task").contains("wait for it with wait_for"),
+        "{}",
+        offered("start_task")
+    );
+    assert!(
+        offered("tail_task_log").contains("wait for it with wait_for rather than calling this"),
+        "{}",
+        offered("tail_task_log")
+    );
+
+    let refusal = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["tool_call_id"] == "sleep_1")
+        .and_then(|message| message["content"].as_str())
+        .expect("the refused sleep is replayed to the model");
+    assert!(refusal.contains(WAIT_FOR), "{refusal}");
+    assert!(refusal.contains("background: true"), "{refusal}");
+
+    for request in &requests {
+        let body = request.to_string().to_lowercase();
+        for superseded in SUPERSEDED_POLL_WORDING {
+            assert!(
+                !body.contains(superseded),
+                "{superseded:?} survives in {request}"
+            );
+        }
+    }
 }
 
 /// Approves `id` as soon as the loop registers it, so the run does not sit out
@@ -1338,4 +1505,331 @@ async fn a_question_the_schema_rejects_fails_and_the_turn_carries_on() {
     assert_eq!(failed, vec!["ask_1", "read_1"]);
     assert_eq!(answer(&events), "Never mind.");
     assert_eq!(requests.len(), 3);
+}
+
+/// Re-reading a run that has not moved is finalised, not read again.
+///
+/// This is the detector the waiting section's last rule exists to protect, and
+/// the two finalisers a repeated read can trip say different things. When every
+/// call in a round has already failed the loop reports repeated failures and
+/// executes nothing; the no-progress detector fires when a round did execute
+/// and learned nothing. So the round carries a file read that comes back
+/// unchanged beside the repeated status read, which is the shape the rule is
+/// about: evidence that came back twice, identical.
+///
+/// The file read leads because a read that is novel clears the failure ledger,
+/// so a run put second keeps the failure the second round needs to be stale.
+#[tokio::test]
+async fn a_run_reread_without_change_is_finalised_rather_than_read_again() {
+    const NO_PROGRESS: &str = "Repeated tool reads returned unchanged evidence without progress.";
+    const SETTLED: &str = "The run has not moved since the first read.";
+
+    let directory = tempfile::TempDir::new().unwrap();
+    let evidence = directory.path().join("run.log");
+    std::fs::write(&evidence, "phase: running").unwrap();
+    let run = Uuid::new_v4();
+    let round = |suffix: &str| {
+        text(
+            &json!([
+                {"id": format!("log_{suffix}"), "name": "read_file", "arguments": {"path": evidence}},
+                {"id": format!("run_{suffix}"), "name": "get_task_run", "arguments": {"run_id": run}},
+            ])
+            .to_string(),
+        )
+    };
+
+    let (events, requests) = exercise(vec![round("1"), round("2"), text(SETTLED)]).await;
+
+    let finalised: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Finalizing(reason) => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finalised, vec![NO_PROGRESS], "{events:?}");
+
+    let instruction = requests[2]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "system")
+        .filter_map(|message| message["content"].as_str())
+        .find(|content| content.contains(NO_PROGRESS))
+        .unwrap_or_else(|| {
+            panic!(
+                "the finalizing instruction never reached the model: {}",
+                requests[2]
+            )
+        });
+    assert!(
+        instruction
+            .contains("Answer the user in ordinary text using the evidence already available."),
+        "{instruction}"
+    );
+    assert!(
+        requests[2].get("tools").is_none(),
+        "a finalizing round still offered tools: {}",
+        requests[2]
+    );
+    assert_eq!(answer(&events), SETTLED);
+    assert_eq!(requests.len(), 3);
+}
+
+/// A wait that ended without its event is never reported as a result.
+///
+/// `resume_with_outcome` injects the outcome as an envelope and a tool result,
+/// so a resumed turn reads it as evidence like any other. The two outcomes that
+/// say nothing happened are the ones a model would most readily round up to
+/// "finished", and the honesty they are written for is only worth something if
+/// it survives the trip: the outcome has to reach the provider as written, and
+/// nothing the turn produces from it may read as success. "settled to success"
+/// is a different outcome that legitimately contains the word, and is not one
+/// of these two.
+#[tokio::test]
+async fn a_wait_that_ended_without_its_event_is_never_reported_as_a_result() {
+    const SUCCESS_WORDS: [&str; 5] = ["success", "succeeded", "completed", "passed", "done"];
+    const JOB: &str = "job_9f3c1a7b2e04";
+
+    for (outcome, honesty) in [
+        (
+            wait::timed_out(
+                &wait::job_subject(JOB),
+                Duration::from_secs(wait::DEFAULT_WAIT_SECS),
+            ),
+            "this is a timeout, not a result",
+        ),
+        (
+            wait::checks_unknown("main", wait::CHECK_SETTLE_GRACE),
+            "This is not a pass.",
+        ),
+    ] {
+        assert!(outcome.contains(honesty), "{outcome}");
+
+        let (events, requests) = exercise_messages(
+            vec![(200, text(&report(&outcome)))],
+            settled_wait(JOB, &outcome),
+        )
+        .await;
+
+        let replayed: Vec<&str> = requests[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["tool_call_id"] == SETTLED_CALL)
+            .filter_map(|message| message["content"].as_str())
+            .collect();
+        assert_eq!(
+            replayed,
+            vec![outcome.as_str()],
+            "the outcome reached the model as something other than what it says"
+        );
+
+        let reported = answer(&events).to_lowercase();
+        for word in SUCCESS_WORDS {
+            assert!(
+                !outcome.to_lowercase().contains(word),
+                "{word:?}: {outcome}"
+            );
+            assert!(!reported.contains(word), "{word:?}: {reported}");
+        }
+    }
+}
+
+/// The call id `resume_with_outcome` injects the settled pair under.
+const SETTLED_CALL: &str = "wait_1#settled";
+
+/// Fixed, so the receipt a transcript replays is the same bytes on every run.
+const DEADLINE: &str = "2026-09-09T09:35:00Z";
+
+/// The transcript a wait's outcome resumes into: the call that opened the wait
+/// and the receipt it returned, then the pair `resume_with_outcome` appends.
+fn settled_wait(job: &str, outcome: &str) -> Vec<Message> {
+    let waiting = json!({"kind": KIND_JOB, "id": job, "deadline": DEADLINE}).to_string();
+    vec![
+        Message::user("Start the build and tell me how it went."),
+        Message::assistant_with_tools(vec![wait_call("wait_1", &waiting)]),
+        Message::tool_result("wait_1", wait::receipt(&wait::job_subject(job), DEADLINE)),
+        Message::assistant_with_tools(vec![wait_call(SETTLED_CALL, &waiting)]),
+        Message::tool_result(SETTLED_CALL, outcome),
+    ]
+}
+
+fn wait_call(id: &str, arguments: &str) -> ToolCall {
+    ToolCall {
+        id: id.to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: WAIT_FOR.to_string(),
+            arguments: arguments.to_string(),
+        },
+    }
+}
+
+/// What the waiting section asks for: report which of the two you have. A
+/// script that answered in its own words would prove only that the script was
+/// honest, so the reply carries the outcome it was handed.
+fn report(outcome: &str) -> String {
+    format!("The wait came back: {outcome}")
+}
+
+/// The refund, through the loop that grants it.
+///
+/// Nothing before this could reach it. A wait is registered by the tool and
+/// bound to its call by the loop, so a park needs both halves live; and a tool
+/// set assembled without a chat scope stages under `Session::Detached`, where a
+/// background job is refused outright. The turn therefore starts the job it
+/// waits on through the same tool set, and the script reads the job id back out
+/// of the spawn receipt the way the chat layer does.
+///
+/// Both parks happen in the same round, which is what makes the two numbers
+/// comparable: a wait hands that round back because the same work continues the
+/// moment its subject settles, and a question spends it because the answer
+/// arrives as a turn of its own.
+#[tokio::test]
+async fn a_wait_hands_its_round_back_while_a_question_spends_it() {
+    /// The round both parks open in. Round 0 is the call each one needs behind
+    /// it: the job to wait on, and a read to fail.
+    const PARKED_AT: usize = 1;
+    const WAIT_CALL: &str = "wait_1";
+    const QUEUED: &str = "queued_1";
+    const JOB_CALL: &str = "background_1";
+
+    let directory = tempfile::TempDir::new().unwrap();
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let chat = Uuid::new_v4();
+    let session = Session::Chat(chat);
+    let opening = text(
+        &json!([{
+            "id": JOB_CALL,
+            "name": "run_shell",
+            "arguments": {
+                "command": "sleep 30",
+                "cwd": cwd,
+                "background": true,
+                "reason": "The build outlives this round, so wait for it rather than block on it.",
+            },
+        }])
+        .to_string(),
+    );
+
+    let (events, requests) = exercise_scripted(
+        chat_catalog(chat).await,
+        move |request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let started = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|message| job::parse_receipt(message["content"].as_str()?))
+                .next_back();
+            match started {
+                None => stream(200, opening.clone()),
+                Some(job) => stream(
+                    200,
+                    text(
+                        &json!([
+                            {"id": WAIT_CALL, "name": WAIT_FOR, "arguments": {"kind": KIND_JOB, "id": job.id}},
+                            read(QUEUED),
+                        ])
+                        .to_string(),
+                    ),
+                ),
+            }
+        },
+        vec![Message::user("Start the build and tell me when it lands.")],
+        ApprovalPolicy::auto(),
+    )
+    .await;
+
+    // Before any assertion, so a failing one cannot leave the child behind.
+    let killed = Jobs::kill_session(session).await;
+    wait::reset_session(session);
+
+    let (waiting, spent) = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::WaitRequired {
+                tool_call_id,
+                waiting,
+                spent,
+            } if tool_call_id == WAIT_CALL => Some((waiting.clone(), *spent)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the scripted wait never ended the turn: {events:?}"));
+    assert_eq!(
+        spent.iterations, PARKED_AT,
+        "a wait charged the round it handed back"
+    );
+    assert_eq!(spent.tool_calls, 2);
+
+    let entries = tool_entries(&events);
+    let receipt = job::parse_receipt(&entries[0].1)
+        .unwrap_or_else(|| panic!("the backgrounded call returned no spawn receipt: {entries:?}"));
+    assert_eq!(entries[0].0, JOB_CALL);
+    assert_eq!(
+        killed, 1,
+        "the job the turn started was not this chat session's to end"
+    );
+    assert!(
+        receipt.log_path.starts_with(&cwd),
+        "the job log landed outside the call's own directory: {}",
+        receipt.log_path
+    );
+    assert_eq!(waiting.kind, KIND_JOB);
+    assert_eq!(waiting.id, receipt.id);
+
+    // The receipt, not an outcome: at the moment it is written the job has not
+    // exited, and the outcome is injected on resume instead.
+    assert_eq!(entries[1].0, WAIT_CALL);
+    assert_eq!(
+        entries[1].1,
+        wait::receipt(&wait::job_subject(&receipt.id), &waiting.deadline)
+    );
+    assert!(!entries[1].1.contains("exited with code"), "{entries:?}");
+    assert!(!entries[1].1.contains("Timed out after"), "{entries:?}");
+
+    assert_eq!(entries[2].0, QUEUED);
+    assert_eq!(
+        entries[2].1,
+        "Not executed: the turn ended when a wait was opened."
+    );
+    assert_eq!(
+        started(&events),
+        vec![JOB_CALL, WAIT_CALL],
+        "nothing queued behind the wait ran"
+    );
+    assert_eq!(requests.len(), 2);
+
+    let (events, requests) = exercise(vec![
+        text(&read("read_0").to_string()),
+        text(&json!([ask("ask_1"), read(QUEUED)]).to_string()),
+    ])
+    .await;
+
+    let spent = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::QuestionRequired {
+                tool_call_id,
+                spent,
+                ..
+            } if tool_call_id == "ask_1" => Some(*spent),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the scripted question never ended the turn: {events:?}"));
+    assert_eq!(
+        spent.iterations,
+        PARKED_AT + 1,
+        "a question handed back the round it spends"
+    );
+
+    let entries = tool_entries(&events);
+    assert_eq!(entries.last().unwrap().0, QUEUED);
+    assert_eq!(
+        entries.last().unwrap().1,
+        "Not executed: the turn ended when the user was asked a question.",
+        "a turn stopped by a wait and one stopped by a question tell the calls behind them apart"
+    );
+    assert_eq!(requests.len(), 2);
 }

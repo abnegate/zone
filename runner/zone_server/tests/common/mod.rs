@@ -459,3 +459,120 @@ pub async fn setup_test_data(pool: &PgPool) -> (uuid::Uuid, uuid::Uuid, uuid::Uu
 
     (org_id, workspace_id, user_id)
 }
+
+/// A user who is actually a member of the workspace it will act in.
+///
+/// [`setup_test_data`] leaves the user outside the workspace, which is enough
+/// for routes that only read ids but not for a task run: the worker checks the
+/// trigger's role before it claims anything, and a task tool set reaches
+/// workspace tools only for a member.
+pub async fn setup_workspace_member(pool: &PgPool) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid) {
+    use zone_server::db::workspace_members::{WorkspaceRole, add_member};
+
+    let (organization, workspace, user) = setup_test_data(pool).await;
+    add_member(pool, workspace, user, WorkspaceRole::Member, None)
+        .await
+        .expect("the user joins the workspace it will run tasks in");
+    (organization, workspace, user)
+}
+
+/// Serve the real router on an ephemeral port and return its `host:port`.
+///
+/// The oneshot [`TestClient`] cannot upgrade a connection, so anything that
+/// exercises a websocket needs a listening server rather than a router.
+pub async fn serve(state: AppState) -> String {
+    let router = create_test_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("an ephemeral port");
+    let address = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    format!("{}:{}", address.ip(), address.port())
+}
+
+/// Register a user and give it an organization, a workspace and a chat.
+///
+/// Returned in the order a caller needs them: the access token, the chat, and
+/// the workspace, which is what scopes anything the chat's tools reach.
+pub async fn seed_chat(client: &TestClient, model: &str) -> (String, String, String) {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let registered = client
+        .post_json(
+            "/api/auth/register",
+            &serde_json::json!({"email": test_email(), "password": test_password()}),
+        )
+        .await
+        .json_value();
+    let token = registered["access_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("register must return an access token, got {registered}"))
+        .to_string();
+
+    let organization = client
+        .post_json_auth(
+            "/api/organizations",
+            &serde_json::json!({"name": "Jobs Org", "slug": format!("jobs-org-{suffix}")}),
+            &token,
+        )
+        .await
+        .json_value()["organization"]["id"]
+        .as_str()
+        .expect("an organization")
+        .to_string();
+    let workspace = client
+        .post_json_auth(
+            &format!("/api/organizations/{organization}/workspaces"),
+            &serde_json::json!({"name": "Jobs Workspace", "slug": format!("jobs-ws-{suffix}")}),
+            &token,
+        )
+        .await
+        .json_value()["workspace"]["id"]
+        .as_str()
+        .expect("a workspace")
+        .to_string();
+    let chat = client
+        .post_json_auth(
+            "/api/chats",
+            // `agent_enabled` defaults to false on the route, and a chat with
+            // no tool catalog runs its turn non-agentically: a scripted tool
+            // call would be read as an empty reply.
+            &serde_json::json!({
+                "workspace_id": workspace,
+                "title": "Jobs Chat",
+                "model_name": model,
+                "agent_enabled": true,
+            }),
+            &token,
+        )
+        .await
+        .json_value()["chat"]["id"]
+        .as_str()
+        .expect("a chat")
+        .to_string();
+
+    (token, chat, workspace)
+}
+
+/// The next JSON frame a socket sends, or nothing if it closed or went quiet.
+pub async fn next_frame<Socket>(socket: &mut Socket, within: Duration) -> Option<Value>
+where
+    Socket: futures_util::StreamExt<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    use tokio_tungstenite::tungstenite::Message;
+
+    loop {
+        let frame = tokio::time::timeout(within, socket.next()).await.ok()??;
+        match frame.ok()? {
+            Message::Text(text) => return serde_json::from_str(&text).ok(),
+            Message::Close(_) => return None,
+            _ => continue,
+        }
+    }
+}
