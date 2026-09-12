@@ -304,3 +304,30 @@ describe('MessageContent source markers', () => {
     expect(container.textContent).toContain('[other:a3f21c]');
   });
 });
+
+describe('MessageContent line breaks', () => {
+  const ANSWER = 'Communication channel: Workspace document\nAnnouncement tone: Formal';
+
+  it('keeps each answered question on its own line', () => {
+    const { container } = render(<MessageContent content={ANSWER} links="none" breaks />);
+
+    expect(container.querySelectorAll('br')).toHaveLength(1);
+    expect(container.textContent).toContain('Communication channel: Workspace document');
+    expect(container.textContent).toContain('Announcement tone: Formal');
+  });
+
+  it('runs the lines together without the flag, as markdown does', () => {
+    const { container } = render(<MessageContent content={ANSWER} links="none" />);
+
+    expect(container.querySelectorAll('br')).toHaveLength(0);
+  });
+
+  it('leaves a fenced block alone', () => {
+    const { container } = render(
+      <MessageContent content={'```\nfirst\nsecond\n```'} links="none" breaks />
+    );
+
+    expect(container.querySelectorAll('br')).toHaveLength(0);
+    expect(container.querySelector('code')?.textContent).toBe('first\nsecond\n');
+  });
+});

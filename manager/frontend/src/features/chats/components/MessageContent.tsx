@@ -16,6 +16,7 @@ interface MessageContentProps {
   links: MessageLinks;
   citations?: Citation[];
   compact?: boolean;
+  breaks?: boolean;
 }
 
 export const UNSOURCED_LINK_NOTE = 'Link disabled: not among the sources for this reply';
@@ -148,6 +149,52 @@ function citationMarkers(citations: readonly Citation[]) {
   };
 }
 
+/// Markdown folds a single newline into a space, so text written as separate
+/// lines renders as one run-on paragraph. An answer to a question card is one
+/// line per question answered, and folded together two answers read as a single
+/// sentence with nothing between them.
+///
+/// Rewritten on the parsed tree for the same reason markers are: a fenced block
+/// and inline code are their own node types, never text, so whatever the writer
+/// laid out inside them keeps its own lines.
+function softBreaks() {
+  const split = (value: string): MarkdownNode[] | null => {
+    const lines = value.split('\n');
+    if (lines.length === 1) return null;
+
+    const nodes: MarkdownNode[] = [];
+    for (const [index, line] of lines.entries()) {
+      if (index > 0) nodes.push({ type: 'break' });
+      if (line) nodes.push({ type: 'text', value: line });
+    }
+    return nodes;
+  };
+
+  const walk = (node: MarkdownNode): void => {
+    if (!node.children) return;
+    const rewritten: MarkdownNode[] = [];
+
+    for (const child of node.children) {
+      const parts =
+        child.type === 'text' && typeof child.value === 'string' && !child.data
+          ? split(child.value)
+          : null;
+      if (parts) {
+        rewritten.push(...parts);
+        continue;
+      }
+      walk(child);
+      rewritten.push(child);
+    }
+
+    node.children = rewritten;
+  };
+
+  return () => (tree: MarkdownNode) => {
+    walk(tree);
+  };
+}
+
 function Anchor({ href, title, children }: { href?: string; title?: string; children: ReactNode }) {
   const external = Boolean(href && EXTERNAL.test(href));
   return (
@@ -180,7 +227,13 @@ function UnsourcedLink({ children }: { children: ReactNode }) {
 // rehype plugin enables it, so model output cannot inject markup here. Anchors
 // are the exception: GitHub-flavoured autolinking turns any bare URL the model
 // invents into one, so they are resolved against the reply's own sources.
-export function MessageContent({ content, links, citations, compact }: MessageContentProps) {
+export function MessageContent({
+  content,
+  links,
+  citations,
+  compact,
+  breaks,
+}: MessageContentProps) {
   const sources = citations ?? [];
   /// Every retrieval path now registers what it returned and mints a citation
   /// for it, so an empty list means nothing was retrieved rather than that the
@@ -195,7 +248,11 @@ export function MessageContent({ content, links, citations, compact }: MessageCo
   return (
     <div className={compact ? 'message-markdown message-markdown--compact' : 'message-markdown'}>
       <Markdown
-        remarkPlugins={marking ? [remarkGfm, citationMarkers(sources)] : [remarkGfm]}
+        remarkPlugins={[
+          remarkGfm,
+          ...(marking ? [citationMarkers(sources)] : []),
+          ...(breaks ? [softBreaks()] : []),
+        ]}
         components={{
           a: ({ href, title, className, children }) => {
             if (className === REFERENCE_CLASS) {
