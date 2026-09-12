@@ -686,6 +686,23 @@ describe('WikiPage', () => {
       expect(mockReadEntry).toHaveBeenCalledWith('kb-beyond');
     });
 
+    it('falls back to the listed entry when the read of a linked entry fails', async () => {
+      mockReadEntry.mockImplementation(async () => {
+        throw new Error('offline');
+      });
+      renderWikiPage('/wiki?id=kb-1');
+      expect(await screen.findByRole('dialog', { name: 'Text Entry' })).toBeInTheDocument();
+    });
+
+    it('opens nothing when a linked entry is neither readable nor listed', async () => {
+      mockReadEntry.mockImplementation(async () => {
+        throw new Error('not found');
+      });
+      renderWikiPage('/wiki?id=kb-gone');
+      await waitFor(() => expect(mockReadEntry).toHaveBeenCalledWith('kb-gone'));
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
     it('reads the content the list left out of a linked entry', async () => {
       const withoutContent = defaultEntries.map((entry) => ({ ...entry, content: '' }));
       getMockState = () => ({ entries: withoutContent, loading: false, error: null });

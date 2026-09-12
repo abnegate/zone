@@ -275,9 +275,11 @@ async fn a_stranger_cannot_read_another_tenants_knowledge_entry() {
     let read = client
         .get_auth(&format!("/api/knowledge/{entry}"), &attacker.token)
         .await;
-    assert!(
-        refused(read.status),
-        "a stranger read another tenant's knowledge entry: {} {}",
+    // Not forbidden: a 403 would confirm the id names a real entry.
+    assert_eq!(
+        read.status,
+        StatusCode::NOT_FOUND,
+        "a stranger learned something about another tenant's knowledge entry: {} {}",
         read.status,
         read.text()
     );

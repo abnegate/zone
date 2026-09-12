@@ -1,5 +1,5 @@
 import { Badge, Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { CreateKnowledgeWizard } from '../components';
 import { useKnowledge } from '../hooks';
@@ -21,9 +21,15 @@ export default function WikiPage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
 
+  const listed = useRef<KnowledgeEntry[]>(entries);
+  useEffect(() => {
+    listed.current = entries;
+  }, [entries]);
+
   /// A citation names the entry by id, and the list is one page of a workspace
   /// that carries no content, so the entry is read on its own rather than
-  /// looked up in what happens to be loaded.
+  /// looked up in what happens to be loaded. A read that fails falls back to
+  /// the loaded page, which is all this ever had.
   useEffect(() => {
     if (!linkedEntryId) return;
     let live = true;
@@ -31,7 +37,10 @@ export default function WikiPage() {
       .then((entry) => {
         if (live) setSelectedEntry(entry);
       })
-      .catch(() => undefined);
+      .catch(() => {
+        const known = listed.current.find((entry) => entry.id === linkedEntryId);
+        if (live && known) setSelectedEntry(known);
+      });
     return () => {
       live = false;
     };
