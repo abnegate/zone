@@ -2376,6 +2376,59 @@ mod tests {
         assert_eq!(leased.session(), Session::Task(run));
     }
 
+    /// The other half of that threading, and the half neither the park nor the
+    /// registration could prove on its own: the wait a leased tool set opens is
+    /// charged to the run. While the context still assembled with a
+    /// placeholder, every task-run wait counted against `Detached`, which is
+    /// one counter shared by every run at once -- so the per-attempt limit was
+    /// both unreachable on the task surface and exhaustible by a stranger.
+    /// Dispatched through the registry the profile really assembles, with the
+    /// context it really threads, because that pairing is the thing at issue.
+    #[tokio::test]
+    async fn a_wait_a_leased_tool_set_opens_is_charged_to_its_run() {
+        let directory = tempfile::TempDir::new().expect("a temporary working directory");
+        let state = AppState::for_tests();
+        let run = Uuid::new_v4();
+        let tools =
+            ChatTools::for_task(&state, directory.path().to_path_buf(), Uuid::new_v4(), None)
+                .await
+                .with_task_lease(state.db().clone(), run, Uuid::new_v4());
+        let session = tools.session();
+
+        assert_eq!(session, Session::Task(run));
+        assert_eq!(crate::agent::wait::waits_taken(session), 0);
+
+        let job = zone_core::tools::job::Jobs::spawn(
+            session,
+            &zone_core::tools::job::JobCommand::shell("sleep 30"),
+            directory.path(),
+            &tools.context.env,
+        )
+        .await
+        .expect("the job starts");
+        let wait_for = tools
+            .registry
+            .get(crate::agent::wait::WAIT_FOR)
+            .expect("a task profile registers wait_for");
+        let opened = wait_for
+            .execute(
+                json!({"kind": crate::agent::wait::KIND_JOB, "id": &job.id}),
+                &tools.context,
+            )
+            .await
+            .expect("wait_for reports refusals as tool errors");
+
+        assert!(opened.success, "the wait was refused: {opened:?}");
+        assert_eq!(
+            crate::agent::wait::waits_taken(session),
+            1,
+            "a wait charged to any other session leaves the per-attempt limit unreachable"
+        );
+
+        crate::agent::wait::reset_session(session);
+        zone_core::tools::job::Jobs::kill_session(session).await;
+    }
+
     #[tokio::test]
     async fn an_unknown_tool_lists_what_is_available() {
         let tools = ChatTools::build(scope()).await;
