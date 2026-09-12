@@ -64,10 +64,11 @@ pub struct KnowledgeListRow {
 
 /// Get a knowledge entry by ID
 ///
-/// `indexed` is the `knowledge_embeddings` row, read through that table's
-/// unique index on `knowledge_entry_id`, so it costs one probe per entry. Every
-/// projection of an entry spells the same `EXISTS` out, because sqlx takes only
-/// literal SQL and a shared fragment would have to be assembled at run time.
+/// `indexed` is whether the entry has a `knowledge_embeddings` row.
+/// `knowledge_entry_id` is unique there, so the check is an index probe once
+/// the table is large enough for the planner to prefer one. Every projection of
+/// an entry spells the same `EXISTS` out, because sqlx takes only literal SQL
+/// and a shared fragment would have to be assembled at run time.
 pub async fn get_knowledge(pool: &PgPool, id: Uuid) -> DbResult<Option<KnowledgeRow>> {
     sqlx::query_as::<_, KnowledgeRow>(
         r#"
