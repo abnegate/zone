@@ -109,6 +109,7 @@ type ServerMessage =
       reason?: string;
       preview?: string;
     }
+  | { type: 'tool_approval_closed'; tool_call_id: string }
   | {
       type: 'question_required';
       message_id: string;
@@ -420,6 +421,33 @@ export function useChat(
     []
   );
 
+  // The server refused a decision this window sent: another window answered
+  // the card first, or the turn moved past it. This window never learns which
+  // way it went, so the card drops the outcome it assumed and the buttons that
+  // offered one. The turn is untouched — its own result frame says what
+  // happened to the call.
+  const closeApproval = useCallback((toolCallId: string) => {
+    setChat((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        messages: prev.messages.map((message) => {
+          const calls = message.metadata?.tool_calls;
+          if (!calls?.some((call) => call.id === toolCallId)) return message;
+          return {
+            ...message,
+            metadata: {
+              ...message.metadata,
+              tool_calls: calls.map((call) =>
+                call.id === toolCallId ? { ...call, approval: undefined } : call
+              ),
+            },
+          };
+        }),
+      };
+    });
+  }, []);
+
   const appendCitations = useCallback((messageId: string, incoming: Citation[]) => {
     if (incoming.length === 0) return;
     setChat((prev) => {
@@ -712,6 +740,9 @@ export function useChat(
             preview: payload.preview,
           });
           break;
+        case 'tool_approval_closed':
+          closeApproval(payload.tool_call_id);
+          break;
         // The turn ends here: the model asked something and the reply waits on
         // the reader, whose answer arrives as an ordinary user message rather
         // than as a decision frame of its own. The call itself already returned
@@ -731,6 +762,9 @@ export function useChat(
           });
           break;
         }
+        // The result settles the call for every window. One that never decided
+        // it stops offering a decision it can no longer make, so nothing here
+        // is left to click after another window has answered the card.
         case 'tool_result':
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
@@ -738,6 +772,7 @@ export function useChat(
             detail: payload.detail,
             duration_ms: payload.duration_ms,
             pending: false,
+            approval: undefined,
           });
           if (payload.citations?.length) {
             appendCitations(payload.message_id, payload.citations);
@@ -985,6 +1020,7 @@ export function useChat(
     startAssistant,
     applySavedUserMessage,
     patchToolCall,
+    closeApproval,
     appendCitations,
     appendReceipt,
     applyTitle,
@@ -1074,16 +1110,39 @@ export function useChat(
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return;
     }
-    const assistant = chat?.messages.find((message) =>
-      message.metadata?.tool_calls?.some((call) => call.id === toolCallId)
-    );
-    if (assistant) {
-      patchToolCall(assistant.id, toolCallId, {
-        approval: approved ? 'approved' : 'denied',
-        detail: approved ? 'Approved. Running…' : 'Denied',
-        pending: approved,
-      });
-    }
+    // An outcome is assumed only while the card is still open, judged on the
+    // state the updater sees rather than the render that drew the buttons: a
+    // result that lands in the same tick as the click keeps the row it
+    // settled, and a call that already carries its result keeps saying what
+    // the server said.
+    setChat((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        messages: prev.messages.map((message) => {
+          const calls = message.metadata?.tool_calls;
+          if (!calls?.some((call) => call.id === toolCallId && call.approval === 'pending')) {
+            return message;
+          }
+          return {
+            ...message,
+            metadata: {
+              ...message.metadata,
+              tool_calls: calls.map((call) =>
+                call.id === toolCallId
+                  ? {
+                      ...call,
+                      approval: approved ? ('approved' as const) : ('denied' as const),
+                      detail: approved ? 'Approved. Running…' : 'Denied',
+                      pending: approved,
+                    }
+                  : call
+              ),
+            },
+          };
+        }),
+      };
+    });
     socket.send(
       JSON.stringify({
         type: 'approve_tool',

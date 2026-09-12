@@ -9,6 +9,7 @@ import type { KnowledgeEntry } from '../types';
 const mockCreateEntry = mock();
 const mockDeleteEntry = mock();
 const mockRefreshEntry = mock();
+const mockReadEntry = mock();
 const mockReload = mock();
 
 // Create a function reference that we can update
@@ -26,6 +27,7 @@ mock.module('../hooks', () => ({
       createEntry: mockCreateEntry,
       deleteEntry: mockDeleteEntry,
       refreshEntry: mockRefreshEntry,
+      readEntry: mockReadEntry,
       reload: mockReload,
     };
   },
@@ -130,6 +132,12 @@ describe('WikiPage', () => {
     mockCreateEntry.mockReset();
     mockDeleteEntry.mockReset();
     mockRefreshEntry.mockReset();
+    mockReadEntry.mockReset();
+    mockReadEntry.mockImplementation(async (id: string) => {
+      const found = defaultEntries.find((entry) => entry.id === id);
+      if (!found) throw new Error('Knowledge entry not found');
+      return found;
+    });
     mockReload.mockReset();
     // Set default state for each test
     getMockState = () => ({
@@ -655,9 +663,62 @@ describe('WikiPage', () => {
       expect(screen.getAllByText('Text Entry').length).toBeGreaterThan(1);
     });
 
-    it('opens the linked entry from the page URL', () => {
+    it('opens the linked entry from the page URL', async () => {
       renderWikiPage('/wiki?id=kb-1');
-      expect(screen.getByRole('dialog', { name: 'Text Entry' })).toBeInTheDocument();
+      expect(await screen.findByRole('dialog', { name: 'Text Entry' })).toBeInTheDocument();
+    });
+
+    it('opens a linked entry the loaded page does not hold', async () => {
+      mockReadEntry.mockImplementation(async (id: string) => ({
+        id,
+        workspace_id: 'ws-1',
+        title: 'Beyond The Page',
+        type: 'text' as const,
+        content: 'Torque the collar to 57 newton-metres.',
+        fetched_content: null,
+        tags: [],
+        last_refreshed_at: null,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+      }));
+      renderWikiPage('/wiki?id=kb-beyond');
+      expect(await screen.findByRole('dialog', { name: 'Beyond The Page' })).toBeInTheDocument();
+      expect(mockReadEntry).toHaveBeenCalledWith('kb-beyond');
+    });
+
+    it('falls back to the listed entry when the read of a linked entry fails', async () => {
+      mockReadEntry.mockImplementation(async () => {
+        throw new Error('offline');
+      });
+      renderWikiPage('/wiki?id=kb-1');
+      expect(await screen.findByRole('dialog', { name: 'Text Entry' })).toBeInTheDocument();
+    });
+
+    it('opens nothing when a linked entry is neither readable nor listed', async () => {
+      mockReadEntry.mockImplementation(async () => {
+        throw new Error('not found');
+      });
+      renderWikiPage('/wiki?id=kb-gone');
+      await waitFor(() => expect(mockReadEntry).toHaveBeenCalledWith('kb-gone'));
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('reads the content the list left out of a linked entry', async () => {
+      const withoutContent = defaultEntries.map((entry) => ({ ...entry, content: '' }));
+      getMockState = () => ({ entries: withoutContent, loading: false, error: null });
+      renderWikiPage('/wiki?id=kb-1');
+      const dialog = await screen.findByRole('dialog', { name: 'Text Entry' });
+      expect(await within(dialog).findByText('This is text content')).toBeInTheDocument();
+    });
+
+    it('reads the content the list left out of an entry opened from its card', async () => {
+      const withoutContent = defaultEntries.map((entry) => ({ ...entry, content: '' }));
+      getMockState = () => ({ entries: withoutContent, loading: false, error: null });
+      renderWikiPage();
+      const card = screen.getByText('Text Entry').closest('.knowledge-card');
+      if (card) fireEvent.click(card);
+      const dialog = await screen.findByRole('dialog', { name: 'Text Entry' });
+      expect(await within(dialog).findByText('This is text content')).toBeInTheDocument();
     });
 
     it('displays full entry details in modal', () => {

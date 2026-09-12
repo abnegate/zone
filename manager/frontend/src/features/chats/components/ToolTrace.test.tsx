@@ -165,6 +165,27 @@ describe('ToolTrace', () => {
     expect(screen.getByTestId('tool-call').closest('li')).toHaveClass('tool-call--approval');
   });
 
+  it('offers no decision once the approval is closed', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'write_file',
+            pending: true,
+            detail: 'Waiting for approval…',
+          }),
+        ]}
+        onDecide={() => {
+          throw new Error('a closed approval must not be decidable');
+        }}
+      />
+    );
+
+    expect(screen.queryByTestId('tool-approve')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('tool-deny')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tool-call').closest('li')).toHaveClass('tool-call--pending');
+  });
+
   it('shows the reason the model gave for a call still awaiting approval', () => {
     render(
       <ToolTrace

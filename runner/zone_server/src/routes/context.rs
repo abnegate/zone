@@ -156,6 +156,10 @@ pub struct KnowledgeResponse {
     /// Last fetch error if any
     #[serde(skip_serializing_if = "Option::is_none")]
     last_fetch_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Lightweight knowledge entry for list responses (without full content)
@@ -852,6 +856,89 @@ pub async fn list_knowledge(
     Json(knowledge).into_response()
 }
 
+/// GET /api/knowledge/{id}
+/// Read one knowledge entry, with its content.
+///
+/// A citation names a single entry, and the list is a page of a workspace that
+/// drops both the content and the timestamps — so an entry older than that page
+/// is unreachable through it, and one inside the page opens with nothing to
+/// read. Reading by id is what lets a reader follow a citation to the passage.
+pub async fn get_knowledge_entry(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let user_id = match auth.0.user_id() {
+        Ok(id) => id,
+        Err(_) => {
+            tracing::error!("Failed to parse user ID from auth claims");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Authentication error")),
+            )
+                .into_response();
+        }
+    };
+
+    let db = state.db();
+    use crate::db::knowledge;
+    let entry = match knowledge::get_knowledge(db, id).await {
+        Ok(Some(entry)) if entry.is_active => entry,
+        Ok(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("Database error fetching knowledge: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+
+    // A stranger learns nothing from the refusal, not even that the id exists.
+    match workspace_members::can_read(db, entry.workspace_id, user_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(
+                "User {} attempted to read knowledge in workspace {}",
+                user_id,
+                entry.workspace_id
+            );
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Err(e) => {
+            tracing::error!("Database error checking workspace read access: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    }
+
+    Json(KnowledgeResponse {
+        id: entry.id,
+        workspace_id: entry.workspace_id,
+        title: entry.title,
+        content: entry.content,
+        category: entry.category,
+        tags: entry.tags,
+        token_count: entry.token_count as usize,
+        is_active: entry.is_active,
+        source_url: entry.source_url,
+        last_fetched_at: entry.last_fetched_at.map(utc),
+        refresh_interval_minutes: entry.refresh_interval_minutes,
+        last_fetch_error: entry.last_fetch_error,
+        created_at: entry.created_at.map(utc),
+        updated_at: entry.updated_at.map(utc),
+    })
+    .into_response()
+}
+
+fn utc(stamp: chrono::NaiveDateTime) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_naive_utc_and_offset(stamp, chrono::Utc)
+}
+
 /// Maximum URL length
 const MAX_URL_LENGTH: usize = 2048;
 
@@ -1163,6 +1250,7 @@ pub async fn create_knowledge(
         }
     }
 
+    let now = chrono::Utc::now();
     let response = KnowledgeResponse {
         id: entry_id,
         workspace_id: req.workspace_id,
@@ -1173,13 +1261,11 @@ pub async fn create_knowledge(
         token_count: token_count as usize,
         is_active: true,
         source_url: req.source_url.clone(),
-        last_fetched_at: if is_url_based {
-            Some(chrono::Utc::now())
-        } else {
-            None
-        },
+        last_fetched_at: if is_url_based { Some(now) } else { None },
         refresh_interval_minutes: req.refresh_interval_minutes,
         last_fetch_error: None,
+        created_at: Some(now),
+        updated_at: Some(now),
     };
 
     (StatusCode::CREATED, Json(response)).into_response()

@@ -69,8 +69,8 @@ impl ApprovalPolicy {
     /// Register the waiter before the request reaches the client.
     ///
     /// The decision can come back before the caller has even finished emitting
-    /// the request, and a decision with nothing to resolve is reported to the
-    /// client as "not waiting for approval", so the waiter has to exist first.
+    /// the request, and a decision with nothing to resolve is refused to the
+    /// client as a closed approval, so the waiter has to exist first.
     pub fn expect_decision(&self, id: &str) -> Option<oneshot::Receiver<bool>> {
         if self.is_auto() {
             return None;

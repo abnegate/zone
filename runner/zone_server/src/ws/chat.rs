@@ -485,6 +485,12 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<String>,
     },
+    /// A decision arrived for a call that is no longer waiting: another
+    /// connection answered the card first, or the turn moved past it. Nothing
+    /// about the turn has gone wrong, so this is its own frame rather than an
+    /// `Error`, which the console reads as the reply having died. It goes only
+    /// to the connection that decided.
+    ToolApprovalClosed { tool_call_id: String },
     /// The model put a structured question to the reader, and the turn ends
     /// here. There is no answering frame: what the reader chooses arrives as
     /// an ordinary `send`, so this is the last decision point of the turn.
@@ -1245,10 +1251,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                 if !decided {
                                     let _ = send_server(
                                         &sender,
-                                        ServerMessage::Error {
-                                            message: "That tool call is not waiting for approval."
-                                                .to_string(),
-                                        },
+                                        ServerMessage::ToolApprovalClosed { tool_call_id },
                                     )
                                     .await;
                                 }
