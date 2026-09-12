@@ -153,6 +153,19 @@ pub fn checks_settled(reference: &str, sha: &str, assessment: &str, elapsed: Dur
 /// compares it against the console's own.
 pub const CHECKS_UNKNOWN_PREFIX: &str = "No checks are configured or reporting on";
 
+/// A commit whose checks could not be read, after [`CHECK_SETTLE_GRACE`].
+///
+/// An outage is not an empty check list. Reporting one as the other blames the
+/// repository for GitHub being unreachable and hides the only thing that would
+/// tell a model to try again, so the two are separate strings — both of which
+/// have to be unphrasable as a pass.
+pub fn checks_unreadable(reference: &str, reason: &str, elapsed: Duration) -> String {
+    format!(
+        "The checks on {reference} could not be read after {}s, so this is not a pass: {reason}",
+        elapsed.as_secs()
+    )
+}
+
 /// A commit nothing is reporting on, after [`CHECK_SETTLE_GRACE`]. Deliberately
 /// says out loud that it is not a pass.
 pub fn checks_unknown(reference: &str, elapsed: Duration) -> String {
@@ -278,24 +291,27 @@ impl Waited {
     }
 }
 
-/// What one poll of a commit's checks reports.
+/// What one poll of a commit's checks reports, or why it could not be read.
 ///
 /// A trait rather than the client directly so the grace period and the settle
 /// rule can be proven without a network, which the client's fixed origin
 /// otherwise requires.
 #[async_trait]
 trait Checks: Send + Sync {
-    async fn assess(&self, sha: &str) -> Option<&'static str>;
+    async fn assess(&self, sha: &str) -> Result<&'static str, String>;
 }
 
 #[async_trait]
 impl Checks for Github {
     /// Polled against the resolved SHA rather than the reference, so a branch
     /// that moves mid-wait does not silently change what is being waited on.
-    async fn assess(&self, sha: &str) -> Option<&'static str> {
+    ///
+    /// The failure is carried rather than dropped: a poll GitHub refused says
+    /// nothing about what the checks are, and reading it as "no answer" is
+    /// what let an outage end the wait as a commit nothing reports on.
+    async fn assess(&self, sha: &str) -> Result<&'static str, String> {
         self.settled(Some(sha))
             .await
-            .ok()
             .map(|(_, _, assessment)| assessment)
     }
 }
@@ -380,6 +396,7 @@ struct Commit {
 impl Commit {
     async fn settle(mut self, started: Instant) -> String {
         let mut unknown_since = None;
+        let mut unreadable: Option<String> = None;
         loop {
             if SETTLED_ASSESSMENTS.contains(&self.assessment) {
                 return checks_settled(
@@ -392,14 +409,23 @@ impl Commit {
             if self.assessment == UNKNOWN_ASSESSMENT {
                 let since = *unknown_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= CHECK_SETTLE_GRACE {
-                    return checks_unknown(&self.reference, started.elapsed());
+                    return match unreadable {
+                        Some(reason) => {
+                            checks_unreadable(&self.reference, &reason, started.elapsed())
+                        }
+                        None => checks_unknown(&self.reference, started.elapsed()),
+                    };
                 }
             } else {
                 unknown_since = None;
             }
             tokio::time::sleep(CHECK_POLL_INTERVAL).await;
-            if let Some(assessment) = self.checks.assess(&self.sha).await {
-                self.assessment = assessment;
+            match self.checks.assess(&self.sha).await {
+                Ok(assessment) => {
+                    self.assessment = assessment;
+                    unreadable = None;
+                }
+                Err(reason) => unreadable = Some(reason),
             }
         }
     }
@@ -1008,27 +1034,51 @@ mod tests {
         result.output.clone().expect("a receipt carries its text")
     }
 
-    /// A commit whose checks answer from a script rather than from GitHub.
-    struct Scripted(Lock<VecDeque<&'static str>>);
+    /// A commit whose checks answer from a script rather than from GitHub. A
+    /// script that has run out goes on reporting nothing, which is what an
+    /// empty check list answers.
+    struct Scripted(Lock<VecDeque<Result<&'static str, String>>>);
 
     #[async_trait]
     impl Checks for Scripted {
-        async fn assess(&self, _sha: &str) -> Option<&'static str> {
+        async fn assess(&self, _sha: &str) -> Result<&'static str, String> {
             self.0
                 .lock()
                 .expect("the script is not poisoned")
                 .pop_front()
+                .unwrap_or(Ok(UNKNOWN_ASSESSMENT))
+        }
+    }
+
+    /// Checks no poll can read, the way an outage or an exhausted rate limit
+    /// answers every one of them.
+    struct Unreadable(&'static str);
+
+    #[async_trait]
+    impl Checks for Unreadable {
+        async fn assess(&self, _sha: &str) -> Result<&'static str, String> {
+            Err(self.0.to_string())
         }
     }
 
     fn commit(assessment: &'static str, polls: &[&'static str]) -> Commit {
+        let script = polls.iter().copied().map(Ok).collect();
+        watching(assessment, Box::new(Scripted(Lock::new(script))))
+    }
+
+    fn watching(assessment: &'static str, checks: Box<dyn Checks>) -> Commit {
         Commit {
-            checks: Box::new(Scripted(Lock::new(polls.iter().copied().collect()))),
+            checks,
             reference: "main".to_string(),
             sha: "8c4d21fa9b7e6053".to_string(),
             assessment,
         }
     }
+
+    /// What a GitHub read answers with when it fails. Shaped like the client's
+    /// own messages, which is all this needs: the outcome quotes whatever
+    /// reason it is handed.
+    const UNREADABLE_REASON: &str = "GitHub returned HTTP 503.";
 
     /// Anything a model could read as "it passed".
     const SUCCESS_WORDS: [&str; 5] = ["success", "succeeded", "completed", "passed", "done"];
@@ -1439,6 +1489,37 @@ mod tests {
         let outcome = commit(UNKNOWN_ASSESSMENT, &[]).settle(Instant::now()).await;
         assert_eq!(outcome, checks_unknown("main", CHECK_SETTLE_GRACE));
         assert_unphrasable_as_success(&outcome);
+    }
+
+    /// A poll GitHub refused is not a commit nothing is reporting on. Ending
+    /// the grace period with "no checks are configured" blames the repository
+    /// for an outage, and a model reads it as a repository that does not test
+    /// itself rather than as evidence it never got.
+    #[tokio::test(start_paused = true)]
+    async fn checks_that_could_not_be_read_end_the_wait_as_an_outage_not_as_silence() {
+        let outcome = watching(UNKNOWN_ASSESSMENT, Box::new(Unreadable(UNREADABLE_REASON)))
+            .settle(Instant::now())
+            .await;
+
+        assert_eq!(
+            outcome,
+            checks_unreadable("main", UNREADABLE_REASON, CHECK_SETTLE_GRACE)
+        );
+        assert_unphrasable_as_success(&outcome);
+    }
+
+    /// Which of the two a wait ends with is the *last* poll's answer: an
+    /// outage that clears and leaves a commit still unreported on is the empty
+    /// case again, and saying the checks could not be read would be a stale
+    /// complaint about a read that has since succeeded.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_poll_that_recovers_ends_the_wait_as_silence_again() {
+        let script = VecDeque::from([Err(UNREADABLE_REASON.to_string())]);
+        let outcome = watching(UNKNOWN_ASSESSMENT, Box::new(Scripted(Lock::new(script))))
+            .settle(Instant::now())
+            .await;
+
+        assert_eq!(outcome, checks_unknown("main", CHECK_SETTLE_GRACE));
     }
 
     #[tokio::test(start_paused = true)]
