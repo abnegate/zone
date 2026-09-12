@@ -814,8 +814,13 @@ export function useChat(
       socketRef.current = socket;
       held.length = 0;
       overflowed = false;
+      // An open socket is not yet a working one: the server accepts every
+      // connection and only then decides, so init is the first word that this
+      // one carries a chat, and an error before it refuses the connection
+      // rather than dropping one that already worked.
+      let announced = false;
+      let refused = false;
       socket.onopen = () => {
-        reconnectAttempt = 0;
         const token = chatsApi.chatAccessToken();
         if (token) {
           socket.send(JSON.stringify({ type: 'auth', token }));
@@ -829,6 +834,12 @@ export function useChat(
           payload = JSON.parse(event.data);
         } catch {
           return;
+        }
+        if (payload.type === 'init') {
+          announced = true;
+          reconnectAttempt = 0;
+        } else if (payload.type === 'error' && !announced) {
+          refused = true;
         }
         receive(payload);
       };
@@ -871,6 +882,7 @@ export function useChat(
         setStatus(null);
         activeGenerationRef.current = false;
         setStreaming(false);
+        if (refused) return;
         const delay =
           reconnectAttempt === 0 ? 0 : Math.min(500 * 2 ** (reconnectAttempt - 1), 8000);
         reconnectAttempt += 1;
