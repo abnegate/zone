@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { Question } from '../../chats/types';
+import type { Question, Waiting } from '../../chats/types';
 import type { Task, TaskRun, TaskRunLog } from '../types';
+
+const FAR_FUTURE = '2099-01-01T00:00:00Z';
+const LONG_PAST = '2000-01-01T00:00:00Z';
+const WAITING_ON_OUTCOME = 'Task run is waiting on something outside its loop';
 
 const question: Question = {
   header: 'Scope',
@@ -39,6 +43,30 @@ const waiting: TaskRun = {
   ...running,
   status: 'waiting',
   pending_question: { tool_call_id: 'call-1', questions: [question] },
+};
+
+const check: Waiting = {
+  kind: 'check',
+  id: 'a1b2c3d4e5f6',
+  reference: 'main',
+  deadline: FAR_FUTURE,
+};
+
+const parked: TaskRun = {
+  ...running,
+  status: 'waiting',
+  current_phase: 'waiting',
+  waiting_on: check,
+};
+
+const parkLine: TaskRunLog = {
+  id: 'log-2',
+  phase: 'waiting',
+  agent_type: 'agent',
+  level: 'info',
+  message: WAITING_ON_OUTCOME,
+  metadata: { tool_call_id: 'call-2', waiting: check },
+  created_at: '2026-09-10T00:00:02Z',
 };
 
 const mockRunTask = mock(() => Promise.resolve(running));
@@ -107,7 +135,7 @@ describe('a task run that parked on a question', () => {
     expect(screen.queryByRole('button', { name: 'Run Again' })).not.toBeInTheDocument();
   });
 
-  it('names the phase the run is in as waiting, not the one it parked from', async () => {
+  it('names the phase the run is in as waiting for an answer, not the one it parked from', async () => {
     mockGetTaskRun.mockImplementation(() =>
       Promise.resolve({ ...waiting, current_phase: 'waiting' })
     );
@@ -127,8 +155,24 @@ describe('a task run that parked on a question', () => {
     render(<TaskExecutionView task={task} onClose={() => {}} />);
 
     expect(await screen.findByText('Waiting for you')).toBeInTheDocument();
-    expect(await screen.findAllByText('Waiting for an answer')).toHaveLength(2);
+    expect(await screen.findByText('Waiting for an answer')).toBeInTheDocument();
+    expect(screen.getByText('Waiting')).toBeInTheDocument();
+    expect(screen.getByText('Task run is waiting on a question')).toBeInTheDocument();
     expect(screen.queryByText('Reviewing results')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('wait-countdown')).not.toBeInTheDocument();
+  });
+
+  it('reads as a question, not a wait, when the run carries both', async () => {
+    mockGetTaskRun.mockImplementation(() =>
+      Promise.resolve({ ...waiting, current_phase: 'waiting', waiting_on: check })
+    );
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    expect(await screen.findByTestId('question-card')).toBeInTheDocument();
+    expect(screen.getByText('Waiting for you')).toBeInTheDocument();
+    expect(screen.getByText('Waiting for an answer')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for checks on main')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('wait-countdown')).not.toBeInTheDocument();
   });
 
   it('asks the question above the log the run stopped in', async () => {
@@ -183,5 +227,90 @@ describe('a task run that parked on a question', () => {
     );
     expect(await screen.findByText('Running')).toBeInTheDocument();
     expect(screen.queryByTestId('question-card')).not.toBeInTheDocument();
+  });
+});
+
+describe('a task run that parked on a wait', () => {
+  beforeEach(() => {
+    mockRunTask.mockReset();
+    mockGetTaskRuns.mockReset();
+    mockGetTaskRun.mockReset();
+    mockGetTaskRunLogs.mockReset();
+    mockAnswerRun.mockReset();
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([parked]));
+    mockGetTaskRun.mockImplementation(() => Promise.resolve(parked));
+    mockGetTaskRunLogs.mockImplementation(() => Promise.resolve([]));
+  });
+
+  it('reads as a wait on its subject, not as a question nobody asked', async () => {
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    expect(await screen.findByText('Waiting for checks on main')).toBeInTheDocument();
+    expect(screen.getByText('Waiting')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for you')).not.toBeInTheDocument();
+    expect(screen.queryByText('Waiting for an answer')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('question-card')).not.toBeInTheDocument();
+    expect(document.querySelector('time')).toHaveAttribute('datetime', FAR_FUTURE);
+    expect(screen.getByTestId('wait-countdown')).toHaveTextContent(/\d+:\d{2} left/);
+    expect(screen.queryByRole('button', { name: 'Run Again' })).not.toBeInTheDocument();
+  });
+
+  const subjects: [Waiting, string][] = [
+    [{ kind: 'job', id: 'job_9f3c1a7b2e04', deadline: FAR_FUTURE }, 'job_9f3c1a7b2e04'],
+    [{ kind: 'task_run', id: 'run-2', deadline: FAR_FUTURE }, 'task run run-2'],
+    [{ kind: 'check', id: 'a1b2c3d4e5f6', deadline: FAR_FUTURE }, 'checks on a1b2c3d4e5f6'],
+  ];
+  for (const [waiting_on, subject] of subjects) {
+    it(`names a ${waiting_on.kind} wait the way the chat card does`, async () => {
+      mockGetTaskRuns.mockImplementation(() => Promise.resolve([{ ...parked, waiting_on }]));
+      mockGetTaskRun.mockImplementation(() => Promise.resolve({ ...parked, waiting_on }));
+      render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+      expect(await screen.findByText(`Waiting for ${subject}`)).toBeInTheDocument();
+    });
+  }
+
+  it('says the deadline has passed rather than counting up from nothing', async () => {
+    const overdue = { ...parked, waiting_on: { ...check, deadline: LONG_PAST } };
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([overdue]));
+    mockGetTaskRun.mockImplementation(() => Promise.resolve(overdue));
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    expect(await screen.findByText('Deadline passed')).toBeInTheDocument();
+    expect(screen.getByText('Waiting')).toBeInTheDocument();
+  });
+
+  it('shows an unreadable deadline as written and counts nothing down', async () => {
+    const unreadable = { ...parked, waiting_on: { ...check, deadline: 'soon' } };
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([unreadable]));
+    mockGetTaskRun.mockImplementation(() => Promise.resolve(unreadable));
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    expect(await screen.findByText('soon')).toBeInTheDocument();
+    expect(screen.queryByTestId('wait-countdown')).not.toBeInTheDocument();
+  });
+
+  it('labels the park line as waiting and lets its message say on what', async () => {
+    mockGetTaskRunLogs.mockImplementation(() => Promise.resolve([parkLine]));
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    expect(await screen.findByText(WAITING_ON_OUTCOME)).toBeInTheDocument();
+    expect(screen.getAllByText('Waiting')).toHaveLength(2);
+    expect(screen.queryByText('Waiting for an answer')).not.toBeInTheDocument();
+  });
+
+  it('keeps polling a run parked on a wait, so its outcome lands here', async () => {
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    expect(await screen.findByTestId('wait-countdown')).toBeInTheDocument();
+    mockGetTaskRun.mockImplementation(() =>
+      Promise.resolve({ ...running, status: 'completed', current_phase: null })
+    );
+    await waitFor(() => expect(screen.getByText('Completed')).toBeInTheDocument(), {
+      timeout: 4000,
+    });
+    expect(mockGetTaskRun.mock.calls.length).toBeGreaterThan(1);
+    expect(screen.queryByText('Waiting for checks on main')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('wait-countdown')).not.toBeInTheDocument();
   });
 });

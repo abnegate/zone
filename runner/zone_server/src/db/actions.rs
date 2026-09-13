@@ -6,6 +6,10 @@ use sqlx::{PgConnection, PgPool};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+/// The last thing a model reads before it decides what to do while a runner
+/// runs, which is why the waiting section pins this one too.
+pub(crate) const RUNNER_STARTED: &str = "Runner started. Wait for it with wait_for, then read get_task_run and tail_task_log; do not claim the work finished.";
+
 static UPDATES: Lazy<broadcast::Sender<(Uuid, Value)>> = Lazy::new(|| broadcast::channel(256).0);
 pub fn subscribe() -> broadcast::Receiver<(Uuid, Value)> {
     UPDATES.subscribe()
@@ -328,7 +332,7 @@ pub async fn start_task(
         "title": task.title,
         "is_agentic": true,
         "status": run.status,
-        "message": "Runner started. Poll get_task_run and tail_task_log; do not claim the work finished."
+        "message": RUNNER_STARTED
     }))
 }
 

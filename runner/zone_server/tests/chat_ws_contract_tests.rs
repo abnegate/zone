@@ -15,6 +15,8 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use std::collections::VecDeque;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -26,10 +28,13 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
+use zone_core::tools::job::{JobExited, JobStarted};
 use zone_server::{
+    agent::wait::{Verdict, WaitSettled, Waiting},
     auth::validate_access_token,
     config::Config,
     db::{actions, chats},
+    ws::chat::ServerMessage,
 };
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -1201,4 +1206,354 @@ async fn a_turn_ending_question_is_published_stored_and_answered_by_an_ordinary_
         "the answer reaches the model as an ordinary user turn: {second}"
     );
     assert_replay(second, 1);
+}
+
+const JOB_ID: &str = "job_0123456789ab";
+const JOB_LOG_PATH: &str = ".zone/jobs/job_0123456789ab.log";
+const SPAWNING_CALL: &str = "call_run_shell";
+const WAITING_CALL: &str = "call_wait_for";
+const DEADLINE: &str = "2026-09-13T18:30:00Z";
+
+/// The four frames the job and wait cards are drawn from, serialised straight
+/// off the variant rather than provoked through a socket.
+///
+/// Provoking one needs a model that backgrounds a command or opens a wait, and
+/// a turn that does either belongs to the integration tests that drive one. The
+/// tag a variant travels under and the exact set of keys beside it are narrower
+/// than that and are what the console's schemas are written against, so they
+/// are pinned here where no model is needed to read them.
+fn job_started() -> JobStarted {
+    JobStarted {
+        id: JOB_ID.to_string(),
+        pid: 4242,
+        log_path: JOB_LOG_PATH.to_string(),
+    }
+}
+
+#[test]
+fn a_job_started_frame_names_the_call_that_spawned_it_and_the_job_it_spawned() {
+    let message = Uuid::new_v4();
+
+    let frame = serde_json::to_value(ServerMessage::JobStarted {
+        message_id: message,
+        tool_call_id: SPAWNING_CALL.to_string(),
+        job: job_started(),
+    })
+    .expect("the frame serialises");
+
+    assert_eq!(
+        frame,
+        json!({
+            "type": "job_started",
+            "message_id": message,
+            "tool_call_id": SPAWNING_CALL,
+            "job": {"id": JOB_ID, "pid": 4242, "log_path": JOB_LOG_PATH},
+        })
+    );
+}
+
+#[test]
+fn a_job_exited_frame_is_matched_by_its_job_and_omits_an_exit_code_it_never_had() {
+    let message = Uuid::new_v4();
+    let exited = |exit_code| ServerMessage::JobExited {
+        message_id: message,
+        job: JobExited {
+            id: JOB_ID.to_string(),
+            exit_code,
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(exited(Some(0))).expect("the frame serialises"),
+        json!({
+            "type": "job_exited",
+            "message_id": message,
+            "job": {"id": JOB_ID, "exit_code": 0},
+        }),
+        "no tool_call_id: the call that observes an exit is rarely the one that started the job"
+    );
+    assert_eq!(
+        serde_json::to_value(exited(None)).expect("the frame serialises"),
+        json!({
+            "type": "job_exited",
+            "message_id": message,
+            "job": {"id": JOB_ID},
+        }),
+        "a killed job has no exit code, and the key is absent rather than null"
+    );
+}
+
+#[test]
+fn a_wait_started_frame_says_what_is_waited_on_and_until_when() {
+    let message = Uuid::new_v4();
+    let started = |reference| ServerMessage::WaitStarted {
+        message_id: message,
+        tool_call_id: WAITING_CALL.to_string(),
+        waiting: Waiting {
+            kind: "job".to_string(),
+            id: JOB_ID.to_string(),
+            reference,
+            deadline: DEADLINE.to_string(),
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(started(Some("cargo test --workspace".to_string())))
+            .expect("the frame serialises"),
+        json!({
+            "type": "wait_started",
+            "message_id": message,
+            "tool_call_id": WAITING_CALL,
+            "waiting": {
+                "kind": "job",
+                "id": JOB_ID,
+                "reference": "cargo test --workspace",
+                "deadline": DEADLINE,
+            },
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(started(None)).expect("the frame serialises"),
+        json!({
+            "type": "wait_started",
+            "message_id": message,
+            "tool_call_id": WAITING_CALL,
+            "waiting": {"kind": "job", "id": JOB_ID, "deadline": DEADLINE},
+        }),
+        "a wait on something that needs no reference omits the key rather than sending null"
+    );
+}
+
+#[test]
+fn a_wait_settled_frame_carries_the_call_it_settles_inside_its_own_payload() {
+    let message = Uuid::new_v4();
+
+    let frame = serde_json::to_value(ServerMessage::WaitSettled {
+        message_id: message,
+        settled: WaitSettled {
+            tool_call_id: WAITING_CALL.to_string(),
+            outcome: "Job job_0123456789ab exited 0.".to_string(),
+            verdict: Verdict::Settled,
+        },
+    })
+    .expect("the frame serialises");
+
+    assert_eq!(
+        frame,
+        json!({
+            "type": "wait_settled",
+            "message_id": message,
+            "settled": {
+                "tool_call_id": WAITING_CALL,
+                "outcome": "Job job_0123456789ab exited 0.",
+                "verdict": "settled",
+            },
+        }),
+        "the call id rides inside settled, not beside it: the console matches the card on it"
+    );
+}
+
+/// Every status read Zone offers answers instantly, so a model told to look
+/// again learns nothing between calls and spends a round per glance. Six
+/// strings said exactly that, and they are the instructions nearest the moment
+/// the decision is made, so they beat any prompt section that disagrees.
+///
+/// The needles are those six strings' own earlier wording. They are phrases no
+/// assertion needs to spell, so inline test modules are swept too rather than
+/// skipped; a test file is not, and this test's own needles sit outside every
+/// swept root.
+const SWEPT: [&str; 3] = [
+    "runner/zone_server/src",
+    "runner/zone_core/src",
+    "manager/frontend/src",
+];
+
+const SOURCE_EXTENSIONS: [&str; 3] = ["rs", "ts", "tsx"];
+
+const TEST_DIRECTORIES: [&str; 3] = ["test", "tests", "__tests__"];
+
+const TEST_INFIXES: [&str; 2] = [".test.", ".spec."];
+
+const POLLING: [&str; 5] = [
+    "poll get_task_run",
+    "poll tail_task_log",
+    "poll get_build_status",
+    "check again in a later call",
+    "monitor start_task progress",
+];
+
+/// One of the six strings, where it lives, how to find it, and the name it has
+/// to point at now. The two schema strings interpolate the tool's name from a
+/// constant, which `WAIT_FOR_BINDING` holds to `wait_for` separately.
+struct Rewritten {
+    file: &'static str,
+    opens: &'static str,
+    closes: &'static str,
+    names: &'static str,
+}
+
+const WAIT_FOR: &str = "wait_for";
+const WAIT_FOR_PLACEHOLDER: &str = "{WAIT_FOR_TOOL}";
+const WAIT_FOR_BINDING: &str = "const WAIT_FOR_TOOL: &str = \"wait_for\";";
+const COMMAND_RS: &str = "runner/zone_core/src/tools/command.rs";
+const JOB_RS: &str = "runner/zone_core/src/tools/job.rs";
+const ACTIONS_RS: &str = "runner/zone_server/src/agent/actions.rs";
+const LITERAL_END: &str = "\";";
+const FORMAT_END: &str = ")";
+
+const REWRITTEN: [Rewritten; 6] = [
+    Rewritten {
+        file: "runner/zone_server/src/agent/prompt/section/workspace.rs",
+        opens: "const START_TASK: &str = ",
+        closes: LITERAL_END,
+        names: WAIT_FOR,
+    },
+    Rewritten {
+        file: ACTIONS_RS,
+        opens: "const START_TASK_DESCRIPTION: &str = ",
+        closes: LITERAL_END,
+        names: WAIT_FOR,
+    },
+    Rewritten {
+        file: ACTIONS_RS,
+        opens: "const TAIL_TASK_LOG_DESCRIPTION: &str = ",
+        closes: LITERAL_END,
+        names: WAIT_FOR,
+    },
+    Rewritten {
+        file: "runner/zone_server/src/db/actions.rs",
+        opens: "const RUNNER_STARTED: &str = ",
+        closes: LITERAL_END,
+        names: WAIT_FOR,
+    },
+    Rewritten {
+        file: COMMAND_RS,
+        opens: "\"Shell command to run",
+        closes: FORMAT_END,
+        names: WAIT_FOR_PLACEHOLDER,
+    },
+    Rewritten {
+        file: COMMAND_RS,
+        opens: "\"This command sleeps for",
+        closes: FORMAT_END,
+        names: WAIT_FOR_PLACEHOLDER,
+    },
+];
+
+fn repository() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("the crate sits two directories under the repository")
+        .to_path_buf()
+}
+
+fn is_test_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    TEST_INFIXES.iter().any(|infix| name.contains(infix))
+        || name.ends_with("_test.rs")
+        || name.ends_with("_tests.rs")
+        || path.components().any(|component| {
+            TEST_DIRECTORIES.contains(&component.as_os_str().to_str().unwrap_or(""))
+        })
+}
+
+fn sources(directory: &Path, into: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("{} is readable: {error}", directory.display()));
+    for entry in entries {
+        let path = entry.expect("a directory entry is readable").path();
+        if is_test_path(&path) {
+            continue;
+        }
+        if path.is_dir() {
+            sources(&path, into);
+        } else if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| SOURCE_EXTENSIONS.contains(&extension))
+        {
+            into.push(path);
+        }
+    }
+}
+
+#[test]
+fn nothing_still_tells_the_model_to_sample_a_status_in_a_loop() {
+    let repository = repository();
+    let mut swept = 0;
+
+    for directory in SWEPT {
+        let mut files = Vec::new();
+        sources(&repository.join(directory), &mut files);
+        assert!(
+            !files.is_empty(),
+            "{directory} contributed no source files, so the sweep proved nothing"
+        );
+        for file in &files {
+            let source = fs::read_to_string(file)
+                .unwrap_or_else(|error| panic!("{} is readable: {error}", file.display()))
+                .to_lowercase();
+            for needle in POLLING {
+                assert!(
+                    !source.contains(needle),
+                    "{} still says {needle:?}, which sends the model round the loop to look again",
+                    file.display()
+                );
+            }
+        }
+        swept += files.len();
+    }
+
+    assert!(swept > 0, "the sweep walked nothing");
+}
+
+#[test]
+fn every_rewritten_string_points_the_model_at_the_wait_tool() {
+    let repository = repository();
+
+    for rewritten in REWRITTEN {
+        let path = repository.join(rewritten.file);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{} is readable: {error}", path.display()));
+        let opens = source.find(rewritten.opens).unwrap_or_else(|| {
+            panic!(
+                "{} no longer declares {:?}",
+                rewritten.file, rewritten.opens
+            )
+        });
+        let rest = &source[opens + rewritten.opens.len()..];
+        let closes = rest.find(rewritten.closes).unwrap_or_else(|| {
+            panic!(
+                "{} does not close {:?} with {:?}",
+                rewritten.file, rewritten.opens, rewritten.closes
+            )
+        });
+        let string = &rest[..closes];
+
+        assert!(
+            string.contains(rewritten.names),
+            "{} tells the model what to do after {:?} without naming {}: {string}",
+            rewritten.file,
+            rewritten.opens,
+            rewritten.names
+        );
+    }
+
+    let command = fs::read_to_string(repository.join(COMMAND_RS)).expect("command.rs is readable");
+    assert!(
+        command.contains(WAIT_FOR_BINDING),
+        "the two schema strings name the tool through a constant, and that constant is what \
+         binds the placeholder to {WAIT_FOR}"
+    );
+
+    let job = fs::read_to_string(repository.join(JOB_RS)).expect("job.rs is readable");
+    assert!(
+        job.contains(WAIT_FOR_BINDING),
+        "the spawn receipt points the model at the tool through a second copy of the constant, \
+         and that copy binds it to {WAIT_FOR} too"
+    );
 }

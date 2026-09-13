@@ -4,6 +4,7 @@ export { AuthenticatedImage } from './AuthenticatedImage';
 export { AuthenticatedVideo } from './AuthenticatedVideo';
 export { Citations } from './Citations';
 export { Generation } from './Generation';
+export { JobCard } from './JobCard';
 export { MessageContent } from './MessageContent';
 export { QuestionCard } from './QuestionCard';
 export { Reasoning } from './Reasoning';

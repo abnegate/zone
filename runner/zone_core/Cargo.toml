@@ -39,6 +39,10 @@ zeroize = { workspace = true }
 # Read and write a SecretValue as the text column it is stored in
 sqlx = { workspace = true, optional = true }
 
+# Process-local registry of background jobs
+dashmap = { workspace = true }
+once_cell = { workspace = true }
+
 # Streaming
 async-stream = "=0.3.6"
 

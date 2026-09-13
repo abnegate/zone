@@ -1,0 +1,140 @@
+/* Background work behind a tool call: a job the call detached or a wait it
+   opened. Sits on the tool row like the question card, in the same frame, and
+   settles into the trace's own status colours. Only a clean exit is green;
+   a wait that ran out, a commit nothing reported on and checks that could not
+   be read are drawn as warnings with their own words, because silence is not
+   success. */
+.job-card {
+  display: grid;
+  gap: var(--ui-space-2);
+  margin: 0 var(--ui-space-3) var(--ui-space-2);
+  padding: var(--ui-space-3);
+  border: 1px solid var(--ui-border);
+  border-left: 3px solid var(--ui-text-tertiary, var(--ui-text-secondary));
+  background: var(--ui-bg-surface);
+  font-size: var(--ui-text-xs);
+}
+
+.job-card--running,
+.job-card--waiting {
+  border-left-color: var(--ui-accent);
+}
+
+.job-card--ok {
+  border-left-color: var(--ui-success, #16a34a);
+}
+
+.job-card--failed {
+  border-left-color: var(--ui-danger, #dc2626);
+}
+
+.job-card--timed-out,
+.job-card--unknown,
+.job-card--unreadable {
+  border-left-color: var(--ui-warning, #b45309);
+}
+
+.job-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  margin: 0;
+}
+
+.job-card-status {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ui-text-tertiary, var(--ui-text-secondary));
+}
+
+.job-card--running .job-card-status,
+.job-card--waiting .job-card-status {
+  background: var(--ui-accent);
+  animation: job-card-pulse 1.2s ease-in-out infinite;
+}
+
+.job-card--ok .job-card-status {
+  background: var(--ui-success, #16a34a);
+}
+
+.job-card--failed .job-card-status {
+  background: var(--ui-danger, #dc2626);
+}
+
+.job-card--timed-out .job-card-status,
+.job-card--unknown .job-card-status,
+.job-card--unreadable .job-card-status {
+  background: var(--ui-warning, #b45309);
+}
+
+.job-card-title {
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+}
+
+.job-card--timed-out .job-card-title,
+.job-card--unknown .job-card-title,
+.job-card--unreadable .job-card-title {
+  color: var(--ui-warning, #b45309);
+}
+
+.job-card-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: var(--ui-space-2) var(--ui-space-3);
+  margin: 0;
+}
+
+.job-card-meta dt {
+  margin: 0 0 2px;
+  color: var(--ui-text-secondary);
+  letter-spacing: var(--ui-tracking-tight);
+}
+
+.job-card-meta dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-2);
+  margin: 0;
+  color: var(--ui-text-primary);
+}
+
+.job-card-wide {
+  grid-column: 1 / -1;
+}
+
+.job-card-mono {
+  font-family: var(--ui-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.job-card-countdown {
+  color: var(--ui-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.job-card-outcome {
+  margin: 0;
+  color: var(--ui-text-primary);
+  overflow-wrap: anywhere;
+}
+
+@keyframes job-card-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .job-card--running .job-card-status,
+  .job-card--waiting .job-card-status {
+    animation: none;
+  }
+}

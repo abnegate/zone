@@ -17,3 +17,4 @@ pub mod model;
 pub mod prioritisation;
 pub mod runner;
 pub mod stages;
+pub mod task_progress;

@@ -14,10 +14,13 @@ use uuid::Uuid;
 use zone_core::agent::{AgentCallback, AgentPhase};
 use zone_core::context::Entry;
 use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage};
+use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
+use zone_core::tools::job::Jobs;
 
 use crate::agent::prompt::{self, Environment, Vcs};
 use crate::agent::question::{self, Question};
+use crate::agent::wait::{self, Waited, Waiting};
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
 use crate::db::{ai_settings, tasks, workspaces};
 use crate::services::chat::session::{self, RunContext};
@@ -64,6 +67,7 @@ const RUN_FAILED: &str = "failed";
 
 const PHASE_WAITING: &str = "waiting";
 const WAITING_ON_ANSWER: &str = "Task run is waiting on a question";
+const WAITING_ON_OUTCOME: &str = "Task run is waiting on something outside its loop";
 const RESUMED_ON_ANSWER: &str = "Task run resumed on an answer";
 const LOST_LEASE: &str = "Task execution lost its lease";
 const ANSWER_WITHDRAWN: &str = "The claim on the answer was withdrawn before one arrived";
@@ -727,6 +731,22 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         )
         .await;
     }
+    reap(run_id).await;
+}
+
+/// Release what the run's session still owns, once its status is terminal.
+///
+/// One point rather than one per exit: every path that executed anything
+/// passes through the select above, the cancelled one included. A backgrounded
+/// job outlives the tool call that started it and nothing drops its child, so
+/// killing what the run left running is the run's own last act.
+async fn reap(run_id: Uuid) {
+    let session = Session::Task(run_id);
+    let killed = Jobs::kill_session(session).await;
+    if killed > 0 {
+        tracing::info!(%run_id, killed, "Killed the background jobs a finished run left behind");
+    }
+    wait::reset_session(session);
 }
 
 async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
@@ -1701,7 +1721,11 @@ async fn attempt_run(
         // no ceiling at all: a model looping on `ask_user` restarts it as often
         // as it likes, and an all-optional card answers itself in 30 seconds.
         let mut budget = LoopBudget::task();
+        // The wait allowance shares that lifetime, so a retried attempt starts
+        // at zero and the waits of one attempt cap only its own park churn.
+        wait::reset_session(Session::Task(run_id));
         let mut answers: Vec<String> = Vec::new();
+        let mut waits: Vec<String> = Vec::new();
         let mut carried = TaskOutcome::empty();
         loop {
             match run_task_loop(
@@ -1733,6 +1757,24 @@ async fn attempt_run(
                             .await?;
                     context = parked;
                     resume_with(&mut context, answered, &mut answers);
+                    tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
+                }
+                Ok(TurnOutcome::Waiting {
+                    tool_call_id,
+                    waiting,
+                    context: parked,
+                    turn,
+                    spent,
+                }) => {
+                    carried.absorb(turn);
+                    budget = budget.less(spent);
+                    let waited = Waited::new(tool_call_id, waiting);
+                    let outcome = park_for_wait(state, run_id, owner, &waited, permit).await?;
+                    context = parked;
+                    // The pair the helper returns is for a surface with durable
+                    // turn history to write it to. A task run replays from the
+                    // context it carries forward, and has no such store.
+                    let _ = wait::resume_with_outcome(&mut context, &waited, outcome, &mut waits);
                     tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
                 }
             }
@@ -1859,19 +1901,99 @@ async fn park_for_answer(
         return Err(Fault::lease());
     }
     let (resume, answered) = resumed?;
-    log_resume(state, run_id, owner, &resume, answered).await;
+    log_resume(
+        state,
+        run_id,
+        owner,
+        &resume,
+        answered.then_some(RESUMED_ON_ANSWER),
+    )
+    .await;
     Ok(resume)
+}
+
+/// Park the run on what it is waiting for and come back with the outcome.
+///
+/// Symmetric with [`park_for_answer`] and for the same reasons, with one
+/// difference: the wait was registered by the call that opened it, strictly
+/// before its own receipt was streamed, so nothing can settle unobserved
+/// between the registration and the park. The admission slot is the one thing
+/// this park does not keep — a run waiting on a build is not executing, and
+/// [`MAX_CONCURRENT_TASKS`] runs holding slots through a half-hour wait would
+/// take the deployment's task throughput to zero.
+async fn park_for_wait(
+    state: &AppState,
+    run_id: Uuid,
+    owner: Uuid,
+    waited: &Waited,
+    permit: &Permit,
+) -> Result<String, Fault> {
+    let waiting = serde_json::json!(waited.waiting);
+    if !matches!(
+        tasks::park_task_run_waiting(state.db(), run_id, owner, waiting.clone()).await,
+        Ok(true)
+    ) {
+        return Err(Fault::lease());
+    }
+    if let Err(error) = tasks::add_owned_task_run_log(
+        state.db(),
+        run_id,
+        Some(owner),
+        PHASE_WAITING,
+        SOURCE_AGENT,
+        LEVEL_INFO,
+        WAITING_ON_OUTCOME,
+        Some(serde_json::json!({
+            "tool_call_id": waited.tool_call_id,
+            "waiting": waiting,
+        })),
+    )
+    .await
+    {
+        tracing::warn!(%run_id, %error, "Could not record a run parked on a wait");
+    }
+
+    // The park is symmetric: every way out of the wait unparks the row before
+    // it propagates, the failing ones included. A run left reading 'waiting'
+    // while the retry re-executed it would advertise a wait nothing is
+    // watching, and the retry's own park would fail the 'running' fence.
+    let settled = permit
+        .yielded(wait::await_outcome(
+            Session::Task(run_id),
+            &waited.tool_call_id,
+            wait::deadline(&waited.waiting),
+        ))
+        .await;
+
+    if !matches!(
+        tasks::resume_task_run(state.db(), run_id, owner).await,
+        Ok(true)
+    ) {
+        return Err(Fault::lease());
+    }
+    // The verdict rides with the outcome for the console's card; a run has no
+    // card, and its log and the model both read the prose.
+    let outcome = settled.map_err(|_| Fault::overloaded())?.text;
+    log_resume(state, run_id, owner, &outcome, None).await;
+    Ok(outcome)
 }
 
 /// Say in the run's own log how the wait ended.
 ///
 /// The text handed to the model is the only record of what the run went ahead
 /// on, and a reader of the execution view otherwise sees the card vanish
-/// between `waiting` and the next `thinking` with nothing to explain it. The
-/// elapsed-window line is the message itself; an answer is named as one, with
-/// what was chosen alongside it.
-async fn log_resume(state: &AppState, run_id: Uuid, owner: Uuid, resume: &str, answered: bool) {
-    let message = if answered { RESUMED_ON_ANSWER } else { resume };
+/// between `waiting` and the next `thinking` with nothing to explain it. An
+/// answer is named as one, with what was chosen alongside it; an elapsed
+/// window and a settled wait are their own headline, because what they say is
+/// the whole point of the line.
+async fn log_resume(
+    state: &AppState,
+    run_id: Uuid,
+    owner: Uuid,
+    resume: &str,
+    headline: Option<&str>,
+) {
+    let message = headline.unwrap_or(resume);
     if let Err(error) = tasks::add_owned_task_run_log(
         state.db(),
         run_id,
@@ -1961,6 +2083,62 @@ enum TurnOutcome {
         turn: TaskOutcome,
         spent: Spend,
     },
+    Waiting {
+        tool_call_id: String,
+        waiting: Waiting,
+        context: RunContext,
+        turn: TaskOutcome,
+        spent: Spend,
+    },
+}
+
+/// What one turn suspended on, before the turn's own work is folded in.
+///
+/// The two parks are captured rather than acted on: the stream still has the
+/// calls queued behind the ends-turn one to emit, and draining it keeps every
+/// tool call in the replay paired with a result.
+enum Park {
+    Question {
+        tool_call_id: String,
+        questions: Vec<Question>,
+        spent: Spend,
+    },
+    Wait {
+        tool_call_id: String,
+        waiting: Waiting,
+        spent: Spend,
+    },
+}
+
+impl Park {
+    /// What the attempt is handed: the park, the replay it resumes from, and
+    /// what the suspended turn itself produced.
+    fn outcome(self, context: RunContext, turn: TaskOutcome) -> TurnOutcome {
+        match self {
+            Self::Question {
+                tool_call_id,
+                questions,
+                spent,
+            } => TurnOutcome::Parked {
+                tool_call_id,
+                questions,
+                context,
+                turn,
+                spent,
+            },
+            Self::Wait {
+                tool_call_id,
+                waiting,
+                spent,
+            } => TurnOutcome::Waiting {
+                tool_call_id,
+                waiting,
+                context,
+                turn,
+                spent,
+            },
+        }
+    }
 }
 
 pub(super) async fn complete_publication(
@@ -2113,7 +2291,7 @@ async fn run_task_loop(
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
     let mut tool_calls = 0usize;
-    let mut parked: Option<(String, Vec<Question>, Spend)> = None;
+    let mut parked: Option<Park> = None;
     let mut replay = context.clone();
     let mut events = std::pin::pin!(agent::run_with_context(
         AgentRun {
@@ -2197,14 +2375,28 @@ async fn run_task_loop(
             AgentEvent::Finalizing(reason) => {
                 callback.on_phase_change(AgentPhase::Responding, Some(&reason));
             }
-            // The stream still has the unexecuted calls queued behind the
-            // question to emit. Draining it keeps every tool call in the replay
-            // paired with a result, so the resumed turn is not sent a dangling one.
             AgentEvent::QuestionRequired {
                 tool_call_id,
                 questions,
                 spent,
-            } => parked = Some((tool_call_id, questions, spent)),
+            } => {
+                parked = Some(Park::Question {
+                    tool_call_id,
+                    questions,
+                    spent,
+                });
+            }
+            AgentEvent::WaitRequired {
+                tool_call_id,
+                waiting,
+                spent,
+            } => {
+                parked = Some(Park::Wait {
+                    tool_call_id,
+                    waiting,
+                    spent,
+                });
+            }
             AgentEvent::Consumed(_)
             | AgentEvent::Context(_)
             | AgentEvent::Usage(_)
@@ -2214,17 +2406,14 @@ async fn run_task_loop(
             AgentEvent::Failed(error) => return Err(error),
         }
     }
-    if let Some((tool_call_id, questions, spent)) = parked {
-        return Ok(TurnOutcome::Parked {
-            tool_call_id,
-            questions,
-            context: replay,
-            turn: TaskOutcome {
+    if let Some(park) = parked {
+        return Ok(park.outcome(
+            replay,
+            TaskOutcome {
                 summary,
                 tool_calls,
             },
-            spent,
-        });
+        ));
     }
     callback.on_phase_change(AgentPhase::Responding, Some(&summary));
     callback.on_response(&summary);
@@ -4101,5 +4290,626 @@ mod watchdog_tests {
             Some(&"Scope: Backfill"),
             "the answer is the newest turn: {carried:?}"
         );
+    }
+
+    const WAITED_JOB: &str = "job_9f3c1a7b2e04";
+    const WAITED_CALL: &str = "call-wait-1";
+
+    /// Longer than [`STALL_AFTER`], so a wait the watchdog could still see
+    /// would have been announced twice over before this one ended. Only ever
+    /// waited out on a paused clock.
+    const WAIT_WINDOW: Duration = Duration::from_secs(150);
+
+    /// How often a test asks the row whether the run has parked yet.
+    const POLL: Duration = Duration::from_millis(10);
+
+    /// A wait short enough to sit out in real time.
+    ///
+    /// The tests that read the parked row keep the real clock: a paused one
+    /// auto-advances to the next timer whenever the runtime has only pending
+    /// I/O left, which is every moment between asking the row for its state
+    /// and being told, so the deadline could elapse before the park is seen.
+    const WAIT_TICK: Duration = Duration::from_secs(3);
+
+    /// A wait on a background job, ending `seconds` from now.
+    ///
+    /// Registered directly, so it ends at its own deadline: the subscriptions
+    /// that settle early belong to the tool call that opened them, and what a
+    /// park does with the outcome is the same either way.
+    fn waiting_in(seconds: i64) -> Waiting {
+        Waiting {
+            kind: wait::KIND_JOB.to_string(),
+            id: WAITED_JOB.to_string(),
+            reference: None,
+            deadline: (chrono::Utc::now() + chrono::Duration::seconds(seconds))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }
+    }
+
+    /// One call id per claim, because the registry is process-wide and a wait
+    /// one test leaves unconsumed would otherwise be found by the next.
+    fn claimed_wait(run: Uuid, seconds: i64) -> Waited {
+        let waiting = waiting_in(seconds);
+        let call = format!("{WAITED_CALL}-{}", Uuid::new_v4());
+        wait::claim(&call, waiting.clone(), Session::Task(run));
+        Waited::new(call, waiting)
+    }
+
+    /// Status, what the run waits on, whether anything is answerable, and the
+    /// phase, from one row read: under paused time the deadline can elapse
+    /// between two queries, and a resumed row has already shed all four.
+    #[allow(clippy::type_complexity)]
+    async fn waiting_state(
+        pool: &PgPool,
+        run: Uuid,
+    ) -> (
+        String,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+        Option<String>,
+    ) {
+        sqlx::query_as(
+            "SELECT status, pending_wait, pending_question, current_phase FROM task_runs WHERE id = $1",
+        )
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Everything the run complained about. The watchdog's stall line is the
+    /// only warning anything in these tests can produce.
+    async fn warnings(pool: &PgPool, run: Uuid) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT phase, message FROM task_run_logs WHERE task_run_id = $1 AND log_level = $2 ORDER BY created_at")
+            .bind(run)
+            .bind(LEVEL_WARNING)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The expression the whole primitive rests on, on the consuming side. A
+    /// wait hands back the round it opened in, so the work resumes in that
+    /// round instead of the next one, and only the call it spent is gone.
+    #[test]
+    fn a_wait_park_hands_the_attempt_back_the_round_it_opened_in() {
+        let calls_made = 1;
+        let park = Park::Wait {
+            tool_call_id: WAITED_CALL.to_string(),
+            waiting: waiting_in(WAIT_WINDOW.as_secs() as i64),
+            spent: Spend {
+                iterations: 0,
+                tool_calls: calls_made,
+            },
+        };
+        let turn = TaskOutcome {
+            summary: "Started the build.".to_string(),
+            tool_calls: calls_made,
+        };
+
+        let TurnOutcome::Waiting {
+            tool_call_id,
+            waiting,
+            turn,
+            spent,
+            ..
+        } = park.outcome(
+            RunContext::from_messages(vec![LlmMessage::user("Ship it.")]),
+            turn,
+        )
+        else {
+            panic!("a wait is neither a question nor a finished turn");
+        };
+
+        assert_eq!(tool_call_id, WAITED_CALL);
+        assert_eq!(waiting.id, WAITED_JOB);
+        assert_eq!(
+            turn.summary, "Started the build.",
+            "the prose the suspended turn streamed is the attempt's to keep"
+        );
+        let ceiling = LoopBudget::task();
+        let resumed = ceiling.less(spent);
+        assert_eq!(
+            resumed.max_iterations, ceiling.max_iterations,
+            "waiting is not thinking, so the round it opened in comes back"
+        );
+        assert_eq!(
+            resumed.max_tool_calls,
+            ceiling.max_tool_calls - calls_made,
+            "the call that opened the wait is still a call the attempt made"
+        );
+    }
+
+    /// The asymmetry the refund depends on: a question is answered by a person
+    /// and the turn that resumes is a turn the model got to use.
+    #[test]
+    fn a_question_park_still_spends_the_round_it_asked_in() {
+        let park = Park::Question {
+            tool_call_id: "ask-1".to_string(),
+            questions: vec![asked("Scope", true, &["Backfill", "Forward only"])],
+            spent: Spend {
+                iterations: 1,
+                tool_calls: 1,
+            },
+        };
+        let TurnOutcome::Parked { spent, .. } = park.outcome(
+            RunContext::from_messages(vec![LlmMessage::user("Ship it.")]),
+            TaskOutcome::empty(),
+        ) else {
+            panic!("a question park is not a wait");
+        };
+
+        let ceiling = LoopBudget::task();
+        assert_eq!(
+            ceiling.less(spent).max_iterations,
+            ceiling.max_iterations - 1,
+            "only a wait is refunded"
+        );
+    }
+
+    /// Successive outcomes may not grow a set of preserved entries compaction
+    /// can never shed, and the one entry they must never demote is the task
+    /// prompt: it is the run's own specification, and a run that waited twice
+    /// and then compacted would proceed on the model's paraphrase of it.
+    #[test]
+    fn successive_wait_outcomes_keep_only_the_newest_as_preserved_evidence() {
+        const SPECIFICATION: &str = "# Task: Ship it\n\nStart the build and wait for it.";
+        let mut context = RunContext::from_messages(vec![
+            LlmMessage::system("Task rules"),
+            LlmMessage::user(SPECIFICATION),
+        ]);
+        let mut waits: Vec<String> = Vec::new();
+
+        let first = Waited::new("call-wait-1", waiting_in(60));
+        let _ = wait::resume_with_outcome(
+            &mut context,
+            &first,
+            "The build exited with code 1.".to_string(),
+            &mut waits,
+        );
+        let older = waits.clone();
+        let second = Waited::new("call-wait-2", waiting_in(60));
+        let _ = wait::resume_with_outcome(
+            &mut context,
+            &second,
+            "The build exited with code 0.".to_string(),
+            &mut waits,
+        );
+
+        assert_eq!(waits.len(), 4, "both pairs are recorded: {waits:?}");
+        let newest: Vec<&Entry> = context
+            .entries
+            .iter()
+            .filter(|entry| waits.contains(&entry.id) && !older.contains(&entry.id))
+            .collect();
+        assert_eq!(
+            newest.len(),
+            2,
+            "an envelope and the result that follows it"
+        );
+        assert!(
+            newest.iter().all(|entry| entry.preserve),
+            "the outcome the run resumes on is the newest evidence it has"
+        );
+        assert!(
+            context
+                .entries
+                .iter()
+                .filter(|entry| older.contains(&entry.id))
+                .all(|entry| !entry.preserve),
+            "a previous outcome stays in the context but stops being pinned"
+        );
+        assert!(
+            context.entries.iter().any(|entry| {
+                entry.preserve && entry.message.content.as_deref() == Some(SPECIFICATION)
+            }),
+            "demoting the task prompt would compact away what the run was asked to do"
+        );
+    }
+
+    /// The console reads the phase beside the badge, and `answer_run` reads
+    /// `pending_question` to decide whether anything is answerable. A wait
+    /// park owes the first a truthful phase and the second nothing at all.
+    #[tokio::test]
+    async fn a_wait_park_stores_its_wait_names_the_phase_and_leaves_nothing_to_answer() {
+        let _execution = EXECUTION.lock().await;
+        let (pool, observed, state, run, owner) = parked_fixture().await;
+        let permit = Arc::new(Permit::acquire().await.unwrap());
+        let waited = claimed_wait(run, WAIT_TICK.as_secs() as i64);
+
+        let parking = {
+            let state = state.clone();
+            let permit = permit.clone();
+            let waited = waited.clone();
+            tokio::spawn(async move { park_for_wait(&state, run, owner, &waited, &permit).await })
+        };
+        // Bounded by the wait's own window: past it there is no park left to
+        // read, and spinning would report a hang instead of what went wrong.
+        tokio::time::timeout(WAIT_TICK, async {
+            loop {
+                let (status, pending_wait, pending_question, phase) =
+                    waiting_state(&observed, run).await;
+                if status == PHASE_WAITING {
+                    assert_eq!(
+                        serde_json::from_value::<Waiting>(
+                            pending_wait.expect("a parked run stores what it waits on")
+                        )
+                        .expect("the stored wait is a wait"),
+                        waited.waiting,
+                        "the card the console draws comes from this column"
+                    );
+                    assert_eq!(
+                        pending_question, None,
+                        "a run waiting on a job has nothing to answer, which is what answer_run \
+                     refuses with a conflict"
+                    );
+                    assert_eq!(
+                        phase.as_deref(),
+                        Some(PHASE_WAITING),
+                        "the phase shown beside the badge must say the run is waiting"
+                    );
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the run never read as parked on its wait");
+
+        let outcome = parking
+            .await
+            .unwrap()
+            .expect("a wait that ran out still resumes the run");
+        assert!(
+            outcome.contains(&wait::job_subject(WAITED_JOB)),
+            "silence is not success: the model is told which wait did not finish: {outcome}"
+        );
+
+        let (status, pending_wait, _, phase) = waiting_state(&pool, run).await;
+        assert_eq!(status, "running", "every exit from a wait unparks the row");
+        assert_eq!(pending_wait, None, "a resumed run waits on nothing");
+        assert_eq!(
+            phase, None,
+            "a resumed run must not go on reading as waiting"
+        );
+
+        let rows = waiting_rows(&pool, run).await;
+        assert_eq!(rows.len(), 2, "a park and its ending: {rows:?}");
+        assert_eq!(rows[0].0, WAITING_ON_OUTCOME);
+        let payload = rows[0].1.as_ref().expect("the park says what it waits on");
+        assert_eq!(payload["tool_call_id"], waited.tool_call_id);
+        assert_eq!(payload["waiting"]["id"], WAITED_JOB);
+        assert_eq!(payload["waiting"]["deadline"], waited.waiting.deadline);
+        assert!(
+            payload.get("questions").is_none(),
+            "a wait is not a question: {payload}"
+        );
+        assert_eq!(
+            rows[1].0, outcome,
+            "the outcome is its own headline, because what it says is the point of the line"
+        );
+        assert_eq!(rows[1].1.as_ref().unwrap()["resume"], outcome);
+    }
+
+    /// A run waiting on a build is not executing. Held through the wait, five
+    /// runs parked on half-hour waits take the whole deployment's task
+    /// throughput to zero, and the timeout is the model's to size.
+    #[tokio::test]
+    async fn a_run_parked_on_a_wait_gives_back_its_slot_and_keeps_proving_its_lease() {
+        let _execution = EXECUTION.lock().await;
+        let (pool, observed, state, run, owner) = parked_fixture().await;
+        let permit = Arc::new(Permit::acquire().await.unwrap());
+        assert_eq!(
+            get_semaphore().available_permits(),
+            MAX_CONCURRENT_TASKS - 1,
+            "the executing run holds a slot"
+        );
+        let waited = claimed_wait(run, WAIT_TICK.as_secs() as i64);
+
+        let parking = {
+            let state = state.clone();
+            let permit = permit.clone();
+            let waited = waited.clone();
+            tokio::spawn(async move { park_for_wait(&state, run, owner, &waited, &permit).await })
+        };
+        tokio::time::timeout(WAIT_TICK, async {
+            while waiting_state(&observed, run).await.0 != PHASE_WAITING {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the run never read as parked on its wait");
+        // The row is written before the slot is handed back, so the release is
+        // waited for rather than read the instant the row appears -- the same
+        // poll the question park's own slot assertion uses.
+        tokio::time::timeout(WAIT_TICK, async {
+            while get_semaphore().available_permits() != MAX_CONCURRENT_TASKS {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("a parked run kept the execution slot it is not executing on");
+        assert!(
+            tasks::heartbeat_task_run(&observed, run, owner)
+                .await
+                .unwrap(),
+            "a parked run still has to prove the process behind it is alive, or the sweeper \
+             orphans it mid-wait"
+        );
+
+        parking
+            .await
+            .unwrap()
+            .expect("the wait ended and the run owes the pool a slot again");
+        assert_eq!(
+            get_semaphore().available_permits(),
+            MAX_CONCURRENT_TASKS - 1,
+            "a run about to execute again queued for no slot"
+        );
+        assert!(
+            warnings(&pool, run).await.is_empty(),
+            "the watchdog is for silence inside the loop; a parked run has left it"
+        );
+        drop(permit);
+    }
+
+    /// The stall line exists for a wedged turn. A run parked on a wait is not
+    /// wedged, and announcing it every minute would bury the log it writes to
+    /// and tell whoever reads it the opposite of the truth.
+    #[tokio::test]
+    async fn the_stall_watchdog_says_nothing_about_a_run_parked_on_a_wait() {
+        let _execution = EXECUTION.lock().await;
+        let (pool, _observed, state, run, owner) = parked_fixture().await;
+        let permit = Permit::acquire().await.unwrap();
+        let waited = claimed_wait(run, WAIT_WINDOW.as_secs() as i64);
+
+        // Nothing reads the row here, so the clock is free to run the whole
+        // window out on its own: the only timer left is the wait's deadline.
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let outcome = park_for_wait(&state, run, owner, &waited, &permit)
+            .await
+            .expect("the wait ran out and the run resumed");
+
+        assert!(
+            tokio::time::Instant::now().duration_since(started) >= STALL_AFTER,
+            "the park ended before the watchdog would have had its chance to announce it"
+        );
+        assert!(
+            outcome.contains(&wait::job_subject(WAITED_JOB)),
+            "the run resumed on something other than the wait it opened: {outcome}"
+        );
+        assert_eq!(
+            waiting_rows(&pool, run).await.len(),
+            2,
+            "the park and its ending are the only lines a wait writes"
+        );
+        assert!(
+            warnings(&pool, run).await.is_empty(),
+            "a run that was waiting, not stalling, was announced as stalled"
+        );
+    }
+
+    /// Every exit from the park unparks the row, and a park that cannot be
+    /// taken changes nothing. A run left reading `'waiting'` would advertise a
+    /// wait nothing is watching, and the retry's own park would then fail the
+    /// `'running'` fence and report a lost lease instead.
+    #[tokio::test]
+    async fn a_wait_on_a_run_this_attempt_no_longer_owns_is_terminal_and_parks_nothing() {
+        let _execution = EXECUTION.lock().await;
+        let (pool, _observed, state, run, _owner) = parked_fixture().await;
+        let permit = Permit::acquire().await.unwrap();
+        let waited = claimed_wait(run, WAIT_WINDOW.as_secs() as i64);
+
+        let fault = park_for_wait(&state, run, Uuid::new_v4(), &waited, &permit)
+            .await
+            .expect_err("a run another owner holds is not this attempt's to park");
+
+        assert_eq!(fault.message, LOST_LEASE);
+        assert!(
+            matches!(fault.failure, Failure::Terminal),
+            "a lost lease was classified {}",
+            fault.failure.label()
+        );
+        assert_eq!(
+            RetryPolicy::default().decide(1, fault.failure, 0.0),
+            Decision::Terminal,
+            "retrying would put two writers on one checkout"
+        );
+        let (status, pending_wait, _, phase) = waiting_state(&pool, run).await;
+        assert_eq!(status, "running", "the row was parked by a foreign owner");
+        assert_eq!(pending_wait, None);
+        assert_eq!(phase, None);
+        assert!(
+            waiting_rows(&pool, run).await.is_empty(),
+            "a park that never happened told the console it had"
+        );
+    }
+
+    /// The wait sits inside the attempt's own timeout and gets no second one.
+    /// A wait that outlives it ends the run rather than the attempt being run
+    /// again: the retry would re-open the same wait on the same subject.
+    #[tokio::test]
+    async fn a_wait_that_outlives_the_attempt_timeout_ends_the_run_without_a_retry() {
+        let _execution = EXECUTION.lock().await;
+        let (_pool, observed, state, run, owner) = parked_fixture().await;
+        let permit = Arc::new(Permit::acquire().await.unwrap());
+        assert!(
+            Duration::from_secs(wait::MAX_WAIT_SECS) < TASK_TIMEOUT,
+            "one clamped wait can never reach the attempt timeout on its own"
+        );
+        let waited = claimed_wait(run, TASK_TIMEOUT.as_secs() as i64 * 2);
+
+        // The wrapper the attempt puts around every turn of the run, waiting
+        // included. Nothing inside the park may bound the wait more tightly or
+        // survive this elapsing.
+        let attempt = {
+            let state = state.clone();
+            let permit = permit.clone();
+            let waited = waited.clone();
+            tokio::spawn(async move {
+                tokio::time::timeout(
+                    TASK_TIMEOUT,
+                    park_for_wait(&state, run, owner, &waited, &permit),
+                )
+                .await
+            })
+        };
+        // The park's own writes are I/O, and a paused clock advances to the
+        // next timer whenever pending I/O is all the runtime has left: paused
+        // now, the attempt would elapse before the row was parked and the
+        // assertion below would read a row nothing ever parked. The real clock
+        // runs until the row says the run is waiting, and only then is the
+        // attempt timeout the one timer left for the clock to reach.
+        tokio::time::timeout(WAIT_TICK, async {
+            while waiting_state(&observed, run).await.0 != PHASE_WAITING {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the run never read as parked on its wait");
+        tokio::time::pause();
+        let attempt = attempt.await.unwrap();
+
+        assert!(
+            attempt.is_err(),
+            "the wait outlived the attempt and kept the run alive anyway"
+        );
+        let (status, _, _, phase) = waiting_state(&observed, run).await;
+        assert_eq!(
+            (status.as_str(), phase.as_deref()),
+            (PHASE_WAITING, Some(PHASE_WAITING)),
+            "the attempt was cancelled mid-wait, and the terminal completion is what clears \
+             the row it left parked"
+        );
+        let fault = Fault::timeout();
+        assert!(
+            matches!(fault.failure, Failure::Terminal),
+            "an elapsed attempt was classified {}",
+            fault.failure.label()
+        );
+        assert_eq!(
+            RetryPolicy::default().decide(1, fault.failure, 0.0),
+            Decision::Terminal
+        );
+    }
+
+    /// A background job outlives the tool call that started it, and nothing
+    /// drops a detached child. The run's last act is to kill what it left
+    /// running, or a task run ends and its build keeps burning the host.
+    #[tokio::test]
+    async fn a_background_job_the_run_left_running_dies_with_the_run() {
+        let run = Uuid::new_v4();
+        let session = Session::Task(run);
+        let checkout = tempfile::tempdir().expect("a temporary checkout");
+        // A program rather than a shell line: a job runs with a cleared
+        // environment, and this way the pid the registry reports is the
+        // long-running process itself rather than a shell in front of it.
+        let started = Jobs::spawn(
+            session,
+            &zone_core::tools::job::JobCommand::new(
+                "/bin/sleep",
+                vec![TASK_TIMEOUT.as_secs().to_string()],
+            ),
+            checkout.path(),
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .expect("the job starts");
+        assert!(
+            Jobs::settled(session, &started.id).is_ok(),
+            "the run's own session holds the job it started"
+        );
+
+        reap(run).await;
+
+        assert!(
+            Jobs::settled(session, &started.id).is_err(),
+            "a job the registry still holds can still be waited on by the next run"
+        );
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", &started.pid.to_string()])
+                .status()
+                .expect("kill -0 runs")
+                .success(),
+            "process {} outlived the run that started it",
+            started.pid
+        );
+    }
+
+    /// A retried attempt may not inherit what the attempt before it spent. The
+    /// allowance, the ceiling and any wait staged but never parked on are one
+    /// session entry, cleared together at the top of the attempt.
+    #[tokio::test]
+    async fn a_second_attempt_starts_its_wait_allowance_at_zero() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _execution = EXECUTION.lock().await;
+        let (pool, _observed, _state, run, owner) = parked_fixture().await;
+        let workspace_id: Uuid = sqlx::query_scalar("SELECT tasks.workspace_id FROM tasks JOIN task_runs ON task_runs.task_id=tasks.id WHERE task_runs.id=$1").bind(run).fetch_one(&pool).await.unwrap();
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(streamed(
+                        serde_json::json!({"content":"Nothing further to do."}),
+                    )),
+            )
+            .mount(&provider)
+            .await;
+        let mut config = crate::state::test_config();
+        config.litellm_host = provider.uri();
+        config.ollama_host = provider.uri();
+        let state = AppState::new(config, pool.clone(), None);
+
+        // What the attempt before this one left behind, still registered under
+        // the run's session because its own park never consumed it.
+        let waited = claimed_wait(run, TASK_TIMEOUT.as_secs() as i64);
+        let workspace = std::env::temp_dir();
+        let environment = Environment {
+            directory: workspace.clone(),
+            ..Environment::here()
+        };
+        attempt_run(
+            &state,
+            run,
+            owner,
+            workspace_id,
+            None,
+            "gpt-4",
+            "# Task: Retry\n\nFinish without waiting",
+            "",
+            &workspace,
+            &environment,
+            &Permit::acquire().await.unwrap(),
+        )
+        .await
+        .expect("an attempt that waits on nothing finishes");
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait::await_outcome(
+                Session::Task(run),
+                &waited.tool_call_id,
+                wait::deadline(&waited.waiting),
+            ),
+        )
+        .await
+        .expect("a wait the new attempt no longer holds ends at once, not at its deadline")
+        .text;
+        assert!(
+            !outcome.contains(WAITED_JOB),
+            "the new attempt inherited the wait the one before it staged: {outcome}"
+        );
+        assert_eq!(
+            wait::waits_taken(Session::Task(run)),
+            0,
+            "the allowance the refused eleventh wait is counted against has to start empty"
+        );
+        sqlx::query("DELETE FROM organizations WHERE id=(SELECT organization_id FROM workspaces WHERE id=$1)").bind(workspace_id).execute(&pool).await.unwrap();
     }
 }

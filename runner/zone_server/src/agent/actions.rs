@@ -13,6 +13,13 @@ use zone_core::tools::{
 
 use super::PREVIEW_BODY_CHARS;
 
+/// Named because the waiting section counts on them: a description that still
+/// mandates a poll is read at the moment a runner starts, which is closer to
+/// the decision than any prompt section gets.
+pub(crate) const START_TASK_DESCRIPTION: &str = "Create an agentic coding task and start the background runner immediately. Returns task_id and run_id. Does not wait for completion — wait for it with wait_for, then read get_task_run and tail_task_log. Use only when the user asked to run work in the background.";
+
+pub(crate) const TAIL_TASK_LOG_DESCRIPTION: &str = "Fetch new runner log lines since a previous log ID. Read a run's progress with it once; to find out when the run finishes, wait for it with wait_for rather than calling this again.";
+
 #[derive(Clone, Copy)]
 enum Action {
     ListTasks,
@@ -128,15 +135,11 @@ impl Tool for WorkspaceAction {
                 "List the current user's workspace reminders, including pending, delivered, and cancelled reminders."
             }
             Action::CancelReminder => "Cancel one of the current user's pending reminders.",
-            Action::StartTask => {
-                "Create an agentic coding task and start the background runner immediately. Returns task_id and run_id. Does not wait for completion — poll get_task_run and tail_task_log. Use only when the user asked to run work in the background."
-            }
+            Action::StartTask => START_TASK_DESCRIPTION,
             Action::GetTaskRun => {
                 "Get status, phase, progress and error for a runner task in this workspace."
             }
-            Action::TailTaskLog => {
-                "Fetch new runner log lines since a previous log ID. Use to monitor start_task progress."
-            }
+            Action::TailTaskLog => TAIL_TASK_LOG_DESCRIPTION,
         }
     }
 

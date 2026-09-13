@@ -5,8 +5,10 @@
 mod beneath;
 mod command;
 mod file;
+pub mod job;
 mod reason;
 mod sanitize;
+pub mod tail;
 mod tier;
 
 pub use command::*;
@@ -22,6 +24,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::llm::ToolDefinition;
 
@@ -218,6 +221,17 @@ pub fn is_vision_url(url: &str) -> bool {
         .any(|extension| path.ends_with(extension))
 }
 
+/// Which conversation or task run a tool call belongs to.
+///
+/// Background jobs and waits are keyed on it: a job started by one session is
+/// unreadable from another, and a detached context can start neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Session {
+    Detached,
+    Chat(Uuid),
+    Task(Uuid),
+}
+
 /// Context passed to tools during execution
 #[derive(Debug, Clone)]
 pub struct ToolContext {
@@ -236,6 +250,8 @@ pub struct ToolContext {
     /// directly and paths are taken at face value. Only turn this on where
     /// the caller has asked for it and knows what it means.
     pub unrestricted: bool,
+    /// Which chat or task run this tool call belongs to.
+    pub session: Session,
 }
 
 impl Default for ToolContext {
@@ -246,6 +262,7 @@ impl Default for ToolContext {
             max_file_size: 10 * 1024 * 1024, // 10MB
             command_timeout: 300,            // 5 minutes
             unrestricted: false,
+            session: Session::Detached,
         }
     }
 }
@@ -336,6 +353,7 @@ impl ToolRegistry {
 
         // Command tools
         registry.register(Arc::new(RunCommandTool));
+        registry.register(Arc::new(tail::TailJobTool));
 
         registry
     }
@@ -524,11 +542,20 @@ pub(crate) mod test_support {
         }
     }
 
+    /// One collector at a time.
+    ///
+    /// The sink is per-thread but the subscriber and `tracing`'s interest
+    /// cache are not, and two tests collecting at once have found an empty
+    /// buffer. Serialising here rather than at each call site means a test
+    /// added later cannot forget to.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Run `work` and return it with everything it logged on this thread.
     ///
     /// `zone_server` turns `zone_core=debug` on by default, so a debug field is
     /// a production log line. This is how a test reads one back.
     pub(crate) async fn captured_logs<T>(work: impl Future<Output = T>) -> (T, String) {
+        let _collecting = SERIAL.lock().await;
         INSTALLED.call_once(|| {
             let _ = tracing_subscriber::fmt()
                 .with_max_level(tracing::Level::DEBUG)
@@ -708,7 +735,32 @@ mod tests {
         assert!(names.contains(&"list_files"));
         assert!(names.contains(&"search_code"));
         assert!(names.contains(&"run_command"));
-        assert_eq!(names.len(), 6);
+        assert!(names.contains(&job::TAIL_JOB));
+        assert_eq!(names.len(), 7);
+    }
+
+    /// `with_host_tools` is `with_defaults` plus a shell, so one registration
+    /// is what puts a background job's log within reach of a chat and a task
+    /// run alike, and registering it twice would be redundant.
+    #[test]
+    fn tail_job_is_registered_once_and_reaches_both_profiles() {
+        let defaults = ToolRegistry::with_defaults();
+        let host = ToolRegistry::with_host_tools();
+
+        assert!(defaults.get(job::TAIL_JOB).is_some());
+        assert!(host.get(job::TAIL_JOB).is_some());
+
+        let mut added: Vec<&str> = host
+            .names()
+            .into_iter()
+            .filter(|name| !defaults.names().contains(name))
+            .collect();
+        added.sort_unstable();
+        assert_eq!(
+            added,
+            vec!["run_shell"],
+            "the host profile adds only a shell"
+        );
     }
 
     #[test]
@@ -724,7 +776,7 @@ mod tests {
         let registry = ToolRegistry::with_defaults();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 6);
+        assert_eq!(definitions.len(), 7);
 
         // All definitions should be function type
         for def in &definitions {
