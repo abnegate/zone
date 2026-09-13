@@ -4733,27 +4733,53 @@ mod watchdog_tests {
     async fn a_wait_that_outlives_the_attempt_timeout_ends_the_run_without_a_retry() {
         let _execution = EXECUTION.lock().await;
         let (_pool, observed, state, run, owner) = parked_fixture().await;
-        let permit = Permit::acquire().await.unwrap();
+        let permit = Arc::new(Permit::acquire().await.unwrap());
         assert!(
             Duration::from_secs(wait::MAX_WAIT_SECS) < TASK_TIMEOUT,
             "one clamped wait can never reach the attempt timeout on its own"
         );
         let waited = claimed_wait(run, TASK_TIMEOUT.as_secs() as i64 * 2);
 
+        let mut parking = {
+            let state = state.clone();
+            let permit = permit.clone();
+            let waited = waited.clone();
+            tokio::spawn(async move { park_for_wait(&state, run, owner, &waited, &permit).await })
+        };
+        // The park writes the row before it awaits anything, and a paused clock
+        // auto-advances straight through that write to the only timer left --
+        // the attempt timeout below, which would then elapse against a row
+        // still reading 'running'. So the park lands on the real clock first.
+        tokio::time::timeout(WAIT_TICK, async {
+            loop {
+                let (status, _, _, phase) = waiting_state(&observed, run).await;
+                if (status.as_str(), phase.as_deref()) == (PHASE_WAITING, Some(PHASE_WAITING)) {
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the run never read as parked on its wait");
+
         tokio::time::pause();
         // The wrapper the attempt puts around every turn of the run, waiting
         // included. Nothing inside the park may bound the wait more tightly or
         // survive this elapsing, so the clock has only one timer to reach.
-        let attempt = tokio::time::timeout(
-            TASK_TIMEOUT,
-            park_for_wait(&state, run, owner, &waited, &permit),
-        )
-        .await;
+        let attempt = tokio::time::timeout(TASK_TIMEOUT, &mut parking).await;
 
         assert!(
             attempt.is_err(),
             "the wait outlived the attempt and kept the run alive anyway"
         );
+        // What the attempt's own wrapper does to the park it is holding: drop
+        // it where the elapsed timeout found it, mid-wait.
+        parking.abort();
+        assert!(
+            parking.await.unwrap_err().is_cancelled(),
+            "the park ended on its own rather than being cancelled mid-wait"
+        );
+        tokio::time::resume();
         let (status, _, _, phase) = waiting_state(&observed, run).await;
         assert_eq!(
             (status.as_str(), phase.as_deref()),
