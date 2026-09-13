@@ -2595,6 +2595,7 @@ async fn prepare_chat(
         agentic,
         &search.capability(),
         &preparation.environment,
+        &preparation.memory,
     );
     if !agentic && character.is_none() {
         let query_embedding = match state.embedding_service() {
@@ -2734,6 +2735,7 @@ async fn handle_chat_generation(
         mut budget,
         timeout,
         environment: _,
+        memory: _,
     } = preparation;
     let model_name = model.as_str();
     let mut replay = context.clone();
@@ -3524,6 +3526,10 @@ mod tests {
         assert!(interleave_context_lines(Vec::new(), Vec::new(), 5).is_empty());
     }
 
+    /// The capability tail closes each arm here because these four calls pass
+    /// no memory. A user with something remembered reads the block after that
+    /// tail, which `session`'s own tests pin; what this one holds is that the
+    /// persona, the agent contracts and the tail are unchanged by its arrival.
     #[tokio::test]
     async fn system_prompt_preserves_persona_and_agent_contracts() {
         let state = AppState::for_tests();
@@ -3554,6 +3560,7 @@ mod tests {
             false,
             CAPABILITY,
             &environment,
+            "",
         );
         assert!(persona.starts_with("Stay Ari."), "{persona}");
         assert!(persona.ends_with(CAPABILITY), "{persona}");
@@ -3565,6 +3572,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
         );
         assert!(agent.contains("You can call these tools"), "{agent}");
         assert!(
@@ -3579,6 +3587,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
         );
         assert!(combined.starts_with("Stay Ari.\n\n"), "{combined}");
         assert!(
@@ -3592,6 +3601,7 @@ mod tests {
             false,
             CAPABILITY,
             &environment,
+            "",
         );
         assert!(plain.contains(IDENTITY), "{plain}");
         assert!(!plain.contains("You can call these tools"), "{plain}");

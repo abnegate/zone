@@ -254,6 +254,10 @@ pub struct Preparation {
     /// Built once here so a preview and the generation that follows it, and
     /// the retrieval-augmented reassembly in `ws::chat`, all read one clock.
     pub environment: Environment,
+    /// What this user's memory adds to the system prompt, read once here so
+    /// the reassembly in `ws::chat` composes the same bytes rather than a
+    /// second read of a table that may have moved between the two.
+    pub memory: String,
 }
 
 /// Read-only common builder. It never classifies intent, executes tools, searches, or summarizes.
@@ -306,6 +310,28 @@ pub async fn build(
     if let Some(effort) = effort {
         environment = environment.with_effort(effort);
     }
+    let memory = if agentic {
+        match crate::agent::memory::render::prompt(
+            state.db(),
+            prompt::Surface::Chat,
+            workspace,
+            user,
+        )
+        .await
+        {
+            Ok(memory) => memory,
+            Err(error) => {
+                tracing::warn!(
+                    chat_id = %chat.id,
+                    %error,
+                    "Failed to load remembered entries; continuing without them"
+                );
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
     let mut entries = vec![Entry {
         id: "instructions".into(),
         message: Message::system(system_prompt(
@@ -314,6 +340,7 @@ pub async fn build(
             agentic,
             &SearchContext::new(&state.config().web_search).capability(),
             &environment,
+            &memory,
         )),
         preserve: true,
         consumed: true,
@@ -420,6 +447,7 @@ pub async fn build(
         budget: settings.budget(),
         timeout: settings.timeout,
         environment,
+        memory,
     })
 }
 
@@ -448,13 +476,19 @@ pub fn policy(settings: &Settings, capacity: &capacity::Capacity) -> Policy {
 }
 
 /// The whole system entry: a character card if there is one, the built prompt
-/// for this surface, then the web-search capability tail.
+/// for this surface, the web-search capability tail, then whatever this user
+/// asked to have remembered.
+///
+/// `memory` is required rather than optional so the compiler enumerates every
+/// caller: a turn that quietly lost the block would answer a person the server
+/// knows about as if it had never met them.
 pub fn system_prompt(
     chat: &ChatRow,
     tools: &ChatTools,
     agentic: bool,
     capability: &str,
     environment: &Environment,
+    memory: &str,
 ) -> String {
     let prompt = match (chat.character.as_ref(), agentic) {
         (Some(card), true) => format!(
@@ -469,7 +503,7 @@ pub fn system_prompt(
         (None, true) => prompt::chat(tools, chat.auto_approve, environment),
         (None, false) => prompt::plain(environment),
     };
-    format!("{prompt}\n\n{capability}")
+    format!("{prompt}\n\n{capability}{memory}")
 }
 
 /// A minimal chat row, so prompt tests do not need a database.
@@ -592,6 +626,45 @@ impl Drop for Session {
 mod tests {
     use super::*;
 
+    /// What `SearchContext::capability()` returns on its quieter arm. Non-empty
+    /// on both arms, which is what keeps a memory block one blank line below it
+    /// rather than two.
+    const CAPABILITY: &str = "Web search is unavailable this turn.";
+
+    const CARD: &str = "You are Ada, and you stay in character.";
+
+    /// A stored profile, rendered the way a chat turn receives it.
+    fn memory() -> String {
+        crate::agent::memory::render::render(
+            prompt::Surface::Chat,
+            Some(&crate::agent::memory::render::memory_row(
+                crate::db::memory::MemoryCategory::Profile,
+                crate::db::memory::PROFILE_TITLE,
+                "Ada, an electrical engineer in Wellington.",
+            )),
+            None,
+            &[],
+        )
+    }
+
+    /// A fixed clock, so every prompt these tests compose is comparable with
+    /// every other.
+    fn environment() -> Environment {
+        Environment::at(
+            chrono::DateTime::parse_from_rfc3339("2026-09-09T09:30:00+12:00").unwrap(),
+            "Pacific/Auckland",
+            PathBuf::from("/srv/zone"),
+        )
+    }
+
+    fn tools() -> ChatTools {
+        ChatTools::with_names(
+            crate::agent::ToolProfile::Chat,
+            &["list_documents", "read_document", "read_file"],
+            None,
+        )
+    }
+
     #[test]
     fn small_windows_keep_input_capacity_and_use_the_same_response_reserve() {
         let settings = Settings::default();
@@ -618,25 +691,17 @@ mod tests {
 
     /// The wiring proof for the whole builder: whichever of the four arms runs,
     /// a character card prefixes the assembled text, the boundary section is
-    /// present, and the web-search capability tail is still the last thing the
-    /// model reads. A persona chat with the agent off gets the boundary alone
-    /// rather than a whole prompt, which is the only arm the builder does not
-    /// assemble, so it is the one most easily lost.
+    /// present, and the web-search capability tail follows the assembled
+    /// prompt. The tail is the last thing the model reads only while there is
+    /// nothing remembered for this user, which is why the four calls here pass
+    /// no memory and the block's own placement is pinned separately. A persona
+    /// chat with the agent off gets the boundary alone rather than a whole
+    /// prompt, which is the only arm the builder does not assemble, so it is
+    /// the one most easily lost.
     #[test]
-    fn every_arm_carries_the_boundary_and_ends_with_the_capability_tail() {
-        const CAPABILITY: &str = "Web search is unavailable this turn.";
-        const CARD: &str = "You are Ada, and you stay in character.";
-
-        let environment = Environment::at(
-            chrono::DateTime::parse_from_rfc3339("2026-09-09T09:30:00+12:00").unwrap(),
-            "Pacific/Auckland",
-            PathBuf::from("/srv/zone"),
-        );
-        let tools = ChatTools::with_names(
-            crate::agent::ToolProfile::Chat,
-            &["list_documents", "read_document", "read_file"],
-            None,
-        );
+    fn every_arm_carries_the_boundary_and_the_capability_follows_the_prompt() {
+        let environment = environment();
+        let tools = tools();
         let card = crate::services::character::ChatCharacter {
             name: "Ada".into(),
             system_prompt: Some(CARD.into()),
@@ -651,6 +716,7 @@ mod tests {
             false,
             CAPABILITY,
             &environment,
+            "",
         );
         let agentic = system_prompt(
             &chat_row(None, true, false),
@@ -658,6 +724,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
         );
         let persona = system_prompt(
             &chat_row(Some(card.clone()), false, false),
@@ -665,6 +732,7 @@ mod tests {
             false,
             CAPABILITY,
             &environment,
+            "",
         );
         let persona_agentic = system_prompt(
             &chat_row(Some(card), true, false),
@@ -672,6 +740,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
         );
 
         for prompt in [&plain, &agentic, &persona, &persona_agentic] {
@@ -698,6 +767,109 @@ mod tests {
             persona_agentic.find(CARD) < persona_agentic.find(&boundary),
             "{persona_agentic}"
         );
+    }
+
+    /// A chat with nothing remembered must read byte for byte as it did before
+    /// memory existed, on every arm: the whole feature is then invisible to a
+    /// user who has never asked for anything to be remembered.
+    #[test]
+    fn an_empty_memory_block_leaves_every_arm_exactly_as_it_was() {
+        let environment = environment();
+        let tools = tools();
+        let card = crate::services::character::ChatCharacter {
+            name: "Ada".into(),
+            system_prompt: Some(CARD.into()),
+            ..Default::default()
+        };
+        let arms = [
+            (
+                chat_row(None, false, false),
+                false,
+                format!("{}\n\n{CAPABILITY}", prompt::plain(&environment)),
+            ),
+            (
+                chat_row(None, true, false),
+                true,
+                format!(
+                    "{}\n\n{CAPABILITY}",
+                    prompt::chat(&tools, false, &environment)
+                ),
+            ),
+            (
+                chat_row(Some(card.clone()), false, false),
+                false,
+                format!("{CARD}\n\n{}\n\n{CAPABILITY}", prompt::boundary()),
+            ),
+            (
+                chat_row(Some(card), true, false),
+                true,
+                format!(
+                    "{CARD}\n\n{}\n\n{CAPABILITY}",
+                    prompt::chat(&tools, false, &environment)
+                ),
+            ),
+        ];
+
+        for (chat, agentic, expected) in arms {
+            assert_eq!(
+                system_prompt(&chat, &tools, agentic, CAPABILITY, &environment, ""),
+                expected
+            );
+        }
+    }
+
+    /// The block follows the capability with no separator of its own, because
+    /// `render` brings the blank line that opens it.
+    #[test]
+    fn a_memory_block_follows_the_capability_tail() {
+        let environment = environment();
+        let tools = tools();
+        let chat = chat_row(None, true, false);
+        let memory = memory();
+        assert!(!memory.is_empty());
+
+        let without = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "");
+        let with = system_prompt(&chat, &tools, true, CAPABILITY, &environment, &memory);
+
+        assert_eq!(with, format!("{without}{memory}"));
+        assert!(
+            with.contains(&format!("{CAPABILITY}{memory}")),
+            "the block carries its own blank line, so nothing separates it from the tail: {with}"
+        );
+        assert!(
+            with.find(CAPABILITY) < with.find("Ada, an electrical engineer"),
+            "{with}"
+        );
+        assert!(
+            with.ends_with("Ada, an electrical engineer in Wellington."),
+            "{with}"
+        );
+    }
+
+    /// The capability is non-empty on both `SearchContext` arms, and it has to
+    /// be: with an empty one the prompt would already close on a blank line and
+    /// a block opening with its own would make three.
+    #[test]
+    fn a_prompt_carrying_memory_keeps_its_sections_one_blank_line_apart() {
+        let environment = environment();
+        let tools = tools();
+        let memory = memory();
+        let composed = system_prompt(
+            &chat_row(None, true, false),
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+            &memory,
+        );
+
+        assert!(!CAPABILITY.is_empty());
+        assert!(
+            !composed.contains("\n\n\n"),
+            "the capability must be non-empty for the block to sit one blank line below it: {composed}"
+        );
+        assert!(memory.starts_with("\n\n"), "{memory}");
+        assert!(!composed.ends_with('\n'), "{composed}");
     }
 
     #[test]

@@ -929,7 +929,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
         Vec::new()
     };
 
-    let guidance = guidance(state, &task, &workspace_path).await;
+    let guidance = guidance(state, &task, actor, &workspace_path).await;
     let task_prompt = format!("# Task: {}\n\n{}", task.title, task.description);
     let environment = Environment {
         directory: workspace_path.clone(),
@@ -1109,8 +1109,9 @@ async fn resolve_model(state: &AppState, task: &tasks::TaskRow) -> String {
 ///
 /// Every block carries its own leading blank line, so a run with nothing to add
 /// appends nothing at all and the built prompt is left exactly as it rendered.
-/// The two knowledge renderers already open with their own `"\n\n# "` heading,
-/// which is why they arrive here whole rather than as bodies to be titled.
+/// The three knowledge renderers already open with their own `"\n\n# "`
+/// heading, which is why they arrive here whole rather than as bodies to be
+/// titled.
 ///
 /// The repository block is last because it is the only one read off a checkout
 /// Zone did not write, and nothing the operator authored may follow it.
@@ -1119,6 +1120,9 @@ struct Guidance<'a> {
     criteria: Option<&'a str>,
     instructions: &'a str,
     facts: &'a str,
+    /// What the person who started this run asked to have remembered. A run
+    /// reads it and writes none of it, so it arrives as an index-free block.
+    memory: &'a str,
     repository: &'a str,
 }
 
@@ -1134,6 +1138,7 @@ impl Guidance<'_> {
         }
         push_block(&mut guidance, self.instructions);
         push_block(&mut guidance, self.facts);
+        push_block(&mut guidance, self.memory);
         push_block(&mut guidance, self.repository);
         guidance
     }
@@ -1173,7 +1178,15 @@ fn push_block(guidance: &mut String, block: &str) {
     guidance.push_str(block);
 }
 
-async fn guidance(state: &AppState, task: &tasks::TaskRow, workspace: &Path) -> String {
+/// The remembered block follows `actor`, whoever started this run, rather than
+/// whoever wrote the task: any member may edit another's task and start a run
+/// of it, and the run's output is theirs to read.
+async fn guidance(
+    state: &AppState,
+    task: &tasks::TaskRow,
+    actor: Option<Uuid>,
+    workspace: &Path,
+) -> String {
     let retrieved = retrieved_context(state, task).await;
     let repository = instructions::render(workspace).await;
 
@@ -1205,11 +1218,36 @@ async fn guidance(state: &AppState, task: &tasks::TaskRow, workspace: &Path) -> 
             }
         };
 
+    let memory = match actor {
+        Some(user) => {
+            match crate::agent::memory::render::prompt(
+                state.db(),
+                crate::agent::prompt::Surface::Task,
+                task.workspace_id,
+                user,
+            )
+            .await
+            {
+                Ok(memory) => memory,
+                Err(error) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        %error,
+                        "Failed to load remembered entries; continuing without them"
+                    );
+                    String::new()
+                }
+            }
+        }
+        None => String::new(),
+    };
+
     Guidance {
         retrieved: &retrieved,
         criteria: task.acceptance_criteria.as_deref(),
         instructions: &instructions,
         facts: &facts,
+        memory: &memory,
         repository: &repository,
     }
     .render()
@@ -1275,9 +1313,11 @@ async fn retrieved_context(
 mod guidance_tests {
     use super::*;
     use crate::agent::ToolProfile;
+    use crate::agent::memory::render::memory_row;
     use crate::db::knowledge::{
         LearnedCategory, LearnedEntryRow, render_learned_facts, render_standing_instructions,
     };
+    use crate::db::memory::{MemoryCategory, PREFERENCES_TITLE, PROFILE_TITLE};
     use chrono::DateTime;
     use std::path::PathBuf;
 
@@ -1351,13 +1391,33 @@ mod guidance_tests {
             criteria: Some("The suite passes and clippy is clean.\n"),
             instructions: &instructions,
             facts: &facts,
+            memory: &memory(),
             repository,
         }
         .render()
     }
 
+    /// The block a run actually receives: the profile and the preferences, and
+    /// no index, because a run has no tool to read one with.
+    fn memory() -> String {
+        crate::agent::memory::render::render(
+            prompt::Surface::Task,
+            Some(&memory_row(
+                MemoryCategory::Profile,
+                PROFILE_TITLE,
+                "Ada, an electrical engineer in Wellington.",
+            )),
+            Some(&memory_row(
+                MemoryCategory::Preference,
+                PREFERENCES_TITLE,
+                "Answer with the command first and the reasoning after it.",
+            )),
+            &[],
+        )
+    }
+
     /// A checkout carrying none of the instruction files, which is what proves
-    /// the fifth block changed nothing for the runs that came before it.
+    /// the repository block changed nothing for the runs that came before it.
     fn empty_checkout() -> tempfile::TempDir {
         tempfile::tempdir().expect("a temporary checkout")
     }
@@ -1369,6 +1429,7 @@ mod guidance_tests {
             criteria: None,
             instructions: "",
             facts: "",
+            memory: "",
             repository: "",
         }
         .render();
@@ -1466,7 +1527,7 @@ mod guidance_tests {
     }
 
     #[test]
-    fn the_five_blocks_keep_their_headings_and_their_order() {
+    fn the_six_blocks_keep_their_headings_and_their_order() {
         let root = empty_checkout();
         std::fs::write(
             root.path().join("AGENTS.md"),
@@ -1484,12 +1545,22 @@ mod guidance_tests {
         let criteria = offset("# Acceptance Criteria");
         let instructions = offset("# Standing instructions");
         let facts = offset("# Repository conventions");
+        let memory = offset(MemoryCategory::Profile.heading());
         let repository = offset("<repository_instructions>");
 
         assert!(retrieved < criteria, "{guidance}");
         assert!(criteria < instructions, "{guidance}");
         assert!(instructions < facts, "{guidance}");
-        assert!(facts < repository, "{guidance}");
+        assert!(facts < memory, "{guidance}");
+        assert!(memory < repository, "{guidance}");
+        assert!(
+            guidance.contains(MemoryCategory::Preference.heading()),
+            "{guidance}"
+        );
+        assert!(
+            !guidance.contains(MemoryCategory::Fact.heading()),
+            "a run has no tool to read an index with: {guidance}"
+        );
         assert!(
             guidance.contains("## Context 1 (Relevance: 0.91)"),
             "{guidance}"
@@ -1523,6 +1594,7 @@ mod guidance_tests {
             criteria: None,
             instructions: "",
             facts: &facts,
+            memory: "",
             repository: "",
         }
         .render();
