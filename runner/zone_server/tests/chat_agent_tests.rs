@@ -1089,7 +1089,12 @@ async fn the_turn_offers_the_wait_and_carries_no_surviving_poll_instruction() {
         offered("start_task")
     );
     assert!(
-        offered("tail_task_log").contains("wait for it with wait_for rather than calling this"),
+        offered("tail_task_log").contains("rather than calling it again"),
+        "{}",
+        offered("tail_task_log")
+    );
+    assert!(
+        offered("tail_task_log").contains("wait_for kind=task_run"),
         "{}",
         offered("tail_task_log")
     );
