@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -312,17 +313,23 @@ impl Tool for RunCommandTool {
 /// followed repeats the call until the loop's no-progress detector ends the
 /// turn with nothing to show.
 fn sleep_refusal(seconds: f64, backgrounded: bool) -> String {
-    let remedy = if backgrounded {
-        format!(
-            "Backgrounding does not raise the cap. Start something that finishes on its own and \
-             wait for it with {WAIT_FOR_TOOL} rather than sleeping."
+    let (remedy, tail) = if backgrounded {
+        (
+            Cow::Borrowed(
+                "Backgrounding does not raise the cap. Start something that finishes on its own \
+                 and",
+            ),
+            " rather than sleeping.",
         )
     } else {
-        format!("Start it with {BACKGROUND_PARAM}: true and wait for it with {WAIT_FOR_TOOL}.")
+        (
+            Cow::Owned(format!("Start it with {BACKGROUND_PARAM}: true and")),
+            ".",
+        )
     };
     format!(
         "This command sleeps for {seconds} seconds, and a call may block on sleep for at most \
-         {MAX_SLEEP_SECS}. {remedy}"
+         {MAX_SLEEP_SECS}. {remedy} wait for it with {WAIT_FOR_TOOL}{tail}"
     )
 }
 
