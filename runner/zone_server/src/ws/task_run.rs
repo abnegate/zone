@@ -16,12 +16,12 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt, stream::SplitSink};
-use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::auth::{AccessClaims, validate_access_token};
 use crate::db::{self, sessions, tasks, workspace_members};
+use crate::services::task_progress::ProgressMessage;
 use crate::state::AppState;
 
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -44,40 +44,6 @@ fn log_follows_cursor(
     }
 }
 
-/// Progress message sent to clients
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ProgressMessage {
-    /// Initial task run state
-    Init {
-        run_id: Uuid,
-        task_id: Uuid,
-        status: String,
-    },
-    /// Status changed
-    StatusUpdate {
-        status: String,
-        current_phase: Option<String>,
-        progress_percent: Option<i32>,
-    },
-    /// New log entry
-    Log {
-        id: Uuid,
-        phase: String,
-        agent_type: String,
-        log_level: String,
-        message: String,
-        /// Receipt detail the worker attached to this line.
-        metadata: Option<serde_json::Value>,
-    },
-    /// Task completed successfully
-    Completed { status: String },
-    /// Task failed
-    Failed { error: String },
-    /// Error message
-    Error { message: String },
-}
-
 impl ProgressMessage {
     /// Convert to a WebSocket text message
     fn to_ws_message(&self) -> Message {
@@ -91,55 +57,6 @@ impl ProgressMessage {
 pub enum ClientMessage {
     /// Authenticate with JWT
     Auth { token: String },
-}
-
-/// Global task progress broadcaster
-///
-/// In production, this would be backed by Redis pub/sub for horizontal scaling
-pub struct TaskProgressBroadcaster {
-    senders: dashmap::DashMap<Uuid, broadcast::Sender<ProgressMessage>>,
-}
-
-impl TaskProgressBroadcaster {
-    pub fn new() -> Self {
-        Self {
-            senders: dashmap::DashMap::new(),
-        }
-    }
-
-    /// Get or create a broadcast channel for a task run
-    pub fn get_sender(&self, run_id: Uuid) -> broadcast::Sender<ProgressMessage> {
-        self.senders
-            .entry(run_id)
-            .or_insert_with(|| {
-                let (tx, _) = broadcast::channel(100);
-                tx
-            })
-            .clone()
-    }
-
-    /// Subscribe to a task run's progress
-    pub fn subscribe(&self, run_id: Uuid) -> broadcast::Receiver<ProgressMessage> {
-        self.get_sender(run_id).subscribe()
-    }
-
-    /// Broadcast a message to all subscribers of a task run
-    pub fn broadcast(&self, run_id: Uuid, message: ProgressMessage) {
-        if let Some(sender) = self.senders.get(&run_id) {
-            let _ = sender.send(message);
-        }
-    }
-
-    /// Remove a broadcast channel when no longer needed
-    pub fn remove(&self, run_id: Uuid) {
-        self.senders.remove(&run_id);
-    }
-}
-
-impl Default for TaskProgressBroadcaster {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// WebSocket upgrade handler for task run progress

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ActionReceiptSchema, QuestionSchema } from '../chats/schemas';
+import { ActionReceiptSchema, QuestionSchema, WaitingSchema } from '../chats/schemas';
 
 export const TaskStatusSchema = z.enum([
   'created',
@@ -62,6 +62,11 @@ export const TaskRunSchema = z.object({
   current_phase: z.string().nullable(),
   progress_percent: z.number().nullable(),
   error_message: z.string().nullable(),
+  /**
+   * Null until the run starts and until it finishes. Optional as well, so a
+   * reply from a server older than the route that began sending them still
+   * parses rather than costing the run its card.
+   */
   started_at: z.string().nullable().optional(),
   completed_at: z.string().nullable().optional(),
   /**
@@ -73,6 +78,11 @@ export const TaskRunSchema = z.object({
    * version newer than the reader's tab.
    */
   pending_question: PendingQuestionSchema.nullish().catch(undefined),
+  /**
+   * The sibling of the question, on the same terms: sent only while the run is
+   * parked on a wait, and an unreadable one costs the subject, never the run.
+   */
+  waiting_on: WaitingSchema.nullish().catch(undefined),
 });
 
 const TaskRunMetadataSchema = z

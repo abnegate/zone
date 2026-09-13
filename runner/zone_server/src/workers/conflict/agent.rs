@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use zone_core::llm::{LlmClient, Message, ToolDefinition};
-use zone_core::tools::{ReadFileTool, Tool, ToolContext, ToolRegistry, ToolResult, WriteFileTool};
+use zone_core::tools::{
+    ReadFileTool, Session, Tool, ToolContext, ToolRegistry, ToolResult, WriteFileTool,
+};
 use zone_vcs::conflict::Conflict;
 
 use super::scope::{RepairScope, Scoped};
@@ -126,6 +128,7 @@ pub fn context(conflict: &Conflict, environment: HashMap<String, String>) -> Too
         max_file_size: 10 * 1024 * 1024,
         command_timeout: 60,
         unrestricted: false,
+        session: Session::Detached,
     }
 }
 
@@ -176,6 +179,7 @@ mod tests {
             max_file_size: 1024,
             command_timeout: 5,
             unrestricted: false,
+            session: Session::Detached,
         };
 
         for name in ["read_file", "write_file"] {

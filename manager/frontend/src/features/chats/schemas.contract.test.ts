@@ -19,9 +19,13 @@ import {
   ActionReceiptSchema,
   ChoiceSchema,
   CitationSchema,
+  JobExitedSchema,
+  JobStartedSchema,
   MessageMetadataSchema,
   QuestionSchema,
   ToolCallRecordSchema,
+  WaitingSchema,
+  WaitSettledSchema,
 } from './schemas';
 import { AWAITING_ANSWER_DETAIL, REASONED_TOOLS } from './types';
 
@@ -43,6 +47,12 @@ const QUESTION_RS = join(
 );
 
 const CHAT_WS_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/ws/chat.rs');
+
+const JOB_RS = join(import.meta.dir, '../../../../../runner/zone_core/src/tools/job.rs');
+
+const WAIT_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/agent/wait.rs');
+
+const AGENT_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/agent/mod.rs');
 
 const REASONED_TOOLS_RS = 'REASONED_TOOLS';
 
@@ -88,6 +98,13 @@ function rustStructFields(source: string, structName: string): Record<string, bo
     structFields(source, structName).map((field) => [field.name, field.optional])
   );
 }
+
+/// The same shape read off the zod side: every declared key, against whether
+/// the schema accepts the key being absent.
+const zodFields = (schema: unknown): Record<string, boolean> => {
+  const shape = (schema as { shape: Record<string, { isOptional(): boolean }> }).shape;
+  return Object.fromEntries(Object.entries(shape).map(([key, value]) => [key, value.isOptional()]));
+};
 
 function zodOptions(schema: unknown, key: string): string[] {
   const shape = (schema as { shape: Record<string, { options?: string[] }> }).shape;
@@ -176,6 +193,43 @@ describe('a question call is labelled the same live as it is after a reload', ()
     expect(AWAITING_ANSWER_DETAIL).toBe(
       rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'AWAITING_ANSWER_DETAIL')
     );
+  });
+});
+
+/**
+ * How a wait ended is a value the server sends, not something to be read back
+ * out of the outcome's prose. The card draws on this alone, so a variant added
+ * or respelled on the server that this console cannot parse must not be able to
+ * reach it as anything — least of all as a pass.
+ */
+describe('the console reads which way a wait ended rather than the words it ended with', () => {
+  test('the verdicts the console accepts are the ones the server declares', () => {
+    const rust = rustVariants(readFileSync(WAIT_RS, 'utf8'), 'Verdict')
+      .filter((variant) => !variant.startsWith('#['))
+      .sort();
+
+    expect(rust).toEqual(['settled', 'silent', 'timed_out', 'unreadable']);
+    expect(zodOptions(WaitSettledSchema, 'verdict')).toEqual(rust);
+  });
+
+  /**
+   * Nothing here falls back to a value, unlike every other tolerant read in
+   * these schemas: there is no safe default for whether something passed. A
+   * verdict this console cannot read fails the whole parse, the frame is
+   * dropped where it is read, and the card stays drawn as the wait it still
+   * was — which is not a claim that anything finished.
+   */
+  test('an unreadable verdict fails the parse rather than defaulting to one', () => {
+    const settled = {
+      tool_call_id: 'call_1',
+      outcome: 'The checks on main could not be read after 120s, so this is not a pass: offline.',
+    };
+
+    for (const verdict of ['', 'ok', 'passed', 'unknown', 'timed-out', null, undefined, 7]) {
+      const parsed = WaitSettledSchema.safeParse({ ...settled, verdict });
+      expect(parsed.success).toBe(false);
+    }
+    expect(WaitSettledSchema.safeParse({ ...settled, verdict: 'unreadable' }).success).toBe(true);
   });
 });
 
@@ -281,6 +335,31 @@ describe('a stated reason and an observed preview survive storage', () => {
     >;
 
     expect(parsed.undeclared).toBeUndefined();
+  });
+
+  /**
+   * `exited` and `settled` are live-frame-only by design. `useChat` patches
+   * them onto the record as a `job_exited` or `wait_settled` frame arrives, and
+   * neither the schema above nor Rust's `ToolCallRecord` declares either, so a
+   * reload strips both and re-derives them from the frames it replays. They are
+   * the two card fields it is correct to leave undeclared, and this is the test
+   * that says so rather than leaving the omission looking like the oversight
+   * the strip test above exists to catch.
+   */
+  test('the live-frame-only exited and settled are undeclared, and stripped on reload', () => {
+    const declared = Object.keys(ToolCallRecordSchema.shape);
+    expect(declared).not.toContain('exited');
+    expect(declared).not.toContain('settled');
+
+    const parsed = ToolCallRecordSchema.parse({
+      ...storedCall,
+      exited: { id: 'job_0123456789ab', exit_code: 0 },
+      settled: { tool_call_id: 'call_1', outcome: 'Job exited 0.', verdict: 'settled' },
+    }) as Record<string, unknown>;
+
+    expect(parsed.exited).toBeUndefined();
+    expect(parsed.settled).toBeUndefined();
+    expect(parsed.detail).toBe('ok');
   });
 
   test('a reason on a tool call is kept rather than stripped', () => {
@@ -397,18 +476,55 @@ describe('a stated reason and an observed preview survive storage', () => {
 describe('the question card the console draws is the one the server sent', () => {
   const source = readFileSync(QUESTION_RS, 'utf8');
 
-  const zodFields = (schema: unknown): Record<string, boolean> => {
-    const shape = (schema as { shape: Record<string, { isOptional(): boolean }> }).shape;
-    return Object.fromEntries(
-      Object.entries(shape).map(([key, value]) => [key, value.isOptional()])
-    );
-  };
-
   test('Choice carries the same fields on both sides', () => {
     expect(zodFields(ChoiceSchema)).toEqual(rustStructFields(source, 'Choice'));
   });
 
   test('Question carries the same fields on both sides, optional where serde may omit', () => {
     expect(zodFields(QuestionSchema)).toEqual(rustStructFields(source, 'Question'));
+  });
+});
+
+/**
+ * The job and wait cards are drawn from the same four payloads twice over: once
+ * from the live frame that announces them, and again from the record the server
+ * persisted, which is where a reload finds them. `ToolCallRecordSchema` is not
+ * passthrough, so a field the server adds and the console does not declare is
+ * stripped before either drawing — a job card with no pid, a wait card with no
+ * deadline. Nothing in the type system links the two definitions.
+ *
+ * Each of the four travels as a named Rust struct rather than inside an enum
+ * variant precisely so `structFields` can read it; an enum payload would be
+ * unreadable here and so unpinned.
+ */
+describe('the job and wait cards the console draws are the ones the server sent', () => {
+  const job = readFileSync(JOB_RS, 'utf8');
+  const wait = readFileSync(WAIT_RS, 'utf8');
+  const agent = readFileSync(AGENT_RS, 'utf8');
+
+  test('JobStarted carries the same fields on both sides', () => {
+    expect(zodFields(JobStartedSchema)).toEqual(rustStructFields(job, 'JobStarted'));
+  });
+
+  test('JobExited carries the same fields on both sides, optional where serde may omit', () => {
+    expect(zodFields(JobExitedSchema)).toEqual(rustStructFields(job, 'JobExited'));
+  });
+
+  test('Waiting carries the same fields on both sides, optional where serde may omit', () => {
+    expect(zodFields(WaitingSchema)).toEqual(rustStructFields(wait, 'Waiting'));
+  });
+
+  test('WaitSettled carries the same fields on both sides', () => {
+    expect(zodFields(WaitSettledSchema)).toEqual(rustStructFields(wait, 'WaitSettled'));
+  });
+
+  test('ToolCallRecord carries the same fields on both sides, the two new cards included', () => {
+    const rust = rustStructFields(agent, 'ToolCallRecord');
+
+    expect(rust).toHaveProperty('job', true);
+    expect(rust).toHaveProperty('waiting', true);
+    expect(rust).not.toHaveProperty('exited');
+    expect(rust).not.toHaveProperty('settled');
+    expect(zodFields(ToolCallRecordSchema)).toEqual(rust);
   });
 });

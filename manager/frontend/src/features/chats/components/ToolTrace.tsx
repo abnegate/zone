@@ -8,6 +8,7 @@ import {
   type ToolCallRecord,
 } from '../types';
 import { renderAnswers } from '../utils/answers';
+import { JobCard } from './JobCard';
 import { QuestionCard } from './QuestionCard';
 import { Reasoning } from './Reasoning';
 
@@ -44,6 +45,8 @@ const TOOL_LABELS: Record<string, string> = {
   run_shell: 'Ran a shell command',
   run_command: 'Ran a command',
   ask_user: 'Asked you a question',
+  tail_job: 'Read a job log',
+  wait_for: 'Waited for something to finish',
 };
 
 function toolLabel(name: string): string {
@@ -147,6 +150,7 @@ function ToolTraceRow({
           onSubmit={(answers: Answer[]) => onAnswer?.(renderAnswers(call.questions ?? [], answers))}
         />
       ) : null}
+      <JobCard call={call} />
       {call.approval === 'pending' && onDecide && (
         <div className="tool-call-approval">
           <button

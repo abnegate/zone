@@ -19,13 +19,14 @@ use super::citations;
 use super::question::{self, Question};
 use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
+use super::wait::{self, Waiting};
 use crate::services::chat::session::RunContext;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
 use zone_core::llm::{RequestOptions, Usage};
-use zone_core::tools::is_vision_url;
+use zone_core::tools::{Session, is_vision_url};
 
 /// What the calls queued behind a turn-ending question are told.
 ///
@@ -34,6 +35,10 @@ use zone_core::tools::is_vision_url;
 /// rather than a failure the model would try to work around.
 const NOT_EXECUTED_AFTER_QUESTION: &str =
     "Not executed: the turn ended when the user was asked a question.";
+
+/// The same, for a turn that ended on a wait. A model told the turn stopped for
+/// a question would go looking for an answer nobody was asked for.
+const NOT_EXECUTED_AFTER_WAIT: &str = "Not executed: the turn ended when a wait was opened.";
 
 /// What the model is told after a reply the parser could not read as a call.
 const MALFORMED_CALL: &str = "The last reply contained a malformed tool call; no tools were \
@@ -147,6 +152,15 @@ pub enum AgentEvent {
     QuestionRequired {
         tool_call_id: String,
         questions: Vec<Question>,
+        spent: Spend,
+    },
+    /// The model asked to wait for something outside the loop. The wait itself is
+    /// the consumer's: a task run parks and gives up its admission slot, and a chat
+    /// awaits inside the turn's own deadline. `spent` refunds the round, which is
+    /// what "without consuming an iteration" means.
+    WaitRequired {
+        tool_call_id: String,
+        waiting: Waiting,
         spent: Spend,
     },
     /// The turn could not continue. Anything already streamed still stands.
@@ -507,12 +521,14 @@ pub fn run_with_context(
                 };
                 // A fresh acknowledgement boundary after potentially long approval waits.
                 yield AgentEvent::Context(context.usage(&model, definitions));
-                // `batch` is consumed below and a finished call carries no
-                // arguments, so the parked call's own are taken while it can
-                // still be reached.
-                let parked = tools
-                    .ends_turn(&batch[0].function.name)
-                    .then(|| (batch[0].id.clone(), batch[0].function.arguments.clone()));
+                // `batch` is consumed below and a finished call carries neither
+                // name nor arguments, so the parked call's own are taken while
+                // it can still be reached.
+                let parked = tools.ends_turn(&batch[0].function.name).then(|| Parked {
+                    id: batch[0].id.clone(),
+                    name: batch[0].function.name.clone(),
+                    arguments: batch[0].function.arguments.clone(),
+                });
                 let completed = futures::future::join_all(batch.into_iter().map(|call| {
                     let tools = &tools;
                     async move {
@@ -537,12 +553,7 @@ pub fn run_with_context(
                     let digest = hex::encode(Sha256::digest(finished.output.as_bytes()));
                     let park = parked
                         .as_ref()
-                        .filter(|(id, _)| *id == finished.id && finished.success)
-                        .and_then(|(id, arguments)| {
-                            question::parse(arguments)
-                                .ok()
-                                .map(|questions| (id.clone(), questions))
-                        });
+                        .and_then(|parked| parked.park(&finished.id, finished.success, tools.session()));
                     if mutation && finished.success {
                         observations.clear();
                         failures.clear();
@@ -582,12 +593,12 @@ pub fn run_with_context(
                         citations: finished.citations,
                         receipt: finished.receipt,
                     };
-                    if let Some((tool_call_id, questions)) = park {
-                        let spent = Spend { iterations: iteration + 1, tool_calls: used };
-                        yield AgentEvent::QuestionRequired { tool_call_id, questions, spent };
+                    if let Some((tool_call_id, park)) = park {
+                        let queued = park.queued();
+                        yield park.event(tool_call_id, iteration, used);
                         while let Some(call) = requested.pop_front() {
                             let entry = canonical(
-                                LlmMessage::tool_result(&call.id, NOT_EXECUTED_AFTER_QUESTION),
+                                LlmMessage::tool_result(&call.id, queued),
                                 Vec::new(),
                             );
                             context.append(&entry);
@@ -607,6 +618,86 @@ pub fn run_with_context(
                 finalizing = true;
                 reason = Some("The configured tool-call budget was reached.".into());
             }
+        }
+    }
+}
+
+/// The turn-ending call a batch was held open by.
+struct Parked {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl Parked {
+    /// What this call leaves the turn suspended on, now that a call has finished.
+    ///
+    /// Nothing, unless the call that finished is this one and it succeeded. A
+    /// refused wait — one past `MAX_WAITS_PER_ATTEMPT`, or on a job another
+    /// session started — comes back as a tool error, and the turn carries on
+    /// rather than suspending on a wait nobody opened.
+    ///
+    /// A wait's deadline is read from the registry and never from these
+    /// arguments: `wait_for` clamps as it registers, so the arguments hold the
+    /// deadline the model asked for and the registry the one it was given.
+    ///
+    /// The wait is bound by session rather than looked up by inference.
+    /// `Tool::execute` is never told which call it is serving, so `wait_for`
+    /// stages under the session on the `ToolContext` it was handed; that is the
+    /// context this tool set holds, so `session` here is the same value and the
+    /// binding is exact however many sessions are parked at once.
+    fn park(&self, finished: &str, success: bool, session: Session) -> Option<(String, Park)> {
+        if self.id != finished || !success {
+            return None;
+        }
+        let park = match self.name.as_str() {
+            question::ASK_USER => Park::Question(question::parse(&self.arguments).ok()?),
+            wait::WAIT_FOR => Park::Wait(wait::bind(session, &self.id)?),
+            _ => return None,
+        };
+        Some((self.id.clone(), park))
+    }
+}
+
+/// What a suspended turn is suspended on.
+enum Park {
+    Question(Vec<Question>),
+    Wait(Waiting),
+}
+
+impl Park {
+    /// The event this park ends the turn with.
+    ///
+    /// A question spends the round it ends: the answer arrives as a new turn,
+    /// and the turn that resumes is a turn the model got to use. A wait spends
+    /// none — the same work continues the moment its subject settles — so the
+    /// round it opened in is handed back rather than charged.
+    fn event(self, tool_call_id: String, iteration: usize, used: usize) -> AgentEvent {
+        match self {
+            Self::Question(questions) => AgentEvent::QuestionRequired {
+                tool_call_id,
+                questions,
+                spent: Spend {
+                    iterations: iteration + 1,
+                    tool_calls: used,
+                },
+            },
+            Self::Wait(waiting) => AgentEvent::WaitRequired {
+                tool_call_id,
+                waiting,
+                spent: Spend {
+                    iterations: iteration,
+                    tool_calls: used,
+                },
+            },
+        }
+    }
+
+    /// What the calls queued behind this park are told.
+    const fn queued(&self) -> &'static str {
+        match self {
+            Self::Question(_) => NOT_EXECUTED_AFTER_QUESTION,
+            Self::Wait(_) => NOT_EXECUTED_AFTER_WAIT,
         }
     }
 }
@@ -1484,6 +1575,213 @@ mod tests {
         assert_eq!(
             summarize(&result, &output).chars().count(),
             DETAIL_CHARS + 1
+        );
+    }
+
+    const ASK_USER_ARGUMENTS: &str = r#"{"questions":[{"header":"Scope",
+        "question":"How far back should the rewrite run?","options":[
+        {"label":"Backfill","description":"Rewrite the existing rows."},
+        {"label":"Forward only","description":"Leave the existing rows alone."}]}]}"#;
+
+    const WAIT_FOR_ARGUMENTS: &str = r#"{"kind":"job","id":"job_9f3c1a7b2e04","timeout_secs":300}"#;
+
+    /// The rounds already taken when a park happens, so a spend that refunds
+    /// one and a spend that does not are told apart by more than zero.
+    const PARKED_AT: usize = 3;
+    const CALLS_MADE: usize = 9;
+
+    fn waiting() -> Waiting {
+        Waiting {
+            kind: wait::KIND_JOB.to_string(),
+            id: "job_9f3c1a7b2e04".to_string(),
+            reference: None,
+            deadline: "2026-09-12T10:15:00Z".to_string(),
+        }
+    }
+
+    fn questions() -> Vec<Question> {
+        question::parse(ASK_USER_ARGUMENTS).expect("the sample ask_user arguments are valid")
+    }
+
+    fn spent(event: AgentEvent) -> Spend {
+        match event {
+            AgentEvent::WaitRequired { spent, .. } | AgentEvent::QuestionRequired { spent, .. } => {
+                spent
+            }
+            other => panic!("{other:?} does not end the turn on a park"),
+        }
+    }
+
+    /// The expression the whole primitive rests on. A wait hands its round back,
+    /// so the work resumes in the round that opened it rather than the next one.
+    #[test]
+    fn a_wait_park_refunds_the_round_it_opened_in() {
+        match Park::Wait(waiting()).event("call_7".to_string(), PARKED_AT, CALLS_MADE) {
+            AgentEvent::WaitRequired {
+                tool_call_id,
+                waiting: registered,
+                spent,
+            } => {
+                assert_eq!(tool_call_id, "call_7");
+                assert_eq!(registered, waiting());
+                assert_eq!(
+                    spent,
+                    Spend {
+                        iterations: PARKED_AT,
+                        tool_calls: CALLS_MADE
+                    }
+                );
+            }
+            other => panic!("a wait ends the turn on WaitRequired, not {other:?}"),
+        }
+    }
+
+    /// The contrast the refund is measured against: a question spends the round
+    /// it ends, because the answer arrives as a turn of its own.
+    #[test]
+    fn a_question_park_spends_the_round_it_ends() {
+        match Park::Question(questions()).event("ask_1".to_string(), PARKED_AT, CALLS_MADE) {
+            AgentEvent::QuestionRequired {
+                tool_call_id,
+                questions,
+                spent,
+            } => {
+                assert_eq!(tool_call_id, "ask_1");
+                assert_eq!(questions.len(), 1);
+                assert_eq!(
+                    spent,
+                    Spend {
+                        iterations: PARKED_AT + 1,
+                        tool_calls: CALLS_MADE
+                    }
+                );
+            }
+            other => panic!("a question ends the turn on QuestionRequired, not {other:?}"),
+        }
+    }
+
+    /// `LoopBudget::less` subtracts exactly `spent.iterations`, so the refund is
+    /// only real if it survives the subtraction the resuming turn performs.
+    #[test]
+    fn the_resuming_turn_keeps_the_round_a_wait_gave_back() {
+        let budget = LoopBudget::chat();
+        let waited = budget.less(spent(Park::Wait(waiting()).event(
+            "call_7".to_string(),
+            PARKED_AT,
+            CALLS_MADE,
+        )));
+        let asked = budget.less(spent(Park::Question(questions()).event(
+            "ask_1".to_string(),
+            PARKED_AT,
+            CALLS_MADE,
+        )));
+
+        assert_eq!(
+            waited.max_iterations,
+            asked.max_iterations + 1,
+            "a wait gives its round back and a question does not"
+        );
+        assert_eq!(
+            waited.max_iterations,
+            budget.max_iterations - PARKED_AT,
+            "the rounds already spent this turn are still spent"
+        );
+        assert_eq!(
+            waited.max_tool_calls, asked.max_tool_calls,
+            "a refunded round still costs the tool call that opened it"
+        );
+    }
+
+    /// A model told its queued calls were dropped for a question would go
+    /// looking for an answer nobody was asked for.
+    #[test]
+    fn queued_calls_are_told_which_park_stopped_them() {
+        assert_eq!(
+            Park::Question(questions()).queued(),
+            NOT_EXECUTED_AFTER_QUESTION
+        );
+        assert_eq!(Park::Wait(waiting()).queued(), NOT_EXECUTED_AFTER_WAIT);
+        assert!(
+            NOT_EXECUTED_AFTER_WAIT.contains("wait")
+                && !NOT_EXECUTED_AFTER_WAIT.contains("question"),
+            "{NOT_EXECUTED_AFTER_WAIT} names a question rather than the wait that stopped the turn"
+        );
+    }
+
+    fn parked(name: &str, arguments: &str) -> Parked {
+        Parked {
+            id: "call_7".to_string(),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        }
+    }
+
+    /// A session of this test's own. The wait registry is process-global, so a
+    /// shared key would let one test's staged wait answer another's lookup.
+    fn session() -> Session {
+        Session::Chat(Uuid::new_v4())
+    }
+
+    #[test]
+    fn an_ask_user_call_parks_on_the_questions_it_carries() {
+        match parked(question::ASK_USER, ASK_USER_ARGUMENTS).park("call_7", true, session()) {
+            Some((tool_call_id, Park::Question(questions))) => {
+                assert_eq!(tool_call_id, "call_7");
+                assert_eq!(questions.len(), 1);
+            }
+            _ => panic!("valid ask_user arguments park the turn on their questions"),
+        }
+    }
+
+    #[test]
+    fn an_ask_user_call_the_schema_rejects_parks_on_nothing() {
+        assert!(
+            parked(question::ASK_USER, r#"{"questions":[]}"#)
+                .park("call_7", true, session())
+                .is_none(),
+            "a card that cannot be rendered has to leave the loop running"
+        );
+    }
+
+    /// A refused wait — one past `MAX_WAITS_PER_ATTEMPT`, or on a job another
+    /// session started — is a tool error, and an error registered nothing.
+    #[test]
+    fn a_wait_for_call_that_failed_parks_on_nothing() {
+        assert!(
+            parked(wait::WAIT_FOR, WAIT_FOR_ARGUMENTS)
+                .park("call_7", false, session())
+                .is_none()
+        );
+    }
+
+    /// The deadline is the registry's, never the call's: `wait_for` clamps as it
+    /// registers, so arguments that read perfectly are still not a wait.
+    #[test]
+    fn a_wait_the_registry_never_saw_parks_on_nothing() {
+        assert!(
+            parked(wait::WAIT_FOR, WAIT_FOR_ARGUMENTS)
+                .park("call_7", true, session())
+                .is_none()
+        );
+    }
+
+    /// Read batching stops at a turn-ending call, but a mutating call still runs
+    /// beside one, so the finished call is not always the parked one.
+    #[test]
+    fn another_call_finishing_does_not_park_the_turn() {
+        assert!(
+            parked(question::ASK_USER, ASK_USER_ARGUMENTS)
+                .park("call_8", true, session())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_tool_that_ends_no_turn_parks_on_nothing() {
+        assert!(
+            parked("read_file", "{}")
+                .park("call_7", true, session())
+                .is_none()
         );
     }
 }

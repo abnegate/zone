@@ -74,6 +74,58 @@ export interface ToolCallRecord {
    * and persisted with the message, unlike the client-only fields above.
    */
   questions?: Question[];
+  /** The background job this call started. Server-authored and persisted. */
+  job?: JobStarted;
+  /** What this call is waiting for, and until when. Server-authored and persisted. */
+  waiting?: Waiting;
+  /**
+   * Client-only: how the job ended, from the live exit frame. A job dies with
+   * the turn that started it, so nothing durable records the exit and a reload
+   * has only the start to rebuild from.
+   */
+  exited?: JobExited;
+  /** Client-only: how the wait ended, from the live settle frame. */
+  settled?: WaitSettled;
+}
+
+/// A background job, as reported when a shell call detaches it. The log path
+/// is what a reader opens to see what it is doing.
+export interface JobStarted {
+  id: string;
+  pid: number;
+  log_path: string;
+}
+
+/// A background job that is no longer running. No exit code means it was
+/// killed rather than allowed to finish, which is never a pass.
+export interface JobExited {
+  id: string;
+  exit_code?: number;
+}
+
+/// What one registered wait is waiting for. The deadline is RFC 3339 and
+/// already clamped by the server, so the card counts down to it as given.
+export interface Waiting {
+  kind: string;
+  id: string;
+  reference?: string;
+  deadline: string;
+}
+
+/// Which way a wait ended, as the server decided when it built the outcome.
+/// `silent` is a commit nothing reported on for the whole grace period and
+/// `unreadable` one whose checks could not be read; neither is a pass, and
+/// neither is `timed_out`.
+export type WaitVerdict = 'settled' | 'timed_out' | 'silent' | 'unreadable';
+
+/// How a wait ended. The outcome is the prose the model is told, so the card
+/// shows it as written and judges nothing on it: reading the verdict out of the
+/// sentence is what once drew an outcome saying "this is not a pass" as a
+/// finished wait. The verdict beside it is what the card judges on.
+export interface WaitSettled {
+  tool_call_id: string;
+  outcome: string;
+  verdict: WaitVerdict;
 }
 
 export type CitationKind =

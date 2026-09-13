@@ -1,8 +1,8 @@
 //! Live GitHub observations and writes using an authorized workspace source.
 
 use async_trait::async_trait;
-use chrono::Utc;
-use reqwest::{Client, Url};
+use chrono::{DateTime, Utc};
+use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
@@ -72,6 +72,11 @@ const LOG_REDIRECT_HOSTS: [&str; 4] = [
     "github.com",
 ];
 const LOG_NOTE: &str = "Excerpt of what the job printed, not proof of why it failed. Per-line timestamps, progress redraws and over-long lines are trimmed, and unshown regions are marked as omitted.";
+pub const SETTLED_ASSESSMENTS: [&str; 2] = ["success", "failure"];
+const RATE_LIMIT_EXHAUSTED: &str = "GitHub's API rate limit is exhausted for this source's credential. Retrying now will not help; wait for the limit to reset.";
+const MAX_RETRY_AFTER_SECONDS: u64 = 60;
+const RETRY_AFTER_HEADER: &str = "Retry-After";
+const RATE_LIMIT_REMAINING_HEADER: &str = "X-RateLimit-Remaining";
 
 /// Compiling the path vocabulary is the expensive part, so the prioritiser
 /// behind a blast radius is built once and shared by every assessment.
@@ -142,15 +147,15 @@ struct Arguments {
 }
 
 #[derive(Deserialize)]
-struct Configuration {
-    owner: String,
-    repo: String,
-    branch: Option<String>,
-    path: Option<String>,
-    token: Option<String>,
+pub(crate) struct Configuration {
+    pub(crate) owner: String,
+    pub(crate) repo: String,
+    pub(crate) branch: Option<String>,
+    pub(crate) path: Option<String>,
+    pub(crate) token: Option<String>,
     /// Which review bots count as review evidence for this source. Absent
     /// means every bot this build recognises.
-    review_signals: Option<Vec<String>>,
+    pub(crate) review_signals: Option<Vec<String>>,
 }
 
 #[async_trait]
@@ -374,7 +379,7 @@ impl Integration {
     }
 }
 
-struct Github {
+pub struct Github {
     client: Client,
     origin: Url,
     log_bytes: u64,
@@ -383,7 +388,7 @@ struct Github {
 }
 
 impl Github {
-    fn new(configuration: Configuration) -> Result<Self, String> {
+    pub(crate) fn new(configuration: Configuration) -> Result<Self, String> {
         if !segment(&configuration.owner) || !segment(&configuration.repo) {
             return Err("The source owner or repository name is invalid.".to_string());
         }
@@ -447,9 +452,40 @@ impl Github {
         raw: bool,
         body: Option<&Value>,
     ) -> Result<reqwest::Response, String> {
+        let response = self.send(&method, &url, raw, body).await?;
+        let response = match rate_limit(&response, Utc::now()) {
+            Some(RateLimit::Exhausted) => return Err(RATE_LIMIT_EXHAUSTED.to_string()),
+            // Honoured once, never in a loop: a caller polling every
+            // CHECK_POLL_INTERVAL comes back on its own schedule, and a second
+            // sleep here would hold its round open for a limit it cannot see.
+            Some(RateLimit::RetryAfter(delay)) => {
+                tokio::time::sleep(delay).await;
+                self.send(&method, &url, raw, body).await?
+            }
+            None => response,
+        };
+        if !response.status().is_success() {
+            if matches!(
+                rate_limit(&response, Utc::now()),
+                Some(RateLimit::Exhausted)
+            ) {
+                return Err(RATE_LIMIT_EXHAUSTED.to_string());
+            }
+            return Err(status_error(response.status()));
+        }
+        Ok(response)
+    }
+
+    async fn send(
+        &self,
+        method: &reqwest::Method,
+        url: &Url,
+        raw: bool,
+        body: Option<&Value>,
+    ) -> Result<reqwest::Response, String> {
         let mut request = self
             .client
-            .request(method, url)
+            .request(method.clone(), url.clone())
             .header(
                 "Accept",
                 if raw {
@@ -465,18 +501,10 @@ impl Github {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let response = request
+        request
             .send()
             .await
-            .map_err(|_| "GitHub request failed or timed out.".to_string())?;
-        if !response.status().is_success() {
-            // Provider response bodies and request errors can contain secrets.
-            return Err(format!(
-                "GitHub returned HTTP {}. Check source access, permissions, rate limits and the requested resource.",
-                response.status().as_u16()
-            ));
-        }
-        Ok(response)
+            .map_err(|_| "GitHub request failed or timed out.".to_string())
     }
 
     async fn get(&self, parts: &[&str], query: &[(&str, String)]) -> Result<Value, String> {
@@ -609,6 +637,23 @@ impl Github {
             .ok_or("GitHub did not return an immutable commit SHA.")?
             .to_string();
         Ok((reference, sha))
+    }
+
+    /// The one call a wait on GitHub checks polls: resolve the reference once,
+    /// then read the checks on the immutable commit it resolved to.
+    ///
+    /// Only `SETTLED_ASSESSMENTS` end a wait. `pending` has not finished, and
+    /// `unknown` is a commit GitHub has registered no run for at all, which
+    /// right after a push is indistinguishable from a repository with no CI —
+    /// so how long to tolerate it is the caller's decision, not this call's.
+    pub async fn settled(
+        &self,
+        reference: Option<&str>,
+    ) -> Result<(String, String, &'static str), String> {
+        let (reference, sha) = self.resolve(reference).await?;
+        let (workflows, checks, statuses) = self.ci_rows(&sha).await?;
+        let state = assessment(&conclusions(&workflows, &checks, &statuses));
+        Ok((reference, sha, state))
     }
 
     async fn observe(&self, operation: Operation, arguments: &Arguments) -> Result<Value, String> {
@@ -761,13 +806,7 @@ impl Github {
 
     async fn build(&self, sha: &str) -> Result<Value, String> {
         let (workflows, checks, statuses) = self.ci_rows(sha).await?;
-        let conclusions: Vec<&str> = workflows
-            .iter()
-            .chain(checks.iter())
-            .chain(statuses.iter())
-            .map(ci_token)
-            .collect();
-        let state = assessment(&conclusions);
+        let state = assessment(&conclusions(&workflows, &checks, &statuses));
         Ok(bound_build(json!({"state": state, "complete": true,
             "assessment": "Observed CI only; required branch checks and service health are not evaluated.",
             "workflows": workflows.iter().map(|row| project(row, &["id", "name", "head_sha", "status", "conclusion", "html_url", "updated_at"])).collect::<Vec<_>>(),
@@ -1659,6 +1698,78 @@ fn array(value: &Value) -> Result<&Vec<Value>, String> {
         .ok_or_else(|| "GitHub returned an invalid record list.".to_string())
 }
 
+enum RateLimit {
+    Exhausted,
+    RetryAfter(Duration),
+}
+
+/// GitHub answers its primary and its secondary limits alike with 403 or 429,
+/// and only an exhausted quota is hopeless — it lasts until the window rolls
+/// over, so it is reported rather than slept on.
+fn rate_limit(response: &reqwest::Response, now: DateTime<Utc>) -> Option<RateLimit> {
+    if !matches!(
+        response.status(),
+        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+    ) {
+        return None;
+    }
+    if header(response, RATE_LIMIT_REMAINING_HEADER)
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        == Some(0)
+    {
+        return Some(RateLimit::Exhausted);
+    }
+    header(response, RETRY_AFTER_HEADER)
+        .and_then(|value| retry_after(value, now))
+        .map(RateLimit::RetryAfter)
+}
+
+fn header<'a>(response: &'a reqwest::Response, name: &str) -> Option<&'a str> {
+    response.headers().get(name)?.to_str().ok()
+}
+
+/// `Retry-After` carries either delta-seconds or an HTTP-date (RFC 9110
+/// 10.2.3). A delay past the cap is refused rather than waited out: the caller
+/// owns its own schedule, and a request that cannot be served for minutes is
+/// better reported now than slept through.
+fn retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
+    let value = value.trim();
+    let seconds = match value.parse::<u64>() {
+        Ok(seconds) => seconds,
+        Err(_) => {
+            let at = DateTime::parse_from_rfc2822(value)
+                .ok()?
+                .with_timezone(&Utc);
+            u64::try_from((at - now).num_seconds()).unwrap_or(0)
+        }
+    };
+    if seconds > MAX_RETRY_AFTER_SECONDS {
+        return None;
+    }
+    Some(Duration::from_secs(seconds))
+}
+
+// Provider response bodies and request errors can contain secrets.
+fn status_error(status: StatusCode) -> String {
+    format!(
+        "GitHub returned HTTP {}. Check source access, permissions, rate limits and the requested resource.",
+        status.as_u16()
+    )
+}
+
+fn conclusions<'a>(
+    workflows: &'a [Value],
+    checks: &'a [Value],
+    statuses: &'a [Value],
+) -> Vec<&'a str> {
+    workflows
+        .iter()
+        .chain(checks.iter())
+        .chain(statuses.iter())
+        .map(ci_token)
+        .collect()
+}
+
 fn next_page(length: usize, page: u32) -> Result<Option<u32>, String> {
     next_page_of(length, page, PAGE_SIZE)
 }
@@ -2024,6 +2135,7 @@ fn readiness_citation(record: &Value, observed_at: &str) -> Value {
 mod tests {
     use super::*;
     use crate::state::AppState;
+    use std::time::Instant;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use zone_core::tools::REASON_DESCRIPTION;
@@ -4101,5 +4213,236 @@ mod tests {
         assert_eq!(current["runs"].as_array().unwrap().len(), 1);
         assert_eq!(previous["state"], "failed");
         assert_eq!(result["succeeded"], 1);
+    }
+
+    async fn commit_and_empty_ci(server: &MockServer) {
+        mock(server, "commits/main", json!({"sha": COMMIT})).await;
+        mock(
+            server,
+            "actions/runs",
+            json!({"workflow_runs": [], "total_count": 0}),
+        )
+        .await;
+        mock(server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
+    }
+
+    async fn check_runs(server: &MockServer, rows: Value) {
+        mock(
+            server,
+            &format!("commits/{COMMIT}/check-runs"),
+            json!({ "check_runs": rows }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_running_check_does_not_settle_until_it_succeeds() {
+        let server = MockServer::start().await;
+        commit_and_empty_ci(&server).await;
+        Mock::given(path(format!(
+            "/repos/owner/repository/commits/{COMMIT}/check-runs"
+        )))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"check_runs": [{"head_sha": COMMIT, "status": "in_progress"}]}),
+            ),
+        )
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+        check_runs(
+            &server,
+            json!([{"head_sha": COMMIT, "status": "completed", "conclusion": "success"}]),
+        )
+        .await;
+        let github = github(&server);
+        let (reference, sha, running) = github.settled(None).await.unwrap();
+        assert_eq!(reference, "main");
+        assert_eq!(sha, COMMIT);
+        assert_eq!(running, "pending");
+        assert!(
+            !SETTLED_ASSESSMENTS.contains(&running),
+            "a check still running must not end a wait"
+        );
+        let (_, _, finished) = github.settled(None).await.unwrap();
+        assert_eq!(finished, "success");
+        assert!(
+            SETTLED_ASSESSMENTS.contains(&finished),
+            "a successful check must end a wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_settles_the_wait() {
+        let server = MockServer::start().await;
+        commit_and_empty_ci(&server).await;
+        check_runs(
+            &server,
+            json!([{"head_sha": COMMIT, "status": "completed", "conclusion": "failure"}]),
+        )
+        .await;
+        let (_, _, state) = github(&server).settled(None).await.unwrap();
+        assert_eq!(state, "failure");
+        assert!(
+            SETTLED_ASSESSMENTS.contains(&state),
+            "a failed check must end a wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_commit_with_no_checks_is_unknown_and_never_settles() {
+        let server = MockServer::start().await;
+        commit_and_empty_ci(&server).await;
+        check_runs(&server, json!([])).await;
+        let (_, _, state) = github(&server).settled(None).await.unwrap();
+        assert_eq!(state, "unknown");
+        assert!(
+            !SETTLED_ASSESSMENTS.contains(&state),
+            "a commit GitHub has registered no run for is not a settled wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn settled_refuses_checks_reported_for_another_commit() {
+        let server = MockServer::start().await;
+        commit_and_empty_ci(&server).await;
+        check_runs(
+            &server,
+            json!([{"head_sha": BLOB, "status": "completed", "conclusion": "success"}]),
+        )
+        .await;
+        assert!(
+            github(&server)
+                .settled(None)
+                .await
+                .unwrap_err()
+                .contains("different")
+        );
+    }
+
+    async fn rate_limited(server: &MockServer, response: ResponseTemplate) {
+        Mock::given(path("/repos/owner/repository/commits/main"))
+            .respond_with(response)
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(server)
+            .await;
+        mock(server, "commits/main", json!({"sha": COMMIT})).await;
+    }
+
+    #[tokio::test]
+    async fn a_retry_after_in_seconds_is_honoured_once() {
+        let server = MockServer::start().await;
+        rate_limited(
+            &server,
+            ResponseTemplate::new(429).insert_header("Retry-After", "3"),
+        )
+        .await;
+        let started = Instant::now();
+        let (_, sha) = github(&server).resolve(None).await.unwrap();
+        let waited = started.elapsed();
+        assert_eq!(sha, COMMIT);
+        assert!(
+            waited >= Duration::from_secs(3),
+            "Retry-After was not honoured, waited {waited:?}"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "a rate-limited request is retried exactly once, never in a loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retry_after_http_date_is_honoured_once() {
+        let server = MockServer::start().await;
+        let at = (Utc::now() + chrono::Duration::seconds(2))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        rate_limited(
+            &server,
+            ResponseTemplate::new(429).insert_header("Retry-After", at.as_str()),
+        )
+        .await;
+        let started = Instant::now();
+        let (_, sha) = github(&server).resolve(None).await.unwrap();
+        let waited = started.elapsed();
+        assert_eq!(sha, COMMIT);
+        assert!(
+            waited >= Duration::from_secs(1),
+            "an HTTP-date Retry-After was not honoured, waited {waited:?}"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "a rate-limited request is retried exactly once, never in a loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_rate_limit_is_reported_and_never_retried() {
+        let server = MockServer::start().await;
+        for status in [403, 429] {
+            server.reset().await;
+            rate_limited(
+                &server,
+                ResponseTemplate::new(status)
+                    .insert_header("X-RateLimit-Remaining", "0")
+                    .insert_header("Retry-After", "1"),
+            )
+            .await;
+            let error = github(&server).resolve(None).await.unwrap_err();
+            assert_eq!(error, RATE_LIMIT_EXHAUSTED, "HTTP {status}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                1,
+                "an exhausted quota must not be retried"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_response_without_an_exhausted_quota_keeps_its_status() {
+        let server = MockServer::start().await;
+        mock(&server, "commits/main", json!({"sha": COMMIT})).await;
+        Mock::given(path("/repos/owner/repository/commits/main"))
+            .respond_with(ResponseTemplate::new(403))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let error = github(&server).resolve(None).await.unwrap_err();
+        assert!(error.contains("HTTP 403"), "{error}");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retry_after_reads_delta_seconds_and_http_dates() {
+        let now = DateTime::parse_from_rfc3339("1994-11-06T08:49:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(retry_after("3", now), Some(Duration::from_secs(3)));
+        assert_eq!(retry_after(" 30 ", now), Some(Duration::from_secs(30)));
+        assert_eq!(
+            retry_after("Sun, 06 Nov 1994 08:49:37 GMT", now),
+            Some(Duration::from_secs(37))
+        );
+        assert_eq!(
+            retry_after("Sun, 06 Nov 1994 08:48:00 GMT", now),
+            Some(Duration::ZERO),
+            "a date already past is retried at once"
+        );
+        assert_eq!(retry_after("soon", now), None);
+        assert_eq!(retry_after("", now), None);
+        assert_eq!(
+            retry_after(&(MAX_RETRY_AFTER_SECONDS + 1).to_string(), now),
+            None,
+            "a delay past the cap is not honoured"
+        );
+        assert_eq!(
+            retry_after("Sun, 06 Nov 1994 09:49:37 GMT", now),
+            None,
+            "a date past the cap is not honoured"
+        );
     }
 }

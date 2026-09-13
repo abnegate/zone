@@ -6,8 +6,10 @@ import {
   AWAITING_ANSWER_DETAIL,
   type ChatWithMessages,
   type ContextUsage,
+  type JobStarted,
   type Message,
   type Question,
+  type Waiting,
 } from '../types';
 import { renderAnswers } from '../utils/answers';
 
@@ -2058,6 +2060,222 @@ describe('useChat', () => {
     expect(asked?.pending).toBe(false);
     expect(asked?.success).toBe(true);
     expect(asked?.detail).toBe(AWAITING_ANSWER_DETAIL);
+  });
+
+  const job: JobStarted = {
+    id: 'job_9f3c1a7b2e04',
+    pid: 48213,
+    log_path: '/srv/zone/.zone/jobs/job_9f3c1a7b2e04.log',
+  };
+
+  const waiting: Waiting = {
+    kind: 'job',
+    id: 'job_9f3c1a7b2e04',
+    deadline: '2026-09-12T10:15:00Z',
+  };
+
+  const backgroundCall = (messageId: string) => {
+    lastSocket?.emit({ type: 'message_start', message_id: messageId, role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: messageId,
+      tool_call_id: 'call_shell',
+      name: 'run_shell',
+      arguments: '{"command":"bun test","background":true}',
+    });
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: messageId,
+      tool_call_id: 'call_shell',
+      name: 'run_shell',
+      success: true,
+      detail: 'Started job_9f3c1a7b2e04 (pid 48213).',
+      duration_ms: 12,
+    });
+  };
+
+  const waitCall = (messageId: string) => {
+    lastSocket?.emit({ type: 'message_start', message_id: messageId, role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: messageId,
+      tool_call_id: 'call_wait',
+      name: 'wait_for',
+      arguments: '{"kind":"job","id":"job_9f3c1a7b2e04"}',
+    });
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: messageId,
+      tool_call_id: 'call_wait',
+      name: 'wait_for',
+      success: true,
+      detail: 'Waiting for job_9f3c1a7b2e04 until 2026-09-12T10:15:00Z.',
+      duration_ms: 4,
+    });
+  };
+
+  it('puts the job a call started on that call, and its exit on the same row', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    act(() => {
+      backgroundCall('m7');
+      lastSocket?.emit({ type: 'job_started', message_id: 'm7', tool_call_id: 'call_shell', job });
+    });
+
+    const started = result.current.chat?.messages.at(-1)?.metadata?.tool_calls;
+    expect(started).toHaveLength(1);
+    expect(started?.[0]?.job).toEqual(job);
+    expect(started?.[0]?.exited).toBeUndefined();
+    expect(started?.[0]?.detail).toBe('Started job_9f3c1a7b2e04 (pid 48213).');
+
+    // The exit names the job, not the call: it has to land on the row that
+    // started that job rather than open a second one.
+    act(() => {
+      lastSocket?.emit({
+        type: 'job_exited',
+        message_id: 'm7',
+        job: { id: 'job_9f3c1a7b2e04', exit_code: 1 },
+      });
+    });
+
+    const exited = result.current.chat?.messages.at(-1)?.metadata?.tool_calls;
+    expect(exited).toHaveLength(1);
+    expect(exited?.[0]?.id).toBe('call_shell');
+    expect(exited?.[0]?.job).toEqual(job);
+    expect(exited?.[0]?.exited).toEqual({ id: 'job_9f3c1a7b2e04', exit_code: 1 });
+  });
+
+  it('gives an exit no call on the message started a row of its own', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'm7', role: 'assistant' });
+      lastSocket?.emit({ type: 'job_exited', message_id: 'm7', job: { id: 'job_9f3c1a7b2e04' } });
+    });
+
+    const calls = result.current.chat?.messages.at(-1)?.metadata?.tool_calls;
+    expect(calls).toHaveLength(1);
+    expect(calls?.[0]?.id).toBe('job_9f3c1a7b2e04');
+    expect(calls?.[0]?.exited).toEqual({ id: 'job_9f3c1a7b2e04' });
+    expect(calls?.[0]?.job).toBeUndefined();
+  });
+
+  it('puts what a call is waiting for on the call, and how it settled after it', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    act(() => {
+      waitCall('m8');
+      lastSocket?.emit({
+        type: 'wait_started',
+        message_id: 'm8',
+        tool_call_id: 'call_wait',
+        waiting,
+      });
+    });
+
+    const opened = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(opened?.waiting).toEqual(waiting);
+    expect(opened?.settled).toBeUndefined();
+    expect(opened?.pending).toBe(false);
+    expect(opened?.detail).toBe('Waiting for job_9f3c1a7b2e04 until 2026-09-12T10:15:00Z.');
+
+    const settled = {
+      tool_call_id: 'call_wait',
+      outcome:
+        'Timed out after 300s. job_9f3c1a7b2e04 has not finished — this is a timeout, not a result. Check again or wait longer.',
+      verdict: 'timed_out' as const,
+    };
+    act(() => {
+      lastSocket?.emit({ type: 'wait_settled', message_id: 'm8', settled });
+    });
+
+    const calls = result.current.chat?.messages.at(-1)?.metadata?.tool_calls;
+    expect(calls).toHaveLength(1);
+    expect(calls?.[0]?.waiting).toEqual(waiting);
+    expect(calls?.[0]?.settled).toEqual(settled);
+  });
+
+  it('gives a settle no call on the message opened a row of its own', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    const settled = {
+      tool_call_id: 'call_wait',
+      outcome: 'No checks are configured or reporting on main after 120s. This is not a pass.',
+      verdict: 'silent' as const,
+    };
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'm8', role: 'assistant' });
+      lastSocket?.emit({ type: 'wait_settled', message_id: 'm8', settled });
+    });
+
+    const calls = result.current.chat?.messages.at(-1)?.metadata?.tool_calls;
+    expect(calls).toHaveLength(1);
+    expect(calls?.[0]?.id).toBe('call_wait');
+    expect(calls?.[0]?.settled).toEqual(settled);
+  });
+
+  it('leaves the call as the tool result left it when a job or wait frame cannot be read', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    act(() => {
+      backgroundCall('m9');
+      lastSocket?.emit({
+        type: 'job_started',
+        message_id: 'm9',
+        tool_call_id: 'call_shell',
+        job: { id: 'job_9f3c1a7b2e04' },
+      });
+      lastSocket?.emit({ type: 'job_exited', message_id: 'm9', job: { exit_code: 0 } });
+      lastSocket?.emit({
+        type: 'wait_started',
+        message_id: 'm9',
+        tool_call_id: 'call_shell',
+        waiting: { kind: 'job', id: 'job_9f3c1a7b2e04' },
+      });
+      lastSocket?.emit({
+        type: 'wait_settled',
+        message_id: 'm9',
+        settled: { tool_call_id: 'call_shell', outcome: 'Finished' },
+      });
+    });
+
+    const calls = result.current.chat?.messages.at(-1)?.metadata?.tool_calls;
+    expect(calls).toHaveLength(1);
+    expect(calls?.[0]?.job).toBeUndefined();
+    expect(calls?.[0]?.exited).toBeUndefined();
+    expect(calls?.[0]?.waiting).toBeUndefined();
+    expect(calls?.[0]?.settled).toBeUndefined();
+    expect(calls?.[0]?.detail).toBe('Started job_9f3c1a7b2e04 (pid 48213).');
   });
 
   it('sends the rendered answer as an ordinary message rather than a frame of its own', async () => {
