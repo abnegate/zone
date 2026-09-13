@@ -3227,10 +3227,13 @@ async fn handle_chat_generation(
         && tool_calls.is_empty()
         && generated_images.is_empty()
     {
-        session
-            .store
-            .interrupt(&session.lease, session.turn)
-            .await?;
+        match session.store.interrupt(&session.lease, session.turn).await {
+            Ok(()) => {}
+            Err(crate::db::context::Error::LeaseLost) => {
+                session.settle(None, None, None).await?;
+            }
+            Err(error) => return Err(error.into()),
+        }
         session.close().await?;
         publish(
             stream,
@@ -3360,7 +3363,17 @@ async fn handle_chat_generation(
                 msg.content.len()
             );
         }
-        Err(error) => return Err(format!("Failed to save response: {error}").into()),
+        Err(error) => {
+            // The fenced close is refused, and this turn's row is ours alone.
+            if matches!(error, crate::db::context::Error::LeaseLost)
+                && let Err(refused) = session
+                    .settle(Some(&full_content), assistant_metadata, partial.as_ref())
+                    .await
+            {
+                tracing::warn!(%refused, "Could not settle a turn whose lease was lost");
+            }
+            return Err(format!("Failed to save response: {error}").into());
+        }
     }
 
     Ok(())
