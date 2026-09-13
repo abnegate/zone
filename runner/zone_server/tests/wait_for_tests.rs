@@ -797,15 +797,25 @@ async fn the_stall_watchdog_says_nothing_about_a_run_parked_past_its_threshold()
     // The job follows a file nothing appends to, so the only thing that can end
     // this park is its own deadline — which is the point: the park has to
     // outlast the watchdog's threshold with the run reading as healthy.
-    tokio::time::timeout(SETTLE + window, async {
-        while driven.status().await == PHASE_WAITING {
+    //
+    // The park is lifted before the line saying how it ended is written, so a
+    // status off `waiting` is one write too early to read the log on. What the
+    // assertion below needs is that ending line: the one a wait writes that is
+    // not the park.
+    let lines = tokio::time::timeout(SETTLE + window, async {
+        loop {
+            let lines = driven.waiting_lines().await;
+            if lines
+                .iter()
+                .any(|(message, _)| message != WAITING_ON_OUTCOME)
+            {
+                return lines;
+            }
             tokio::time::sleep(POLL).await;
         }
     })
     .await
     .expect("the wait never ran out");
-
-    let lines = driven.waiting_lines().await;
     assert_eq!(
         lines.len(),
         2,
