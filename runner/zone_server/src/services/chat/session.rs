@@ -12,6 +12,7 @@ use crate::agent::prompt::{self, Environment};
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
 use crate::db::chats::ChatRow;
 use crate::db::context::{Error, Guard, Lease, Store};
+use crate::db::knowledge::not_memory;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::completion_tokens::merge_stops;
 use crate::state::AppState;
@@ -352,7 +353,7 @@ pub async fn build(
         );
     }
     if mode == Mode::Preview && !agentic && chat.character.is_none() {
-        let knowledge: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_entries WHERE workspace_id=$1 AND is_active=TRUE)")
+        let knowledge: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM knowledge_entries WHERE workspace_id=$1 AND is_active=TRUE ", not_memory!(), ")"))
             .bind(workspace).fetch_one(state.db()).await.map_err(|error|error.to_string())?;
         let sources = if state.context_service().is_some() {
             sqlx::query_scalar::<_, bool>(
