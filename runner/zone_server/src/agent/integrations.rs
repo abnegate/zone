@@ -72,7 +72,22 @@ const LOG_REDIRECT_HOSTS: [&str; 4] = [
     "github.com",
 ];
 const LOG_NOTE: &str = "Excerpt of what the job printed, not proof of why it failed. Per-line timestamps, progress redraws and over-long lines are trimmed, and unshown regions are marked as omitted.";
-pub const SETTLED_ASSESSMENTS: [&str; 2] = ["success", "failure"];
+pub(crate) const SUCCESS_ASSESSMENT: &str = "success";
+const FAILURE_ASSESSMENT: &str = "failure";
+const PENDING_ASSESSMENT: &str = "pending";
+const UNKNOWN_ASSESSMENT: &str = "unknown";
+
+/// Conclusions a completed run reports that are neither a pass nor a failure.
+/// The run finished and said so, which is the opposite of the silence
+/// `unknown` stands for, so a wait on them ends — named, and never as a pass.
+const TERMINAL_ASSESSMENTS: [&str; 2] = ["neutral", "skipped"];
+
+pub const SETTLED_ASSESSMENTS: [&str; 4] = [
+    SUCCESS_ASSESSMENT,
+    FAILURE_ASSESSMENT,
+    TERMINAL_ASSESSMENTS[0],
+    TERMINAL_ASSESSMENTS[1],
+];
 const RATE_LIMIT_EXHAUSTED: &str = "GitHub's API rate limit is exhausted for this source's credential. Retrying now will not help; wait for the limit to reset.";
 const MAX_RETRY_AFTER_SECONDS: u64 = 60;
 const RETRY_AFTER_HEADER: &str = "Retry-After";
@@ -646,6 +661,9 @@ impl Github {
     /// `unknown` is a commit GitHub has registered no run for at all, which
     /// right after a push is indistinguishable from a repository with no CI —
     /// so how long to tolerate it is the caller's decision, not this call's.
+    /// A run that completed neutral or skipped is neither: it reported and it
+    /// is over, so it settles under its own name rather than waiting out a
+    /// grace period meant for silence.
     pub async fn settled(
         &self,
         reference: Option<&str>,
@@ -1809,9 +1827,18 @@ fn latest(rows: Vec<Value>, key: &str) -> Vec<Value> {
         .collect()
 }
 
+/// What a commit's checks add up to, in one word a wait can act on.
+///
+/// `unknown` is silence — nothing registered, or a token this does not know —
+/// and a wait tolerates it for a grace period before giving up on it. A
+/// completed run that concluded neutral or skipped is not silence: it reported,
+/// and it is over. Folding those into `unknown` had a wait sit out the whole
+/// grace period and then say no checks were configured or reporting, about
+/// checks that had reported. They settle under their own name instead, which
+/// reads as the non-pass they are.
 fn assessment(conclusions: &[&str]) -> &'static str {
     if conclusions.is_empty() {
-        return "unknown";
+        return UNKNOWN_ASSESSMENT;
     }
     if conclusions.iter().any(|value| {
         matches!(
@@ -1825,7 +1852,7 @@ fn assessment(conclusions: &[&str]) -> &'static str {
                 | "stale"
         )
     }) {
-        return "failure";
+        return FAILURE_ASSESSMENT;
     }
     if conclusions.iter().any(|value| {
         matches!(
@@ -1833,13 +1860,23 @@ fn assessment(conclusions: &[&str]) -> &'static str {
             "pending" | "queued" | "in_progress" | "waiting" | "requested"
         )
     }) {
-        return "pending";
+        return PENDING_ASSESSMENT;
     }
-    if conclusions.iter().all(|value| *value == "success") {
-        "success"
-    } else {
-        "unknown"
+    if !conclusions
+        .iter()
+        .all(|value| *value == SUCCESS_ASSESSMENT || TERMINAL_ASSESSMENTS.contains(value))
+    {
+        return UNKNOWN_ASSESSMENT;
     }
+    conclusions
+        .iter()
+        .find_map(|value| {
+            TERMINAL_ASSESSMENTS
+                .iter()
+                .copied()
+                .find(|terminal| terminal == value)
+        })
+        .unwrap_or(SUCCESS_ASSESSMENT)
 }
 
 fn issue_record(row: &Value) -> Value {
@@ -1944,10 +1981,10 @@ fn ci_token(row: &Value) -> &str {
 
 fn ci_priority(row: &Value) -> u8 {
     match assessment(&[ci_token(row)]) {
-        "failure" => 0,
-        "pending" => 1,
-        "unknown" => 2,
-        _ => 3,
+        FAILURE_ASSESSMENT => 0,
+        PENDING_ASSESSMENT => 1,
+        SUCCESS_ASSESSMENT => 3,
+        _ => 2,
     }
 }
 
@@ -2240,20 +2277,52 @@ mod tests {
     }
 
     #[test]
-    fn absent_neutral_unknown_and_pending_results_are_not_green() {
-        for conclusions in [
-            vec![],
-            vec!["neutral"],
-            vec!["skipped"],
-            vec!["unknown"],
-            vec!["success", "unexpected"],
-        ] {
-            assert_eq!(assessment(&conclusions), "unknown");
+    fn absent_unknown_and_pending_results_are_not_green() {
+        for conclusions in [vec![], vec!["unknown"], vec!["success", "unexpected"]] {
+            assert_eq!(assessment(&conclusions), UNKNOWN_ASSESSMENT);
         }
-        assert_eq!(assessment(&["success"]), "success");
-        assert_eq!(assessment(&["success", "pending"]), "pending");
-        assert_eq!(assessment(&["pending", "failure"]), "failure");
-        assert_eq!(assessment(&["cancelled"]), "failure");
+        assert_eq!(assessment(&["success"]), SUCCESS_ASSESSMENT);
+        assert_eq!(assessment(&["success", "pending"]), PENDING_ASSESSMENT);
+        assert_eq!(assessment(&["pending", "failure"]), FAILURE_ASSESSMENT);
+        assert_eq!(assessment(&["cancelled"]), FAILURE_ASSESSMENT);
+    }
+
+    /// A completed run that concluded neutral or skipped has reported, and
+    /// reporting is the one thing `unknown` says did not happen. Reading it as
+    /// unknown had a wait sit out the whole grace period and then answer that
+    /// no checks are configured or reporting on the commit — about a commit
+    /// whose checks had reported and finished. Each settles under its own name,
+    /// and none of those names is a pass.
+    #[test]
+    fn a_completed_run_that_neither_passed_nor_failed_settles_under_its_own_name() {
+        for conclusion in TERMINAL_ASSESSMENTS {
+            assert_eq!(assessment(&[conclusion]), conclusion);
+            assert_eq!(
+                assessment(&["success", conclusion]),
+                conclusion,
+                "the conclusion that is not a pass is the one the commit is reported as"
+            );
+            assert_ne!(assessment(&[conclusion]), SUCCESS_ASSESSMENT);
+            assert_ne!(
+                assessment(&[conclusion]),
+                UNKNOWN_ASSESSMENT,
+                "{conclusion} reported, which is the opposite of what unknown stands for"
+            );
+            assert!(
+                SETTLED_ASSESSMENTS.contains(&assessment(&[conclusion])),
+                "{conclusion} is over, so a wait on it has nothing left to wait for"
+            );
+        }
+        assert_eq!(
+            assessment(&["queued", "skipped"]),
+            PENDING_ASSESSMENT,
+            "a run still queued beside a skipped one has not finished"
+        );
+        assert_eq!(
+            assessment(&["failure", "neutral"]),
+            FAILURE_ASSESSMENT,
+            "a failure outranks every other conclusion on the commit"
+        );
     }
 
     #[test]
@@ -4287,6 +4356,40 @@ mod tests {
         assert!(
             SETTLED_ASSESSMENTS.contains(&state),
             "a failed check must end a wait"
+        );
+    }
+
+    /// The whole point of the finding: at the Checks level, a run GitHub has
+    /// completed with a skipped conclusion ends a wait, and one it has only
+    /// queued does not. The first used to be indistinguishable from a
+    /// repository with no CI at all.
+    #[tokio::test]
+    async fn a_completed_skipped_run_settles_the_wait_and_a_queued_one_does_not() {
+        let server = MockServer::start().await;
+        commit_and_empty_ci(&server).await;
+        check_runs(
+            &server,
+            json!([{"head_sha": COMMIT, "status": "completed", "conclusion": "skipped"}]),
+        )
+        .await;
+        let (_, _, state) = github(&server).settled(None).await.unwrap();
+        assert_eq!(state, "skipped");
+        assert!(
+            SETTLED_ASSESSMENTS.contains(&state),
+            "a run that completed and said skipped has reported, so the wait is over"
+        );
+
+        let pending = MockServer::start().await;
+        commit_and_empty_ci(&pending).await;
+        check_runs(
+            &pending,
+            json!([{"head_sha": COMMIT, "status": "queued", "conclusion": null}]),
+        )
+        .await;
+        let (_, _, state) = github(&pending).settled(None).await.unwrap();
+        assert!(
+            !SETTLED_ASSESSMENTS.contains(&state),
+            "a queued run has not reported anything yet: {state}"
         );
     }
 

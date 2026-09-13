@@ -85,7 +85,9 @@ pub const CHECK_SETTLE_GRACE: Duration = Duration::from_secs(120);
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
     /// The subject reached an end of its own: a job exited or was killed, a run
-    /// finished, a commit's checks concluded pass or fail.
+    /// finished, a commit's checks concluded. Settled is not a synonym for
+    /// passed — a failure settles, and so does a check that concluded neutral
+    /// or skipped — which is why the outcome beside it names what it settled to.
     Settled,
     /// The window ran out with the subject still going, or with nothing left
     /// holding the wait open.
@@ -994,6 +996,7 @@ impl WaitForTool {
 mod tests {
     use super::*;
 
+    use crate::agent::integrations::SUCCESS_ASSESSMENT;
     use crate::state::{AppState, test_config};
     use std::collections::{HashMap, VecDeque};
     use std::path::Path;
@@ -1544,6 +1547,10 @@ mod tests {
         Jobs::kill_session(session).await;
     }
 
+    /// Every assessment that ends a wait, including the two that are neither a
+    /// pass nor a failure. The sentence names what the checks settled to, and
+    /// the only one of those words a model may read as a pass is the one that
+    /// is one.
     #[tokio::test(start_paused = true)]
     async fn a_commit_whose_checks_settle_reports_what_they_settled_to() {
         for assessment in SETTLED_ASSESSMENTS {
@@ -1553,6 +1560,9 @@ mod tests {
                 outcome,
                 checks_settled("main", "8c4d21fa9b7e6053", assessment, CHECK_POLL_INTERVAL)
             );
+            if assessment != SUCCESS_ASSESSMENT {
+                assert_unphrasable_as_success(&outcome.text);
+            }
         }
     }
 
