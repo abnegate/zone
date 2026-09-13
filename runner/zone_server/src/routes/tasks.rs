@@ -117,12 +117,28 @@ pub struct TaskRunData {
     status: String,
     current_phase: Option<String>,
     progress_percent: Option<i32>,
+    /// When the run began and when it finished, in RFC 3339, as `TaskData` in
+    /// this file sends the same two columns.
+    ///
+    /// The console orders a task's earlier runs by `started_at`, so a run that
+    /// travelled without one sorted as though it had never started.
+    started_at: Option<String>,
+    completed_at: Option<String>,
     error_message: Option<String>,
     /// The question envelope a `waiting` run is parked on, or nothing.
     ///
     /// Without it the console can see that a run stopped and not what it
     /// stopped to ask, which is the only thing anyone can act on.
     pending_question: Option<serde_json::Value>,
+    /// What a `waiting` run is waiting for, and until when, or nothing.
+    ///
+    /// The sibling of `pending_question`: a run parks on one or the other, and
+    /// which field arrived is how a reader tells a question nobody has answered
+    /// from a wait nobody can. The column keeps `pending_wait` beside its
+    /// sibling; the wire says what the run is doing. Absent rather than null,
+    /// so a reader that has the key knows there is a wait to describe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waiting_on: Option<serde_json::Value>,
 }
 
 /// Task runs list response
@@ -139,8 +155,15 @@ impl From<tasks::TaskRunRow> for TaskRunData {
             status: row.status,
             current_phase: row.current_phase,
             progress_percent: row.progress_percent,
+            started_at: row
+                .started_at
+                .map(|timestamp| timestamp.and_utc().to_rfc3339()),
+            completed_at: row
+                .completed_at
+                .map(|timestamp| timestamp.and_utc().to_rfc3339()),
             error_message: row.error_message,
             pending_question: row.pending_question,
+            waiting_on: row.pending_wait,
         }
     }
 }
@@ -751,6 +774,16 @@ mod tests {
             error_message: None,
             artifacts: None,
             pending_question: pending,
+            pending_wait: None,
+        }
+    }
+
+    /// The same run, parked on a wait instead of a question.
+    fn parked_on_wait(waiting: serde_json::Value) -> tasks::TaskRunRow {
+        tasks::TaskRunRow {
+            status: "waiting".into(),
+            pending_wait: Some(waiting),
+            ..run(None)
         }
     }
 
@@ -770,5 +803,71 @@ mod tests {
             serde_json::to_value(TaskRunResponse::from(run(None))).unwrap()["run"]["pending_question"],
             Value::Null
         );
+    }
+
+    /// A wait park reaches the console or it does not exist: the column went in
+    /// with the park and nothing carried it to the wire, so a console rendering
+    /// `waiting` had a badge and no subject. The absence on a plain row is half
+    /// the contract -- the key is what says there is a wait at all, which is
+    /// how a reader tells this park from the question beside it.
+    #[test]
+    fn a_run_parked_on_a_wait_discloses_what_it_waits_for() {
+        let waiting = serde_json::json!({
+            "kind": "job",
+            "id": "job_9f3c1a7b2e04",
+            "deadline": "2026-09-13T09:41:00Z",
+        });
+        let body =
+            serde_json::to_value(TaskRunResponse::from(parked_on_wait(waiting.clone()))).unwrap();
+
+        assert_eq!(body["run"]["status"], "waiting");
+        assert_eq!(
+            body["run"]["waiting_on"], waiting,
+            "a console that cannot read the wait cannot say what the run is doing"
+        );
+        assert_eq!(
+            body["run"]["pending_question"],
+            Value::Null,
+            "a wait is not a question and answering it must stay refused"
+        );
+
+        let running = serde_json::to_value(TaskRunResponse::from(run(None))).unwrap();
+        assert!(
+            running["run"].get("waiting_on").is_none(),
+            "a run waiting for nothing carries no key: {running}"
+        );
+    }
+
+    /// The row has carried both columns since before this route existed and the
+    /// run it sends carried neither, so the console ordering a task's earlier
+    /// runs by `started_at` compared two blanks and kept whatever order the
+    /// list arrived in. Both travel formatted as `TaskData` formats them.
+    #[test]
+    fn a_run_discloses_when_it_started_and_when_it_finished() {
+        let started = NaiveDateTime::parse_from_str("2026-09-13 09:41:00", "%Y-%m-%d %H:%M:%S")
+            .expect("valid timestamp");
+        let completed = NaiveDateTime::parse_from_str("2026-09-13 09:44:30", "%Y-%m-%d %H:%M:%S")
+            .expect("valid timestamp");
+        let finished = tasks::TaskRunRow {
+            status: "completed".into(),
+            started_at: Some(started),
+            completed_at: Some(completed),
+            ..run(None)
+        };
+
+        let body = serde_json::to_value(TaskRunResponse::from(finished)).unwrap();
+        assert_eq!(
+            body["run"]["started_at"], "2026-09-13T09:41:00+00:00",
+            "a console sorting runs by when they started needs the value, not the column"
+        );
+        assert_eq!(body["run"]["completed_at"], "2026-09-13T09:44:30+00:00");
+
+        let running = serde_json::to_value(TaskRunResponse::from(run(None))).unwrap();
+        assert_eq!(
+            running["run"]["started_at"],
+            Value::Null,
+            "a run that has not started sends the key as null, as a task does"
+        );
+        assert_eq!(running["run"]["completed_at"], Value::Null);
     }
 }

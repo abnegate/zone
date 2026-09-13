@@ -3,6 +3,7 @@
 mod common;
 
 use uuid::Uuid;
+use zone_server::agent::wait::Waiting;
 use zone_server::db::tasks;
 
 /// Test helper to create a test project and workspace
@@ -983,4 +984,288 @@ async fn a_required_question_waits_and_a_timeout_can_still_end_the_parked_run() 
     );
 
     parked.finish().await;
+}
+
+/// A run holding a live lease, ready to park on a wait rather than on a
+/// question.
+///
+/// The wait is injected through `park_task_run_waiting` rather than driven out
+/// of a real `wait_for` call: what these tests are about is whether the column
+/// the park writes reaches the run routes at all, and a scripted turn would put
+/// a model and a tool catalog between the two ends of that one mapping.
+struct Leased {
+    pool: sqlx::PgPool,
+    client: common::TestClient,
+    token: String,
+    organization: Uuid,
+    user: Uuid,
+    task: Uuid,
+    run: Uuid,
+    owner: Uuid,
+}
+
+impl Leased {
+    /// The run as `GET /api/tasks/runs/{id}` renders it.
+    async fn read(&self) -> serde_json::Value {
+        let response = self
+            .client
+            .get_auth(&format!("/api/tasks/runs/{}", self.run), &self.token)
+            .await;
+        response.assert_status(axum::http::StatusCode::OK);
+        response.json_value()["run"].clone()
+    }
+
+    /// The same run as the list route renders it.
+    async fn listed(&self) -> serde_json::Value {
+        let response = self
+            .client
+            .get_auth(&format!("/api/tasks/{}/runs", self.task), &self.token)
+            .await;
+        response.assert_status(axum::http::StatusCode::OK);
+        response.json_value()["runs"]
+            .as_array()
+            .expect("the list route returns an array of runs")
+            .iter()
+            .find(|run| run["id"] == self.run.to_string())
+            .expect("the run the task owns is in its own list")
+            .clone()
+    }
+
+    async fn park_on(&self, waiting: &Waiting) {
+        assert!(
+            tasks::park_task_run_waiting(
+                &self.pool,
+                self.run,
+                self.owner,
+                serde_json::to_value(waiting).expect("a wait serialises"),
+            )
+            .await
+            .expect("the claimed run parks"),
+            "a running run with a fresh lease parks on a wait"
+        );
+    }
+
+    /// What the column the park wrote holds, straight out of the table.
+    async fn stored(&self) -> Option<serde_json::Value> {
+        sqlx::query_scalar("SELECT pending_wait FROM task_runs WHERE id = $1")
+            .bind(self.run)
+            .fetch_one(&self.pool)
+            .await
+            .expect("the run is still readable")
+    }
+
+    async fn answer(&self, body: serde_json::Value) -> common::TestResponse {
+        self.client
+            .post_json_auth(
+                &format!("/api/tasks/runs/{}/answers", self.run),
+                &body,
+                &self.token,
+            )
+            .await
+    }
+
+    async fn finish(self) {
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(self.organization)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(self.user)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// A workspace member's task, one run of it, and the lease a worker would hold.
+async fn lease() -> Leased {
+    use chrono::{Duration, Utc};
+    use zone_server::auth::jwt::create_session_access_token;
+    use zone_server::db::{sessions, workspace_members};
+
+    let pool = common::create_test_pool().await;
+    let (organization, workspace, user) = common::setup_test_data(&pool).await;
+    workspace_members::add_member(
+        &pool,
+        workspace,
+        user,
+        workspace_members::WorkspaceRole::Member,
+        None,
+    )
+    .await
+    .unwrap();
+    let task = tasks::create_task_as(
+        &pool,
+        workspace,
+        &[],
+        "Waits on something",
+        "Start the runner, then wait for it",
+        None,
+        None,
+        true,
+        None,
+        Some(user),
+    )
+    .await
+    .unwrap();
+    let run = tasks::create_task_run_as(&pool, task.id, Some(user))
+        .await
+        .unwrap();
+
+    let owner = Uuid::new_v4();
+    assert!(
+        tasks::claim_task_run(&pool, run.id, owner)
+            .await
+            .expect("the new run is claimable"),
+        "a freshly admitted run takes a lease"
+    );
+
+    let config = common::test_config();
+    let client = common::TestClient::new(common::create_test_router(common::create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let session = sessions::create_session(
+        &pool,
+        user,
+        &format!("refresh-{}", Uuid::new_v4()),
+        None,
+        None,
+        None,
+        (Utc::now() + Duration::hours(1)).naive_utc(),
+    )
+    .await
+    .unwrap();
+    let token = create_session_access_token(
+        user,
+        "waits@example.com",
+        vec![],
+        vec![],
+        false,
+        session.id,
+        &config.jwt_secret,
+        Duration::minutes(5),
+    )
+    .unwrap();
+
+    Leased {
+        pool,
+        client,
+        token,
+        organization,
+        user,
+        task: task.id,
+        run: run.id,
+        owner,
+    }
+}
+
+/// The wait a job-shaped park carries, with every field the frozen shape has.
+fn waiting_on_a_job() -> Waiting {
+    Waiting {
+        kind: "job".to_string(),
+        id: "job_0123456789ab".to_string(),
+        reference: Some("cargo test --workspace".to_string()),
+        deadline: "2026-09-13T18:30:00Z".to_string(),
+    }
+}
+
+/// The console tells a question nobody has answered from a wait nobody can by
+/// which field arrived, so an absent wait has to be an absent key rather than a
+/// null: a reader holding the key knows there is a wait to describe.
+#[tokio::test]
+async fn a_wait_park_reaches_both_run_routes_and_a_running_row_carries_no_such_key() {
+    let leased = lease().await;
+
+    let running = leased.read().await;
+    assert_eq!(running["status"], "running");
+    assert!(
+        running.get("waiting_on").is_none(),
+        "a running run is not waiting on anything, and says so by omission: {running}"
+    );
+    assert!(
+        leased.listed().await.get("waiting_on").is_none(),
+        "the list route omits it on the same terms as the run route"
+    );
+
+    let waiting = waiting_on_a_job();
+    leased.park_on(&waiting).await;
+
+    for (route, run) in [
+        ("run", leased.read().await),
+        ("list", leased.listed().await),
+    ] {
+        assert_eq!(run["status"], "waiting", "{route}");
+        assert_eq!(run["current_phase"], "waiting", "{route}");
+        let waiting_on = run.get("waiting_on").unwrap_or_else(|| {
+            panic!("the {route} route sends what the run is waiting for: {run}")
+        });
+        assert_eq!(waiting_on["kind"], "job", "{route}");
+        assert_eq!(waiting_on["id"], waiting.id, "{route}");
+        assert_eq!(
+            waiting_on["reference"],
+            *waiting.reference.as_ref().unwrap(),
+            "{route}"
+        );
+        assert_eq!(waiting_on["deadline"], waiting.deadline, "{route}");
+    }
+
+    let stored = leased.stored().await;
+    let sent = leased.read().await.get("waiting_on").cloned();
+    assert_eq!(
+        stored, sent,
+        "the wire field is the column, not a second rendering of it"
+    );
+
+    leased.finish().await;
+}
+
+/// `answer_run` refuses a wait park because it checks `pending_question`, which
+/// a wait leaves NULL. Nothing about the route knows what a wait is, and that is
+/// exactly why the refusal has to be asserted: the two parks share a status.
+#[tokio::test]
+async fn an_answer_is_refused_against_a_run_parked_on_a_wait() {
+    let leased = lease().await;
+    leased.park_on(&waiting_on_a_job()).await;
+
+    let refused = leased
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
+        .await;
+    refused.assert_status(axum::http::StatusCode::CONFLICT);
+    assert_eq!(
+        refused.json_value(),
+        serde_json::json!({"error": "Task run is not waiting on a question"})
+    );
+    assert_eq!(
+        leased.read().await["status"],
+        "waiting",
+        "a refused answer leaves the wait exactly where it was"
+    );
+    assert!(
+        leased.stored().await.is_some(),
+        "and leaves the wait itself on the run"
+    );
+
+    leased.finish().await;
+}
+
+/// The field is only as durable as the column under it, and that column arrives
+/// with migration 032 rather than with the route that reads it.
+#[tokio::test]
+async fn the_wait_field_is_backed_by_the_column_migration_032_adds() {
+    let pool = common::create_test_pool().await;
+
+    let column: Option<String> = sqlx::query_scalar(
+        "SELECT data_type FROM information_schema.columns WHERE table_name = 'task_runs' AND column_name = 'pending_wait'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("the catalog is readable");
+
+    assert_eq!(
+        column.as_deref(),
+        Some("jsonb"),
+        "task_runs.pending_wait is the JSONB column 032 adds, and nothing else"
+    );
 }

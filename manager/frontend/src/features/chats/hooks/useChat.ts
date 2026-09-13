@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
-import { ContextUsageSchema, QuestionsSchema } from '../schemas';
+import {
+  ContextUsageSchema,
+  JobExitedSchema,
+  JobStartedSchema,
+  QuestionsSchema,
+  WaitingSchema,
+  WaitSettledSchema,
+} from '../schemas';
 import {
   type ActionReceipt,
   AWAITING_ANSWER_DETAIL,
@@ -8,6 +15,8 @@ import {
   type ChatWithMessages,
   type Citation,
   type ContextUsage,
+  type JobExited,
+  type JobStarted,
   type Message,
   type MessageMetadata,
   type MessageRole,
@@ -16,11 +25,81 @@ import {
   type SendMessageRequest,
   type ToolCallRecord,
   type UpdateChatRequest,
+  type Waiting,
+  type WaitSettled,
 } from '../types';
 import { mergeCitations } from '../utils/citations';
 
 // How many frames to hold while the chat they belong to is still loading.
 const MAX_HELD_FRAMES = 1000;
+
+// The frames a background job and a wait arrive on. An exit carries no call
+// id, only the job's own, so it is matched to the call that started the job
+// rather than addressed to one.
+const JOB_STARTED = 'job_started';
+const JOB_EXITED = 'job_exited';
+const WAIT_STARTED = 'wait_started';
+const WAIT_SETTLED = 'wait_settled';
+
+const EMPTY_TOOL_CALL: Omit<ToolCallRecord, 'id'> = {
+  name: '',
+  arguments: '',
+  success: false,
+  detail: '',
+  duration_ms: 0,
+};
+
+// A frame names the call it patches by id, or by something only the message's
+// existing calls can answer; either way an unknown call is created rather
+// than dropped, so a frame that beat or outlived its call still renders.
+type ToolCallTarget = string | ((calls: ToolCallRecord[]) => string);
+
+function upsertToolCall(
+  message: Message,
+  target: ToolCallTarget,
+  patch: Partial<ToolCallRecord>
+): Message {
+  const existing = message.metadata?.tool_calls ?? [];
+  const toolCallId = typeof target === 'string' ? target : target(existing);
+  const toolCalls = existing.some((call) => call.id === toolCallId)
+    ? existing.map((call) => (call.id === toolCallId ? { ...call, ...patch } : call))
+    : [...existing, { id: toolCallId, ...EMPTY_TOOL_CALL, ...patch }];
+  return { ...message, metadata: { ...message.metadata, tool_calls: toolCalls } };
+}
+
+// The call that started this job, or the job id itself when no call on the
+// message claims it, so an exit that arrived unpaired still has a row.
+const startedBy =
+  (jobId: string): ToolCallTarget =>
+  (calls) =>
+    calls.find((call) => call.job?.id === jobId)?.id ?? jobId;
+
+// message_end carries the turn's persisted calls: the same rows the live
+// frames patched, but without the fields only this client ever holds. Spreading
+// that list whole is what put a settled wait back to "waiting" and an exited
+// job back to "running" at the end of the turn, so the rows are merged by id
+// and anything the trace holds that the server never stored is kept beside them.
+function mergeToolCalls(existing: ToolCallRecord[], incoming: ToolCallRecord[]): ToolCallRecord[] {
+  const stored = new Map(incoming.map((call) => [call.id, call]));
+  const merged = existing.map((call) => {
+    const arrived = stored.get(call.id);
+    stored.delete(call.id);
+    return arrived ? { ...call, ...arrived } : call;
+  });
+  return [...merged, ...stored.values()];
+}
+
+function mergeMetadata(
+  existing: MessageMetadata | null | undefined,
+  incoming: MessageMetadata | null | undefined
+): MessageMetadata | null | undefined {
+  if (incoming === undefined) return existing;
+  const merged = { ...existing, ...incoming };
+  if (incoming?.tool_calls && existing?.tool_calls) {
+    merged.tool_calls = mergeToolCalls(existing.tool_calls, incoming.tool_calls);
+  }
+  return merged;
+}
 
 // The server saves the user message and streams the assistant reply over
 // /ws/chats/:id. Posting to /api/chats/:id/messages only stores the user's
@@ -64,6 +143,10 @@ type ServerMessage =
       tool_call_id: string;
       questions: Question[];
     }
+  | { type: typeof JOB_STARTED; message_id: string; tool_call_id: string; job: JobStarted }
+  | { type: typeof JOB_EXITED; message_id: string; job: JobExited }
+  | { type: typeof WAIT_STARTED; message_id: string; tool_call_id: string; waiting: Waiting }
+  | { type: typeof WAIT_SETTLED; message_id: string; settled: WaitSettled }
   | {
       type: 'tool_result';
       message_id: string;
@@ -291,8 +374,7 @@ export function useChat(
                 // Merged, not replaced: a streaming turn has several
                 // writers for one message, and an arriving image must not
                 // drop the tool trace that patchToolCall put there.
-                metadata:
-                  metadata !== undefined ? { ...last.metadata, ...metadata } : last.metadata,
+                metadata: mergeMetadata(last.metadata, metadata),
               },
             ],
           };
@@ -302,13 +384,7 @@ export function useChat(
           return {
             ...prev,
             messages: prev.messages.map((m) =>
-              m.id === id
-                ? {
-                    ...m,
-                    content,
-                    metadata: metadata !== undefined ? { ...m.metadata, ...metadata } : m.metadata,
-                  }
-                : m
+              m.id === id ? { ...m, content, metadata: mergeMetadata(m.metadata, metadata) } : m
             ),
           };
         }
@@ -351,30 +427,14 @@ export function useChat(
   // when it finishes, so this merges a partial update into the message's trace
   // rather than replacing the record.
   const patchToolCall = useCallback(
-    (messageId: string, toolCallId: string, patch: Partial<ToolCallRecord>) => {
+    (messageId: string, target: ToolCallTarget, patch: Partial<ToolCallRecord>) => {
       setChat((prev) => {
         if (!prev) return prev;
         return {
           ...prev,
-          messages: prev.messages.map((message) => {
-            if (message.id !== messageId) return message;
-            const existing = message.metadata?.tool_calls ?? [];
-            const toolCalls = existing.some((call) => call.id === toolCallId)
-              ? existing.map((call) => (call.id === toolCallId ? { ...call, ...patch } : call))
-              : [
-                  ...existing,
-                  {
-                    id: toolCallId,
-                    name: '',
-                    arguments: '',
-                    success: false,
-                    detail: '',
-                    duration_ms: 0,
-                    ...patch,
-                  },
-                ];
-            return { ...message, metadata: { ...message.metadata, tool_calls: toolCalls } };
-          }),
+          messages: prev.messages.map((message) =>
+            message.id === messageId ? upsertToolCall(message, target, patch) : message
+          ),
         };
       });
     },
@@ -738,6 +798,33 @@ export function useChat(
             appendCitations(payload.message_id, payload.citations);
           }
           break;
+        // Each of these is read by the schema its stored counterpart is read
+        // by, so the card a frame draws is the card a reload rebuilds, and a
+        // frame this client cannot read leaves the call as it found it.
+        case JOB_STARTED: {
+          const job = JobStartedSchema.safeParse(payload.job);
+          if (!job.success) break;
+          patchToolCall(payload.message_id, payload.tool_call_id, { job: job.data });
+          break;
+        }
+        case JOB_EXITED: {
+          const job = JobExitedSchema.safeParse(payload.job);
+          if (!job.success) break;
+          patchToolCall(payload.message_id, startedBy(job.data.id), { exited: job.data });
+          break;
+        }
+        case WAIT_STARTED: {
+          const waiting = WaitingSchema.safeParse(payload.waiting);
+          if (!waiting.success) break;
+          patchToolCall(payload.message_id, payload.tool_call_id, { waiting: waiting.data });
+          break;
+        }
+        case WAIT_SETTLED: {
+          const settled = WaitSettledSchema.safeParse(payload.settled);
+          if (!settled.success) break;
+          patchToolCall(payload.message_id, settled.data.tool_call_id, { settled: settled.data });
+          break;
+        }
         case 'action_receipt':
           appendReceipt(payload.message_id, payload.receipt);
           break;

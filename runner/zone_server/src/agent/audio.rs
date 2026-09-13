@@ -154,6 +154,7 @@ mod tests {
     use uuid::Uuid;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zone_core::tools::Session;
 
     fn scope(comfyui_enabled: bool) -> WorkspaceScope {
         let mut config = test_config();
@@ -340,6 +341,7 @@ mod tests {
             max_file_size: 1024 * 1024,
             command_timeout: 30,
             unrestricted: false,
+            session: Session::Detached,
         };
         let result = GenerateAudioTool(scope)
             .execute(json!({"prompt": "forest ambience"}), &context)

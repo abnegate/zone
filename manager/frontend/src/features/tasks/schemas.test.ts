@@ -76,3 +76,34 @@ describe('a run that parked on a question', () => {
     expect(parsed).toMatchObject({ id: 'run-1', status: 'waiting', progress_percent: 40 });
   });
 });
+
+const waiting_on = {
+  kind: 'check',
+  id: 'a1b2c3d4e5f6',
+  reference: 'main',
+  deadline: '2026-09-13T17:00:00Z',
+};
+
+describe('a run that parked on a wait', () => {
+  it('carries the wait the run is parked on', () => {
+    expect(TaskRunSchema.parse({ ...run, waiting_on })).toMatchObject({ waiting_on });
+  });
+
+  it('carries a wait with nothing to reference, as a job or another run has', () => {
+    const { reference: _, ...job } = { ...waiting_on, kind: 'job' };
+
+    expect(TaskRunSchema.parse({ ...run, waiting_on: job }).waiting_on).toEqual(job);
+  });
+
+  it('accepts a run that carries no wait, sent or stored before the field existed', () => {
+    expect(TaskRunSchema.parse(run)).not.toHaveProperty('waiting_on');
+    expect(TaskRunSchema.parse({ ...run, waiting_on: null }).waiting_on).toBeNull();
+  });
+
+  it('costs an unreadable wait its subject, never the run it sits on', () => {
+    const parsed = TaskRunSchema.parse({ ...run, waiting_on: { kind: 'job', deadline: 7 } });
+
+    expect(parsed.waiting_on).toBeUndefined();
+    expect(parsed).toMatchObject({ id: 'run-1', status: 'waiting', progress_percent: 40 });
+  });
+});

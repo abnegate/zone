@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 use zone_core::llm::ToolDefinition;
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::citations::{self, Citation};
 use super::identifier::{self, Kind};
@@ -177,6 +177,7 @@ fn context(profile: ToolProfile, cwd: std::path::PathBuf) -> ToolContext {
         max_file_size: MAX_TOOL_FILE_BYTES,
         command_timeout: TOOL_COMMAND_TIMEOUT_SECS,
         unrestricted: profile == ToolProfile::Chat,
+        session: Session::Detached,
     }
 }
 
@@ -341,7 +342,10 @@ impl ChatTools {
         Self::assemble(scope, ToolProfile::Task, Some(cwd), false).await
     }
 
+    /// The run id reaches the tool context nowhere else, so the session a job
+    /// or a wait is keyed on is taken here rather than at assembly.
     pub fn with_task_lease(mut self, pool: sqlx::PgPool, run: Uuid, owner: Uuid) -> Self {
+        self.context.session = Session::Task(run);
         self.lease = Some(TaskLease { pool, run, owner });
         self
     }
@@ -409,12 +413,16 @@ impl ChatTools {
         }
 
         super::question::register(&mut registry);
+        super::wait::register(&mut registry, scope.as_ref());
 
         let cwd = match profile {
             ToolProfile::Chat => host_root(),
             ToolProfile::Task => task_cwd.unwrap_or_else(host_root),
         };
-        let context = context(profile, cwd);
+        let mut context = context(profile, cwd);
+        if let Some(chat_id) = scope.as_ref().and_then(|scope| scope.chat_id) {
+            context.session = Session::Chat(chat_id);
+        }
         let mcp_guidance = registry.mcp_guidance();
 
         let mut assembled = Self {
@@ -451,6 +459,15 @@ impl ChatTools {
 
     pub fn profile(&self) -> ToolProfile {
         self.profile
+    }
+
+    /// Which chat or run these tools act for.
+    ///
+    /// The loop binds a staged wait to the call that opened it with this. A
+    /// tool is handed `&self.context` and never its own call id, so the tool
+    /// stages under this same value and the two sides cannot disagree.
+    pub fn session(&self) -> Session {
+        self.context.session
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2286,6 +2303,8 @@ mod tests {
             "start_task",
             "get_task_run",
             "tail_task_log",
+            "tail_job",
+            "wait_for",
         ] {
             assert!(
                 tools.names().contains(&name.to_string()),
@@ -2325,11 +2344,92 @@ mod tests {
         assert!(!tools.context.unrestricted);
         assert!(tools.names().contains(&"read_file".to_string()));
         assert!(tools.names().contains(&"apply_patch".to_string()));
+        assert!(tools.names().contains(&"tail_job".to_string()));
+        assert!(tools.names().contains(&"wait_for".to_string()));
         assert!(!tools.names().contains(&"run_shell".to_string()));
         assert!(!tools.names().contains(&"list_projects".to_string()));
         assert!(!tools.names().contains(&"start_task".to_string()));
         assert!(!tools.names().contains(&"generate_image".to_string()));
         assert!(!tools.names().contains(&"query_prometheus".to_string()));
+    }
+
+    /// A job or a wait belongs to the session that opened it, so a placeholder
+    /// session would let any turn read and settle another turn's work.
+    #[tokio::test]
+    async fn a_context_is_keyed_to_the_chat_or_the_run_it_serves() {
+        let scope = scope();
+        let chat_id = scope.chat_id.expect("a chat scope carries its chat");
+        let chat = ChatTools::preview(scope).await;
+
+        assert_eq!(chat.session(), Session::Chat(chat_id));
+
+        let state = AppState::for_tests();
+        let unleased =
+            ChatTools::for_task(&state, std::env::temp_dir(), Uuid::new_v4(), None).await;
+
+        assert_eq!(
+            unleased.session(),
+            Session::Detached,
+            "a task run assembles before its lease is taken"
+        );
+
+        let run = Uuid::new_v4();
+        let leased = unleased.with_task_lease(state.db().clone(), run, Uuid::new_v4());
+
+        assert_eq!(leased.session(), Session::Task(run));
+    }
+
+    /// The other half of that threading, and the half neither the park nor the
+    /// registration could prove on its own: the wait a leased tool set opens is
+    /// charged to the run. While the context still assembled with a
+    /// placeholder, every task-run wait counted against `Detached`, which is
+    /// one counter shared by every run at once -- so the per-attempt limit was
+    /// both unreachable on the task surface and exhaustible by a stranger.
+    /// Dispatched through the registry the profile really assembles, with the
+    /// context it really threads, because that pairing is the thing at issue.
+    #[tokio::test]
+    async fn a_wait_a_leased_tool_set_opens_is_charged_to_its_run() {
+        let directory = tempfile::TempDir::new().expect("a temporary working directory");
+        let state = AppState::for_tests();
+        let run = Uuid::new_v4();
+        let tools =
+            ChatTools::for_task(&state, directory.path().to_path_buf(), Uuid::new_v4(), None)
+                .await
+                .with_task_lease(state.db().clone(), run, Uuid::new_v4());
+        let session = tools.session();
+
+        assert_eq!(session, Session::Task(run));
+        assert_eq!(crate::agent::wait::waits_taken(session), 0);
+
+        let job = zone_core::tools::job::Jobs::spawn(
+            session,
+            &zone_core::tools::job::JobCommand::shell("sleep 30"),
+            directory.path(),
+            &tools.context.env,
+        )
+        .await
+        .expect("the job starts");
+        let wait_for = tools
+            .registry
+            .get(crate::agent::wait::WAIT_FOR)
+            .expect("a task profile registers wait_for");
+        let opened = wait_for
+            .execute(
+                json!({"kind": crate::agent::wait::KIND_JOB, "id": &job.id}),
+                &tools.context,
+            )
+            .await
+            .expect("wait_for reports refusals as tool errors");
+
+        assert!(opened.success, "the wait was refused: {opened:?}");
+        assert_eq!(
+            crate::agent::wait::waits_taken(session),
+            1,
+            "a wait charged to any other session leaves the per-attempt limit unreachable"
+        );
+
+        crate::agent::wait::reset_session(session);
+        zone_core::tools::job::Jobs::kill_session(session).await;
     }
 
     #[tokio::test]

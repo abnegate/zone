@@ -12,6 +12,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::path::PathBuf;
 use uuid::Uuid;
 use zone_server::agent::prompt;
+use zone_server::agent::wait::WAIT_FOR;
 use zone_server::agent::{ASK_USER, ChatTools, Environment, WorkspaceScope};
 use zone_server::db::knowledge::{
     LearnedCategory, LearnedEntryRow, render_learned_facts, render_standing_instructions,
@@ -19,6 +20,22 @@ use zone_server::db::knowledge::{
 
 /// The sentence `workers::task` used to append after the prompt it now owns.
 const SANDBOX: &str = "You are completing a background coding task.";
+
+/// What each of the six model-facing strings said before `wait_for` existed,
+/// lowercased, reduced to the half no replacement could contain.
+///
+/// A fragment rather than the whole string because the whole string is gone: an
+/// absence asserted against text nothing ever says again is vacuous the moment
+/// its owner rewords anything. These are the words that mandated the poll, so a
+/// revert restores them whatever else it changes around them.
+const SUPERSEDED_POLL_WORDING: [&str; 6] = [
+    "do not claim the runner finished; poll",
+    "does not wait for completion — poll",
+    "use to monitor start_task progress",
+    "runner started. poll",
+    "to wait longer, return and check again in a later call",
+    "return without waiting and check again in a later call",
+];
 
 /// Fixed, so a rendered prompt is the same bytes on every run.
 fn environment() -> Environment {
@@ -346,4 +363,60 @@ async fn both_surfaces_offer_the_question_tool_and_read_its_rules() {
     ] {
         assert!(rendered.contains("Asking the user:"), "{rendered}");
     }
+}
+
+/// The waiting section renders only for a catalog holding `wait_for`, and these
+/// are the catalogs the server registers rather than ones a test named by hand,
+/// so a registration that stopped happening loses every rule below in silence.
+///
+/// The absences are the other half of the same claim. A section teaching
+/// `wait_for` while a nearer instruction still mandates a poll teaches nothing,
+/// so each superseded string is pinned by the half of itself that only the
+/// poll wording contained. Only the start_task bullet renders into a prompt at
+/// all, and only into the chat one; the other five reach the model as a tool
+/// description, a schema or a tool result, and are pinned in `chat_agent_tests`
+/// where a turn carries them.
+#[tokio::test]
+async fn both_surfaces_read_the_waiting_rules_and_no_surviving_poll_instruction() {
+    let chat = chat_tools().await;
+    let task = task_tools().await;
+
+    assert!(chat.has(WAIT_FOR), "a chat catalog must offer {WAIT_FOR}");
+    assert!(task.has(WAIT_FOR), "a task catalog must offer {WAIT_FOR}");
+
+    let chat = prompt::chat(&chat, false, &environment());
+    let task = prompt::task(&task, &environment());
+
+    for rendered in [&chat, &task] {
+        assert!(rendered.contains(WAIT_FOR), "{rendered}");
+        assert!(
+            rendered.contains("Waiting for something to finish:"),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .contains("Never call tail_task_log, get_task_run or get_build_status in a loop"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("A wait that ends without its event is a timeout, not a result."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("A wait is not a way to re-read something that has not changed."),
+            "{rendered}"
+        );
+        for superseded in SUPERSEDED_POLL_WORDING {
+            assert!(
+                !rendered.to_lowercase().contains(superseded),
+                "{superseded:?} survives in {rendered}"
+            );
+        }
+    }
+
+    assert!(chat.contains("this turn's own deadline"), "{chat}");
+    assert!(
+        task.contains("parks this run and hands its slot back"),
+        "{task}"
+    );
 }

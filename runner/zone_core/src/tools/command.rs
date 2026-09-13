@@ -3,11 +3,14 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tool_runner::Proxy;
 
+use super::file::{confine, resolve};
+use super::job::{self, JobCommand, Jobs};
 use super::{
     ERROR_PREFIX, MAX_PREVIEW_CHARS, MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tier, Tool, ToolContext,
     ToolError, ToolResult, excerpt, reason_property, trim_middle,
@@ -43,9 +46,16 @@ struct RunCommandParams {
     reason: Option<String>,
     #[serde(default)]
     max_output_chars: Option<u64>,
+    #[serde(default)]
+    background: bool,
 }
 
-const MAX_OUTPUT_PARAM: &str = "max_output_chars";
+pub(super) const MAX_OUTPUT_PARAM: &str = "max_output_chars";
+const BACKGROUND_PARAM: &str = "background";
+
+/// `wait_for` is registered by `zone_server`, which depends on this crate, so
+/// its name is spelled here rather than shared through a constant.
+const WAIT_FOR_TOOL: &str = "wait_for";
 
 /// Cap on returned output, so one noisy command cannot fill the context
 /// window. Spends the shared tool budget, which the transcript cap sits above,
@@ -61,7 +71,7 @@ const MIN_SHELL_OUTPUT_CHARS: usize = 500;
 ///
 /// Reduce-only: a caller may spend fewer characters than the default, never
 /// more, so the constant stays the ceiling on what one call can cost.
-fn clamp_output_chars(requested: Option<u64>) -> usize {
+pub(super) fn clamp_output_chars(requested: Option<u64>) -> usize {
     match requested {
         Some(chars) => {
             chars.clamp(MIN_SHELL_OUTPUT_CHARS as u64, MAX_SHELL_OUTPUT_CHARS as u64) as usize
@@ -70,7 +80,7 @@ fn clamp_output_chars(requested: Option<u64>) -> usize {
     }
 }
 
-fn max_output_property() -> Value {
+pub(super) fn max_output_property() -> Value {
     json!({
         "type": "integer",
         // Parsed into a u64, so a negative fails the call instead of clamping.
@@ -81,6 +91,46 @@ fn max_output_property() -> Value {
              {MIN_SHELL_OUTPUT_CHARS} clamp up."
         )
     })
+}
+
+fn background_property() -> Value {
+    json!({
+        "type": "boolean",
+        "description": format!(
+            "Detach and return immediately with a job id and log path. Use for anything \
+             long-running; wait for it with {WAIT_FOR_TOOL} instead of blocking. A background job \
+             ends with the turn that started it, or with the run. Default false."
+        )
+    })
+}
+
+/// Where the command runs, resolved and confined the way every other
+/// model-supplied path in these tools is.
+///
+/// `Path::join` alone neither normalises `..` nor resists an absolute
+/// argument, so a joined directory names whatever the caller asked for. Both
+/// tools and both modes resolve it here, so the foreground and the background
+/// cannot drift on what a directory is allowed to be.
+fn working_directory(context: &ToolContext, directory: Option<&str>) -> Result<PathBuf, ToolError> {
+    let Some(directory) = directory else {
+        return Ok(context.cwd.clone());
+    };
+    let resolved = resolve(&context.cwd.join(directory));
+    confine(&resolved, context)?;
+    Ok(resolved)
+}
+
+/// Start a detached job, and hand back the receipt the model reads it by.
+///
+/// Reached only once the tool's own checks have passed, so backgrounding buys
+/// a command nothing the foreground would have refused it. The job is keyed to
+/// the session's own working tree and the command carries the directory the
+/// child runs in, so where the model pointed the command cannot move the log.
+async fn background(command: &JobCommand, context: &ToolContext) -> Result<ToolResult, ToolError> {
+    Jobs::spawn(context.session, command, &context.cwd, &context.env)
+        .await
+        .map(|started| ToolResult::success(job::started_text(&started)))
+        .map_err(ToolError::Execution)
 }
 
 #[async_trait]
@@ -132,6 +182,7 @@ impl Tool for RunCommandTool {
                     "type": "integer",
                     "description": "Timeout in seconds (default: 300)"
                 },
+                BACKGROUND_PARAM: background_property(),
                 MAX_OUTPUT_PARAM: max_output_property(),
                 REASON_PARAM: reason_property()
             },
@@ -173,12 +224,12 @@ impl Tool for RunCommandTool {
             }
         }
 
-        // Determine working directory
-        let cwd = if let Some(dir) = &params.cwd {
-            context.cwd.join(dir)
-        } else {
-            context.cwd.clone()
-        };
+        let cwd = working_directory(context, params.cwd.as_deref())?;
+
+        if params.background {
+            let command = JobCommand::new(&params.command, params.args.clone()).within(&cwd);
+            return background(&command, context).await;
+        }
 
         // Build command
         let mut cmd = Command::new(&params.command);
@@ -285,10 +336,12 @@ struct RunShellParams {
     reason: Option<String>,
     #[serde(default)]
     max_output_chars: Option<u64>,
+    #[serde(default)]
+    background: bool,
 }
 
 /// Longest a single shell command may run, whatever it asks for.
-const MAX_SHELL_TIMEOUT_SECS: u64 = 900;
+pub(crate) const MAX_SHELL_TIMEOUT_SECS: u64 = 900;
 
 /// Longest a call may spend blocked on `sleep`.
 ///
@@ -381,17 +434,19 @@ impl Tool for RunShellTool {
                     "description": format!(
                         "Shell command to run, e.g. 'cargo test 2>&1 | tail -40'. It may not \
                          block on sleep for more than {MAX_SLEEP_SECS} seconds: to wait longer, \
-                         return and check again in a later call."
+                         start it with {BACKGROUND_PARAM}: true and wait for it with \
+                         {WAIT_FOR_TOOL}."
                     )
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Directory to run in. Absolute, or relative to the working directory."
+                    "description": "Directory to run in, relative to the project root."
                 },
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Wall-clock limit in seconds. Default 120, maximum 900."
                 },
+                BACKGROUND_PARAM: background_property(),
                 MAX_OUTPUT_PARAM: max_output_property(),
                 REASON_PARAM: reason_property()
             },
@@ -426,14 +481,17 @@ impl Tool for RunShellTool {
         {
             return Err(ToolError::Execution(format!(
                 "This command sleeps for {seconds} seconds, and a call may block on sleep for at \
-                 most {MAX_SLEEP_SECS}. Return without waiting and check again in a later call."
+                 most {MAX_SLEEP_SECS}. Start it with {BACKGROUND_PARAM}: true and wait for it \
+                 with {WAIT_FOR_TOOL}."
             )));
         }
 
-        let cwd = match &params.cwd {
-            Some(dir) => context.cwd.join(dir),
-            None => context.cwd.clone(),
-        };
+        let cwd = working_directory(context, params.cwd.as_deref())?;
+
+        if params.background {
+            let command = JobCommand::shell(&params.command).within(&cwd);
+            return background(&command, context).await;
+        }
 
         let limit = Duration::from_secs(
             params
@@ -502,6 +560,7 @@ impl Tool for RunShellTool {
 mod tests {
     use super::*;
     use crate::tools::MAX_TOOL_MESSAGE_CHARS;
+    use crate::tools::Session;
     use crate::tools::test_support::captured_logs;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -513,6 +572,7 @@ mod tests {
             max_file_size: 1024 * 1024,
             command_timeout: 30,
             unrestricted: false,
+            session: Session::Detached,
         }
     }
 
@@ -1476,5 +1536,406 @@ mod tests {
             error.contains("TAIL_RIGHT") || error.contains("TAIL_LEFT"),
             "{error}"
         );
+    }
+
+    fn background_context() -> (tempfile::TempDir, ToolContext, Session) {
+        let dir = tempfile::tempdir().expect("a temporary working directory");
+        let session = Session::Chat(uuid::Uuid::new_v4());
+        let mut context = shell_test_context();
+        context.cwd = dir.path().to_path_buf();
+        context.session = session;
+        (dir, context, session)
+    }
+
+    /// The receipt is the only channel a tool has to the chat layer, so its
+    /// shape is pinned here rather than left to whatever the spawn returned.
+    #[tokio::test]
+    async fn a_backgrounded_shell_call_returns_the_spawn_receipt() {
+        let (dir, context, session) = background_context();
+
+        let result = RunShellTool
+            .execute(
+                json!({
+                    "command": "printf 'detached\\n'",
+                    "background": true,
+                    "reason": "Start the long one."
+                }),
+                &context,
+            )
+            .await
+            .expect("the job starts");
+
+        assert!(result.success, "{result:?}");
+        let output = result.output.expect("a receipt");
+        let id = job::parse_started(&output).expect("the receipt names the job");
+        let pid = output
+            .split("(pid ")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("the receipt names the process");
+        assert_eq!(
+            output,
+            format!(
+                "Started {id} (pid {pid}). Log: {}\nWait for it with wait_for, or read it with \
+                 tail_job.",
+                job::log_path(dir.path(), &id).display()
+            )
+        );
+        assert!(
+            job::log_path(dir.path(), &id).exists(),
+            "the log is where the receipt says it is"
+        );
+
+        Jobs::kill_session(session).await;
+    }
+
+    #[tokio::test]
+    async fn a_backgrounded_command_call_returns_the_spawn_receipt() {
+        let (dir, context, session) = background_context();
+
+        let result = RunCommandTool
+            .execute(
+                json!({
+                    "command": "echo",
+                    "args": ["detached"],
+                    "background": true,
+                    "reason": "Start the long one."
+                }),
+                &context,
+            )
+            .await
+            .expect("the job starts");
+
+        assert!(result.success, "{result:?}");
+        let output = result.output.expect("a receipt");
+        let id = job::parse_started(&output).expect("the receipt names the job");
+        assert!(
+            output.starts_with(&format!("Started {id} (pid ")),
+            "{output}"
+        );
+        assert!(
+            output.ends_with("Wait for it with wait_for, or read it with tail_job."),
+            "{output}"
+        );
+        assert!(job::log_path(dir.path(), &id).exists(), "{output}");
+
+        Jobs::kill_session(session).await;
+    }
+
+    /// A call that says nothing about backgrounding still blocks, so nothing
+    /// about an existing call changes under it.
+    #[tokio::test]
+    async fn a_call_that_asks_for_no_background_still_runs_in_the_foreground() {
+        let (dir, context, session) = background_context();
+
+        let shell = RunShellTool
+            .execute(json!({"command": "printf 'inline\\n'"}), &context)
+            .await
+            .expect("the command runs");
+        let command = RunCommandTool
+            .execute(json!({"command": "echo", "args": ["inline"]}), &context)
+            .await
+            .expect("the command runs");
+
+        for result in [shell, command] {
+            assert!(result.success, "{result:?}");
+            let output = result.output.expect("output");
+            assert!(output.contains("inline"), "{output}");
+            assert!(job::parse_started(&output).is_none(), "{output}");
+        }
+        assert!(
+            !dir.path().join(job::JOB_LOG_DIRECTORY).exists(),
+            "a foreground call writes no job log"
+        );
+
+        Jobs::kill_session(session).await;
+    }
+
+    /// Backgrounding moves who waits, not what a command is allowed to do, so
+    /// the sleep cap is measured before the job is ever spawned.
+    #[tokio::test]
+    async fn a_backgrounded_shell_call_may_not_block_on_sleep_past_the_cap() {
+        let (dir, context, session) = background_context();
+
+        let error = RunShellTool
+            .execute(
+                json!({
+                    "command": "sleep 300",
+                    "background": true,
+                    "reason": "Wait for the deploy."
+                }),
+                &context,
+            )
+            .await
+            .expect_err("a sleep past the cap is refused whichever way it runs");
+
+        let message = error.to_string();
+        assert!(message.contains("300"), "{message}");
+        assert!(message.contains(&MAX_SLEEP_SECS.to_string()), "{message}");
+        assert!(
+            !dir.path().join(job::JOB_LOG_DIRECTORY).exists(),
+            "the refusal came before anything was spawned"
+        );
+
+        Jobs::kill_session(session).await;
+    }
+
+    #[tokio::test]
+    async fn a_backgrounded_command_still_answers_to_the_allow_list() {
+        let (dir, context, session) = background_context();
+
+        let error = RunCommandTool
+            .execute(
+                json!({
+                    "command": "rm",
+                    "args": ["-rf", "."],
+                    "background": true,
+                    "reason": "Clean up."
+                }),
+                &context,
+            )
+            .await
+            .expect_err("an unlisted program is refused whichever way it runs");
+
+        assert!(
+            error.to_string().contains("not in the allowed list"),
+            "{error}"
+        );
+        assert!(!dir.path().join(job::JOB_LOG_DIRECTORY).exists());
+
+        Jobs::kill_session(session).await;
+    }
+
+    /// An argument reaches the child whole, so one the foreground inspects for
+    /// metacharacters cannot be smuggled past it by detaching.
+    #[tokio::test]
+    async fn a_backgrounded_command_still_refuses_a_metacharacter_argument() {
+        let (dir, context, session) = background_context();
+
+        let error = RunCommandTool
+            .execute(
+                json!({
+                    "command": "echo",
+                    "args": ["safe; rm -rf ."],
+                    "background": true,
+                    "reason": "Print something."
+                }),
+                &context,
+            )
+            .await
+            .expect_err("a metacharacter is refused whichever way it runs");
+
+        assert!(error.to_string().contains("dangerous pattern"), "{error}");
+        assert!(!dir.path().join(job::JOB_LOG_DIRECTORY).exists());
+
+        Jobs::kill_session(session).await;
+    }
+
+    /// A checkout and a directory beside it, which is what a `..` in the
+    /// model's `cwd` reaches for.
+    fn neighbours() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().expect("a temporary root");
+        let checkout = root.path().join("checkout");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&checkout).expect("the session's own tree is created");
+        std::fs::create_dir(&elsewhere).expect("a directory beside it is created");
+        (root, checkout, elsewhere)
+    }
+
+    /// The directory a call names is the child's, and nothing else's.
+    ///
+    /// A chat's context is unrestricted, so `..` is the chat's to name — and
+    /// the receipt still has to promise a log under the tree the session gave
+    /// the tool, because that tree is the one `tail_job` reads and the one a
+    /// teardown clears.
+    #[tokio::test]
+    async fn a_directory_outside_the_tree_moves_the_child_and_not_the_log() {
+        let (_root, checkout, elsewhere) = neighbours();
+        let session = Session::Chat(uuid::Uuid::new_v4());
+        let mut context = shell_test_context();
+        context.cwd = checkout.clone();
+        context.session = session;
+        let call = json!({
+            "command": "pwd",
+            "cwd": "../elsewhere",
+            "reason": "Look next door."
+        });
+
+        let inline = RunShellTool
+            .execute(call.clone(), &context)
+            .await
+            .expect("the command runs");
+        let ran_in = inline.output.expect("output");
+        assert_eq!(
+            std::fs::canonicalize(ran_in.lines().nth(1).unwrap_or_default()).ok(),
+            std::fs::canonicalize(&elsewhere).ok(),
+            "the foreground runs where the call said: {ran_in}"
+        );
+
+        let mut detached = call;
+        detached["background"] = json!(true);
+        let started = RunShellTool
+            .execute(detached, &context)
+            .await
+            .expect("the job starts");
+        let receipt = started.output.expect("a receipt");
+        let id = job::parse_started(&receipt).expect("the receipt names the job");
+
+        assert!(
+            receipt.contains(&job::log_path(&checkout, &id).display().to_string()),
+            "the receipt names a log outside the session's tree: {receipt}"
+        );
+        assert!(
+            job::log_path(&checkout, &id).exists(),
+            "the log is not where the receipt says it is: {receipt}"
+        );
+        assert!(
+            !elsewhere.join(job::JOB_LOG_DIRECTORY).exists(),
+            "the log tree followed the directory the call named"
+        );
+
+        Jobs::kill_session(session).await;
+    }
+
+    /// Both tools confine the directory they are given the way they confine
+    /// every other path a model supplies, and both modes answer the same:
+    /// backgrounding is not a way to run where the foreground would not.
+    #[tokio::test]
+    async fn a_directory_outside_the_tree_is_refused_the_same_way_in_both_modes() {
+        let (_root, checkout, elsewhere) = neighbours();
+        let mut context = create_test_context();
+        context.cwd = checkout.clone();
+        context.session = Session::Task(uuid::Uuid::new_v4());
+        context.env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        );
+
+        for named in [
+            elsewhere.to_string_lossy().into_owned(),
+            "../elsewhere".to_string(),
+        ] {
+            for background in [false, true] {
+                let call = json!({
+                    "command": "ls",
+                    "cwd": named,
+                    "background": background,
+                    "reason": "Look next door."
+                });
+                for tool in ["run_command", "run_shell"] {
+                    let refused = match tool {
+                        "run_command" => RunCommandTool.execute(call.clone(), &context).await,
+                        _ => RunShellTool.execute(call.clone(), &context).await,
+                    }
+                    .expect_err("a directory outside the tree is refused");
+                    assert!(
+                        refused.to_string().contains("escapes working directory"),
+                        "{tool} answered {named} with background={background} in other words: \
+                         {refused}"
+                    );
+                }
+            }
+        }
+
+        assert!(
+            !elsewhere.join(job::JOB_LOG_DIRECTORY).exists()
+                && !checkout.join(job::JOB_LOG_DIRECTORY).exists(),
+            "a refusal came after something was already spawned"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_detached_context_cannot_start_a_background_job() {
+        let dir = tempfile::tempdir().expect("a temporary working directory");
+        let mut context = shell_test_context();
+        context.cwd = dir.path().to_path_buf();
+
+        let shell = RunShellTool
+            .execute(json!({"command": "true", "background": true}), &context)
+            .await
+            .expect_err("a detached context has no session to key a job to");
+        let command = RunCommandTool
+            .execute(json!({"command": "true", "background": true}), &context)
+            .await
+            .expect_err("a detached context has no session to key a job to");
+
+        for error in [shell, command] {
+            assert!(error.to_string().contains(job::UNAVAILABLE), "{error}");
+        }
+        assert!(!dir.path().join(job::JOB_LOG_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn both_shell_schemas_offer_background_and_describe_it_the_same_way() {
+        let shell = RunShellTool.parameters_schema();
+        let command = RunCommandTool.parameters_schema();
+
+        let described = shell["properties"][BACKGROUND_PARAM]["description"]
+            .as_str()
+            .expect("run_shell describes background");
+        assert_eq!(
+            command["properties"][BACKGROUND_PARAM]["description"]
+                .as_str()
+                .expect("run_command describes background"),
+            described
+        );
+        assert_eq!(
+            shell["properties"][BACKGROUND_PARAM]["type"],
+            json!("boolean")
+        );
+        assert_eq!(
+            described,
+            "Detach and return immediately with a job id and log path. Use for anything \
+             long-running; wait for it with wait_for instead of blocking. A background job ends \
+             with the turn that started it, or with the run. Default false."
+        );
+        for schema in [&shell, &command] {
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(BACKGROUND_PARAM)),
+                "background is optional"
+            );
+        }
+    }
+
+    #[test]
+    fn params_default_to_the_foreground() {
+        let shell: RunShellParams = serde_json::from_value(json!({"command": "true"})).unwrap();
+        let command: RunCommandParams = serde_json::from_value(json!({"command": "true"})).unwrap();
+
+        assert!(!shell.background);
+        assert!(!command.background);
+    }
+
+    /// Both places the model is told a wait is too long now name the way to
+    /// take it, rather than sending it round the loop to look again.
+    #[test]
+    fn a_long_wait_is_pointed_at_a_background_job_rather_than_another_call() {
+        let described = RunShellTool.parameters_schema()["properties"]["command"]["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert!(described.contains(BACKGROUND_PARAM), "{described}");
+        assert!(described.contains(WAIT_FOR_TOOL), "{described}");
+        assert!(!described.contains("later call"), "{described}");
+    }
+
+    #[tokio::test]
+    async fn the_sleep_refusal_points_at_a_background_job_rather_than_another_call() {
+        let error = RunShellTool
+            .execute(
+                json!({"command": "sleep 5m", "reason": "Wait for the deploy."}),
+                &shell_test_context(),
+            )
+            .await
+            .expect_err("a sleep past the cap is refused");
+
+        let message = error.to_string();
+        assert!(message.contains(BACKGROUND_PARAM), "{message}");
+        assert!(message.contains(WAIT_FOR_TOOL), "{message}");
+        assert!(!message.contains("later call"), "{message}");
     }
 }

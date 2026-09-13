@@ -26,6 +26,7 @@ pub mod releases;
 pub mod runner;
 pub mod tools;
 pub mod verification;
+pub mod wait;
 pub mod web;
 
 pub use approval::{ApprovalGate, ApprovalPolicy};
@@ -40,6 +41,9 @@ pub use tools::{ChatTools, ToolProfile, WorkspaceScope};
 
 use serde::{Deserialize, Serialize};
 use zone_core::tools::REASON_PARAM;
+use zone_core::tools::job::JobStarted;
+
+use wait::Waiting;
 
 /// How much of a title an approval preview quotes.
 pub(crate) const PREVIEW_TITLE_CHARS: usize = 80;
@@ -94,6 +98,12 @@ pub struct ToolCallRecord {
     /// message's metadata to rebuild the card from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<Question>,
+    /// The background job this call started, for the console's job card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobStarted>,
+    /// What this call is waiting for, and until when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Waiting>,
 }
 
 #[cfg(test)]
@@ -113,6 +123,8 @@ mod tests {
             reason: Some("The user asked what changed in the deploy.".into()),
             preview: None,
             questions: Vec::new(),
+            job: None,
+            waiting: None,
         };
 
         let json = serde_json::to_value(&record).unwrap();
@@ -123,6 +135,10 @@ mod tests {
         assert!(
             json.get("questions").is_none(),
             "a record that asked nothing must not carry an empty question list"
+        );
+        assert!(
+            json.get("job").is_none() && json.get("waiting").is_none(),
+            "a call that started no job and waited on nothing carries neither card"
         );
 
         let parsed: ToolCallRecord = serde_json::from_value(json).unwrap();
@@ -141,6 +157,8 @@ mod tests {
             reasoning: None,
             reason: None,
             preview: None,
+            job: None,
+            waiting: None,
             questions: vec![Question {
                 header: "Scope".to_string(),
                 question: "How far back should the backfill run?".to_string(),

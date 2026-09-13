@@ -37,6 +37,7 @@ const ORDER: &[Section] = &[
     ("workspace", section::workspace::render),
     ("retrieval", section::retrieval::render),
     ("files", section::files::render),
+    ("waiting", section::waiting::render),
     ("images", section::images::render),
     ("cluster", section::cluster::render),
     ("web", section::web::render),
@@ -56,9 +57,9 @@ const PLAIN: &[Section] = &[
     ("session", section::session::render),
 ];
 
-pub const CHAT_MAX_CHARS: usize = 19_500;
+pub const CHAT_MAX_CHARS: usize = 21_000;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
-pub const TASK_MAX_CHARS: usize = 12_400;
+pub const TASK_MAX_CHARS: usize = 14_000;
 
 fn assemble(order: &[Section], context: &Context<'_>) -> String {
     order
@@ -163,7 +164,7 @@ mod tests {
     use crate::state::AppState;
     use std::collections::HashMap;
     use std::sync::LazyLock;
-    use test_support::environment;
+    use test_support::{chat_context, environment, task_context};
     use uuid::Uuid;
     use zone_core::tools::{Tier, ToolRegistry};
 
@@ -214,9 +215,11 @@ mod tests {
         "search_knowledge",
         "send_message",
         "start_task",
+        "tail_job",
         "tail_task_log",
         "update_document",
         "update_task",
+        "wait_for",
         "web_search",
         "write_file",
     ];
@@ -230,6 +233,8 @@ mod tests {
         "read_file",
         "run_command",
         "search_code",
+        "tail_job",
+        "wait_for",
         "write_file",
     ];
 
@@ -364,6 +369,7 @@ mod tests {
                 "workspace",
                 "retrieval",
                 "files",
+                "waiting",
                 "images",
                 "cluster",
                 "web",
@@ -794,6 +800,33 @@ mod tests {
 
         assert!(!chat(&without, false, &environment).contains("Asking the user:"));
         assert!(chat(&chat_tools(), false, &environment).contains("Asking the user:"));
+    }
+
+    /// Both sections go quiet for a catalog without `wait_for` and neither
+    /// failure is visible from anywhere else: the waiting rules render nothing,
+    /// and the runner bullet, which names the tool among the ones it requires,
+    /// drops out of the workspace list.
+    #[test]
+    fn both_assembled_prompts_carry_the_waiting_rules_and_the_runner_bullet() {
+        let environment = environment();
+        let chat_tools = chat_tools();
+        let task_tools = task_tools();
+
+        let for_chat = section::waiting::render(&chat_context(&chat_tools, false, &environment))
+            .expect("the chat catalog carries wait_for");
+        let for_task = section::waiting::render(&task_context(&task_tools, &environment))
+            .expect("the task catalog carries wait_for");
+        let chat_prompt = chat(&chat_tools, false, &environment);
+
+        assert!(chat_prompt.contains(&for_chat), "{chat_prompt}");
+        assert!(
+            chat_prompt.contains(section::workspace::START_TASK),
+            "{chat_prompt}"
+        );
+
+        let task_prompt = task(&task_tools, &environment);
+
+        assert!(task_prompt.contains(&for_task), "{task_prompt}");
     }
 
     #[test]

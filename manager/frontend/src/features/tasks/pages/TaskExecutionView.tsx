@@ -2,29 +2,132 @@ import { Badge, Button, Modal } from '@zone/ui';
 import { useEffect, useRef, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
 import { ActionReceipts } from '../../chats/components';
+import type { Waiting } from '../../chats/types';
 import { QuestionPrompt } from '../components';
-import type { Task, TaskRun, TaskRunLog } from '../types';
+import type { RunStatus, Task, TaskRun, TaskRunLog } from '../types';
+
+const WAITING_PHASE = 'waiting';
+const WAITING_LABEL = 'Waiting for';
+const ANSWER_ACTIVITY = 'Waiting for an answer';
+const WAITING_STATUS = 'Waiting';
+const WAITING_FOR_YOU_STATUS = 'Waiting for you';
+const DEADLINE_PASSED_LABEL = 'Deadline passed';
+
+const KIND_JOB = 'job';
+const KIND_TASK_RUN = 'task_run';
+const KIND_CHECK = 'check';
 
 const ACTIVITIES: Record<string, string> = {
   thinking: 'Thinking',
   acting: 'Using tools',
   observing: 'Reviewing results',
-  waiting: 'Waiting for an answer',
+  waiting: 'Waiting',
   responding: 'Writing response',
   complete: 'Completed',
   error: 'Failed',
 };
 
+const STATUSES: Record<RunStatus, string> = {
+  pending: 'Queued',
+  running: 'Running',
+  waiting: WAITING_FOR_YOU_STATUS,
+  completed: 'Completed',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+};
+
 /**
  * Whether the run is still this console's to watch.
  *
- * A waiting run counts: it has stopped at a question rather than finished, and
- * dropping it here would stop the poll at the very moment the question arrives,
- * leaving the reader looking at a run that appears stalled with nothing to
- * answer.
+ * A waiting run counts: it has stopped at a question or a wait rather than
+ * finished, and dropping it here would stop the poll at the very moment the
+ * question arrives or the wait settles, leaving the reader looking at a run
+ * that appears stalled with nothing to answer.
  */
 function active(run: TaskRun): boolean {
   return run.status === 'pending' || run.status === 'running' || run.status === 'waiting';
+}
+
+/**
+ * The wait a parked run is on when nobody is being asked anything. A question
+ * on the same run wins: it needs the reader, and the wait needs no one.
+ */
+function wait(run: TaskRun): Waiting | undefined {
+  if (run.status !== 'waiting' || run.pending_question) return undefined;
+  return run.waiting_on ?? undefined;
+}
+
+function waitSubject(waiting: Waiting): string {
+  switch (waiting.kind) {
+    case KIND_JOB:
+      return waiting.id;
+    case KIND_TASK_RUN:
+      return `task run ${waiting.id}`;
+    case KIND_CHECK:
+      return `checks on ${waiting.reference ?? waiting.id}`;
+    default:
+      return `${waiting.kind} ${waiting.id}`;
+  }
+}
+
+function statusLabel(run: TaskRun): string {
+  return wait(run) ? WAITING_STATUS : STATUSES[run.status];
+}
+
+/// The phase, read with what the run carries: a parked run reads as a question
+/// or as a wait, never as an answer nobody was asked for.
+function activity(run: TaskRun): string | null {
+  const phase = run.current_phase;
+  if (!phase) return null;
+  if (phase === WAITING_PHASE) {
+    if (run.pending_question) return ANSWER_ACTIVITY;
+    const waiting = wait(run);
+    if (waiting) return `${WAITING_LABEL} ${waitSubject(waiting)}`;
+  }
+  return ACTIVITIES[phase] ?? phase;
+}
+
+function formatDeadline(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function formatRemaining(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, '0')} left`;
+}
+
+/// Seconds until the deadline, ticking once a second until it passes. Null
+/// when the deadline cannot be read, in which case the raw value is shown and
+/// nothing counts down to it.
+function useRemaining(deadline: string): number | null {
+  const target = new Date(deadline).getTime();
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (Number.isNaN(target) || target <= Date.now()) return;
+    const interval = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= target) window.clearInterval(interval);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [target]);
+
+  if (Number.isNaN(target)) return null;
+  return Math.max(0, Math.ceil((target - now) / 1000));
+}
+
+function Countdown({ deadline }: { deadline: string }) {
+  const remaining = useRemaining(deadline);
+
+  if (remaining === null) return null;
+  return (
+    <span role="timer" aria-label="Time remaining" data-testid="wait-countdown">
+      {remaining > 0 ? formatRemaining(remaining) : DEADLINE_PASSED_LABEL}
+    </span>
+  );
 }
 
 export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () => void }) {
@@ -134,19 +237,14 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
   };
 
   const running = !!run && active(run);
+  const waiting = run ? wait(run) : undefined;
+  const phase = run ? activity(run) : null;
   const status = starting
     ? 'Starting'
     : loading
       ? 'Loading run'
       : run
-        ? {
-            pending: 'Queued',
-            running: 'Running',
-            waiting: 'Waiting for you',
-            completed: 'Completed',
-            failed: 'Failed',
-            cancelled: 'Cancelled',
-          }[run.status]
+        ? statusLabel(run)
         : 'Ready to run';
   return (
     <Modal
@@ -173,7 +271,13 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
         >
           {status}
         </Badge>
-        {run?.current_phase && <span>{ACTIVITIES[run.current_phase] ?? run.current_phase}</span>}
+        {phase && <span>{phase}</span>}
+        {waiting && (
+          <span>
+            until <time dateTime={waiting.deadline}>{formatDeadline(waiting.deadline)}</time>
+          </span>
+        )}
+        {waiting && <Countdown deadline={waiting.deadline} />}
       </div>
       {!run && !loading && !starting && !error && (
         <p className="execution-hint">
