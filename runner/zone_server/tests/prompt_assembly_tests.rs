@@ -420,3 +420,219 @@ async fn both_surfaces_read_the_waiting_rules_and_no_surviving_poll_instruction(
         "{task}"
     );
 }
+
+use zone_core::llm::ReasoningEffort;
+use zone_server::agent::memory::render;
+use zone_server::agent::memory::{
+    MEMORY_APPEND, MEMORY_DELETE, MEMORY_LIST, MEMORY_READ, MEMORY_WRITE,
+};
+use zone_server::db::chats::ChatRow;
+use zone_server::db::memory::{
+    MemoryCategory, MemoryIndexRow, MemoryRow, PREFERENCES_TITLE, PROFILE_TITLE,
+};
+use zone_server::services::chat::session::system_prompt;
+
+/// The five tools, in the order the catalog sorts them.
+const MEMORY_TOOLS: [&str; 5] = [
+    MEMORY_APPEND,
+    MEMORY_DELETE,
+    MEMORY_LIST,
+    MEMORY_READ,
+    MEMORY_WRITE,
+];
+
+/// The section's heading, as a literal because the constant carrying it is
+/// private to that section.
+const MEMORY_SECTION: &str = "Memory:";
+
+/// The web-search tail `ws::chat` composes a chat prompt with. Its own wording
+/// is not this test's subject; that it is what the block follows is.
+const CAPABILITY: &str = "Web search is unavailable this turn.";
+
+const PROFILE: &str = "Ada, an electrical engineer in Wellington.";
+
+const PREFERENCES: &str = "Lead with the answer, then the reasoning.";
+
+const FACT: &str = "Deploy window";
+
+fn remembered(category: MemoryCategory, title: &str, content: &str) -> MemoryRow {
+    MemoryRow {
+        id: Uuid::new_v4(),
+        workspace_id: Uuid::new_v4(),
+        title: title.to_string(),
+        description: None,
+        content: content.to_string(),
+        category: category.as_str().to_string(),
+        version: 1,
+        updated_at: None,
+    }
+}
+
+fn facts() -> Vec<MemoryIndexRow> {
+    vec![MemoryIndexRow {
+        title: FACT.to_string(),
+        description: Some("When deploys go out".to_string()),
+        category: MemoryCategory::Fact.as_str().to_string(),
+        version: 1,
+    }]
+}
+
+/// Everything one person has stored, as the surface receives it.
+fn block(surface: prompt::Surface) -> String {
+    render::render(
+        surface,
+        Some(&remembered(MemoryCategory::Profile, PROFILE_TITLE, PROFILE)),
+        Some(&remembered(
+            MemoryCategory::Preference,
+            PREFERENCES_TITLE,
+            PREFERENCES,
+        )),
+        &facts(),
+    )
+}
+
+/// A chat the agent loop runs in, so `system_prompt` composes the real chat
+/// prompt rather than the plain one.
+fn chat_row() -> ChatRow {
+    ChatRow {
+        id: Uuid::new_v4(),
+        workspace_id: Some(Uuid::new_v4()),
+        title: "Prompt fixture".to_string(),
+        model_name: "fixture-model".to_string(),
+        archived: None,
+        agent_enabled: true,
+        agent_sandboxed: false,
+        auto_approve: false,
+        reasoning_effort: ReasoningEffort::Auto,
+        character: None,
+        created_at: None,
+        updated_at: None,
+    }
+}
+
+/// The rules are gated on the catalog holding `memory_read`, so the tools and
+/// the section are one claim: a registration that stopped happening would take
+/// the rules with it and no section test would notice.
+#[tokio::test]
+async fn a_chat_offers_every_memory_tool_and_reads_the_rules_that_govern_them() {
+    let tools = chat_tools().await;
+
+    for tool in MEMORY_TOOLS {
+        assert!(tools.has(tool), "a chat catalog must offer {tool}");
+    }
+
+    let rendered = prompt::chat(&tools, false, &environment());
+    assert!(rendered.contains(MEMORY_SECTION), "{rendered}");
+    for tool in MEMORY_TOOLS {
+        assert!(rendered.contains(tool), "{tool} is unnamed in {rendered}");
+    }
+}
+
+/// The other half of the same claim, and the one no catalog test can make:
+/// `task_tools()` is built from hand-written constants, so only the assembled
+/// prompt shows that nothing registered a memory tool on the run's surface.
+#[tokio::test]
+async fn a_background_run_is_offered_no_memory_tool_and_no_memory_rules() {
+    let tools = task_tools().await;
+
+    for tool in MEMORY_TOOLS {
+        assert!(!tools.has(tool), "a task catalog must not offer {tool}");
+    }
+
+    let rendered = prompt::task(&tools, &environment());
+    assert!(!rendered.contains(MEMORY_SECTION), "{rendered}");
+    for tool in MEMORY_TOOLS {
+        assert!(!rendered.contains(tool), "{tool} reaches a run: {rendered}");
+    }
+}
+
+/// What a run is left with once the rules and the tools are gone: the profile
+/// and the preferences, and no index of facts it has no way to read.
+///
+/// The guidance is composed the way `workers::task` composes it -- each block
+/// owning the blank line that opens it, memory ahead of the repository block --
+/// so the sandbox sentence stays single and nothing opens a third newline.
+#[tokio::test]
+async fn a_run_reads_the_remembered_profile_and_no_index_it_could_not_act_on() {
+    fn push(guidance: &mut String, block: &str) {
+        let block = block.trim_end();
+        if block.is_empty() {
+            return;
+        }
+        guidance.truncate(guidance.trim_end().len());
+        guidance.push_str(block);
+    }
+
+    let memory = block(prompt::Surface::Task);
+    assert!(
+        !memory.is_empty(),
+        "a run with a stored profile renders one"
+    );
+
+    let mut guidance = String::new();
+    push(&mut guidance, &memory);
+    push(
+        &mut guidance,
+        "\n\n# Repository Instructions\nRun the suite before opening the pull request.",
+    );
+    let composed = prompt::task(&task_tools().await, &environment()) + &guidance;
+
+    assert!(
+        composed.contains(MemoryCategory::Profile.heading()),
+        "{composed}"
+    );
+    assert!(composed.contains(PROFILE), "{composed}");
+    assert!(
+        composed.contains(MemoryCategory::Preference.heading()),
+        "{composed}"
+    );
+    assert!(
+        !composed.contains(MemoryCategory::Fact.heading()),
+        "a run was handed an index it has no tool to read: {composed}"
+    );
+    assert!(!composed.contains(FACT), "{composed}");
+    assert!(!composed.contains(MEMORY_SECTION), "{composed}");
+    assert!(
+        composed.find(MemoryCategory::Profile.heading()) < composed.find("# Repository"),
+        "{composed}"
+    );
+    assert_eq!(composed.matches(SANDBOX).count(), 1, "{composed}");
+    assert!(!composed.contains("\n\n\n"), "{composed}");
+}
+
+/// The same block on the chat surface, composed by the function that composes
+/// it in production: after the capability tail, index and all.
+///
+/// The sandbox sentence is counted here too, as an absence. A chat prompt has
+/// never carried it, and appending a run's block would be one way to acquire
+/// one.
+#[tokio::test]
+async fn a_chat_reads_the_remembered_block_after_the_capability_tail() {
+    let memory = block(prompt::Surface::Chat);
+    let composed = system_prompt(
+        &chat_row(),
+        &chat_tools().await,
+        true,
+        CAPABILITY,
+        &environment(),
+        &memory,
+    );
+
+    let tail = composed.find(CAPABILITY).expect("the capability tail");
+    for heading in [
+        MemoryCategory::Profile.heading(),
+        MemoryCategory::Preference.heading(),
+        MemoryCategory::Fact.heading(),
+    ] {
+        let at = composed
+            .find(heading)
+            .unwrap_or_else(|| panic!("{heading} is missing from {composed}"));
+        assert!(at > tail, "{heading} precedes the tail: {composed}");
+    }
+    assert!(composed.contains(PROFILE), "{composed}");
+    assert!(composed.contains(PREFERENCES), "{composed}");
+    assert!(composed.contains(&format!("- {FACT} — ")), "{composed}");
+    assert!(composed.contains(MEMORY_SECTION), "{composed}");
+    assert_eq!(composed.matches(SANDBOX).count(), 0, "{composed}");
+    assert!(!composed.contains("\n\n\n"), "{composed}");
+}

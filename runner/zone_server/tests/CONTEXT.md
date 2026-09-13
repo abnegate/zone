@@ -11,3 +11,7 @@ cargo test -p zone_server --test chat_context_tests --test chat_replay_tests --t
 The fixtures serve the real router on an ephemeral local port, authenticate through its public API, and replace inference and model metadata with deterministic Wiremock responses. They disable MCP startup and external web/image services. Tool mutations are confined to per-test temporary directories. Tests retain rows only in the disposable database; remove the database when finished.
 
 `fixtures/context.json` is checked against Rust `ContextUsage` serialization and shared with frontend E2E tests.
+
+## Library tests that need the same database
+
+`cargo test -p zone_server --lib` is not all in-process. The memory tools' fixture (`agent::memory`) and `agent::tools::tests::a_run_with_an_authorized_writer_still_gets_no_memory_tool` connect to `DATABASE_URL` and expect the migrations applied, so a `--lib` run without it fails where it would otherwise pass. They are deliberately not `#[ignore]`d: CI runs nextest without `--include-ignored`, and an ignored test that proves memory stays off the task surface is a test that never runs. Point `DATABASE_URL` at the same disposable migrated database the suites above use.
