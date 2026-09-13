@@ -202,7 +202,12 @@ export const REASONED_TOOLS: ReadonlySet<string> = new Set([
   'write_file',
 ]);
 
-export type ActionTarget = 'task' | 'document' | 'message' | 'reminder';
+/// Every kind of workspace item a write can target, as the server names it.
+/// A list rather than only a union, so the schema enum is built from it and a
+/// test can compare it with the server's enum.
+export const ACTION_TARGETS = ['task', 'document', 'message', 'reminder', 'memory'] as const;
+
+export type ActionTarget = (typeof ACTION_TARGETS)[number];
 
 /// A workspace write the agent completed. Streamed live and stored on the
 /// message so the receipt survives a reload.
@@ -232,6 +237,8 @@ export interface MessageMetadata {
   action_receipts?: ActionReceipt[];
   /** Optional API override: force web search on/off for one message. */
   web_search?: boolean;
+  /** The assistant read stored memory while writing this reply. Server-observed. */
+  memory_used?: boolean;
   /** Model thinking text, when the deployment advertised reasoning. */
   reasoning?: string;
 }

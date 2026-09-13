@@ -119,4 +119,64 @@ describe('ActionReceipts', () => {
 
     expect(screen.queryByTestId('action-receipt-reason')).not.toBeInTheDocument();
   });
+
+  it('labels each memory write and links nowhere, because memory has no page', () => {
+    const { container } = renderReceipts([
+      receipt({
+        id: 'write',
+        action: 'memory_write',
+        target_type: 'memory',
+        target_id: 'preference/Preferences',
+        target_label: 'Preferences',
+        outcome: 'Memory written',
+        href: '',
+      }),
+      receipt({
+        id: 'append',
+        action: 'memory_append',
+        target_type: 'memory',
+        target_id: 'fact/editor',
+        target_label: 'editor',
+        outcome: 'Memory appended',
+        href: '',
+      }),
+      receipt({
+        id: 'delete',
+        action: 'memory_delete',
+        target_type: 'memory',
+        target_id: 'fact/editor',
+        target_label: 'editor',
+        outcome: 'Memory forgotten',
+        href: '',
+      }),
+    ]);
+
+    expect(screen.getAllByTestId('action-receipt')).toHaveLength(3);
+    expect(screen.getByText('Wrote memory')).toBeInTheDocument();
+    expect(screen.getByText('Preferences')).toBeInTheDocument();
+    expect(screen.getByText('Appended to memory')).toBeInTheDocument();
+    expect(screen.getByText('Forgot memory')).toBeInTheDocument();
+    expect(screen.getAllByText('editor')).toHaveLength(2);
+    expect(screen.queryByTestId('action-receipt-link')).not.toBeInTheDocument();
+    expect(container.querySelector('a')).toBeNull();
+  });
+
+  it('marks a memory write that did not stick', () => {
+    renderReceipts([
+      receipt({
+        action: 'memory_write',
+        target_type: 'memory',
+        target_id: 'profile/Profile',
+        target_label: 'Profile',
+        success: false,
+        outcome: 'Version conflict',
+        href: '',
+      }),
+    ]);
+
+    expect(screen.getByTestId('action-receipt')).toHaveClass('action-receipt--failed');
+    expect(screen.getByText('Write memory failed')).toBeInTheDocument();
+    expect(screen.getByText('Version conflict')).toBeInTheDocument();
+    expect(screen.queryByTestId('action-receipt-link')).not.toBeInTheDocument();
+  });
 });
