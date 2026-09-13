@@ -89,7 +89,7 @@ pub const SETTLED_ASSESSMENTS: [&str; 4] = [
     TERMINAL_ASSESSMENTS[1],
 ];
 const RATE_LIMIT_EXHAUSTED: &str = "GitHub's API rate limit is exhausted for this source's credential. Retrying now will not help; wait for the limit to reset.";
-const MAX_RETRY_AFTER_SECONDS: u64 = 60;
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 const RETRY_AFTER_HEADER: &str = "Retry-After";
 const RATE_LIMIT_REMAINING_HEADER: &str = "X-RateLimit-Remaining";
 
@@ -1752,19 +1752,21 @@ fn header<'a>(response: &'a reqwest::Response, name: &str) -> Option<&'a str> {
 /// better reported now than slept through.
 fn retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
     let value = value.trim();
-    let seconds = match value.parse::<u64>() {
-        Ok(seconds) => seconds,
+    let delay = match value.parse::<u64>() {
+        Ok(seconds) => Duration::from_secs(seconds),
         Err(_) => {
             let at = DateTime::parse_from_rfc2822(value)
                 .ok()?
                 .with_timezone(&Utc);
-            u64::try_from((at - now).num_seconds()).unwrap_or(0)
+            // Whole seconds would round the wait down past the instant the date
+            // names, retrying before the moment the server asked us to wait for.
+            (at - now).to_std().unwrap_or(Duration::ZERO)
         }
     };
-    if seconds > MAX_RETRY_AFTER_SECONDS {
+    if delay > MAX_RETRY_AFTER {
         return None;
     }
-    Some(Duration::from_secs(seconds))
+    Some(delay)
 }
 
 // Provider response bodies and request errors can contain secrets.
@@ -4439,7 +4441,7 @@ mod tests {
         let server = MockServer::start().await;
         rate_limited(
             &server,
-            ResponseTemplate::new(429).insert_header("Retry-After", "3"),
+            ResponseTemplate::new(429).insert_header(RETRY_AFTER_HEADER, "3"),
         )
         .await;
         let started = Instant::now();
@@ -4459,22 +4461,29 @@ mod tests {
 
     #[tokio::test]
     async fn a_retry_after_http_date_is_honoured_once() {
+        const DATE_FORMAT: &str = "%a, %d %b %Y %H:%M:%S GMT";
+        const DISTANCE_SECONDS: i64 = 4;
+
         let server = MockServer::start().await;
-        let at = (Utc::now() + chrono::Duration::seconds(2))
-            .format("%a, %d %b %Y %H:%M:%S GMT")
+        let at = (Utc::now() + chrono::Duration::seconds(DISTANCE_SECONDS))
+            .format(DATE_FORMAT)
             .to_string();
+        // A date names an instant, so the retry is held to that instant and not
+        // to an elapsed floor a slow run exhausts before the wait even begins.
+        let date = DateTime::parse_from_rfc2822(&at)
+            .unwrap()
+            .with_timezone(&Utc);
         rate_limited(
             &server,
-            ResponseTemplate::new(429).insert_header("Retry-After", at.as_str()),
+            ResponseTemplate::new(429).insert_header(RETRY_AFTER_HEADER, at.as_str()),
         )
         .await;
-        let started = Instant::now();
         let (_, sha) = github(&server).resolve(None).await.unwrap();
-        let waited = started.elapsed();
+        let retried = Utc::now();
         assert_eq!(sha, COMMIT);
         assert!(
-            waited >= Duration::from_secs(1),
-            "an HTTP-date Retry-After was not honoured, waited {waited:?}"
+            retried >= date,
+            "an HTTP-date Retry-After was not honoured, retried at {retried} before {date}"
         );
         assert_eq!(
             server.received_requests().await.unwrap().len(),
@@ -4491,8 +4500,8 @@ mod tests {
             rate_limited(
                 &server,
                 ResponseTemplate::new(status)
-                    .insert_header("X-RateLimit-Remaining", "0")
-                    .insert_header("Retry-After", "1"),
+                    .insert_header(RATE_LIMIT_REMAINING_HEADER, "0")
+                    .insert_header(RETRY_AFTER_HEADER, "1"),
             )
             .await;
             let error = github(&server).resolve(None).await.unwrap_err();
@@ -4538,7 +4547,7 @@ mod tests {
         assert_eq!(retry_after("soon", now), None);
         assert_eq!(retry_after("", now), None);
         assert_eq!(
-            retry_after(&(MAX_RETRY_AFTER_SECONDS + 1).to_string(), now),
+            retry_after(&(MAX_RETRY_AFTER.as_secs() + 1).to_string(), now),
             None,
             "a delay past the cap is not honoured"
         );
