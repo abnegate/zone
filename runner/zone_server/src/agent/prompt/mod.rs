@@ -202,6 +202,11 @@ mod tests {
         "list_sources",
         "list_tasks",
         MCP_TOOL,
+        "memory_append",
+        "memory_delete",
+        "memory_list",
+        "memory_read",
+        "memory_write",
         "query_prometheus",
         "read_chat_evidence",
         "read_check_logs",
@@ -423,6 +428,7 @@ mod tests {
 
         assert!(rendered.contains("You can call these tools:"), "{rendered}");
         assert!(rendered.contains("Workspace actions:"), "{rendered}");
+        assert!(rendered.contains("Memory:"), "{rendered}");
         assert!(rendered.contains("Images:"), "{rendered}");
         assert!(rendered.contains("Cluster:"), "{rendered}");
         assert!(rendered.contains("Web tools:"), "{rendered}");
@@ -443,6 +449,7 @@ mod tests {
             !rendered.contains("act in the server runtime"),
             "{rendered}"
         );
+        assert!(!rendered.contains("Memory:"), "{rendered}");
         assert!(!rendered.contains("Images:"), "{rendered}");
         assert!(!rendered.contains("Cluster:"), "{rendered}");
         assert!(!rendered.contains("Web tools:"), "{rendered}");
