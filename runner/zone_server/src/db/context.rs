@@ -52,6 +52,7 @@ impl From<Error> for store::Error {
 }
 
 const PAGE_CHARS: u64 = 8_000;
+const RUNNING: &str = "running";
 
 #[derive(Clone)]
 pub struct Store {
@@ -425,8 +426,8 @@ impl Store {
         let mut transaction = self.pool.begin().await?;
         self.lock(&mut transaction, lease).await?;
         self.turn(&mut transaction, lease, turn_id).await?;
-        let recovery = if interrupted {
-            self.interrupt_in(&mut transaction, turn_id).await?
+        if interrupted {
+            self.settle_in(&mut transaction, turn_id, partial).await?;
         } else {
             let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chat_calls WHERE chat_id=$1 AND turn_id=$2 AND result_id IS NULL)").bind(self.chat_id).bind(turn_id).fetch_one(&mut *transaction).await?;
             if pending {
@@ -435,19 +436,8 @@ impl Store {
                 ));
             }
             sqlx::query("UPDATE chat_turns SET status='completed',completed_at=clock_timestamp() WHERE chat_id=$1 AND id=$2").bind(self.chat_id).bind(turn_id).execute(&mut *transaction).await?;
-            Vec::new()
-        };
-        if let Some(partial) = partial {
-            self.append_in(
-                &mut transaction,
-                turn_id,
-                &NewEntry {
-                    id: Uuid::new_v4().to_string(),
-                    message: partial.clone(),
-                    mutations: Vec::new(),
-                },
-            )
-            .await?;
+            self.partial_in(&mut transaction, turn_id, partial).await?;
+            self.consume_turn_in(&mut transaction, turn_id, &[]).await?;
         }
         let row = self
             .visible(
@@ -459,11 +449,52 @@ impl Store {
                 false,
             )
             .await?;
-        self.consume_turn_in(&mut transaction, turn_id, &recovery)
-            .await?;
         self.lock(&mut transaction, lease).await?;
         transaction.commit().await?;
         Ok(row)
+    }
+
+    /// Close a turn whose lease is gone, keeping what it produced.
+    ///
+    /// Deliberately unfenced, and safe because it moves exactly one named turn
+    /// out of `running`: a turn id belongs to one generation, so no other
+    /// writer owns that row, and it takes the same chat lease row lock every
+    /// fenced writer takes, so it cannot interleave with a new owner's
+    /// recovery. False when the turn was no longer running.
+    pub async fn settle(
+        &self,
+        turn_id: Uuid,
+        content: Option<&str>,
+        metadata: Option<Value>,
+        partial: Option<&ReplayMessage>,
+    ) -> Result<bool, Error> {
+        let mut transaction = self.pool.begin().await?;
+        self.scope(&mut transaction).await?;
+        self.exclusive(&mut transaction).await?;
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM chat_turns WHERE chat_id = $1 AND id = $2 FOR UPDATE",
+        )
+        .bind(self.chat_id)
+        .bind(turn_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if status.as_deref() != Some(RUNNING) {
+            return Ok(false);
+        }
+        self.settle_in(&mut transaction, turn_id, partial).await?;
+        if let Some(content) = content {
+            self.visible(
+                &mut transaction,
+                turn_id,
+                "assistant",
+                content,
+                metadata,
+                false,
+            )
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(true)
     }
 
     pub async fn interrupt(&self, lease: &Lease, turn_id: Uuid) -> Result<(), Error> {
@@ -676,6 +707,15 @@ impl Store {
         Ok(())
     }
 
+    /// Serialize with whoever holds the lease, without claiming to be them.
+    async fn exclusive(&self, connection: &mut PgConnection) -> Result<(), Error> {
+        sqlx::query("SELECT 1 FROM chat_leases WHERE chat_id = $1 FOR UPDATE")
+            .bind(self.chat_id)
+            .fetch_optional(connection)
+            .await?;
+        Ok(())
+    }
+
     async fn turn(
         &self,
         connection: &mut PgConnection,
@@ -766,6 +806,40 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    /// The one way a turn stops running: uncertain outcomes for the calls with no
+    /// result, then the prose the model had produced, then consumption.
+    async fn settle_in(
+        &self,
+        connection: &mut PgConnection,
+        turn_id: Uuid,
+        partial: Option<&ReplayMessage>,
+    ) -> Result<(), Error> {
+        let recovery = self.interrupt_in(connection, turn_id).await?;
+        self.partial_in(connection, turn_id, partial).await?;
+        self.consume_turn_in(connection, turn_id, &recovery).await
+    }
+
+    async fn partial_in(
+        &self,
+        connection: &mut PgConnection,
+        turn_id: Uuid,
+        partial: Option<&ReplayMessage>,
+    ) -> Result<(), Error> {
+        let Some(partial) = partial else {
+            return Ok(());
+        };
+        self.append_in(
+            connection,
+            turn_id,
+            &NewEntry {
+                id: Uuid::new_v4().to_string(),
+                message: partial.clone(),
+                mutations: Vec::new(),
+            },
+        )
+        .await
     }
 
     async fn recover_in(&self, connection: &mut PgConnection) -> Result<usize, Error> {
@@ -1096,6 +1170,18 @@ impl store::ContextStore for Store {
 
     async fn interrupt(&self, lease: &Lease, turn_id: Uuid) -> Result<(), store::Error> {
         Store::interrupt(self, lease, turn_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn settle(
+        &self,
+        turn_id: Uuid,
+        content: Option<&str>,
+        metadata: Option<Value>,
+        partial: Option<&ReplayMessage>,
+    ) -> Result<bool, store::Error> {
+        Store::settle(self, turn_id, content, metadata, partial)
             .await
             .map_err(Into::into)
     }

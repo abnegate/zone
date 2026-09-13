@@ -82,6 +82,34 @@ fn envelope(id: &str, call: &str, mutating: bool) -> NewEntry {
     }
 }
 
+async fn expire(pool: &PgPool, chat: Uuid) {
+    sqlx::query(
+        "UPDATE chat_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE chat_id=$1",
+    )
+    .bind(chat)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn turn_state(pool: &PgPool, chat: Uuid, turn: Uuid) -> (String, Option<String>) {
+    sqlx::query_as("SELECT status, completed_at::text FROM chat_turns WHERE chat_id=$1 AND id=$2")
+        .bind(chat)
+        .bind(turn)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn visible(pool: &PgPool, chat: Uuid, id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT content FROM messages WHERE chat_id=$1 AND id=$2")
+        .bind(chat)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
 fn result(id: &str, call: &str, content: &str) -> NewEntry {
     NewEntry {
         id: id.into(),
@@ -263,13 +291,7 @@ async fn takeover_fences_old_writes_and_recovers_uncertain_mutation_without_retr
         .append(&old, turn, &[envelope("mutation", "call", true)])
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE chat_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE chat_id=$1",
-    )
-    .bind(chat)
-    .execute(&pool)
-    .await
-    .unwrap();
+    expire(&pool, chat).await;
     let current = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
     assert!(matches!(
         store
@@ -861,4 +883,259 @@ async fn catalog_pages_all_references_without_exposing_result_bodies_or_other_ch
         .execute(&pool)
         .await
         .unwrap();
+}
+
+/// The live failure this fixes: a generation that lost its lease left
+/// `chat_turns` running with no `completed_at`, for ever, and the prose it had
+/// streamed was never written as an interruption writes it.
+#[tokio::test]
+async fn a_lost_lease_still_closes_its_own_turn_and_keeps_what_it_produced() {
+    let (pool, store, chat, _) = fixture().await;
+    let lost = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (turn, _) = begin(&store, &lost).await;
+    store
+        .append(&lost, turn, &[envelope("mutation", "call", true)])
+        .await
+        .unwrap();
+    store
+        .publish(&lost, turn, "Half an ans", None)
+        .await
+        .unwrap();
+    expire(&pool, chat).await;
+    store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    assert!(
+        matches!(
+            store
+                .finish(&lost, turn, "Half an answer.", None, true, None)
+                .await,
+            Err(Error::LeaseLost)
+        ),
+        "the fenced close is the one that is refused, and it is why the row was left running"
+    );
+
+    let partial = ReplayMessage::from(&Message::assistant("Half an answer."));
+    assert!(
+        store
+            .settle(
+                turn,
+                Some("Half an answer.\n\n[Response interrupted]"),
+                None,
+                Some(&partial),
+            )
+            .await
+            .unwrap(),
+        "a running turn whose lease is gone must still be closable"
+    );
+
+    let (status, completed) = turn_state(&pool, chat, turn).await;
+    assert_eq!(
+        status, "interrupted",
+        "a turn nobody owns must not stay running"
+    );
+    assert!(
+        completed.is_some(),
+        "a closed turn must carry the time it stopped"
+    );
+    assert_eq!(
+        visible(&pool, chat, turn).await.as_deref(),
+        Some("Half an answer.\n\n[Response interrupted]"),
+        "the reader must keep the prose the generation had already streamed"
+    );
+    let history = store.load().await.unwrap();
+    let kept = history
+        .entries
+        .iter()
+        .find(|entry| entry.message.content.as_deref() == Some("Half an answer."))
+        .expect("the partial must be stored the way an ordinary interruption stores it");
+    assert!(
+        kept.consumed,
+        "the model has already seen the prose it wrote"
+    );
+    let notice = history
+        .entries
+        .iter()
+        .find(|entry| {
+            entry
+                .message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("may have changed external state"))
+        })
+        .expect("a call with no result must still get its uncertain outcome");
+    assert_eq!(notice.message.role, Role::Tool);
+    assert!(!notice.consumed, "the next run has to replay the warning");
+    chats::delete_chat(&pool, chat).await.unwrap();
+}
+
+#[tokio::test]
+async fn settling_never_unfences_the_writes_the_lost_lease_owned() {
+    let (pool, store, chat, _) = fixture().await;
+    let lost = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (turn, _) = begin(&store, &lost).await;
+    expire(&pool, chat).await;
+    store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    for refused in refusals(&store, &lost, turn).await {
+        assert!(
+            matches!(refused, Some(Error::LeaseLost)),
+            "a lost lease must never be allowed to write: {refused:?}"
+        );
+    }
+    assert!(
+        store
+            .settle(turn, Some("Stopped."), None, None)
+            .await
+            .unwrap()
+    );
+    for refused in refusals(&store, &lost, turn).await {
+        assert!(
+            matches!(refused, Some(Error::LeaseLost)),
+            "closing a turn must not hand its lost lease the right to write: {refused:?}"
+        );
+    }
+    let history = store.load().await.unwrap();
+    assert!(
+        !history.entries.iter().any(|entry| entry.id == "stale"),
+        "a fenced-out write must never reach the conversation"
+    );
+    chats::delete_chat(&pool, chat).await.unwrap();
+}
+
+async fn refusals(store: &Store, lease: &Lease, turn: Uuid) -> Vec<Option<Error>> {
+    vec![
+        store
+            .append(lease, turn, &[envelope("stale", "call", false)])
+            .await
+            .err(),
+        store.publish(lease, turn, "Stale prose", None).await.err(),
+        store.complete(lease, turn, "Stale prose", None).await.err(),
+        store
+            .finish(lease, turn, "Stale prose", None, true, None)
+            .await
+            .err(),
+        store
+            .create_message(lease, "assistant", "Stale prose", None)
+            .await
+            .err(),
+    ]
+}
+
+#[tokio::test]
+async fn settling_the_same_turn_twice_changes_nothing() {
+    let (pool, store, chat, _) = fixture().await;
+    let lost = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (turn, _) = begin(&store, &lost).await;
+    store
+        .append(&lost, turn, &[envelope("mutation", "call", true)])
+        .await
+        .unwrap();
+    expire(&pool, chat).await;
+    let partial = ReplayMessage::from(&Message::assistant("Half an answer."));
+    assert!(
+        store
+            .settle(turn, Some("Stopped."), None, Some(&partial))
+            .await
+            .unwrap()
+    );
+    let closed = turn_state(&pool, chat, turn).await;
+    let entries = store.load().await.unwrap().entries.len();
+    assert!(
+        !store
+            .settle(turn, Some("Stopped again."), None, Some(&partial))
+            .await
+            .unwrap(),
+        "a turn that is already closed must be left exactly as it is, not closed twice"
+    );
+    assert_eq!(
+        turn_state(&pool, chat, turn).await,
+        closed,
+        "a second close must not move the time the turn stopped"
+    );
+    assert_eq!(
+        store.load().await.unwrap().entries.len(),
+        entries,
+        "a second close must not duplicate the partial or the uncertain outcomes"
+    );
+    assert_eq!(
+        visible(&pool, chat, turn).await.as_deref(),
+        Some("Stopped."),
+        "a second close must not overwrite what the reader already has"
+    );
+    chats::delete_chat(&pool, chat).await.unwrap();
+}
+
+/// The safety argument for closing without the lease: a turn id belongs to one
+/// generation, so this must never reach a turn a new owner is running.
+#[tokio::test]
+async fn a_lost_lease_settles_only_the_turn_it_opened() {
+    let (pool, store, chat, _) = fixture().await;
+    let lost = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (mine, _) = begin(&store, &lost).await;
+    expire(&pool, chat).await;
+    let current = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let theirs = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO messages (id,chat_id,role,content) VALUES ($1,$2,'user','Next request')",
+    )
+    .bind(user)
+    .bind(chat)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO chat_turns (id,chat_id,user_message_id,fence) VALUES ($1,$2,$3,$4)")
+        .bind(theirs)
+        .bind(chat)
+        .bind(user)
+        .bind(current.fence)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(store.settle(mine, None, None, None).await.unwrap());
+    assert_eq!(
+        turn_state(&pool, chat, theirs).await.0,
+        "running",
+        "closing an abandoned turn must never stop the generation that took the chat over"
+    );
+    chats::delete_chat(&pool, chat).await.unwrap();
+}
+
+#[tokio::test]
+async fn closing_a_session_whose_lease_was_lost_settles_its_turn() {
+    use zone_server::services::chat::session::Session;
+    use zone_server::state::AppState;
+    let (pool, _, chat, workspace) = fixture().await;
+    let mut config = common::test_config();
+    config.litellm_host = "http://127.0.0.1:1".into();
+    config.ollama_host = "http://127.0.0.1:1".into();
+    let state = AppState::new(config, pool.clone(), None);
+    let mut session = Session::acquire(&state, chat, workspace, Uuid::new_v4())
+        .await
+        .unwrap();
+    session
+        .store
+        .begin(
+            &session.lease,
+            session.turn,
+            Uuid::new_v4(),
+            "Latest request",
+            None,
+            ReplayMessage::from(&Message::user("Latest request")),
+        )
+        .await
+        .unwrap();
+    expire(&pool, chat).await;
+    session
+        .close()
+        .await
+        .expect("a session whose lease is gone must still close");
+    let (status, completed) = turn_state(&pool, chat, session.turn).await;
+    assert_eq!(
+        status, "interrupted",
+        "the one exit every generation takes must settle the row a lost lease left running"
+    );
+    assert!(
+        completed.is_some(),
+        "a closed turn must carry the time it stopped"
+    );
+    chats::delete_chat(&pool, chat).await.unwrap();
 }

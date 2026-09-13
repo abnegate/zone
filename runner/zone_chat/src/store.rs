@@ -96,7 +96,9 @@ pub struct StoredMessage {
 ///
 /// Writes are gated on a [`Lease`], so a chat can only ever have one live
 /// response: whoever holds the lease owns the turn, and a stale holder is told
-/// [`Error::LeaseLost`] rather than being allowed to append.
+/// [`Error::LeaseLost`] rather than being allowed to append. The one exception
+/// is [`ContextStore::settle`], which closes a turn whose lease is already
+/// gone: it can reach nothing but the one turn it names.
 #[async_trait]
 pub trait ContextStore: Send + Sync {
     /// Take the right to respond in this chat, or fail with [`Error::Busy`].
@@ -167,6 +169,17 @@ pub trait ContextStore: Send + Sync {
     ) -> Result<StoredMessage, Error>;
 
     async fn interrupt(&self, lease: &Lease, turn_id: Uuid) -> Result<(), Error>;
+
+    /// Close a turn whose lease is already gone, so a lost lease cannot leave a
+    /// row running for ever. A turn id belongs to one generation, so no other
+    /// writer owns that row. False when the turn was no longer running.
+    async fn settle(
+        &self,
+        turn_id: Uuid,
+        content: Option<&str>,
+        metadata: Option<Value>,
+        partial: Option<&ReplayMessage>,
+    ) -> Result<bool, Error>;
 
     /// Settle turns a previous process left open. Returns how many.
     async fn recover(&self, lease: &Lease) -> Result<usize, Error>;
