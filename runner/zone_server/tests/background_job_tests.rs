@@ -83,19 +83,32 @@ fn blocking_on(gate: &Path) -> JobCommand {
     JobCommand::new("cat", vec![gate.to_string_lossy().into_owned()])
 }
 
-/// Whether nothing is reading `gate` any more.
+/// Whether nothing is reading `gate` any more, and the write end of a probe
+/// that found a reader still there.
 ///
 /// Opening a FIFO for writing blocks until a reader holds the other end, so an
 /// open that cannot complete is a reader that has gone. It proves a child is
 /// dead without reaching for the process table, and the thread it leaves
 /// blocked is detached so no runtime shutdown waits on it.
-async fn reader_is_gone(gate: &Path) -> bool {
+///
+/// The handle is returned rather than dropped because dropping it is an EOF
+/// the reader acts on: `cat` reaches the end of its input and exits of its own
+/// accord, and a later probe then reports a dead child whatever teardown did
+/// or did not do. Holding it open for the rest of the test is what leaves the
+/// child alive for `kill_session` to be judged on. Only a probe that times out
+/// is a reader that is gone; an open that fails outright answers the question
+/// without proving anything, and hands back no writer to hold.
+async fn reader_is_gone(gate: &Path) -> (bool, Option<std::fs::File>) {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let path = gate.to_path_buf();
     std::thread::spawn(move || {
-        let _ = sender.send(std::fs::OpenOptions::new().write(true).open(path).is_ok());
+        let _ = sender.send(std::fs::OpenOptions::new().write(true).open(path).ok());
     });
-    tokio::time::timeout(READER_PROBE, receiver).await.is_err()
+    match tokio::time::timeout(READER_PROBE, receiver).await {
+        Ok(Ok(writer)) => (false, writer),
+        Ok(Err(_)) => (false, None),
+        Err(_) => (true, None),
+    }
 }
 
 /// Wait until `job` has stopped, as its own session sees it.
@@ -110,6 +123,24 @@ async fn settled(session: Session, job: &str) {
     })
     .await
     .unwrap_or_else(|_| panic!("{job} never finished"));
+}
+
+/// Wait until nothing is reading `gate` any more.
+///
+/// `kill_session` takes a job out of the registry before it signals the child
+/// and waits for it, so a registry that has let go is not yet a child that has
+/// gone — a single probe the instant `released` returns races the kill it is
+/// meant to be judging. Every probe after the first may drop its writer freely:
+/// the caller still holds one, so the reader is never sent an EOF it could
+/// mistake for being told to stop.
+async fn reaped(gate: &Path, owner: &str) {
+    tokio::time::timeout(SETTLE, async {
+        while !reader_is_gone(gate).await.0 {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the child {owner} left running is still reading its gate"));
 }
 
 /// Wait until the registry no longer holds `job` for `session`.
@@ -550,10 +581,12 @@ async fn a_job_a_run_started_is_dead_once_the_run_reaches_a_terminal_status() {
     )
     .await
     .expect("a job keyed to the run");
+    let (gone, writer) = reader_is_gone(&gate).await;
     assert!(
-        !reader_is_gone(&gate).await,
+        !gone,
         "the job is not reading its gate, so nothing later proves it was killed"
     );
+    let writer = writer.expect("the probe opened the gate for writing");
 
     zone_server::workers::task::execute_task_run(&state, prepared.run, prepared.task).await;
 
@@ -568,10 +601,8 @@ async fn a_job_a_run_started_is_dead_once_the_run_reaches_a_terminal_status() {
     );
 
     released(Session::Task(prepared.run), &started.id).await;
-    assert!(
-        reader_is_gone(&gate).await,
-        "the child the run left running is still reading its gate"
-    );
+    reaped(&gate, "the run").await;
+    drop(writer);
     let log = PathBuf::from(started.log_path);
     let left = root.keep();
     tokio::fs::remove_dir_all(&left)
@@ -628,10 +659,12 @@ async fn a_job_a_chat_turn_started_is_dead_once_the_turn_ends() {
     )
     .await
     .expect("a job keyed to the chat");
+    let (gone, writer) = reader_is_gone(&gate).await;
     assert!(
-        !reader_is_gone(&gate).await,
+        !gone,
         "the job is not reading its gate, so nothing later proves it was killed"
     );
+    let writer = writer.expect("the probe opened the gate for writing");
 
     let (mut socket, _) = connect_async(format!("ws://{address}/ws/chats/{chat}"))
         .await
@@ -669,10 +702,8 @@ async fn a_job_a_chat_turn_started_is_dead_once_the_turn_ends() {
     );
 
     released(Session::Chat(chat_id), &started.id).await;
-    assert!(
-        reader_is_gone(&gate).await,
-        "the child the turn left running is still reading its gate"
-    );
+    reaped(&gate, "the turn").await;
+    drop(writer);
     let log = PathBuf::from(started.log_path);
     let left = root.keep();
     tokio::fs::remove_dir_all(&left)
