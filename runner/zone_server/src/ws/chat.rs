@@ -725,6 +725,11 @@ fn image_metadata(attachments: &[ChatImageAttachment]) -> Option<serde_json::Val
     (!attachments.is_empty()).then(|| serde_json::json!({ "attachments": attachments }))
 }
 
+/// The key the console reads to show that a reply was written with stored
+/// memory in front of the model. Set from the turn's own tool calls, never
+/// from anything the model claims.
+const MEMORY_USED_KEY: &str = "memory_used";
+
 /// Fold the tool trace, citations, and write receipts into the image
 /// metadata, since one turn can produce all of them and they share the
 /// message's single metadata column.
@@ -745,6 +750,12 @@ fn merge_metadata(
     };
     if !tool_calls.is_empty() {
         object.insert("tool_calls".to_string(), serde_json::json!(tool_calls));
+    }
+    if tool_calls
+        .iter()
+        .any(|call| call.success && call.name == crate::agent::memory::MEMORY_READ)
+    {
+        object.insert(MEMORY_USED_KEY.to_string(), serde_json::json!(true));
     }
     if !citations.is_empty() {
         object.insert("citations".to_string(), serde_json::json!(citations));
@@ -4816,6 +4827,74 @@ mod tests {
     #[test]
     fn test_merge_metadata_is_none_when_the_turn_produced_neither() {
         assert!(merge_metadata(None, &[], &[], &[], None).is_none());
+    }
+
+    fn call(name: &str, success: bool) -> ToolCallRecord {
+        ToolCallRecord {
+            id: "call_1".to_string(),
+            name: name.to_string(),
+            arguments: "{}".to_string(),
+            success,
+            detail: "ok".to_string(),
+            duration_ms: 1,
+            reasoning: None,
+            reason: None,
+            preview: None,
+            questions: Vec::new(),
+            job: None,
+            waiting: None,
+        }
+    }
+
+    /// The badge is derived from the turn's own calls, so it is a claim the
+    /// server made rather than one the model made about itself.
+    #[test]
+    fn test_merge_metadata_flags_a_turn_that_read_memory() {
+        let images = image_metadata(&[ChatImageAttachment {
+            name: "generated-image-1.png".to_string(),
+            mime: "image/png".to_string(),
+            url: "https://example.test/one.png".to_string(),
+        }]);
+        let records = vec![
+            call("read_file", true),
+            call(crate::agent::memory::MEMORY_READ, true),
+        ];
+
+        let merged = merge_metadata(images, &records, &[], &[], None).expect("the turn had calls");
+
+        assert_eq!(merged[MEMORY_USED_KEY], true);
+        assert_eq!(merged["attachments"][0]["name"], "generated-image-1.png");
+        assert_eq!(merged["tool_calls"].as_array().expect("the trace").len(), 2);
+    }
+
+    /// A read that failed read nothing, a write is not a read, and a turn with
+    /// no calls has nothing to derive the badge from. The key is absent in all
+    /// three rather than present and false, which is what the console's
+    /// optional boolean expects.
+    #[test]
+    fn test_merge_metadata_leaves_the_flag_off_without_a_successful_read() {
+        let failed = merge_metadata(
+            None,
+            &[call(crate::agent::memory::MEMORY_READ, false)],
+            &[],
+            &[],
+            None,
+        )
+        .expect("the turn had calls");
+        assert!(failed.get(MEMORY_USED_KEY).is_none(), "{failed}");
+
+        let wrote = merge_metadata(
+            None,
+            &[call(crate::agent::memory::MEMORY_WRITE, true)],
+            &[],
+            &[],
+            None,
+        )
+        .expect("the turn had calls");
+        assert!(wrote.get(MEMORY_USED_KEY).is_none(), "{wrote}");
+
+        let quiet = merge_metadata(None, &[], &[], &[], Some("Thinking.")).expect("reasoning");
+        assert!(quiet.get(MEMORY_USED_KEY).is_none(), "{quiet}");
     }
 
     #[test]
