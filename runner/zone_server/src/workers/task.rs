@@ -4733,22 +4733,43 @@ mod watchdog_tests {
     async fn a_wait_that_outlives_the_attempt_timeout_ends_the_run_without_a_retry() {
         let _execution = EXECUTION.lock().await;
         let (_pool, observed, state, run, owner) = parked_fixture().await;
-        let permit = Permit::acquire().await.unwrap();
+        let permit = Arc::new(Permit::acquire().await.unwrap());
         assert!(
             Duration::from_secs(wait::MAX_WAIT_SECS) < TASK_TIMEOUT,
             "one clamped wait can never reach the attempt timeout on its own"
         );
         let waited = claimed_wait(run, TASK_TIMEOUT.as_secs() as i64 * 2);
 
-        tokio::time::pause();
         // The wrapper the attempt puts around every turn of the run, waiting
         // included. Nothing inside the park may bound the wait more tightly or
-        // survive this elapsing, so the clock has only one timer to reach.
-        let attempt = tokio::time::timeout(
-            TASK_TIMEOUT,
-            park_for_wait(&state, run, owner, &waited, &permit),
-        )
-        .await;
+        // survive this elapsing.
+        let attempt = {
+            let state = state.clone();
+            let permit = permit.clone();
+            let waited = waited.clone();
+            tokio::spawn(async move {
+                tokio::time::timeout(
+                    TASK_TIMEOUT,
+                    park_for_wait(&state, run, owner, &waited, &permit),
+                )
+                .await
+            })
+        };
+        // The park's own writes are I/O, and a paused clock advances to the
+        // next timer whenever pending I/O is all the runtime has left: paused
+        // now, the attempt would elapse before the row was parked and the
+        // assertion below would read a row nothing ever parked. The real clock
+        // runs until the row says the run is waiting, and only then is the
+        // attempt timeout the one timer left for the clock to reach.
+        tokio::time::timeout(WAIT_TICK, async {
+            while waiting_state(&observed, run).await.0 != PHASE_WAITING {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the run never read as parked on its wait");
+        tokio::time::pause();
+        let attempt = attempt.await.unwrap();
 
         assert!(
             attempt.is_err(),
