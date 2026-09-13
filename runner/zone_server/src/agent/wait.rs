@@ -487,7 +487,13 @@ impl Commit {
                     self.assessment = assessment;
                     unreadable = None;
                 }
-                Err(reason) => unreadable = Some(reason),
+                Err(reason) => {
+                    // A failed poll leaves the last assessment stale, so the
+                    // checks count as unreadable from this moment rather than
+                    // from whatever the last successful read said.
+                    self.assessment = UNKNOWN_ASSESSMENT;
+                    unreadable = Some(reason);
+                }
             }
         }
     }
@@ -996,7 +1002,7 @@ impl WaitForTool {
 mod tests {
     use super::*;
 
-    use crate::agent::integrations::SUCCESS_ASSESSMENT;
+    use crate::agent::integrations::{PENDING_ASSESSMENT, SUCCESS_ASSESSMENT};
     use crate::state::{AppState, test_config};
     use std::collections::{HashMap, VecDeque};
     use std::path::Path;
@@ -1135,6 +1141,18 @@ mod tests {
             reference: "main".to_string(),
             sha: "8c4d21fa9b7e6053".to_string(),
             assessment,
+        }
+    }
+
+    /// The deadline arm `await_outcome` races a subscription against, so a
+    /// commit that never settles ends a test the way it ends a real wait.
+    async fn settled_or_timed_out(commit: Commit, started: Instant) -> Outcome {
+        let subject = check_subject(&commit.reference, &commit.sha);
+        let deadline = started + Duration::from_secs(DEFAULT_WAIT_SECS);
+        tokio::select! {
+            biased;
+            outcome = commit.settle(started) => outcome,
+            _ = tokio::time::sleep_until(deadline) => timed_out(&subject, started.elapsed()),
         }
     }
 
@@ -1613,6 +1631,47 @@ mod tests {
             .await;
 
         assert_eq!(outcome, checks_unknown("main", CHECK_SETTLE_GRACE));
+    }
+
+    /// A commit still pending when the reads start failing is what the grace
+    /// period exists for. Holding on to the last readable assessment leaves
+    /// nothing measuring the outage, so the wait runs to its deadline and
+    /// reports a timeout, burying the reason it was handed every poll.
+    #[tokio::test(start_paused = true)]
+    async fn checks_that_stop_being_readable_while_pending_end_the_wait_as_an_outage() {
+        let commit = watching(PENDING_ASSESSMENT, Box::new(Unreadable(UNREADABLE_REASON)));
+
+        let outcome = settled_or_timed_out(commit, Instant::now()).await;
+
+        assert_eq!(
+            outcome,
+            checks_unreadable(
+                "main",
+                UNREADABLE_REASON,
+                CHECK_POLL_INTERVAL + CHECK_SETTLE_GRACE
+            ),
+            "the grace period runs from the failed poll, not from the last readable assessment"
+        );
+        assert_unphrasable_as_success(&outcome.text);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_commit_whose_failed_poll_recovers_still_settles() {
+        let script = VecDeque::from([Err(UNREADABLE_REASON.to_string()), Ok(SUCCESS_ASSESSMENT)]);
+        let commit = watching(PENDING_ASSESSMENT, Box::new(Scripted(Lock::new(script))));
+
+        let outcome = settled_or_timed_out(commit, Instant::now()).await;
+
+        assert_eq!(
+            outcome,
+            checks_settled(
+                "main",
+                "8c4d21fa9b7e6053",
+                SUCCESS_ASSESSMENT,
+                CHECK_POLL_INTERVAL * 2
+            ),
+            "one failed poll must not cost a commit the settle the next read reports"
+        );
     }
 
     #[tokio::test(start_paused = true)]

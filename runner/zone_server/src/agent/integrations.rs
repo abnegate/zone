@@ -74,7 +74,7 @@ const LOG_REDIRECT_HOSTS: [&str; 4] = [
 const LOG_NOTE: &str = "Excerpt of what the job printed, not proof of why it failed. Per-line timestamps, progress redraws and over-long lines are trimmed, and unshown regions are marked as omitted.";
 pub(crate) const SUCCESS_ASSESSMENT: &str = "success";
 const FAILURE_ASSESSMENT: &str = "failure";
-const PENDING_ASSESSMENT: &str = "pending";
+pub(crate) const PENDING_ASSESSMENT: &str = "pending";
 const UNKNOWN_ASSESSMENT: &str = "unknown";
 
 /// Conclusions a completed run reports that are neither a pass nor a failure.
