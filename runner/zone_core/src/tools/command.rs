@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -303,6 +304,35 @@ impl Tool for RunCommandTool {
     }
 }
 
+/// Why a command that sleeps too long is refused, in words that are true of the
+/// call that asked.
+///
+/// Backgrounding moves who waits, not what a command may do, so a detached call
+/// is refused the same cap -- but telling that call to background itself is
+/// advice it has already taken, and a model handed advice it has already
+/// followed repeats the call until the loop's no-progress detector ends the
+/// turn with nothing to show.
+fn sleep_refusal(seconds: f64, backgrounded: bool) -> String {
+    let (remedy, tail) = if backgrounded {
+        (
+            Cow::Borrowed(
+                "Backgrounding does not raise the cap. Start something that finishes on its own \
+                 and",
+            ),
+            " rather than sleeping.",
+        )
+    } else {
+        (
+            Cow::Owned(format!("Start it with {BACKGROUND_PARAM}: true and")),
+            ".",
+        )
+    };
+    format!(
+        "This command sleeps for {seconds} seconds, and a call may block on sleep for at most \
+         {MAX_SLEEP_SECS}. {remedy} wait for it with {WAIT_FOR_TOOL}{tail}"
+    )
+}
+
 /// The command line as it will run, for an approval card.
 ///
 /// The command is what the reader is deciding on, so it keeps the whole budget
@@ -479,10 +509,9 @@ impl Tool for RunShellTool {
         if let Some(seconds) = total_sleep(&params.command)
             && seconds > MAX_SLEEP_SECS as f64
         {
-            return Err(ToolError::Execution(format!(
-                "This command sleeps for {seconds} seconds, and a call may block on sleep for at \
-                 most {MAX_SLEEP_SECS}. Start it with {BACKGROUND_PARAM}: true and wait for it \
-                 with {WAIT_FOR_TOOL}."
+            return Err(ToolError::Execution(sleep_refusal(
+                seconds,
+                params.background,
             )));
         }
 
@@ -1584,6 +1613,43 @@ mod tests {
         assert!(
             job::log_path(dir.path(), &id).exists(),
             "the log is where the receipt says it is"
+        );
+
+        Jobs::kill_session(session).await;
+    }
+
+    /// The refusal a detached call gets has to be actionable by that call.
+    /// "Background it" is what it already did, and the live consequence of
+    /// saying so was the model reissuing the identical call until the turn was
+    /// abandoned with no answer at all.
+    #[tokio::test]
+    async fn the_sleep_cap_does_not_tell_a_backgrounded_call_to_background_itself() {
+        let (dir, context, session) = background_context();
+
+        let error = RunShellTool
+            .execute(
+                json!({
+                    "command": format!("sleep {}", MAX_SLEEP_SECS + 60),
+                    "background": true,
+                    "reason": "Wait for the deploy."
+                }),
+                &context,
+            )
+            .await
+            .expect_err("the cap holds whichever way the command runs");
+
+        let message = error.to_string();
+        assert!(
+            !message.contains(&format!("{BACKGROUND_PARAM}: true")),
+            "the call had already done that: {message}"
+        );
+        assert!(
+            message.contains(WAIT_FOR_TOOL) && message.contains(&MAX_SLEEP_SECS.to_string()),
+            "the refusal still says what the cap is and what to do instead: {message}"
+        );
+        assert!(
+            !dir.path().join(job::JOB_LOG_DIRECTORY).exists(),
+            "the refusal still comes before anything is spawned"
         );
 
         Jobs::kill_session(session).await;
