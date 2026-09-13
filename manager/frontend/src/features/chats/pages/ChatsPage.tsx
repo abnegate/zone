@@ -897,6 +897,10 @@ export default function ChatsPage() {
                   const receipts = message.metadata?.action_receipts ?? [];
                   const links = message.role === 'assistant' ? 'citations' : 'all';
                   const linked = linkedMessageId === message.id;
+                  // The turn still being written. Anything it detached dies with
+                  // it, so this is also the only turn whose job cards can claim
+                  // to be watching something that is still running.
+                  const live = streaming && message.id === displayedChat.messages.at(-1)?.id;
                   return (
                     <div
                       key={message.id}
@@ -966,24 +970,19 @@ export default function ChatsPage() {
                         </div>
                       )}
                       {!toolsHaveReasoning && leftoverReasoning ? (
-                        <Reasoning
-                          content={leftoverReasoning}
-                          open={streaming && message.id === displayedChat.messages.at(-1)?.id}
-                        />
+                        <Reasoning content={leftoverReasoning} open={live} />
                       ) : null}
                       {toolCalls.length > 0 && (
                         <ToolTrace
                           calls={toolCalls}
                           answered={index < lastUserIndex}
+                          live={live}
                           onDecide={approveTool}
                           onAnswer={handleAnswerQuestions}
                         />
                       )}
                       {toolsHaveReasoning && leftoverReasoning ? (
-                        <Reasoning
-                          content={leftoverReasoning}
-                          open={streaming && message.id === displayedChat.messages.at(-1)?.id}
-                        />
+                        <Reasoning content={leftoverReasoning} open={live} />
                       ) : null}
                       {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                       {message.content.trim() ? (

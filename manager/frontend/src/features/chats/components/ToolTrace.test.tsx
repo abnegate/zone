@@ -547,6 +547,7 @@ describe('ToolTrace', () => {
             job,
           }),
         ]}
+        live
       />
     );
 
@@ -691,10 +692,15 @@ describe('ToolTrace', () => {
       });
     });
 
-    it('draws the job card a reload rebuilds', () => {
+    /// The stored record carries the start and never the exit, because a job
+    /// outlives no turn and nothing durable records how it went. The card a
+    /// reload rebuilds says the job is over, not that it is still running.
+    it('draws the job card a reload rebuilds as work that is over', () => {
       render(<ToolTrace calls={[ToolCallRecordSchema.parse({ ...stored, job })]} />);
 
-      expect(screen.getByTestId('job-card')).toHaveClass('job-card--running');
+      const card = screen.getByTestId('job-card');
+      expect(card).toHaveClass('job-card--ended');
+      expect(card).not.toHaveClass('job-card--running');
       expect(screen.getByText('/srv/zone/.zone/jobs/job_9f3c1a7b2e04.log')).toBeInTheDocument();
     });
 

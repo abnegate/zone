@@ -104,11 +104,13 @@ function ObservedPreview({ call }: { call: ToolCallRecord }) {
 function ToolTraceRow({
   call,
   answered,
+  live,
   onDecide,
   onAnswer,
 }: {
   call: ToolCallRecord;
   answered: boolean;
+  live: boolean;
   onDecide?: (id: string, approved: boolean) => void;
   onAnswer?: (content: string) => void;
 }) {
@@ -150,7 +152,7 @@ function ToolTraceRow({
           onSubmit={(answers: Answer[]) => onAnswer?.(renderAnswers(call.questions ?? [], answers))}
         />
       ) : null}
-      <JobCard call={call} />
+      <JobCard call={call} live={live} />
       {call.approval === 'pending' && onDecide && (
         <div className="tool-call-approval">
           <button
@@ -179,6 +181,7 @@ function ToolTraceRow({
 export function ToolTrace({
   calls,
   answered = false,
+  live = false,
   onDecide,
   onAnswer,
 }: {
@@ -190,6 +193,12 @@ export function ToolTrace({
    * says a question is settled, and none needs to.
    */
   answered?: boolean;
+  /**
+   * Whether the turn these calls belong to is still being written. Background
+   * work outlives no turn, so this is what separates a job that may still be
+   * running from one a reload can only report as over.
+   */
+  live?: boolean;
   onDecide?: (id: string, approved: boolean) => void;
   onAnswer?: (content: string) => void;
 }) {
@@ -202,6 +211,7 @@ export function ToolTrace({
           key={call.id}
           call={call}
           answered={answered}
+          live={live}
           onDecide={onDecide}
           onAnswer={onAnswer}
         />

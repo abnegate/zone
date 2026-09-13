@@ -12,6 +12,7 @@ import './JobCard.css';
 const RUNNING_LABEL = 'Job running';
 const EXITED_LABEL = 'Job exited with code';
 const KILLED_LABEL = 'Job killed without exiting';
+const ENDED_LABEL = 'Job ended with the turn — exit not recorded';
 const WAITING_LABEL = 'Waiting for';
 const SETTLED_LABEL = 'Finished waiting';
 const TIMED_OUT_LABEL = 'Timed out — not a result';
@@ -25,7 +26,7 @@ const KIND_CHECK = 'check';
 
 const SUCCESSFUL_EXIT_CODE = 0;
 
-type JobState = 'running' | 'ok' | 'failed';
+type JobState = 'running' | 'ok' | 'failed' | 'ended';
 type WaitState = 'waiting' | 'settled' | 'timed-out' | 'unknown' | 'unreadable';
 
 const WAIT_STATES: Record<WaitVerdict, WaitState> = {
@@ -35,16 +36,20 @@ const WAIT_STATES: Record<WaitVerdict, WaitState> = {
   unreadable: 'unreadable',
 };
 
-/// A job that has not reported an exit is running as far as this client knows;
-/// one that exited is a pass only on a clean code. A killed job has no code,
-/// which the frozen shape uses to mean exactly that, and it is never a pass.
-function jobState(exited?: JobExited): JobState {
-  if (!exited) return 'running';
+/// A job exits a pass only on a clean code. A killed job has no code, which the
+/// frozen shape uses to mean exactly that, and it is never a pass.
+///
+/// With no exit at all the answer is whose turn this is. A job dies with the
+/// turn that started it and the exit lives only on the live frame, so a card
+/// rebuilt from storage has no exit to show and no job left to run: saying it
+/// is running claims a process that ended before the page was even loaded.
+function jobState(exited: JobExited | undefined, live: boolean): JobState {
+  if (!exited) return live ? 'running' : 'ended';
   return exited.exit_code === SUCCESSFUL_EXIT_CODE ? 'ok' : 'failed';
 }
 
-function jobTitle(exited?: JobExited): string {
-  if (!exited) return RUNNING_LABEL;
+function jobTitle(exited: JobExited | undefined, live: boolean): string {
+  if (!exited) return live ? RUNNING_LABEL : ENDED_LABEL;
   if (exited.exit_code === undefined) return KILLED_LABEL;
   return `${EXITED_LABEL} ${exited.exit_code}`;
 }
@@ -138,14 +143,14 @@ function Deadline({ deadline }: { deadline: string }) {
   );
 }
 
-function Job({ job, exited }: { job?: JobStarted; exited?: JobExited }) {
-  const state = jobState(exited);
+function Job({ job, exited, live }: { job?: JobStarted; exited?: JobExited; live: boolean }) {
+  const state = jobState(exited, live);
 
   return (
     <div className={`job-card job-card--${state}`} data-testid="job-card">
       <p className="job-card-header">
         <span className="job-card-status" aria-hidden="true" />
-        <span className="job-card-title">{jobTitle(exited)}</span>
+        <span className="job-card-title">{jobTitle(exited, live)}</span>
       </p>
       <dl className="job-card-meta">
         <div>
@@ -213,16 +218,23 @@ function Wait({ waiting, settled }: { waiting?: Waiting; settled?: WaitSettled }
 /// opened, and how either ended. Keyed on what the record carries, never on
 /// the tool's name, so an exit or a settle that reached the trace without its
 /// start still has a card.
+///
+/// `live` is the turn that started this work still being written, which is the
+/// only turn a job can still be running in. It defaults to false because that
+/// is what a stored message is, and a caller that forgets it should understate
+/// rather than claim a process that is gone.
 export function JobCard({
   call,
+  live = false,
 }: {
   call: Pick<ToolCallRecord, 'job' | 'exited' | 'waiting' | 'settled'>;
+  live?: boolean;
 }) {
   const { job, exited, waiting, settled } = call;
 
   return (
     <>
-      {job || exited ? <Job job={job} exited={exited} /> : null}
+      {job || exited ? <Job job={job} exited={exited} live={live} /> : null}
       {waiting || settled ? <Wait waiting={waiting} settled={settled} /> : null}
     </>
   );

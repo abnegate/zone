@@ -45,7 +45,7 @@ describe('JobCard', () => {
   });
 
   it('shows a running job with the id, process and log a reader would look up', () => {
-    render(<JobCard call={{ job: started }} />);
+    render(<JobCard call={{ job: started }} live />);
 
     const card = screen.getByTestId('job-card');
     expect(card).toHaveClass('job-card--running');
@@ -78,6 +78,32 @@ describe('JobCard', () => {
     const card = screen.getByTestId('job-card');
     expect(card).toHaveClass('job-card--failed');
     expectNotAPass(card);
+    expect(screen.getByText('Job killed without exiting')).toBeInTheDocument();
+  });
+
+  /// A job dies with the turn that started it, and only the live exit frame
+  /// ever says how. A reload has the start and nothing else, so drawing it as
+  /// running claims a process that ended before the page was opened — and the
+  /// pulsing accent it is drawn in reads as work still in hand.
+  it('shows a job rebuilt from a reloaded chat as ended, never as still running', () => {
+    render(<JobCard call={{ job: started }} />);
+
+    const card = screen.getByTestId('job-card');
+    expect(card).toHaveClass('job-card--ended');
+    expect(card).not.toHaveClass('job-card--running');
+    expectNotAPass(card);
+    expect(screen.getByText('Job ended with the turn — exit not recorded')).toBeInTheDocument();
+    expect(screen.queryByText('Job running')).not.toBeInTheDocument();
+  });
+
+  it('keeps an exit the live frame reported, whichever turn the card belongs to', () => {
+    const { rerender } = render(
+      <JobCard call={{ job: started, exited: exited({ exit_code: 0 }) }} />
+    );
+    expect(screen.getByTestId('job-card')).toHaveClass('job-card--ok');
+
+    rerender(<JobCard call={{ job: started, exited: exited() }} live />);
+    expect(screen.getByTestId('job-card')).toHaveClass('job-card--failed');
     expect(screen.getByText('Job killed without exiting')).toBeInTheDocument();
   });
 

@@ -30,7 +30,8 @@
 
 .job-card--timed-out,
 .job-card--unknown,
-.job-card--unreadable {
+.job-card--unreadable,
+.job-card--ended {
   border-left-color: var(--ui-warning, #b45309);
 }
 
@@ -65,7 +66,8 @@
 
 .job-card--timed-out .job-card-status,
 .job-card--unknown .job-card-status,
-.job-card--unreadable .job-card-status {
+.job-card--unreadable .job-card-status,
+.job-card--ended .job-card-status {
   background: var(--ui-warning, #b45309);
 }
 
@@ -77,7 +79,8 @@
 
 .job-card--timed-out .job-card-title,
 .job-card--unknown .job-card-title,
-.job-card--unreadable .job-card-title {
+.job-card--unreadable .job-card-title,
+.job-card--ended .job-card-title {
   color: var(--ui-warning, #b45309);
 }
 
