@@ -129,7 +129,9 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::actions::{START_TASK_DESCRIPTION, TAIL_TASK_LOG_DESCRIPTION};
+    use crate::agent::actions::{
+        FROM_CHAT, FROM_RUN, START_TASK_DESCRIPTION, TAIL_TASK_LOG_DESCRIPTION,
+    };
     use crate::agent::prompt;
     use crate::agent::prompt::section::tiers::FINISH_FIRST;
     use crate::agent::prompt::section::workspace::START_TASK;
@@ -320,6 +322,34 @@ mod tests {
         for owned in [START_TASK, FINISH_FIRST] {
             assert_eq!(rendered.matches(owned).count(), 1, "{owned}");
         }
+    }
+
+    /// tail_task_log is registered for an authorized task run as well as for a
+    /// chat, and wait_for refuses kind=task_run from a run. An unscoped offer
+    /// to wait on the run is therefore true on one surface and false on the
+    /// other, and the refusal is the first a run hears of it. The offer is
+    /// scoped to the surface that can take it, and the half a run reads names
+    /// no kind at all — it hands off, in the register the refusal already uses.
+    #[test]
+    fn the_log_read_offers_the_run_wait_only_to_the_surface_that_can_make_it() {
+        let description = TAIL_TASK_LOG_DESCRIPTION;
+        assert!(
+            description.contains(&format!("{WAIT_FOR} kind={KIND_TASK_RUN}")),
+            "a chat still has to be sent to the wait rather than back to this read: {description}"
+        );
+        let (chat_half, run_half) = description.split_once(FROM_RUN).unwrap_or_else(|| {
+            panic!(
+                "a run reads this too, so the description has to say what it does: {description}"
+            )
+        });
+        assert!(
+            chat_half.contains(FROM_CHAT),
+            "the run wait is available from a chat only, so the offer has to say whose it is:              {description}"
+        );
+        assert!(
+            !run_half.contains(KIND_TASK_RUN),
+            "what a run is told to do is the one wait it will be refused: {run_half}"
+        );
     }
 
     /// The four strings a model reads at the moment it starts a runner. A
