@@ -74,6 +74,33 @@ const startedBy =
   (calls) =>
     calls.find((call) => call.job?.id === jobId)?.id ?? jobId;
 
+// message_end carries the turn's persisted calls: the same rows the live
+// frames patched, but without the fields only this client ever holds. Spreading
+// that list whole is what put a settled wait back to "waiting" and an exited
+// job back to "running" at the end of the turn, so the rows are merged by id
+// and anything the trace holds that the server never stored is kept beside them.
+function mergeToolCalls(existing: ToolCallRecord[], incoming: ToolCallRecord[]): ToolCallRecord[] {
+  const stored = new Map(incoming.map((call) => [call.id, call]));
+  const merged = existing.map((call) => {
+    const arrived = stored.get(call.id);
+    stored.delete(call.id);
+    return arrived ? { ...call, ...arrived } : call;
+  });
+  return [...merged, ...stored.values()];
+}
+
+function mergeMetadata(
+  existing: MessageMetadata | null | undefined,
+  incoming: MessageMetadata | null | undefined
+): MessageMetadata | null | undefined {
+  if (incoming === undefined) return existing;
+  const merged = { ...existing, ...incoming };
+  if (incoming?.tool_calls && existing?.tool_calls) {
+    merged.tool_calls = mergeToolCalls(existing.tool_calls, incoming.tool_calls);
+  }
+  return merged;
+}
+
 // The server saves the user message and streams the assistant reply over
 // /ws/chats/:id. Posting to /api/chats/:id/messages only stores the user's
 // message, so sending over the socket is what produces a reply.
@@ -347,8 +374,7 @@ export function useChat(
                 // Merged, not replaced: a streaming turn has several
                 // writers for one message, and an arriving image must not
                 // drop the tool trace that patchToolCall put there.
-                metadata:
-                  metadata !== undefined ? { ...last.metadata, ...metadata } : last.metadata,
+                metadata: mergeMetadata(last.metadata, metadata),
               },
             ],
           };
@@ -358,13 +384,7 @@ export function useChat(
           return {
             ...prev,
             messages: prev.messages.map((m) =>
-              m.id === id
-                ? {
-                    ...m,
-                    content,
-                    metadata: metadata !== undefined ? { ...m.metadata, ...metadata } : m.metadata,
-                  }
-                : m
+              m.id === id ? { ...m, content, metadata: mergeMetadata(m.metadata, metadata) } : m
             ),
           };
         }

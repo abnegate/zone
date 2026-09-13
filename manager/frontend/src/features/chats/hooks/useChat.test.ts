@@ -2238,6 +2238,102 @@ describe('useChat', () => {
     expect(calls?.[0]?.settled).toEqual(settled);
   });
 
+  // The turn that ends carries its own saved tool calls, and nothing durable
+  // records how a wait settled or a job exited. Letting that list replace the
+  // trace flipped a settled verdict back to "waiting" on screen at the very
+  // moment the reader was left looking at it.
+  it('keeps a settled verdict when the end of the turn brings the saved calls back', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    const settled = {
+      tool_call_id: 'call_wait',
+      outcome: 'job_9f3c1a7b2e04 exited with code 0 after 214s.',
+      verdict: 'settled' as const,
+    };
+    act(() => {
+      waitCall('m10');
+      lastSocket?.emit({
+        type: 'wait_started',
+        message_id: 'm10',
+        tool_call_id: 'call_wait',
+        waiting,
+      });
+      lastSocket?.emit({ type: 'wait_settled', message_id: 'm10', settled });
+      lastSocket?.emit({
+        type: 'message_end',
+        message_id: 'm10',
+        content: 'The build is green.',
+        metadata: {
+          tool_calls: [
+            {
+              id: 'call_wait',
+              name: 'wait_for',
+              arguments: '{"kind":"job","id":"job_9f3c1a7b2e04"}',
+              success: true,
+              detail: 'Waiting for job_9f3c1a7b2e04 until 2026-09-12T10:15:00Z.',
+              duration_ms: 4,
+              waiting,
+            },
+          ],
+        },
+      });
+    });
+
+    const calls = result.current.chat?.messages.at(-1)?.metadata?.tool_calls;
+    expect(calls).toHaveLength(1);
+    expect(calls?.[0]?.settled).toEqual(settled);
+    expect(calls?.[0]?.waiting).toEqual(waiting);
+  });
+
+  it('keeps a job exit when the end of the turn brings the saved calls back', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    act(() => {
+      backgroundCall('m11');
+      lastSocket?.emit({ type: 'job_started', message_id: 'm11', tool_call_id: 'call_shell', job });
+      lastSocket?.emit({
+        type: 'job_exited',
+        message_id: 'm11',
+        job: { id: 'job_9f3c1a7b2e04', exit_code: 1 },
+      });
+      lastSocket?.emit({
+        type: 'message_end',
+        message_id: 'm11',
+        content: 'The build failed.',
+        metadata: {
+          tool_calls: [
+            {
+              id: 'call_shell',
+              name: 'run_shell',
+              arguments: '{"command":"bun test","background":true}',
+              success: true,
+              detail: 'Started job_9f3c1a7b2e04 (pid 48213).',
+              duration_ms: 12,
+              job,
+            },
+          ],
+        },
+      });
+    });
+
+    const calls = result.current.chat?.messages.at(-1)?.metadata?.tool_calls;
+    expect(calls).toHaveLength(1);
+    expect(calls?.[0]?.exited).toEqual({ id: 'job_9f3c1a7b2e04', exit_code: 1 });
+    expect(calls?.[0]?.job).toEqual(job);
+  });
+
   it('leaves the call as the tool result left it when a job or wait frame cannot be read', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
