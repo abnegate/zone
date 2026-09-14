@@ -438,6 +438,14 @@ mod tests {
     static DISPATCH: std::sync::LazyLock<tokio::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+    /// Long enough that a claimed turn stays claimed for the length of a test,
+    /// which is what a real lease is for.
+    const LEASE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// And a lease nothing can be inside, which is a worker that claimed a turn
+    /// and never came back — without a test that has to wait out a real one.
+    const ABANDONED: std::time::Duration = std::time::Duration::ZERO;
+
     async fn fixture() -> (PgPool, Uuid, Uuid, Uuid, Uuid) {
         let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
             .await
@@ -917,12 +925,14 @@ mod tests {
         cleanup(&pool, organization, user).await;
     }
 
-    /// A prompt is a turn, not a message. The dispatch claims the row, stores
-    /// nothing in the chat, and hands the worker what it needs to run the turn
-    /// once the claim has committed — because holding a row lock across a model
-    /// call is exactly what this split exists to avoid.
+    /// A prompt is a turn, not a message. The claim stores nothing in the chat
+    /// and writes the turn down as still owed, because holding a row lock
+    /// across a model call is exactly what this split exists to avoid — and
+    /// because a handoff that only lived in memory would go with the process
+    /// holding it, leaving a schedule that had moved past an occurrence nobody
+    /// was ever given.
     #[tokio::test]
-    async fn a_prompt_is_handed_back_as_a_turn_and_stores_no_message_of_its_own() {
+    async fn a_prompt_is_written_down_as_a_turn_and_stores_no_message_of_its_own() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let _dispatch = DISPATCH.lock().await;
         let created = reminders::create(
@@ -954,21 +964,20 @@ mod tests {
         .unwrap();
 
         let delivered = reminders::deliver_next(&pool).await.unwrap();
-        let Delivered::Turn {
-            chat_id: turn_chat,
-            workspace_id: turn_workspace,
-            user_id: turn_user,
-            reminder_id,
-            prompt,
-        } = delivered
-        else {
-            panic!("a prompt must come back as a turn to run: {delivered:?}");
-        };
-        assert_eq!(turn_chat, chat_id);
-        assert_eq!(turn_workspace, workspace);
-        assert_eq!(turn_user, user, "the turn runs as whoever asked for it");
-        assert_eq!(reminder_id, id);
-        assert!(prompt.starts_with("Say what changed"), "{prompt}");
+        assert_eq!(delivered, Delivered::Settled);
+        let turn = reminders::claim_turn(&pool, LEASE)
+            .await
+            .unwrap()
+            .expect("a prompt leaves a turn to run");
+        assert_eq!(turn.chat_id, chat_id);
+        assert_eq!(turn.workspace_id, workspace);
+        assert_eq!(turn.user_id, user, "the turn runs as whoever asked for it");
+        assert_eq!(turn.reminder_id, id);
+        assert!(turn.prompt.starts_with("Say what changed"), "{turn:?}");
+        assert!(
+            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            "a claimed turn is not offered to a second worker inside its lease"
+        );
 
         let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
             .bind(chat_id)
@@ -990,6 +999,115 @@ mod tests {
         assert_eq!(status, "pending");
         assert_eq!(fired, 1);
         assert_eq!(message_id, None);
+
+        reminders::finish_turn(&pool, turn.id).await.unwrap();
+        assert!(
+            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            "a turn that has run is not owed again"
+        );
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// The gap this table exists for. A process that claims a firing and dies
+    /// before the turn finishes leaves a schedule that has moved past an
+    /// occurrence and a chat with nothing in it, so the firing is offered again
+    /// once its claim goes stale — and given up on rather than offered for
+    /// ever, because a firing that takes the server down every time it runs is
+    /// a crash loop and not a delivery.
+    #[tokio::test]
+    async fn a_turn_whose_worker_died_is_offered_again_and_then_given_up_on() {
+        let _dispatch = DISPATCH.lock().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Overnight check".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: None,
+                prompt: Some("Say what changed overnight.".into()),
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        reminders::deliver_next(&pool).await.unwrap();
+
+        // Three claims, each abandoned: the lease of zero is a worker that
+        // never came back, without a test that has to wait out a real one.
+        for attempt in 1..=3 {
+            let turn = reminders::claim_turn(&pool, ABANDONED)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("attempt {attempt} must be offered the turn"));
+            assert_eq!(turn.reminder_id, id);
+        }
+        assert!(
+            reminders::claim_turn(&pool, ABANDONED)
+                .await
+                .unwrap()
+                .is_none(),
+            "a turn that has used every attempt is dropped rather than offered a fourth time"
+        );
+        let owed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM reminder_turns WHERE reminder_id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            owed, 0,
+            "the queue does not silt up with firings nothing will run"
+        );
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// Stopping a standing job stops the firing it has already claimed as well.
+    /// Being answered once more by something just cancelled reads as the cancel
+    /// not having worked.
+    #[tokio::test]
+    async fn cancelling_a_schedule_drops_the_turn_it_has_not_run_yet() {
+        let _dispatch = DISPATCH.lock().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Hourly check".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=HOURLY".into()),
+                prompt: Some("Say what changed in the last hour.".into()),
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        sqlx::query(
+            "UPDATE reminders SET due_at = NOW() - INTERVAL '1 second', \
+             anchor_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        reminders::deliver_next(&pool).await.unwrap();
+
+        reminders::cancel(&pool, workspace, user, id).await.unwrap();
+        assert!(
+            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            "a cancelled schedule owes nothing, including what it had already claimed"
+        );
         cleanup(&pool, organization, user).await;
     }
 

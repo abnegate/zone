@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use std::time::Duration;
 use uuid::Uuid;
 
 /// How a due automation is meant to be read when it fires.
@@ -156,6 +157,15 @@ pub async fn cancel(
     actions::authorize(&mut transaction, workspace_id, user_id, true).await?;
     let result = sqlx::query_scalar("UPDATE reminders SET status = 'cancelled', completed_at = NOW() WHERE id = $1 AND workspace_id = $2 AND created_by = $3 AND status = 'pending' RETURNING to_jsonb(reminders.*)")
         .bind(reminder_id).bind(workspace_id).bind(user_id).fetch_optional(&mut *transaction).await?;
+    // A firing that came due and has not run yet goes with the schedule.
+    // Stopping a standing job and then being answered by it once more reads as
+    // the cancel not having worked.
+    if result.is_some() {
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder_id)
+            .execute(&mut *transaction)
+            .await?;
+    }
     transaction.commit().await?;
     result.ok_or_else(|| actions::invalid("Pending reminder not found"))
 }
@@ -176,29 +186,36 @@ struct Due {
     prompt: Option<String>,
 }
 
-/// What one dispatch did, so the worker knows whether a turn has to follow it.
+/// What one claim did.
 ///
 /// A reminder that carries no prompt is finished when its message is stored:
 /// the content *is* the delivery. One that carries a prompt has delivered
 /// nothing yet — the prompt is a turn for the model to take, and the answer is
-/// what the person asked to receive — so the worker is handed what it needs to
-/// run it once this transaction has committed. Running a generation inside the
-/// claim's transaction would hold the row lock for the length of a model call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// what the person asked to receive — so the claim writes the turn down as
+/// still owed and commits, and the worker runs it from there. Running a
+/// generation inside the claim's transaction would hold the row lock for the
+/// length of a model call; handing it back in memory instead would lose the
+/// firing with the process holding it, and the schedule has already moved past
+/// that occurrence by the time the claim commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivered {
     /// Nothing was due.
     Nothing,
-    /// A claim was settled and needs nothing more: a message was stored, a
-    /// membership was gone, or a schedule had outlived its lifetime.
+    /// A claim was settled: a message was stored, a turn was written down for
+    /// the worker to run, a membership was gone, or a schedule had outlived
+    /// its lifetime.
     Settled,
-    /// The automation's prompt is a turn the worker still has to run.
-    Turn {
-        chat_id: Uuid,
-        workspace_id: Uuid,
-        user_id: Uuid,
-        reminder_id: Uuid,
-        prompt: String,
-    },
+}
+
+/// One firing that still owes its chat a turn.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct PendingTurn {
+    pub id: Uuid,
+    pub reminder_id: Uuid,
+    pub workspace_id: Uuid,
+    pub chat_id: Uuid,
+    pub user_id: Uuid,
+    pub prompt: String,
 }
 
 /// Where a fired automation goes next, or `None` when its rule is spent and
@@ -282,7 +299,6 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
     }
 
     let mut message = None;
-    let mut turn = None;
     if let Err(error) = actions::authorize(&mut transaction, workspace_id, user_id, true).await {
         if !matches!(error, sqlx::Error::Protocol(_)) {
             return Err(error);
@@ -301,13 +317,17 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
         // put a notice in the chat that the person never asked for.
         let message_id = match prompt {
             Some(prompt) => {
-                turn = Some(Delivered::Turn {
-                    chat_id,
-                    workspace_id,
-                    user_id,
-                    reminder_id: id,
-                    prompt,
-                });
+                sqlx::query(
+                    "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, \
+                     prompt) VALUES ($1, $2, $3, $4, $5)",
+                )
+                .bind(id)
+                .bind(workspace_id)
+                .bind(chat_id)
+                .bind(user_id)
+                .bind(prompt)
+                .execute(&mut *transaction)
+                .await?;
                 None
             }
             None => {
@@ -367,8 +387,77 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
     if let Some(message) = message {
         actions::publish(chat_id, message);
     }
-    // The turn is handed back rather than run here: this function owns a
-    // transaction and a row lock, and a model call is not something to hold
-    // either across.
-    Ok(turn.unwrap_or(Delivered::Settled))
+    Ok(Delivered::Settled)
+}
+
+/// How many times one firing's turn is offered before it is given up on.
+///
+/// A turn is only ever offered again because whatever took it did not live to
+/// say it was done, so a firing that exhausts this is one three attempts have
+/// started and none has finished. A fourth is a crash loop rather than a
+/// delivery, and a crash loop costs every other schedule its dispatch.
+const MAX_TURN_ATTEMPTS: i32 = 3;
+
+/// Takes the oldest firing that still owes a turn, or `None` when none does.
+///
+/// `lease` is how long a claim is honoured: past it the firing is taken to have
+/// died with whatever was running it, and is offered again. The caller sets it
+/// because only the caller knows how long a turn can take — the generation
+/// timeout, plus however long one may sit queued behind the chat's own
+/// semaphore. Too short costs a duplicate turn and too long costs a late one,
+/// and of the two only the duplicate is something a person has to read.
+pub async fn claim_turn(pool: &PgPool, lease: Duration) -> DbResult<Option<PendingTurn>> {
+    let seconds = lease.as_secs_f64();
+    let mut transaction = pool.begin().await?;
+    // Dropped here rather than skipped, so the queue does not silt up with
+    // firings nothing will ever run. Named in the log, because a firing nobody
+    // receives is worth one line saying which schedule it belonged to.
+    let abandoned: Vec<Uuid> = sqlx::query_scalar(
+        "DELETE FROM reminder_turns WHERE attempts >= $1 AND claimed_at IS NOT NULL \
+         AND claimed_at <= NOW() - make_interval(secs => $2) RETURNING reminder_id",
+    )
+    .bind(MAX_TURN_ATTEMPTS)
+    .bind(seconds)
+    .fetch_all(&mut *transaction)
+    .await?;
+    for reminder_id in abandoned {
+        tracing::warn!(
+            %reminder_id,
+            attempts = MAX_TURN_ATTEMPTS,
+            "Reminder turn abandoned after repeated attempts; its firing may never have reached \
+             the chat"
+        );
+    }
+    // The attempt bound is repeated here so the rows this can claim and the
+    // rows the delete above takes are disjoint sets. Without it a worker could
+    // hold a row another worker's delete is waiting on while waiting on a row
+    // that worker holds, which is a deadlock either of them could have been
+    // written out of.
+    let claimed = sqlx::query_as::<_, PendingTurn>(
+        "UPDATE reminder_turns SET attempts = attempts + 1, claimed_at = NOW() WHERE id = ( \
+         SELECT id FROM reminder_turns WHERE attempts < $1 \
+         AND (claimed_at IS NULL OR claimed_at <= NOW() - make_interval(secs => $2)) \
+         ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED) \
+         RETURNING id, reminder_id, workspace_id, chat_id, created_by AS user_id, prompt",
+    )
+    .bind(MAX_TURN_ATTEMPTS)
+    .bind(seconds)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(claimed)
+}
+
+/// Marks one firing's turn as run, whatever the turn made of it.
+///
+/// A turn that reached the chat and failed there has already said so in the
+/// chat, and offering it again would repeat the failure rather than recover
+/// from it. The retry in `claim_turn` exists for the one case this cannot
+/// reach: a process that did not live to call this.
+pub async fn finish_turn(pool: &PgPool, turn_id: Uuid) -> DbResult<()> {
+    sqlx::query("DELETE FROM reminder_turns WHERE id = $1")
+        .bind(turn_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
