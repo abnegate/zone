@@ -157,9 +157,15 @@ impl Tool for WorkspaceAction {
             }
             Action::CreateReminder => CREATE_REMINDER_DESCRIPTION,
             Action::ListReminders => {
-                "List the current user's workspace reminders, including pending, delivered, and cancelled reminders."
+                "List the current user's workspace reminders: pending, delivered, cancelled, and \
+                 expired — a repeating one that ran out of rule or outlived its week, which is a \
+                 different ending from one somebody cancelled. A pending row with an rrule is \
+                 still repeating, and its due_at is the next firing rather than the first."
             }
-            Action::CancelReminder => "Cancel one of the current user's pending reminders.",
+            Action::CancelReminder => {
+                "Cancel one of the current user's pending reminders. Cancelling a repeating one \
+                 stops the whole schedule, not just its next firing."
+            }
             Action::StartTask => START_TASK_DESCRIPTION,
             Action::GetTaskRun => {
                 "Get status, phase, progress and error for a runner task in this workspace."
