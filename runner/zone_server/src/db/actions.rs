@@ -428,15 +428,42 @@ mod tests {
     use crate::db::reminders::Delivered;
     use chrono::{Duration, Utc};
 
+    /// The key every test that dispatches a reminder takes first.
+    ///
     /// `deliver_next` claims the oldest due reminder in the whole database
     /// rather than the oldest in one workspace — it is a dispatcher, and every
-    /// server instance shares it. Two tests that both have a due row therefore
-    /// steal each other's, so every test that dispatches holds this first.
+    /// server instance shares it — and `claim_turn` takes the oldest firing
+    /// that still owes a turn the same way. Two tests that both have one
+    /// therefore steal each other's.
+    ///
+    /// In the database rather than in this process, because CI runs these
+    /// under `cargo nextest`, which gives every test a process of its own: a
+    /// `Mutex` here would serialise nothing there, and the tests would pass
+    /// locally and race in CI. Postgres releases a session lock when the
+    /// connection holding it goes, which covers a test that panics as well as
+    /// one that returns.
     ///
     /// Not a fixture concern: the rows are already isolated by workspace. It is
     /// the claim that is global, which is the behaviour under test.
-    static DISPATCH: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+    const DISPATCH: i64 = 0x7A6F_6E65_5245_4D44;
+
+    /// Held for the length of a dispatching test. Its connection is its own
+    /// rather than the pool's, because a pooled connection is returned to the
+    /// pool still holding the lock.
+    async fn dispatching() -> sqlx::PgConnection {
+        use sqlx::Connection;
+        let mut connection = sqlx::PgConnection::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL required"),
+        )
+        .await
+        .expect("a connection of its own to hold the dispatch lock");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(DISPATCH)
+            .execute(&mut connection)
+            .await
+            .expect("the dispatch lock is takeable");
+        connection
+    }
 
     /// Long enough that a claimed turn stays claimed for the length of a test,
     /// which is what a real lease is for.
@@ -770,7 +797,7 @@ mod tests {
     /// pending. Both deliver exactly one message per firing.
     #[tokio::test]
     async fn an_automation_moves_to_its_next_firing_where_a_one_shot_is_finished() {
-        let _dispatch = DISPATCH.lock().await;
+        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let one_shot = reminders::Reminder {
             content: "Once".into(),
@@ -875,7 +902,7 @@ mod tests {
     #[tokio::test]
     async fn a_finite_count_delivers_exactly_the_firings_it_named() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
-        let _dispatch = DISPATCH.lock().await;
+        let _dispatch = dispatching().await;
         let created = reminders::create(
             &pool,
             workspace,
@@ -934,7 +961,7 @@ mod tests {
     #[tokio::test]
     async fn a_prompt_is_written_down_as_a_turn_and_stores_no_message_of_its_own() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
-        let _dispatch = DISPATCH.lock().await;
+        let _dispatch = dispatching().await;
         let created = reminders::create(
             &pool,
             workspace,
@@ -1016,7 +1043,7 @@ mod tests {
     /// a crash loop and not a delivery.
     #[tokio::test]
     async fn a_turn_whose_worker_died_is_offered_again_and_then_given_up_on() {
-        let _dispatch = DISPATCH.lock().await;
+        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let created = reminders::create(
             &pool,
@@ -1075,7 +1102,7 @@ mod tests {
     /// not having worked.
     #[tokio::test]
     async fn cancelling_a_schedule_drops_the_turn_it_has_not_run_yet() {
-        let _dispatch = DISPATCH.lock().await;
+        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let created = reminders::create(
             &pool,
@@ -1116,7 +1143,7 @@ mod tests {
     /// reader can tell a schedule that ran out from one somebody stopped.
     #[tokio::test]
     async fn an_automation_past_its_lifetime_expires_rather_than_firing_for_ever() {
-        let _dispatch = DISPATCH.lock().await;
+        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let created = reminders::create(
             &pool,
@@ -1177,7 +1204,7 @@ mod tests {
 
     #[tokio::test]
     async fn reminders_cancel_revoke_and_deliver_once_across_workers() {
-        let _dispatch = DISPATCH.lock().await;
+        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let reminder = || reminders::Reminder {
             content: "Check release".into(),
