@@ -172,16 +172,23 @@ impl Recurrence {
         Ok(recurrence)
     }
 
-    /// Refuses a rule that would fire faster than `MIN_PERIOD`.
+    /// The nominal gap between two firings: the frequency's own period, times
+    /// the interval, divided by how many times the `BY` clauses split it.
+    /// `FREQ=DAILY;BYHOUR=9,17` is twelve hours, not twenty-four.
     ///
-    /// The period is the frequency's own, divided by how many times the `BY`
-    /// clauses split it: `FREQ=DAILY;BYHOUR=9,10` is two firings a day and
-    /// passes, where `FREQ=HOURLY;BYMINUTE=0,30` is two an hour and does not.
-    fn within_the_floor(&self) -> Result<(), String> {
+    /// Nominal because a month is measured at its shortest and a `BYDAY` list
+    /// is not counted — it is what sizes a jitter offset and what holds a rule
+    /// to `MIN_PERIOD`, and both want the gap at its smallest.
+    pub fn period(&self) -> Duration {
         let splits = i32::try_from(self.by_hour.len().max(1) * self.by_minute.len().max(1))
             .unwrap_or(i32::MAX);
-        let period = self.frequency.shortest() * i32::try_from(self.interval).unwrap_or(i32::MAX);
-        if period / splits.max(1) < MIN_PERIOD {
+        let whole = self.frequency.shortest() * i32::try_from(self.interval).unwrap_or(i32::MAX);
+        whole / splits.max(1)
+    }
+
+    /// Refuses a rule that would fire faster than `MIN_PERIOD`.
+    fn within_the_floor(&self) -> Result<(), String> {
+        if self.period() < MIN_PERIOD {
             return Err(
                 "That repeats more often than once an hour, which is the ceiling. Ask for \
                         a slower schedule, or wait on the event itself if you need to know the \

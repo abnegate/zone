@@ -427,6 +427,16 @@ mod tests {
     use crate::db::reminders;
     use chrono::{Duration, Utc};
 
+    /// `deliver_next` claims the oldest due reminder in the whole database
+    /// rather than the oldest in one workspace — it is a dispatcher, and every
+    /// server instance shares it. Two tests that both have a due row therefore
+    /// steal each other's, so every test that dispatches holds this first.
+    ///
+    /// Not a fixture concern: the rows are already isolated by workspace. It is
+    /// the claim that is global, which is the behaviour under test.
+    static DISPATCH: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     async fn fixture() -> (PgPool, Uuid, Uuid, Uuid, Uuid) {
         let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
             .await
@@ -688,12 +698,208 @@ mod tests {
         cleanup(&pool, organization, user).await;
     }
 
+    /// A rule the schedule module refuses never reaches a row, and each
+    /// refusal names what was wrong: the caller is a model turning a person's
+    /// sentence into a schedule, and a refusal it cannot act on costs the
+    /// person another turn.
+    #[tokio::test]
+    async fn a_schedule_this_build_will_not_keep_is_refused_at_the_create() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let automation = |rrule: Option<&str>, mode: Option<&str>| reminders::Reminder {
+            content: "Check the build".into(),
+            due_at: Utc::now() + Duration::hours(1),
+            rrule: rrule.map(str::to_string),
+            prompt: None,
+            timing_mode: mode.map(str::to_string),
+        };
+
+        for (rrule, mode, expected) in [
+            // Faster than the ceiling, counted after the BY clauses split it.
+            (Some("FREQ=HOURLY;BYMINUTE=0,30"), None, "once an hour"),
+            // A clause this build does not implement, refused and not dropped.
+            (Some("FREQ=MONTHLY;BYSETPOS=-1;BYDAY=FR"), None, "BYSETPOS"),
+            // A mode the worker would dispatch under the wrong contract.
+            (None, Some("whenever"), "not a timing mode"),
+            // A watch that never fires again samples once and reports nothing.
+            (None, Some("condition_watch"), "has to repeat"),
+        ] {
+            let refused =
+                reminders::create(&pool, workspace, user, chat_id, automation(rrule, mode))
+                    .await
+                    .expect_err(&format!("{rrule:?}/{mode:?} must be refused"));
+            let sqlx::Error::Protocol(why) = &refused else {
+                panic!("{rrule:?}/{mode:?} was refused by the wrong error: {refused:?}");
+            };
+            assert!(why.contains(expected), "{rrule:?}/{mode:?}: {why}");
+        }
+
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM reminders WHERE workspace_id = $1")
+                .bind(workspace)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, 0, "a refused create must leave no row behind");
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// The difference this whole change exists for: a one-shot is finished when
+    /// it fires, and an automation moves to its next occurrence and stays
+    /// pending. Both deliver exactly one message per firing.
+    #[tokio::test]
+    async fn an_automation_moves_to_its_next_firing_where_a_one_shot_is_finished() {
+        let _dispatch = DISPATCH.lock().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let one_shot = reminders::Reminder {
+            content: "Once".into(),
+            due_at: Utc::now() + Duration::hours(1),
+            rrule: None,
+            prompt: None,
+            timing_mode: None,
+        };
+        let daily = reminders::Reminder {
+            content: "Every morning".into(),
+            due_at: Utc::now() + Duration::hours(1),
+            rrule: Some("FREQ=DAILY".into()),
+            prompt: Some("Say what changed since yesterday.".into()),
+            timing_mode: Some("exact_schedule".into()),
+        };
+
+        let one_shot = reminders::create(&pool, workspace, user, chat_id, one_shot)
+            .await
+            .unwrap();
+        let daily = reminders::create(&pool, workspace, user, chat_id, daily)
+            .await
+            .unwrap();
+        let one_shot_id: Uuid = serde_json::from_value(one_shot["id"].clone()).unwrap();
+        let daily_id: Uuid = serde_json::from_value(daily["id"].clone()).unwrap();
+        assert_eq!(daily["timing_mode"], "exact_schedule");
+        assert!(
+            !daily["anchor_at"].is_null(),
+            "a recurring reminder keeps the first firing to measure from: {daily}"
+        );
+        assert!(
+            !daily["expires_at"].is_null(),
+            "a recurring reminder carries a lifetime: {daily}"
+        );
+        assert!(
+            one_shot["anchor_at"].is_null() && one_shot["expires_at"].is_null(),
+            "a one-shot gets neither: {one_shot}"
+        );
+
+        sqlx::query(
+            // The anchor moves with the due date. A schedule that has reached its
+            // first firing has that firing behind it; leaving the anchor in the
+            // future would leave today's occurrence still ahead, which is right for
+            // a schedule that has not fired yet and is not the case under test.
+            "UPDATE reminders SET due_at = NOW() - INTERVAL '1 second', anchor_at = \
+             CASE WHEN anchor_at IS NULL THEN NULL ELSE NOW() - INTERVAL '1 second' END \
+             WHERE workspace_id = $1",
+        )
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(reminders::deliver_next(&pool).await.unwrap());
+        assert!(reminders::deliver_next(&pool).await.unwrap());
+        assert!(
+            !reminders::deliver_next(&pool).await.unwrap(),
+            "the rescheduled automation is not due again immediately"
+        );
+
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(chat_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(messages, 2, "one message per firing, and no more");
+
+        let (status, fired, due): (String, i32, chrono::DateTime<Utc>) =
+            sqlx::query_as("SELECT status, fired_count, due_at FROM reminders WHERE id = $1")
+                .bind(daily_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "pending", "an automation is not finished by firing");
+        assert_eq!(fired, 1);
+        assert!(
+            due > Utc::now() + Duration::hours(20),
+            "a daily rule moves about a day on, not to the next tick: {due}"
+        );
+
+        let (status, fired): (String, i32) =
+            sqlx::query_as("SELECT status, fired_count FROM reminders WHERE id = $1")
+                .bind(one_shot_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "delivered", "a one-shot is finished when it fires");
+        assert_eq!(fired, 1);
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A schedule that has outlived its lifetime ends as `expired`, which is a
+    /// different ending from a delivery and different again from a cancel, so a
+    /// reader can tell a schedule that ran out from one somebody stopped.
+    #[tokio::test]
+    async fn an_automation_past_its_lifetime_expires_rather_than_firing_for_ever() {
+        let _dispatch = DISPATCH.lock().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Every morning".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY".into()),
+                prompt: None,
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+
+        sqlx::query(
+            "UPDATE reminders SET due_at = NOW() - INTERVAL '1 second', \
+             expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(reminders::deliver_next(&pool).await.unwrap());
+
+        let (status, completed): (String, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as("SELECT status, completed_at FROM reminders WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "expired");
+        assert!(
+            completed.is_some(),
+            "an ended schedule records when it ended"
+        );
+        assert!(
+            !reminders::deliver_next(&pool).await.unwrap(),
+            "an expired schedule is never claimed again"
+        );
+        cleanup(&pool, organization, user).await;
+    }
+
     #[tokio::test]
     async fn reminders_cancel_revoke_and_deliver_once_across_workers() {
+        let _dispatch = DISPATCH.lock().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let reminder = || reminders::Reminder {
             content: "Check release".into(),
             due_at: Utc::now() + Duration::hours(1),
+            rrule: None,
+            prompt: None,
+            timing_mode: None,
         };
         assert!(
             reminders::create(&pool, workspace, user, Uuid::new_v4(), reminder())
