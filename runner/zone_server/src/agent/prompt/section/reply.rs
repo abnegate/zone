@@ -18,6 +18,8 @@ pub(in crate::agent::prompt) const BANNED_PHRASES: &[&str] = &[
     "delve",
     "leverage",
     "it's worth noting",
+    "Based on your memories",
+    "I remember",
 ];
 
 const HEADING: &str = "Writing the reply:";
@@ -87,7 +89,7 @@ mod tests {
     fn every_banned_phrase_is_named_in_the_section() {
         let rendered = rendered();
 
-        assert!(!BANNED_PHRASES.is_empty());
+        assert_eq!(BANNED_PHRASES.len(), 10, "{BANNED_PHRASES:?}");
         for phrase in BANNED_PHRASES {
             assert!(
                 rendered.contains(&format!("\"{phrase}\"")),

@@ -18,6 +18,9 @@ use serde_json::Value;
 use uuid::Uuid;
 use zone_core::tools::ToolResult;
 
+use super::memory::{MEMORY_APPEND, MEMORY_DELETE, MEMORY_WRITE};
+use crate::db::memory::MemoryCategory;
+
 /// Longest target label we keep on a receipt.
 const LABEL_CHARS: usize = 80;
 
@@ -32,6 +35,9 @@ pub enum ActionTarget {
     Document,
     Message,
     Reminder,
+    /// One person's remembered entry. Private to them, so it has no page to
+    /// link to and the receipt is the only record the console gets.
+    Memory,
 }
 
 /// A completed workspace write, as streamed to the client and stored on the
@@ -67,6 +73,9 @@ pub fn is_write_tool(name: &str) -> bool {
             | "send_message"
             | "create_reminder"
             | "cancel_reminder"
+            | MEMORY_WRITE
+            | MEMORY_APPEND
+            | MEMORY_DELETE
     )
 }
 
@@ -120,11 +129,38 @@ fn target_type(name: &str) -> Option<ActionTarget> {
         "create_document" | "update_document" => ActionTarget::Document,
         "send_message" => ActionTarget::Message,
         "create_reminder" | "cancel_reminder" => ActionTarget::Reminder,
+        MEMORY_WRITE | MEMORY_APPEND | MEMORY_DELETE => ActionTarget::Memory,
         _ => return None,
     })
 }
 
+/// Which entry a memory call addressed, read from the call's own arguments: a
+/// memory tool answers in prose, so its output carries no `id` to read. A
+/// single-entry kind resolves to its forced title whatever name the model
+/// supplied, exactly as the store resolves it.
+///
+/// A fact resolves to its kind and to no name. The receipt is stored on the
+/// assistant message and streamed to the console, and a chat is readable by
+/// anyone holding workspace read access — not only by the person the memory
+/// belongs to. A fact's name is the model's, chosen to describe what one
+/// person asked to have remembered, so it does not go in a field the whole
+/// workspace reads. The two forced titles are constants that name nothing
+/// about anybody, so they stay.
+fn memory_entry(name: &str, args: &Value) -> Option<(MemoryCategory, Option<&'static str>)> {
+    if !matches!(name, MEMORY_WRITE | MEMORY_APPEND | MEMORY_DELETE) {
+        return None;
+    }
+    let category = MemoryCategory::parse(&text_field(args, "category")?)?;
+    Some((category, category.title()))
+}
+
 fn target_id(name: &str, args: &Value, output: Option<&Value>) -> String {
+    if let Some((category, title)) = memory_entry(name, args) {
+        return match title {
+            Some(title) => format!("{category}/{title}"),
+            None => category.to_string(),
+        };
+    }
     let from_output = output.and_then(|value| text_field(value, "id"));
     let from_args = match name {
         "update_task" => text_field(args, "task_id"),
@@ -136,6 +172,11 @@ fn target_id(name: &str, args: &Value, output: Option<&Value>) -> String {
 }
 
 fn target_label(name: &str, args: &Value, output: Option<&Value>) -> String {
+    // A fact falls through to `fallback_label`, which names the kind and not
+    // the entry, for the reason `memory_entry` gives.
+    if let Some((_, Some(title))) = memory_entry(name, args) {
+        return title.to_string();
+    }
     let title = first_text(&[
         output.and_then(|value| text_field(value, "title")),
         text_field(args, "title"),
@@ -161,12 +202,24 @@ fn fallback_label(name: &str) -> &'static str {
         "create_document" | "update_document" => "Document",
         "send_message" => "Message",
         "create_reminder" | "cancel_reminder" => "Reminder",
+        MEMORY_WRITE | MEMORY_APPEND | MEMORY_DELETE => "Memory",
         _ => "Workspace item",
     }
 }
 
 fn outcome(name: &str, result: &ToolResult) -> String {
     if !result.success {
+        // A memory tool's failure is reported by its kind and nothing else.
+        // The store's messages name the entry and quote what it currently
+        // holds, so that the model can merge and write again — and that
+        // belongs in the tool result the model reads, not on a receipt stored
+        // on a message every member of the workspace can read. This covers
+        // every failure and not only a version conflict, because a receipt
+        // should not depend on the store having worded its next error
+        // carefully.
+        if let Some(refusal) = memory_refusal(name) {
+            return refusal.to_string();
+        }
         return result
             .error
             .as_deref()
@@ -186,7 +239,21 @@ fn outcome(name: &str, result: &ToolResult) -> String {
         "send_message" => "Message sent".to_string(),
         "create_reminder" => "Reminder scheduled".to_string(),
         "cancel_reminder" => "Reminder cancelled".to_string(),
+        MEMORY_WRITE => "Memory written".to_string(),
+        MEMORY_APPEND => "Memory appended".to_string(),
+        MEMORY_DELETE => "Memory forgotten".to_string(),
         _ => "Write completed".to_string(),
+    }
+}
+
+/// What a failed memory call puts on its receipt: which kind of write was
+/// refused, and no part of what it was refused for.
+fn memory_refusal(name: &str) -> Option<&'static str> {
+    match name {
+        MEMORY_WRITE => Some("Memory write refused"),
+        MEMORY_APPEND => Some("Memory append refused"),
+        MEMORY_DELETE => Some("Memory forget refused"),
+        _ => None,
     }
 }
 
@@ -203,6 +270,9 @@ fn href(target_type: ActionTarget, target_id: &str, chat_id: &Option<String>) ->
             Some(chat) if !chat.is_empty() => format!("/chats?id={chat}"),
             _ => String::new(),
         },
+        // A remembered entry is one person's and has no page, and the console
+        // renders a link only where there is an href.
+        ActionTarget::Memory => String::new(),
         _ => String::new(),
     }
 }
@@ -472,5 +542,203 @@ mod tests {
         let parsed: ActionReceipt = serde_json::from_value(stored).unwrap();
         assert_eq!(parsed.reason, None);
         assert_eq!(parsed.outcome, "Message sent");
+    }
+
+    #[test]
+    fn a_remembered_preference_is_receipted_against_the_entry_the_store_wrote() {
+        let built = receipt(
+            MEMORY_WRITE,
+            r#"{"category":"preference","content":"Short answers, no preamble."}"#,
+            ToolResult::success("Remembered: preference/Preferences, version 1."),
+        );
+
+        assert_eq!(built.target_type, ActionTarget::Memory);
+        assert_eq!(built.target_id, "preference/Preferences");
+        assert_eq!(built.target_label, "Preferences");
+        assert_eq!(built.outcome, "Memory written");
+        assert!(
+            built.href.is_empty(),
+            "a remembered entry has no page to link to"
+        );
+        assert!(built.success);
+    }
+
+    /// A fact is receipted under its kind and never under its name. The
+    /// receipt is stored on the assistant message and a chat is readable by
+    /// anyone with workspace read access, so the name one person chose for
+    /// what they asked to have remembered does not go in it — the same reason
+    /// `reading_what_is_remembered_mints_no_receipt` gives for minting none.
+    ///
+    /// A single-entry kind still resolves to its forced title, which is a
+    /// constant of this build and names nobody.
+    #[test]
+    fn a_named_fact_is_receipted_under_its_kind_and_never_under_its_name() {
+        let named = receipt(
+            MEMORY_WRITE,
+            r#"{"category":"fact","name":"Deploy window","description":"When we ship.","content":"Thursdays."}"#,
+            ToolResult::success("Remembered: fact/Deploy window, version 1."),
+        );
+        assert_eq!(named.target_id, "fact");
+        assert_eq!(named.target_label, "Memory");
+        let on_the_message = serde_json::to_string(&named).expect("a receipt serialises");
+        assert!(
+            !on_the_message.contains("Deploy window"),
+            "the entry's name reached the message: {on_the_message}"
+        );
+        assert!(
+            !on_the_message.contains("Thursdays"),
+            "the entry's content reached the message: {on_the_message}"
+        );
+
+        let ignored = receipt(
+            MEMORY_WRITE,
+            r#"{"category":"profile","name":"Whatever the model called it","content":"Builds Zone."}"#,
+            ToolResult::success("Remembered: profile/Profile, version 1."),
+        );
+        assert_eq!(ignored.target_id, "profile/Profile");
+        assert_eq!(ignored.target_label, "Profile");
+    }
+
+    #[test]
+    fn appending_and_forgetting_each_say_what_they_did() {
+        let appended = receipt(
+            MEMORY_APPEND,
+            r#"{"category":"fact","name":"Deploy window","content":"Never on a Friday."}"#,
+            ToolResult::success("Added to fact/Deploy window, now version 2."),
+        );
+        assert_eq!(appended.target_type, ActionTarget::Memory);
+        assert_eq!(appended.target_id, "fact");
+        assert_eq!(appended.outcome, "Memory appended");
+
+        let forgotten = receipt(
+            MEMORY_DELETE,
+            r#"{"category":"fact","name":"Deploy window","version":2}"#,
+            ToolResult::success("Forgotten: fact/Deploy window."),
+        );
+        assert_eq!(forgotten.target_id, "fact");
+        assert_eq!(forgotten.outcome, "Memory forgotten");
+        assert!(forgotten.href.is_empty());
+    }
+
+    /// Reading what is remembered is not an action anyone needs a record of,
+    /// and a receipt for one would put the entry's name on the message.
+    #[test]
+    fn reading_what_is_remembered_mints_no_receipt() {
+        for name in [
+            crate::agent::memory::MEMORY_LIST,
+            crate::agent::memory::MEMORY_READ,
+        ] {
+            assert!(!is_write_tool(name), "{name}");
+            assert!(
+                from_write(
+                    "call_1",
+                    name,
+                    r#"{"category":"fact","name":"Deploy window"}"#,
+                    &ToolResult::success("fact/Deploy window, version 1."),
+                    actor(),
+                    "Alice",
+                    at()
+                )
+                .is_none(),
+                "{name}"
+            );
+        }
+        for name in [MEMORY_WRITE, MEMORY_APPEND, MEMORY_DELETE] {
+            assert!(is_write_tool(name), "{name}");
+        }
+    }
+
+    /// A refused memory write says which kind of write was refused and nothing
+    /// about what it was refused for. The store's conflict message names the
+    /// entry and quotes what it now holds so the model can merge and write
+    /// again; the model reads that in the tool result, and it does not belong
+    /// on a message the whole workspace can read.
+    #[test]
+    fn a_refused_memory_write_says_only_that_it_was_refused() {
+        let conflict = |category: &str, entry: &str| {
+            format!(
+                "{category}/{entry} has changed since you read it, and is now version 2. It \
+                 says:\n\nThursdays, but never in a release week.\n\nMerge what you wanted to \
+                 change into that and write again with version 2."
+            )
+        };
+
+        let built = receipt(
+            MEMORY_WRITE,
+            r#"{"category":"preference","content":"Long answers.","version":1}"#,
+            ToolResult::error(conflict("preference", "Preferences")),
+        );
+        assert!(!built.success);
+        assert_eq!(built.outcome, "Memory write refused");
+        assert!(built.href.is_empty());
+
+        // A stale fact write, append and delete each leave the name and the
+        // stored content off the message.
+        for (tool, arguments, expected) in [
+            (
+                MEMORY_WRITE,
+                r#"{"category":"fact","name":"Deploy window","content":"x","version":1}"#,
+                "Memory write refused",
+            ),
+            (
+                MEMORY_APPEND,
+                r#"{"category":"fact","name":"Deploy window","content":"x"}"#,
+                "Memory append refused",
+            ),
+            (
+                MEMORY_DELETE,
+                r#"{"category":"fact","name":"Deploy window","version":1}"#,
+                "Memory forget refused",
+            ),
+        ] {
+            let built = receipt(
+                tool,
+                arguments,
+                ToolResult::error(conflict("fact", "Deploy window")),
+            );
+
+            assert_eq!(built.outcome, expected, "{tool}");
+            let on_the_message = serde_json::to_string(&built).expect("a receipt serialises");
+            assert!(
+                !on_the_message.contains("Deploy window"),
+                "{tool} put the entry's name on the message: {on_the_message}"
+            );
+            assert!(
+                !on_the_message.contains("Thursdays"),
+                "{tool} put the entry's content on the message: {on_the_message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_memory_receipt_reaches_the_console_as_the_memory_target() {
+        let built = receipt(
+            MEMORY_WRITE,
+            r#"{"category":"preference","content":"Short answers."}"#,
+            ToolResult::success("Remembered: preference/Preferences, version 1."),
+        );
+
+        let json = serde_json::to_value(&built).unwrap();
+        assert_eq!(json["target_type"], "memory");
+        assert_eq!(json["href"], "");
+        let parsed: ActionReceipt = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, built);
+    }
+
+    /// A kind this build does not know is not a memory entry it can name, so
+    /// the receipt falls back rather than inventing an identifier.
+    #[test]
+    fn a_memory_call_naming_no_entry_falls_back_to_the_kind_itself() {
+        let built = receipt(
+            MEMORY_WRITE,
+            r#"{"category":"memory-fact","content":"Thursdays."}"#,
+            ToolResult::error(
+                "\"memory-fact\" is not a kind of memory. Use profile, preference or fact.",
+            ),
+        );
+
+        assert_eq!(built.target_type, ActionTarget::Memory);
+        assert_eq!(built.target_id, "");
+        assert_eq!(built.target_label, "Memory");
     }
 }

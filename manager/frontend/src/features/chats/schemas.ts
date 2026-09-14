@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ACTION_TARGETS } from './types';
 
 export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);
 
@@ -178,7 +179,7 @@ export const CitationSchema = z.object({
   note: z.string().nullish(),
 });
 
-export const ActionTargetSchema = z.enum(['task', 'document', 'message', 'reminder']);
+export const ActionTargetSchema = z.enum(ACTION_TARGETS);
 
 export const ActionReceiptSchema = z.object({
   id: z.string(),
@@ -202,6 +203,7 @@ export const MessageMetadataSchema = z
     citations: tolerantArray(CitationSchema).optional(),
     action_receipts: tolerantArray(ActionReceiptSchema).optional(),
     web_search: z.boolean().optional(),
+    memory_used: z.boolean().optional().catch(undefined),
     reasoning: z.string().optional(),
   })
   .passthrough();

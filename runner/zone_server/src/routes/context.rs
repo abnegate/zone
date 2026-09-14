@@ -926,6 +926,10 @@ pub async fn get_knowledge_entry(
         }
     }
 
+    if private(entry.category.as_deref()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     Json(KnowledgeResponse {
         id: entry.id,
         workspace_id: entry.workspace_id,
@@ -948,6 +952,25 @@ pub async fn get_knowledge_entry(
 
 fn utc(stamp: chrono::NaiveDateTime) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_naive_utc_and_offset(stamp, chrono::Utc)
+}
+
+/// Whether the entry belongs to one person rather than to the workspace.
+///
+/// The owner is refused along with everybody else: these routes are the
+/// workspace's, and memory is reached through the tools that own it. The
+/// refusal is the `404` a stranger already gets, so a member learns nothing
+/// from it either -- not even that the id exists.
+///
+/// The prefix, because that is what every statement keeping memory out of a
+/// workspace read matches. A list of the kinds that exist today would leave a
+/// kind minted inside the prefix later reachable here until somebody
+/// remembered to add it, which is the one place it must not be.
+fn private(category: Option<&str>) -> bool {
+    category.is_some_and(|category| {
+        category
+            .trim()
+            .starts_with(crate::db::memory::MEMORY_CATEGORY_PREFIX)
+    })
 }
 
 /// Maximum URL length
@@ -1479,6 +1502,10 @@ pub async fn delete_knowledge(
             )
                 .into_response();
         }
+    }
+
+    if private(knowledge_entry.category.as_deref()) {
+        return StatusCode::NOT_FOUND.into_response();
     }
 
     // Soft delete the knowledge entry

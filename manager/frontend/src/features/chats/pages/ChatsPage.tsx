@@ -12,6 +12,7 @@ import {
   AuthenticatedVideo,
   Citations,
   Generation,
+  MemoryBadge,
   MessageContent,
   Reasoning,
   ToolTrace,
@@ -895,6 +896,8 @@ export default function ChatsPage() {
                   );
                   const citations = message.metadata?.citations ?? [];
                   const receipts = message.metadata?.action_receipts ?? [];
+                  const memoryUsed =
+                    message.role === 'assistant' && Boolean(message.metadata?.memory_used);
                   const links = message.role === 'assistant' ? 'citations' : 'all';
                   const linked = linkedMessageId === message.id;
                   // The turn still being written. Anything it detached dies with
@@ -909,6 +912,7 @@ export default function ChatsPage() {
                     >
                       <div className="message-header">
                         {message.role === 'system' && <span className="message-role">System</span>}
+                        <MemoryBadge used={memoryUsed} />
                         <span className="message-time">{formatDate(message.created_at)}</span>
                       </div>
                       {images.length > 0 && (

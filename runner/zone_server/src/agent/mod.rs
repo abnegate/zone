@@ -17,6 +17,7 @@ pub mod documents;
 pub mod identifier;
 pub mod images;
 pub mod integrations;
+pub mod memory;
 pub mod monitoring;
 pub mod prompt;
 pub mod question;

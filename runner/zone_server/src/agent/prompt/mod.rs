@@ -36,6 +36,7 @@ const ORDER: &[Section] = &[
     ("refusal", section::refusal::render),
     ("workspace", section::workspace::render),
     ("retrieval", section::retrieval::render),
+    ("memory", section::memory::render),
     ("files", section::files::render),
     ("waiting", section::waiting::render),
     ("images", section::images::render),
@@ -57,7 +58,7 @@ const PLAIN: &[Section] = &[
     ("session", section::session::render),
 ];
 
-pub const CHAT_MAX_CHARS: usize = 21_000;
+pub const CHAT_MAX_CHARS: usize = 22_400;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 14_000;
 
@@ -202,6 +203,11 @@ mod tests {
         "list_sources",
         "list_tasks",
         MCP_TOOL,
+        "memory_append",
+        "memory_delete",
+        "memory_list",
+        "memory_read",
+        "memory_write",
         "query_prometheus",
         "read_chat_evidence",
         "read_check_logs",
@@ -368,6 +374,7 @@ mod tests {
                 "refusal",
                 "workspace",
                 "retrieval",
+                "memory",
                 "files",
                 "waiting",
                 "images",
@@ -423,6 +430,7 @@ mod tests {
 
         assert!(rendered.contains("You can call these tools:"), "{rendered}");
         assert!(rendered.contains("Workspace actions:"), "{rendered}");
+        assert!(rendered.contains("Memory:"), "{rendered}");
         assert!(rendered.contains("Images:"), "{rendered}");
         assert!(rendered.contains("Cluster:"), "{rendered}");
         assert!(rendered.contains("Web tools:"), "{rendered}");
@@ -443,6 +451,7 @@ mod tests {
             !rendered.contains("act in the server runtime"),
             "{rendered}"
         );
+        assert!(!rendered.contains("Memory:"), "{rendered}");
         assert!(!rendered.contains("Images:"), "{rendered}");
         assert!(!rendered.contains("Cluster:"), "{rendered}");
         assert!(!rendered.contains("Web tools:"), "{rendered}");

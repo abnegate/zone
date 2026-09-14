@@ -1658,6 +1658,33 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('badges an assistant reply that read stored memory, never a user message', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: mockChatWithMessages.messages.map((message) => ({
+          ...message,
+          metadata: { memory_used: true },
+        })),
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Hi there!')).toBeInTheDocument();
+      });
+      const badges = screen.getAllByTestId('memory-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toHaveTextContent('Memory read');
+      expect(badges[0].closest('.message')).toHaveClass('message-assistant');
+      expect(screen.getByText('Hello').closest('.message')).toHaveClass('message-user');
+    });
+
     it('selects chat via keyboard Enter', async () => {
       renderChatsPage();
 

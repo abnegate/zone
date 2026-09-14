@@ -11,6 +11,9 @@ const ACTION_LABELS: Record<string, { ok: string; failed: string }> = {
   send_message: { ok: 'Sent message', failed: 'Send message failed' },
   create_reminder: { ok: 'Created reminder', failed: 'Create reminder failed' },
   cancel_reminder: { ok: 'Cancelled reminder', failed: 'Cancel reminder failed' },
+  memory_write: { ok: 'Wrote memory', failed: 'Write memory failed' },
+  memory_append: { ok: 'Appended to memory', failed: 'Append to memory failed' },
+  memory_delete: { ok: 'Forgot memory', failed: 'Forget memory failed' },
 };
 
 const LINK_LABELS: Record<ActionTarget, string> = {
@@ -18,6 +21,7 @@ const LINK_LABELS: Record<ActionTarget, string> = {
   document: 'Open document',
   message: 'Open message',
   reminder: 'Open chat',
+  memory: 'Open memory',
 };
 
 function actionLabel(receipt: ActionReceipt): string {
