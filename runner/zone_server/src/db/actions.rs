@@ -715,13 +715,26 @@ mod tests {
 
         for (rrule, mode, expected) in [
             // Faster than the ceiling, counted after the BY clauses split it.
-            (Some("FREQ=HOURLY;BYMINUTE=0,30"), None, "once an hour"),
+            (
+                Some(
+                    "FREQ=DAILY;BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23;\
+                     BYMINUTE=0,30",
+                ),
+                None,
+                "once an hour",
+            ),
             // A clause this build does not implement, refused and not dropped.
             (Some("FREQ=MONTHLY;BYSETPOS=-1;BYDAY=FR"), None, "BYSETPOS"),
-            // A mode the worker would dispatch under the wrong contract.
+            // A clause the frequency's arithmetic never reads, which would
+            // otherwise fire on days nobody chose.
+            (Some("FREQ=DAILY;BYDAY=MO,FR"), None, "does not use"),
+            // A mode that is not a mode at all.
             (None, Some("whenever"), "not a timing mode"),
-            // A watch that never fires again samples once and reports nothing.
-            (None, Some("condition_watch"), "has to repeat"),
+            // And the two the worker cannot dispatch: accepting either would
+            // run it under exact_schedule's contract, which is not what it
+            // asked for.
+            (None, Some("condition_watch"), "exact_schedule"),
+            (None, Some("flexible_schedule"), "exact_schedule"),
         ] {
             let refused =
                 reminders::create(&pool, workspace, user, chat_id, automation(rrule, mode))
@@ -838,6 +851,59 @@ mod tests {
         cleanup(&pool, organization, user).await;
     }
 
+    /// `COUNT=1` means one firing. The row still carries the count from before
+    /// the delivery in hand, so without adding it every finite rule delivers
+    /// one more message than it was asked for.
+    #[tokio::test]
+    async fn a_finite_count_delivers_exactly_the_firings_it_named() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let _dispatch = DISPATCH.lock().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Once only".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY;COUNT=1".into()),
+                prompt: None,
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+
+        sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(reminders::deliver_next(&pool).await.unwrap());
+        assert!(
+            !reminders::deliver_next(&pool).await.unwrap(),
+            "COUNT=1 must not leave a second firing scheduled"
+        );
+
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(chat_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(messages, 1, "COUNT=1 is one message, not two");
+
+        let (status, fired): (String, i32) =
+            sqlx::query_as("SELECT status, fired_count FROM reminders WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "expired");
+        assert_eq!(fired, 1);
+        cleanup(&pool, organization, user).await;
+    }
+
     /// A schedule that has outlived its lifetime ends as `expired`, which is a
     /// different ending from a delivery and different again from a cancel, so a
     /// reader can tell a schedule that ran out from one somebody stopped.
@@ -882,6 +948,15 @@ mod tests {
         assert!(
             completed.is_some(),
             "an ended schedule records when it ended"
+        );
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(chat_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            messages, 0,
+            "a schedule nobody renewed must not get one more message on its way out"
         );
         assert!(
             !reminders::deliver_next(&pool).await.unwrap(),

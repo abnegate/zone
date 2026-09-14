@@ -11,11 +11,15 @@ use uuid::Uuid;
 
 /// How a due automation is meant to be read when it fires.
 ///
-/// The database holds the same three, so a mode this build does not know
-/// cannot arrive at the worker and be dispatched as an `exact_schedule` — the
-/// wrong contract for a watch.
-const TIMING_MODES: [&str; 3] = ["exact_schedule", "flexible_schedule", "condition_watch"];
-const CONDITION_WATCH: &str = "condition_watch";
+/// One mode, because one is what the worker dispatches. `deliver_next` sends
+/// the reminder's content at the stated time and does nothing else, which is
+/// exactly `exact_schedule` and is the wrong contract for either of the others:
+/// a `flexible_schedule` would fire at a time it never promised to keep, and a
+/// `condition_watch` would redeliver fixed content and call it monitoring.
+/// Accepting a mode and then running it under a different contract is worse
+/// than refusing it, so the list widens when the worker learns the mode, and
+/// the database constraint widens with it.
+const TIMING_MODES: [&str; 1] = ["exact_schedule"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,8 +51,9 @@ fn automation(input: &Reminder) -> Result<(Option<Recurrence>, &'static str), sq
             .find(|mode| **mode == given)
             .ok_or_else(|| {
                 actions::invalid(&format!(
-                    "\"{given}\" is not a timing mode. Use exact_schedule, flexible_schedule or \
-                     condition_watch."
+                    "\"{given}\" is not a timing mode this build runs. Only exact_schedule is \
+                     dispatched; flexible_schedule and condition_watch need a firing that can run \
+                     a turn, which does not exist yet."
                 ))
             })?,
     };
@@ -63,15 +68,6 @@ fn automation(input: &Reminder) -> Result<(Option<Recurrence>, &'static str), sq
         None => None,
     };
 
-    // A watch samples state at each firing and reports a difference, so one
-    // that never fires again is not a watch: it samples once and reports
-    // nothing for ever.
-    if mode == CONDITION_WATCH && rule.is_none() {
-        return Err(actions::invalid(
-            "A condition_watch has to repeat, so it needs an rrule. Give one no faster than \
-             hourly, or use exact_schedule for a single reminder.",
-        ));
-    }
     Ok((rule, mode))
 }
 
@@ -195,7 +191,11 @@ fn reschedule(
     }
     let rule = Recurrence::parse(rrule?).ok()?;
     let fired = u32::try_from(fired).unwrap_or(u32::MAX);
-    let next = rule.next_after(anchor.unwrap_or(due_at), now, fired)?
+    // The row still holds the count from before this firing -- the increment
+    // shares the transaction that is delivering it -- so the delivery in hand
+    // is added here. Without it COUNT=1 schedules a second firing, and every
+    // finite rule delivers one more than it was asked for.
+    let next = rule.next_after(anchor.unwrap_or(due_at), now, fired.saturating_add(1))?
         + schedule::jitter(id, rule.period());
     // A firing past the lifetime is not scheduled at all, rather than scheduled
     // and then refused when it arrives.
@@ -230,6 +230,21 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<bool> {
     else {
         return Ok(false);
     };
+
+    // A schedule whose lifetime ran out before this claim ends without
+    // delivering. The row went past its week while it sat due -- the server was
+    // down, or the tick was late -- and the firing it is holding is one nobody
+    // renewed, so sending it would be one unasked-for message on the way out.
+    // Checked here rather than in `reschedule`, which runs after the insert.
+    if expires_at.is_some_and(|expires| expires <= Utc::now()) {
+        sqlx::query("UPDATE reminders SET status = 'expired', completed_at = NOW() WHERE id = $1")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        return Ok(true);
+    }
+
     let mut message = None;
     if let Err(error) = actions::authorize(&mut transaction, workspace_id, user_id, true).await {
         if !matches!(error, sqlx::Error::Protocol(_)) {

@@ -168,8 +168,62 @@ impl Recurrence {
             until,
             count,
         };
+        recurrence.clauses_the_frequency_uses()?;
         recurrence.within_the_floor()?;
         Ok(recurrence)
+    }
+
+    /// Refuses a clause this frequency's arithmetic never reads.
+    ///
+    /// The module's rule is that a clause it does not implement is refused
+    /// rather than dropped, and that has to hold for a clause this build parses
+    /// but this frequency ignores. `FREQ=HOURLY;BYHOUR=9` reads as "every day
+    /// at nine" and fires twenty-four times a day; `FREQ=DAILY;BYDAY=MO,FR`
+    /// reads as "Mondays and Fridays" and fires every day. Both are worse than
+    /// a refusal, because the person finds out by being interrupted.
+    ///
+    /// Which clause each frequency actually reads is `candidates` and
+    /// `days_of`: an hourly period is its own firing and reads none of them; a
+    /// day reads the hour and the minute; a week reads those and `BYDAY`; a
+    /// month reads those and `BYMONTHDAY`.
+    fn clauses_the_frequency_uses(&self) -> Result<(), String> {
+        let ignored: Vec<&str> = [
+            (
+                "BYDAY",
+                !self.by_day.is_empty(),
+                self.frequency != Frequency::Weekly,
+            ),
+            (
+                "BYMONTHDAY",
+                !self.by_month_day.is_empty(),
+                self.frequency != Frequency::Monthly,
+            ),
+            (
+                "BYHOUR",
+                !self.by_hour.is_empty(),
+                self.frequency == Frequency::Hourly,
+            ),
+            (
+                "BYMINUTE",
+                !self.by_minute.is_empty(),
+                self.frequency == Frequency::Hourly,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, given, unread)| *given && *unread)
+        .map(|(clause, _, _)| clause)
+        .collect();
+
+        if ignored.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "{:?} does not use {}. Drop the clause, or state the FREQ that reads it: BYDAY needs \
+             WEEKLY, BYMONTHDAY needs MONTHLY, and BYHOUR and BYMINUTE need DAILY, WEEKLY or \
+             MONTHLY.",
+            self.frequency,
+            ignored.join(", ")
+        ))
     }
 
     /// The nominal gap between two firings: the frequency's own period, times
@@ -622,9 +676,11 @@ mod tests {
     /// period rather than before.
     #[test]
     fn anything_faster_than_an_hour_is_refused_however_it_is_spelled() {
+        // Both spellings use only clauses their frequency reads, so the floor
+        // is what refuses them rather than the clause check ahead of it.
         for rule in [
-            "FREQ=HOURLY;BYMINUTE=0,30",
             "FREQ=DAILY;BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23;BYMINUTE=0,30",
+            "FREQ=WEEKLY;BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23;BYMINUTE=0,5,10,15,20,25,30,35",
         ] {
             let refused = Recurrence::parse(rule).expect_err(rule);
             assert!(refused.contains("once an hour"), "{rule}: {refused}");
@@ -639,6 +695,49 @@ mod tests {
             assert!(
                 Recurrence::parse(rule).is_ok(),
                 "{rule} is at or under the ceiling"
+            );
+        }
+    }
+
+    /// A clause this frequency's arithmetic never reads is refused, for the
+    /// same reason a clause the build does not implement is: `FREQ=HOURLY;
+    /// BYHOUR=9` reads as "every day at nine" and would fire twenty-four times
+    /// a day, and the person would find out by being interrupted.
+    #[test]
+    fn a_clause_the_frequency_never_reads_is_refused_rather_than_ignored() {
+        for (rule, clause) in [
+            ("FREQ=HOURLY;BYHOUR=9", "BYHOUR"),
+            ("FREQ=HOURLY;BYMINUTE=0,30", "BYMINUTE"),
+            ("FREQ=HOURLY;BYDAY=MO", "BYDAY"),
+            ("FREQ=DAILY;BYDAY=MO,FR", "BYDAY"),
+            ("FREQ=DAILY;BYMONTHDAY=1", "BYMONTHDAY"),
+            ("FREQ=WEEKLY;BYMONTHDAY=1", "BYMONTHDAY"),
+            ("FREQ=MONTHLY;BYDAY=FR", "BYDAY"),
+        ] {
+            let refused = Recurrence::parse(rule).expect_err(rule);
+            assert!(refused.contains(clause), "{rule}: {refused}");
+            assert!(
+                refused.contains("does not use"),
+                "the refusal must say the clause is unread, not that it is unknown: {refused}"
+            );
+        }
+    }
+
+    /// And the combinations each frequency does read stay accepted, or the
+    /// check above would have refused the schedules this feature exists for.
+    #[test]
+    fn every_clause_a_frequency_does_read_is_still_accepted() {
+        for rule in [
+            "FREQ=HOURLY",
+            "FREQ=HOURLY;INTERVAL=6",
+            "FREQ=DAILY;BYHOUR=9,17",
+            "FREQ=DAILY;BYHOUR=9;BYMINUTE=30",
+            "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9",
+            "FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=8;BYMINUTE=5",
+        ] {
+            assert!(
+                Recurrence::parse(rule).is_ok(),
+                "{rule} must still be accepted"
             );
         }
     }

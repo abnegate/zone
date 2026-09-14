@@ -22,24 +22,24 @@ ALTER TABLE reminders ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS fired_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS last_fired_at TIMESTAMPTZ;
 
--- A timing mode this build does not know would be dispatched as an
--- exact_schedule, which is the wrong contract for a watch, so the column is
--- closed at the database rather than at the tool alone.
+-- Every constraint below is added NOT VALID and validated in 036, the way 026
+-- widens task_runs_status_check and 029 validates it. An ADD CONSTRAINT that
+-- validates scans the whole table under ACCESS EXCLUSIVE, and the installer
+-- runs this file in one transaction, so the scan would block every insert and
+-- update to reminders until it committed. lock_timeout bounds how long the lock
+-- is waited for, not how long it is held.
+
+-- One mode, because one is what the worker dispatches: deliver_next sends the
+-- content at the stated time and does nothing else. Accepting a mode the worker
+-- would run under a different contract is worse than refusing it, so this
+-- widens when the worker learns the other two rather than ahead of them.
 ALTER TABLE reminders DROP CONSTRAINT IF EXISTS reminders_timing_mode_check;
 ALTER TABLE reminders ADD CONSTRAINT reminders_timing_mode_check
-    CHECK (timing_mode IN ('exact_schedule', 'flexible_schedule', 'condition_watch'));
-
--- A condition_watch samples state at each firing and reports a difference, so
--- one that never fires again is not a watch. The rule is stated here as well as
--- in the tool because a row that reaches the worker without it would sample
--- once and report nothing for ever.
-ALTER TABLE reminders DROP CONSTRAINT IF EXISTS reminders_watch_recurs_check;
-ALTER TABLE reminders ADD CONSTRAINT reminders_watch_recurs_check
-    CHECK (timing_mode <> 'condition_watch' OR rrule IS NOT NULL);
+    CHECK (timing_mode = 'exact_schedule') NOT VALID;
 
 -- A recurring reminder ends by exhausting its rule or by outliving its
 -- lifetime, and neither is a delivery. 'expired' is that ending, so a reader
 -- can tell a schedule that ran out from one somebody cancelled.
 ALTER TABLE reminders DROP CONSTRAINT IF EXISTS reminders_status_check;
 ALTER TABLE reminders ADD CONSTRAINT reminders_status_check
-    CHECK (status IN ('pending', 'delivered', 'cancelled', 'expired'));
+    CHECK (status IN ('pending', 'delivered', 'cancelled', 'expired')) NOT VALID;
