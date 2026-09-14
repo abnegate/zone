@@ -15,11 +15,12 @@ use super::PREVIEW_BODY_CHARS;
 
 /// What `create_reminder` offers and what it refuses, in the tool's own words.
 ///
-/// Long because the schema alone cannot say the three things a caller gets
+/// Long because the schema alone cannot say the four things a caller gets
 /// wrong: that a rule outside the subset is refused rather than quietly
 /// dropped, that hourly is a ceiling and a faster condition wants an event
-/// rather than a schedule, and that a repeat is something to offer rather than
-/// something to impose on a request that was made once.
+/// rather than a schedule, that a prompt turns content into the schedule's
+/// name rather than its message, and that a repeat is something to offer
+/// rather than something to impose on a request that was made once.
 const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered to this chat. \
      due_at is the first firing: a future RFC3339 time with an explicit timezone offset, and the \
      exact time the person named. Clarify an ambiguous date or timezone rather than guessing, and \
@@ -32,10 +33,13 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
      the ceiling wants wait_for on the event itself, not a schedule. A repeating reminder stops \
      after seven days unless it is asked for again. \
      Without a prompt, each firing delivers content as it is written. With one, each firing runs \
-     the prompt as a turn of your own in this chat and what you say is the delivery — so use a \
-     prompt when the useful answer has to be worked out at the time, and content when it is the \
-     same words every time. A prompt is an instruction to your future self, which will have this \
-     chat and these tools and no memory of writing it, so say what to check and what to report. \
+     the prompt as a turn of your own in this chat and what you say is the delivery, and content \
+     is not sent at all — it stays as the schedule's name, which is what list_reminders shows and \
+     what the person reads when deciding whether to cancel it, so make it a short description of \
+     the standing job rather than a message. Use a prompt when the useful answer has to be worked \
+     out at the time, and content alone when it is the same words every time. A prompt is an \
+     instruction to your future self, which will have this chat and these tools and no memory of \
+     writing it, so say what to check and what to report. \
      End it with the rule that if nothing changed, it should say nothing: a schedule that reports \
      every firing whether or not anything happened teaches the person to ignore it. \
      Offer a repeat when somebody plainly wants the same thing again; never turn a request made \
@@ -242,7 +246,7 @@ impl Tool for WorkspaceAction {
             ),
             Action::CreateReminder => (
                 json!({
-                    "content":{"type":"string","minLength":1},
+                    "content":{"type":"string","minLength":1,"description":"The words each firing delivers. With a prompt they are not delivered at all and this is the schedule's name instead, so keep it short enough to recognise in a list."},
                     "due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset. The first firing, and the exact time the person named."},
                     "rrule":{"type":"string","description":"RFC 5545 rule to repeat it, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9. Omit for a single reminder."},
                     "prompt":{"type":"string","description":"An instruction to your future self, run as a turn at each firing instead of delivering content. End it with the rule that if nothing changed, say nothing."}

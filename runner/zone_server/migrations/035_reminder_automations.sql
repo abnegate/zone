@@ -29,10 +29,10 @@ ALTER TABLE reminders ADD COLUMN IF NOT EXISTS last_fired_at TIMESTAMPTZ;
 -- update to reminders until it committed. lock_timeout bounds how long the lock
 -- is waited for, not how long it is held.
 
--- One mode, because one is what the worker dispatches: deliver_next sends the
--- content at the stated time and does nothing else. Accepting a mode the worker
--- would run under a different contract is worse than refusing it, so this
--- widens when the worker learns the other two rather than ahead of them.
+-- One mode, because one is what the worker dispatches: deliver_next fires at the
+-- stated time and nowhere else. Accepting a mode the worker would run under a
+-- different contract is worse than refusing it, so this widens when the worker
+-- learns the other two rather than ahead of them.
 ALTER TABLE reminders DROP CONSTRAINT IF EXISTS reminders_timing_mode_check;
 ALTER TABLE reminders ADD CONSTRAINT reminders_timing_mode_check
     CHECK (timing_mode = 'exact_schedule') NOT VALID;

@@ -11,11 +11,13 @@ use uuid::Uuid;
 
 /// How a due automation is meant to be read when it fires.
 ///
-/// One mode, because one is what the worker dispatches. `deliver_next` sends
-/// the reminder's content at the stated time and does nothing else, which is
-/// exactly `exact_schedule` and is the wrong contract for either of the others:
-/// a `flexible_schedule` would fire at a time it never promised to keep, and a
-/// `condition_watch` would redeliver fixed content and call it monitoring.
+/// One mode, because one is what the worker dispatches. `deliver_next` fires at
+/// the stated time and nowhere else, which is exactly `exact_schedule` and is
+/// the wrong contract for either of the others. A `flexible_schedule` is a
+/// window to place a firing inside, and placing one needs a reading of what
+/// else is on the person's day that nothing here takes. A `condition_watch`
+/// fires only when something changed, and telling changed from unchanged needs
+/// the previous firing's answer kept and compared, which no row holds.
 /// Accepting a mode and then running it under a different contract is worse
 /// than refusing it, so the list widens when the worker learns the mode, and
 /// the database constraint widens with it.
@@ -24,14 +26,20 @@ const TIMING_MODES: [&str; 1] = ["exact_schedule"];
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reminder {
+    /// The words a firing delivers, and required whether or not one is sent:
+    /// alongside a `prompt` they are not delivered at all, and are the
+    /// schedule's name instead. A standing job needs a name somebody can
+    /// recognise in `list` and act on in `cancel`, and its prompt is an
+    /// instruction rather than a name — reading one back to somebody deciding
+    /// whether to stop it tells them how the job works rather than what it is.
     pub content: String,
     pub due_at: DateTime<Utc>,
     /// An RFC 5545 rule, in the subset `services::schedule` accepts. Absent is
-    /// what a one-shot is, which is every reminder that exists today.
+    /// what a one-shot is.
     #[serde(default)]
     pub rrule: Option<String>,
-    /// What the future self is to do, as an imperative. Stored now; nothing
-    /// executes it yet, and the worker still delivers `content`.
+    /// What the future self is to do, as an imperative. A firing that carries
+    /// one runs it as a turn in the chat instead of posting `content`.
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
@@ -52,8 +60,9 @@ fn automation(input: &Reminder) -> Result<(Option<Recurrence>, &'static str), sq
             .ok_or_else(|| {
                 actions::invalid(&format!(
                     "\"{given}\" is not a timing mode this build runs. Only exact_schedule is \
-                     dispatched; flexible_schedule and condition_watch need a firing that can run \
-                     a turn, which does not exist yet."
+                     dispatched: flexible_schedule needs a window to place a firing in, and \
+                     condition_watch needs one firing's answer kept so the next can tell changed \
+                     from unchanged. Neither is stored yet."
                 ))
             })?,
     };
