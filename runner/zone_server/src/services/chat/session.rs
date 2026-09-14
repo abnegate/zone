@@ -310,15 +310,18 @@ pub async fn build(
     if let Some(effort) = effort {
         environment = environment.with_effort(effort);
     }
-    let memory = if agentic {
-        match crate::agent::memory::render::prompt(
-            state.db(),
-            prompt::Surface::Chat,
-            workspace,
-            user,
-        )
-        .await
-        {
+    // Every chat reads what is remembered about the person it is talking to:
+    // a profile and a set of preferences describe them and how they want to be
+    // worked with, and a chat with its agent off is still a chat with them.
+    // Only a chat holding the memory tools is given the fact index, which
+    // names `memory_read` and is nothing without it.
+    let recall = if agentic {
+        crate::agent::memory::render::Recall::Indexed
+    } else {
+        crate::agent::memory::render::Recall::Passive
+    };
+    let memory =
+        match crate::agent::memory::render::prompt(state.db(), recall, workspace, user).await {
             Ok(memory) => memory,
             Err(error) => {
                 tracing::warn!(
@@ -328,10 +331,7 @@ pub async fn build(
                 );
                 String::new()
             }
-        }
-    } else {
-        String::new()
-    };
+        };
     let mut entries = vec![Entry {
         id: "instructions".into(),
         message: Message::system(system_prompt(
@@ -636,7 +636,7 @@ mod tests {
     /// A stored profile, rendered the way a chat turn receives it.
     fn memory() -> String {
         crate::agent::memory::render::render(
-            prompt::Surface::Chat,
+            crate::agent::memory::render::Recall::Indexed,
             Some(&crate::agent::memory::render::memory_row(
                 crate::db::memory::MemoryCategory::Profile,
                 crate::db::memory::PROFILE_TITLE,

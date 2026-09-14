@@ -477,10 +477,10 @@ fn facts() -> Vec<MemoryIndexRow> {
     }]
 }
 
-/// Everything one person has stored, as the surface receives it.
-fn block(surface: prompt::Surface) -> String {
+/// Everything one person has stored, as that reader receives it.
+fn block(recall: render::Recall) -> String {
     render::render(
-        surface,
+        recall,
         Some(&remembered(MemoryCategory::Profile, PROFILE_TITLE, PROFILE)),
         Some(&remembered(
             MemoryCategory::Preference,
@@ -563,7 +563,7 @@ async fn a_run_reads_the_remembered_profile_and_no_index_it_could_not_act_on() {
         guidance.push_str(block);
     }
 
-    let memory = block(prompt::Surface::Task);
+    let memory = block(render::Recall::Passive);
     assert!(
         !memory.is_empty(),
         "a run with a stored profile renders one"
@@ -600,6 +600,52 @@ async fn a_run_reads_the_remembered_profile_and_no_index_it_could_not_act_on() {
     assert!(!composed.contains("\n\n\n"), "{composed}");
 }
 
+/// A chat with its agent off is still a chat with the person, so it reads the
+/// profile and the preferences — and is given no fact index, because it holds
+/// no `memory_read` to open one with.
+///
+/// This is the plain prompt, not the agent one: the block has to survive the
+/// branch that picks between them, which is where it used to be dropped.
+#[tokio::test]
+async fn a_chat_with_the_agent_off_reads_the_profile_and_no_index() {
+    let memory = block(render::Recall::Passive);
+    assert!(
+        !memory.is_empty(),
+        "a stored profile renders for any reader"
+    );
+
+    let composed = system_prompt(
+        &chat_row(),
+        &chat_tools().await,
+        false,
+        CAPABILITY,
+        &environment(),
+        &memory,
+    );
+
+    let tail = composed.find(CAPABILITY).expect("the capability tail");
+    for heading in [
+        MemoryCategory::Profile.heading(),
+        MemoryCategory::Preference.heading(),
+    ] {
+        let at = composed
+            .find(heading)
+            .unwrap_or_else(|| panic!("{heading} is missing from {composed}"));
+        assert!(at > tail, "{heading} precedes the tail: {composed}");
+    }
+    assert!(composed.contains(PROFILE), "{composed}");
+    assert!(composed.contains(PREFERENCES), "{composed}");
+    assert!(
+        !composed.contains(MemoryCategory::Fact.heading()),
+        "a chat with no memory tool was handed an index: {composed}"
+    );
+    assert!(!composed.contains(FACT), "{composed}");
+    // The rules section belongs to the agent prompt, which this chat is not.
+    assert!(!composed.contains(MEMORY_SECTION), "{composed}");
+    assert_eq!(composed.matches(SANDBOX).count(), 0, "{composed}");
+    assert!(!composed.contains("\n\n\n"), "{composed}");
+}
+
 /// The same block on the chat surface, composed by the function that composes
 /// it in production: after the capability tail, index and all.
 ///
@@ -608,7 +654,7 @@ async fn a_run_reads_the_remembered_profile_and_no_index_it_could_not_act_on() {
 /// one.
 #[tokio::test]
 async fn a_chat_reads_the_remembered_block_after_the_capability_tail() {
-    let memory = block(prompt::Surface::Chat);
+    let memory = block(render::Recall::Indexed);
     let composed = system_prompt(
         &chat_row(),
         &chat_tools().await,

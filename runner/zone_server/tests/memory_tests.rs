@@ -27,11 +27,11 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_server::agent::ActionTarget;
 use zone_server::agent::memory::render;
+use zone_server::agent::memory::render::Recall;
 use zone_server::agent::memory::rules::Refusal;
 use zone_server::agent::memory::{
     MEMORY_APPEND, MEMORY_DELETE, MEMORY_LIST, MEMORY_READ, MEMORY_WRITE, version_required,
 };
-use zone_server::agent::prompt::Surface;
 use zone_server::db::memory::{
     self, MEMORY_CATEGORY_PREFIX, MemoryCategory, MemoryWrite, PREFERENCES_TITLE, PROFILE_TITLE,
 };
@@ -367,7 +367,7 @@ async fn the_preview_and_the_generation_carry_the_same_memory_bytes() {
 
     let expected = render::prompt(
         remembering.pool(),
-        Surface::Chat,
+        Recall::Indexed,
         remembering.harness.workspace,
         remembering.user,
     )

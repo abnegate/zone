@@ -138,21 +138,28 @@ fn target_type(name: &str) -> Option<ActionTarget> {
 /// memory tool answers in prose, so its output carries no `id` to read. A
 /// single-entry kind resolves to its forced title whatever name the model
 /// supplied, exactly as the store resolves it.
-fn memory_entry(name: &str, args: &Value) -> Option<(MemoryCategory, String)> {
+///
+/// A fact resolves to its kind and to no name. The receipt is stored on the
+/// assistant message and streamed to the console, and a chat is readable by
+/// anyone holding workspace read access — not only by the person the memory
+/// belongs to. A fact's name is the model's, chosen to describe what one
+/// person asked to have remembered, so it does not go in a field the whole
+/// workspace reads. The two forced titles are constants that name nothing
+/// about anybody, so they stay.
+fn memory_entry(name: &str, args: &Value) -> Option<(MemoryCategory, Option<&'static str>)> {
     if !matches!(name, MEMORY_WRITE | MEMORY_APPEND | MEMORY_DELETE) {
         return None;
     }
     let category = MemoryCategory::parse(&text_field(args, "category")?)?;
-    let title = match category.title() {
-        Some(forced) => forced.to_string(),
-        None => text_field(args, "name")?,
-    };
-    Some((category, title))
+    Some((category, category.title()))
 }
 
 fn target_id(name: &str, args: &Value, output: Option<&Value>) -> String {
     if let Some((category, title)) = memory_entry(name, args) {
-        return format!("{category}/{title}");
+        return match title {
+            Some(title) => format!("{category}/{title}"),
+            None => category.to_string(),
+        };
     }
     let from_output = output.and_then(|value| text_field(value, "id"));
     let from_args = match name {
@@ -165,8 +172,10 @@ fn target_id(name: &str, args: &Value, output: Option<&Value>) -> String {
 }
 
 fn target_label(name: &str, args: &Value, output: Option<&Value>) -> String {
-    if let Some((_, title)) = memory_entry(name, args) {
-        return title;
+    // A fact falls through to `fallback_label`, which names the kind and not
+    // the entry, for the reason `memory_entry` gives.
+    if let Some((_, Some(title))) = memory_entry(name, args) {
+        return title.to_string();
     }
     let title = first_text(&[
         output.and_then(|value| text_field(value, "title")),
@@ -532,18 +541,32 @@ mod tests {
         assert!(built.success);
     }
 
-    /// The name the model supplied is the entry's, and a single-entry kind
-    /// ignores one — the same resolution the store makes, so the receipt names
-    /// the row that really changed.
+    /// A fact is receipted under its kind and never under its name. The
+    /// receipt is stored on the assistant message and a chat is readable by
+    /// anyone with workspace read access, so the name one person chose for
+    /// what they asked to have remembered does not go in it — the same reason
+    /// `reading_what_is_remembered_mints_no_receipt` gives for minting none.
+    ///
+    /// A single-entry kind still resolves to its forced title, which is a
+    /// constant of this build and names nobody.
     #[test]
-    fn a_named_fact_is_receipted_under_its_own_name() {
+    fn a_named_fact_is_receipted_under_its_kind_and_never_under_its_name() {
         let named = receipt(
             MEMORY_WRITE,
             r#"{"category":"fact","name":"Deploy window","description":"When we ship.","content":"Thursdays."}"#,
             ToolResult::success("Remembered: fact/Deploy window, version 1."),
         );
-        assert_eq!(named.target_id, "fact/Deploy window");
-        assert_eq!(named.target_label, "Deploy window");
+        assert_eq!(named.target_id, "fact");
+        assert_eq!(named.target_label, "Memory");
+        let on_the_message = serde_json::to_string(&named).expect("a receipt serialises");
+        assert!(
+            !on_the_message.contains("Deploy window"),
+            "the entry's name reached the message: {on_the_message}"
+        );
+        assert!(
+            !on_the_message.contains("Thursdays"),
+            "the entry's content reached the message: {on_the_message}"
+        );
 
         let ignored = receipt(
             MEMORY_WRITE,
@@ -562,7 +585,7 @@ mod tests {
             ToolResult::success("Added to fact/Deploy window, now version 2."),
         );
         assert_eq!(appended.target_type, ActionTarget::Memory);
-        assert_eq!(appended.target_id, "fact/Deploy window");
+        assert_eq!(appended.target_id, "fact");
         assert_eq!(appended.outcome, "Memory appended");
 
         let forgotten = receipt(
@@ -570,7 +593,7 @@ mod tests {
             r#"{"category":"fact","name":"Deploy window","version":2}"#,
             ToolResult::success("Forgotten: fact/Deploy window."),
         );
-        assert_eq!(forgotten.target_id, "fact/Deploy window");
+        assert_eq!(forgotten.target_id, "fact");
         assert_eq!(forgotten.outcome, "Memory forgotten");
         assert!(forgotten.href.is_empty());
     }

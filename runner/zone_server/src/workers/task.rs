@@ -883,7 +883,10 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
         Ok(Some(run)) => run,
         _ => return,
     };
-    let actor = task.created_by.and(run.triggered_by);
+    // The run's initiator, not the task's author: `Execution::authorized`
+    // validates `triggered_by` against active membership, and a task whose
+    // author has since been cleared must not cost its initiator their memory.
+    let actor = run.triggered_by;
     let workspace_id = task.workspace_id;
     let model = resolve_model(state, &task).await;
     if stages::is_auto(&model) {
@@ -1222,7 +1225,7 @@ async fn guidance(
         Some(user) => {
             match crate::agent::memory::render::prompt(
                 state.db(),
-                crate::agent::prompt::Surface::Task,
+                crate::agent::memory::render::Recall::Passive,
                 task.workspace_id,
                 user,
             )
@@ -1401,7 +1404,7 @@ mod guidance_tests {
     /// no index, because a run has no tool to read one with.
     fn memory() -> String {
         crate::agent::memory::render::render(
-            prompt::Surface::Task,
+            crate::agent::memory::render::Recall::Passive,
             Some(&memory_row(
                 MemoryCategory::Profile,
                 PROFILE_TITLE,

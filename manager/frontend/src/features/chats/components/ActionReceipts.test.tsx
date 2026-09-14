@@ -131,12 +131,14 @@ describe('ActionReceipts', () => {
         outcome: 'Memory written',
         href: '',
       }),
+      // A fact is receipted under its kind, never under the name one person
+      // gave it: the server keeps that off a message the workspace can read.
       receipt({
         id: 'append',
         action: 'memory_append',
         target_type: 'memory',
-        target_id: 'fact/editor',
-        target_label: 'editor',
+        target_id: 'fact',
+        target_label: 'Memory',
         outcome: 'Memory appended',
         href: '',
       }),
@@ -144,8 +146,8 @@ describe('ActionReceipts', () => {
         id: 'delete',
         action: 'memory_delete',
         target_type: 'memory',
-        target_id: 'fact/editor',
-        target_label: 'editor',
+        target_id: 'fact',
+        target_label: 'Memory',
         outcome: 'Memory forgotten',
         href: '',
       }),
@@ -156,7 +158,7 @@ describe('ActionReceipts', () => {
     expect(screen.getByText('Preferences')).toBeInTheDocument();
     expect(screen.getByText('Appended to memory')).toBeInTheDocument();
     expect(screen.getByText('Forgot memory')).toBeInTheDocument();
-    expect(screen.getAllByText('editor')).toHaveLength(2);
+    expect(screen.getAllByText('Memory')).toHaveLength(2);
     expect(screen.queryByTestId('action-receipt-link')).not.toBeInTheDocument();
     expect(container.querySelector('a')).toBeNull();
   });
