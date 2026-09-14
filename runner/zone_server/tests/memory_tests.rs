@@ -563,13 +563,12 @@ async fn every_writer_leaves_a_memory_receipt_and_a_read_leaves_none() {
     // rather than ownership, so the name one person chose for their own entry
     // is not a field the rest of the workspace gets to read.
     assert_eq!(written[1]["target_id"], json!(MemoryCategory::Fact.short()));
-    for receipt in [&written[1]] {
-        assert_ne!(
-            receipt["target_label"],
-            json!(DEPLOY_WINDOW),
-            "a fact's name reached a receipt: {receipt}"
-        );
-    }
+    assert_ne!(
+        written[1]["target_label"],
+        json!(DEPLOY_WINDOW),
+        "a fact's name reached a receipt: {}",
+        written[1]
+    );
 
     let appended = receipts(&stored[1]);
     assert_eq!(appended.len(), 1, "{}", stored[1]);

@@ -209,6 +209,17 @@ fn fallback_label(name: &str) -> &'static str {
 
 fn outcome(name: &str, result: &ToolResult) -> String {
     if !result.success {
+        // A memory tool's failure is reported by its kind and nothing else.
+        // The store's messages name the entry and quote what it currently
+        // holds, so that the model can merge and write again — and that
+        // belongs in the tool result the model reads, not on a receipt stored
+        // on a message every member of the workspace can read. This covers
+        // every failure and not only a version conflict, because a receipt
+        // should not depend on the store having worded its next error
+        // carefully.
+        if let Some(refusal) = memory_refusal(name) {
+            return refusal.to_string();
+        }
         return result
             .error
             .as_deref()
@@ -232,6 +243,17 @@ fn outcome(name: &str, result: &ToolResult) -> String {
         MEMORY_APPEND => "Memory appended".to_string(),
         MEMORY_DELETE => "Memory forgotten".to_string(),
         _ => "Write completed".to_string(),
+    }
+}
+
+/// What a failed memory call puts on its receipt: which kind of write was
+/// refused, and no part of what it was refused for.
+fn memory_refusal(name: &str) -> Option<&'static str> {
+    match name {
+        MEMORY_WRITE => Some("Memory write refused"),
+        MEMORY_APPEND => Some("Memory append refused"),
+        MEMORY_DELETE => Some("Memory forget refused"),
+        _ => None,
     }
 }
 
@@ -626,23 +648,66 @@ mod tests {
         }
     }
 
+    /// A refused memory write says which kind of write was refused and nothing
+    /// about what it was refused for. The store's conflict message names the
+    /// entry and quotes what it now holds so the model can merge and write
+    /// again; the model reads that in the tool result, and it does not belong
+    /// on a message the whole workspace can read.
     #[test]
-    fn a_refused_memory_write_still_names_the_entry_it_did_not_change() {
+    fn a_refused_memory_write_says_only_that_it_was_refused() {
+        let conflict = |category: &str, entry: &str| {
+            format!(
+                "{category}/{entry} has changed since you read it, and is now version 2. It \
+                 says:\n\nThursdays, but never in a release week.\n\nMerge what you wanted to \
+                 change into that and write again with version 2."
+            )
+        };
+
         let built = receipt(
             MEMORY_WRITE,
             r#"{"category":"preference","content":"Long answers.","version":1}"#,
-            ToolResult::error(
-                "preference/Preferences has changed since you read it, and is now version 2. It says:\n\nShort answers.\n\nMerge what you wanted to change into that and write again with version 2.",
-            ),
+            ToolResult::error(conflict("preference", "Preferences")),
         );
-
         assert!(!built.success);
-        assert_eq!(built.target_id, "preference/Preferences");
-        assert_eq!(
-            built.outcome,
-            "preference/Preferences has changed since you read it, and is now version 2. It says:"
-        );
+        assert_eq!(built.outcome, "Memory write refused");
         assert!(built.href.is_empty());
+
+        // A stale fact write, append and delete each leave the name and the
+        // stored content off the message.
+        for (tool, arguments, expected) in [
+            (
+                MEMORY_WRITE,
+                r#"{"category":"fact","name":"Deploy window","content":"x","version":1}"#,
+                "Memory write refused",
+            ),
+            (
+                MEMORY_APPEND,
+                r#"{"category":"fact","name":"Deploy window","content":"x"}"#,
+                "Memory append refused",
+            ),
+            (
+                MEMORY_DELETE,
+                r#"{"category":"fact","name":"Deploy window","version":1}"#,
+                "Memory forget refused",
+            ),
+        ] {
+            let built = receipt(
+                tool,
+                arguments,
+                ToolResult::error(conflict("fact", "Deploy window")),
+            );
+
+            assert_eq!(built.outcome, expected, "{tool}");
+            let on_the_message = serde_json::to_string(&built).expect("a receipt serialises");
+            assert!(
+                !on_the_message.contains("Deploy window"),
+                "{tool} put the entry's name on the message: {on_the_message}"
+            );
+            assert!(
+                !on_the_message.contains("Thursdays"),
+                "{tool} put the entry's content on the message: {on_the_message}"
+            );
+        }
     }
 
     #[test]
