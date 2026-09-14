@@ -13,6 +13,26 @@ use zone_core::tools::{
 
 use super::PREVIEW_BODY_CHARS;
 
+/// What `create_reminder` offers and what it refuses, in the tool's own words.
+///
+/// Long because the schema alone cannot say the three things a caller gets
+/// wrong: that a rule outside the subset is refused rather than quietly
+/// dropped, that hourly is a ceiling and a faster condition wants an event
+/// rather than a schedule, and that a repeat is something to offer rather than
+/// something to impose on a request that was made once.
+const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered to this chat. \
+     due_at is the first firing: a future RFC3339 time with an explicit timezone offset, and the \
+     exact time the person named. Clarify an ambiguous date or timezone rather than guessing, and \
+     do not claim this will run a task. \
+     Add rrule to repeat it, as an RFC 5545 rule in this subset: FREQ (HOURLY, DAILY, WEEKLY, \
+     MONTHLY), INTERVAL, BYDAY, BYHOUR, BYMINUTE, BYMONTHDAY, UNTIL, COUNT. A clause outside that \
+     list is refused rather than dropped. Once an hour is the ceiling, counted after BYHOUR and \
+     BYMINUTE have split the period; a condition that changes faster than that wants wait_for on \
+     the event itself, not a schedule. Each firing delivers the same content, and a repeating \
+     reminder stops after seven days unless it is asked for again. \
+     Offer a repeat when somebody plainly wants the same thing again; never turn a request made \
+     once into a standing one they did not ask for.";
+
 /// Named because the waiting section counts on them: a description that still
 /// mandates a poll is read at the moment a runner starts, which is closer to
 /// the decision than any prompt section gets.
@@ -135,9 +155,7 @@ impl Tool for WorkspaceAction {
             Action::SendMessage => {
                 "Send a message to a workspace chat on the user's explicit request. Mentions record the intended member IDs in the message; they do not send email or push notifications."
             }
-            Action::CreateReminder => {
-                "Schedule a durable one-time reminder delivered to this chat. Require a future RFC3339 due_at with timezone offset. Clarify ambiguous dates or timezones; do not claim to run a task automatically."
-            }
+            Action::CreateReminder => CREATE_REMINDER_DESCRIPTION,
             Action::ListReminders => {
                 "List the current user's workspace reminders, including pending, delivered, and cancelled reminders."
             }
@@ -209,7 +227,11 @@ impl Tool for WorkspaceAction {
                 json!(["chat_id", "content", REASON_PARAM]),
             ),
             Action::CreateReminder => (
-                json!({"content":{"type":"string","minLength":1},"due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset"}}),
+                json!({
+                    "content":{"type":"string","minLength":1},
+                    "due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset. The first firing, and the exact time the person named."},
+                    "rrule":{"type":"string","description":"RFC 5545 rule to repeat it, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9. Omit for a single reminder."}
+                }),
                 json!(["content", "due_at"]),
             ),
             Action::CancelReminder => (json!({"reminder_id":identifier}), json!(["reminder_id"])),
