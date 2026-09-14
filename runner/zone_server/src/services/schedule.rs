@@ -226,29 +226,122 @@ impl Recurrence {
         ))
     }
 
-    /// The nominal gap between two firings: the frequency's own period, times
-    /// the interval, divided by how many times the `BY` clauses split it.
-    /// `FREQ=DAILY;BYHOUR=9,17` is twelve hours, not twenty-four.
+    /// The shortest gap between two firings.
     ///
-    /// Nominal because a month is measured at its shortest and a `BYDAY` list
-    /// is not counted — it is what sizes a jitter offset and what holds a rule
-    /// to `MIN_PERIOD`, and both want the gap at its smallest.
+    /// Shortest rather than average, because an average is what lets a rule
+    /// through the floor. `FREQ=DAILY;BYHOUR=0,1;BYMINUTE=0,30` fires four
+    /// times a day, so its firings average six hours apart — but three of its
+    /// gaps are half an hour and the fourth is twenty-two and a half, and the
+    /// half hours are the ones somebody is interrupted by. So the gap is
+    /// measured where it is smallest: between two times on one date, and out
+    /// of a period's last date into the next period's first.
+    ///
+    /// An hour, minute or date the rule leaves unstated is the anchor's, which
+    /// is one value rather than none. Which value it is never matters here,
+    /// because every gap is a difference and a difference survives being
+    /// shifted.
+    ///
+    /// This is also what sizes a jitter offset, and it is the right size for
+    /// that too: an offset drawn from the widest gap could push one firing
+    /// past the next.
     pub fn period(&self) -> Duration {
-        let splits = i32::try_from(self.by_hour.len().max(1) * self.by_minute.len().max(1))
-            .unwrap_or(i32::MAX);
         let whole = self.frequency.shortest() * i32::try_from(self.interval).unwrap_or(i32::MAX);
-        whole / splits.max(1)
+        // An hourly period is its own firing and reads no BY clause, so the
+        // interval is the whole answer.
+        if self.frequency == Frequency::Hourly {
+            return whole;
+        }
+        let times = self.times_of_day();
+        let span = match (times.first(), times.last()) {
+            (Some(first), Some(last)) => last - first,
+            _ => 0,
+        };
+        let across = self.shortest_gap_between_dates(whole) - Duration::minutes(span);
+        times
+            .windows(2)
+            .map(|pair| Duration::minutes(pair[1] - pair[0]))
+            .min()
+            .map_or(across, |within_a_date| within_a_date.min(across))
+    }
+
+    /// The minutes past midnight one selected date offers, in order.
+    ///
+    /// Midnight stands in for an hour or a minute the rule does not state,
+    /// because an unstated one is the anchor's single value and only the
+    /// distances between these are read.
+    fn times_of_day(&self) -> Vec<i64> {
+        let hours = if self.by_hour.is_empty() {
+            vec![0]
+        } else {
+            self.by_hour.clone()
+        };
+        let minutes = if self.by_minute.is_empty() {
+            vec![0]
+        } else {
+            self.by_minute.clone()
+        };
+        let mut times: Vec<i64> = hours
+            .iter()
+            .flat_map(|hour| {
+                minutes
+                    .iter()
+                    .map(move |minute| i64::from(*hour) * 60 + i64::from(*minute))
+            })
+            .collect();
+        times.sort_unstable();
+        times.dedup();
+        times
+    }
+
+    /// The shortest gap between two dates the rule selects, counting the step
+    /// out of one period's last date into the next period's first.
+    ///
+    /// A frequency that names no dates inside its period selects exactly one,
+    /// so the gap is the period itself. Two distinct dates are never less than
+    /// a day apart, which is what the floor of a day is for: a month is
+    /// measured at twenty-eight days here, and that undercounts the step out
+    /// of a longer month rather than overcounting it, so the clamp keeps the
+    /// undercount from reading as a gap no calendar could produce.
+    fn shortest_gap_between_dates(&self, whole: Duration) -> Duration {
+        let mut days: Vec<i64> = match self.frequency {
+            Frequency::Weekly => self
+                .by_day
+                .iter()
+                .map(|day| i64::from(day.num_days_from_monday()))
+                .collect(),
+            Frequency::Monthly => self
+                .by_month_day
+                .iter()
+                .map(|day| i64::from(*day))
+                .collect(),
+            Frequency::Hourly | Frequency::Daily => Vec::new(),
+        };
+        days.sort_unstable();
+        days.dedup();
+        let (Some(first), Some(last)) = (days.first(), days.last()) else {
+            return whole;
+        };
+        let Some(within_a_period) = days.windows(2).map(|pair| pair[1] - pair[0]).min() else {
+            return whole;
+        };
+        let into_the_next = whole.num_days() - (last - first);
+        Duration::days(within_a_period.min(into_the_next).max(1))
     }
 
     /// Refuses a rule that would fire faster than `MIN_PERIOD`.
+    ///
+    /// The refusal names the gap it measured, because a rule that trips this
+    /// is usually one whose clauses multiplied out further than whoever wrote
+    /// it expected, and "too often" alone does not say by how much.
     fn within_the_floor(&self) -> Result<(), String> {
-        if self.period() < MIN_PERIOD {
-            return Err(
-                "That repeats more often than once an hour, which is the ceiling. Ask for \
-                        a slower schedule, or wait on the event itself if you need to know the \
-                        moment it changes."
-                    .to_string(),
-            );
+        let shortest = self.period();
+        if shortest < MIN_PERIOD {
+            return Err(format!(
+                "Two of those firings are {} minutes apart, and once an hour is the ceiling. Ask \
+                 for a slower schedule, or wait on the event itself if you need to know the \
+                 moment it changes.",
+                shortest.num_minutes().max(0)
+            ));
         }
         Ok(())
     }
@@ -672,18 +765,48 @@ mod tests {
         }
     }
 
-    /// Hourly is the ceiling, counted after the `BY` clauses have split the
-    /// period rather than before.
+    /// Hourly is the ceiling, counted at the shortest gap a rule's clauses
+    /// produce rather than at their average.
+    ///
+    /// The distinction is the whole point: a rule that fires twice in an hour
+    /// and then not again until the next day averages out well above the
+    /// floor, and an average is no comfort to whoever the two firings half an
+    /// hour apart interrupt.
     #[test]
     fn anything_faster_than_an_hour_is_refused_however_it_is_spelled() {
-        // Both spellings use only clauses their frequency reads, so the floor
-        // is what refuses them rather than the clause check ahead of it.
-        for rule in [
-            "FREQ=DAILY;BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23;BYMINUTE=0,30",
-            "FREQ=WEEKLY;BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23;BYMINUTE=0,5,10,15,20,25,30,35",
+        // Every spelling here uses only clauses its frequency reads, so the
+        // floor is what refuses it rather than the clause check ahead of it.
+        for (rule, gap) in [
+            (
+                "FREQ=DAILY;BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23;BYMINUTE=0,30",
+                "30",
+            ),
+            (
+                "FREQ=WEEKLY;BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23;BYMINUTE=0,5,10,15,20,25,30,35",
+                "5",
+            ),
+            // Four firings a day, which averages six hours apart and is three
+            // half-hours and one long wait.
+            ("FREQ=DAILY;BYHOUR=0,1;BYMINUTE=0,30", "30"),
+            // Twice a day, averaging twelve hours, half an hour apart.
+            ("FREQ=DAILY;BYMINUTE=0,30", "30"),
+            // Two dates a week, and the shortest gap is the one across
+            // midnight between them -- Monday 23:45 to Tuesday 00:00 --
+            // rather than either of the forty-five-minute ones inside a day.
+            ("FREQ=WEEKLY;BYDAY=MO,TU;BYHOUR=0,23;BYMINUTE=0,45", "15"),
+            // The same shape a month apart: the 1st at 23:45 to the 2nd at
+            // 00:00.
+            (
+                "FREQ=MONTHLY;BYMONTHDAY=1,2;BYHOUR=0,23;BYMINUTE=0,45",
+                "15",
+            ),
         ] {
             let refused = Recurrence::parse(rule).expect_err(rule);
             assert!(refused.contains("once an hour"), "{rule}: {refused}");
+            assert!(
+                refused.contains(&format!("{gap} minutes apart")),
+                "{rule} should name its own shortest gap: {refused}"
+            );
         }
 
         for rule in [
@@ -691,11 +814,47 @@ mod tests {
             "FREQ=HOURLY;INTERVAL=4",
             "FREQ=DAILY;BYHOUR=9,17",
             "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9",
+            // Exactly the floor, from the far end of one day into the near
+            // end of the next. At the ceiling is not over it.
+            "FREQ=DAILY;BYHOUR=0,23",
+            "FREQ=WEEKLY;BYDAY=MO,TU;BYHOUR=0,23",
+            "FREQ=MONTHLY;BYMONTHDAY=1,2;BYHOUR=0,23",
         ] {
             assert!(
                 Recurrence::parse(rule).is_ok(),
                 "{rule} is at or under the ceiling"
             );
+        }
+    }
+
+    /// `period` answers with the shortest gap between two firings, which is
+    /// what both of its readers want: the floor refuses on it, and a jitter
+    /// offset drawn from anything wider could push one firing past the next.
+    #[test]
+    fn a_period_is_the_shortest_gap_between_firings_not_the_average_one() {
+        for (rule, minutes) in [
+            ("FREQ=HOURLY", 60),
+            ("FREQ=HOURLY;INTERVAL=6", 360),
+            ("FREQ=DAILY", 24 * 60),
+            ("FREQ=DAILY;INTERVAL=3", 3 * 24 * 60),
+            // Nine to five is eight hours; the wait back round to nine is
+            // sixteen, and the shorter one is the answer.
+            ("FREQ=DAILY;BYHOUR=9,17", 8 * 60),
+            ("FREQ=DAILY;BYHOUR=0,23", 60),
+            ("FREQ=WEEKLY", 7 * 24 * 60),
+            ("FREQ=WEEKLY;BYDAY=MO,TU", 24 * 60),
+            // Friday to Monday is three days; Monday to Friday is four.
+            ("FREQ=WEEKLY;BYDAY=MO,FR", 3 * 24 * 60),
+            ("FREQ=WEEKLY;BYDAY=MO,TU;BYHOUR=0,23", 60),
+            // A month is measured at February's length, and the step out of
+            // one selected date into the next is clamped at a day rather than
+            // allowed to read shorter than any calendar could make it.
+            ("FREQ=MONTHLY", 28 * 24 * 60),
+            ("FREQ=MONTHLY;BYMONTHDAY=1,15", 14 * 24 * 60),
+            ("FREQ=MONTHLY;BYMONTHDAY=1,29", 24 * 60),
+        ] {
+            let period = Recurrence::parse(rule).expect(rule).period();
+            assert_eq!(period.num_minutes(), minutes, "{rule}");
         }
     }
 

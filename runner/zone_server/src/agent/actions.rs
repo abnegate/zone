@@ -26,10 +26,11 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
      do not claim this will run a task. \
      Add rrule to repeat it, as an RFC 5545 rule in this subset: FREQ (HOURLY, DAILY, WEEKLY, \
      MONTHLY), INTERVAL, BYDAY, BYHOUR, BYMINUTE, BYMONTHDAY, UNTIL, COUNT. A clause outside that \
-     list is refused rather than dropped. Once an hour is the ceiling, counted after BYHOUR and \
-     BYMINUTE have split the period; a condition that changes faster than that wants wait_for on \
-     the event itself, not a schedule. A repeating reminder stops after seven days unless it is \
-     asked for again. \
+     list is refused rather than dropped. Once an hour is the ceiling, measured at the shortest \
+     gap the rule produces rather than its average — BYHOUR=0,1 with BYMINUTE=0,30 fires four \
+     times a day and three of those gaps are half an hour. A condition that changes faster than \
+     the ceiling wants wait_for on the event itself, not a schedule. A repeating reminder stops \
+     after seven days unless it is asked for again. \
      Without a prompt, each firing delivers content as it is written. With one, each firing runs \
      the prompt as a turn of your own in this chat and what you say is the delivery — so use a \
      prompt when the useful answer has to be worked out at the time, and content when it is the \
