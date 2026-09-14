@@ -2413,6 +2413,45 @@ async fn handle_send_message(
     }
 }
 
+/// Run one chat turn with nobody connected.
+///
+/// A scheduled automation has a prompt and a chat but no browser, and this is
+/// the same turn a person's message takes: the prompt is persisted as the user
+/// message and the model answers it. Nothing here is a second code path, which
+/// is the point — an automation's turn gets the same lease, the same
+/// per-chat serialisation, the same approval policy and the same recovery as
+/// a typed one.
+///
+/// No socket is needed because none was ever required. `ChatStream::of` keys a
+/// broadcast channel by chat id and `publish` drops a frame nobody is
+/// subscribed to, so the frames this turn emits reach whoever is connected and
+/// are replayed to whoever connects later from the live-turn log.
+///
+/// `metadata` marks where the turn came from, so a reader can tell an
+/// automation's message from one the person typed.
+pub(crate) async fn run_turn(
+    state: &AppState,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    content: &str,
+    metadata: Option<serde_json::Value>,
+) {
+    let stream = ChatStream::of(chat_id);
+    let generation = Generation::new(chat_id);
+    handle_send_message(
+        state,
+        &stream,
+        chat_id,
+        workspace_id,
+        user_id,
+        content,
+        metadata,
+        generation,
+    )
+    .await;
+}
+
 async fn prepare_message(
     state: &AppState,
     chat_id: Uuid,

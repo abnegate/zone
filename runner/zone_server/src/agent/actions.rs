@@ -28,8 +28,15 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
      MONTHLY), INTERVAL, BYDAY, BYHOUR, BYMINUTE, BYMONTHDAY, UNTIL, COUNT. A clause outside that \
      list is refused rather than dropped. Once an hour is the ceiling, counted after BYHOUR and \
      BYMINUTE have split the period; a condition that changes faster than that wants wait_for on \
-     the event itself, not a schedule. Each firing delivers the same content, and a repeating \
-     reminder stops after seven days unless it is asked for again. \
+     the event itself, not a schedule. A repeating reminder stops after seven days unless it is \
+     asked for again. \
+     Without a prompt, each firing delivers content as it is written. With one, each firing runs \
+     the prompt as a turn of your own in this chat and what you say is the delivery — so use a \
+     prompt when the useful answer has to be worked out at the time, and content when it is the \
+     same words every time. A prompt is an instruction to your future self, which will have this \
+     chat and these tools and no memory of writing it, so say what to check and what to report. \
+     End it with the rule that if nothing changed, it should say nothing: a schedule that reports \
+     every firing whether or not anything happened teaches the person to ignore it. \
      Offer a repeat when somebody plainly wants the same thing again; never turn a request made \
      once into a standing one they did not ask for.";
 
@@ -236,7 +243,8 @@ impl Tool for WorkspaceAction {
                 json!({
                     "content":{"type":"string","minLength":1},
                     "due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset. The first firing, and the exact time the person named."},
-                    "rrule":{"type":"string","description":"RFC 5545 rule to repeat it, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9. Omit for a single reminder."}
+                    "rrule":{"type":"string","description":"RFC 5545 rule to repeat it, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9. Omit for a single reminder."},
+                    "prompt":{"type":"string","description":"An instruction to your future self, run as a turn at each firing instead of delivering content. End it with the rule that if nothing changed, say nothing."}
                 }),
                 json!(["content", "due_at"]),
             ),

@@ -164,6 +164,32 @@ struct Due {
     due_at: DateTime<Utc>,
     expires_at: Option<DateTime<Utc>>,
     fired_count: i32,
+    prompt: Option<String>,
+}
+
+/// What one dispatch did, so the worker knows whether a turn has to follow it.
+///
+/// A reminder that carries no prompt is finished when its message is stored:
+/// the content *is* the delivery. One that carries a prompt has delivered
+/// nothing yet — the prompt is a turn for the model to take, and the answer is
+/// what the person asked to receive — so the worker is handed what it needs to
+/// run it once this transaction has committed. Running a generation inside the
+/// claim's transaction would hold the row lock for the length of a model call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivered {
+    /// Nothing was due.
+    Nothing,
+    /// A claim was settled and needs nothing more: a message was stored, a
+    /// membership was gone, or a schedule had outlived its lifetime.
+    Settled,
+    /// The automation's prompt is a turn the worker still has to run.
+    Turn {
+        chat_id: Uuid,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        reminder_id: Uuid,
+        prompt: String,
+    },
 }
 
 /// Where a fired automation goes next, or `None` when its rule is spent and
@@ -206,11 +232,11 @@ fn reschedule(
 }
 
 /// The claim, message, and terminal state share a transaction across all workers.
-pub async fn deliver_next(pool: &PgPool) -> DbResult<bool> {
+pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
     let mut transaction = pool.begin().await?;
     let next = sqlx::query_as::<_, Due>(
         "SELECT id, workspace_id, created_by, chat_id, content, rrule, anchor_at, due_at, \
-         expires_at, fired_count FROM reminders WHERE status = 'pending' AND due_at <= NOW() \
+         expires_at, fired_count, prompt FROM reminders WHERE status = 'pending' AND due_at <= NOW() \
          ORDER BY due_at, id LIMIT 1 FOR UPDATE SKIP LOCKED",
     )
     .fetch_optional(&mut *transaction)
@@ -226,9 +252,10 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<bool> {
         due_at,
         expires_at,
         fired_count,
+        prompt,
     }) = next
     else {
-        return Ok(false);
+        return Ok(Delivered::Nothing);
     };
 
     // A schedule whose lifetime ran out before this claim ends without
@@ -242,10 +269,11 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<bool> {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
-        return Ok(true);
+        return Ok(Delivered::Settled);
     }
 
     let mut message = None;
+    let mut turn = None;
     if let Err(error) = actions::authorize(&mut transaction, workspace_id, user_id, true).await {
         if !matches!(error, sqlx::Error::Protocol(_)) {
             return Err(error);
@@ -258,13 +286,32 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<bool> {
         .await?;
     } else {
         actions::chat(&mut transaction, workspace_id, chat_id).await?;
-        let message_id = Uuid::new_v4();
-        message = Some(sqlx::query_scalar::<_, Value>("INSERT INTO messages (id, chat_id, role, content, metadata) VALUES ($1, $2, 'assistant', $3, $4) RETURNING to_jsonb(messages.*)")
-            .bind(message_id).bind(chat_id).bind(content).bind(json!({"source": "reminder", "reminder_id": id, "actor_id": user_id})).fetch_one(&mut *transaction).await?);
-        sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
-            .bind(chat_id)
-            .execute(&mut *transaction)
-            .await?;
+        // A prompt is a turn, not a message. The worker runs it after this
+        // commits, and that turn stores the prompt as the user message and the
+        // model's answer beside it -- so storing `content` here as well would
+        // put a notice in the chat that the person never asked for.
+        let message_id = match prompt {
+            Some(prompt) => {
+                turn = Some(Delivered::Turn {
+                    chat_id,
+                    workspace_id,
+                    user_id,
+                    reminder_id: id,
+                    prompt,
+                });
+                None
+            }
+            None => {
+                let message_id = Uuid::new_v4();
+                message = Some(sqlx::query_scalar::<_, Value>("INSERT INTO messages (id, chat_id, role, content, metadata) VALUES ($1, $2, 'assistant', $3, $4) RETURNING to_jsonb(messages.*)")
+                    .bind(message_id).bind(chat_id).bind(content).bind(json!({"source": "reminder", "reminder_id": id, "actor_id": user_id})).fetch_one(&mut *transaction).await?);
+                sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
+                    .bind(chat_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                Some(message_id)
+            }
+        };
         // A one-shot is finished; an automation either moves to its next
         // occurrence and stays pending, or has run out of rule and is
         // `expired` -- which is a different ending from `delivered`, and a
@@ -311,5 +358,8 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<bool> {
     if let Some(message) = message {
         actions::publish(chat_id, message);
     }
-    Ok(true)
+    // The turn is handed back rather than run here: this function owns a
+    // transaction and a row lock, and a model call is not something to hold
+    // either across.
+    Ok(turn.unwrap_or(Delivered::Settled))
 }

@@ -425,6 +425,7 @@ pub async fn tail_task_log(
 mod tests {
     use super::*;
     use crate::db::reminders;
+    use crate::db::reminders::Delivered;
     use chrono::{Duration, Utc};
 
     /// `deliver_next` claims the oldest due reminder in the whole database
@@ -774,7 +775,10 @@ mod tests {
             content: "Every morning".into(),
             due_at: Utc::now() + Duration::hours(1),
             rrule: Some("FREQ=DAILY".into()),
-            prompt: Some("Say what changed since yesterday.".into()),
+            // No prompt: this test is about a schedule moving on rather than
+            // ending, and a prompt would replace the message it counts with a
+            // turn. The prompt path has its own test.
+            prompt: None,
             timing_mode: Some("exact_schedule".into()),
         };
 
@@ -813,10 +817,16 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert!(reminders::deliver_next(&pool).await.unwrap());
-        assert!(reminders::deliver_next(&pool).await.unwrap());
+        assert_ne!(
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
+        );
+        assert_ne!(
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
+        );
         assert!(
-            !reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
             "the rescheduled automation is not due again immediately"
         );
 
@@ -880,9 +890,12 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert!(reminders::deliver_next(&pool).await.unwrap());
+        assert_ne!(
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
+        );
         assert!(
-            !reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
             "COUNT=1 must not leave a second firing scheduled"
         );
 
@@ -901,6 +914,82 @@ mod tests {
                 .unwrap();
         assert_eq!(status, "expired");
         assert_eq!(fired, 1);
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A prompt is a turn, not a message. The dispatch claims the row, stores
+    /// nothing in the chat, and hands the worker what it needs to run the turn
+    /// once the claim has committed — because holding a row lock across a model
+    /// call is exactly what this split exists to avoid.
+    #[tokio::test]
+    async fn a_prompt_is_handed_back_as_a_turn_and_stores_no_message_of_its_own() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let _dispatch = DISPATCH.lock().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "unused when a prompt is given".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY".into()),
+                prompt: Some(
+                    "Say what changed since yesterday. If nothing did, say nothing.".into(),
+                ),
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+
+        sqlx::query(
+            "UPDATE reminders SET due_at = NOW() - INTERVAL '1 second', \
+             anchor_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let delivered = reminders::deliver_next(&pool).await.unwrap();
+        let Delivered::Turn {
+            chat_id: turn_chat,
+            workspace_id: turn_workspace,
+            user_id: turn_user,
+            reminder_id,
+            prompt,
+        } = delivered
+        else {
+            panic!("a prompt must come back as a turn to run: {delivered:?}");
+        };
+        assert_eq!(turn_chat, chat_id);
+        assert_eq!(turn_workspace, workspace);
+        assert_eq!(turn_user, user, "the turn runs as whoever asked for it");
+        assert_eq!(reminder_id, id);
+        assert!(prompt.starts_with("Say what changed"), "{prompt}");
+
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(chat_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            messages, 0,
+            "the content must not be posted beside the turn the prompt opens"
+        );
+
+        // The schedule still moved on, and still holds no message of its own.
+        let (status, fired, message_id): (String, i32, Option<Uuid>) =
+            sqlx::query_as("SELECT status, fired_count, message_id FROM reminders WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(fired, 1);
+        assert_eq!(message_id, None);
         cleanup(&pool, organization, user).await;
     }
 
@@ -936,7 +1025,10 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert!(reminders::deliver_next(&pool).await.unwrap());
+        assert_ne!(
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
+        );
 
         let (status, completed): (String, Option<chrono::DateTime<Utc>>) =
             sqlx::query_as("SELECT status, completed_at FROM reminders WHERE id = $1")
@@ -959,7 +1051,7 @@ mod tests {
             "a schedule nobody renewed must not get one more message on its way out"
         );
         assert!(
-            !reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
             "an expired schedule is never claimed again"
         );
         cleanup(&pool, organization, user).await;
@@ -1007,11 +1099,12 @@ mod tests {
             reminders::deliver_next(&pool),
             reminders::deliver_next(&pool)
         );
+        let claimed = |outcome: Delivered| usize::from(outcome != Delivered::Nothing);
+        assert_eq!(claimed(first.unwrap()) + claimed(second.unwrap()), 1);
         assert_eq!(
-            usize::from(first.unwrap()) + usize::from(second.unwrap()),
-            1
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
         );
-        assert!(!reminders::deliver_next(&pool).await.unwrap());
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
             .bind(chat_id)
             .fetch_one(&pool)
@@ -1033,7 +1126,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert!(reminders::deliver_next(&pool).await.unwrap());
+        assert_ne!(
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
+        );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
             .bind(chat_id)
             .fetch_one(&pool)
