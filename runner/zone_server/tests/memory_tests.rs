@@ -558,10 +558,18 @@ async fn every_writer_leaves_a_memory_receipt_and_a_read_leaves_none() {
         written[0]["target_id"],
         json!(entry(MemoryCategory::Profile, PROFILE_TITLE))
     );
-    assert_eq!(
-        written[1]["target_id"],
-        json!(entry(MemoryCategory::Fact, DEPLOY_WINDOW))
-    );
+    // A fact is receipted under its kind and never under its name: a receipt
+    // rides an assistant message, and chat access is workspace read access
+    // rather than ownership, so the name one person chose for their own entry
+    // is not a field the rest of the workspace gets to read.
+    assert_eq!(written[1]["target_id"], json!(MemoryCategory::Fact.short()));
+    for receipt in [&written[1]] {
+        assert_ne!(
+            receipt["target_label"],
+            json!(DEPLOY_WINDOW),
+            "a fact's name reached a receipt: {receipt}"
+        );
+    }
 
     let appended = receipts(&stored[1]);
     assert_eq!(appended.len(), 1, "{}", stored[1]);
@@ -584,6 +592,11 @@ async fn every_writer_leaves_a_memory_receipt_and_a_read_leaves_none() {
             "memory has no page, so a receipt must offer no link: {receipt}"
         );
         assert_eq!(receipt["actor_id"], json!(remembering.user.to_string()));
+        assert_ne!(
+            receipt["target_id"],
+            json!(entry(MemoryCategory::Fact, DEPLOY_WINDOW)),
+            "a fact's name reached a receipt: {receipt}"
+        );
     }
 
     assert!(
