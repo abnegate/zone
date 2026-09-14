@@ -49,19 +49,41 @@ async fn messages(harness: &Harness) -> Vec<(String, String, Value)> {
     .expect("the chat's messages are readable")
 }
 
-/// Waits for the worker to get as far as an answer, or gives up saying what it
-/// had instead. Polled rather than signalled: the worker is the production one,
-/// and a test hook into it would be a different worker from the one shipping.
-async fn until_answered(harness: &Harness) -> Vec<(String, String, Value)> {
+/// How many turns the firing still owes.
+async fn owed(harness: &Harness, reminder: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM reminder_turns WHERE reminder_id = $1")
+        .bind(reminder)
+        .fetch_one(&harness.pool)
+        .await
+        .expect("the queue is readable")
+}
+
+/// Waits for the firing to be *finished* — the answer in the chat and nothing
+/// left owed — or gives up saying which half it was still missing.
+///
+/// Both halves, because they do not land together. `finish_turn` runs after
+/// `run_turn` has returned, and `run_turn` stores the answer before it returns,
+/// so between the words appearing and the queue clearing there is a window the
+/// dispatch is still inside. That window is the whole reason delivery is
+/// at-least-once, and it is wide enough to read: this test asserted the queue
+/// the moment the words landed, passed on every local run, and failed in CI
+/// where the machine was busy enough to hold the two apart.
+///
+/// Polled rather than signalled: the worker is the production one, and a test
+/// hook into it would be a different worker from the one shipping.
+async fn until_finished(harness: &Harness, reminder: Uuid) -> Vec<(String, String, Value)> {
     for _ in 0..300 {
         let stored = messages(harness).await;
-        if stored.iter().any(|(role, _, _)| role == "assistant") {
+        if stored.iter().any(|(role, _, _)| role == "assistant")
+            && owed(harness, reminder).await == 0
+        {
             return stored;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     panic!(
-        "the firing never reached the chat: {:?}",
+        "the firing never finished: {} still owed, and the chat holds {:?}",
+        owed(harness, reminder).await,
         messages(harness).await
     );
 }
@@ -126,7 +148,7 @@ async fn a_due_prompt_is_answered_in_its_chat_by_the_worker_that_claimed_it() {
         harness.pool.clone(),
     ));
 
-    let stored = until_answered(&harness).await;
+    let stored = until_finished(&harness, reminder).await;
     worker.abort();
 
     assert_eq!(
@@ -160,13 +182,11 @@ async fn a_due_prompt_is_answered_in_its_chat_by_the_worker_that_claimed_it() {
         "the content is the schedule's name beside a prompt, not a notice posted with it"
     );
 
-    let owed: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM reminder_turns WHERE reminder_id = $1")
-            .bind(reminder)
-            .fetch_one(&harness.pool)
-            .await
-            .unwrap();
-    assert_eq!(owed, 0, "a turn that has run is not owed again");
+    assert_eq!(
+        owed(&harness, reminder).await,
+        0,
+        "a turn that has run is not owed again"
+    );
 
     let (status, fired): (String, i32) =
         sqlx::query_as("SELECT status, fired_count FROM reminders WHERE id = $1")
