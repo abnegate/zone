@@ -536,6 +536,13 @@ async fn exclude(checkout: &Path) {
         return;
     };
     let path = checkout.join(resolved.trim());
+    // A checkout cloned with an empty template has no `info` directory, and an
+    // append cannot create the parent it is missing.
+    if let Some(parent) = path.parent()
+        && tokio::fs::create_dir_all(parent).await.is_err()
+    {
+        return;
+    }
 
     let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
     if existing.lines().any(|line| line.trim() == EXCLUDED) {
@@ -749,6 +756,16 @@ mod tests {
 
     fn repository(root: &Path) {
         git(root, &["init", "--initial-branch", "main"]);
+        std::fs::write(root.join("README"), "seed").expect("the seed file is written");
+        git(root, &["add", "README"]);
+        git(root, &["commit", "--message", "seed"]);
+    }
+
+    /// A checkout shaped the way `zone_vcs` leaves one. It clones with
+    /// `--template=`, and an empty template means git writes no `info`
+    /// directory at all -- so there is nothing for an append to open.
+    fn untemplated_repository(root: &Path) {
+        git(root, &["init", "--template=", "--initial-branch", "main"]);
         std::fs::write(root.join("README"), "seed").expect("the seed file is written");
         git(root, &["add", "README"]);
         git(root, &["commit", "--message", "seed"]);
@@ -1216,6 +1233,30 @@ mod tests {
             excluded_lines(&exclude),
             1,
             "a second job appends nothing the first already wrote"
+        );
+
+        Jobs::kill_session(session).await;
+    }
+
+    /// Every checkout a run actually works in is one of these, so this is the
+    /// only shape of the exclude write that production ever reaches.
+    #[tokio::test]
+    async fn a_task_job_excludes_its_logs_in_a_checkout_git_left_no_info_directory_in() {
+        let cwd = directory();
+        untemplated_repository(cwd.path());
+        assert!(
+            !cwd.path().join(".git").join("info").exists(),
+            "the fixture is the shape a clone leaves behind"
+        );
+
+        let session = task();
+        let started = spawned(session, "exit 0", cwd.path()).await;
+        settles(session, &started.id).await;
+
+        assert_eq!(
+            excluded_lines(&exclude_path(cwd.path())),
+            1,
+            "a run's job logs are kept out of its diff whatever git left behind"
         );
 
         Jobs::kill_session(session).await;

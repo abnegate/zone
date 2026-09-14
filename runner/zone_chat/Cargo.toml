@@ -24,4 +24,5 @@ zone_core = { path = "../zone_core" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tracing-subscriber = { workspace = true }
 wiremock = "=0.6.5"

@@ -219,7 +219,7 @@ impl CommandExecutor {
             });
         }
 
-        // Spawn the process
+        let started_at = Instant::now();
         let mut child = process.spawn().map_err(ExecutorError::SpawnFailed)?;
 
         let pid = child.id().ok_or_else(|| {
@@ -296,7 +296,6 @@ impl CommandExecutor {
         let pg = process_group.clone();
         let job_id_clone = job_id.clone();
         let cancelled_clone = cancelled.clone();
-        let started_at = Instant::now();
 
         tokio::spawn(async move {
             let drain_output = async {
@@ -648,6 +647,95 @@ mod tests {
 
         let elapsed = handle.elapsed();
         assert!(elapsed >= Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn test_duration_spans_the_whole_child() {
+        const SLEPT: Duration = Duration::from_millis(100);
+
+        let executor = CommandExecutor::new();
+        let (tx, mut rx) = mpsc::channel(100);
+
+        let request = InboundMessage::RunStart {
+            job_id: "duration-test".to_string(),
+            workspace: PathBuf::from("/tmp"),
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), format!("sleep {}", SLEPT.as_secs_f64())],
+            env: HashMap::new(),
+            timeout_ms: Some(5000),
+            max_output_bytes: None,
+            working_dir: None,
+            confinement: None,
+        };
+
+        executor.spawn(&request, tx).await.unwrap();
+
+        let reported = loop {
+            let message = rx.recv().await.expect("the run reports how it ended");
+            if let OutboundMessage::RunExit { duration_ms, .. } = message {
+                break u128::from(duration_ms);
+            }
+        };
+
+        assert!(
+            reported >= SLEPT.as_millis(),
+            "a run that slept {}ms is reported as {reported}ms",
+            SLEPT.as_millis()
+        );
+    }
+
+    /// The gap between the spawn and the timestamp holds an `await` on the
+    /// outbound channel, so a consumer that is not reading stretches it without
+    /// bound. Filling the channel before the spawn holds that `await` open for
+    /// longer than the child lives, which turns an understatement of a few
+    /// milliseconds into the whole run and fails whenever the timestamp is
+    /// taken late.
+    #[tokio::test]
+    async fn test_duration_survives_a_stalled_consumer() {
+        const SLEPT: Duration = Duration::from_millis(100);
+        const STALL: Duration = Duration::from_millis(300);
+
+        let executor = CommandExecutor::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(OutboundMessage::log(
+            "stall".to_string(),
+            LogLevel::Info,
+            "stall".to_string(),
+            None,
+        ))
+        .await
+        .unwrap();
+
+        let request = InboundMessage::RunStart {
+            job_id: "stalled-consumer-test".to_string(),
+            workspace: PathBuf::from("/tmp"),
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), format!("sleep {}", SLEPT.as_secs_f64())],
+            env: HashMap::new(),
+            timeout_ms: Some(5000),
+            max_output_bytes: None,
+            working_dir: None,
+            confinement: None,
+        };
+
+        let drain = tokio::spawn(async move {
+            tokio::time::sleep(STALL).await;
+            while let Some(message) = rx.recv().await {
+                if let OutboundMessage::RunExit { duration_ms, .. } = message {
+                    return Some(u128::from(duration_ms));
+                }
+            }
+            None
+        });
+
+        executor.spawn(&request, tx).await.unwrap();
+        let reported = drain.await.unwrap().expect("the run reports how it ended");
+
+        assert!(
+            reported >= SLEPT.as_millis(),
+            "a run that slept {}ms is reported as {reported}ms",
+            SLEPT.as_millis()
+        );
     }
 
     // StdinHandle Tests
