@@ -238,6 +238,10 @@ pub struct ChatTools {
     /// What is deferred, and what this turn has since asked for. Shared with
     /// the two tools that read and change it.
     toolbox: Arc<Toolbox>,
+    /// The tools an MCP server contributed, whose declared text is written by
+    /// that server rather than by this repository. The catalog carries the
+    /// distinction through to the prompt; see [`Listed::remote`].
+    remote: HashSet<String>,
     /// Tiers for a catalog assembled by name rather than from tools, so a
     /// prompt test is answered by the same declaration production reads.
     #[cfg(test)]
@@ -282,6 +286,7 @@ impl ChatTools {
             definitions: Vec::new(),
             core: HashSet::new(),
             toolbox: Arc::new(Toolbox::default()),
+            remote: HashSet::new(),
             #[cfg(test)]
             tiers: HashMap::new(),
             mcp_guidance: None,
@@ -351,6 +356,7 @@ impl ChatTools {
             // that existed before deferral renders against the same input it
             // always did.
             core: sorted.iter().cloned().collect(),
+            remote: HashSet::new(),
             names: sorted,
             tiers,
             mcp_guidance,
@@ -360,11 +366,15 @@ impl ChatTools {
 
     /// A by-name catalog that holds some of its tools back, for the sections
     /// and tests that care about the difference.
+    ///
+    /// `remote` names the subset of `deferred` standing in for MCP tools, so a
+    /// test can exercise the boundary without attaching a server.
     #[cfg(test)]
     pub(crate) fn with_deferred(
         profile: ToolProfile,
         core: &[&str],
         deferred: &[(&str, &str)],
+        remote: &[&str],
     ) -> Self {
         let every: Vec<&str> = core
             .iter()
@@ -373,12 +383,14 @@ impl ChatTools {
             .collect();
         let mut built = Self::from_names(profile, &every, HashMap::new(), None);
         built.core = core.iter().map(|name| (*name).to_string()).collect();
+        built.remote = remote.iter().map(|name| (*name).to_string()).collect();
         built.toolbox.publish(
             deferred
                 .iter()
                 .map(|(name, purpose)| Listed {
                     name: (*name).to_string(),
                     purpose: (*purpose).to_string(),
+                    remote: built.remote.contains(*name),
                 })
                 .collect(),
         );
@@ -422,6 +434,7 @@ impl ChatTools {
     ) -> Self {
         let mut registry = ToolRegistry::new();
         let mut workspace = Vec::new();
+        let mut remote: HashSet<String> = HashSet::new();
         // Evidence, knowledge search and documents are what a turn reaches for
         // before it knows what it is doing, so they are never deferred.
         let mut core: HashSet<String> = HashSet::new();
@@ -498,10 +511,26 @@ impl ChatTools {
             } else {
                 scope.state.existing_mcp()
             };
+            let before: HashSet<String> = registry
+                .names()
+                .iter()
+                .map(|name| name.to_string())
+                .collect();
             let added = hub.map_or(0, |hub| registry.register_mcp(hub));
             if added > 0 {
                 tracing::info!(tools = added, "Attached MCP tools to chat");
             }
+            // Taken by difference because the registry does not record which
+            // of its names a server contributed, and the catalog has to know:
+            // these are the only entries whose text this repository did not
+            // write.
+            remote.extend(
+                registry
+                    .names()
+                    .iter()
+                    .filter(|name| !before.contains(**name))
+                    .map(|name| name.to_string()),
+            );
         }
 
         // Control flow is core on the same grounds: asking a question and
@@ -559,6 +588,7 @@ impl ChatTools {
             definitions: Vec::new(),
             core,
             toolbox,
+            remote,
             mcp_guidance,
             lease: None,
             actor_name: OnceCell::new(),
@@ -581,6 +611,7 @@ impl ChatTools {
             .map(|definition| Listed {
                 name: definition.function.name.clone(),
                 purpose: purpose(&definition.function.description),
+                remote: self.remote.contains(&definition.function.name),
             })
             .collect();
         self.toolbox.publish(listed);
