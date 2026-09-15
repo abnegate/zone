@@ -126,6 +126,12 @@ impl Toolbox {
             .collect()
     }
 
+    /// The names taken so far this turn, cloned rather than borrowed because
+    /// the lock cannot be held across the caller's filtering.
+    ///
+    /// A poisoned lock answers "nothing loaded", which costs a schema rather
+    /// than inventing one: the catalog still lists the tool and `load_tools`
+    /// can still be asked for it.
     pub fn loaded(&self) -> HashSet<String> {
         self.loaded
             .lock()
@@ -133,6 +139,8 @@ impl Toolbox {
             .unwrap_or_default()
     }
 
+    /// Whether this one name has been taken, for the search result that says
+    /// so rather than offering a load the model has already paid for.
     pub fn is_loaded(&self, name: &str) -> bool {
         self.loaded
             .lock()
