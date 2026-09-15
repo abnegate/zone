@@ -42,6 +42,15 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
      writing it, so say what to check and what to report. \
      End it with the rule that if nothing changed, it should say nothing: a schedule that reports \
      every firing whether or not anything happened teaches the person to ignore it. \
+     Set timing_mode to condition_watch when the change is the point rather than the time. Each \
+     firing is handed what the last one answered and asked what differs, so the prompt only has \
+     to say what to look at — the comparison and the say-nothing-if-unchanged rule are supplied. \
+     A watch needs both an rrule and a prompt and is refused without them: one firing has nothing \
+     to compare against, and fixed content has nothing to compare. Two limits to state when you \
+     offer one. It sees only the state at each firing, so a condition that appears and disappears \
+     between two firings is never noticed — for something that raises an event of its own, use \
+     wait_for on the event rather than a watch. And an unchanged firing still answers here, in \
+     one short line, because running the turn is how a watch reports at all. \
      Offer a repeat when somebody plainly wants the same thing again; never turn a request made \
      once into a standing one they did not ask for.";
 
@@ -249,7 +258,8 @@ impl Tool for WorkspaceAction {
                     "content":{"type":"string","minLength":1,"description":"The words each firing delivers. With a prompt they are not delivered at all and this is the schedule's name instead, so keep it short enough to recognise in a list."},
                     "due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset. The first firing, and the exact time the person named."},
                     "rrule":{"type":"string","description":"RFC 5545 rule to repeat it, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9. Omit for a single reminder."},
-                    "prompt":{"type":"string","description":"An instruction to your future self, run as a turn at each firing instead of delivering content. End it with the rule that if nothing changed, say nothing."}
+                    "prompt":{"type":"string","description":"An instruction to your future self, run as a turn at each firing instead of delivering content. End it with the rule that if nothing changed, say nothing."},
+                    "timing_mode":{"type":"string","enum":["exact_schedule","condition_watch"],"description":"exact_schedule, the default, fires at the time named. condition_watch fires on the rrule and reports what differs from the last firing, and requires both rrule and prompt. It cannot see a change that appears and disappears between two firings."}
                 }),
                 json!(["content", "due_at"]),
             ),

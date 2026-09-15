@@ -741,15 +741,16 @@ mod tests {
     #[tokio::test]
     async fn a_schedule_this_build_will_not_keep_is_refused_at_the_create() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
-        let automation = |rrule: Option<&str>, mode: Option<&str>| reminders::Reminder {
-            content: "Check the build".into(),
-            due_at: Utc::now() + Duration::hours(1),
-            rrule: rrule.map(str::to_string),
-            prompt: None,
-            timing_mode: mode.map(str::to_string),
-        };
+        let automation =
+            |rrule: Option<&str>, prompt: Option<&str>, mode: Option<&str>| reminders::Reminder {
+                content: "Check the build".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: rrule.map(str::to_string),
+                prompt: prompt.map(str::to_string),
+                timing_mode: mode.map(str::to_string),
+            };
 
-        for (rrule, mode, expected) in [
+        for (rrule, prompt, mode, expected) in [
             // Faster than the ceiling, counted after the BY clauses split it.
             (
                 Some(
@@ -757,25 +758,51 @@ mod tests {
                      BYMINUTE=0,30",
                 ),
                 None,
+                None,
                 "once an hour",
             ),
             // A clause this build does not implement, refused and not dropped.
-            (Some("FREQ=MONTHLY;BYSETPOS=-1;BYDAY=FR"), None, "BYSETPOS"),
+            (
+                Some("FREQ=MONTHLY;BYSETPOS=-1;BYDAY=FR"),
+                None,
+                None,
+                "BYSETPOS",
+            ),
             // A clause the frequency's arithmetic never reads, which would
             // otherwise fire on days nobody chose.
-            (Some("FREQ=DAILY;BYDAY=MO,FR"), None, "does not use"),
+            (Some("FREQ=DAILY;BYDAY=MO,FR"), None, None, "does not use"),
             // A mode that is not a mode at all.
-            (None, Some("whenever"), "not a timing mode"),
-            // And the two the worker cannot dispatch: accepting either would
-            // run it under exact_schedule's contract, which is not what it
-            // asked for.
-            (None, Some("condition_watch"), "exact_schedule"),
-            (None, Some("flexible_schedule"), "exact_schedule"),
+            (None, None, Some("whenever"), "not a timing mode"),
+            // The mode the worker still cannot dispatch: accepting it would run
+            // it under exact_schedule's contract, which is not what it asked
+            // for.
+            (None, None, Some("flexible_schedule"), "window"),
+            // And a watch missing either half of its comparison. One firing has
+            // nothing to compare against, and fixed content has nothing to
+            // compare, so neither is stored and quietly downgraded.
+            (
+                None,
+                Some("Check it"),
+                Some("condition_watch"),
+                "both halves",
+            ),
+            (
+                Some("FREQ=DAILY"),
+                None,
+                Some("condition_watch"),
+                "both halves",
+            ),
+            (None, None, Some("condition_watch"), "both halves"),
         ] {
-            let refused =
-                reminders::create(&pool, workspace, user, chat_id, automation(rrule, mode))
-                    .await
-                    .expect_err(&format!("{rrule:?}/{mode:?} must be refused"));
+            let refused = reminders::create(
+                &pool,
+                workspace,
+                user,
+                chat_id,
+                automation(rrule, prompt, mode),
+            )
+            .await
+            .expect_err(&format!("{rrule:?}/{prompt:?}/{mode:?} must be refused"));
             let sqlx::Error::Protocol(why) = &refused else {
                 panic!("{rrule:?}/{mode:?} was refused by the wrong error: {refused:?}");
             };
@@ -789,6 +816,114 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(stored, 0, "a refused create must leave no row behind");
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// The baseline is a column and an explicit write, because the cheap
+    /// version — asking the model to compare against the answer already sitting
+    /// in the chat — is destroyed by compaction and says nothing when it is.
+    /// This pins the column: only a watch is given one, a firing's own answer
+    /// is what fills it, and a firing that answered nothing leaves it alone.
+    #[tokio::test]
+    async fn a_watch_keeps_its_own_reading_and_a_plain_reminder_is_given_none() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let watch = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Release branch".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY".into()),
+                prompt: Some("Check whether the release branch is green".into()),
+                timing_mode: Some("condition_watch".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(watch["timing_mode"], "condition_watch");
+        assert!(
+            watch["last_observation"].is_null(),
+            "a watch starts with nothing to compare against: {watch}"
+        );
+        let watch_id: Uuid = serde_json::from_value(watch["id"].clone()).unwrap();
+
+        let plain = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Standup".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY".into()),
+                prompt: Some("Say what is on today".into()),
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let plain_id: Uuid = serde_json::from_value(plain["id"].clone()).unwrap();
+
+        // The outer option is what tells the worker to compose a comparison at
+        // all, and the inner one is what it has to compare against.
+        assert_eq!(
+            reminders::watch_baseline(&pool, watch_id).await.unwrap(),
+            Some(None),
+            "a watch's first firing has a baseline to fill and nothing yet in it"
+        );
+        assert_eq!(
+            reminders::watch_baseline(&pool, plain_id).await.unwrap(),
+            None,
+            "a reminder that is not a watch is never handed a comparison"
+        );
+
+        // A firing that stored no answer leaves the baseline alone, so the next
+        // one compares against the last reading that worked. Overwriting it
+        // with nothing would report the world changed when all that happened is
+        // that this firing did not run.
+        reminders::record_observation(&pool, watch_id, Uuid::new_v4())
+            .await
+            .unwrap();
+        assert_eq!(
+            reminders::watch_baseline(&pool, watch_id).await.unwrap(),
+            Some(None),
+            "a firing with no answer must not overwrite the baseline"
+        );
+
+        // One that did answer keeps it, capped. The reading is read back into
+        // the next firing's prompt, where an unbounded one would crowd out the
+        // context it is meant to be compared in.
+        let long = "green. ".repeat(2000);
+        let answered = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, chat_id, role, content) VALUES ($1, $2, 'assistant', $3)",
+        )
+        .bind(answered)
+        .bind(chat_id)
+        .bind(&long)
+        .execute(&pool)
+        .await
+        .unwrap();
+        reminders::record_observation(&pool, watch_id, answered)
+            .await
+            .unwrap();
+        let kept = reminders::watch_baseline(&pool, watch_id)
+            .await
+            .unwrap()
+            .flatten()
+            .expect("a firing that answered fills the baseline");
+        assert_eq!(
+            kept.chars().count(),
+            reminders::OBSERVATION_CAP,
+            "a reading longer than the cap is kept up to it"
+        );
+        assert!(
+            long.starts_with(&kept),
+            "the cap keeps the leading characters, so two readings stay comparable"
+        );
+
         cleanup(&pool, organization, user).await;
     }
 

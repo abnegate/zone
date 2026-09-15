@@ -2429,6 +2429,12 @@ async fn handle_send_message(
 ///
 /// `metadata` marks where the turn came from, so a reader can tell an
 /// automation's message from one the person typed.
+///
+/// Returns the id the answer is stored under. A caller that has to read back
+/// what this turn said — a watch keeping its own reading as the next firing's
+/// baseline — needs to name the message rather than take the chat's latest,
+/// which may by then be something the person typed. The id is allocated before
+/// the turn runs, so it is returned whether or not an answer reached that row.
 pub(crate) async fn run_turn(
     state: &AppState,
     chat_id: Uuid,
@@ -2436,9 +2442,10 @@ pub(crate) async fn run_turn(
     user_id: Uuid,
     content: &str,
     metadata: Option<serde_json::Value>,
-) {
+) -> Uuid {
     let stream = ChatStream::of(chat_id);
     let generation = Generation::new(chat_id);
+    let message_id = generation.message_id;
     handle_send_message(
         state,
         &stream,
@@ -2450,6 +2457,7 @@ pub(crate) async fn run_turn(
         generation,
     )
     .await;
+    message_id
 }
 
 async fn prepare_message(

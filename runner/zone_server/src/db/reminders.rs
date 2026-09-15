@@ -12,17 +12,28 @@ use uuid::Uuid;
 
 /// How a due automation is meant to be read when it fires.
 ///
-/// One mode, because one is what the worker dispatches. `deliver_next` fires at
-/// the stated time and nowhere else, which is exactly `exact_schedule` and is
-/// the wrong contract for either of the others. A `flexible_schedule` is a
-/// window to place a firing inside, and placing one needs a reading of what
-/// else is on the person's day that nothing here takes. A `condition_watch`
-/// fires only when something changed, and telling changed from unchanged needs
-/// the previous firing's answer kept and compared, which no row holds.
-/// Accepting a mode and then running it under a different contract is worse
-/// than refusing it, so the list widens when the worker learns the mode, and
-/// the database constraint widens with it.
-const TIMING_MODES: [&str; 1] = ["exact_schedule"];
+/// Two modes, because two are what the worker dispatches. `deliver_next` fires
+/// at the stated time and nowhere else, which is exactly `exact_schedule`. A
+/// `condition_watch` is that same firing handed the last one's answer and asked
+/// what differs, which is a contract the worker now honours because the answer
+/// is kept on the row. A `flexible_schedule` is a window to place a firing
+/// inside, and placing one needs a reading of what else is on the person's day
+/// that nothing here takes, so it stays refused. Accepting a mode and then
+/// running it under a different contract is worse than refusing it, so this
+/// list widens when the worker learns the mode, and the database constraint
+/// widens with it.
+const TIMING_MODES: [&str; 2] = ["exact_schedule", "condition_watch"];
+
+/// How much of one firing's answer is kept as the next one's baseline.
+///
+/// A model's answer has no length anybody promised, and this one is read back
+/// into the next firing's prompt, where an unbounded one would crowd out the
+/// context it is meant to be compared in. Truncation is safe here where
+/// compaction was not: it takes the same leading characters every firing, so
+/// two readings stay comparable, and whatever falls past the bound is missed
+/// consistently rather than intermittently. The database holds the same bound,
+/// so a later writer cannot store a baseline this would not have kept.
+pub const OBSERVATION_CAP: usize = 4000;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,10 +71,11 @@ fn automation(input: &Reminder) -> Result<(Option<Recurrence>, &'static str), sq
             .find(|mode| **mode == given)
             .ok_or_else(|| {
                 actions::invalid(&format!(
-                    "\"{given}\" is not a timing mode this build runs. Only exact_schedule is \
-                     dispatched: flexible_schedule needs a window to place a firing in, and \
-                     condition_watch needs one firing's answer kept so the next can tell changed \
-                     from unchanged. Neither is stored yet."
+                    "\"{given}\" is not a timing mode this build runs. exact_schedule fires at \
+                     the time you name, and condition_watch fires on a rule and reports what \
+                     differs from its last firing. flexible_schedule needs a window to place a \
+                     firing in, and nothing here reads what else is on the person's day, so it \
+                     is not stored yet."
                 ))
             })?,
     };
@@ -77,6 +89,27 @@ fn automation(input: &Reminder) -> Result<(Option<Recurrence>, &'static str), sq
         Some(rrule) => Some(Recurrence::parse(rrule).map_err(|why| actions::invalid(&why))?),
         None => None,
     };
+
+    // A watch needs both halves of a comparison. One firing has nothing to
+    // compare against, and fixed content has nothing to compare. Either way it
+    // is a reminder wearing a watch's name, and a mode that quietly does less
+    // than it says is the thing this whole path exists to avoid.
+    if mode == "condition_watch" {
+        let prompted = input
+            .prompt
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|prompt| !prompt.is_empty());
+        if rule.is_none() || !prompted {
+            return Err(actions::invalid(
+                "A condition_watch reports what changed since its last firing, so it needs both \
+                 halves of that comparison: an rrule, because a schedule that fires once has \
+                 nothing to compare against, and a prompt, because fixed content has nothing to \
+                 compare. Add whichever is missing, or drop timing_mode if the time is the point \
+                 rather than the change.",
+            ));
+        }
+    }
 
     Ok((rule, mode))
 }
@@ -459,5 +492,64 @@ pub async fn finish_turn(pool: &PgPool, turn_id: Uuid) -> DbResult<()> {
         .bind(turn_id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// What the last firing of this watch found, or `None` when the reminder is
+/// not a watch at all.
+///
+/// The outer `Option` answers whether to compose a comparison into the firing;
+/// the inner one is empty on the first firing, which has nothing to compare
+/// against yet. Read live at run time rather than snapshotted onto the turn,
+/// so two firings that queued up behind a restart compare against each other
+/// rather than both against the reading they shared.
+pub async fn watch_baseline(pool: &PgPool, reminder_id: Uuid) -> DbResult<Option<Option<String>>> {
+    let baseline = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT last_observation FROM reminders WHERE id = $1 AND timing_mode = 'condition_watch'",
+    )
+    .bind(reminder_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(baseline)
+}
+
+/// Keeps what this firing found as the baseline the next one is compared with.
+///
+/// The answer is read back by the id the turn was given rather than by taking
+/// the chat's most recent message, so something the person typed while the turn
+/// was running cannot be mistaken for the watch's own reading.
+///
+/// A firing that stored no answer — it failed before the model replied, or was
+/// cancelled — leaves the baseline as it was. Overwriting it with nothing would
+/// make the next firing compare against an empty reading and report the world
+/// changed when all that happened is that this firing did not run.
+pub async fn record_observation(
+    pool: &PgPool,
+    reminder_id: Uuid,
+    message_id: Uuid,
+) -> DbResult<()> {
+    let answer = sqlx::query_scalar::<_, String>(
+        "SELECT content FROM messages WHERE id = $1 AND role = 'assistant'",
+    )
+    .bind(message_id)
+    .fetch_optional(pool)
+    .await?
+    .filter(|answer| !answer.trim().is_empty());
+    let Some(answer) = answer else {
+        tracing::warn!(
+            %reminder_id,
+            "A watch fired but stored no answer; its baseline is left as it was, so the next \
+             firing compares against the last reading that worked"
+        );
+        return Ok(());
+    };
+    sqlx::query(
+        "UPDATE reminders SET last_observation = $2 WHERE id = $1 \
+         AND timing_mode = 'condition_watch'",
+    )
+    .bind(reminder_id)
+    .bind(answer.chars().take(OBSERVATION_CAP).collect::<String>())
+    .execute(pool)
+    .await?;
     Ok(())
 }

@@ -88,6 +88,156 @@ async fn until_finished(harness: &Harness, reminder: Uuid) -> Vec<(String, Strin
     );
 }
 
+/// Waits for the chat to hold `count` messages with nothing left owed.
+///
+/// `until_finished` cannot serve a second firing: its first condition — any
+/// assistant message at all — is already true the moment the first one lands.
+async fn until_stored(
+    harness: &Harness,
+    reminder: Uuid,
+    count: usize,
+) -> Vec<(String, String, Value)> {
+    for _ in 0..300 {
+        let stored = messages(harness).await;
+        if stored.len() >= count && owed(harness, reminder).await == 0 {
+            return stored;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let stored = messages(harness).await;
+    panic!(
+        "the chat never reached {count} messages: {} still owed, and it holds {stored:?}",
+        owed(harness, reminder).await,
+    );
+}
+
+/// Due now rather than when it was asked for. The create refuses a past
+/// `due_at`, which is the right refusal for a person asking for one and the
+/// wrong thing for a test that needs the sweep to find something.
+async fn make_due(harness: &Harness, reminder: Uuid) {
+    sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+        .bind(reminder)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+}
+
+/// What a watch keeps to compare the next firing against.
+async fn baseline(harness: &Harness, reminder: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT last_observation FROM reminders WHERE id = $1")
+        .bind(reminder)
+        .fetch_one(&harness.pool)
+        .await
+        .expect("the watch is readable")
+}
+
+/// A watch, over two firings: the first establishes a reading and the second is
+/// handed it.
+///
+/// This is the test the design argument rests on. The comparison could have
+/// been left to the chat — both firings land in it, so the previous answer is
+/// already in the history the model is given — and that shortcut fails silently
+/// once the history is compacted, which an hourly watch outlives within a day.
+/// So the reading is passed in explicitly, and what proves it is passed in is
+/// that the second firing's *user message* contains the first firing's answer.
+#[tokio::test]
+async fn a_watch_hands_its_next_firing_the_reading_the_last_one_took() {
+    let _dispatch = dispatching().await;
+    let harness = Harness::new(
+        Some(32_768),
+        false,
+        vec![
+            answer("Three jobs, all green."),
+            answer("The lint job is red; it was green last time."),
+        ],
+    )
+    .await;
+
+    let user: Uuid = sqlx::query_scalar(
+        "SELECT user_id FROM workspace_members WHERE workspace_id = $1 AND role = 'owner' \
+         AND is_active LIMIT 1",
+    )
+    .bind(harness.workspace)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the harness workspace has an owner");
+
+    let created = zone_server::db::reminders::create(
+        &harness.pool,
+        harness.workspace,
+        user,
+        harness.chat,
+        zone_server::db::reminders::Reminder {
+            content: "Release branch".into(),
+            due_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            rrule: Some("FREQ=DAILY".into()),
+            prompt: Some("Check whether the release branch is green.".into()),
+            timing_mode: Some("condition_watch".into()),
+        },
+    )
+    .await
+    .expect("a watch carrying both halves of its comparison is storable");
+    let reminder: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+    assert_eq!(
+        baseline(&harness, reminder).await,
+        None,
+        "a watch starts with nothing to compare against"
+    );
+
+    make_due(&harness, reminder).await;
+    let worker = zone_server::workers::reminders::spawn(common::create_test_state(
+        harness.config.clone(),
+        harness.pool.clone(),
+    ));
+
+    let stored = until_stored(&harness, reminder, 2).await;
+    let (role, first_turn, _) = &stored[0];
+    assert_eq!(role, "user");
+    assert!(
+        first_turn.starts_with("Check whether the release branch is green."),
+        "the stored prompt still leads the firing: {first_turn}"
+    );
+    assert!(
+        first_turn.contains("first firing"),
+        "the first firing is told it has nothing to compare against: {first_turn}"
+    );
+    assert_eq!(stored[1].0, "assistant");
+    assert_eq!(stored[1].1, "Three jobs, all green.");
+    assert_eq!(
+        baseline(&harness, reminder).await.as_deref(),
+        Some("Three jobs, all green."),
+        "what the firing answered is what the next one is compared against"
+    );
+
+    make_due(&harness, reminder).await;
+    let stored = until_stored(&harness, reminder, 4).await;
+    worker.abort();
+
+    let (role, second_turn, metadata) = &stored[2];
+    assert_eq!(role, "user");
+    assert!(
+        second_turn.contains("Three jobs, all green."),
+        "the reading is handed to the firing rather than left in a history that \
+         compaction will take: {second_turn}"
+    );
+    assert!(
+        !second_turn.contains("first firing"),
+        "a firing with a reading behind it is not told it is the first: {second_turn}"
+    );
+    assert_eq!(
+        metadata["reminder_id"],
+        Value::from(reminder.to_string()),
+        "a watch's turn is marked like any other firing's: {metadata}"
+    );
+    assert_eq!(stored[3].0, "assistant");
+    assert_eq!(
+        baseline(&harness, reminder).await.as_deref(),
+        Some("The lint job is red; it was green last time."),
+        "each firing's answer replaces the reading, so the next compares against \
+         the most recent one rather than against the first"
+    );
+}
+
 /// The whole path, from a row that has come due to words in the chat: the
 /// worker's own sweep claims it, writes the turn down, runs it through
 /// `ws::chat::run_turn`, and marks it done — and what the model says is the
@@ -131,14 +281,7 @@ async fn a_due_prompt_is_answered_in_its_chat_by_the_worker_that_claimed_it() {
     .expect("a prompt-bearing reminder is storable");
     let reminder: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
 
-    // Due now rather than in an hour. The create refuses a past due_at, which
-    // is the right refusal for a person asking for one and the wrong thing for
-    // a test that needs the sweep to find something.
-    sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
-        .bind(reminder)
-        .execute(&harness.pool)
-        .await
-        .unwrap();
+    make_due(&harness, reminder).await;
 
     // A second instance of the server, which is what a worker is: it shares the
     // database and the provider and knows nothing about the socket the harness
