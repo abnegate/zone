@@ -241,7 +241,11 @@ pub fn run_with_context(
                 yield AgentEvent::Finalizing(reason.clone());
                 nudge(&mut context, finalizing_instruction(&reason));
             }
-            let definitions = (agentic && !finalizing).then_some(tools.definitions());
+            // Recomputed each round, and owned: `load_tools` can have widened
+            // the set since the last one, and the schemas it took have to be
+            // in front of the model now rather than next turn.
+            let exposed = (agentic && !finalizing).then(|| tools.definitions());
+            let definitions = exposed.as_deref();
             let mut usage = context.usage(&model, definitions);
             if usage
                 .threshold

@@ -1077,6 +1077,20 @@ async fn the_turn_offers_the_wait_and_carries_no_surviving_poll_instruction() {
             .unwrap_or_else(|| panic!("{name} is missing from the catalog"))
             .to_string()
     };
+    // `tail_task_log` is one of the deferred schemas, so it is on the wire
+    // only after a `load_tools`. The string being audited is the description
+    // the tool declares, which is what a load hands over, so it is read from
+    // the catalog that serves it rather than from this round's body.
+    let described = |name: &str| {
+        tools
+            .all_definitions()
+            .iter()
+            .find(|definition| definition.function.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the catalog"))
+            .function
+            .description
+            .clone()
+    };
     assert!(offered(WAIT_FOR).contains("Wait for something outside this loop to finish"));
     assert!(
         offered("run_shell").contains("wait for it with wait_for"),
@@ -1089,14 +1103,14 @@ async fn the_turn_offers_the_wait_and_carries_no_surviving_poll_instruction() {
         offered("start_task")
     );
     assert!(
-        offered("tail_task_log").contains("rather than calling it again"),
+        described("tail_task_log").contains("rather than calling it again"),
         "{}",
-        offered("tail_task_log")
+        described("tail_task_log")
     );
     assert!(
-        offered("tail_task_log").contains("wait_for kind=task_run"),
+        described("tail_task_log").contains("wait_for kind=task_run"),
         "{}",
-        offered("tail_task_log")
+        described("tail_task_log")
     );
 
     let refusal = requests[1]["messages"]
