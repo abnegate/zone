@@ -524,14 +524,27 @@ async fn web_search_turn(
                 "{name} is required even for legacy sandboxed chats"
             );
         }
-        let has_web = definitions
-            .iter()
-            .any(|tool| tool["function"]["name"] == "web_search");
-        let has_fetch = definitions
-            .iter()
-            .any(|tool| tool["function"]["name"] == "fetch_url");
-        assert_eq!(has_web, !matches!(outcome, SearchOutcome::Disabled));
-        assert_eq!(has_fetch, has_web);
+        // The web tools are deferred, so what says whether this turn can reach
+        // them is no longer the schema block alone: a deferred tool appears in
+        // the prompt's own list as `- name: purpose`, and a load puts it on
+        // the wire. Disabled means neither, which is the distinction this is
+        // really about. Matching the list's line shape rather than the bare
+        // name keeps the web guidance paragraph, which says "Call web_search",
+        // from answering for the tool's existence.
+        let system = requests[0]["messages"][0]["content"]
+            .as_str()
+            .expect("a system prompt");
+        let reachable = |name: &str| {
+            definitions
+                .iter()
+                .any(|tool| tool["function"]["name"] == name)
+                || system.contains(&format!("- {name}: "))
+        };
+        assert_eq!(
+            reachable("web_search"),
+            !matches!(outcome, SearchOutcome::Disabled)
+        );
+        assert_eq!(reachable("fetch_url"), reachable("web_search"));
     }
     assert!(
         requests[0]["messages"]

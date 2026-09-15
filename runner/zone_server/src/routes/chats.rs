@@ -223,10 +223,11 @@ async fn chat_with_messages(
                 .await
                 .ok()
                 .map(|prepared| {
-                    prepared.context.usage(
-                        &prepared.model,
-                        prepared.agentic.then_some(prepared.tools.definitions()),
-                    )
+                    // The exposed set, not every registered tool: this is what
+                    // a turn would actually send, which is the number a reader
+                    // is asking for when they ask what a chat costs.
+                    let exposed = prepared.agentic.then(|| prepared.tools.definitions());
+                    prepared.context.usage(&prepared.model, exposed.as_deref())
                 })
         }
         _ => None,
@@ -1046,8 +1047,19 @@ pub async fn context(
         Ok(actor) => actor,
         Err(error) => return error.into_response(),
     };
-    match session::build(&state,&chat,actor,Some((&request.content,request.metadata.as_ref())),session::Mode::Preview).await {
-        Ok(prepared)=>Json(serde_json::json!({"context":prepared.context.usage(&prepared.model,prepared.agentic.then_some(prepared.tools.definitions()))})).into_response(),
-        Err(error)=>ServerError::Conflict(error).into_response(),
+    match session::build(
+        &state,
+        &chat,
+        actor,
+        Some((&request.content, request.metadata.as_ref())),
+        session::Mode::Preview,
+    )
+    .await
+    {
+        Ok(prepared) => {
+            let exposed = prepared.agentic.then(|| prepared.tools.definitions());
+            Json(serde_json::json!({"context":prepared.context.usage(&prepared.model,exposed.as_deref())})).into_response()
+        }
+        Err(error) => ServerError::Conflict(error).into_response(),
     }
 }

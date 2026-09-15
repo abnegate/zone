@@ -19,6 +19,10 @@ use uuid::Uuid;
 use zone_core::llm::ToolDefinition;
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
+use super::toolbox::{
+    LOAD_TOOLS, Listed, LoadToolsTool, SEARCH_TOOLS, SearchToolsTool, Toolbox, purpose,
+};
+
 use super::citations::{self, Citation};
 use super::identifier::{self, Kind};
 use super::receipts::{self, ActionReceipt};
@@ -194,6 +198,23 @@ struct TaskLease {
     owner: Uuid,
 }
 
+/// Workspace tools kept in front of the model anyway.
+///
+/// Deferring never puts a tool out of reach for the turn: `definitions` is
+/// recomputed each round, so a `load_tools` in one round has the schema in
+/// front of the model in the next round of the same turn. What it costs is
+/// that round trip, which makes the choice frequency against size rather than
+/// anything a prompt rule forces. `start_task` is 186 tokens and is the hinge
+/// of the whole chat-hands-off-to-a-runner workflow that `prompt::section::
+/// workspace` and `waiting` spend most of their text on, so a chat would pay
+/// the round trip far more often than it saved the schema.
+///
+/// `create_reminder` is the other tool those sections name and it is not here:
+/// at 1,056 tokens it is the single most expensive schema in the catalog, more
+/// than three times the next, and a small minority of turns want it. Deferring
+/// it is most of what E4 is worth.
+const NEVER_DEFERRED: [&str; 1] = ["start_task"];
+
 /// The tools offered for one turn, and the context they run in.
 ///
 /// Chat and tasks share workspace tools. Tasks have a sandboxed file/shell
@@ -207,7 +228,16 @@ pub struct ChatTools {
     profile: ToolProfile,
     names: Vec<String>,
     name_set: HashSet<String>,
+    /// Every tool's schema, whether or not this turn has been shown it.
+    /// [`Self::definitions`] is the part the model is actually handed.
     definitions: Vec<ToolDefinition>,
+    /// The tools whose schemas are always sent. Everything else is listed by
+    /// name and fetched through `load_tools`; see [`super::toolbox`] for why,
+    /// and for what the trade costs.
+    core: HashSet<String>,
+    /// What is deferred, and what this turn has since asked for. Shared with
+    /// the two tools that read and change it.
+    toolbox: Arc<Toolbox>,
     /// Tiers for a catalog assembled by name rather than from tools, so a
     /// prompt test is answered by the same declaration production reads.
     #[cfg(test)]
@@ -250,6 +280,8 @@ impl ChatTools {
             names: Vec::new(),
             name_set: HashSet::new(),
             definitions: Vec::new(),
+            core: HashSet::new(),
+            toolbox: Arc::new(Toolbox::default()),
             #[cfg(test)]
             tiers: HashMap::new(),
             mcp_guidance: None,
@@ -314,11 +346,43 @@ impl ChatTools {
             context: context(profile, host_root()),
             profile,
             name_set: sorted.iter().cloned().collect(),
+            // A catalog stated by name is stated in full: nothing is deferred
+            // unless a test says so through `with_deferred`, so every section
+            // that existed before deferral renders against the same input it
+            // always did.
+            core: sorted.iter().cloned().collect(),
             names: sorted,
             tiers,
             mcp_guidance,
             ..Self::empty()
         }
+    }
+
+    /// A by-name catalog that holds some of its tools back, for the sections
+    /// and tests that care about the difference.
+    #[cfg(test)]
+    pub(crate) fn with_deferred(
+        profile: ToolProfile,
+        core: &[&str],
+        deferred: &[(&str, &str)],
+    ) -> Self {
+        let every: Vec<&str> = core
+            .iter()
+            .copied()
+            .chain(deferred.iter().map(|(name, _)| *name))
+            .collect();
+        let mut built = Self::from_names(profile, &every, HashMap::new(), None);
+        built.core = core.iter().map(|name| (*name).to_string()).collect();
+        built.toolbox.publish(
+            deferred
+                .iter()
+                .map(|(name, purpose)| Listed {
+                    name: (*name).to_string(),
+                    purpose: (*purpose).to_string(),
+                })
+                .collect(),
+        );
+        built
     }
 
     /// Sandboxed tools and workspace tools authorized as the initiating task actor.
@@ -358,6 +422,9 @@ impl ChatTools {
     ) -> Self {
         let mut registry = ToolRegistry::new();
         let mut workspace = Vec::new();
+        // Evidence, knowledge search and documents are what a turn reaches for
+        // before it knows what it is doing, so they are never deferred.
+        let mut core: HashSet<String> = HashSet::new();
 
         if let Some(scope) = &scope {
             if scope.chat_id.is_some() {
@@ -369,8 +436,13 @@ impl ChatTools {
             registry.register(Arc::new(SearchChatHistoryTool(scope.clone())));
             registry.register(Arc::new(ListSourcesTool(scope.clone())));
             registry.register(Arc::new(ListProjectsTool(scope.clone())));
-            super::actions::register(&mut registry, scope);
+            // Documents register here rather than after the actions so that
+            // everything registered so far is the core set, which is what the
+            // snapshot below takes. Order of registration changes nothing else:
+            // both the catalog and the definitions sort by name.
             super::documents::register(&mut registry, scope);
+            core.extend(registry.names().iter().map(|name| name.to_string()));
+            super::actions::register(&mut registry, scope);
             super::integrations::register(&mut registry, scope);
             if scope.chat_id.is_some() {
                 super::images::register(&mut registry, scope);
@@ -385,6 +457,16 @@ impl ChatTools {
             super::web::register(&mut registry, scope);
         }
 
+        // Snapshot before the host tools land, so the extend below adds those
+        // and only those. Taking `names()` after everything had registered
+        // would sweep the workspace actions, the web tools and MCP into the
+        // core set, which is exactly the deferral this exists for.
+        let workspace_side: HashSet<String> = registry
+            .names()
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+
         match profile {
             ToolProfile::Chat => {
                 for tool in ToolRegistry::with_host_tools().into_tools() {
@@ -397,6 +479,16 @@ impl ChatTools {
                 }
             }
         }
+
+        // Host tools are core: a turn that can read a file should not have to
+        // ask for the ability first.
+        core.extend(
+            registry
+                .names()
+                .iter()
+                .filter(|name| !workspace_side.contains(**name))
+                .map(|name| name.to_string()),
+        );
 
         if let Some(scope) = &scope
             && profile == ToolProfile::Chat
@@ -412,8 +504,37 @@ impl ChatTools {
             }
         }
 
+        // Control flow is core on the same grounds: asking a question and
+        // waiting on something are what a turn does between the steps of any
+        // other work, so a chat would spend the round trip on them constantly.
+        // They are cheap too — 229 and 226 tokens — so there is little to win
+        // by holding them back.
         super::question::register(&mut registry);
         super::wait::register(&mut registry, scope.as_ref());
+        core.insert(super::question::ASK_USER.to_string());
+        core.extend(
+            registry
+                .names()
+                .iter()
+                .filter(|name| name.starts_with("wait"))
+                .map(|name| name.to_string()),
+        );
+
+        // And the workspace tools a chat reaches for often enough that the
+        // round trip would cost more than the schema; see `NEVER_DEFERRED`.
+        core.extend(
+            NEVER_DEFERRED
+                .iter()
+                .filter(|name| registry.names().contains(name))
+                .map(|name| (*name).to_string()),
+        );
+
+        // And the two that fetch the rest, which are useless deferred.
+        let toolbox = Arc::new(Toolbox::default());
+        registry.register(Arc::new(SearchToolsTool(toolbox.clone())));
+        registry.register(Arc::new(LoadToolsTool(toolbox.clone())));
+        core.insert(SEARCH_TOOLS.to_string());
+        core.insert(LOAD_TOOLS.to_string());
 
         let cwd = match profile {
             ToolProfile::Chat => host_root(),
@@ -436,12 +557,33 @@ impl ChatTools {
             names: Vec::new(),
             name_set: HashSet::new(),
             definitions: Vec::new(),
+            core,
+            toolbox,
             mcp_guidance,
             lease: None,
             actor_name: OnceCell::new(),
         };
         assembled.cache_catalog();
+        assembled.publish_catalog();
         assembled
+    }
+
+    /// Tell the toolbox what it is holding back.
+    ///
+    /// Only after `cache_catalog`, because a tool cannot list its siblings
+    /// until every one of them is registered — the two that do the listing are
+    /// themselves registered partway through.
+    fn publish_catalog(&mut self) {
+        let listed = self
+            .definitions
+            .iter()
+            .filter(|definition| !self.core.contains(&definition.function.name))
+            .map(|definition| Listed {
+                name: definition.function.name.clone(),
+                purpose: purpose(&definition.function.description),
+            })
+            .collect();
+        self.toolbox.publish(listed);
     }
 
     fn cache_catalog(&mut self) {
@@ -474,8 +616,38 @@ impl ChatTools {
         self.names.is_empty()
     }
 
-    pub fn definitions(&self) -> &[ToolDefinition] {
+    /// The schemas this turn is handed: the core set, plus whatever it has
+    /// since loaded.
+    ///
+    /// Recomputed per round rather than cached, because `load_tools` runs from
+    /// behind a shared reference and the next round has to see what it took.
+    /// The agent loop already asks for this inside its own iteration, so a
+    /// tool loaded in round two is callable in round three with nothing else
+    /// rearranged.
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
+        let loaded = self.toolbox.loaded();
+        self.definitions
+            .iter()
+            .filter(|definition| {
+                let name = &definition.function.name;
+                self.core.contains(name) || loaded.contains(name)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Every schema, exposed or not. What a measurement compares against, and
+    /// what a caller wanting the old whole-catalog behaviour asks for.
+    pub fn all_definitions(&self) -> &[ToolDefinition] {
         &self.definitions
+    }
+
+    /// The deferred tools still waiting to be asked for, for the prompt to
+    /// list. A model cannot ask for a tool it has never heard of, so this is
+    /// what keeps the saving from turning into a tool that may as well not
+    /// exist.
+    pub fn deferred(&self) -> Vec<&Listed> {
+        self.toolbox.unloaded()
     }
 
     /// Tool names, sorted so the system prompt is stable between turns.
@@ -2221,6 +2393,11 @@ mod tests {
     /// chat catalog can hold all seven to it at once. The sentence lives in
     /// `zone_core::tools::REASON_DESCRIPTION`; a second copy anywhere, however
     /// lightly reworded, fails here.
+    ///
+    /// Read from `all_definitions`, not from what a turn is handed: three of
+    /// the seven are deferred, so the exposed set is missing them until
+    /// something asks. What is audited here is the declaration each tool
+    /// carries, which does not depend on whether this turn was shown it.
     #[tokio::test]
     async fn every_side_effecting_tool_shares_one_reason_description() {
         let tools = ChatTools::preview(scope()).await;
@@ -2228,7 +2405,7 @@ mod tests {
         let mut asked: HashSet<String> = HashSet::new();
         let mut descriptions: HashSet<String> = HashSet::new();
 
-        for definition in tools.definitions() {
+        for definition in tools.all_definitions() {
             let name = &definition.function.name;
             let schema = &definition.function.parameters;
             let Some(property) = schema["properties"].get(REASON_PARAM) else {
@@ -2263,6 +2440,36 @@ mod tests {
             descriptions,
             HashSet::from([REASON_DESCRIPTION.to_string()]),
             "the reason description has forked across the two crates"
+        );
+    }
+
+    /// The list is only worth having if it survives the assembly that reads
+    /// it: a name misspelled here, or a tool that stops registering, would
+    /// defer something the catalog says it never defers and nothing else would
+    /// notice.
+    #[tokio::test]
+    async fn the_tools_named_as_never_deferred_are_in_the_block_that_is_sent() {
+        let tools = ChatTools::preview(scope()).await;
+        let definitions = tools.definitions();
+        let offered: HashSet<&str> = definitions
+            .iter()
+            .map(|definition| definition.function.name.as_str())
+            .collect();
+
+        for name in NEVER_DEFERRED {
+            assert!(
+                tools.has(name),
+                "{name} is held out of the deferred set and registered by nothing"
+            );
+            assert!(
+                offered.contains(name),
+                "{name} is named as never deferred and was deferred anyway"
+            );
+        }
+
+        assert!(
+            !tools.deferred().is_empty(),
+            "nothing is deferred, so this proves nothing"
         );
     }
 
