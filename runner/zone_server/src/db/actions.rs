@@ -938,6 +938,88 @@ mod tests {
         cleanup(&pool, organization, user).await;
     }
 
+    /// The last attempt a firing gets is still a firing in flight. `attempts`
+    /// reaches the bound on the third claim, and a schedule whose turn is out
+    /// for the third time is no less busy than one out for the first — so the
+    /// question "is another one already running" is answered by the claim
+    /// alone, never by how many times it has been tried.
+    #[tokio::test]
+    async fn a_firing_on_its_last_attempt_still_holds_the_one_behind_it() {
+        let _dispatch = dispatching().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Release branch".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY".into()),
+                prompt: Some("Check whether the release branch is green".into()),
+                timing_mode: Some("condition_watch".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let reminder: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, \
+                 prompt) VALUES ($1, $2, $3, $4, 'Check it')",
+            )
+            .bind(reminder)
+            .bind(workspace)
+            .bind(chat_id)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // The older firing has been taken twice and its claim has gone stale,
+        // so the next one it gets is its third and last.
+        let older: Uuid = sqlx::query_scalar(
+            "SELECT id FROM reminder_turns WHERE reminder_id = $1 ORDER BY created_at, id LIMIT 1",
+        )
+        .bind(reminder)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE reminder_turns SET attempts = 2, claimed_at = NOW() - INTERVAL '1 day' \
+             WHERE id = $1",
+        )
+        .bind(older)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let third = reminders::claim_turn(&pool, LEASE)
+            .await
+            .unwrap()
+            .expect("a firing whose claim went stale is offered again");
+        assert_eq!(third.id, older, "the stale claim is the one taken up again");
+        let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM reminder_turns WHERE id = $1")
+            .bind(older)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(attempts, 3, "the third claim reaches the attempt bound");
+        assert!(
+            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            "a firing out for the last time still holds the one behind it; otherwise the two run \
+             together and the watch compares both against the same reading"
+        );
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+    }
+
     /// The baseline is a column and an explicit write, because the cheap
     /// version — asking the model to compare against the answer already sitting
     /// in the chat — is destroyed by compaction and says nothing when it is.

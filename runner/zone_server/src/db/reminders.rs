@@ -492,6 +492,13 @@ pub async fn claim_turn(pool: &PgPool, lease: Duration) -> DbResult<Option<Pendi
     // firing whose schedule already has a turn under a live claim is left for
     // the next sweep, by which time the one ahead of it has recorded what it
     // found. A claim that went stale is not live and does not hold its siblings.
+    //
+    // Live is decided by the claim alone, with no attempt bound: a turn taken
+    // for the third time has reached the limit and is still running, and asking
+    // for `attempts < $1` here would read the last attempt any firing gets as
+    // though nothing held the schedule at all. The bound belongs on the row
+    // being taken, which is a different question from whether another one is
+    // already out.
     let claimed = sqlx::query_as::<_, PendingTurn>(
         "UPDATE reminder_turns SET attempts = attempts + 1, claimed_at = NOW() WHERE id = ( \
          SELECT owed.id FROM reminder_turns AS owed WHERE owed.attempts < $1 \
@@ -499,7 +506,7 @@ pub async fn claim_turn(pool: &PgPool, lease: Duration) -> DbResult<Option<Pendi
          AND NOT EXISTS ( \
            SELECT 1 FROM reminder_turns AS ahead \
            WHERE ahead.reminder_id = owed.reminder_id AND ahead.id <> owed.id \
-           AND ahead.attempts < $1 AND ahead.claimed_at IS NOT NULL \
+           AND ahead.claimed_at IS NOT NULL \
            AND ahead.claimed_at > NOW() - make_interval(secs => $2)) \
          ORDER BY owed.created_at, owed.id LIMIT 1 FOR UPDATE SKIP LOCKED) \
          RETURNING id, reminder_id, workspace_id, chat_id, created_by AS user_id, prompt",

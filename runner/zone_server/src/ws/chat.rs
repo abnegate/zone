@@ -2378,8 +2378,17 @@ async fn handle_send_message(
                 )
                 .await
             }
-            Routing::Chat(chat) => {
-                let mut preparation = tokio::select! {
+            Routing::Chat(mut chat) => {
+                // Cleared before the prompt is built rather than after it.
+                // `prepare_chat` renders the approval rules from this flag, so
+                // setting it on the preparation instead would gate the tools
+                // while telling the model they were not gated -- and a
+                // confirmed call made on that belief would sit waiting out the
+                // approval timeout for somebody who is not there.
+                if unattended {
+                    chat.auto_approve = false;
+                }
+                let preparation = tokio::select! {
                     biased;
                     _ = request.cancel.recv() => {
                         let _=session.close().await;
@@ -2389,9 +2398,6 @@ async fn handle_send_message(
                     _ = session.guard.lost() => { return Err(OWNERSHIP_LOST.into()); }
                     result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, web_search_requested) => result?,
                 };
-                if unattended {
-                    preparation.auto_approve = false;
-                }
                 handle_chat_generation(state, stream, chat_id, workspace_id, user_id, preparation, &mut request, &mut session, &mut jobs).await
             }
         }
@@ -3405,8 +3411,13 @@ async fn handle_chat_generation(
                 spawn_message_embedding_task(state.clone(), msg.id, chat_id, full_content.clone());
             }
 
-            // CRITICAL-4: Send message end with the SAME ID we sent in MessageStart
-            // The database generates msg.id, but we use assistant_message_id for protocol consistency
+            // Send message end with the same id MessageStart carried.
+            //
+            // `msg.id` is that same id, not a new one: `finish` stores the
+            // answer under the turn's own id, and the turn is this generation's
+            // `message_id`. Said plainly because the comment that used to sit
+            // here claimed the database generated it, which is what a caller
+            // reading back the answer by id would have been misled by.
             let end_msg = if cancelled {
                 ServerMessage::Cancelled {
                     message_id: Some(assistant_message_id),
