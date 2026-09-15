@@ -1227,6 +1227,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                         &task_content,
                                         metadata,
                                         generation,
+                                        false,
                                     ).await;
                                 });
                             }
@@ -2217,6 +2218,15 @@ async fn handle_audio_generation(
 ///
 /// Chat requires write access (Member role or higher) since it creates messages.
 /// This is intentionally stricter than context.rs which only requires membership.
+/// `unattended` says nobody is watching this turn, which is what an automation's
+/// firing is. It withholds the chat's auto-approve from that turn and nothing
+/// else. Auto-approve is a standing "yes" a person gave while they were present
+/// to see what they were saying yes to; a scheduled turn runs hours later with
+/// nobody there, and its prompt can carry text the model itself wrote from
+/// something it read, so a tool that writes to the host or leaves the workspace
+/// must still be put to somebody. It waits, finds no one, and is declined —
+/// which is the right answer when the alternative is acting unasked. Reading
+/// tools are below that tier and run either way, so a watch still works.
 async fn handle_send_message(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -2226,6 +2236,7 @@ async fn handle_send_message(
     content: &str,
     metadata: Option<serde_json::Value>,
     mut request: Generation,
+    unattended: bool,
 ) {
     let generation = CHAT_GENERATIONS
         .entry(chat_id)
@@ -2368,7 +2379,7 @@ async fn handle_send_message(
                 .await
             }
             Routing::Chat(chat) => {
-                let preparation = tokio::select! {
+                let mut preparation = tokio::select! {
                     biased;
                     _ = request.cancel.recv() => {
                         let _=session.close().await;
@@ -2378,6 +2389,9 @@ async fn handle_send_message(
                     _ = session.guard.lost() => { return Err(OWNERSHIP_LOST.into()); }
                     result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, web_search_requested) => result?,
                 };
+                if unattended {
+                    preparation.auto_approve = false;
+                }
                 handle_chat_generation(state, stream, chat_id, workspace_id, user_id, preparation, &mut request, &mut session, &mut jobs).await
             }
         }
@@ -2418,9 +2432,14 @@ async fn handle_send_message(
 /// A scheduled automation has a prompt and a chat but no browser, and this is
 /// the same turn a person's message takes: the prompt is persisted as the user
 /// message and the model answers it. Nothing here is a second code path, which
-/// is the point — an automation's turn gets the same lease, the same
-/// per-chat serialisation, the same approval policy and the same recovery as
-/// a typed one.
+/// is the point — an automation's turn gets the same lease, the same per-chat
+/// serialisation and the same recovery as a typed one.
+///
+/// It gets one thing deliberately different: approvals are not waived. The
+/// chat's auto-approve is a person's standing yes, given while they were there
+/// to see what it applied to, and this turn runs when they are not. See the
+/// `unattended` flag on `handle_send_message` for what that withholds and what
+/// it leaves alone.
 ///
 /// No socket is needed because none was ever required. `ChatStream::of` keys a
 /// broadcast channel by chat id and `publish` drops a frame nobody is
@@ -2455,6 +2474,9 @@ pub(crate) async fn run_turn(
         content,
         metadata,
         generation,
+        // There is no socket here and no person behind one, which is the
+        // definition of unattended.
+        true,
     )
     .await;
     message_id

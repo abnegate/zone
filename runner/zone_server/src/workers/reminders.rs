@@ -136,11 +136,17 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
                             )
                             .await;
                             // What this firing found becomes what the next one
-                            // is compared with. Failing to keep it costs one
-                            // spurious "changed" next firing; the turn is still
-                            // finished below, because its answer is already in
-                            // the chat and running it again would repeat the
-                            // question rather than recover the baseline.
+                            // is compared with, and the turn stays owed until
+                            // it is written down. A turn that reached the chat
+                            // is normally finished whatever it made of the
+                            // question, because its answer is already there and
+                            // running it again would only repeat it -- but a
+                            // watch that loses its reading does not merely
+                            // repeat, it goes on to call the next firing a
+                            // change when nothing changed. Between a question
+                            // asked twice and a watch that cries wolf, the
+                            // duplicate is the one worth paying: it is the
+                            // failure this whole path was built to avoid.
                             if baseline.is_some()
                                 && let Err(error) = reminders::record_observation(
                                     state.db(),
@@ -152,9 +158,11 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
                                 tracing::warn!(
                                     %error,
                                     reminder_id = %turn.reminder_id,
-                                    "A watch fired but its reading could not be kept; the next \
-                                     firing compares against the one before this"
+                                    "A watch answered but its reading could not be kept; leaving \
+                                     the turn owed so the reading is taken again rather than \
+                                     reporting the next firing as a change"
                                 );
+                                return;
                             }
                             // Last, and only after the turn has finished: this
                             // is what stops it being offered again, so it is

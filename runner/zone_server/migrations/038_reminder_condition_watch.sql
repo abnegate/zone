@@ -32,9 +32,23 @@ ALTER TABLE reminders ADD CONSTRAINT reminders_timing_mode_check
 -- has nothing to compare against; without a prompt it delivers fixed words and
 -- has nothing to compare. Either way it is a reminder wearing a watch's name,
 -- and the mode is refused rather than stored and quietly downgraded.
+--
+-- Blank counts as missing, not just NULL. `create` trims both and stores NULL
+-- for an empty one, so the two agree on what "carries a prompt" means; written
+-- out here because this constraint is the boundary a write that never went
+-- through `create` still has to cross, and a watch holding a prompt of spaces
+-- would fire for ever with nothing to ask.
+--
+-- "Has a character that is not whitespace" rather than a trim, because
+-- `btrim` with one argument strips spaces and only spaces: a prompt of one tab
+-- survives it and reads as present. The regular expression is what `trim` means
+-- on the Rust side of the same check.
 ALTER TABLE reminders DROP CONSTRAINT IF EXISTS reminders_watch_compares_check;
 ALTER TABLE reminders ADD CONSTRAINT reminders_watch_compares_check
-    CHECK (timing_mode <> 'condition_watch' OR (rrule IS NOT NULL AND prompt IS NOT NULL))
+    CHECK (
+        timing_mode <> 'condition_watch'
+        OR (COALESCE(rrule, '') ~ '[^[:space:]]' AND COALESCE(prompt, '') ~ '[^[:space:]]')
+    )
     NOT VALID;
 
 -- A model's answer has no length anybody promised, and this one is read back

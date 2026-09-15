@@ -819,6 +819,125 @@ mod tests {
         cleanup(&pool, organization, user).await;
     }
 
+    /// `create` trims a prompt and stores NULL for an empty one, so the
+    /// constraint has to mean the same thing by "carries a prompt" — it is the
+    /// boundary a write that never went through `create` still has to cross.
+    /// A watch holding a prompt of spaces would fire for ever with nothing to
+    /// ask, which is the mode doing less than its name, quietly.
+    #[tokio::test]
+    async fn a_watch_missing_either_half_is_refused_by_the_database_too() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        for (rrule, prompt) in [
+            (Some("FREQ=DAILY"), Some("   ")),
+            (Some("  \t "), Some("Check the release branch")),
+            (Some("FREQ=DAILY"), None),
+            (None, Some("Check the release branch")),
+        ] {
+            let refused = sqlx::query(
+                "INSERT INTO reminders (workspace_id, created_by, chat_id, content, due_at, \
+                 rrule, prompt, timing_mode) VALUES ($1, $2, $3, 'Release branch', \
+                 NOW() + INTERVAL '1 hour', $4, $5, 'condition_watch')",
+            )
+            .bind(workspace)
+            .bind(user)
+            .bind(chat_id)
+            .bind(rrule)
+            .bind(prompt)
+            .execute(&pool)
+            .await;
+            let Err(sqlx::Error::Database(why)) = refused else {
+                panic!("{rrule:?}/{prompt:?} must be refused by the database");
+            };
+            assert_eq!(
+                why.constraint(),
+                Some("reminders_watch_compares_check"),
+                "{rrule:?}/{prompt:?} was refused by the wrong constraint: {why}"
+            );
+        }
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// Two firings of one schedule can be owed at once — the server was down,
+    /// and the schedule moved on twice. Handing both out together would read
+    /// one baseline into both and write the two answers back in whatever order
+    /// they finished, which is exactly the comparison a watch promises not to
+    /// get wrong. They go out one at a time, and schedules do not block each
+    /// other.
+    #[tokio::test]
+    async fn a_schedule_runs_one_firing_at_a_time_and_does_not_hold_up_another() {
+        let _dispatch = dispatching().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let watch = |name: &str| reminders::Reminder {
+            content: name.into(),
+            due_at: Utc::now() + Duration::hours(1),
+            rrule: Some("FREQ=DAILY".into()),
+            prompt: Some("Check whether the release branch is green".into()),
+            timing_mode: Some("condition_watch".into()),
+        };
+        let mut owed = Vec::new();
+        for name in ["Release branch", "Dependency PRs"] {
+            let created = reminders::create(&pool, workspace, user, chat_id, watch(name))
+                .await
+                .unwrap();
+            let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+            // Two firings of this one, written down the way a claim writes them.
+            for _ in 0..2 {
+                sqlx::query(
+                    "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, \
+                     created_by, prompt) VALUES ($1, $2, $3, $4, 'Check it')",
+                )
+                .bind(id)
+                .bind(workspace)
+                .bind(chat_id)
+                .bind(user)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            owed.push(id);
+        }
+
+        // One from each schedule, and then nothing: the second firing of each
+        // is waiting on the first, not on the other schedule.
+        let first = reminders::claim_turn(&pool, LEASE)
+            .await
+            .unwrap()
+            .expect("the oldest firing is claimable");
+        let second = reminders::claim_turn(&pool, LEASE)
+            .await
+            .unwrap()
+            .expect("the other schedule is not held up by the first");
+        assert_ne!(
+            first.reminder_id, second.reminder_id,
+            "a schedule with a firing in flight must not be handed its next one"
+        );
+        assert!(
+            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            "both schedules now have a firing in flight, so neither offers its second"
+        );
+
+        // And once a firing is done, the one behind it is offered — to the same
+        // schedule, so the next comparison is against what the first recorded.
+        reminders::finish_turn(&pool, first.id).await.unwrap();
+        let next = reminders::claim_turn(&pool, LEASE)
+            .await
+            .unwrap()
+            .expect("the firing behind a finished one is offered");
+        assert_eq!(
+            next.reminder_id, first.reminder_id,
+            "the freed schedule is the one that gets its next firing"
+        );
+
+        for id in owed {
+            sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        cleanup(&pool, organization, user).await;
+    }
+
     /// The baseline is a column and an explicit write, because the cheap
     /// version — asking the model to compare against the answer already sitting
     /// in the chat — is destroyed by compaction and says nothing when it is.

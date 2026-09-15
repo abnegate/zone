@@ -423,6 +423,11 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
     Ok(Delivered::Settled)
 }
 
+/// The key the claim serialises on. Arbitrary and constant; it only has to be
+/// the same number in every process, and distinct from the one the dispatch
+/// tests take.
+const CLAIM_LOCK: i64 = 0x7A6F_6E65_5455_524E;
+
 /// How many times one firing's turn is offered before it is given up on.
 ///
 /// A turn is only ever offered again because whatever took it did not live to
@@ -442,6 +447,17 @@ const MAX_TURN_ATTEMPTS: i32 = 3;
 pub async fn claim_turn(pool: &PgPool, lease: Duration) -> DbResult<Option<PendingTurn>> {
     let seconds = lease.as_secs_f64();
     let mut transaction = pool.begin().await?;
+    // One claim at a time across the fleet, released when this transaction
+    // ends. The claim below refuses a firing whose schedule already has one in
+    // flight, and that refusal is only sound if no other worker is deciding the
+    // same thing at the same moment: `FOR UPDATE SKIP LOCKED` locks the row
+    // being taken, not the sibling row the check is about. Cheap to hold —
+    // this transaction is two statements and no model call, which is the whole
+    // reason the turn is written down and run outside it.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(CLAIM_LOCK)
+        .execute(&mut *transaction)
+        .await?;
     // Dropped here rather than skipped, so the queue does not silt up with
     // firings nothing will ever run. Named in the log, because a firing nobody
     // receives is worth one line saying which schedule it belonged to.
@@ -466,11 +482,26 @@ pub async fn claim_turn(pool: &PgPool, lease: Duration) -> DbResult<Option<Pendi
     // hold a row another worker's delete is waiting on while waiting on a row
     // that worker holds, which is a deadlock either of them could have been
     // written out of.
+    //
+    // The NOT EXISTS is what keeps one schedule's firings in order. Two of them
+    // can be owed at once -- the server was down, and the schedule moved on
+    // twice -- and a watch handed both at the same time would read one baseline
+    // into both, answer the same question twice over, and write the two answers
+    // back in whatever order they finished. Its whole contract is that each
+    // firing is compared with the one before it, so they run one at a time: a
+    // firing whose schedule already has a turn under a live claim is left for
+    // the next sweep, by which time the one ahead of it has recorded what it
+    // found. A claim that went stale is not live and does not hold its siblings.
     let claimed = sqlx::query_as::<_, PendingTurn>(
         "UPDATE reminder_turns SET attempts = attempts + 1, claimed_at = NOW() WHERE id = ( \
-         SELECT id FROM reminder_turns WHERE attempts < $1 \
-         AND (claimed_at IS NULL OR claimed_at <= NOW() - make_interval(secs => $2)) \
-         ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED) \
+         SELECT owed.id FROM reminder_turns AS owed WHERE owed.attempts < $1 \
+         AND (owed.claimed_at IS NULL OR owed.claimed_at <= NOW() - make_interval(secs => $2)) \
+         AND NOT EXISTS ( \
+           SELECT 1 FROM reminder_turns AS ahead \
+           WHERE ahead.reminder_id = owed.reminder_id AND ahead.id <> owed.id \
+           AND ahead.attempts < $1 AND ahead.claimed_at IS NOT NULL \
+           AND ahead.claimed_at > NOW() - make_interval(secs => $2)) \
+         ORDER BY owed.created_at, owed.id LIMIT 1 FOR UPDATE SKIP LOCKED) \
          RETURNING id, reminder_id, workspace_id, chat_id, created_by AS user_id, prompt",
     )
     .bind(MAX_TURN_ATTEMPTS)
