@@ -53,4 +53,9 @@ pub const EMBEDDED: &[Source] = &[
     source!("030_task_run_legacy_admission_index_drop.sql"),
     source!("031_task_run_legacy_heartbeat_index_drop.sql"),
     source!("032_task_run_pending_wait.sql"),
+    source!("035_reminder_automations.sql"),
+    source!("036_reminder_automation_validation.sql"),
+    source!("037_reminder_turns.sql"),
+    source!("038_reminder_condition_watch.sql"),
+    source!("039_reminder_condition_watch_validation.sql"),
 ];

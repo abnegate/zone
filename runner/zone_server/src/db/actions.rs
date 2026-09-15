@@ -425,7 +425,53 @@ pub async fn tail_task_log(
 mod tests {
     use super::*;
     use crate::db::reminders;
+    use crate::db::reminders::Delivered;
     use chrono::{Duration, Utc};
+
+    /// The key every test that dispatches a reminder takes first.
+    ///
+    /// `deliver_next` claims the oldest due reminder in the whole database
+    /// rather than the oldest in one workspace — it is a dispatcher, and every
+    /// server instance shares it — and `claim_turn` takes the oldest firing
+    /// that still owes a turn the same way. Two tests that both have one
+    /// therefore steal each other's.
+    ///
+    /// In the database rather than in this process, because CI runs these
+    /// under `cargo nextest`, which gives every test a process of its own: a
+    /// `Mutex` here would serialise nothing there, and the tests would pass
+    /// locally and race in CI. Postgres releases a session lock when the
+    /// connection holding it goes, which covers a test that panics as well as
+    /// one that returns.
+    ///
+    /// Not a fixture concern: the rows are already isolated by workspace. It is
+    /// the claim that is global, which is the behaviour under test.
+    const DISPATCH: i64 = 0x7A6F_6E65_5245_4D44;
+
+    /// Held for the length of a dispatching test. Its connection is its own
+    /// rather than the pool's, because a pooled connection is returned to the
+    /// pool still holding the lock.
+    async fn dispatching() -> sqlx::PgConnection {
+        use sqlx::Connection;
+        let mut connection = sqlx::PgConnection::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL required"),
+        )
+        .await
+        .expect("a connection of its own to hold the dispatch lock");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(DISPATCH)
+            .execute(&mut connection)
+            .await
+            .expect("the dispatch lock is takeable");
+        connection
+    }
+
+    /// Long enough that a claimed turn stays claimed for the length of a test,
+    /// which is what a real lease is for.
+    const LEASE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// And a lease nothing can be inside, which is a worker that claimed a turn
+    /// and never came back — without a test that has to wait out a real one.
+    const ABANDONED: std::time::Duration = std::time::Duration::ZERO;
 
     async fn fixture() -> (PgPool, Uuid, Uuid, Uuid, Uuid) {
         let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
@@ -688,12 +734,820 @@ mod tests {
         cleanup(&pool, organization, user).await;
     }
 
+    /// A rule the schedule module refuses never reaches a row, and each
+    /// refusal names what was wrong: the caller is a model turning a person's
+    /// sentence into a schedule, and a refusal it cannot act on costs the
+    /// person another turn.
+    #[tokio::test]
+    async fn a_schedule_this_build_will_not_keep_is_refused_at_the_create() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let automation =
+            |rrule: Option<&str>, prompt: Option<&str>, mode: Option<&str>| reminders::Reminder {
+                content: "Check the build".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: rrule.map(str::to_string),
+                prompt: prompt.map(str::to_string),
+                timing_mode: mode.map(str::to_string),
+            };
+
+        for (rrule, prompt, mode, expected) in [
+            // Faster than the ceiling, counted after the BY clauses split it.
+            (
+                Some(
+                    "FREQ=DAILY;BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23;\
+                     BYMINUTE=0,30",
+                ),
+                None,
+                None,
+                "once an hour",
+            ),
+            // A clause this build does not implement, refused and not dropped.
+            (
+                Some("FREQ=MONTHLY;BYSETPOS=-1;BYDAY=FR"),
+                None,
+                None,
+                "BYSETPOS",
+            ),
+            // A clause the frequency's arithmetic never reads, which would
+            // otherwise fire on days nobody chose.
+            (Some("FREQ=DAILY;BYDAY=MO,FR"), None, None, "does not use"),
+            // A mode that is not a mode at all.
+            (None, None, Some("whenever"), "not a timing mode"),
+            // The mode the worker still cannot dispatch: accepting it would run
+            // it under exact_schedule's contract, which is not what it asked
+            // for.
+            (None, None, Some("flexible_schedule"), "window"),
+            // And a watch missing either half of its comparison. One firing has
+            // nothing to compare against, and fixed content has nothing to
+            // compare, so neither is stored and quietly downgraded.
+            (
+                None,
+                Some("Check it"),
+                Some("condition_watch"),
+                "both halves",
+            ),
+            (
+                Some("FREQ=DAILY"),
+                None,
+                Some("condition_watch"),
+                "both halves",
+            ),
+            (None, None, Some("condition_watch"), "both halves"),
+        ] {
+            let refused = reminders::create(
+                &pool,
+                workspace,
+                user,
+                chat_id,
+                automation(rrule, prompt, mode),
+            )
+            .await
+            .expect_err(&format!("{rrule:?}/{prompt:?}/{mode:?} must be refused"));
+            let sqlx::Error::Protocol(why) = &refused else {
+                panic!("{rrule:?}/{mode:?} was refused by the wrong error: {refused:?}");
+            };
+            assert!(why.contains(expected), "{rrule:?}/{mode:?}: {why}");
+        }
+
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM reminders WHERE workspace_id = $1")
+                .bind(workspace)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, 0, "a refused create must leave no row behind");
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// `create` trims a prompt and stores NULL for an empty one, so the
+    /// constraint has to mean the same thing by "carries a prompt" — it is the
+    /// boundary a write that never went through `create` still has to cross.
+    /// A watch holding a prompt of spaces would fire for ever with nothing to
+    /// ask, which is the mode doing less than its name, quietly.
+    #[tokio::test]
+    async fn a_watch_missing_either_half_is_refused_by_the_database_too() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        for (rrule, prompt) in [
+            (Some("FREQ=DAILY"), Some("   ")),
+            (Some("  \t "), Some("Check the release branch")),
+            (Some("FREQ=DAILY"), None),
+            (None, Some("Check the release branch")),
+        ] {
+            let refused = sqlx::query(
+                "INSERT INTO reminders (workspace_id, created_by, chat_id, content, due_at, \
+                 rrule, prompt, timing_mode) VALUES ($1, $2, $3, 'Release branch', \
+                 NOW() + INTERVAL '1 hour', $4, $5, 'condition_watch')",
+            )
+            .bind(workspace)
+            .bind(user)
+            .bind(chat_id)
+            .bind(rrule)
+            .bind(prompt)
+            .execute(&pool)
+            .await;
+            let Err(sqlx::Error::Database(why)) = refused else {
+                panic!("{rrule:?}/{prompt:?} must be refused by the database");
+            };
+            assert_eq!(
+                why.constraint(),
+                Some("reminders_watch_compares_check"),
+                "{rrule:?}/{prompt:?} was refused by the wrong constraint: {why}"
+            );
+        }
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// Two firings of one schedule can be owed at once — the server was down,
+    /// and the schedule moved on twice. Handing both out together would read
+    /// one baseline into both and write the two answers back in whatever order
+    /// they finished, which is exactly the comparison a watch promises not to
+    /// get wrong. They go out one at a time, and schedules do not block each
+    /// other.
+    #[tokio::test]
+    async fn a_schedule_runs_one_firing_at_a_time_and_does_not_hold_up_another() {
+        let _dispatch = dispatching().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let watch = |name: &str| reminders::Reminder {
+            content: name.into(),
+            due_at: Utc::now() + Duration::hours(1),
+            rrule: Some("FREQ=DAILY".into()),
+            prompt: Some("Check whether the release branch is green".into()),
+            timing_mode: Some("condition_watch".into()),
+        };
+        let mut owed = Vec::new();
+        for name in ["Release branch", "Dependency PRs"] {
+            let created = reminders::create(&pool, workspace, user, chat_id, watch(name))
+                .await
+                .unwrap();
+            let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+            // Two firings of this one, written down the way a claim writes them.
+            for _ in 0..2 {
+                sqlx::query(
+                    "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, \
+                     created_by, prompt) VALUES ($1, $2, $3, $4, 'Check it')",
+                )
+                .bind(id)
+                .bind(workspace)
+                .bind(chat_id)
+                .bind(user)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            owed.push(id);
+        }
+
+        // One from each schedule, and then nothing: the second firing of each
+        // is waiting on the first, not on the other schedule.
+        let first = reminders::claim_turn(&pool, LEASE)
+            .await
+            .unwrap()
+            .expect("the oldest firing is claimable");
+        let second = reminders::claim_turn(&pool, LEASE)
+            .await
+            .unwrap()
+            .expect("the other schedule is not held up by the first");
+        assert_ne!(
+            first.reminder_id, second.reminder_id,
+            "a schedule with a firing in flight must not be handed its next one"
+        );
+        assert!(
+            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            "both schedules now have a firing in flight, so neither offers its second"
+        );
+
+        // And once a firing is done, the one behind it is offered — to the same
+        // schedule, so the next comparison is against what the first recorded.
+        reminders::finish_turn(&pool, first.id).await.unwrap();
+        let next = reminders::claim_turn(&pool, LEASE)
+            .await
+            .unwrap()
+            .expect("the firing behind a finished one is offered");
+        assert_eq!(
+            next.reminder_id, first.reminder_id,
+            "the freed schedule is the one that gets its next firing"
+        );
+
+        for id in owed {
+            sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// The last attempt a firing gets is still a firing in flight. `attempts`
+    /// reaches the bound on the third claim, and a schedule whose turn is out
+    /// for the third time is no less busy than one out for the first — so the
+    /// question "is another one already running" is answered by the claim
+    /// alone, never by how many times it has been tried.
+    #[tokio::test]
+    async fn a_firing_on_its_last_attempt_still_holds_the_one_behind_it() {
+        let _dispatch = dispatching().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Release branch".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY".into()),
+                prompt: Some("Check whether the release branch is green".into()),
+                timing_mode: Some("condition_watch".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let reminder: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, \
+                 prompt) VALUES ($1, $2, $3, $4, 'Check it')",
+            )
+            .bind(reminder)
+            .bind(workspace)
+            .bind(chat_id)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // The older firing has been taken twice and its claim has gone stale,
+        // so the next one it gets is its third and last.
+        let older: Uuid = sqlx::query_scalar(
+            "SELECT id FROM reminder_turns WHERE reminder_id = $1 ORDER BY created_at, id LIMIT 1",
+        )
+        .bind(reminder)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE reminder_turns SET attempts = 2, claimed_at = NOW() - INTERVAL '1 day' \
+             WHERE id = $1",
+        )
+        .bind(older)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let third = reminders::claim_turn(&pool, LEASE)
+            .await
+            .unwrap()
+            .expect("a firing whose claim went stale is offered again");
+        assert_eq!(third.id, older, "the stale claim is the one taken up again");
+        let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM reminder_turns WHERE id = $1")
+            .bind(older)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(attempts, 3, "the third claim reaches the attempt bound");
+        assert!(
+            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            "a firing out for the last time still holds the one behind it; otherwise the two run \
+             together and the watch compares both against the same reading"
+        );
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// The baseline is a column and an explicit write, because the cheap
+    /// version — asking the model to compare against the answer already sitting
+    /// in the chat — is destroyed by compaction and says nothing when it is.
+    /// This pins the column: only a watch is given one, a firing's own answer
+    /// is what fills it, and a firing that answered nothing leaves it alone.
+    #[tokio::test]
+    async fn a_watch_keeps_its_own_reading_and_a_plain_reminder_is_given_none() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let watch = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Release branch".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY".into()),
+                prompt: Some("Check whether the release branch is green".into()),
+                timing_mode: Some("condition_watch".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(watch["timing_mode"], "condition_watch");
+        assert!(
+            watch["last_observation"].is_null(),
+            "a watch starts with nothing to compare against: {watch}"
+        );
+        let watch_id: Uuid = serde_json::from_value(watch["id"].clone()).unwrap();
+
+        let plain = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Standup".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY".into()),
+                prompt: Some("Say what is on today".into()),
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let plain_id: Uuid = serde_json::from_value(plain["id"].clone()).unwrap();
+
+        // The outer option is what tells the worker to compose a comparison at
+        // all, and the inner one is what it has to compare against.
+        assert_eq!(
+            reminders::watch_baseline(&pool, watch_id).await.unwrap(),
+            Some(None),
+            "a watch's first firing has a baseline to fill and nothing yet in it"
+        );
+        assert_eq!(
+            reminders::watch_baseline(&pool, plain_id).await.unwrap(),
+            None,
+            "a reminder that is not a watch is never handed a comparison"
+        );
+
+        // A firing that stored no answer leaves the baseline alone, so the next
+        // one compares against the last reading that worked. Overwriting it
+        // with nothing would report the world changed when all that happened is
+        // that this firing did not run.
+        reminders::record_observation(&pool, watch_id, Uuid::new_v4())
+            .await
+            .unwrap();
+        assert_eq!(
+            reminders::watch_baseline(&pool, watch_id).await.unwrap(),
+            Some(None),
+            "a firing with no answer must not overwrite the baseline"
+        );
+
+        // One that did answer keeps it, capped. The reading is read back into
+        // the next firing's prompt, where an unbounded one would crowd out the
+        // context it is meant to be compared in.
+        let long = "green. ".repeat(2000);
+        let answered = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, chat_id, role, content) VALUES ($1, $2, 'assistant', $3)",
+        )
+        .bind(answered)
+        .bind(chat_id)
+        .bind(&long)
+        .execute(&pool)
+        .await
+        .unwrap();
+        reminders::record_observation(&pool, watch_id, answered)
+            .await
+            .unwrap();
+        let kept = reminders::watch_baseline(&pool, watch_id)
+            .await
+            .unwrap()
+            .flatten()
+            .expect("a firing that answered fills the baseline");
+        assert_eq!(
+            kept.chars().count(),
+            reminders::OBSERVATION_CAP,
+            "a reading longer than the cap is kept up to it"
+        );
+        assert!(
+            long.starts_with(&kept),
+            "the cap keeps the leading characters, so two readings stay comparable"
+        );
+
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// The difference this whole change exists for: a one-shot is finished when
+    /// it fires, and an automation moves to its next occurrence and stays
+    /// pending. Both deliver exactly one message per firing.
+    #[tokio::test]
+    async fn an_automation_moves_to_its_next_firing_where_a_one_shot_is_finished() {
+        let _dispatch = dispatching().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let one_shot = reminders::Reminder {
+            content: "Once".into(),
+            due_at: Utc::now() + Duration::hours(1),
+            rrule: None,
+            prompt: None,
+            timing_mode: None,
+        };
+        let daily = reminders::Reminder {
+            content: "Every morning".into(),
+            due_at: Utc::now() + Duration::hours(1),
+            rrule: Some("FREQ=DAILY".into()),
+            // No prompt: this test is about a schedule moving on rather than
+            // ending, and a prompt would replace the message it counts with a
+            // turn. The prompt path has its own test.
+            prompt: None,
+            timing_mode: Some("exact_schedule".into()),
+        };
+
+        let one_shot = reminders::create(&pool, workspace, user, chat_id, one_shot)
+            .await
+            .unwrap();
+        let daily = reminders::create(&pool, workspace, user, chat_id, daily)
+            .await
+            .unwrap();
+        let one_shot_id: Uuid = serde_json::from_value(one_shot["id"].clone()).unwrap();
+        let daily_id: Uuid = serde_json::from_value(daily["id"].clone()).unwrap();
+        assert_eq!(daily["timing_mode"], "exact_schedule");
+        assert!(
+            !daily["anchor_at"].is_null(),
+            "a recurring reminder keeps the first firing to measure from: {daily}"
+        );
+        assert!(
+            !daily["expires_at"].is_null(),
+            "a recurring reminder carries a lifetime: {daily}"
+        );
+        assert!(
+            one_shot["anchor_at"].is_null() && one_shot["expires_at"].is_null(),
+            "a one-shot gets neither: {one_shot}"
+        );
+
+        sqlx::query(
+            // The anchor moves with the due date. A schedule that has reached its
+            // first firing has that firing behind it; leaving the anchor in the
+            // future would leave today's occurrence still ahead, which is right for
+            // a schedule that has not fired yet and is not the case under test.
+            "UPDATE reminders SET due_at = NOW() - INTERVAL '1 second', anchor_at = \
+             CASE WHEN anchor_at IS NULL THEN NULL ELSE NOW() - INTERVAL '1 second' END \
+             WHERE workspace_id = $1",
+        )
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_ne!(
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
+        );
+        assert_ne!(
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
+        );
+        assert!(
+            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
+            "the rescheduled automation is not due again immediately"
+        );
+
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(chat_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(messages, 2, "one message per firing, and no more");
+
+        let (status, fired, due): (String, i32, chrono::DateTime<Utc>) =
+            sqlx::query_as("SELECT status, fired_count, due_at FROM reminders WHERE id = $1")
+                .bind(daily_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "pending", "an automation is not finished by firing");
+        assert_eq!(fired, 1);
+        assert!(
+            due > Utc::now() + Duration::hours(20),
+            "a daily rule moves about a day on, not to the next tick: {due}"
+        );
+
+        let (status, fired): (String, i32) =
+            sqlx::query_as("SELECT status, fired_count FROM reminders WHERE id = $1")
+                .bind(one_shot_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "delivered", "a one-shot is finished when it fires");
+        assert_eq!(fired, 1);
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// `COUNT=1` means one firing. The row still carries the count from before
+    /// the delivery in hand, so without adding it every finite rule delivers
+    /// one more message than it was asked for.
+    #[tokio::test]
+    async fn a_finite_count_delivers_exactly_the_firings_it_named() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let _dispatch = dispatching().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Once only".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY;COUNT=1".into()),
+                prompt: None,
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+
+        sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_ne!(
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
+        );
+        assert!(
+            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
+            "COUNT=1 must not leave a second firing scheduled"
+        );
+
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(chat_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(messages, 1, "COUNT=1 is one message, not two");
+
+        let (status, fired): (String, i32) =
+            sqlx::query_as("SELECT status, fired_count FROM reminders WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "expired");
+        assert_eq!(fired, 1);
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A prompt is a turn, not a message. The claim stores nothing in the chat
+    /// and writes the turn down as still owed, because holding a row lock
+    /// across a model call is exactly what this split exists to avoid — and
+    /// because a handoff that only lived in memory would go with the process
+    /// holding it, leaving a schedule that had moved past an occurrence nobody
+    /// was ever given.
+    #[tokio::test]
+    async fn a_prompt_is_written_down_as_a_turn_and_stores_no_message_of_its_own() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let _dispatch = dispatching().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "unused when a prompt is given".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY".into()),
+                prompt: Some(
+                    "Say what changed since yesterday. If nothing did, say nothing.".into(),
+                ),
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+
+        sqlx::query(
+            "UPDATE reminders SET due_at = NOW() - INTERVAL '1 second', \
+             anchor_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let delivered = reminders::deliver_next(&pool).await.unwrap();
+        assert_eq!(delivered, Delivered::Settled);
+        let turn = reminders::claim_turn(&pool, LEASE)
+            .await
+            .unwrap()
+            .expect("a prompt leaves a turn to run");
+        assert_eq!(turn.chat_id, chat_id);
+        assert_eq!(turn.workspace_id, workspace);
+        assert_eq!(turn.user_id, user, "the turn runs as whoever asked for it");
+        assert_eq!(turn.reminder_id, id);
+        assert!(turn.prompt.starts_with("Say what changed"), "{turn:?}");
+        assert!(
+            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            "a claimed turn is not offered to a second worker inside its lease"
+        );
+
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(chat_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            messages, 0,
+            "the content must not be posted beside the turn the prompt opens"
+        );
+
+        // The schedule still moved on, and still holds no message of its own.
+        let (status, fired, message_id): (String, i32, Option<Uuid>) =
+            sqlx::query_as("SELECT status, fired_count, message_id FROM reminders WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(fired, 1);
+        assert_eq!(message_id, None);
+
+        reminders::finish_turn(&pool, turn.id).await.unwrap();
+        assert!(
+            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            "a turn that has run is not owed again"
+        );
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// The gap this table exists for. A process that claims a firing and dies
+    /// before the turn finishes leaves a schedule that has moved past an
+    /// occurrence and a chat with nothing in it, so the firing is offered again
+    /// once its claim goes stale — and given up on rather than offered for
+    /// ever, because a firing that takes the server down every time it runs is
+    /// a crash loop and not a delivery.
+    #[tokio::test]
+    async fn a_turn_whose_worker_died_is_offered_again_and_then_given_up_on() {
+        let _dispatch = dispatching().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Overnight check".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: None,
+                prompt: Some("Say what changed overnight.".into()),
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        reminders::deliver_next(&pool).await.unwrap();
+
+        // Three claims, each abandoned: the lease of zero is a worker that
+        // never came back, without a test that has to wait out a real one.
+        for attempt in 1..=3 {
+            let turn = reminders::claim_turn(&pool, ABANDONED)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("attempt {attempt} must be offered the turn"));
+            assert_eq!(turn.reminder_id, id);
+        }
+        assert!(
+            reminders::claim_turn(&pool, ABANDONED)
+                .await
+                .unwrap()
+                .is_none(),
+            "a turn that has used every attempt is dropped rather than offered a fourth time"
+        );
+        let owed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM reminder_turns WHERE reminder_id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            owed, 0,
+            "the queue does not silt up with firings nothing will run"
+        );
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// Stopping a standing job stops the firing it has already claimed as well.
+    /// Being answered once more by something just cancelled reads as the cancel
+    /// not having worked.
+    #[tokio::test]
+    async fn cancelling_a_schedule_drops_the_turn_it_has_not_run_yet() {
+        let _dispatch = dispatching().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Hourly check".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=HOURLY".into()),
+                prompt: Some("Say what changed in the last hour.".into()),
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        sqlx::query(
+            "UPDATE reminders SET due_at = NOW() - INTERVAL '1 second', \
+             anchor_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        reminders::deliver_next(&pool).await.unwrap();
+
+        reminders::cancel(&pool, workspace, user, id).await.unwrap();
+        assert!(
+            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            "a cancelled schedule owes nothing, including what it had already claimed"
+        );
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A schedule that has outlived its lifetime ends as `expired`, which is a
+    /// different ending from a delivery and different again from a cancel, so a
+    /// reader can tell a schedule that ran out from one somebody stopped.
+    #[tokio::test]
+    async fn an_automation_past_its_lifetime_expires_rather_than_firing_for_ever() {
+        let _dispatch = dispatching().await;
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let created = reminders::create(
+            &pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Every morning".into(),
+                due_at: Utc::now() + Duration::hours(1),
+                rrule: Some("FREQ=DAILY".into()),
+                prompt: None,
+                timing_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+
+        sqlx::query(
+            "UPDATE reminders SET due_at = NOW() - INTERVAL '1 second', \
+             expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_ne!(
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
+        );
+
+        let (status, completed): (String, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as("SELECT status, completed_at FROM reminders WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "expired");
+        assert!(
+            completed.is_some(),
+            "an ended schedule records when it ended"
+        );
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(chat_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            messages, 0,
+            "a schedule nobody renewed must not get one more message on its way out"
+        );
+        assert!(
+            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
+            "an expired schedule is never claimed again"
+        );
+        cleanup(&pool, organization, user).await;
+    }
+
     #[tokio::test]
     async fn reminders_cancel_revoke_and_deliver_once_across_workers() {
+        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let reminder = || reminders::Reminder {
             content: "Check release".into(),
             due_at: Utc::now() + Duration::hours(1),
+            rrule: None,
+            prompt: None,
+            timing_mode: None,
         };
         assert!(
             reminders::create(&pool, workspace, user, Uuid::new_v4(), reminder())
@@ -726,11 +1580,12 @@ mod tests {
             reminders::deliver_next(&pool),
             reminders::deliver_next(&pool)
         );
+        let claimed = |outcome: Delivered| usize::from(outcome != Delivered::Nothing);
+        assert_eq!(claimed(first.unwrap()) + claimed(second.unwrap()), 1);
         assert_eq!(
-            usize::from(first.unwrap()) + usize::from(second.unwrap()),
-            1
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
         );
-        assert!(!reminders::deliver_next(&pool).await.unwrap());
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
             .bind(chat_id)
             .fetch_one(&pool)
@@ -752,7 +1607,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert!(reminders::deliver_next(&pool).await.unwrap());
+        assert_ne!(
+            reminders::deliver_next(&pool).await.unwrap(),
+            Delivered::Nothing
+        );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
             .bind(chat_id)
             .fetch_one(&pool)
