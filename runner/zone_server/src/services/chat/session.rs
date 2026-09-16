@@ -594,12 +594,34 @@ impl Session {
             closed: false,
         })
     }
+
+    /// Close this turn without the lease it was opened under.
+    ///
+    /// The lease is gone, so the fenced routes refuse; this one moves only the
+    /// turn this session opened, which belongs to this generation alone.
+    pub async fn settle(
+        &self,
+        content: Option<&str>,
+        metadata: Option<Value>,
+        partial: Option<&history::ReplayMessage>,
+    ) -> Result<bool, Error> {
+        self.store
+            .settle(self.turn, content, metadata, partial)
+            .await
+    }
+
     /// Release before acknowledging a terminal response so the next request can start.
     pub async fn close(&mut self) -> Result<(), Error> {
         if self.closed {
             return Ok(());
         }
-        self.store.recover(&self.lease).await?;
+        match self.store.recover(&self.lease).await {
+            Ok(_) => {}
+            Err(Error::LeaseLost) => {
+                self.settle(None, None, None).await?;
+            }
+            Err(error) => return Err(error),
+        }
         self.guard.stop().await;
         self.store.release(&self.lease).await?;
         self.closed = true;
@@ -614,9 +636,12 @@ impl Drop for Session {
         }
         let store = self.store.clone();
         let lease = self.lease.clone();
+        let turn = self.turn;
         // Cancellation during preparation must not hold an idle chat until expiry.
         tokio::spawn(async move {
-            let _ = store.recover(&lease).await;
+            if matches!(store.recover(&lease).await, Err(Error::LeaseLost)) {
+                let _ = store.settle(turn, None, None, None).await;
+            }
             let _ = store.release(&lease).await;
         });
     }
