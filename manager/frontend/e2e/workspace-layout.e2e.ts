@@ -248,18 +248,29 @@ for (const viewport of [
               .toBeLessThanOrEqual(priorities.width);
             const toggle = await dialog
               .locator('.toggle-wrapper')
+              .first()
               .boundingBox();
             expect(toggle).not.toBeNull();
             expect.soft(toggle!.width).toBeCloseTo(44, 3);
             expect.soft(toggle!.height).toBeCloseTo(24, 3);
-            const agentic = dialog.locator('.toggle-wrapper input');
+            // Named, because enabling agentic mode reveals a second toggle
+            // (plan approval) inside the same dialog.
+            const agentic = dialog.getByRole('checkbox', {
+              name: /Enable Agentic Mode/,
+            });
+            const planApproval = dialog.getByText('Require plan approval', {
+              exact: true,
+            });
+            await expect(planApproval).toHaveCount(0);
             await dialog
               .getByText('Enable Agentic Mode', { exact: true })
               .click();
             await expect(agentic).toBeChecked();
+            await expect(planApproval).toBeVisible();
             await agentic.focus();
             await agentic.press('Space');
             await expect(agentic).not.toBeChecked();
+            await expect(planApproval).toHaveCount(0);
           }
           const footer = await dialog.locator('footer').boundingBox();
           expect(footer!.y + footer!.height).toBeLessThanOrEqual(
