@@ -2,6 +2,24 @@
 
 Your AI, your data, your infrastructure—put your backlog on autopilot.
 
+## Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Services](#services)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Development](#development)
+- [Security](#security)
+- [System Requirements](#system-requirements)
+- [Troubleshooting](#troubleshooting)
+- [Backup & Recovery](#backup--recovery)
+- [License](#license)
+- [Contributing](#contributing)
+- [Acknowledgments](#acknowledgments)
+- [Workspace assistant tools](#workspace-assistant-tools)
+
 ## Features
 
 ### AI & LLM
