@@ -4,6 +4,7 @@
 //! and who runs git themselves; an unattended run has neither, so the frame it
 //! works in has to be stated rather than inferred.
 
+use crate::agent::plan::SUBMIT_PLAN;
 use crate::agent::prompt::{Context, Surface};
 
 const RUN: &str = "You are completing a background coding task. Stay inside the sandboxed working directory: \
@@ -26,10 +27,32 @@ const REPORT: &str = "Your closing message is the report. Zone puts it in the co
      are leaving behind. One line covers routine checks. Leave out approaches you abandoned, \
      and say what you did not finish rather than letting the diff say it for you.";
 
+/// Rendered only when the catalog holds `submit_plan`, which a task gets
+/// only when it requires its plan approved: a paragraph that names a tool the
+/// run cannot call is exactly what the conduct section forbids offering.
+///
+/// CC 1389-1604 condensed: plan before an implementation task unless it is
+/// simple, and here the task has already said it is not; a question about the
+/// approach belongs in the plan rather than in a question of its own; and CX
+/// 21, that a plan is not a stopping point — once approved, it is carried out.
+const PLAN: &str = "Plan first: this task requires its plan approved. Before you change anything, read what \
+     you need to and then call submit_plan with what you will change and in what order, how you \
+     will check it, and what you are leaving out. The run pauses until the plan is answered; \
+     Approve means carry it out without asking again, and Revise comes with what to change, so \
+     change that and submit again. If you would ask a question to settle the approach, put it in \
+     the plan instead. A plan is not a stopping point: once it is approved, do the work.";
+
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
     match context.surface {
         Surface::Chat => None,
-        Surface::Task => Some(format!("{RUN}\n\n{TESTING}\n\n{DELIVERY}\n\n{REPORT}")),
+        Surface::Task => {
+            let mut blocks = vec![RUN];
+            if context.tools.has(SUBMIT_PLAN) {
+                blocks.push(PLAN);
+            }
+            blocks.extend([TESTING, DELIVERY, REPORT]);
+            Some(blocks.join("\n\n"))
+        }
     }
 }
 
@@ -41,6 +64,38 @@ mod tests {
 
     fn task_tools() -> ChatTools {
         ChatTools::with_names(ToolProfile::Task, &["read_file", "run_command"], None)
+    }
+
+    /// The paragraph follows the frame and precedes the testing rules, so a
+    /// run reads where it is before it reads that it must plan, and reads
+    /// that it must plan before it reads how to check work it has not begun.
+    #[test]
+    fn a_task_that_requires_approval_is_told_to_plan_first_and_only_then() {
+        let environment = environment();
+        let plain = render(&task_context(&task_tools(), &environment)).unwrap();
+        assert!(!plain.contains("submit_plan"), "{plain}");
+        let approving = ChatTools::with_names(
+            ToolProfile::Task,
+            &["read_file", "run_command", SUBMIT_PLAN],
+            None,
+        );
+        let rendered = render(&task_context(&approving, &environment)).unwrap();
+        assert!(
+            rendered.contains("Plan first: this task requires its plan approved."),
+            "{rendered}"
+        );
+        assert!(rendered.contains("call submit_plan"), "{rendered}");
+        assert!(
+            rendered.contains("A plan is not a stopping point"),
+            "{rendered}"
+        );
+        let at = |needle: &str| {
+            rendered
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} in {rendered}"))
+        };
+        assert!(at("You are completing a background coding task") < at("Plan first"));
+        assert!(at("Plan first") < at("Testing:"));
     }
 
     #[test]

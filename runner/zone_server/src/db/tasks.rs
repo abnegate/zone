@@ -57,6 +57,9 @@ pub struct Create<'a> {
     pub acceptance_criteria: Option<&'a str>,
     pub priority: Option<i32>,
     pub is_agentic: bool,
+    /// A run of this task submits a plan and waits for it to be approved
+    /// before it changes anything; see `agent::plan`.
+    pub require_plan_approval: bool,
     pub source_id: Option<Uuid>,
     /// Recorded as `tasks.created_by`; a task without one gets no agent tools.
     pub created_by: Option<Uuid>,
@@ -71,6 +74,7 @@ pub struct Patch<'a> {
     pub status: Option<&'a str>,
     pub priority: Option<i32>,
     pub project_ids: Option<&'a [Uuid]>,
+    pub require_plan_approval: Option<bool>,
 }
 
 /// Task row from database
@@ -88,6 +92,7 @@ pub struct TaskRow {
     pub model_name: Option<String>,
     pub dependencies: Option<serde_json::Value>,
     pub is_agentic: bool,
+    pub require_plan_approval: bool,
     pub github_repo_url: Option<String>,
     pub source_id: Option<Uuid>,
     pub source_ids: Option<Vec<Uuid>>,
@@ -151,6 +156,8 @@ pub struct TaskRunRow {
     pub artifacts: Option<serde_json::Value>,
     pub pending_question: Option<serde_json::Value>,
     pub pending_wait: Option<serde_json::Value>,
+    /// The plan the run submitted for approval, kept once it was asked for.
+    pub plan: Option<String>,
 }
 
 /// Task run log row
@@ -182,6 +189,7 @@ macro_rules! map_task_row {
             model_name: $r.model_name,
             dependencies: $r.dependencies,
             is_agentic: $r.is_agentic,
+            require_plan_approval: $r.require_plan_approval,
             github_repo_url: $r.github_repo_url,
             source_id: $r.source_id,
             source_ids: $r.source_ids,
@@ -356,7 +364,7 @@ pub async fn list_tasks(
             let rows = sqlx::query!(
                 r#"
                 SELECT DISTINCT t.id, t.title, t.description, t.acceptance_criteria, t.status, t.priority,
-                       t.model_name, t.dependencies, t.is_agentic, t.github_repo_url, t.source_id, t.source_ids,
+                       t.model_name, t.dependencies, t.is_agentic, t.require_plan_approval, t.github_repo_url, t.source_id, t.source_ids,
                        t.workspace_id, t.worker_id, t.queued_at, t.started_at, t.completed_at, t.created_at, t.updated_at,
                        t.pr_url, t.branch_name, t.pr_status, t.pr_created_at, t.created_by
                 FROM tasks t
@@ -379,7 +387,7 @@ pub async fn list_tasks(
             let rows = sqlx::query!(
                 r#"
                 SELECT DISTINCT t.id, t.title, t.description, t.acceptance_criteria, t.status, t.priority,
-                       t.model_name, t.dependencies, t.is_agentic, t.github_repo_url, t.source_id, t.source_ids,
+                       t.model_name, t.dependencies, t.is_agentic, t.require_plan_approval, t.github_repo_url, t.source_id, t.source_ids,
                        t.workspace_id, t.worker_id, t.queued_at, t.started_at, t.completed_at, t.created_at, t.updated_at,
                        t.pr_url, t.branch_name, t.pr_status, t.pr_created_at, t.created_by
                 FROM tasks t
@@ -400,7 +408,7 @@ pub async fn list_tasks(
             let rows = sqlx::query!(
                 r#"
                 SELECT id, title, description, acceptance_criteria, status, priority,
-                       model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
+                       model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                        workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                        pr_url, branch_name, pr_status, pr_created_at, created_by
                 FROM tasks
@@ -420,7 +428,7 @@ pub async fn list_tasks(
             let rows = sqlx::query!(
                 r#"
                 SELECT id, title, description, acceptance_criteria, status, priority,
-                       model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
+                       model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                        workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                        pr_url, branch_name, pr_status, pr_created_at, created_by
                 FROM tasks
@@ -450,7 +458,7 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
     let row = sqlx::query!(
         r#"
         SELECT id, title, description, acceptance_criteria, status, priority,
-               model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
+               model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                pr_url, branch_name, pr_status, pr_created_at, created_by
         FROM tasks
@@ -491,6 +499,7 @@ pub async fn create_task(
         acceptance_criteria,
         priority,
         is_agentic,
+        require_plan_approval: false,
         source_id,
         created_by: None,
     };
@@ -530,6 +539,7 @@ pub async fn start_task_authorized(
 ) -> Result<Mutation<(TaskRow, TaskRunRow)>, MutationError> {
     let input = Create {
         is_agentic: true,
+        require_plan_approval: false,
         ..input
     };
     let mut transaction = pool.begin().await?;
@@ -558,10 +568,10 @@ pub async fn start_task_authorized(
 async fn insert_task(connection: &mut PgConnection, input: &Create<'_>) -> DbResult<TaskRow> {
     let row = sqlx::query!(
         r#"
-        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, source_id, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING id, title, description, acceptance_criteria, status, priority,
-                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
+                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at, created_by
         "#,
@@ -571,6 +581,7 @@ async fn insert_task(connection: &mut PgConnection, input: &Create<'_>) -> DbRes
         input.acceptance_criteria,
         input.priority,
         input.is_agentic,
+        input.require_plan_approval,
         input.source_id,
         input.created_by
     )
@@ -606,6 +617,7 @@ pub async fn update_task(
         status,
         priority,
         project_ids,
+        require_plan_approval: None,
     };
     let mut transaction = pool.begin().await?;
     let workspace_id: Option<Uuid> =
@@ -678,10 +690,11 @@ async fn update_task_in(
             acceptance_criteria = COALESCE($4, acceptance_criteria),
             status = COALESCE($5, status),
             priority = COALESCE($6, priority),
+            require_plan_approval = COALESCE($7, require_plan_approval),
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, title, description, acceptance_criteria, status, priority,
-                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
+                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at, created_by
         "#,
@@ -690,7 +703,8 @@ async fn update_task_in(
         input.description,
         input.acceptance_criteria,
         input.status,
-        input.priority
+        input.priority,
+        input.require_plan_approval
     )
     .fetch_optional(&mut *connection)
     .await?;
@@ -779,7 +793,7 @@ pub async fn queue_task_as(
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, title, description, acceptance_criteria, status, priority,
-                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
+                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at, created_by
         "#,
@@ -851,7 +865,7 @@ async fn queue_task_in(connection: &mut PgConnection, id: Uuid) -> DbResult<Opti
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, title, description, acceptance_criteria, status, priority,
-                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
+                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at, created_by
         "#,
@@ -895,7 +909,7 @@ pub async fn create_task_run_authorized(
         r#"
         SELECT id, task_id, triggered_by, status, current_phase, progress_percent,
                started_at, completed_at, error_message, artifacts, pending_question,
-               pending_wait
+               pending_wait, plan
         FROM task_runs
         WHERE task_id = $1 AND status IN {ACTIVE_RUN_STATUSES}
         ORDER BY started_at DESC, id
@@ -926,7 +940,7 @@ async fn insert_task_run(
         .fetch_one(&mut *connection)
         .await?;
     let row = sqlx::query!(
-        "INSERT INTO task_runs (task_id, status, triggered_by) VALUES ($1, 'running', $2) RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait",
+        "INSERT INTO task_runs (task_id, status, triggered_by) VALUES ($1, 'running', $2) RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan",
         task_id,
         triggered_by
     )
@@ -950,6 +964,7 @@ async fn insert_task_run(
         artifacts: row.artifacts,
         pending_question: row.pending_question,
         pending_wait: row.pending_wait,
+        plan: row.plan,
     })
 }
 
@@ -979,6 +994,7 @@ pub async fn create_task_as(
         acceptance_criteria,
         priority,
         is_agentic,
+        require_plan_approval: false,
         source_id,
         created_by: actor,
     };
@@ -1031,6 +1047,15 @@ pub async fn claim_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbResul
 pub async fn heartbeat_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbResult<bool> {
     Ok(sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET heartbeat_at = NOW() WHERE id = $1 AND owner = $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds'")))
         .bind(run_id).bind(owner).execute(pool).await?.rows_affected() == 1)
+}
+
+/// Keep the plan a run submitted for approval on the run, so it can be read
+/// after the question that carried it has been answered and cleared. Fenced
+/// on the lease like every write a run makes about itself; a run that lost
+/// it records nothing.
+pub async fn record_run_plan(pool: &PgPool, run: Uuid, owner: Uuid, plan: &str) -> DbResult<bool> {
+    Ok(sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET plan = $3 WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds'")))
+        .bind(run).bind(owner).bind(plan).execute(pool).await?.rows_affected() == 1)
 }
 
 /// Park a live run on a question without giving up its lease or its slot.
@@ -1128,7 +1153,7 @@ pub async fn update_owned_task_run_progress(
     current_phase: Option<&str>,
     progress_percent: Option<i32>,
 ) -> DbResult<Option<TaskRunRow>> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET current_phase = CASE WHEN status = 'waiting' THEN current_phase ELSE COALESCE($3, current_phase) END, progress_percent = COALESCE($4, progress_percent) WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds' RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait")))
+    sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET current_phase = CASE WHEN status = 'waiting' THEN current_phase ELSE COALESCE($3, current_phase) END, progress_percent = COALESCE($4, progress_percent) WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds' RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
         .bind(run_id).bind(owner).bind(current_phase).bind(progress_percent).fetch_optional(pool).await
 }
 
@@ -1158,7 +1183,7 @@ pub async fn complete_owned_task_run(
     .bind(run_id)
     .fetch_optional(&mut *transaction)
     .await?;
-    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $3, completed_at = NOW(), error_message = $4, artifacts = COALESCE($5, artifacts), progress_percent = 100, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds' RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait")))
+    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $3, completed_at = NOW(), error_message = $4, artifacts = COALESCE($5, artifacts), progress_percent = 100, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds' RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
         .bind(run_id).bind(owner).bind(status).bind(error_message).bind(artifacts).fetch_optional(&mut *transaction).await?;
     if let Some(run) = &row {
         let status = if status == COMPLETED {
@@ -1207,7 +1232,7 @@ pub async fn list_task_runs_as(
         r#"
         SELECT id, task_id, status, current_phase, progress_percent, started_at,
                completed_at, error_message, artifacts, triggered_by, pending_question,
-               pending_wait
+               pending_wait, plan
         FROM task_runs
         WHERE task_id = $1
         ORDER BY started_at DESC
@@ -1233,6 +1258,7 @@ pub async fn list_task_runs_as(
             artifacts: r.artifacts,
             pending_question: r.pending_question,
             pending_wait: r.pending_wait,
+            plan: r.plan,
         })
         .collect())
 }
@@ -1249,7 +1275,7 @@ where
         r#"
         SELECT id, task_id, status, current_phase, progress_percent, started_at,
                completed_at, error_message, artifacts, triggered_by, pending_question,
-               pending_wait
+               pending_wait, plan
         FROM task_runs
         WHERE id = $1
         "#,
@@ -1271,6 +1297,7 @@ where
         artifacts: r.artifacts,
         pending_question: r.pending_question,
         pending_wait: r.pending_wait,
+        plan: r.plan,
     }))
 }
 

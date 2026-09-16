@@ -433,6 +433,18 @@ impl ChatTools {
         Self::assemble(scope, ToolProfile::Task, Some(cwd), false).await
     }
 
+    /// A task that requires its plan approved is handed `submit_plan`, and
+    /// only such a task: the paragraph that teaches it renders off the catalog,
+    /// so a run without the requirement is never told to plan for approval.
+    /// Core rather than deferred — it is the first call the run makes.
+    pub fn with_plan_approval(mut self) -> Self {
+        super::plan::register(&mut self.registry);
+        self.core.insert(super::plan::SUBMIT_PLAN.to_string());
+        self.cache_catalog();
+        self.publish_catalog();
+        self
+    }
+
     /// The run id reaches the tool context nowhere else, so the session a job
     /// or a wait is keyed on is taken here rather than at assembly.
     pub fn with_task_lease(mut self, pool: sqlx::PgPool, run: Uuid, owner: Uuid) -> Self {
@@ -1729,6 +1741,26 @@ impl ListProjectsTool {
 
 #[cfg(test)]
 mod tests {
+
+    /// The plan tool joins the catalog late, because whether a task requires
+    /// approval is known per task and not per profile — and it joins the core
+    /// set, since a run that had to load it first would have been told to
+    /// plan before it could.
+    #[test]
+    fn plan_approval_adds_submit_plan_to_the_core_set() {
+        let without = ChatTools::empty();
+        assert!(!without.has(super::super::plan::SUBMIT_PLAN));
+        let with = ChatTools::empty().with_plan_approval();
+        assert!(with.has(super::super::plan::SUBMIT_PLAN));
+        assert!(
+            with.definitions()
+                .iter()
+                .any(|definition| definition.function.name == super::super::plan::SUBMIT_PLAN),
+            "the schema is sent, not listed"
+        );
+        assert!(with.deferred().is_empty(), "{:?}", with.deferred());
+        assert!(with.ends_turn(super::super::plan::SUBMIT_PLAN));
+    }
     use super::*;
     use crate::state::test_config;
     use sqlx::postgres::PgPoolOptions;

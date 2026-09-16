@@ -18,6 +18,7 @@ use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
 
+use crate::agent::plan;
 use crate::agent::prompt::{self, Environment, Vcs};
 use crate::agent::question::{self, Question};
 use crate::agent::wait::{self, Waited, Waiting};
@@ -953,6 +954,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let guidance = guidance.as_str();
     let environment = &environment;
     let permit = &permit;
+    let plan_approval = task.require_plan_approval;
 
     let result = run_with_policy(
         policy,
@@ -969,6 +971,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 workspace,
                 environment,
                 permit,
+                plan_approval,
             )
         },
         move |attempt| record_attempt(pool, run_id, policy, attempt),
@@ -1776,8 +1779,18 @@ async fn attempt_run(
     workspace: &Path,
     environment: &Environment,
     permit: &Permit,
+    plan_approval: bool,
 ) -> Result<TaskOutcome, Fault> {
-    let tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
+    let tools = task_tools(
+        state,
+        run_id,
+        owner,
+        workspace_id,
+        actor,
+        workspace,
+        plan_approval,
+    )
+    .await;
 
     let capacity = Resolver::with_context(
         &state.config().litellm_host,
@@ -1869,7 +1882,16 @@ async fn attempt_run(
                             .await?;
                     context = parked;
                     resume_with(&mut context, answered, &mut answers);
-                    tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
+                    tools = task_tools(
+                        state,
+                        run_id,
+                        owner,
+                        workspace_id,
+                        actor,
+                        workspace,
+                        plan_approval,
+                    )
+                    .await;
                 }
                 Ok(TurnOutcome::Waiting {
                     tool_call_id,
@@ -1887,7 +1909,16 @@ async fn attempt_run(
                     // turn history to write it to. A task run replays from the
                     // context it carries forward, and has no such store.
                     let _ = wait::resume_with_outcome(&mut context, &waited, outcome, &mut waits);
-                    tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
+                    tools = task_tools(
+                        state,
+                        run_id,
+                        owner,
+                        workspace_id,
+                        actor,
+                        workspace,
+                        plan_approval,
+                    )
+                    .await;
                 }
             }
         }
@@ -1911,10 +1942,16 @@ async fn task_tools(
     workspace_id: Uuid,
     actor: Option<Uuid>,
     workspace: &Path,
+    plan_approval: bool,
 ) -> ChatTools {
-    ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
+    let tools = ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
         .await
-        .with_task_lease(state.db().clone(), run_id, owner)
+        .with_task_lease(state.db().clone(), run_id, owner);
+    if plan_approval {
+        tools.with_plan_approval()
+    } else {
+        tools
+    }
 }
 
 /// No window when any question is required.
@@ -1974,6 +2011,17 @@ async fn park_for_answer(
         tasks::park_task_run(state.db(), run_id, owner, pending.clone()).await,
         Ok(true)
     ) {
+        return Err(Fault::lease());
+    }
+    // A plan outlives the question that carried it: once approval is asked
+    // for, the row keeps what was asked about, so a reviewer can read it after
+    // the answer has cleared the question.
+    if let Some(plan) = plan::submitted(questions)
+        && !matches!(
+            tasks::record_run_plan(state.db(), run_id, owner, plan).await,
+            Ok(true)
+        )
+    {
         return Err(Fault::lease());
     }
     if let Err(error) = tasks::add_owned_task_run_log(
@@ -4014,6 +4062,7 @@ mod watchdog_tests {
                 &workspace,
                 &environment,
                 &permit,
+                false,
             ),
         )
         .await
@@ -5003,6 +5052,7 @@ mod watchdog_tests {
             &workspace,
             &environment,
             &Permit::acquire().await.unwrap(),
+            false,
         )
         .await
         .expect("an attempt that waits on nothing finishes");

@@ -594,6 +594,13 @@ const AFTER_ANSWERING: &str = "Proceeding as answered.";
 
 /// Run a task whose first completion asks `questions`, and stop once it parks.
 async fn park(questions: serde_json::Value) -> Parked {
+    park_with("ask_user", questions.to_string(), false).await
+}
+
+/// Run a task whose first completion calls `tool` with `arguments` and stop
+/// once it parks; `plan_approval` is the task's flag, which is what hands the
+/// run `submit_plan` at all.
+async fn park_with(tool: &str, arguments: String, plan_approval: bool) -> Parked {
     use chrono::{Duration, Utc};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -627,8 +634,9 @@ async fn park(questions: serde_json::Value) -> Parked {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE tasks SET model_name = 'gpt-4' WHERE id = $1")
+    sqlx::query("UPDATE tasks SET model_name = 'gpt-4', require_plan_approval = $2 WHERE id = $1")
         .bind(task.id)
+        .bind(plan_approval)
         .execute(&pool)
         .await
         .unwrap();
@@ -638,12 +646,13 @@ async fn park(questions: serde_json::Value) -> Parked {
 
     let provider = MockServer::start().await;
     let rounds = Arc::new(AtomicUsize::new(0));
-    let asked = questions.to_string();
+    let asked = arguments;
+    let tool = tool.to_string();
     Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |_: &Request| {
         let deltas = if rounds.fetch_add(1, Ordering::SeqCst) == 0 {
             vec![
                 serde_json::json!({"content": BEFORE_ASKING}),
-                serde_json::json!({"tool_calls":[{"index":0,"id":"ask-call","type":"function","function":{"name":"ask_user","arguments":asked}}]}),
+                serde_json::json!({"tool_calls":[{"index":0,"id":"ask-call","type":"function","function":{"name":tool,"arguments":asked}}]}),
             ]
         } else {
             vec![serde_json::json!({"content": AFTER_ANSWERING})]
@@ -760,6 +769,86 @@ async fn an_optional_question_parks_the_run_until_a_member_answers_it() {
     assert_eq!(last["role"], "user");
     assert_eq!(last["content"], "Scope: Forward only");
 
+    parked.finish().await;
+}
+
+/// A task that requires its plan approved is handed `submit_plan`, and a run of
+/// it changes nothing before the plan is answered: the call parks the run on one
+/// required question carrying the plan, the plan is kept on the run where a
+/// reader finds it after the question is gone, and Approve is the answer that
+/// buys the next turn.
+#[tokio::test]
+async fn a_task_that_requires_plan_approval_parks_on_its_plan_and_keeps_it() {
+    const PLAN: &str = "1. Add the column.\n2. Thread it through the API.\n3. Test the route.";
+    let parked = park_with(
+        "submit_plan",
+        serde_json::json!({"plan": PLAN}).to_string(),
+        true,
+    )
+    .await;
+    let read = parked
+        .client
+        .get_auth(&format!("/api/tasks/runs/{}", parked.run), &parked.token)
+        .await;
+    read.assert_status(axum::http::StatusCode::OK);
+    let body = read.json_value();
+    assert_eq!(body["run"]["status"], "waiting");
+    let pending = &body["run"]["pending_question"];
+    assert_eq!(pending["questions"].as_array().map(Vec::len), Some(1));
+    assert_eq!(pending["questions"][0]["header"], "Plan approval");
+    assert_eq!(pending["questions"][0]["required"], true);
+    assert_eq!(pending["questions"][0]["preview"], PLAN);
+    assert_eq!(pending["questions"][0]["choices"][0]["label"], "Approve");
+    assert_eq!(
+        body["run"]["plan"], PLAN,
+        "the run carries the plan it submitted, not only the question that asked about it"
+    );
+    let stored: Option<String> = sqlx::query_scalar("SELECT plan FROM task_runs WHERE id = $1")
+        .bind(parked.run)
+        .fetch_one(&parked.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some(PLAN));
+
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Plan approval","labels":["Approve"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+    let rounds = parked.rounds().await;
+    assert_eq!(rounds.len(), 2, "approval bought exactly one more turn");
+    let offered: Vec<&str> = rounds[0]["tools"]
+        .as_array()
+        .expect("the run is offered tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert!(offered.contains(&"submit_plan"), "{offered:?}");
+    let prompt = rounds[0]["messages"][0]["content"]
+        .as_str()
+        .expect("a system prompt");
+    assert!(
+        prompt.contains("Plan first: this task requires its plan approved."),
+        "{prompt}"
+    );
+    let last = rounds[1]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"], "Plan approval: Approve");
+    let kept: Option<String> = sqlx::query_scalar("SELECT plan FROM task_runs WHERE id = $1")
+        .bind(parked.run)
+        .fetch_one(&parked.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        kept.as_deref(),
+        Some(PLAN),
+        "the plan outlives the question that carried it"
+    );
     parked.finish().await;
 }
 

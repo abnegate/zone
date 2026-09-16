@@ -34,6 +34,7 @@ pub struct TaskData {
     status: String,
     priority: Option<i32>,
     is_agentic: bool,
+    require_plan_approval: bool,
     model_name: Option<String>,
     dependencies: serde_json::Value,
     github_repo_url: Option<String>,
@@ -69,6 +70,7 @@ impl From<tasks::TaskRow> for TaskData {
             status: row.status,
             priority: row.priority,
             is_agentic: row.is_agentic,
+            require_plan_approval: row.require_plan_approval,
             model_name: row.model_name,
             dependencies: row.dependencies.unwrap_or_else(|| serde_json::json!([])),
             github_repo_url: row.github_repo_url,
@@ -139,6 +141,9 @@ pub struct TaskRunData {
     /// so a reader that has the key knows there is a wait to describe.
     #[serde(skip_serializing_if = "Option::is_none")]
     waiting_on: Option<serde_json::Value>,
+    /// The plan the run submitted for approval, if it was asked for one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan: Option<String>,
 }
 
 /// Task runs list response
@@ -164,6 +169,7 @@ impl From<tasks::TaskRunRow> for TaskRunData {
             error_message: row.error_message,
             pending_question: row.pending_question,
             waiting_on: row.pending_wait,
+            plan: row.plan,
         }
     }
 }
@@ -242,6 +248,9 @@ pub struct CreateTaskRequest {
     acceptance_criteria: Option<String>,
     priority: Option<i32>,
     is_agentic: Option<bool>,
+    /// A run submits a plan and waits for it to be approved before it changes
+    /// anything. Off unless asked for.
+    require_plan_approval: Option<bool>,
     source_id: Option<Uuid>,
 }
 
@@ -254,6 +263,7 @@ pub struct UpdateTaskRequest {
     status: Option<String>,
     priority: Option<i32>,
     project_ids: Option<Vec<Uuid>>,
+    require_plan_approval: Option<bool>,
 }
 
 fn denied(status: StatusCode, message: &str) -> Box<Response> {
@@ -395,6 +405,7 @@ pub async fn create(
             acceptance_criteria: request.acceptance_criteria.as_deref(),
             priority: request.priority,
             is_agentic: request.is_agentic.unwrap_or(false),
+            require_plan_approval: request.require_plan_approval.unwrap_or(false),
             source_id: request.source_id,
             created_by: Some(user_id),
         },
@@ -461,6 +472,7 @@ pub async fn update(
             status: req.status.as_deref(),
             priority: req.priority,
             project_ids: req.project_ids.as_deref(),
+            require_plan_approval: req.require_plan_approval,
         },
     )
     .await
@@ -714,6 +726,7 @@ mod tests {
             model_name: populated.then(|| "test-model".into()),
             dependencies: populated.then(|| serde_json::json!([Uuid::from_u128(4)])),
             is_agentic: true,
+            require_plan_approval: false,
             github_repo_url: populated.then(|| "https://github.com/abnegate/zone".into()),
             source_id: populated.then_some(Uuid::from_u128(5)),
             source_ids: populated.then(|| vec![Uuid::from_u128(5)]),
@@ -775,6 +788,7 @@ mod tests {
             artifacts: None,
             pending_question: pending,
             pending_wait: None,
+            plan: None,
         }
     }
 
