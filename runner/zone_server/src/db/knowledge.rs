@@ -1320,6 +1320,56 @@ mod document_union_tests {
 /// Category marking a knowledge entry as a promoted standing instruction.
 pub const STANDING_INSTRUCTION_CATEGORY: &str = "standing-instruction";
 
+/// The category a skill is filed under: a written procedure for one kind of
+/// work, indexed by name and trigger in the prompt and read in full when that
+/// work comes up. Rendered by `agent::skills`.
+pub const SKILL_CATEGORY: &str = "skill";
+
+/// How much of a skill's text the index reads its trigger from. Front matter
+/// sits at the top, and a first line of prose does too, so the rest of the
+/// procedure is never fetched for a listing.
+pub const SKILL_HEAD_CHARS: i32 = 1_200;
+
+/// What the skills index needs of one skill: the title it is listed under, the
+/// id `read_document` opens it by, and the head of its text.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SkillRow {
+    pub id: Uuid,
+    pub title: String,
+    pub head: String,
+}
+
+/// How many skills a workspace has filed, for the notice an index that stopped
+/// short states a count in. Asked only once the bound is reached, so the
+/// common case pays one statement and not two.
+pub async fn skill_count(pool: &PgPool, workspace_id: Uuid) -> DbResult<usize> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_entries \
+         WHERE workspace_id = $1 AND category = $2 AND is_active = TRUE",
+    )
+    .bind(workspace_id)
+    .bind(SKILL_CATEGORY)
+    .fetch_one(pool)
+    .await?;
+    Ok(usize::try_from(count).unwrap_or(usize::MAX))
+}
+
+/// Every active skill in a workspace in title order, one row past `limit` so
+/// a caller can tell that the index stopped short rather than ended.
+pub async fn skills(pool: &PgPool, workspace_id: Uuid, limit: i64) -> DbResult<Vec<SkillRow>> {
+    sqlx::query_as(
+        "SELECT id, title, left(content, $3) AS head FROM knowledge_entries \
+         WHERE workspace_id = $1 AND category = $2 AND is_active = TRUE \
+         ORDER BY title, id LIMIT $4",
+    )
+    .bind(workspace_id)
+    .bind(SKILL_CATEGORY)
+    .bind(SKILL_HEAD_CHARS)
+    .bind(limit.saturating_add(1))
+    .fetch_all(pool)
+    .await
+}
+
 /// Categories no client may write, and the tag prefixes that go with them.
 ///
 /// A row in one of the first three is rendered into every system prompt under

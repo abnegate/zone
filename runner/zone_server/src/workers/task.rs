@@ -1126,6 +1126,9 @@ struct Guidance<'a> {
     /// What the person who started this run asked to have remembered. A run
     /// reads it and writes none of it, so it arrives as an index-free block.
     memory: &'a str,
+    /// The workspace's written procedures, by name and trigger. Operator text,
+    /// so it sits before the repository block like the rest of it.
+    skills: &'a str,
     repository: &'a str,
 }
 
@@ -1142,6 +1145,7 @@ impl Guidance<'_> {
         push_block(&mut guidance, self.instructions);
         push_block(&mut guidance, self.facts);
         push_block(&mut guidance, self.memory);
+        push_block(&mut guidance, self.skills);
         push_block(&mut guidance, self.repository);
         guidance
     }
@@ -1244,6 +1248,23 @@ async fn guidance(
         }
         None => String::new(),
     };
+    // The index names read_document, which a run holds only through the
+    // workspace tools its initiator's standing grants — the same condition
+    // memory keys on, and a run without an initiator has neither.
+    let skills = match actor {
+        Some(_) => match crate::agent::skills::prompt(state.db(), task.workspace_id).await {
+            Ok(skills) => skills,
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    %error,
+                    "Failed to load the skills index; continuing without it"
+                );
+                String::new()
+            }
+        },
+        None => String::new(),
+    };
 
     Guidance {
         retrieved: &retrieved,
@@ -1251,6 +1272,7 @@ async fn guidance(
         instructions: &instructions,
         facts: &facts,
         memory: &memory,
+        skills: &skills,
         repository: &repository,
     }
     .render()
@@ -1395,6 +1417,7 @@ mod guidance_tests {
             instructions: &instructions,
             facts: &facts,
             memory: &memory(),
+            skills: &skills(),
             repository,
         }
         .render()
@@ -1419,6 +1442,18 @@ mod guidance_tests {
         )
     }
 
+    /// The index a run receives: one line per skill, opened with read_document.
+    fn skills() -> String {
+        crate::agent::skills::render(
+            &[crate::db::knowledge::SkillRow {
+                id: Uuid::nil(),
+                title: "Deploy checklist".into(),
+                head: "---\ndescription: Use when shipping to production.\n---\n".into(),
+            }],
+            1,
+        )
+    }
+
     /// A checkout carrying none of the instruction files, which is what proves
     /// the repository block changed nothing for the runs that came before it.
     fn empty_checkout() -> tempfile::TempDir {
@@ -1433,6 +1468,7 @@ mod guidance_tests {
             instructions: "",
             facts: "",
             memory: "",
+            skills: "",
             repository: "",
         }
         .render();
@@ -1598,6 +1634,7 @@ mod guidance_tests {
             instructions: "",
             facts: &facts,
             memory: "",
+            skills: "",
             repository: "",
         }
         .render();
