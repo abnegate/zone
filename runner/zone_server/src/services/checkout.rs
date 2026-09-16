@@ -705,7 +705,9 @@ mod tests {
 
     /// Recovery reclaims a finished run's worktree only once nothing in it is
     /// lost: while it holds a commit no remote has, the sweep leaves it and
-    /// says so; once the work is gone, the next sweep removes it.
+    /// says so; once the work is gone, the next sweep removes it. The sweep
+    /// runs over a root of this test's own, as the recovery tests beside it
+    /// do, so nothing here depends on what earlier runs left on the disk.
     #[tokio::test]
     async fn recovery_leaves_a_finished_run_s_worktree_while_it_holds_work() {
         let pool =
@@ -744,7 +746,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let root = Checkout::root(&pool);
+        let (_holder, root) = private_root();
         let base = base_clone(&root);
         let mut checkout = Checkout::create(&root, run.id, owner).unwrap();
         worktree::add(&base, checkout.path(), "origin/HEAD").unwrap();
@@ -766,7 +768,7 @@ mod tests {
         .await
         .unwrap();
 
-        Checkout::recover(&pool).await.unwrap();
+        assert_eq!(Checkout::recover_root(&pool, &root).await.unwrap(), 0);
         assert!(
             path.exists(),
             "a finished run's worktree holding a commit no remote has is left"
@@ -775,14 +777,12 @@ mod tests {
 
         // Nothing of its own left: the sweep may now take it, branch and all.
         git(&path, &["reset", "-q", "--hard", "origin/HEAD"]);
-        Checkout::recover(&pool).await.unwrap();
+        assert_eq!(Checkout::recover_root(&pool, &root).await.unwrap(), 1);
         assert!(
             !path.exists(),
             "a clean worktree of a finished run is reclaimed"
         );
         assert_eq!(git(&base, &["branch", "--list", "zone/recovered"]), "");
-        let _ = std::fs::remove_dir_all(root.join("remote"));
-        let _ = std::fs::remove_dir_all(&base);
         sqlx::query("DELETE FROM organizations WHERE id=$1")
             .bind(organization)
             .execute(&pool)
