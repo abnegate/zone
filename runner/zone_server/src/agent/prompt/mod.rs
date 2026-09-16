@@ -59,10 +59,13 @@ const PLAIN: &[Section] = &[
 ];
 
 /// Raised by measurement rather than by guess, the way every section that has
-/// widened this has raised it: the chat prompt with the automation rules is
-/// 21,162 characters, so the ceiling is the next round number above that and
-/// the next section to grow has to measure itself too.
-pub const CHAT_MAX_CHARS: usize = 22_400;
+/// widened this has raised it: the chat prompt with the memory and automation
+/// rules together is 22,637 characters, so the ceiling is the next round number
+/// above that and the next section to grow has to measure itself too. Neither
+/// section's own measurement was right for both — memory measured 22,395
+/// without automations, automations 21,162 without memory — which is what the
+/// rule is for.
+pub const CHAT_MAX_CHARS: usize = 22_700;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 14_000;
 
