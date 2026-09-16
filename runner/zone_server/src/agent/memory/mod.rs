@@ -38,6 +38,57 @@ pub const MEMORY_WRITE: &str = "memory_write";
 pub const MEMORY_APPEND: &str = "memory_append";
 pub const MEMORY_DELETE: &str = "memory_delete";
 
+/// What the chat's trace may keep of a memory call.
+///
+/// The trace — the `tool_calls` record on the assistant message and the live
+/// frames that mirror it — is readable by anyone who can read the chat, which
+/// is the workspace. What these five tools are handed and hand back belongs to
+/// one person. So the trace keeps a call's name, whether it succeeded and how
+/// long it took, and nothing it carried: the arguments shrink to the category
+/// alone, the way a receipt names a fact by its kind, and the outcome line is
+/// fixed. The model is unaffected — its copy of the result travels as the
+/// tool-result message, which the trace never was.
+pub fn is_private(name: &str) -> bool {
+    matches!(
+        name,
+        MEMORY_LIST | MEMORY_READ | MEMORY_WRITE | MEMORY_APPEND | MEMORY_DELETE
+    )
+}
+
+/// The arguments the trace shows for a call, if this tool's are private.
+///
+/// `None` means show them as they are. For a memory tool the category is kept
+/// when the arguments parse — it is one of three fixed words and names
+/// nobody — and everything else is dropped. Arguments that do not parse are
+/// shown as nothing at all rather than guessed at.
+pub fn trace_arguments(name: &str, arguments: &str) -> Option<String> {
+    if !is_private(name) {
+        return None;
+    }
+    let category = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|value| value.get("category")?.as_str().map(str::to_owned));
+    Some(match category {
+        Some(category) => serde_json::json!({ "category": category }).to_string(),
+        None => "{}".to_string(),
+    })
+}
+
+/// The outcome line the trace shows for a memory call, whichever way it went.
+///
+/// One line for success and failure alike: a success's first line is the
+/// stored content, and a refusal's names the entry it refused.
+pub const TRACE_DETAIL: &str = "Private to the person it belongs to; not shown here.";
+
+/// The outcome line the trace shows for a finished call.
+pub fn trace_detail(name: &str, detail: &str) -> String {
+    if is_private(name) {
+        TRACE_DETAIL.to_string()
+    } else {
+        detail.to_string()
+    }
+}
+
 /// What each tool tells the model it is for.
 ///
 /// `pub` rather than private as `question.rs` and `wait.rs` keep theirs: these
@@ -688,6 +739,50 @@ mod tests {
     use crate::state::{AppState, test_config};
     use regex::Regex;
     use uuid::Uuid;
+
+    /// The trace is workspace-readable and memory is one person's. Realistic
+    /// arguments, because a test that redacts `{}` proves nothing.
+    #[test]
+    fn a_memory_call_shows_its_kind_in_the_trace_and_nothing_else() {
+        let written = trace_arguments(
+            MEMORY_WRITE,
+            r#"{"category":"fact","name":"Deploy window","description":"When we ship.","content":"Thursdays, never Fridays."}"#,
+        )
+        .expect("a memory tool's arguments are private");
+        assert_eq!(written, r#"{"category":"fact"}"#);
+
+        assert_eq!(
+            trace_arguments(MEMORY_LIST, "{}").as_deref(),
+            Some("{}"),
+            "a listing carries no category and shows nothing"
+        );
+        assert_eq!(
+            trace_arguments(MEMORY_READ, "not json").as_deref(),
+            Some("{}"),
+            "arguments that do not parse are dropped, not shown"
+        );
+        assert!(
+            trace_arguments("read_file", r#"{"path":"src/main.rs"}"#).is_none(),
+            "any other tool's arguments are shown as they are"
+        );
+
+        assert_eq!(
+            trace_detail(MEMORY_READ, "Thursdays, never Fridays. (3 lines)"),
+            TRACE_DETAIL
+        );
+        assert_eq!(
+            trace_detail(
+                MEMORY_WRITE,
+                "Memory write refused: Deploy window is at version 3"
+            ),
+            TRACE_DETAIL,
+            "a refusal names the entry, so it is hidden the same way"
+        );
+        assert_eq!(
+            trace_detail("read_file", "fn main() {} (12 lines)"),
+            "fn main() {} (12 lines)"
+        );
+    }
 
     /// PR 6's rule for its timeout strings, carried over: a refusal a model
     /// can read as a write that stuck is worse than no refusal at all. Two of

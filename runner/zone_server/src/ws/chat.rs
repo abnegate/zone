@@ -730,6 +730,49 @@ fn image_metadata(attachments: &[ChatImageAttachment]) -> Option<serde_json::Val
 /// from anything the model claims.
 const MEMORY_USED_KEY: &str = "memory_used";
 
+/// The record and the frame a started call leaves in the trace.
+///
+/// Both are workspace-readable — the record rides the assistant message's
+/// metadata and the frame goes to every reader with the chat open — so a
+/// memory tool's arguments are reduced here, before either exists, and the
+/// model's stated reason is taken from the arguments it actually sent. Lifted
+/// out of the loop so the trace a call leaves can be tested with the arguments
+/// a real call carries.
+fn trace_started(
+    message_id: Uuid,
+    id: String,
+    name: String,
+    arguments: &str,
+    reasoning: Option<String>,
+) -> (ToolCallRecord, ServerMessage) {
+    let reason = crate::agent::reason(arguments);
+    let shown = crate::agent::memory::trace_arguments(&name, arguments)
+        .unwrap_or_else(|| arguments.to_string());
+    let record = ToolCallRecord {
+        id: id.clone(),
+        name: name.clone(),
+        arguments: shown.clone(),
+        success: false,
+        detail: "Did not finish".to_string(),
+        duration_ms: 0,
+        reasoning: reasoning.clone(),
+        reason: reason.clone(),
+        preview: None,
+        questions: Vec::new(),
+        job: None,
+        waiting: None,
+    };
+    let frame = ServerMessage::ToolCall {
+        message_id,
+        tool_call_id: id,
+        name,
+        arguments: shown,
+        reasoning,
+        reason,
+    };
+    (record, frame)
+}
+
 /// Fold the tool trace, citations, and write receipts into the image
 /// metadata, since one turn can produce all of them and they share the
 /// message's single metadata column.
@@ -3000,6 +3043,8 @@ async fn handle_chat_generation(
                                 record.detail = "Waiting for approval…".to_string();
                                 record.preview.clone_from(&preview);
                             }
+                            let arguments = crate::agent::memory::trace_arguments(&name, &arguments)
+                                .unwrap_or(arguments);
                             let tool_msg = ServerMessage::ToolApprovalRequired {
                                 message_id: assistant_message_id,
                                 tool_call_id: id,
@@ -3018,30 +3063,9 @@ async fn handle_chat_generation(
                                 let text = std::mem::take(&mut round_reasoning);
                                 (!text.is_empty()).then_some(text)
                             };
-                            let reason = crate::agent::reason(&arguments);
-                            tool_calls.push(ToolCallRecord {
-                                id: id.clone(),
-                                name: name.clone(),
-                                arguments: arguments.clone(),
-                                success: false,
-                                detail: "Did not finish".to_string(),
-                                duration_ms: 0,
-                                reasoning: reasoning.clone(),
-                                reason: reason.clone(),
-                                preview: None,
-                                questions: Vec::new(),
-                                job: None,
-                                waiting: None,
-                            });
-
-                            let tool_msg = ServerMessage::ToolCall {
-                                message_id: assistant_message_id,
-                                tool_call_id: id,
-                                name,
-                                arguments,
-                                reasoning,
-                                reason,
-                            };
+                            let (record, tool_msg) =
+                                trace_started(assistant_message_id, id, name, &arguments, reasoning);
+                            tool_calls.push(record);
                             publish(stream, tool_msg).await;
                             persist_now = true;
                         }
@@ -3086,6 +3110,7 @@ async fn handle_chat_generation(
                             persist_now = true;
                         }
                         Some(AgentEvent::ToolCallCompleted { id, name, success, detail, duration_ms, citations: observed, receipt }) => {
+                            let detail = crate::agent::memory::trace_detail(&name, &detail);
                             if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
                                 record.success = success;
                                 record.detail = detail.clone();
@@ -4907,6 +4932,78 @@ mod tests {
     #[test]
     fn test_merge_metadata_is_none_when_the_turn_produced_neither() {
         assert!(merge_metadata(None, &[], &[], &[], None).is_none());
+    }
+
+    /// The trace is workspace-readable and memory is one person's, so a memory
+    /// call leaves its name, outcome and timing and nothing it carried — in the
+    /// record that rides the message and in the frame that goes out live. The
+    /// receipts fix covered neither, and the outcome line is the result's first
+    /// line, which for a read is the stored content itself.
+    #[test]
+    fn a_memory_call_leaves_no_private_data_in_the_trace() {
+        use crate::agent::memory::{MEMORY_READ, MEMORY_WRITE, TRACE_DETAIL};
+        let private = [
+            "Deploy window",
+            "When we ship",
+            "Thursdays",
+            "never Fridays",
+        ];
+
+        let (record, frame) = trace_started(
+            Uuid::new_v4(),
+            "call_1".to_string(),
+            MEMORY_WRITE.to_string(),
+            r#"{"category":"fact","name":"Deploy window","description":"When we ship.","content":"Thursdays, never Fridays.","reason":"The user asked me to remember when we ship."}"#,
+            Some("I should remember this.".to_string()),
+        );
+        let record_json = serde_json::to_string(&record).expect("a record serialises");
+        let frame_json = serde_json::to_string(&frame).expect("a frame serialises");
+        for leaked in private {
+            assert!(
+                !record_json.contains(leaked),
+                "the record carries {leaked:?}: {record_json}"
+            );
+            assert!(
+                !frame_json.contains(leaked),
+                "the live frame carries {leaked:?}: {frame_json}"
+            );
+        }
+        assert!(
+            record_json.contains(r#"\"category\":\"fact\""#),
+            "the kind survives, as on a receipt: {record_json}"
+        );
+        assert_eq!(
+            record.name, MEMORY_WRITE,
+            "the name is what the badge and the receipt key on"
+        );
+
+        // A read's outcome line would be the entry's first line.
+        let shown =
+            crate::agent::memory::trace_detail(MEMORY_READ, "Thursdays, never Fridays. (2 lines)");
+        assert_eq!(shown, TRACE_DETAIL);
+
+        // Every other tool's trace is exactly what it was.
+        let (record, frame) = trace_started(
+            Uuid::new_v4(),
+            "call_2".to_string(),
+            "read_file".to_string(),
+            r#"{"path":"src/main.rs"}"#,
+            None,
+        );
+        assert!(
+            serde_json::to_string(&record)
+                .unwrap()
+                .contains("src/main.rs")
+        );
+        assert!(
+            serde_json::to_string(&frame)
+                .unwrap()
+                .contains("src/main.rs")
+        );
+        assert_eq!(
+            crate::agent::memory::trace_detail("read_file", "fn main() {} (12 lines)"),
+            "fn main() {} (12 lines)"
+        );
     }
 
     fn call(name: &str, success: bool) -> ToolCallRecord {
