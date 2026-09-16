@@ -144,19 +144,22 @@ for (const viewport of [
         }
       });
 
-      test('creation wizards keep their title, steps, content and footer visible', async ({
-        page,
-      }) => {
-        for (const wizard of [
-          { path: 'projects', button: '+ New Project', title: 'New Project' },
-          { path: 'tasks', button: '+ New Task', title: 'New Task' },
-          { path: 'sources', button: '+ Add Source', title: 'Add Source' },
-          {
-            path: 'wiki',
-            button: '+ Add Knowledge',
-            title: 'Add Knowledge Entry',
-          },
-        ]) {
+      // One test per wizard: each walkthrough gets the whole per-test budget
+      // and its own retries, and a failure names the wizard. Four of them in
+      // one test ran out of the 60-second budget on a slow WebKit runner.
+      for (const wizard of [
+        { path: 'projects', button: '+ New Project', title: 'New Project' },
+        { path: 'tasks', button: '+ New Task', title: 'New Task' },
+        { path: 'sources', button: '+ Add Source', title: 'Add Source' },
+        {
+          path: 'wiki',
+          button: '+ Add Knowledge',
+          title: 'Add Knowledge Entry',
+        },
+      ]) {
+        test(`the ${wizard.path} creation wizard keeps its title, steps, content and footer visible`, async ({
+          page,
+        }) => {
           await ready(page, wizard.path, theme);
           const button = page.getByRole('button', {
             name: wizard.button,
@@ -281,8 +284,8 @@ for (const viewport of [
             `${profile}-${wizard.path}-wizard-details`,
             theme
           );
-        }
-      });
+        });
+      }
 
       test('conversation uses a full reading pane and preserves markdown hierarchy', async ({
         page,
