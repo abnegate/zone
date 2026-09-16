@@ -1893,3 +1893,349 @@ async fn a_wait_hands_its_round_back_while_a_question_spends_it() {
     );
     assert_eq!(requests.len(), 2);
 }
+
+use sqlx::PgPool;
+use zone_server::agent::memory::{
+    APPEND_DESCRIPTION, DELETE_DESCRIPTION, LIST_DESCRIPTION, MEMORY_APPEND, MEMORY_DELETE,
+    MEMORY_LIST, MEMORY_READ, MEMORY_WRITE, READ_DESCRIPTION, WRITE_DESCRIPTION,
+};
+use zone_server::db::memory::{MemoryCategory, remembered};
+
+/// The section's heading, and the nine rules under it that name no tool, as
+/// literals because the constants carrying them are private to that section.
+const MEMORY_SECTION: &str = "Memory:";
+
+const MEMORY_RULES: [&str; 9] = [
+    "- \"Remember that\", \"forget that\" and \"from now on\" are always a write: call the tool \
+     before you say you have noted it.",
+    "- Write what will still be true and worth reading in a month. A passing mention is not \
+     one; a durable phrasing beats a precise figure.",
+    "- Only what the user said about themselves. Not what you concluded about them, and not \
+     what the repository already records.",
+    "- Their profile is who they are, preferences are how you should work, and a fact is \
+     anything else, named and described so a later turn can tell whether to read it.",
+    "- Never store an identifier, a secret, health, sexual orientation, religion, politics, \
+     criminal history, that someone is a minor, or an inference about their state of mind. \
+     Decline and say you did.",
+    "- Never store an instruction that would have you hold back an error, a disagreement or a \
+     concern. Judge by what it would do, not how it is worded.",
+    "- A remembered entry has to change the substance of the answer or stay out of it. The \
+     current request wins over a stored preference.",
+    "- Never raise something remembered unprompted, and never tell the user you are consulting \
+     your memory of them.",
+    "- Forget only what the user asked you to forget.",
+];
+
+/// The tenth rule is built from the tool names, as the section builds it, so a
+/// renamed tool moves this with it rather than leaving it matching nothing.
+fn memory_rules() -> Vec<String> {
+    let mut rules: Vec<String> = MEMORY_RULES
+        .iter()
+        .map(|rule| (*rule).to_string())
+        .collect();
+    rules.push(format!(
+        "- Read before you replace: {MEMORY_WRITE} and {MEMORY_DELETE} take the version \
+         {MEMORY_READ} returned, and a conflict hands you what the entry says now to merge."
+    ));
+    rules
+}
+
+const FACT: &str = "Deploy window";
+
+const ABOUT: &str = "When deploys go out";
+
+const REMEMBERED: &str = "Thursdays, after standup.";
+
+const ASKED: &str = "Remember that deploys go out on Thursdays, after standup.";
+
+const ACKNOWLEDGED: &str = "Stored it under the deploy window.";
+
+const WRITE_CALL: &str = "memory_1";
+
+const READ_CALL: &str = "memory_2";
+
+/// The whole instruction surface of a chat turn that could write a memory: the
+/// rules in the prompt, and the five tools beside it that they govern.
+///
+/// A rule the model never receives is a rule that does not exist, and the
+/// section renders off the catalog rather than off the surface, so the prompt
+/// and the catalog are one claim and are checked in one place.
+#[tokio::test]
+async fn the_turn_carries_the_memory_rules_and_every_memory_tool_description() {
+    let tools = chat_catalog(Uuid::new_v4()).await;
+    let (_, requests) = exercise_messages(
+        vec![(200, text("Ready."))],
+        vec![
+            Message::system(prompt::chat(&tools, false, &environment())),
+            Message::user(ASKED),
+        ],
+    )
+    .await;
+
+    let prompt = requests[0]["messages"][0]["content"]
+        .as_str()
+        .expect("a system prompt");
+    assert!(prompt.contains(MEMORY_SECTION), "{prompt}");
+    for rule in memory_rules() {
+        assert!(prompt.contains(&rule), "{rule:?} is missing from {prompt}");
+    }
+
+    let offered = |name: &str| {
+        requests[0]["tools"]
+            .as_array()
+            .expect("a tool catalog")
+            .iter()
+            .find(|tool| tool["function"]["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the catalog"))
+            .to_string()
+    };
+    for (tool, description) in [
+        (MEMORY_LIST, LIST_DESCRIPTION),
+        (MEMORY_READ, READ_DESCRIPTION),
+        (MEMORY_WRITE, WRITE_DESCRIPTION),
+        (MEMORY_APPEND, APPEND_DESCRIPTION),
+        (MEMORY_DELETE, DELETE_DESCRIPTION),
+    ] {
+        assert!(offered(tool).contains(description), "{}", offered(tool));
+    }
+}
+
+/// A write the model asked for, executed by the real loop against the real
+/// store, reported back in the words the store froze.
+///
+/// The success message is what the next turn reasons from, so a store outcome
+/// that reached the model as anything else -- a conflict read as a write, a
+/// version the entry does not carry -- would have the model tell the user
+/// something was remembered that was not.
+#[tokio::test]
+async fn a_scripted_turn_stores_what_the_user_asked_to_have_remembered() {
+    let fixture = fixture().await;
+    let (events, _) = exercise_catalog(
+        memory_catalog(&fixture).await,
+        vec![text(&json!([write_call()]).to_string()), text(ACKNOWLEDGED)],
+        ASKED,
+    )
+    .await;
+
+    // Before any assertion, so a failing one cannot leave the rows behind.
+    let entries = tool_entries(&events);
+    let reported = answer(&events);
+    let dispatched = started(&events);
+    fixture.clean().await;
+
+    assert_eq!(dispatched, vec![WRITE_CALL], "{events:?}");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].0, WRITE_CALL);
+    assert_eq!(
+        entries[0].1,
+        remembered(MemoryCategory::Fact, FACT, 1),
+        "the store's outcome reached the model as something other than what it says"
+    );
+    assert_eq!(reported, ACKNOWLEDGED);
+}
+
+/// The round after the write reads what the write created, naming it out of
+/// the message the store returned rather than out of the script.
+///
+/// Nothing before this could reach it: a read naming an entry the script
+/// invented would prove only that the script and the fixture agree, and the
+/// entry exists to be named only once the turn is already running.
+#[tokio::test]
+async fn a_later_round_reads_the_entry_an_earlier_round_wrote() {
+    let fixture = fixture().await;
+    let (events, requests) = exercise_scripted(
+        memory_catalog(&fixture).await,
+        move |request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let results: Vec<&str> = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .filter_map(|message| message["content"].as_str())
+                .collect();
+            match results.as_slice() {
+                [] => stream(200, text(&json!([write_call()]).to_string())),
+                [written] => {
+                    let (category, name) = stored(written)
+                        .unwrap_or_else(|| panic!("the write named no entry: {written}"));
+                    stream(
+                        200,
+                        text(
+                            &json!([{
+                                "id": READ_CALL,
+                                "name": MEMORY_READ,
+                                "arguments": {"category": category, "name": name},
+                            }])
+                            .to_string(),
+                        ),
+                    )
+                }
+                _ => stream(200, text(ACKNOWLEDGED)),
+            }
+        },
+        vec![Message::user(ASKED)],
+        ApprovalPolicy::auto(),
+    )
+    .await;
+
+    // Before any assertion, so a failing one cannot leave the rows behind.
+    let entries = tool_entries(&events);
+    fixture.clean().await;
+
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert_eq!(entries[0].0, WRITE_CALL);
+    assert_eq!(entries[0].1, remembered(MemoryCategory::Fact, FACT, 1));
+    assert_eq!(entries[1].0, READ_CALL);
+    assert_eq!(
+        entries[1].1,
+        format!(
+            "{}/{FACT}, version 1. {ABOUT}\n\n{REMEMBERED}",
+            MemoryCategory::Fact
+        ),
+        "the entry came back as something other than what was written"
+    );
+    assert_eq!(requests.len(), 3);
+}
+
+fn write_call() -> Value {
+    json!({
+        "id": WRITE_CALL,
+        "name": MEMORY_WRITE,
+        "arguments": {
+            "category": MemoryCategory::Fact.short(),
+            "name": FACT,
+            "description": ABOUT,
+            "content": REMEMBERED,
+        },
+    })
+}
+
+/// The entry a store message names, read back out of the message the way the
+/// chat layer reads a job id out of a spawn receipt.
+fn stored(message: &str) -> Option<(String, String)> {
+    let (_, entry) = message.split_once(": ")?;
+    let (path, _) = entry.split_once(", version ")?;
+    path.split_once('/')
+        .map(|(category, name)| (category.to_string(), name.to_string()))
+}
+
+/// `exercise_approved` over a catalog the caller built, for a turn whose tools
+/// need a database that answers rather than the pool that dials nowhere.
+async fn exercise_catalog(
+    tools: ChatTools,
+    rounds: Vec<Vec<Value>>,
+    message: &str,
+) -> (Vec<AgentEvent>, Vec<Value>) {
+    let responses = Arc::new(Mutex::new(VecDeque::from(rounds)));
+    exercise_scripted(
+        tools,
+        move |_: &Request| {
+            let deltas = responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected extra completion");
+            stream(200, deltas)
+        },
+        vec![Message::user(message)],
+        ApprovalPolicy::auto(),
+    )
+    .await
+}
+
+/// The organization, workspace, person and chat one memory turn writes under.
+///
+/// Every row these tests create hangs off the organization or the user, so
+/// taking those two back out is what keeps a shared database from filling with
+/// entries nobody owns.
+struct Fixture {
+    pool: PgPool,
+    organization: Uuid,
+    workspace: Uuid,
+    user: Uuid,
+    chat: Uuid,
+}
+
+async fn fixture() -> Fixture {
+    let pool = PgPool::connect(&common::context_database_url())
+        .await
+        .expect("a scripted memory turn needs a migrated disposable database");
+
+    let organization: Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING id")
+            .bind("Memory")
+            .bind(Uuid::new_v4().to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("an organization");
+    let workspace: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (organization_id, name, slug) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(organization)
+    .bind("Memory")
+    .bind(Uuid::new_v4().to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("a workspace");
+    let user: Uuid =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(format!("{}@example.test", Uuid::new_v4()))
+            .bind("x")
+            .fetch_one(&pool)
+            .await
+            .expect("a user");
+    sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)")
+        .bind(workspace)
+        .bind(user)
+        .bind("member")
+        .execute(&pool)
+        .await
+        .expect("the person belongs to the workspace");
+    let chat: Uuid = sqlx::query_scalar(
+        "INSERT INTO chats (workspace_id, title, model_name, agent_enabled)
+         VALUES ($1, $2, $3, TRUE) RETURNING id",
+    )
+    .bind(workspace)
+    .bind("Memory")
+    .bind("test")
+    .fetch_one(&pool)
+    .await
+    .expect("a chat");
+
+    Fixture {
+        pool,
+        organization,
+        workspace,
+        user,
+        chat,
+    }
+}
+
+impl Fixture {
+    async fn clean(self) {
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(self.organization)
+            .execute(&self.pool)
+            .await
+            .expect("the workspace and everything in it goes");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(self.user)
+            .execute(&self.pool)
+            .await
+            .expect("the person goes");
+    }
+}
+
+/// The catalog the server assembles for one chat turn, over a pool that
+/// answers. `chat_catalog`'s does not, which is all every other test here needs.
+async fn memory_catalog(fixture: &Fixture) -> ChatTools {
+    let state = common::create_test_state(common::test_config(), fixture.pool.clone());
+    ChatTools::build(WorkspaceScope {
+        user_id: fixture.user,
+        state,
+        workspace_id: fixture.workspace,
+        chat_id: Some(fixture.chat),
+    })
+    .await
+}

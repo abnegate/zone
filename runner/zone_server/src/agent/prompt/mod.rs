@@ -36,6 +36,7 @@ const ORDER: &[Section] = &[
     ("refusal", section::refusal::render),
     ("workspace", section::workspace::render),
     ("retrieval", section::retrieval::render),
+    ("memory", section::memory::render),
     ("files", section::files::render),
     ("waiting", section::waiting::render),
     ("images", section::images::render),
@@ -58,10 +59,13 @@ const PLAIN: &[Section] = &[
 ];
 
 /// Raised by measurement rather than by guess, the way every section that has
-/// widened this has raised it: the chat prompt with the automation rules is
-/// 21,162 characters, so the ceiling is the next round number above that and
-/// the next section to grow has to measure itself too.
-pub const CHAT_MAX_CHARS: usize = 21_200;
+/// widened this has raised it: the chat prompt with the memory and automation
+/// rules together is 22,637 characters, so the ceiling is the next round number
+/// above that and the next section to grow has to measure itself too. Neither
+/// section's own measurement was right for both — memory measured 22,395
+/// without automations, automations 21,162 without memory — which is what the
+/// rule is for.
+pub const CHAT_MAX_CHARS: usize = 22_700;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 14_000;
 
@@ -206,6 +210,11 @@ mod tests {
         "list_sources",
         "list_tasks",
         MCP_TOOL,
+        "memory_append",
+        "memory_delete",
+        "memory_list",
+        "memory_read",
+        "memory_write",
         "query_prometheus",
         "read_chat_evidence",
         "read_check_logs",
@@ -372,6 +381,7 @@ mod tests {
                 "refusal",
                 "workspace",
                 "retrieval",
+                "memory",
                 "files",
                 "waiting",
                 "images",
@@ -427,6 +437,7 @@ mod tests {
 
         assert!(rendered.contains("You can call these tools:"), "{rendered}");
         assert!(rendered.contains("Workspace actions:"), "{rendered}");
+        assert!(rendered.contains("Memory:"), "{rendered}");
         assert!(rendered.contains("Images:"), "{rendered}");
         assert!(rendered.contains("Cluster:"), "{rendered}");
         assert!(rendered.contains("Web tools:"), "{rendered}");
@@ -447,6 +458,7 @@ mod tests {
             !rendered.contains("act in the server runtime"),
             "{rendered}"
         );
+        assert!(!rendered.contains("Memory:"), "{rendered}");
         assert!(!rendered.contains("Images:"), "{rendered}");
         assert!(!rendered.contains("Cluster:"), "{rendered}");
         assert!(!rendered.contains("Web tools:"), "{rendered}");
