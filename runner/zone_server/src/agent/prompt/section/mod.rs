@@ -9,6 +9,7 @@ pub(in crate::agent::prompt) mod files;
 pub(in crate::agent::prompt) mod identity;
 pub(in crate::agent::prompt) mod images;
 pub(in crate::agent::prompt) mod mcp;
+pub(in crate::agent::prompt) mod memory;
 pub(in crate::agent::prompt) mod refusal;
 pub(in crate::agent::prompt) mod reply;
 pub(in crate::agent::prompt) mod retrieval;

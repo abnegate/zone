@@ -1,0 +1,16 @@
+-- no-transaction
+-- One name per person per kind, because the create that reserves a name is a
+-- WHERE NOT EXISTS check rather than a constraint: two first writes that
+-- overlap exactly both pass the check and both insert, and after that a read
+-- picks whichever row streams first while an update writes to both. Partial on
+-- the same prefix every read-path predicate matches, so it covers nothing but
+-- memory and leaves ordinary documents free to repeat a title; forgotten rows
+-- are outside it, so a name comes free again when its entry is forgotten; and
+-- an entry whose owner was deleted has a NULL created_by, which the index
+-- treats as distinct, exactly as every read does. CONCURRENTLY, and therefore
+-- its own file: a partial predicate filters what is indexed, not what is read,
+-- so a plain build inside 033's transaction would scan every document and
+-- learned entry with ACCESS EXCLUSIVE already held until commit. Exactly one
+-- statement per file: a multi-statement simple query opens an implicit
+-- transaction block, and CONCURRENTLY is rejected inside one with 25001.
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_knowledge_memory_entry ON public.knowledge_entries (workspace_id, created_by, category, title) WHERE is_active = TRUE AND category LIKE 'memory-%';

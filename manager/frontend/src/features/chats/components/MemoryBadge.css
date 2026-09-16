@@ -1,0 +1,13 @@
+/* The one thing the server can vouch for about memory on a reply: the model
+   read it. Whether the reading changed the answer is the model's claim, so the
+   chip says "read", takes the header's own size, and wears the neutral border
+   every quiet surface in this feature uses rather than a warning colour. */
+.memory-badge {
+  padding: 0 var(--ui-space-1);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm, 3px);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
