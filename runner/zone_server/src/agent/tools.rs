@@ -213,7 +213,22 @@ struct TaskLease {
 /// at 1,056 tokens it is the single most expensive schema in the catalog, more
 /// than three times the next, and a small minority of turns want it. Deferring
 /// it is most of what E4 is worth.
-const NEVER_DEFERRED: [&str; 1] = ["start_task"];
+///
+/// The five memory tools are here on different grounds. `prompt::section::
+/// memory` renders the rules that govern them off this same catalog, naming
+/// each, so the rules and the schemas are one claim the turn makes and are
+/// checked as one; a rule the model can act on only after a round trip is a
+/// weaker rule. And the recall the profile block invites — read before you
+/// answer about the person — is exactly the call a chat would otherwise pay
+/// the trip on every time.
+const NEVER_DEFERRED: [&str; 6] = [
+    "start_task",
+    super::memory::MEMORY_LIST,
+    super::memory::MEMORY_READ,
+    super::memory::MEMORY_WRITE,
+    super::memory::MEMORY_APPEND,
+    super::memory::MEMORY_DELETE,
+];
 
 /// The tools offered for one turn, and the context they run in.
 ///
