@@ -151,6 +151,11 @@ impl GitService {
     fn network_command(token: Option<&str>) -> Command {
         // Task-local replacement refs and legacy grafts must not reinterpret
         // the stored objects used by history checks, diffs, commits or pushes.
+        // Nor may the repository's configuration name a program for git to
+        // run: a task's own git commands can write that configuration, and it
+        // is shared by every worktree of the base clone, so the hook path, the
+        // file-system monitor and commit signing are pinned on the command
+        // line, where the configuration cannot reach.
         let mut command = Command::new("git");
         command
             .env_clear()
@@ -167,6 +172,12 @@ impl GitService {
                 "credential.helper=",
                 "-c",
                 "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "tag.gpgsign=false",
                 "-c",
                 "http.followRedirects=false",
             ])

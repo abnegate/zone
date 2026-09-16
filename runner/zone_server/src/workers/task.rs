@@ -955,6 +955,10 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let environment = &environment;
     let permit = &permit;
     let plan_approval = task.require_plan_approval;
+    // Approval is given to the run, once: an attempt retried after a fault
+    // starts from it rather than asking the person again.
+    let approval = plan::Approval::default();
+    let approval = &approval;
 
     let result = run_with_policy(
         policy,
@@ -972,6 +976,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 environment,
                 permit,
                 plan_approval,
+                approval,
             )
         },
         move |attempt| record_attempt(pool, run_id, policy, attempt),
@@ -1032,23 +1037,22 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 &summary,
             )
             .await;
-            // What the service pushed is the one commit it can vouch for
-            // afterwards: told to the guard, so the worktree may go while it
-            // is on that commit, and recorded under the lease for recovery,
-            // which reads the same facts. A push the record misses only
-            // keeps the worktree, so it is not a failure of the run.
-            if let Some(commit) = publication.pushed() {
-                checkout.mark_published(commit.to_string());
-                match tasks::record_run_publication(state.db(), run_id, owner, commit).await {
-                    Ok(true) => {}
-                    Ok(false) => tracing::warn!(
-                        %run_id,
-                        "Pushed, but the run's lease was gone before the publication was recorded"
-                    ),
-                    Err(error) => {
-                        tracing::warn!(%run_id, %error, "Pushed, but could not record the publication")
-                    }
-                }
+            // What the service pushed was recorded at the push itself,
+            // whatever publication did afterwards; the guard is told it here,
+            // so the worktree may go while it is on that commit. Recovery
+            // reads the same record. A record that cannot be read only keeps
+            // the worktree.
+            match tasks::run_checkout(state.db(), run_id).await {
+                Ok(Some(tasks::RunCheckout {
+                    published: Some(commit),
+                    ..
+                })) => checkout.mark_published(commit),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    %run_id,
+                    %error,
+                    "Could not read the run's publication record; keeping the worktree"
+                ),
             }
             obs.set_status(
                 complete_publication(
@@ -1802,11 +1806,16 @@ async fn attempt_run(
     environment: &Environment,
     permit: &Permit,
     plan_approval: bool,
+    approval: &plan::Approval,
 ) -> Result<TaskOutcome, Fault> {
     // A task that requires its plan approved changes nothing until it is:
     // every tool that would is refused, turn after turn, until the answer
-    // that resumes the run is an Approve to the plan it parked on.
-    let mut plan_held = plan_approval;
+    // that resumes the run is an Approve to the plan it parked on. The
+    // approval is the run's: an attempt retried after one starts unheld,
+    // with the approved plan in hand and no plan phase to go through again.
+    let approved = approval.approved();
+    let planning = plan_approval && approved.is_none();
+    let mut plan_held = planning;
     let tools = task_tools(
         state,
         run_id,
@@ -1814,7 +1823,7 @@ async fn attempt_run(
         workspace_id,
         actor,
         workspace,
-        plan_approval,
+        planning,
         plan_held,
     )
     .await;
@@ -1855,9 +1864,13 @@ async fn attempt_run(
         run_id,
         owner: Some(owner),
     };
+    let task_prompt = match &approved {
+        Some(plan) => format!("{task_prompt}\n\n{}", plan::Approval::resumed(plan)),
+        None => task_prompt.to_string(),
+    };
     let messages = vec![
         LlmMessage::system(system_prompt),
-        LlmMessage::user(task_prompt.to_string()),
+        LlmMessage::user(task_prompt),
     ];
     let mut context = RunContext::from_messages(messages);
     context.policy = policy;
@@ -1909,6 +1922,7 @@ async fn attempt_run(
                             .await?;
                     if plan_held && plan::approved(&questions, &answered) {
                         tracing::info!(%run_id, "Plan approved; the run may change things now");
+                        approval.approve(plan::submitted(&questions).unwrap_or_default());
                         plan_held = false;
                     }
                     context = parked;
@@ -1920,7 +1934,7 @@ async fn attempt_run(
                         workspace_id,
                         actor,
                         workspace,
-                        plan_approval,
+                        planning,
                         plan_held,
                     )
                     .await;
@@ -1948,7 +1962,7 @@ async fn attempt_run(
                         workspace_id,
                         actor,
                         workspace,
-                        plan_approval,
+                        planning,
                         plan_held,
                     )
                     .await;
@@ -4109,6 +4123,7 @@ mod watchdog_tests {
                 &environment,
                 &permit,
                 false,
+                &plan::Approval::default(),
             ),
         )
         .await
@@ -5099,6 +5114,7 @@ mod watchdog_tests {
             &environment,
             &Permit::acquire().await.unwrap(),
             false,
+            &plan::Approval::default(),
         )
         .await
         .expect("an attempt that waits on nothing finishes");

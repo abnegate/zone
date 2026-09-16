@@ -68,17 +68,6 @@ pub enum PrCreationResult {
     Error(String),
 }
 
-impl PrCreationResult {
-    /// The commit the service pushed, when publication got that far: the one
-    /// fact about the checkout that the service can vouch for afterwards.
-    pub fn pushed(&self) -> Option<&str> {
-        match self {
-            Self::Created { commit, .. } | Self::PrAlreadyExists { commit, .. } => Some(commit),
-            _ => None,
-        }
-    }
-}
-
 /// Where a run's branch is pushed. The push says which commit it sent.
 #[async_trait::async_trait]
 trait Remote: Send + Sync {
@@ -307,6 +296,30 @@ impl Publication<'_> {
             .remote
             .push(self.path, branch, &baseline.repository, &token)
             .await?;
+        // The push is the fact, and it is recorded the moment it succeeded,
+        // under the run's lease: whatever publication does after this, the
+        // service can say the remote holds this commit, and the worktree
+        // left on it is not work nobody else has. A record that fails only
+        // keeps the worktree, so it does not fail the run.
+        match tasks::record_run_publication(
+            self.state.db(),
+            self.execution.run,
+            self.execution.owner,
+            &commit,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                run = %self.execution.run,
+                "Pushed, but the run had no checkout record to take the publication"
+            ),
+            Err(error) => tracing::warn!(
+                run = %self.execution.run,
+                %error,
+                "Pushed, but could not record the publication"
+            ),
+        }
         self.identity(baseline).await?;
         if let Some(url) = existing {
             self.record(&url, branch, "open").await?;
@@ -731,10 +744,6 @@ mod tests {
         };
         let debug = format!("{:?}", result);
         assert!(debug.contains("Created"));
-        assert_eq!(
-            result.pushed(),
-            Some("0123456789abcdef0123456789abcdef01234567")
-        );
     }
 
     #[test]
@@ -2033,10 +2042,6 @@ mod reception_tests {
         };
         let debug = format!("{:?}", result);
         assert!(debug.contains("Created"));
-        assert_eq!(
-            result.pushed(),
-            Some("0123456789abcdef0123456789abcdef01234567")
-        );
     }
 
     #[test]

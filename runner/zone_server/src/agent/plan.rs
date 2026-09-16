@@ -42,11 +42,44 @@ const DESCRIPTION: &str = "Submit the plan for this run and wait for it to be ap
 
 const ACKNOWLEDGEMENT: &str = "Plan submitted. The run pauses here until it is approved.";
 
+/// What a run's attempts share about its plan. Approval is given to the
+/// run, once: an attempt retried after a fault starts from it — unheld, and
+/// handed the plan it was approved for — rather than asking the person
+/// again for what they already answered.
+#[derive(Default)]
+pub struct Approval {
+    plan: std::sync::Mutex<Option<String>>,
+}
+
+impl Approval {
+    /// The plan the run's approval was given for, once it was.
+    pub fn approved(&self) -> Option<String> {
+        self.plan.lock().ok().and_then(|plan| plan.clone())
+    }
+
+    pub fn approve(&self, plan: &str) {
+        if let Ok(mut held) = self.plan.lock() {
+            *held = Some(plan.to_string());
+        }
+    }
+
+    /// The paragraph a retried attempt is handed in place of the plan
+    /// phase: the plan, and that it was approved.
+    pub fn resumed(plan: &str) -> String {
+        format!(
+            "# Approved plan\n\nThis plan was approved earlier in this run, before the attempt \
+             restarted. Carry it out as written, without submitting it again.\n\n{plan}"
+        )
+    }
+}
+
 /// The one question a submitted plan asks, in the shape `ask_user` asks it,
-/// so the card, the store and the answer route need to know nothing new.
+/// so the card, the store and the answer route need to know nothing new. It
+/// is asked under a header `ask_user` is refused, so a question the run asks
+/// for itself can never be read as a plan, however it is worded.
 pub fn question(arguments: &str) -> Result<Vec<Question>, String> {
     let plan = plan(arguments)?;
-    question::parse(
+    question::parse_reserved(
         &json!({
             "questions": [{
                 "header": HEADER,
@@ -64,9 +97,10 @@ pub fn question(arguments: &str) -> Result<Vec<Question>, String> {
 }
 
 /// Whether the answer that resumed a run approved the plan it parked on:
-/// the park was a plan, and the rendered answer is Approve — the form
-/// `question::render` gives one chosen option, so a Revise, or an Other with
-/// what to change, leaves the hold in place.
+/// the park was a plan — which only `submit_plan` can make, since the
+/// header is reserved for it — and the rendered answer is Approve. The form
+/// `question::render` gives one chosen option, so a Revise, or an Other
+/// with what to change, leaves the hold in place.
 pub fn approved(questions: &[Question], resume: &str) -> bool {
     submitted(questions).is_some() && resume.trim() == format!("{HEADER}: {APPROVE}")
 }

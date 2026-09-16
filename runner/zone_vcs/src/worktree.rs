@@ -33,9 +33,13 @@ impl Unfinished {
     }
 }
 
-/// A git invocation that reads nothing from the host's configuration and
-/// never talks to the network: the hardening `GitService` applies, for the
-/// local operations that need no timeout.
+/// A git invocation that reads nothing from the host's configuration, runs
+/// no program the repository's configuration names, and never talks to the
+/// network: the hardening `GitService` applies, for the local operations
+/// that need no timeout. The repository configuration is the base clone's,
+/// which every run of the repository can write through its own git
+/// commands, so a hook path or a file-system monitor found there is not
+/// honoured.
 fn local(repository: &Path) -> Command {
     let mut command = Command::new("git");
     command
@@ -46,7 +50,12 @@ fn local(repository: &Path) -> Command {
         .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_GRAFT_FILE", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .args(["-c", "core.hooksPath=/dev/null"])
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+        ])
         .current_dir(repository)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

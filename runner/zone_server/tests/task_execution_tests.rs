@@ -597,17 +597,32 @@ async fn park(questions: serde_json::Value) -> Parked {
     park_with("ask_user", questions.to_string(), false).await
 }
 
+/// One completion the scripted provider serves: a tool call, or a failure
+/// that faults the attempt so the worker retries it.
+enum Round {
+    Call(String, String),
+    Fail(u16),
+}
+
+fn call(tool: &str, arguments: serde_json::Value) -> Round {
+    Round::Call(tool.to_string(), arguments.to_string())
+}
+
 /// Run a task whose first completion calls `tool` with `arguments` and stop
 /// once it parks; `plan_approval` is the task's flag, which is what hands the
 /// run `submit_plan` at all.
 async fn park_with(tool: &str, arguments: String, plan_approval: bool) -> Parked {
-    park_scripted(vec![(tool.to_string(), arguments)], plan_approval).await
+    park_scripted(
+        vec![Round::Call(tool.to_string(), arguments)],
+        plan_approval,
+    )
+    .await
 }
 
-/// Run a task whose completions follow `script`: round `i` calls the tool the
-/// `i`th entry names, as call `call-<i>`, and every round past the script
-/// closes with prose. Stops once the run parks.
-async fn park_scripted(script: Vec<(String, String)>, plan_approval: bool) -> Parked {
+/// Run a task whose completions follow `script`: round `i` serves the `i`th
+/// entry — a tool call as call `call-<i>`, or a failed response — and every
+/// round past the script closes with prose. Stops once the run parks.
+async fn park_scripted(script: Vec<Round>, plan_approval: bool) -> Parked {
     use chrono::{Duration, Utc};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -656,10 +671,13 @@ async fn park_scripted(script: Vec<(String, String)>, plan_approval: bool) -> Pa
     Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |_: &Request| {
         let round = rounds.fetch_add(1, Ordering::SeqCst);
         let deltas = match script.get(round) {
-            Some((tool, arguments)) => vec![
+            Some(Round::Call(tool, arguments)) => vec![
                 serde_json::json!({"content": BEFORE_ASKING}),
                 serde_json::json!({"tool_calls":[{"index":0,"id":format!("call-{round}"),"type":"function","function":{"name":tool,"arguments":arguments}}]}),
             ],
+            Some(Round::Fail(status)) => {
+                return ResponseTemplate::new(*status).set_body_string("upstream fell over");
+            }
             None => vec![serde_json::json!({"content": AFTER_ANSWERING})],
         };
         let mut body = String::new();
@@ -881,18 +899,14 @@ async fn a_task_holding_for_its_plan_refuses_to_change_anything_until_it_is_appr
     const PLAN: &str = "1. Write the note.";
     let parked = park_scripted(
         vec![
-            (
-                "write_file".to_string(),
-                serde_json::json!({"path": "notes.txt", "content": "before approval\n"})
-                    .to_string(),
+            call(
+                "write_file",
+                serde_json::json!({"path": "notes.txt", "content": "before approval\n"}),
             ),
-            (
-                "submit_plan".to_string(),
-                serde_json::json!({"plan": PLAN}).to_string(),
-            ),
-            (
-                "write_file".to_string(),
-                serde_json::json!({"path": "notes.txt", "content": "after approval\n"}).to_string(),
+            call("submit_plan", serde_json::json!({"plan": PLAN})),
+            call(
+                "write_file",
+                serde_json::json!({"path": "notes.txt", "content": "after approval\n"}),
             ),
         ],
         true,
@@ -1440,4 +1454,108 @@ async fn the_wait_field_is_backed_by_the_column_migration_032_adds() {
         Some("jsonb"),
         "task_runs.pending_wait is the JSONB column 032 adds, and nothing else"
     );
+}
+
+/// The approval is bound to `submit_plan`: the header its card is asked
+/// under is refused to `ask_user`, so a question the run asks for itself
+/// cannot be recorded as the plan or answered as its approval, and the run
+/// goes on to submit the real one.
+#[tokio::test]
+async fn a_question_headed_like_a_plan_approval_is_refused_and_records_no_plan() {
+    const PLAN: &str = "1. Write the note.";
+    let parked = park_scripted(
+        vec![
+            call(
+                "ask_user",
+                serde_json::json!({"questions":[{
+                    "header": "Plan approval",
+                    "question": "Approve this?",
+                    "options": [
+                        {"label": "Approve", "description": "Go ahead."},
+                        {"label": "Wait", "description": "Not yet."}
+                    ],
+                    "preview": "a plan nobody submitted"
+                }]}),
+            ),
+            call("submit_plan", serde_json::json!({"plan": PLAN})),
+        ],
+        true,
+    )
+    .await;
+    let rounds = parked.rounds().await;
+    assert_eq!(rounds.len(), 2, "the refused question, then the plan");
+    let refused = tool_result(&rounds[1], "call-0");
+    assert!(refused.contains("reserved for submit_plan"), "{refused}");
+    let stored: Option<String> = sqlx::query_scalar("SELECT plan FROM task_runs WHERE id = $1")
+        .bind(parked.run)
+        .fetch_one(&parked.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.as_deref(),
+        Some(PLAN),
+        "only the plan submit_plan carried is recorded"
+    );
+    parked.finish().await;
+}
+
+/// Approval is the run's, not the attempt's: an attempt that faults after
+/// the plan was approved is retried unheld, handed the approved plan and no
+/// plan phase, so the person is not asked again for what they answered.
+#[tokio::test]
+async fn an_approved_plan_survives_the_attempt_that_restarts_after_it() {
+    const PLAN: &str = "1. Write the note.";
+    let parked = park_scripted(
+        vec![
+            call("submit_plan", serde_json::json!({"plan": PLAN})),
+            Round::Fail(500),
+            call(
+                "write_file",
+                serde_json::json!({"path": "notes.txt", "content": "after approval\n"}),
+            ),
+        ],
+        true,
+    )
+    .await;
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Plan approval","labels":["Approve"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+    let rounds = parked.rounds().await;
+    assert_eq!(
+        rounds.len(),
+        4,
+        "the plan, the round that faulted, then the retried attempt's write and its close"
+    );
+    let system = rounds[2]["messages"][0]["content"]
+        .as_str()
+        .expect("a system prompt");
+    assert!(
+        !system.contains("Plan first"),
+        "a retried attempt after approval is not told to plan again: {system}"
+    );
+    let user = rounds[2]["messages"][1]["content"]
+        .as_str()
+        .expect("the task prompt");
+    assert!(
+        user.contains("# Approved plan") && user.contains(PLAN),
+        "the retried attempt is handed the approved plan: {user}"
+    );
+    let offered: Vec<&str> = rounds[2]["tools"]
+        .as_array()
+        .expect("the run is offered tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert!(
+        !offered.contains(&"submit_plan"),
+        "nothing is left to submit: {offered:?}"
+    );
+    let written = tool_result(&rounds[3], "call-2");
+    assert!(
+        !written.starts_with("Error:"),
+        "the retried attempt is not held: {written}"
+    );
+    parked.finish().await;
 }
