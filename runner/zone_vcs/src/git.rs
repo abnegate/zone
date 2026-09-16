@@ -53,6 +53,15 @@ pub struct DiffSummary {
     pub diff_text: String,
 }
 
+/// A remote's default branch and the commit at its tip, as the remote itself
+/// reports them: what a run starts from is asked of the repository, not read
+/// from a ref every run of it shares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteHead {
+    pub branch: String,
+    pub commit: String,
+}
+
 /// Git service for repository operations
 #[derive(Debug, Clone)]
 pub struct GitService {
@@ -248,9 +257,11 @@ impl GitService {
             return Ok(());
         }
         // A run works in a worktree of a base clone the repository's runs
-        // share, so a branch that already exists here is one an earlier run's
-        // worktree still holds — kept because it has work no remote has. The
-        // run is refused with the reason rather than failed on git's wording.
+        // share, so a branch that already exists here is either one an earlier
+        // run's worktree still holds — kept because it has work no remote has,
+        // and the run is refused with that reason rather than git's wording —
+        // or one a removed worktree left behind when its deletion failed, which
+        // nothing holds and this run may take over.
         let held = Self::output(
             Self::network_command(None)
                 .args(["show-ref", "--verify", "--quiet", &reference])
@@ -258,11 +269,34 @@ impl GitService {
         )
         .await?;
         if held.status.success() {
-            return Err(GitError::CommandFailed(
-                "An earlier run's worktree still holds this task's branch with work that was \
-                 never published; publish or remove it before running the task again"
-                    .into(),
-            ));
+            // A worktree whose directory was deleted by hand no longer holds
+            // anything; prune it so it cannot stand in for one that does.
+            let mut prune = Self::network_command(None);
+            prune.args(["worktree", "prune"]).current_dir(path);
+            let _ = Self::finish(&mut prune).await;
+            let listed = Self::output(
+                Self::network_command(None)
+                    .args(["worktree", "list", "--porcelain"])
+                    .current_dir(path)
+                    .stdout(Stdio::piped()),
+            )
+            .await?;
+            let holder = format!("branch {reference}");
+            if String::from_utf8_lossy(&listed.stdout)
+                .lines()
+                .any(|line| line == holder)
+            {
+                return Err(GitError::CommandFailed(
+                    "An earlier run's worktree still holds this task's branch with work that was \
+                     never published; publish or remove it before running the task again"
+                        .into(),
+                ));
+            }
+            let mut delete = Self::network_command(None);
+            delete
+                .args(["branch", "-D", "--", branch])
+                .current_dir(path);
+            Self::finish(&mut delete).await?;
         }
         let mut command = Self::network_command(None);
         command.args(["checkout", "-b", branch]);
@@ -402,26 +436,208 @@ impl GitService {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    /// Bring a base clone up to date with its origin, credentials in the child
-    /// environment only. Two runs of one repository may fetch at once; git
-    /// serialises the ref updates with lock files and refuses the loser, so
-    /// one refusal is retried once before it is reported.
-    pub async fn fetch(&self, path: &Path, token: Option<&str>) -> GitResult<()> {
-        for attempt in 0..2 {
+    /// Bring a base clone up to date with the repository at `url`, credentials
+    /// in the child environment only. The URL is the one Zone knows, given on
+    /// the command line, so nothing a run wrote into the clone's configuration
+    /// — a rewritten `remote.origin.url`, an `insteadOf` rule — decides where
+    /// the fetch goes; every `refs/remotes/origin/*` ref is forced to what the
+    /// remote holds and the ones it no longer has are pruned. A refusal is
+    /// retried once, since git's ref locks refuse the loser of a race with a
+    /// run's own git commands.
+    pub async fn fetch(&self, path: &Path, url: &str, token: Option<&str>) -> GitResult<()> {
+        let source = Self::repository_url(url)?;
+        self.fetch_source(path, &source, token, false).await
+    }
+
+    async fn fetch_source(
+        &self,
+        path: &Path,
+        source: &str,
+        token: Option<&str>,
+        local: bool,
+    ) -> GitResult<()> {
+        let mut attempts = 0;
+        loop {
             let mut command = Self::network_command(token);
+            if local {
+                #[cfg(test)]
+                command.env("GIT_ALLOW_PROTOCOL", "file");
+                #[cfg(not(test))]
+                return Err(GitError::CommandFailed(
+                    "Local repositories are disabled".to_string(),
+                ));
+            }
             command
-                .args(["fetch", "--prune", "origin"])
+                .args([
+                    "fetch",
+                    "--prune",
+                    "--",
+                    source,
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ])
                 .current_dir(path);
             match Self::finish(&mut command).await {
                 Ok(()) => return Ok(()),
-                Err(error) if attempt == 0 => {
-                    tracing::debug!(%error, "Retrying a fetch another run may have locked");
+                Err(error) if attempts == 0 => {
+                    attempts += 1;
+                    tracing::debug!(%error, "Retrying a fetch another git command may have locked");
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
                 Err(error) => return Err(error),
             }
         }
-        unreachable!("two attempts return or fail")
+    }
+
+    /// The remote's default branch and the commit at its tip, asked of the
+    /// remote itself. `refs/remotes/origin/HEAD` is not consulted: a run's git
+    /// commands share it with every other run of the repository, and a fetch
+    /// never restores it.
+    pub async fn remote_head(
+        &self,
+        path: &Path,
+        url: &str,
+        token: Option<&str>,
+    ) -> GitResult<RemoteHead> {
+        let source = Self::repository_url(url)?;
+        self.remote_head_source(path, &source, token, false).await
+    }
+
+    async fn remote_head_source(
+        &self,
+        path: &Path,
+        source: &str,
+        token: Option<&str>,
+        local: bool,
+    ) -> GitResult<RemoteHead> {
+        let mut command = Self::network_command(token);
+        if local {
+            #[cfg(test)]
+            command.env("GIT_ALLOW_PROTOCOL", "file");
+            #[cfg(not(test))]
+            return Err(GitError::CommandFailed(
+                "Local repositories are disabled".to_string(),
+            ));
+        }
+        command
+            .args(["ls-remote", "--symref", "--", source, "HEAD"])
+            .current_dir(path)
+            .stdout(Stdio::piped());
+        let output = Self::output(&mut command).await?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                "Git operation failed; verify repository access".to_string(),
+            ));
+        }
+        let listing = String::from_utf8_lossy(&output.stdout);
+        let (mut branch, mut commit) = (None, None);
+        for line in listing.lines() {
+            let Some((left, right)) = line.split_once('\t') else {
+                continue;
+            };
+            if right != "HEAD" {
+                continue;
+            }
+            if let Some(reference) = left.strip_prefix("ref: ") {
+                branch = reference.strip_prefix("refs/heads/").map(str::to_string);
+            } else if !left.is_empty() && left.chars().all(|c| c.is_ascii_hexdigit()) {
+                commit = Some(left.to_string());
+            }
+        }
+        match (branch, commit) {
+            (Some(branch), Some(commit)) => Ok(RemoteHead { branch, commit }),
+            _ => Err(GitError::CommandFailed(
+                "The repository reports no default branch".to_string(),
+            )),
+        }
+    }
+
+    /// Rewrite a base clone's configuration from what Zone knows about it.
+    /// The clone's `.git/config` is read by every git command that runs in
+    /// it or in a worktree of it, and a run's git commands can write to it:
+    /// a `core.fsmonitor` or a filter driver would run as this process on the
+    /// next fetch or checkout, an `insteadOf` rule would redirect it. So the
+    /// file is replaced before the base is used, carrying over only the
+    /// settings git chose for the file system, and the remote's URL is
+    /// written through `git config`, which escapes it.
+    pub async fn reset_config(&self, path: &Path, url: &str) -> GitResult<()> {
+        const CARRIED: [&str; 4] = ["filemode", "ignorecase", "precomposeunicode", "symlinks"];
+        if url.chars().any(char::is_control) {
+            return Err(GitError::CommandFailed("Invalid repository URL".into()));
+        }
+        let file = path.join(".git").join("config");
+        let listed = Self::output(
+            Self::network_command(None)
+                .args(["config", "--file"])
+                .arg(&file)
+                .arg("--list")
+                .stdout(Stdio::piped()),
+        )
+        .await?;
+        let mut carried = String::new();
+        if listed.status.success() {
+            for line in String::from_utf8_lossy(&listed.stdout).lines() {
+                if let Some((key, value)) = line.split_once('=')
+                    && let Some(name) = key.strip_prefix("core.")
+                    && CARRIED.contains(&name)
+                    && matches!(value, "true" | "false")
+                {
+                    carried.push_str(&format!("\t{name} = {value}\n"));
+                }
+            }
+        }
+        tokio::fs::write(
+            &file,
+            format!(
+                "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tlogallrefupdates = true\n{carried}"
+            ),
+        )
+        .await?;
+        for (key, value) in [
+            ("remote.origin.url", url),
+            ("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
+        ] {
+            Self::finish(
+                Self::network_command(None)
+                    .args(["config", "--file"])
+                    .arg(&file)
+                    .args([key, value]),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Whether the repository holds `commit`, given as a hex object name.
+    pub async fn has_commit(&self, path: &Path, commit: &str) -> GitResult<bool> {
+        if commit.is_empty() || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(GitError::CommandFailed("Invalid commit".into()));
+        }
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
+                .current_dir(path),
+        )
+        .await?;
+        Ok(output.status.success())
+    }
+
+    /// Point `refs/remotes/origin/HEAD` at the remote's default branch, for
+    /// whoever reads the ref; a run is started from the commit
+    /// [`Self::remote_head`] reported, never from this ref.
+    pub async fn set_remote_head(&self, path: &Path, branch: &str) -> GitResult<()> {
+        let reference = format!("refs/remotes/origin/{branch}");
+        let valid =
+            Self::output(Self::network_command(None).args(["check-ref-format", &reference]))
+                .await?;
+        if !valid.status.success() || branch.starts_with('-') {
+            return Err(GitError::CommandFailed("Invalid default branch".into()));
+        }
+        Self::finish(
+            Self::network_command(None)
+                .args(["symbolic-ref", "refs/remotes/origin/HEAD", &reference])
+                .current_dir(path),
+        )
+        .await
     }
 
     /// Check if there are uncommitted changes
@@ -1318,5 +1534,207 @@ mod publication_tests {
             refused.contains("earlier run's worktree still holds"),
             "{refused}"
         );
+    }
+
+    /// Two remotes that look alike, one of which a run pointed the clone at.
+    /// A fetch is bound to the URL Zone gives it, and prunes what that
+    /// remote no longer has.
+    #[tokio::test]
+    async fn a_fetch_goes_to_the_url_it_is_given_and_not_where_the_clone_was_pointed() {
+        let root = tempfile::tempdir().unwrap();
+        let genuine = root.path().join("genuine");
+        std::fs::create_dir(&genuine).unwrap();
+        crate::worktree::fixtures::remote(&genuine);
+        let rogue = root.path().join("rogue");
+        std::fs::create_dir(&rogue).unwrap();
+        crate::worktree::fixtures::remote(&rogue);
+        std::fs::write(rogue.join("ROGUE"), "planted\n").unwrap();
+        crate::worktree::fixtures::git(&rogue, &["add", "ROGUE"]);
+        crate::worktree::fixtures::git(&rogue, &["commit", "-q", "-m", "rogue"]);
+        let base = root.path().join("base");
+        crate::worktree::fixtures::clone(&genuine, &base);
+        std::fs::write(genuine.join("NEW"), "moved on\n").unwrap();
+        crate::worktree::fixtures::git(&genuine, &["add", "NEW"]);
+        crate::worktree::fixtures::git(&genuine, &["commit", "-q", "-m", "moved on"]);
+        crate::worktree::fixtures::git(&genuine, &["branch", "gone"]);
+        // A run redirected the clone's remote.
+        crate::worktree::fixtures::git(
+            &base,
+            &["config", "remote.origin.url", rogue.to_str().unwrap()],
+        );
+        let service = GitService::new();
+        service
+            .fetch_source(&base, genuine.to_str().unwrap(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::worktree::fixtures::git(&base, &["rev-parse", "refs/remotes/origin/main"]),
+            crate::worktree::fixtures::git(&genuine, &["rev-parse", "main"]),
+            "the genuine remote's tip, not the rogue's"
+        );
+        assert_eq!(
+            crate::worktree::fixtures::git(&base, &["rev-parse", "refs/remotes/origin/gone"]),
+            crate::worktree::fixtures::git(&genuine, &["rev-parse", "gone"])
+        );
+        crate::worktree::fixtures::git(&genuine, &["branch", "-D", "gone"]);
+        service
+            .fetch_source(&base, genuine.to_str().unwrap(), None, true)
+            .await
+            .unwrap();
+        let refs = crate::worktree::fixtures::git(&base, &["for-each-ref", "refs/remotes/origin/"]);
+        assert!(!refs.contains("origin/gone"), "{refs}");
+    }
+
+    /// The default branch and its tip come from the remote; a redirected
+    /// `origin/HEAD` in the clone changes nothing about the answer, and the
+    /// ref is set back to the branch the remote named.
+    #[tokio::test]
+    async fn the_remote_head_is_asked_of_the_remote_and_not_read_from_a_shared_ref() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = root.path().join("remote");
+        std::fs::create_dir(&remote).unwrap();
+        crate::worktree::fixtures::remote(&remote);
+        let base = root.path().join("base");
+        crate::worktree::fixtures::clone(&remote, &base);
+        crate::worktree::fixtures::git(
+            &base,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/planted",
+            ],
+        );
+        let service = GitService::new();
+        let head = service
+            .remote_head_source(&base, remote.to_str().unwrap(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(head.branch, "main");
+        assert_eq!(
+            head.commit,
+            crate::worktree::fixtures::git(&remote, &["rev-parse", "main"])
+        );
+        assert!(service.has_commit(&base, &head.commit).await.unwrap());
+        assert!(!service.has_commit(&base, &"0".repeat(40)).await.unwrap());
+        assert!(
+            service.has_commit(&base, "HEAD").await.is_err(),
+            "a name is not a commit"
+        );
+        service.set_remote_head(&base, &head.branch).await.unwrap();
+        assert_eq!(
+            crate::worktree::fixtures::git(&base, &["symbolic-ref", "refs/remotes/origin/HEAD"]),
+            "refs/remotes/origin/main"
+        );
+        assert!(service.set_remote_head(&base, "-x").await.is_err());
+    }
+
+    /// What a run planted in the clone's configuration is gone once it is
+    /// reset, what git chose for the file system stays, and the remote is
+    /// the one Zone knows.
+    #[tokio::test]
+    async fn resetting_the_configuration_drops_what_a_run_planted_and_keeps_the_remote() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = root.path().join("remote");
+        std::fs::create_dir(&remote).unwrap();
+        crate::worktree::fixtures::remote(&remote);
+        let base = root.path().join("base");
+        crate::worktree::fixtures::clone(&remote, &base);
+        crate::worktree::fixtures::git(&base, &["config", "core.fsmonitor", "/bin/false"]);
+        crate::worktree::fixtures::git(
+            &base,
+            &[
+                "config",
+                "url.https://evil.example/.insteadOf",
+                "https://github.com/",
+            ],
+        );
+        crate::worktree::fixtures::git(
+            &base,
+            &["config", "remote.origin.url", "https://evil.example/x.git"],
+        );
+        crate::worktree::fixtures::git(&base, &["config", "filter.planted.smudge", "/bin/false"]);
+        let service = GitService::new();
+        service
+            .reset_config(&base, "https://github.com/fixture/repository.git")
+            .await
+            .unwrap();
+        let listed =
+            crate::worktree::fixtures::git(&base, &["config", "--file", ".git/config", "--list"]);
+        assert!(!listed.contains("fsmonitor"), "{listed}");
+        assert!(!listed.contains("insteadof"), "{listed}");
+        assert!(!listed.contains("filter."), "{listed}");
+        assert!(!listed.contains("evil"), "{listed}");
+        assert!(
+            listed.contains("remote.origin.url=https://github.com/fixture/repository.git"),
+            "{listed}"
+        );
+        assert!(
+            listed.contains("remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*"),
+            "{listed}"
+        );
+        assert!(listed.contains("core.filemode="), "{listed}");
+        assert_eq!(
+            crate::worktree::fixtures::git(&base, &["status", "--porcelain"]),
+            "",
+            "the clone still works"
+        );
+        assert!(
+            service
+                .reset_config(&base, "https://github.com/x/y.git\n[core]")
+                .await
+                .is_err()
+        );
+    }
+
+    /// A branch that no worktree holds — left behind by a removal whose
+    /// deletion failed, or by a worktree deleted by hand — is taken over by
+    /// the next run that asks for it.
+    #[tokio::test]
+    async fn a_branch_no_worktree_holds_is_taken_over_by_the_next_run() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = root.path().join("remote");
+        std::fs::create_dir(&remote).unwrap();
+        crate::worktree::fixtures::remote(&remote);
+        let base = root.path().join("base");
+        crate::worktree::fixtures::clone(&remote, &base);
+        let service = GitService::new();
+
+        let first = root.path().join("first");
+        crate::worktree::add(&base, &first, "origin/HEAD").unwrap();
+        service
+            .prepare_branch(&first, "zone/task", false)
+            .await
+            .unwrap();
+        crate::worktree::fixtures::git(
+            &base,
+            &["worktree", "remove", "--force", first.to_str().unwrap()],
+        );
+        assert!(
+            crate::worktree::fixtures::git(&base, &["branch", "--list", "zone/task"])
+                .contains("zone/task"),
+            "the branch outlived its worktree"
+        );
+        let second = root.path().join("second");
+        crate::worktree::add(&base, &second, "origin/HEAD").unwrap();
+        service
+            .prepare_branch(&second, "zone/task", false)
+            .await
+            .unwrap();
+        assert_eq!(service.current_branch(&second).await.unwrap(), "zone/task");
+
+        let third = root.path().join("third");
+        crate::worktree::add(&base, &third, "origin/HEAD").unwrap();
+        service
+            .prepare_branch(&third, "zone/other", false)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&third).unwrap();
+        let fourth = root.path().join("fourth");
+        crate::worktree::add(&base, &fourth, "origin/HEAD").unwrap();
+        service
+            .prepare_branch(&fourth, "zone/other", false)
+            .await
+            .unwrap();
+        assert_eq!(service.current_branch(&fourth).await.unwrap(), "zone/other");
     }
 }

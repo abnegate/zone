@@ -237,4 +237,32 @@ mod tests {
             rendered.len() + 2
         );
     }
+
+    /// A run that requires its plan approved is handed one more paragraph,
+    /// and that path is pinned on its own: the section grows by the plan
+    /// paragraph and nothing else, inside a share of its own, and the
+    /// assembled prompt for such a run is measured against the task budget
+    /// by the prompt module's budget test.
+    #[test]
+    fn a_plan_approved_run_adds_the_plan_paragraph_and_stays_inside_its_share() {
+        const PLAN_SHARE: usize = 450;
+        let environment = environment();
+        let plain = render(&task_context(&task_tools(), &environment)).unwrap();
+        let approving = ChatTools::with_names(
+            ToolProfile::Task,
+            &["read_file", "run_command", SUBMIT_PLAN],
+            None,
+        );
+        let rendered = render(&task_context(&approving, &environment)).unwrap();
+        assert_eq!(
+            rendered.len(),
+            plain.len() + "\n\n".len() + PLAN.len(),
+            "the plan paragraph is the only growth"
+        );
+        assert!(
+            rendered.len() + "\n\n".len() <= 1_400 + PLAN_SHARE,
+            "the plan-approved task section adds {} chars",
+            rendered.len() + 2
+        );
+    }
 }

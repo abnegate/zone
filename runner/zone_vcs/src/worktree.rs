@@ -132,11 +132,15 @@ pub fn remove(repository: &Path, path: &Path) -> std::io::Result<()> {
         local(repository).args(["worktree", "prune"]),
         "prune worktrees",
     );
-    if let Some(name) = on {
-        let _ = run(
+    if let Some(name) = on
+        && let Err(error) = run(
             local(repository).args(["branch", "-D", "--", &name]),
             "delete the branch",
-        );
+        )
+    {
+        // The worktree is gone and nothing holds the branch now; the next run
+        // that asks for the name finds it unheld and takes it over.
+        tracing::warn!(branch = %name, %error, "Removed a worktree but could not delete its branch");
     }
     Ok(())
 }

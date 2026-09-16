@@ -335,9 +335,10 @@ pub async fn build(
                 String::new()
             }
         };
-    // A skill is opened with read_document, so only a catalog holding it is
-    // shown the index: a plain chat has no loader and is told of nothing.
-    let skills = if tools.has("read_document") {
+    // A skill is opened with read_document, so only a chat that can call it
+    // is shown the index: a plain chat, or one with its agent off, has no
+    // loader in front of the model and is told of nothing.
+    let skills = if agentic && tools.has("read_document") {
         match crate::agent::skills::prompt(state.db(), workspace).await {
             Ok(skills) => skills,
             Err(error) => {

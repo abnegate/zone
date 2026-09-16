@@ -11,7 +11,15 @@
 //! and by recovery alike — while it holds changes no commit has or commits no
 //! remote has, because removing those would be the one way a run's work could
 //! vanish without anyone having chosen that (CC 349-410, 1487-1640; CX 19).
+//!
+//! What the runs share is not trusted, since a run's own git commands reach
+//! it: the base clone's configuration is rewritten from what Zone knows
+//! before every use, the fetch is bound to the URL Zone knows rather than to
+//! the remote the clone names, a run starts from the commit the remote
+//! reports for its default branch rather than from `origin/HEAD`, and
+//! readying a base is serialised across runs by a file lock beside it.
 
+use nix::fcntl::{Flock, FlockArg};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
@@ -165,9 +173,15 @@ impl Checkout {
         if let Some(repository) = repository {
             let base = Self::base(&root, &repository.url)
                 .map_err(|_| "Cannot create the repository's base clone".to_string())?;
-            Self::refresh(&base, &repository).await?;
+            // One run of a repository readies its base at a time, from checking
+            // the clone to adding the worktree, so two first runs cannot clone
+            // into one directory and nothing lands between a run's fetch and
+            // its checkout.
+            let lock = Self::lock_base(&base).await?;
+            let start = Self::refresh(&base, &repository).await?;
             let (from, at) = (base.clone(), checkout.path().to_path_buf());
-            Self::filesystem(move || worktree::add(&from, &at, "origin/HEAD")).await?;
+            Self::filesystem(move || worktree::add(&from, &at, &start)).await?;
+            drop(lock);
             checkout.repository = Some(base);
             if task.created_by.is_some() {
                 checkout.baseline = Some(
@@ -203,41 +217,84 @@ impl Checkout {
         Ok(base)
     }
 
-    /// Bring the base clone to the repository's current state: a fetch when
-    /// it exists, a clone when it does not. A directory a crashed clone left
-    /// without a `.git` is emptied first, so one failure does not fail every
-    /// run after it; a clone that lost the race to another run's clone falls
-    /// back to fetching what the winner made.
-    async fn refresh(base: &Path, repository: &Repository) -> Result<(), String> {
+    /// An exclusive lock on the base clone, held by whoever readies it. It is
+    /// a file lock beside the clone, so it is shared by every process that
+    /// shares the checkout root and released with the process if one dies
+    /// holding it.
+    async fn lock_base(base: &Path) -> Result<Flock<std::fs::File>, String> {
+        let lock = base.with_extension("lock");
+        Self::filesystem(move || {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).read(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = options.open(&lock)?;
+            Flock::lock(file, FlockArg::LockExclusive)
+                .map_err(|(_, errno)| std::io::Error::from(errno))
+        })
+        .await
+    }
+
+    /// Bring the base clone to the repository's current state and say which
+    /// commit a run starts from. The clone is made the first time and fetched
+    /// after that; a directory a crashed clone left without a `.git` is
+    /// emptied and cloned again rather than failing every run after it. What
+    /// the runs share is not trusted: the clone's configuration is rewritten
+    /// from what Zone knows before any command reads it, the fetch is bound to
+    /// the URL Zone knows rather than to the remote the clone names, and the
+    /// commit a run starts from is the one the remote reports for its default
+    /// branch, never `origin/HEAD`, which a run's git commands share.
+    async fn refresh(base: &Path, repository: &Repository) -> Result<String, String> {
         let git = GitService::new();
         let token = repository.token.as_deref();
-        if base.join(".git").is_dir() {
-            return git
-                .fetch(base, token)
-                .await
-                .map_err(|error| error.to_string());
-        }
-        let directory = base.to_path_buf();
-        Self::filesystem(move || {
-            for entry in std::fs::read_dir(&directory)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    std::fs::remove_dir_all(entry.path())?;
-                } else {
-                    std::fs::remove_file(entry.path())?;
+        let fresh = !base.join(".git").is_dir();
+        if fresh {
+            let directory = base.to_path_buf();
+            Self::filesystem(move || {
+                for entry in std::fs::read_dir(&directory)? {
+                    let entry = entry?;
+                    if entry.file_type()?.is_dir() {
+                        std::fs::remove_dir_all(entry.path())?;
+                    } else {
+                        std::fs::remove_file(entry.path())?;
+                    }
                 }
-            }
-            Ok(())
-        })
-        .await?;
-        match git.clone_repository(&repository.url, base, token).await {
-            Ok(()) => Ok(()),
-            Err(_) if base.join(".git").is_dir() => git
-                .fetch(base, token)
+                Ok(())
+            })
+            .await?;
+            git.clone_repository(&repository.url, base, token)
                 .await
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
+                .map_err(|error| error.to_string())?;
         }
+        git.reset_config(base, &repository.url)
+            .await
+            .map_err(|error| error.to_string())?;
+        let head = git
+            .remote_head(base, &repository.url, token)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !fresh {
+            git.fetch(base, &repository.url, token)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        if !git
+            .has_commit(base, &head.commit)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Err(
+                "The repository's default branch moved while it was being fetched; run the task again"
+                    .to_string(),
+            );
+        }
+        git.set_remote_head(base, &head.branch)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(head.commit)
     }
 
     fn root(pool: &PgPool) -> PathBuf {
@@ -543,6 +600,32 @@ mod tests {
         let root = holder.path().join("root");
         Checkout::directory(&root).unwrap();
         (holder, root)
+    }
+
+    /// Readying a base is exclusive: a second locker is refused while the
+    /// first holds it and admitted once the first lets go.
+    #[tokio::test]
+    async fn readying_a_base_clone_is_exclusive_across_lockers() {
+        let (_holder, root) = private_root();
+        let base = Checkout::base(&root, "https://github.com/fixture/locked.git").unwrap();
+        let held = Checkout::lock_base(&base).await.unwrap();
+        let lock = base.with_extension("lock");
+        let attempt = |lock: PathBuf| {
+            tokio::task::spawn_blocking(move || {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&lock)
+                    .unwrap();
+                Flock::lock(file, FlockArg::LockExclusiveNonblock).is_ok()
+            })
+        };
+        assert!(
+            !attempt(lock.clone()).await.unwrap(),
+            "a second locker is refused while the first holds the base"
+        );
+        drop(held);
+        assert!(attempt(lock).await.unwrap(), "and admitted once it lets go");
     }
 
     /// The guard removes a worktree that holds nothing nobody else has, and

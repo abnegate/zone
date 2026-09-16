@@ -136,6 +136,7 @@ export function CreateTaskWizard({
     setCriteria('');
     setPriority(3);
     setIsAgentic(false);
+    setRequirePlanApproval(false);
     setSourceId('');
     setError(null);
     setFieldErrors({});
