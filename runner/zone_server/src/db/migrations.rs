@@ -1,4 +1,4 @@
-//! Schema upgrades with narrowly scoped recovery for interrupted task indexes.
+//! Schema upgrades with narrowly scoped recovery for interrupted index builds.
 
 use sqlx::migrate::{Migrate, MigrateError};
 use sqlx::{PgConnection, PgPool};
@@ -50,6 +50,16 @@ const WAITING: [Interrupted; 2] = [
     },
 ];
 
+/// The one name per person per kind that 034 reserves, which the create that
+/// takes a name checks for rather than being held to. `pg_get_indexdef` renders
+/// its `LIKE` predicate as `~~`.
+const MEMORY: [Interrupted; 1] = [Interrupted {
+    version: 34,
+    name: "idx_knowledge_memory_entry",
+    definition: "CREATE UNIQUE INDEX idx_knowledge_memory_entry ON public.knowledge_entries USING btree (workspace_id, created_by, category, title) WHERE ((is_active = true) AND (category ~~ 'memory-%'::text))",
+    undo: "DROP INDEX CONCURRENTLY public.idx_knowledge_memory_entry",
+}];
+
 /// Only a database still fenced by 017's admission trigger with 021 pending has
 /// a [`LEGACY`] build to recover; 021 is what proves both indexes valid.
 const LEGACY_PENDING: &str = "SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('public.task_runs') AND tgname='task_runs_migration_admission' AND NOT tgisinternal AND tgenabled='O' AND tgfoid=to_regprocedure('public.guard_task_run_upgrade()')) AND NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=21)";
@@ -58,10 +68,15 @@ const LEGACY_PENDING: &str = "SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrel
 /// leaves a build that may still need recovering.
 const WAITING_PENDING: &str = "SELECT NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=29)";
 
+/// Nothing after 034 proves its index valid, so 034's own record is what leaves
+/// no [`MEMORY`] build to recover.
+const MEMORY_PENDING: &str = "SELECT NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=34)";
+
 /// Each repair runs between the migrations it recovers and the ones before
 /// them: a leftover has to be gone before the build that would adopt it.
 const BEFORE_LEGACY: i64 = 18;
 const BEFORE_WAITING: i64 = 26;
+const BEFORE_MEMORY: i64 = 33;
 
 /// Hold SQLx's migration lock across validation, repair and migration execution.
 /// Closing this dedicated connection also releases the lock on cancellation.
@@ -130,6 +145,10 @@ pub async fn run(pool: &PgPool) -> Result<(), MigrateError> {
             .run_direct(Some(BEFORE_WAITING), &mut *connection, false)
             .await?;
         repair(&mut connection, WAITING_PENDING, &WAITING).await?;
+        migrator
+            .run_direct(Some(BEFORE_MEMORY), &mut *connection, false)
+            .await?;
+        repair(&mut connection, MEMORY_PENDING, &MEMORY).await?;
         migrator.run_direct(None, &mut *connection, false).await
     }
     .await;
@@ -165,7 +184,7 @@ async fn repair(
         if let Some((valid, definition)) = found {
             if definition != index.definition {
                 return Err(MigrateError::Execute(sqlx::Error::Protocol(format!(
-                    "Refusing to repair unexpected task index {name}"
+                    "Refusing to repair unexpected index {name}"
                 ))));
             }
             if !valid {
@@ -174,4 +193,83 @@ async fn repair(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `CONCURRENTLY` build needs an entry above, because a build without
+    /// one is a build nothing can rebuild: the re-run's `IF NOT EXISTS` adopts
+    /// the invalid leftover and the migration is recorded over it.
+    #[test]
+    fn each_concurrent_index_build_is_registered_for_repair() {
+        const MARKER: &str = "-- no-transaction";
+        const OPTIONAL: [&str; 3] = ["IF", "NOT", "EXISTS"];
+        let registered: Vec<&str> = LEGACY
+            .iter()
+            .chain(WAITING.iter())
+            .chain(MEMORY.iter())
+            .map(|index| index.name)
+            .collect();
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut builds: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&directory).expect("migrations directory is readable") {
+            let path = entry.expect("migration entry is readable").path();
+            if !path.extension().is_some_and(|extension| extension == "sql") {
+                continue;
+            }
+            let sql = std::fs::read_to_string(&path).expect("migration is readable");
+            if sql.lines().next().map(str::trim) != Some(MARKER) {
+                continue;
+            }
+            let statement = sql
+                .lines()
+                .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let words: Vec<&str> = statement.split_whitespace().collect();
+            if !words
+                .first()
+                .is_some_and(|word| word.eq_ignore_ascii_case("CREATE"))
+            {
+                continue;
+            }
+            let concurrently = words
+                .iter()
+                .position(|word| word.eq_ignore_ascii_case("CONCURRENTLY"))
+                .expect("a no-transaction migration carries the CONCURRENTLY it gave it up for");
+            let name = words[concurrently + 1..]
+                .iter()
+                .find(|word| {
+                    !OPTIONAL
+                        .iter()
+                        .any(|optional| word.eq_ignore_ascii_case(optional))
+                })
+                .expect("a build names the index it creates")
+                .split('(')
+                .next()
+                .expect("a name precedes its column list")
+                .rsplit('.')
+                .next()
+                .expect("a name follows its schema");
+            let file = path
+                .file_name()
+                .expect("migration path has a file name")
+                .to_string_lossy()
+                .into_owned();
+            assert!(
+                registered.contains(&name),
+                "{file} builds {name} concurrently with no entry to recover it: a build \
+                 interrupted there leaves an invalid index that the re-run adopts, records the \
+                 migration over, and leaves nothing to rebuild"
+            );
+            builds.push(file);
+        }
+        assert!(
+            !builds.is_empty(),
+            "no migration builds an index concurrently; the walk stopped matching the files it \
+             guards"
+        );
+    }
 }

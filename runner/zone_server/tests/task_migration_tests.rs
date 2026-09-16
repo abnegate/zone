@@ -2,7 +2,7 @@ use sqlx::migrate::MigrateError;
 use sqlx::{ConnectOptions, PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
 use uuid::Uuid;
-use zone_server::db::{migrations, tasks};
+use zone_server::db::{memory, migrations, tasks};
 
 struct Database {
     admin: PgPool,
@@ -69,6 +69,24 @@ impl Database {
             .fetch_all(&self.pool)
             .await
             .unwrap()
+    }
+
+    async fn workspace(&self) -> (Uuid, Uuid) {
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let owner = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations(id,name,slug) VALUES($1,'Migration',$1::text)")
+            .bind(organization)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO workspaces(id,organization_id,name,slug) VALUES($1,$2,'Migration',$1::text)").bind(workspace).bind(organization).execute(&self.pool).await.unwrap();
+        sqlx::query("INSERT INTO users(id,email,password_hash) VALUES($1,$1::text,'migration')")
+            .bind(owner)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        (workspace, owner)
     }
 
     async fn cleanup(self) {
@@ -906,6 +924,123 @@ async fn task_migration_repairs_a_cancelled_waiting_index_build() {
     database.cleanup().await;
 }
 
+/// 034's build is adopted the same way, and the rule it exists to enforce is
+/// the one a checked create cannot: with the leftover recorded over, two first
+/// writes that overlap both insert, a read picks whichever row streams first,
+/// and a forget leaves the twin answering in its place.
+#[tokio::test]
+async fn task_migration_repairs_a_cancelled_memory_index_build() {
+    const NAME: &str = "Deploy window";
+    let database = Database::new().await;
+    database.through(33).await;
+    let (workspace, owner) = database.workspace().await;
+    sqlx::query("INSERT INTO knowledge_entries(workspace_id,created_by,title,content) SELECT $1,$2,'Entry '||entry,'Body' FROM generate_series(1,20000) entry").bind(workspace).bind(owner).execute(&database.pool).await.unwrap();
+
+    let mut blocker = database.pool.acquire().await.unwrap();
+    sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query("SELECT count(*) FROM knowledge_entries")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let pool = database.pool.clone();
+    let migrating = tokio::spawn(async move { migrations::run(&pool).await });
+    let process: i32 = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let process: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_progress_create_index WHERE relid='knowledge_entries'::regclass AND index_relid=to_regclass('idx_knowledge_memory_entry')").fetch_optional(&database.pool).await.unwrap();
+            if let Some(process) = process {
+                break process;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    migrating.abort();
+    assert!(migrating.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let alive: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)")
+                    .bind(process)
+                    .fetch_one(&database.pool)
+                    .await
+                    .unwrap();
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("aborted migration retained its backend and advisory lock");
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    drop(blocker);
+
+    let invalid: bool = sqlx::query_scalar(
+        "SELECT NOT indisvalid FROM pg_index WHERE indexrelid='idx_knowledge_memory_entry'::regclass",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(
+        invalid,
+        "cancelled build must leave actual invalid-index recovery work"
+    );
+    let recorded: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=34)")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert!(!recorded);
+
+    migrations::run(&database.pool).await.unwrap();
+
+    let (valid, unique): (bool, bool) = sqlx::query_as(
+        "SELECT indisvalid, indisunique FROM pg_index WHERE indexrelid='idx_knowledge_memory_entry'::regclass",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(
+        valid,
+        "the adopted leftover was recorded instead of rebuilt"
+    );
+    assert!(
+        unique,
+        "a rebuilt index that reserves nothing reserves no name"
+    );
+
+    let entry = "INSERT INTO knowledge_entries(workspace_id,created_by,category,title,content) VALUES($1,$2,$3,$4,'Body')";
+    sqlx::query(entry)
+        .bind(workspace)
+        .bind(owner)
+        .bind(memory::FACT_CATEGORY)
+        .bind(NAME)
+        .execute(&database.pool)
+        .await
+        .expect("the first write of a name must be taken");
+    let refused = sqlx::query(entry)
+        .bind(workspace)
+        .bind(owner)
+        .bind(memory::FACT_CATEGORY)
+        .bind(NAME)
+        .execute(&database.pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.as_database_error().unwrap().code().as_deref(),
+        Some("23505"),
+        "a second entry took a name the first already holds"
+    );
+    database.cleanup().await;
+}
+
 /// Every lock these take on `task_runs` is one ordinary traffic already holds,
 /// and the boot holds sqlx's advisory lock while it queues for them: an
 /// unbounded wait wedges every other instance instead of failing with 55P03.
@@ -959,6 +1094,7 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
             "026_task_run_waiting_status.sql",
             "029_task_run_waiting_validation.sql",
             "032_task_run_pending_wait.sql",
+            "033_knowledge_memory.sql",
             "035_reminder_automations.sql",
             "036_reminder_automation_validation.sql",
             "038_reminder_condition_watch.sql",

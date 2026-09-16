@@ -15,6 +15,7 @@ pub mod email_verification;
 pub mod gathering_events;
 pub mod invitations;
 pub mod knowledge;
+pub mod memory;
 pub mod message_embeddings;
 pub mod migrations;
 pub mod organization_members;

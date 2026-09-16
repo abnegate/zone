@@ -576,3 +576,84 @@ where
         }
     }
 }
+
+const DEADLOCK: &str = "40P01";
+const CLEANUP_ATTEMPTS: u64 = 5;
+
+fn deadlocked(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .is_some_and(|code| code.as_ref() == DEADLOCK)
+}
+
+/// Run one cleanup statement, giving way and trying again when Postgres picks
+/// it as the victim of a deadlock.
+///
+/// Two fixtures discarding at once send cascading deletes that reach the same
+/// tables in different orders, and Postgres breaks the cycle by aborting one
+/// of them with `40P01`. A lock held inside this process would not cover it:
+/// the suites that race are separate test binaries, and so separate
+/// processes. Each statement here is its own transaction and names the rows
+/// it removes by id, so running one again is a no-op if it already took
+/// effect.
+async fn despite_deadlock<F, Fut, T>(expectation: &str, mut statement: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, sqlx::Error>>,
+{
+    let mut attempt = 1;
+    loop {
+        match statement().await {
+            Ok(value) => return value,
+            Err(error) if deadlocked(&error) && attempt < CLEANUP_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                attempt += 1;
+            }
+            Err(error) => panic!("{expectation}: {error}"),
+        }
+    }
+}
+
+/// Take a fixture's organizations and its people back out of the shared
+/// database, so a suite that made them leaves the database as it found it.
+///
+/// Two kinds of organization go: the one above `workspace`, resolved from it
+/// because a fixture is handed a workspace and never sees what holds it, and
+/// the personal one registration mints for each person. Both are read before
+/// anything is deleted — `organization_members` is gone the moment its user
+/// is, and an organization nobody belongs to is unreachable rather than
+/// clean. Deleting an organization cascades to its workspaces and everything
+/// in them; the people go last, because `knowledge_entries.created_by` is
+/// `ON DELETE SET NULL` and a row that went with its workspace is already
+/// gone.
+pub async fn discard(pool: &PgPool, workspace: uuid::Uuid, users: &[uuid::Uuid]) {
+    let organizations: Vec<uuid::Uuid> =
+        despite_deadlock("the fixture's organizations are readable", || {
+            sqlx::query_scalar(
+                "SELECT organization_id FROM workspaces WHERE id = $1
+                 UNION
+                 SELECT organization_id FROM organization_members WHERE user_id = ANY($2)",
+            )
+            .bind(workspace)
+            .bind(users)
+            .fetch_all(pool)
+        })
+        .await;
+
+    despite_deadlock(
+        "the organizations and every workspace under them go",
+        || {
+            sqlx::query("DELETE FROM organizations WHERE id = ANY($1)")
+                .bind(&organizations)
+                .execute(pool)
+        },
+    )
+    .await;
+    despite_deadlock("the people go", || {
+        sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+            .bind(users)
+            .execute(pool)
+    })
+    .await;
+}

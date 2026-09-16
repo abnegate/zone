@@ -27,7 +27,7 @@ import {
   WaitingSchema,
   WaitSettledSchema,
 } from './schemas';
-import { AWAITING_ANSWER_DETAIL, REASONED_TOOLS } from './types';
+import { ACTION_TARGETS, AWAITING_ANSWER_DETAIL, REASONED_TOOLS } from './types';
 
 const CITATIONS_RS = join(
   import.meta.dir,
@@ -53,6 +53,11 @@ const JOB_RS = join(import.meta.dir, '../../../../../runner/zone_core/src/tools/
 const WAIT_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/agent/wait.rs');
 
 const AGENT_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/agent/mod.rs');
+
+const RECEIPTS_RS = join(
+  import.meta.dir,
+  '../../../../../runner/zone_server/src/agent/receipts.rs'
+);
 
 const REASONED_TOOLS_RS = 'REASONED_TOOLS';
 
@@ -230,6 +235,31 @@ describe('the console reads which way a wait ended rather than the words it ende
       expect(parsed.success).toBe(false);
     }
     expect(WaitSettledSchema.safeParse({ ...settled, verdict: 'unreadable' }).success).toBe(true);
+  });
+});
+
+/**
+ * What a memory turn leaves on the message, read back from both ends.
+ *
+ * The server inserts `memory_used` into a hand-built JSON map rather than
+ * declaring it on a struct, so `structFields` cannot reach it and the name is
+ * the whole of what can be pinned: the Rust constant on one side, the declared
+ * zod key on the other. The type is not pinned, and that is the honest limit.
+ *
+ * `ActionTarget` had no pin at all until this one, which is how a variant the
+ * console did not model could reach a receipt the console then dropped.
+ */
+describe('the console mirrors what a memory turn leaves behind', () => {
+  const chatWs = readFileSync(CHAT_WS_RS, 'utf8');
+  const receipts = readFileSync(RECEIPTS_RS, 'utf8');
+
+  test('the console reads the metadata key the server writes', () => {
+    expect(rustStringConstant(chatWs, 'MEMORY_USED_KEY')).toBe('memory_used');
+    expect(Object.keys(MessageMetadataSchema.shape)).toContain('memory_used');
+  });
+
+  test('the console mirrors every workspace item a write can target', () => {
+    expect(rustVariants(receipts, 'ActionTarget').sort()).toEqual([...ACTION_TARGETS].sort());
   });
 });
 

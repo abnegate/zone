@@ -460,6 +460,7 @@ impl ChatTools {
             if scope.chat_id.is_some() {
                 super::images::register(&mut registry, scope);
                 super::audio::register(&mut registry, scope);
+                super::memory::register(&mut registry, scope);
             }
             super::monitoring::register(&mut registry, scope);
             workspace = registry
@@ -2543,6 +2544,11 @@ mod tests {
             "tail_task_log",
             "tail_job",
             "wait_for",
+            crate::agent::memory::MEMORY_LIST,
+            crate::agent::memory::MEMORY_READ,
+            crate::agent::memory::MEMORY_WRITE,
+            crate::agent::memory::MEMORY_APPEND,
+            crate::agent::memory::MEMORY_DELETE,
         ] {
             assert!(
                 tools.names().contains(&name.to_string()),
@@ -2557,6 +2563,8 @@ mod tests {
         assert!(tools.mutating("apply_patch"));
         assert!(tools.mutating("start_task"));
         assert!(!tools.mutating("get_task_run"));
+        assert!(!tools.mutating(crate::agent::memory::MEMORY_READ));
+        assert!(tools.mutating(crate::agent::memory::MEMORY_WRITE));
         let environment = crate::agent::prompt::Environment::at(
             chrono::DateTime::parse_from_rfc3339("2026-09-09T09:30:00+12:00").unwrap(),
             "Pacific/Auckland",
@@ -2589,6 +2597,105 @@ mod tests {
         assert!(!tools.names().contains(&"start_task".to_string()));
         assert!(!tools.names().contains(&"generate_image".to_string()));
         assert!(!tools.names().contains(&"query_prometheus".to_string()));
+        for name in memory_tools() {
+            assert!(
+                !tools.names().contains(&name.to_string()),
+                "{name} must stay off a background run"
+            );
+        }
+    }
+
+    fn memory_tools() -> [&'static str; 5] {
+        use crate::agent::memory::{
+            MEMORY_APPEND, MEMORY_DELETE, MEMORY_LIST, MEMORY_READ, MEMORY_WRITE,
+        };
+        [
+            MEMORY_LIST,
+            MEMORY_READ,
+            MEMORY_WRITE,
+            MEMORY_APPEND,
+            MEMORY_DELETE,
+        ]
+    }
+
+    /// The half of the sandbox rule the test above cannot reach: it passes
+    /// `actor: None`, so no workspace tool registers at all and a tool put on
+    /// the task profile by mistake would be absent for the wrong reason. An
+    /// authorized writer is what assembles the workspace half of a run's
+    /// catalog, and memory has to stay out of it.
+    #[tokio::test]
+    async fn a_run_with_an_authorized_writer_still_gets_no_memory_tool() {
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use crate::state::test_config;
+
+        let pool = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL")
+                .expect("this test requires a migrated PostgreSQL DATABASE_URL"),
+        )
+        .await
+        .expect("DATABASE_URL must reach a migrated PostgreSQL");
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "hash",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Memory sandbox",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Memory sandbox",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let state = AppState::new(test_config(), pool.clone(), None);
+        state.disable_mcp();
+
+        let tools =
+            ChatTools::for_task(&state, std::env::temp_dir(), workspace.id, Some(user.id)).await;
+
+        assert!(
+            tools.names().contains(&"list_documents".to_string()),
+            "an authorized writer has to reach the workspace, or this proves nothing"
+        );
+        for name in memory_tools() {
+            assert!(
+                !tools.names().contains(&name.to_string()),
+                "{name} reached a background run"
+            );
+        }
+
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     /// A job or a wait belongs to the session that opened it, so a placeholder
