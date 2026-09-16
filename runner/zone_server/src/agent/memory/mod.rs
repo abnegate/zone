@@ -58,20 +58,32 @@ pub fn is_private(name: &str) -> bool {
 /// The arguments the trace shows for a call, if this tool's are private.
 ///
 /// `None` means show them as they are. For a memory tool the category is kept
-/// when the arguments parse — it is one of three fixed words and names
-/// nobody — and everything else is dropped. Arguments that do not parse are
-/// shown as nothing at all rather than guessed at.
+/// when it is one of the three the store knows — a fixed word that names
+/// nobody — and everything else is dropped. A category that is not one of
+/// the three is model-written text like any other field, so it goes the same
+/// way, and arguments that do not parse are shown as nothing at all rather
+/// than guessed at.
 pub fn trace_arguments(name: &str, arguments: &str) -> Option<String> {
     if !is_private(name) {
         return None;
     }
     let category = serde_json::from_str::<serde_json::Value>(arguments)
         .ok()
-        .and_then(|value| value.get("category")?.as_str().map(str::to_owned));
+        .and_then(|value| MemoryCategory::parse(value.get("category")?.as_str()?))
+        .map(MemoryCategory::short);
     Some(match category {
         Some(category) => serde_json::json!({ "category": category }).to_string(),
         None => "{}".to_string(),
     })
+}
+
+/// The stated reason the trace shows for a call, if this tool's is private.
+///
+/// The reason is one more field of the arguments the model wrote, and for a
+/// memory call it tends to restate what is being remembered, so it is dropped
+/// with the rest. Every other tool's reason is shown as it was.
+pub fn trace_reason(name: &str, reason: Option<String>) -> Option<String> {
+    if is_private(name) { None } else { reason }
 }
 
 /// The outcome line the trace shows for a memory call, whichever way it went.
@@ -761,9 +773,31 @@ mod tests {
             Some("{}"),
             "arguments that do not parse are dropped, not shown"
         );
+        assert_eq!(
+            trace_arguments(
+                MEMORY_WRITE,
+                r#"{"category":"Deploy window: Thursdays, never Fridays."}"#
+            )
+            .as_deref(),
+            Some("{}"),
+            "a category that is not one of the three is text the model wrote"
+        );
         assert!(
             trace_arguments("read_file", r#"{"path":"src/main.rs"}"#).is_none(),
             "any other tool's arguments are shown as they are"
+        );
+
+        assert_eq!(
+            trace_reason(
+                MEMORY_WRITE,
+                Some("Remembering that we ship on Thursdays.".into())
+            ),
+            None,
+            "a memory call's reason restates what it carries"
+        );
+        assert_eq!(
+            trace_reason("read_file", Some("To see what main does.".into())).as_deref(),
+            Some("To see what main does.")
         );
 
         assert_eq!(

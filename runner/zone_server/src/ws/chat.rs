@@ -734,10 +734,9 @@ const MEMORY_USED_KEY: &str = "memory_used";
 ///
 /// Both are workspace-readable — the record rides the assistant message's
 /// metadata and the frame goes to every reader with the chat open — so a
-/// memory tool's arguments are reduced here, before either exists, and the
-/// model's stated reason is taken from the arguments it actually sent. Lifted
-/// out of the loop so the trace a call leaves can be tested with the arguments
-/// a real call carries.
+/// memory tool's arguments and stated reason are reduced here, before either
+/// exists. Lifted out of the loop so the trace a call leaves can be tested
+/// with the arguments a real call carries.
 fn trace_started(
     message_id: Uuid,
     id: String,
@@ -745,7 +744,7 @@ fn trace_started(
     arguments: &str,
     reasoning: Option<String>,
 ) -> (ToolCallRecord, ServerMessage) {
-    let reason = crate::agent::reason(arguments);
+    let reason = crate::agent::memory::trace_reason(&name, crate::agent::reason(arguments));
     let shown = crate::agent::memory::trace_arguments(&name, arguments)
         .unwrap_or_else(|| arguments.to_string());
     let record = ToolCallRecord {
@@ -3045,6 +3044,7 @@ async fn handle_chat_generation(
                             }
                             let arguments = crate::agent::memory::trace_arguments(&name, &arguments)
                                 .unwrap_or(arguments);
+                            let reason = crate::agent::memory::trace_reason(&name, reason);
                             let tool_msg = ServerMessage::ToolApprovalRequired {
                                 message_id: assistant_message_id,
                                 tool_call_id: id,
@@ -4947,13 +4947,14 @@ mod tests {
             "When we ship",
             "Thursdays",
             "never Fridays",
+            "ship on Thursdays",
         ];
 
         let (record, frame) = trace_started(
             Uuid::new_v4(),
             "call_1".to_string(),
             MEMORY_WRITE.to_string(),
-            r#"{"category":"fact","name":"Deploy window","description":"When we ship.","content":"Thursdays, never Fridays.","reason":"The user asked me to remember when we ship."}"#,
+            r#"{"category":"fact","name":"Deploy window","description":"When we ship.","content":"Thursdays, never Fridays.","reason":"They ship on Thursdays, so remembering it."}"#,
             Some("I should remember this.".to_string()),
         );
         let record_json = serde_json::to_string(&record).expect("a record serialises");
@@ -4976,6 +4977,10 @@ mod tests {
             record.name, MEMORY_WRITE,
             "the name is what the badge and the receipt key on"
         );
+        assert_eq!(
+            record.reason, None,
+            "the stated reason is one more field the model wrote"
+        );
 
         // A read's outcome line would be the entry's first line.
         let shown =
@@ -4987,7 +4992,7 @@ mod tests {
             Uuid::new_v4(),
             "call_2".to_string(),
             "read_file".to_string(),
-            r#"{"path":"src/main.rs"}"#,
+            r#"{"path":"src/main.rs","reason":"To see what main does."}"#,
             None,
         );
         assert!(
@@ -4995,10 +5000,11 @@ mod tests {
                 .unwrap()
                 .contains("src/main.rs")
         );
+        assert_eq!(record.reason.as_deref(), Some("To see what main does."));
         assert!(
             serde_json::to_string(&frame)
                 .unwrap()
-                .contains("src/main.rs")
+                .contains("To see what main does.")
         );
         assert_eq!(
             crate::agent::memory::trace_detail("read_file", "fn main() {} (12 lines)"),
