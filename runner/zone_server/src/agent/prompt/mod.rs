@@ -58,6 +58,10 @@ const PLAIN: &[Section] = &[
     ("session", section::session::render),
 ];
 
+/// Raised by measurement rather than by guess, the way every section that has
+/// widened this has raised it: the chat prompt with the automation rules is
+/// 21,162 characters, so the ceiling is the next round number above that and
+/// the next section to grow has to measure itself too.
 pub const CHAT_MAX_CHARS: usize = 22_400;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 14_000;

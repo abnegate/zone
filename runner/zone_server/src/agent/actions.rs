@@ -13,6 +13,50 @@ use zone_core::tools::{
 
 use super::PREVIEW_BODY_CHARS;
 
+/// What `create_reminder` offers and what it refuses, in the tool's own words.
+///
+/// Long because the schema alone cannot say the four things a caller gets
+/// wrong: that a rule outside the subset is refused rather than quietly
+/// dropped, that hourly is a ceiling and a faster condition wants an event
+/// rather than a schedule, that a prompt turns content into the schedule's
+/// name rather than its message, and that a repeat is something to offer
+/// rather than something to impose on a request that was made once.
+const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered to this chat. \
+     due_at is the first firing: a future RFC3339 time with an explicit timezone offset, and the \
+     exact time the person named. Clarify an ambiguous date or timezone rather than guessing, and \
+     do not claim this will run a task. \
+     Add rrule to repeat it, as an RFC 5545 rule in this subset: FREQ (HOURLY, DAILY, WEEKLY, \
+     MONTHLY), INTERVAL, BYDAY, BYHOUR, BYMINUTE, BYMONTHDAY, UNTIL, COUNT. A clause outside that \
+     list is refused rather than dropped. Once an hour is the ceiling, measured at the shortest \
+     gap the rule produces rather than its average — BYHOUR=0,1 with BYMINUTE=0,30 fires four \
+     times a day and three of those gaps are half an hour. A condition that changes faster than \
+     the ceiling wants wait_for on the event itself, not a schedule. A repeating reminder stops \
+     after seven days unless it is asked for again. \
+     Without a prompt, each firing delivers content as it is written. With one, each firing runs \
+     the prompt as a turn of your own in this chat and what you say is the delivery, and content \
+     is not sent at all — it stays as the schedule's name, which is what list_reminders shows and \
+     what the person reads when deciding whether to cancel it, so make it a short description of \
+     the standing job rather than a message. Use a prompt when the useful answer has to be worked \
+     out at the time, and content alone when it is the same words every time. A prompt is an \
+     instruction to your future self, which will have this chat and these tools and no memory of \
+     writing it, so say what to check and what to report. \
+     End it with the rule that if nothing changed, it should say nothing: a schedule that reports \
+     every firing whether or not anything happened teaches the person to ignore it. \
+     Set timing_mode to condition_watch when the change is the point rather than the time. Each \
+     firing is handed what the last one answered and asked what differs, so the prompt only has \
+     to say what to look at — the comparison is supplied, and so is the rule for an unchanged \
+     firing, which for a watch is one short line rather than silence. \
+     A watch needs both an rrule and a prompt and is refused without them: one firing has nothing \
+     to compare against, and fixed content has nothing to compare. Two limits to state when you \
+     offer one. It sees only the state at each firing, so a condition that appears and disappears \
+     between two firings is never noticed — for something that raises an event of its own, use \
+     wait_for on the event rather than a watch. And a watch cannot stay silent: running the turn \
+     is how it reports at all, so an unchanged firing still answers here, in one short line. That \
+     is the one place a watch departs from the say-nothing rule above, so a watch's prompt should \
+     not repeat that rule. \
+     Offer a repeat when somebody plainly wants the same thing again; never turn a request made \
+     once into a standing one they did not ask for.";
+
 /// Named because the waiting section counts on them: a description that still
 /// mandates a poll is read at the moment a runner starts, which is closer to
 /// the decision than any prompt section gets.
@@ -135,13 +179,17 @@ impl Tool for WorkspaceAction {
             Action::SendMessage => {
                 "Send a message to a workspace chat on the user's explicit request. Mentions record the intended member IDs in the message; they do not send email or push notifications."
             }
-            Action::CreateReminder => {
-                "Schedule a durable one-time reminder delivered to this chat. Require a future RFC3339 due_at with timezone offset. Clarify ambiguous dates or timezones; do not claim to run a task automatically."
-            }
+            Action::CreateReminder => CREATE_REMINDER_DESCRIPTION,
             Action::ListReminders => {
-                "List the current user's workspace reminders, including pending, delivered, and cancelled reminders."
+                "List the current user's workspace reminders: pending, delivered, cancelled, and \
+                 expired — a repeating one that ran out of rule or outlived its week, which is a \
+                 different ending from one somebody cancelled. A pending row with an rrule is \
+                 still repeating, and its due_at is the next firing rather than the first."
             }
-            Action::CancelReminder => "Cancel one of the current user's pending reminders.",
+            Action::CancelReminder => {
+                "Cancel one of the current user's pending reminders. Cancelling a repeating one \
+                 stops the whole schedule, not just its next firing."
+            }
             Action::StartTask => START_TASK_DESCRIPTION,
             Action::GetTaskRun => {
                 "Get status, phase, progress and error for a runner task in this workspace."
@@ -209,7 +257,13 @@ impl Tool for WorkspaceAction {
                 json!(["chat_id", "content", REASON_PARAM]),
             ),
             Action::CreateReminder => (
-                json!({"content":{"type":"string","minLength":1},"due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset"}}),
+                json!({
+                    "content":{"type":"string","minLength":1,"description":"The words each firing delivers. With a prompt they are not delivered at all and this is the schedule's name instead, so keep it short enough to recognise in a list."},
+                    "due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset. The first firing, and the exact time the person named."},
+                    "rrule":{"type":"string","description":"RFC 5545 rule to repeat it, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9. Omit for a single reminder."},
+                    "prompt":{"type":"string","description":"An instruction to your future self, run as a turn at each firing instead of delivering content. End it with the rule that if nothing changed, say nothing — except under condition_watch, which supplies its own rule and answers an unchanged firing in one short line."},
+                    "timing_mode":{"type":"string","enum":["exact_schedule","condition_watch"],"description":"exact_schedule, the default, fires at the time named. condition_watch fires on the rrule and reports what differs from the last firing, and requires both rrule and prompt. It cannot see a change that appears and disappears between two firings."}
+                }),
                 json!(["content", "due_at"]),
             ),
             Action::CancelReminder => (json!({"reminder_id":identifier}), json!(["reminder_id"])),

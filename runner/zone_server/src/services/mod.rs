@@ -16,5 +16,6 @@ pub mod media_source;
 pub mod model;
 pub mod prioritisation;
 pub mod runner;
+pub mod schedule;
 pub mod stages;
 pub mod task_progress;

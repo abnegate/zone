@@ -66,7 +66,10 @@ const BULLETS: &[Bullet] = &[
     (
         &["create_reminder"],
         "- Reminders deliver a message in a workspace chat. Use an explicit future timestamp with \
-         its timezone; clarify ambiguous dates or timezones.",
+         its timezone; clarify ambiguous dates or timezones. After answering something that will \
+         be out of date by tomorrow, you may offer to schedule it — say what you would set and \
+         wait to be told yes. Scheduling one unasked puts a standing claim on somebody's \
+         attention that they did not agree to.",
     ),
     (
         &["create_document", "update_document"],
