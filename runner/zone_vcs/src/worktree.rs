@@ -250,7 +250,12 @@ mod tests {
             "detached, so no branch is pinned"
         );
         assert_eq!(unfinished(&path).unwrap(), Unfinished::default());
-        assert_eq!(repository_of(&path).unwrap(), repositories.base);
+        // Git names the repository by its real path, which on macOS is not
+        // the path the temporary directory was handed out under.
+        assert_eq!(
+            repository_of(&path).unwrap(),
+            repositories.base.canonicalize().unwrap()
+        );
     }
 
     #[test]
