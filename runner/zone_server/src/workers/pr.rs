@@ -50,28 +50,56 @@ const SUBJECT_INSTRUCTIONS: &str = "Name a completed code change. Reply with exa
 /// Result of PR creation attempt
 #[derive(Debug)]
 pub enum PrCreationResult {
-    /// PR was created successfully
-    Created { pr_url: String, branch_name: String },
+    /// PR was created successfully; `commit` is what the service pushed.
+    Created {
+        pr_url: String,
+        branch_name: String,
+        commit: String,
+    },
     /// No changes to commit
     NoChanges,
     /// Legacy creator-null tasks intentionally execute only in the sandbox.
     Sandbox,
     /// No repository configured for project
     NoRepository,
-    /// PR already exists for this branch
-    PrAlreadyExists { pr_url: String },
+    /// PR already exists for this branch; `commit` is what the service pushed.
+    PrAlreadyExists { pr_url: String, commit: String },
     /// Error during PR creation
     Error(String),
 }
 
+impl PrCreationResult {
+    /// The commit the service pushed, when publication got that far: the one
+    /// fact about the checkout that the service can vouch for afterwards.
+    pub fn pushed(&self) -> Option<&str> {
+        match self {
+            Self::Created { commit, .. } | Self::PrAlreadyExists { commit, .. } => Some(commit),
+            _ => None,
+        }
+    }
+}
+
+/// Where a run's branch is pushed. The push says which commit it sent.
 #[async_trait::async_trait]
 trait Remote: Send + Sync {
-    async fn push(&self, path: &Path, branch: &str, url: &str, token: &str) -> Result<(), String>;
+    async fn push(
+        &self,
+        path: &Path,
+        branch: &str,
+        url: &str,
+        token: &str,
+    ) -> Result<String, String>;
 }
 
 #[async_trait::async_trait]
 impl Remote for GitService {
-    async fn push(&self, path: &Path, branch: &str, url: &str, token: &str) -> Result<(), String> {
+    async fn push(
+        &self,
+        path: &Path,
+        branch: &str,
+        url: &str,
+        token: &str,
+    ) -> Result<String, String> {
         self.push_with_token(path, branch, url, token)
             .await
             .map_err(|error| error.to_string())
@@ -275,14 +303,18 @@ impl Publication<'_> {
             .await
             .map_err(|error| error.to_string())?;
         self.authorized().await?;
-        self.remote
+        let commit = self
+            .remote
             .push(self.path, branch, &baseline.repository, &token)
             .await?;
         self.identity(baseline).await?;
         if let Some(url) = existing {
             self.record(&url, branch, "open").await?;
             report_repair(self.state, task.id).await;
-            return Ok(PrCreationResult::PrAlreadyExists { pr_url: url });
+            return Ok(PrCreationResult::PrAlreadyExists {
+                pr_url: url,
+                commit,
+            });
         }
         let changes = files
             .iter()
@@ -323,6 +355,7 @@ impl Publication<'_> {
         Ok(PrCreationResult::Created {
             pr_url: created.url,
             branch_name: branch.clone(),
+            commit,
         })
     }
 }
@@ -674,6 +707,17 @@ async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Option<String>
     None
 }
 
+/// The commit a checkout is on, as a remote double reports having received it.
+#[cfg(test)]
+fn head(directory: &Path) -> String {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .current_dir(directory)
+        .output()
+        .expect("git runs");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,9 +727,14 @@ mod tests {
         let result = PrCreationResult::Created {
             pr_url: "https://github.com/test/repo/pull/1".to_string(),
             branch_name: "zone/task-123-test".to_string(),
+            commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
         };
         let debug = format!("{:?}", result);
         assert!(debug.contains("Created"));
+        assert_eq!(
+            result.pushed(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
     }
 
     #[test]
@@ -886,13 +935,13 @@ mod tests {
     impl Remote for RecordingRemote {
         async fn push(
             &self,
-            _path: &Path,
+            path: &Path,
             _branch: &str,
             _url: &str,
             _token: &str,
-        ) -> Result<(), String> {
+        ) -> Result<String, String> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Ok(head(path))
         }
     }
 
@@ -1094,14 +1143,14 @@ mod publication_tests {
             branch: &str,
             _url: &str,
             _token: &str,
-        ) -> Result<(), String> {
+        ) -> Result<String, String> {
             let output = std::process::Command::new("git")
                 .args(["push", "--", self.0.to_str().unwrap(), branch])
                 .current_dir(directory)
                 .output()
                 .unwrap();
             if output.status.success() {
-                Ok(())
+                Ok(head(directory))
             } else {
                 Err("Git push rejected; remote work was not overwritten".to_string())
             }
@@ -1980,9 +2029,14 @@ mod reception_tests {
         let result = PrCreationResult::Created {
             pr_url: "https://github.com/test/repo/pull/1".to_string(),
             branch_name: "zone/task-123-test".to_string(),
+            commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
         };
         let debug = format!("{:?}", result);
         assert!(debug.contains("Created"));
+        assert_eq!(
+            result.pushed(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
     }
 
     #[test]

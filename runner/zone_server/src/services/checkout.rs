@@ -17,7 +17,11 @@
 //! before every use, the fetch is bound to the URL Zone knows rather than to
 //! the remote the clone names, a run starts from the commit the remote
 //! reports for its default branch rather than from `origin/HEAD`, and
-//! readying a base is serialised across runs by a file lock beside it.
+//! readying a base is serialised across runs by a file lock beside it. The
+//! same goes for the removal rule: whether a worktree's HEAD is published is
+//! decided from what the service recorded about the run — the commit it
+//! started on and the commit the service pushed — never from refs in the
+//! clone, which a run could move to make its commits look published.
 
 use nix::fcntl::{Flock, FlockArg};
 use sha2::{Digest, Sha256};
@@ -148,6 +152,12 @@ pub struct Checkout {
     /// with no repository has none, and its directory is removed as a plain
     /// directory is.
     repository: Option<PathBuf>,
+    /// The commits the guard can vouch for when the run ends: the one the
+    /// worktree was left on before the run's tools could touch it, and the
+    /// one the service pushed from it. A HEAD that is neither is work
+    /// nobody else has, whatever the clone's refs say.
+    start: Option<String>,
+    published: std::sync::Mutex<Option<String>>,
 }
 
 impl Checkout {
@@ -189,8 +199,43 @@ impl Checkout {
                         .await?,
                 );
             }
+            // The commit the run starts on is recorded by the service, under
+            // the run's lease, before any tool of the run can move HEAD: it
+            // is what the guard and recovery alike will trust when they ask
+            // whether the worktree may go.
+            let head = GitService::new()
+                .revision(checkout.path(), "HEAD")
+                .await
+                .map_err(|error| error.to_string())?;
+            if !tasks::record_run_checkout(pool, run, owner, &head)
+                .await
+                .map_err(|_| "Cannot record the run's checkout")?
+            {
+                return Err("Task checkout lost its lease before its start was recorded".into());
+            }
+            checkout.start = Some(head);
         }
         Ok(checkout)
+    }
+
+    /// The commit the service pushed from this worktree. Told to the guard
+    /// after the push succeeded, so a worktree left on that commit is one
+    /// whose work is on the remote and may be removed.
+    pub fn mark_published(&self, commit: String) {
+        if let Ok(mut published) = self.published.lock() {
+            *published = Some(commit);
+        }
+    }
+
+    /// What the guard vouches for: the start commit and the published one.
+    fn known(&self) -> Vec<String> {
+        let mut known: Vec<String> = self.start.iter().cloned().collect();
+        if let Ok(published) = self.published.lock()
+            && let Some(commit) = published.as_ref()
+        {
+            known.push(commit.clone());
+        }
+        known
     }
 
     /// The base clone a repository's runs are worktrees of, under the same
@@ -364,6 +409,8 @@ impl Checkout {
             path,
             baseline: None,
             repository: None,
+            start: None,
+            published: std::sync::Mutex::new(None),
         })
     }
 
@@ -424,6 +471,18 @@ impl Checkout {
             {
                 continue;
             }
+            // What the service recorded about the run's worktree, read here
+            // and not from the clone: a run whose start was never recorded
+            // has nothing anyone can vouch for, and its worktree is kept.
+            let known: Vec<String> = tasks::run_checkout(pool, run)
+                .await
+                .map_err(|_| "Cannot inspect task checkout facts".to_string())?
+                .map(|checkout| {
+                    std::iter::once(checkout.head)
+                        .chain(checkout.published)
+                        .collect()
+                })
+                .unwrap_or_default();
             let directory = root.to_path_buf();
             let result = Self::filesystem(move || {
                 Self::validate_root(&directory)?;
@@ -433,7 +492,7 @@ impl Checkout {
                     Err(error) => return Err(error),
                 };
                 if kind.is_dir() && worktree::is_worktree(&path) {
-                    return Self::reclaim_worktree(&path);
+                    return Self::reclaim_worktree(&path, &known);
                 }
                 let result = if kind.is_symlink() {
                     std::fs::remove_file(&path)
@@ -461,11 +520,14 @@ impl Checkout {
     }
 
     /// Remove a finished run's worktree when nothing in it is lost, and leave
-    /// it — saying so — while it still holds work nobody else has. A worktree
-    /// git cannot read is left too: recovery reclaims what it can prove is
-    /// reclaimable, and a directory it cannot read is not that.
-    fn reclaim_worktree(path: &Path) -> std::io::Result<bool> {
-        match worktree::unfinished(path) {
+    /// it — saying so — while it still holds work nobody else has. `known`
+    /// are the commits the service recorded for the run; a HEAD that is none
+    /// of them is unpublished work. A worktree git cannot read is left too:
+    /// recovery reclaims what it can prove is reclaimable, and a directory
+    /// it cannot read is not that.
+    fn reclaim_worktree(path: &Path, known: &[String]) -> std::io::Result<bool> {
+        let known: Vec<&str> = known.iter().map(String::as_str).collect();
+        match worktree::unfinished(path, &known) {
             Ok(unfinished) if unfinished.any() => {
                 tracing::info!(
                     path = %path.display(),
@@ -507,7 +569,9 @@ impl Drop for Checkout {
         }
         if let Some(repository) = &self.repository {
             // The guard's one rule: never the way a run's work vanishes.
-            match worktree::unfinished(&self.path) {
+            let known = self.known();
+            let known: Vec<&str> = known.iter().map(String::as_str).collect();
+            match worktree::unfinished(&self.path, &known) {
                 Ok(unfinished) if unfinished.any() => {
                     tracing::warn!(
                         path = %self.path.display(),
@@ -590,6 +654,7 @@ mod tests {
         worktree::add(base, checkout.path(), "origin/HEAD").unwrap();
         git(checkout.path(), &["checkout", "-q", "-b", branch]);
         checkout.repository = Some(base.to_path_buf());
+        checkout.start = Some(git(checkout.path(), &["rev-parse", "HEAD"]));
         checkout
     }
 
@@ -629,9 +694,11 @@ mod tests {
     }
 
     /// The guard removes a worktree that holds nothing nobody else has, and
-    /// keeps one that does — with a file no commit holds, or a commit no
-    /// remote holds — because removing it is the one way a run's work could
-    /// vanish without anyone choosing that.
+    /// keeps one that does — with a file no commit holds, or a commit the
+    /// service never pushed — because removing it is the one way a run's
+    /// work could vanish without anyone choosing that. What the service
+    /// pushed is what the guard was told, not what the clone's refs say: a
+    /// remote-tracking ref the run planted proves nothing.
     #[test]
     fn the_guard_keeps_a_worktree_that_holds_work_and_removes_one_that_does_not() {
         let (_holder, root) = private_root();
@@ -643,11 +710,30 @@ mod tests {
         std::fs::write(kept.join("work.txt"), "committed, never pushed\n").unwrap();
         git(&kept, &["add", "work.txt"]);
         git(&kept, &["commit", "-q", "-m", "work"]);
+        git(
+            &kept,
+            &["update-ref", "refs/remotes/origin/zone/committed", "HEAD"],
+        );
         drop(committed);
-        assert!(kept.exists(), "a commit no remote has is kept");
+        assert!(
+            kept.exists(),
+            "a commit the service never pushed is kept, whatever ref the run planted"
+        );
         assert!(
             git(&base, &["branch", "--list", "zone/committed"]).contains("zone/committed"),
             "the kept worktree keeps its branch"
+        );
+
+        let published = run_worktree(root, &base, "zone/published");
+        let published_path = published.path().to_path_buf();
+        std::fs::write(published_path.join("done.txt"), "pushed\n").unwrap();
+        git(&published_path, &["add", "done.txt"]);
+        git(&published_path, &["commit", "-q", "-m", "done"]);
+        published.mark_published(git(&published_path, &["rev-parse", "HEAD"]));
+        drop(published);
+        assert!(
+            !published_path.exists(),
+            "a worktree left on the commit the service pushed is removed"
         );
 
         let dirty = run_worktree(root, &base, "zone/dirty");
@@ -787,10 +873,13 @@ mod tests {
     }
 
     /// Recovery reclaims a finished run's worktree only once nothing in it is
-    /// lost: while it holds a commit no remote has, the sweep leaves it and
-    /// says so; once the work is gone, the next sweep removes it. The sweep
-    /// runs over a root of this test's own, as the recovery tests beside it
-    /// do, so nothing here depends on what earlier runs left on the disk.
+    /// lost: while it holds a commit the service never pushed, the sweep
+    /// leaves it and says so; once the worktree is back on the commit the
+    /// service recorded it started from, the next sweep removes it. A run
+    /// whose start was never recorded has nothing anyone can vouch for, and
+    /// its worktree is left even when it is clean. The sweep runs over a
+    /// root of this test's own, as the recovery tests beside it do, so
+    /// nothing here depends on what earlier runs left on the disk.
     #[tokio::test]
     async fn recovery_leaves_a_finished_run_s_worktree_while_it_holds_work() {
         let pool =
@@ -835,6 +924,13 @@ mod tests {
         worktree::add(&base, checkout.path(), "origin/HEAD").unwrap();
         git(checkout.path(), &["checkout", "-q", "-b", "zone/recovered"]);
         checkout.repository = Some(base.clone());
+        let start = git(checkout.path(), &["rev-parse", "HEAD"]);
+        assert!(
+            crate::db::tasks::record_run_checkout(&pool, run.id, owner, &start)
+                .await
+                .unwrap(),
+            "the start is recorded under the run's lease"
+        );
         let path = checkout.path().to_path_buf();
         std::fs::write(path.join("work.txt"), "committed, never pushed\n").unwrap();
         git(&path, &["add", "work.txt"]);
@@ -851,21 +947,55 @@ mod tests {
         .await
         .unwrap();
 
+        // A second run of the task whose start nobody recorded: clean, and
+        // still not reclaimable, since nothing vouches for its commit.
+        let unrecorded = crate::db::tasks::create_task_run(&pool, task.id)
+            .await
+            .unwrap();
+        let second_owner = Uuid::new_v4();
+        assert!(
+            crate::db::tasks::claim_task_run(&pool, unrecorded.id, second_owner)
+                .await
+                .unwrap()
+        );
+        let mut second = Checkout::create(&root, unrecorded.id, second_owner).unwrap();
+        worktree::add(&base, second.path(), "origin/HEAD").unwrap();
+        git(second.path(), &["checkout", "-q", "-b", "zone/unrecorded"]);
+        second.repository = Some(base.clone());
+        let unrecorded_path = second.path().to_path_buf();
+        std::mem::forget(second);
+        crate::db::tasks::complete_owned_task_run(
+            &pool,
+            unrecorded.id,
+            Some(second_owner),
+            "failed",
+            Some("orphaned"),
+            None,
+        )
+        .await
+        .unwrap();
+
         assert_eq!(Checkout::recover_root(&pool, &root).await.unwrap(), 0);
         assert!(
             path.exists(),
-            "a finished run's worktree holding a commit no remote has is left"
+            "a finished run's worktree holding a commit the service never pushed is left"
         );
         assert!(git(&base, &["branch", "--list", "zone/recovered"]).contains("zone/recovered"));
+        assert!(
+            unrecorded_path.exists(),
+            "a worktree whose start was never recorded is left"
+        );
 
-        // Nothing of its own left: the sweep may now take it, branch and all.
-        git(&path, &["reset", "-q", "--hard", "origin/HEAD"]);
+        // Back on the recorded start, nothing of its own is left: the sweep
+        // may now take it, branch and all. The unrecorded one stays.
+        git(&path, &["reset", "-q", "--hard", &start]);
         assert_eq!(Checkout::recover_root(&pool, &root).await.unwrap(), 1);
         assert!(
             !path.exists(),
-            "a clean worktree of a finished run is reclaimed"
+            "a worktree of a finished run back on its recorded start is reclaimed"
         );
         assert_eq!(git(&base, &["branch", "--list", "zone/recovered"]), "");
+        assert!(unrecorded_path.exists());
         sqlx::query("DELETE FROM organizations WHERE id=$1")
             .bind(organization)
             .execute(&pool)

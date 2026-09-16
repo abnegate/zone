@@ -35,10 +35,11 @@ const REPORT: &str = "Your closing message is the report. Zone puts it in the co
 /// simple, and here the task has already said it is not; a question about the
 /// approach belongs in the plan rather than in a question of its own; and CX
 /// 21, that a plan is not a stopping point — once approved, it is carried out.
-const PLAN: &str = "Plan first: this task requires its plan approved. Before you change anything, read what \
-     you need to and then call submit_plan with what you will change and in what order, how you \
-     will check it, and what you are leaving out. The run pauses until the plan is answered; \
-     Approve means carry it out without asking again, and Revise comes with what to change, so \
+const PLAN: &str = "Plan first: this task requires its plan approved, and until it is, every tool that would \
+     change something is refused. Read what you need to, then call submit_plan with what you will \
+     change and in what order, how you will check it, and what you are leaving out. The run pauses \
+     until the plan is answered; Approve means carry it out without asking again, and Revise comes \
+     with what to change, so \
      change that and submit again. If you would ask a question to settle the approach, put it in \
      the plan instead. A plan is not a stopping point: once it is approved, do the work.";
 
@@ -81,7 +82,10 @@ mod tests {
         );
         let rendered = render(&task_context(&approving, &environment)).unwrap();
         assert!(
-            rendered.contains("Plan first: this task requires its plan approved."),
+            rendered.contains(
+                "Plan first: this task requires its plan approved, and until it is, every tool that \
+                 would change something is refused."
+            ),
             "{rendered}"
         );
         assert!(rendered.contains("call submit_plan"), "{rendered}");

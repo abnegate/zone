@@ -1032,6 +1032,24 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 &summary,
             )
             .await;
+            // What the service pushed is the one commit it can vouch for
+            // afterwards: told to the guard, so the worktree may go while it
+            // is on that commit, and recorded under the lease for recovery,
+            // which reads the same facts. A push the record misses only
+            // keeps the worktree, so it is not a failure of the run.
+            if let Some(commit) = publication.pushed() {
+                checkout.mark_published(commit.to_string());
+                match tasks::record_run_publication(state.db(), run_id, owner, commit).await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::warn!(
+                        %run_id,
+                        "Pushed, but the run's lease was gone before the publication was recorded"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(%run_id, %error, "Pushed, but could not record the publication")
+                    }
+                }
+            }
             obs.set_status(
                 complete_publication(
                     state,
@@ -1252,21 +1270,25 @@ async fn guidance(
         None => String::new(),
     };
     // The index names read_document, which a run holds only through the
-    // workspace tools its initiator's standing grants — the same condition
-    // memory keys on, and a run without an initiator has neither.
+    // workspace tools its initiator's standing grants: the predicate is the
+    // one the tool set is built on, so the index renders exactly where the
+    // tool it points at is registered, and an initiator whose standing
+    // lapsed is offered nothing they can no longer read.
     let skills = match actor {
-        Some(_) => match crate::agent::skills::prompt(state.db(), task.workspace_id).await {
-            Ok(skills) => skills,
-            Err(error) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    %error,
-                    "Failed to load the skills index; continuing without it"
-                );
-                String::new()
+        Some(user) if crate::agent::tools::task_writer(state, task.workspace_id, user).await => {
+            match crate::agent::skills::prompt(state.db(), task.workspace_id).await {
+                Ok(skills) => skills,
+                Err(error) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        %error,
+                        "Failed to load the skills index; continuing without it"
+                    );
+                    String::new()
+                }
             }
-        },
-        None => String::new(),
+        }
+        _ => String::new(),
     };
 
     Guidance {
@@ -1781,6 +1803,10 @@ async fn attempt_run(
     permit: &Permit,
     plan_approval: bool,
 ) -> Result<TaskOutcome, Fault> {
+    // A task that requires its plan approved changes nothing until it is:
+    // every tool that would is refused, turn after turn, until the answer
+    // that resumes the run is an Approve to the plan it parked on.
+    let mut plan_held = plan_approval;
     let tools = task_tools(
         state,
         run_id,
@@ -1789,6 +1815,7 @@ async fn attempt_run(
         actor,
         workspace,
         plan_approval,
+        plan_held,
     )
     .await;
 
@@ -1880,6 +1907,10 @@ async fn attempt_run(
                     let answered =
                         park_for_answer(state, run_id, owner, &tool_call_id, &questions, permit)
                             .await?;
+                    if plan_held && plan::approved(&questions, &answered) {
+                        tracing::info!(%run_id, "Plan approved; the run may change things now");
+                        plan_held = false;
+                    }
                     context = parked;
                     resume_with(&mut context, answered, &mut answers);
                     tools = task_tools(
@@ -1890,6 +1921,7 @@ async fn attempt_run(
                         actor,
                         workspace,
                         plan_approval,
+                        plan_held,
                     )
                     .await;
                 }
@@ -1917,6 +1949,7 @@ async fn attempt_run(
                         actor,
                         workspace,
                         plan_approval,
+                        plan_held,
                     )
                     .await;
                 }
@@ -1934,7 +1967,10 @@ async fn attempt_run(
 ///
 /// [`ChatTools`] is not `Clone` and [`AgentRun`] takes it by value, so a run
 /// that survives its own question needs a fresh set for the turn after it
-/// rather than a hoisted one the first turn already ate.
+/// rather than a hoisted one the first turn already ate. `plan_approval`
+/// registers `submit_plan`; `plan_held` refuses every tool that would change
+/// something until the plan is approved.
+#[allow(clippy::too_many_arguments)]
 async fn task_tools(
     state: &AppState,
     run_id: Uuid,
@@ -1943,12 +1979,18 @@ async fn task_tools(
     actor: Option<Uuid>,
     workspace: &Path,
     plan_approval: bool,
+    plan_held: bool,
 ) -> ChatTools {
     let tools = ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
         .await
         .with_task_lease(state.db().clone(), run_id, owner);
-    if plan_approval {
+    let tools = if plan_approval {
         tools.with_plan_approval()
+    } else {
+        tools
+    };
+    if plan_held {
+        tools.holding_for_plan()
     } else {
         tools
     }
@@ -2322,11 +2364,13 @@ pub(super) async fn complete_publication(
         PrCreationResult::Created {
             pr_url,
             branch_name,
+            commit,
         } => {
             tracing::info!("Created PR for task {}: {}", execution.task, pr_url);
             Some(serde_json::json!({
                 "pr_url": pr_url,
                 "branch_name": branch_name,
+                "commit": commit,
             }))
         }
         PrCreationResult::NoChanges => {
@@ -2338,11 +2382,12 @@ pub(super) async fn complete_publication(
             tracing::info!("No repository configured for task {}", execution.task);
             None
         }
-        PrCreationResult::PrAlreadyExists { pr_url } => {
+        PrCreationResult::PrAlreadyExists { pr_url, commit } => {
             tracing::info!("PR already exists for task {}: {}", execution.task, pr_url);
             Some(serde_json::json!({
                 "pr_url": pr_url,
                 "pr_already_existed": true,
+                "commit": commit,
             }))
         }
         PrCreationResult::Error(err) => {

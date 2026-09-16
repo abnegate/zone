@@ -601,6 +601,13 @@ async fn park(questions: serde_json::Value) -> Parked {
 /// once it parks; `plan_approval` is the task's flag, which is what hands the
 /// run `submit_plan` at all.
 async fn park_with(tool: &str, arguments: String, plan_approval: bool) -> Parked {
+    park_scripted(vec![(tool.to_string(), arguments)], plan_approval).await
+}
+
+/// Run a task whose completions follow `script`: round `i` calls the tool the
+/// `i`th entry names, as call `call-<i>`, and every round past the script
+/// closes with prose. Stops once the run parks.
+async fn park_scripted(script: Vec<(String, String)>, plan_approval: bool) -> Parked {
     use chrono::{Duration, Utc};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -646,16 +653,14 @@ async fn park_with(tool: &str, arguments: String, plan_approval: bool) -> Parked
 
     let provider = MockServer::start().await;
     let rounds = Arc::new(AtomicUsize::new(0));
-    let asked = arguments;
-    let tool = tool.to_string();
     Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |_: &Request| {
-        let deltas = if rounds.fetch_add(1, Ordering::SeqCst) == 0 {
-            vec![
+        let round = rounds.fetch_add(1, Ordering::SeqCst);
+        let deltas = match script.get(round) {
+            Some((tool, arguments)) => vec![
                 serde_json::json!({"content": BEFORE_ASKING}),
-                serde_json::json!({"tool_calls":[{"index":0,"id":"ask-call","type":"function","function":{"name":tool,"arguments":asked}}]}),
-            ]
-        } else {
-            vec![serde_json::json!({"content": AFTER_ANSWERING})]
+                serde_json::json!({"tool_calls":[{"index":0,"id":format!("call-{round}"),"type":"function","function":{"name":tool,"arguments":arguments}}]}),
+            ],
+            None => vec![serde_json::json!({"content": AFTER_ANSWERING})],
         };
         let mut body = String::new();
         for delta in deltas {
@@ -739,7 +744,7 @@ async fn an_optional_question_parks_the_run_until_a_member_answers_it() {
     let body = read.json_value();
     assert_eq!(body["run"]["status"], "waiting");
     let pending = &body["run"]["pending_question"];
-    assert_eq!(pending["tool_call_id"], "ask-call");
+    assert_eq!(pending["tool_call_id"], "call-0");
     assert_eq!(pending["questions"][0]["header"], "Scope");
     assert_eq!(pending["questions"][0]["required"], false);
     assert_eq!(
@@ -828,7 +833,10 @@ async fn a_task_that_requires_plan_approval_parks_on_its_plan_and_keeps_it() {
         .as_str()
         .expect("a system prompt");
     assert!(
-        prompt.contains("Plan first: this task requires its plan approved."),
+        prompt.contains(
+            "Plan first: this task requires its plan approved, and until it is, every tool that \
+             would change something is refused."
+        ),
         "{prompt}"
     );
     let last = rounds[1]["messages"]
@@ -848,6 +856,81 @@ async fn a_task_that_requires_plan_approval_parks_on_its_plan_and_keeps_it() {
         kept.as_deref(),
         Some(PLAN),
         "the plan outlives the question that carried it"
+    );
+    parked.finish().await;
+}
+
+/// The content of the tool message a round carries for `call`, which is what
+/// the model was told the call produced.
+fn tool_result(round: &serde_json::Value, call: &str) -> String {
+    round["messages"]
+        .as_array()
+        .expect("a round carries messages")
+        .iter()
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == call)
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_else(|| panic!("no tool result for {call} in {round}"))
+        .to_string()
+}
+
+/// A task that requires its plan approved changes nothing until it is: a
+/// write before the plan is refused with the reason, the plan parks the run,
+/// and once Approve resumes it the same write goes through.
+#[tokio::test]
+async fn a_task_holding_for_its_plan_refuses_to_change_anything_until_it_is_approved() {
+    const PLAN: &str = "1. Write the note.";
+    let parked = park_scripted(
+        vec![
+            (
+                "write_file".to_string(),
+                serde_json::json!({"path": "notes.txt", "content": "before approval\n"})
+                    .to_string(),
+            ),
+            (
+                "submit_plan".to_string(),
+                serde_json::json!({"plan": PLAN}).to_string(),
+            ),
+            (
+                "write_file".to_string(),
+                serde_json::json!({"path": "notes.txt", "content": "after approval\n"}).to_string(),
+            ),
+        ],
+        true,
+    )
+    .await;
+    let rounds = parked.rounds().await;
+    assert_eq!(rounds.len(), 2, "the refused write, then the plan");
+    let refused = tool_result(&rounds[1], "call-0");
+    assert!(
+        refused.starts_with("Error: This task requires its plan approved before anything changes."),
+        "{refused}"
+    );
+    let offered: Vec<&str> = rounds[1]["tools"]
+        .as_array()
+        .expect("the run is offered tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert!(
+        offered.contains(&"write_file"),
+        "the hold refuses the call rather than hiding the tool: {offered:?}"
+    );
+
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Plan approval","labels":["Approve"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+    let rounds = parked.rounds().await;
+    assert_eq!(
+        rounds.len(),
+        4,
+        "approval bought the write and the turn that closed the run"
+    );
+    let written = tool_result(&rounds[3], "call-2");
+    assert!(
+        !written.starts_with("Error:"),
+        "the write goes through once the plan is approved: {written}"
     );
     parked.finish().await;
 }

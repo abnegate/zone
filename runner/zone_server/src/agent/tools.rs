@@ -87,7 +87,11 @@ pub struct WorkspaceScope {
     pub user_id: Uuid,
 }
 
-async fn task_writer(state: &AppState, workspace: Uuid, actor: Uuid) -> bool {
+/// Whether `actor` may act on the workspace as a task initiator: an active
+/// member of at least member standing. The tool set a run is built with
+/// keys on this, and so does everything the prompt offers only because that
+/// tool set has it.
+pub(crate) async fn task_writer(state: &AppState, workspace: Uuid, actor: Uuid) -> bool {
     match workspace_members::get_member(state.db(), workspace, actor).await {
         Ok(Some(member)) => {
             member.is_active && member.role >= workspace_members::WorkspaceRole::Member
@@ -230,6 +234,12 @@ const NEVER_DEFERRED: [&str; 6] = [
     super::memory::MEMORY_DELETE,
 ];
 
+/// What a held call is told: the run changes nothing until its plan is
+/// answered, and the way forward is the plan.
+pub const PLAN_HELD: &str = "This task requires its plan approved before anything changes. Call \
+                             submit_plan with the plan and wait for the answer; until it is approved, \
+                             only tools that read run.";
+
 /// The tools offered for one turn, and the context they run in.
 ///
 /// Chat and tasks share workspace tools. Tasks have a sandboxed file/shell
@@ -265,6 +275,11 @@ pub struct ChatTools {
     /// hand-written catalog still carries the guidance it was handed.
     mcp_guidance: Option<String>,
     lease: Option<TaskLease>,
+    /// A run that must have its plan approved changes nothing until it is:
+    /// while this holds, every call at a mutating tier is refused, and only
+    /// reading — and `submit_plan` — runs. The worker clears it by rebuilding
+    /// the catalog without it once the approval is answered.
+    plan_hold: bool,
     /// A display name for receipts, not an authorization decision, so it is
     /// the one thing here worth caching: a stale name costs nothing, a stale
     /// grant would. Membership is re-read per call in `authorize_workspace`.
@@ -306,6 +321,7 @@ impl ChatTools {
             tiers: HashMap::new(),
             mcp_guidance: None,
             lease: None,
+            plan_hold: false,
             actor_name: OnceCell::new(),
         }
     }
@@ -443,6 +459,20 @@ impl ChatTools {
         self.cache_catalog();
         self.publish_catalog();
         self
+    }
+
+    /// Hold every mutating call until the plan is approved. The paragraph
+    /// that tells a run to plan first is an instruction; this is what makes
+    /// it so: `apply_patch`, `run_command` and their kind are refused with the
+    /// reason, and reading tools and `submit_plan` run as before.
+    pub fn holding_for_plan(mut self) -> Self {
+        self.plan_hold = true;
+        self
+    }
+
+    /// Whether mutating calls are currently held for a plan's approval.
+    pub fn holds_for_plan(&self) -> bool {
+        self.plan_hold
     }
 
     /// The run id reaches the tool context nowhere else, so the session a job
@@ -618,6 +648,7 @@ impl ChatTools {
             toolbox,
             remote,
             mcp_guidance,
+            plan_hold: false,
             lease: None,
             actor_name: OnceCell::new(),
         };
@@ -781,6 +812,9 @@ impl ChatTools {
                 self.names.join(", ")
             ));
         };
+        if self.plan_hold && tool.tier().mutating() {
+            return ToolResult::error(PLAN_HELD);
+        }
 
         // Models routinely emit "" or "null" for a no-argument call.
         let trimmed = arguments.trim();
@@ -2853,6 +2887,45 @@ mod tests {
 
         assert!(result.success, "{:?}", result.error);
         assert!(result.output.unwrap().contains("agentic"));
+    }
+
+    /// A tool set holding for a plan refuses what would change something,
+    /// with the reason, and lets a read through: the hold is on the call and
+    /// not on the catalog, so the model reads a refusal rather than an absence.
+    #[tokio::test]
+    async fn a_tool_set_holding_for_a_plan_refuses_a_mutation_and_lets_a_read_through() {
+        let tools = ChatTools::build(scope()).await.holding_for_plan();
+        assert!(tools.holds_for_plan());
+        let path = std::env::temp_dir().join(format!("zone-agent-{}.txt", Uuid::new_v4()));
+        std::fs::write(&path, "held").unwrap();
+        let written = tools
+            .execute(
+                "write_file",
+                &json!({"path": path, "content": "changed"}).to_string(),
+            )
+            .await;
+        let read = tools
+            .execute("read_file", &json!({"path": path}).to_string())
+            .await;
+        let contents = std::fs::read_to_string(&path);
+        let cleanup = std::fs::remove_file(&path);
+        assert!(!written.success);
+        assert!(
+            written
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("requires its plan approved")),
+            "{:?}",
+            written.error
+        );
+        assert!(
+            tools.has("write_file"),
+            "the hold refuses the call and does not hide the tool"
+        );
+        assert!(read.success, "{:?}", read.error);
+        assert!(read.output.unwrap().contains("held"));
+        assert_eq!(contents.unwrap(), "held", "nothing changed");
+        cleanup.unwrap();
     }
 
     #[tokio::test]

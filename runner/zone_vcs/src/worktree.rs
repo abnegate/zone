@@ -4,9 +4,11 @@
 //! CC 349-410 and 1487-1640, and CX 19: a run works in a worktree of its own
 //! under a directory the host chose, the worktree is cleaned up when it is
 //! unchanged, and one that still holds work nobody has is refused rather than
-//! removed. "Work nobody has" is read from git itself — changes no commit
-//! holds, and commits no remote-tracking ref holds — so the rule does not
-//! depend on the run remembering what it did.
+//! removed. "Work nobody has" is changes no commit holds, read from git, and
+//! a HEAD that is not a commit the service knows to be safe — the one the run
+//! started on, or one the service itself pushed — which the caller states.
+//! Refs are not consulted for that: every ref in a shared clone is a run's to
+//! move, and a run could make its commits look published without a push.
 //!
 //! Everything here is local to the disk and synchronous, so it can run inside
 //! a `Drop` as well as under `spawn_blocking`; the one network step, fetching
@@ -19,8 +21,9 @@ use std::process::{Command, Stdio};
 pub struct Unfinished {
     /// Changes in the working tree or the index that no commit holds.
     pub uncommitted: bool,
-    /// Commits reachable from HEAD that no remote-tracking ref holds: work
-    /// that was committed and never published.
+    /// HEAD is not a commit the caller knows to be safe — neither the one the
+    /// run started on nor one the service pushed — so it holds work that was
+    /// committed and never published.
     pub unpublished: bool,
 }
 
@@ -83,23 +86,36 @@ pub fn is_worktree(path: &Path) -> bool {
     path.join(".git").is_file()
 }
 
-/// What this worktree holds that nothing else does.
-pub fn unfinished(path: &Path) -> std::io::Result<Unfinished> {
+/// What this worktree holds that nothing else does. `known` are the commits
+/// the caller can vouch for: the one the run started on and the one the
+/// service pushed, if it did. The status is read with untracked files
+/// listed explicitly and no excludes file taken from the configuration, so
+/// neither a `status.showUntrackedFiles` nor a `core.excludesFile` a run
+/// wrote into the shared configuration can hide a file from the check. A
+/// file the repository's own ignore rules cover is not counted: those rules
+/// are what the repository declares disposable, and a rule a run adds to
+/// `.gitignore` is itself a change the check sees.
+pub fn unfinished(path: &Path, known: &[&str]) -> std::io::Result<Unfinished> {
     let status = run(
-        local(path).args(["status", "--porcelain"]),
+        local(path).args([
+            "-c",
+            "status.showUntrackedFiles=all",
+            "-c",
+            "core.excludesFile=/dev/null",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ]),
         "read the worktree's status",
     )?;
-    let ahead = run(
-        local(path).args(["rev-list", "--count", "HEAD", "--not", "--remotes"]),
-        "read the worktree's history",
+    let head = run(
+        local(path).args(["rev-parse", "--verify", "HEAD^{commit}"]),
+        "read the worktree's head",
     )?;
-    let ahead: u64 = String::from_utf8_lossy(&ahead)
-        .trim()
-        .parse()
-        .map_err(|_| std::io::Error::other("git could not count the worktree's commits"))?;
+    let head = String::from_utf8_lossy(&head).trim().to_string();
     Ok(Unfinished {
         uncommitted: !status.is_empty(),
-        unpublished: ahead > 0,
+        unpublished: !known.iter().any(|commit| *commit == head),
     })
 }
 
@@ -253,7 +269,16 @@ mod tests {
             None,
             "detached, so no branch is pinned"
         );
-        assert_eq!(unfinished(&path).unwrap(), Unfinished::default());
+        let start = git(&repositories.remote, &["rev-parse", "main"]);
+        assert_eq!(unfinished(&path, &[&start]).unwrap(), Unfinished::default());
+        assert_eq!(
+            unfinished(&path, &[]).unwrap(),
+            Unfinished {
+                uncommitted: false,
+                unpublished: true
+            },
+            "a head nobody vouches for is unpublished"
+        );
         // Git names the repository by its real path, which on macOS is not
         // the path the temporary directory was handed out under.
         assert_eq!(
@@ -267,10 +292,11 @@ mod tests {
         let repositories = repositories();
         let path = repositories.worktrees.join("run");
         add(&repositories.base, &path, "origin/HEAD").unwrap();
+        let start = git(&path, &["rev-parse", "HEAD"]);
         git(&path, &["checkout", "-q", "-b", "task/one"]);
         std::fs::write(path.join("work.txt"), "in progress\n").unwrap();
         assert_eq!(
-            unfinished(&path).unwrap(),
+            unfinished(&path, &[&start]).unwrap(),
             Unfinished {
                 uncommitted: true,
                 unpublished: false
@@ -279,25 +305,70 @@ mod tests {
         git(&path, &["add", "work.txt"]);
         git(&path, &["commit", "-q", "-m", "work"]);
         assert_eq!(
-            unfinished(&path).unwrap(),
+            unfinished(&path, &[&start]).unwrap(),
             Unfinished {
                 uncommitted: false,
                 unpublished: true
             },
-            "a commit the remote does not have is unpublished"
+            "a commit the service did not push is unpublished"
         );
-        // Publication as the service performs it: a push to the remote, and the
-        // remote-tracking ref moved to what was pushed.
-        git(&path, &["push", "-q", "origin", "HEAD:refs/heads/task/one"]);
+        // A run can write any ref in the shared clone; a remote-tracking ref
+        // planted without a push proves nothing.
         git(
             &path,
             &["update-ref", "refs/remotes/origin/task/one", "HEAD"],
         );
-        assert_eq!(unfinished(&path).unwrap(), Unfinished::default());
+        assert!(
+            unfinished(&path, &[&start]).unwrap().unpublished,
+            "a planted remote-tracking ref is not a publication"
+        );
+        // Publication as the service performs it: a push, and the service
+        // vouching for what it pushed.
+        git(&path, &["push", "-q", "origin", "HEAD:refs/heads/task/one"]);
+        let pushed = git(&path, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            unfinished(&path, &[&start, &pushed]).unwrap(),
+            Unfinished::default()
+        );
         assert_eq!(branch(&path).unwrap().as_deref(), Some("task/one"));
         assert_eq!(
             git(&repositories.remote, &["rev-parse", "task/one"]),
-            git(&path, &["rev-parse", "HEAD"])
+            pushed
+        );
+    }
+
+    /// A run's git commands reach the shared configuration, and a setting
+    /// there that hides untracked files — `status.showUntrackedFiles`, or an
+    /// excludes file that ignores everything — must not hide them from the
+    /// check. A file the repository's own `.gitignore` covers is not counted.
+    #[test]
+    fn an_untracked_file_counts_even_when_the_clone_is_told_to_hide_them() {
+        let repositories = repositories();
+        let path = repositories.worktrees.join("run");
+        add(&repositories.base, &path, "origin/HEAD").unwrap();
+        let start = git(&path, &["rev-parse", "HEAD"]);
+        git(&path, &["config", "status.showUntrackedFiles", "no"]);
+        let excludes = repositories.worktrees.join("hide-everything");
+        std::fs::write(&excludes, "*\n").unwrap();
+        git(
+            &path,
+            &["config", "core.excludesFile", excludes.to_str().unwrap()],
+        );
+        std::fs::write(path.join("notes.txt"), "not yet added\n").unwrap();
+        assert!(
+            unfinished(&path, &[&start]).unwrap().uncommitted,
+            "the file is seen despite status.showUntrackedFiles=no and an excludes file"
+        );
+        std::fs::remove_file(path.join("notes.txt")).unwrap();
+        git(&path, &["config", "--unset", "core.excludesFile"]);
+        std::fs::write(path.join(".gitignore"), "*.log\n").unwrap();
+        git(&path, &["add", ".gitignore"]);
+        git(&path, &["commit", "-q", "-m", "ignore logs"]);
+        std::fs::write(path.join("build.log"), "output\n").unwrap();
+        let head = git(&path, &["rev-parse", "HEAD"]);
+        assert!(
+            !unfinished(&path, &[&start, &head]).unwrap().uncommitted,
+            "a file the repository's own rules ignore is not work"
         );
     }
 
@@ -328,7 +399,7 @@ mod tests {
     fn a_missing_worktree_is_an_error_and_not_a_panic() {
         let repositories = repositories();
         let missing = repositories.worktrees.join("missing");
-        assert!(unfinished(&missing).is_err());
+        assert!(unfinished(&missing, &[]).is_err());
         assert!(remove(&repositories.base, &missing).is_err());
         assert!(repository_of(&missing).is_err());
     }

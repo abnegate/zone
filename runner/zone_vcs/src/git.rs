@@ -260,8 +260,10 @@ impl GitService {
         // share, so a branch that already exists here is either one an earlier
         // run's worktree still holds — kept because it has work no remote has,
         // and the run is refused with that reason rather than git's wording —
-        // or one a removed worktree left behind when its deletion failed, which
-        // nothing holds and this run may take over.
+        // or one nothing holds: left by a removal whose deletion failed, or by
+        // a kept worktree deleted by hand. That one may still point at commits
+        // nothing else has, so it is set aside under a name of its own rather
+        // than deleted, and the run takes the name.
         let held = Self::output(
             Self::network_command(None)
                 .args(["show-ref", "--verify", "--quiet", &reference])
@@ -292,11 +294,17 @@ impl GitService {
                         .into(),
                 ));
             }
-            let mut delete = Self::network_command(None);
-            delete
-                .args(["branch", "-D", "--", branch])
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| format!("{}.{:09}", since.as_secs(), since.subsec_nanos()))
+                .unwrap_or_else(|_| "0".to_string());
+            let aside = format!("{branch}.abandoned.{stamp}");
+            let mut rename = Self::network_command(None);
+            rename
+                .args(["branch", "-m", branch, &aside])
                 .current_dir(path);
-            Self::finish(&mut delete).await?;
+            Self::finish(&mut rename).await?;
+            tracing::warn!(branch, %aside, "Set aside a branch no worktree held so the run could take the name");
         }
         let mut command = Self::network_command(None);
         command.args(["checkout", "-b", branch]);
@@ -874,14 +882,18 @@ impl GitService {
         Ok(())
     }
 
-    /// Push branch with access token authentication
+    /// Push the checkout's HEAD to `branch_name` on the remote, with access
+    /// token authentication, and say which commit was pushed. The commit is
+    /// resolved before the push and the push names it rather than `HEAD`, so
+    /// what the caller is told was pushed is what the remote received even if
+    /// something moves HEAD meanwhile.
     pub async fn push_with_token(
         &self,
         path: &Path,
         branch_name: &str,
         remote_url: &str,
         token: &str,
-    ) -> GitResult<()> {
+    ) -> GitResult<String> {
         let remote = Self::repository_url(remote_url)?;
         self.push_source(path, branch_name, &remote, token, false)
             .await
@@ -894,7 +906,8 @@ impl GitService {
         remote: &str,
         token: &str,
         local: bool,
-    ) -> GitResult<()> {
+    ) -> GitResult<String> {
+        let commit = self.revision(path, "HEAD").await?;
         let mut command = Self::network_command(Some(token));
         if local {
             #[cfg(test)]
@@ -910,27 +923,28 @@ impl GitService {
                 "--porcelain",
                 "--",
                 remote,
-                &format!("HEAD:refs/heads/{branch_name}"),
+                &format!("{commit}:refs/heads/{branch_name}"),
             ])
             .current_dir(path)
             .stdout(Stdio::piped());
         let output = Self::output(&mut command).await?;
         if output.status.success() {
-            // What was pushed is what origin has. Said in the repository's own
-            // terms so a worktree's "unpublished" reading — commits no
-            // remote-tracking ref holds — turns false the moment it is true.
+            // What was pushed is what origin has, said in the repository's
+            // own terms for whoever reads its refs; the service itself keeps
+            // the commit it was told, since a ref in a shared clone proves
+            // nothing to it.
             let mut tracking = Self::network_command(None);
             tracking
                 .args([
                     "update-ref",
                     &format!("refs/remotes/origin/{branch_name}"),
-                    "HEAD",
+                    &commit,
                 ])
                 .current_dir(path);
             if let Err(error) = Self::finish(&mut tracking).await {
                 tracing::warn!(%error, "Pushed, but could not record the remote-tracking ref");
             }
-            return Ok(());
+            return Ok(commit);
         }
         // Classify only Git's machine-readable status; never expose remote output
         // or URLs that could contain credentials or untrusted server messages.
@@ -1450,7 +1464,7 @@ mod publication_tests {
         std::fs::write(second.join("second"), "second attempt").unwrap();
         service.stage_all(&second).await.unwrap();
         let second_commit = service.commit(&second, "second attempt").await.unwrap();
-        service
+        let pushed = service
             .push_source(
                 &second,
                 "zone/task-test",
@@ -1460,6 +1474,7 @@ mod publication_tests {
             )
             .await
             .unwrap();
+        assert_eq!(pushed, second_commit, "the push says which commit it sent");
         assert_eq!(
             git(&remote, &["rev-parse", "zone/task-test"]),
             second_commit
@@ -1688,9 +1703,10 @@ mod publication_tests {
 
     /// A branch that no worktree holds — left behind by a removal whose
     /// deletion failed, or by a worktree deleted by hand — is taken over by
-    /// the next run that asks for it.
+    /// the next run that asks for it, and what it pointed at is set aside
+    /// under a name of its own rather than lost.
     #[tokio::test]
-    async fn a_branch_no_worktree_holds_is_taken_over_by_the_next_run() {
+    async fn a_branch_no_worktree_holds_is_set_aside_and_its_name_taken_by_the_next_run() {
         let root = tempfile::tempdir().unwrap();
         let remote = root.path().join("remote");
         std::fs::create_dir(&remote).unwrap();
@@ -1705,6 +1721,10 @@ mod publication_tests {
             .prepare_branch(&first, "zone/task", false)
             .await
             .unwrap();
+        std::fs::write(first.join("work.txt"), "never pushed\n").unwrap();
+        crate::worktree::fixtures::git(&first, &["add", "work.txt"]);
+        crate::worktree::fixtures::git(&first, &["commit", "-q", "-m", "work"]);
+        let orphaned = crate::worktree::fixtures::git(&first, &["rev-parse", "HEAD"]);
         crate::worktree::fixtures::git(
             &base,
             &["worktree", "remove", "--force", first.to_str().unwrap()],
@@ -1721,6 +1741,23 @@ mod publication_tests {
             .await
             .unwrap();
         assert_eq!(service.current_branch(&second).await.unwrap(), "zone/task");
+        assert_ne!(
+            crate::worktree::fixtures::git(&second, &["rev-parse", "HEAD"]),
+            orphaned,
+            "the run starts fresh"
+        );
+        let aside = crate::worktree::fixtures::git(
+            &base,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short) %(objectname)",
+                "refs/heads/zone/task.abandoned.*",
+            ],
+        );
+        assert!(
+            aside.contains("zone/task.abandoned.") && aside.contains(&orphaned),
+            "the orphaned commit is kept under a name of its own: {aside}"
+        );
 
         let third = root.path().join("third");
         crate::worktree::add(&base, &third, "origin/HEAD").unwrap();

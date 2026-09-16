@@ -63,6 +63,14 @@ pub fn question(arguments: &str) -> Result<Vec<Question>, String> {
     )
 }
 
+/// Whether the answer that resumed a run approved the plan it parked on:
+/// the park was a plan, and the rendered answer is Approve — the form
+/// `question::render` gives one chosen option, so a Revise, or an Other with
+/// what to change, leaves the hold in place.
+pub fn approved(questions: &[Question], resume: &str) -> bool {
+    submitted(questions).is_some() && resume.trim() == format!("{HEADER}: {APPROVE}")
+}
+
 /// The plan a parked question carries, when the park is a plan approval and
 /// not a question the run asked for itself.
 pub fn submitted(questions: &[Question]) -> Option<&str> {
@@ -219,5 +227,30 @@ mod tests {
         assert!(!refused.success);
         assert!(tool.ends_turn());
         assert_eq!(tool.tier(), Tier::Read);
+    }
+
+    /// Approve, rendered the way the run receives it, releases the hold;
+    /// Revise and an Other do not, and neither does an answer to a question
+    /// the run asked for itself.
+    #[test]
+    fn only_an_approve_rendered_as_the_run_receives_it_counts_as_approval() {
+        use crate::agent::question::{Answer, OTHER_LABEL, render};
+        let questions = question(&serde_json::json!({"plan": "1. Do it."}).to_string()).unwrap();
+        let answer = |labels: &[&str], other: Option<&str>| Answer {
+            header: HEADER.to_string(),
+            labels: labels.iter().map(|label| label.to_string()).collect(),
+            other: other.map(str::to_string),
+        };
+        let approve = render(&questions, &[answer(&[APPROVE], None)]).unwrap();
+        assert!(approved(&questions, &approve), "{approve}");
+        let revise = render(&questions, &[answer(&[REVISE], None)]).unwrap();
+        assert!(!approved(&questions, &revise), "{revise}");
+        let other = render(&questions, &[answer(&[OTHER_LABEL], Some("Skip the test"))]).unwrap();
+        assert!(!approved(&questions, &other), "{other}");
+        let own = crate::agent::question::parse(
+            &serde_json::json!({"questions":[{"header":"Scope","question":"How far?","options":[{"label":"Approve","description":"All of it"},{"label":"Some","description":"Part"}]}]}).to_string(),
+        )
+        .unwrap();
+        assert!(!approved(&own, "Scope: Approve"));
     }
 }

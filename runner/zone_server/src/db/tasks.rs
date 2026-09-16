@@ -1049,6 +1049,75 @@ pub async fn heartbeat_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbR
         .bind(run_id).bind(owner).execute(pool).await?.rows_affected() == 1)
 }
 
+/// The commit a run's worktree started on, once its branch is prepared,
+/// recorded by the service under the run's lease fence. Cleanup may remove
+/// the worktree while its HEAD is this commit or one the service pushed, and
+/// nothing else: a run's own git commands can move any ref in the clone the
+/// runs share, so refs are no proof of anything.
+pub async fn record_run_checkout(
+    pool: &PgPool,
+    run: Uuid,
+    owner: Uuid,
+    head: &str,
+) -> DbResult<bool> {
+    Ok(sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO task_run_checkouts (run_id, head) \
+         SELECT id, $3 FROM task_runs \
+         WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} \
+           AND heartbeat_at > NOW() - INTERVAL '60 seconds' \
+         ON CONFLICT (run_id) DO UPDATE SET head = EXCLUDED.head, updated_at = NOW()"
+    )))
+    .bind(run)
+    .bind(owner)
+    .bind(head)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// The commit the service pushed from a run's worktree, recorded after the
+/// push succeeded and under the same fence; the worktree may be removed
+/// while its HEAD is still this commit.
+pub async fn record_run_publication(
+    pool: &PgPool,
+    run: Uuid,
+    owner: Uuid,
+    commit: &str,
+) -> DbResult<bool> {
+    Ok(sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE task_run_checkouts c SET published = $3, updated_at = NOW() \
+         FROM task_runs r \
+         WHERE c.run_id = r.id AND r.id = $1 AND r.owner IS NOT DISTINCT FROM $2 \
+           AND r.status IN {ACTIVE_RUN_STATUSES} \
+           AND r.heartbeat_at > NOW() - INTERVAL '60 seconds'"
+    )))
+    .bind(run)
+    .bind(owner)
+    .bind(commit)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// What the service recorded about a run's worktree: the commit it started on
+/// and the commit last pushed from it, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunCheckout {
+    pub head: String,
+    pub published: Option<String>,
+}
+
+pub async fn run_checkout(pool: &PgPool, run: Uuid) -> DbResult<Option<RunCheckout>> {
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT head, published FROM task_run_checkouts WHERE run_id = $1")
+            .bind(run)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(head, published)| RunCheckout { head, published }))
+}
+
 /// Keep the plan a run submitted for approval on the run, so it can be read
 /// after the question that carried it has been answered and cleared. Fenced
 /// on the lease like every write a run makes about itself; a run that lost
