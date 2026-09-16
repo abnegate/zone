@@ -946,6 +946,16 @@ async fn a_task_holding_for_its_plan_refuses_to_change_anything_until_it_is_appr
         !written.starts_with("Error:"),
         "the write goes through once the plan is approved: {written}"
     );
+    let offered: Vec<&str> = rounds[2]["tools"]
+        .as_array()
+        .expect("the run is offered tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert!(
+        !offered.contains(&"submit_plan"),
+        "an approved plan cannot be replaced while changes are allowed: {offered:?}"
+    );
     parked.finish().await;
 }
 

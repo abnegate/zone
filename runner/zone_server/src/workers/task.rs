@@ -1814,8 +1814,7 @@ async fn attempt_run(
     // approval is the run's: an attempt retried after one starts unheld,
     // with the approved plan in hand and no plan phase to go through again.
     let approved = approval.approved();
-    let planning = plan_approval && approved.is_none();
-    let mut plan_held = planning;
+    let mut plan_held = plan_approval && approved.is_none();
     let tools = task_tools(
         state,
         run_id,
@@ -1823,7 +1822,6 @@ async fn attempt_run(
         workspace_id,
         actor,
         workspace,
-        planning,
         plan_held,
     )
     .await;
@@ -1934,7 +1932,6 @@ async fn attempt_run(
                         workspace_id,
                         actor,
                         workspace,
-                        planning,
                         plan_held,
                     )
                     .await;
@@ -1962,7 +1959,6 @@ async fn attempt_run(
                         workspace_id,
                         actor,
                         workspace,
-                        planning,
                         plan_held,
                     )
                     .await;
@@ -1981,10 +1977,11 @@ async fn attempt_run(
 ///
 /// [`ChatTools`] is not `Clone` and [`AgentRun`] takes it by value, so a run
 /// that survives its own question needs a fresh set for the turn after it
-/// rather than a hoisted one the first turn already ate. `plan_approval`
-/// registers `submit_plan`; `plan_held` refuses every tool that would change
-/// something until the plan is approved.
-#[allow(clippy::too_many_arguments)]
+/// rather than a hoisted one the first turn already ate. `plan_held` is the
+/// plan phase in one flag: while the run holds for its plan, `submit_plan`
+/// is registered and every tool that would change something is refused;
+/// once the plan is approved both go together, so an approved plan cannot
+/// be replaced while changes are allowed.
 async fn task_tools(
     state: &AppState,
     run_id: Uuid,
@@ -1992,19 +1989,13 @@ async fn task_tools(
     workspace_id: Uuid,
     actor: Option<Uuid>,
     workspace: &Path,
-    plan_approval: bool,
     plan_held: bool,
 ) -> ChatTools {
     let tools = ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
         .await
         .with_task_lease(state.db().clone(), run_id, owner);
-    let tools = if plan_approval {
-        tools.with_plan_approval()
-    } else {
-        tools
-    };
     if plan_held {
-        tools.holding_for_plan()
+        tools.with_plan_approval().holding_for_plan()
     } else {
         tools
     }
