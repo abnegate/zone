@@ -2007,21 +2007,22 @@ async fn park_for_answer(
     // reads 'waiting' has to find a claim already standing, or it resolves
     // nothing and the run waits out the whole timeout.
     let waiter = question::expect(run_id);
-    if !matches!(
-        tasks::park_task_run(state.db(), run_id, owner, pending.clone()).await,
-        Ok(true)
-    ) {
-        return Err(Fault::lease());
-    }
     // A plan outlives the question that carried it: once approval is asked
     // for, the row keeps what was asked about, so a reviewer can read it after
-    // the answer has cleared the question.
+    // the answer has cleared the question. It is written before the park, so
+    // a reader who finds the row waiting on the question finds the plan too.
     if let Some(plan) = plan::submitted(questions)
         && !matches!(
             tasks::record_run_plan(state.db(), run_id, owner, plan).await,
             Ok(true)
         )
     {
+        return Err(Fault::lease());
+    }
+    if !matches!(
+        tasks::park_task_run(state.db(), run_id, owner, pending.clone()).await,
+        Ok(true)
+    ) {
         return Err(Fault::lease());
     }
     if let Err(error) = tasks::add_owned_task_run_log(
