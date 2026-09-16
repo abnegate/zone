@@ -1227,6 +1227,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                         &task_content,
                                         metadata,
                                         generation,
+                                        false,
                                     ).await;
                                 });
                             }
@@ -2217,6 +2218,15 @@ async fn handle_audio_generation(
 ///
 /// Chat requires write access (Member role or higher) since it creates messages.
 /// This is intentionally stricter than context.rs which only requires membership.
+/// `unattended` says nobody is watching this turn, which is what an automation's
+/// firing is. It withholds the chat's auto-approve from that turn and nothing
+/// else. Auto-approve is a standing "yes" a person gave while they were present
+/// to see what they were saying yes to; a scheduled turn runs hours later with
+/// nobody there, and its prompt can carry text the model itself wrote from
+/// something it read, so a tool that writes to the host or leaves the workspace
+/// must still be put to somebody. It waits, finds no one, and is declined —
+/// which is the right answer when the alternative is acting unasked. Reading
+/// tools are below that tier and run either way, so a watch still works.
 async fn handle_send_message(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -2226,6 +2236,7 @@ async fn handle_send_message(
     content: &str,
     metadata: Option<serde_json::Value>,
     mut request: Generation,
+    unattended: bool,
 ) {
     let generation = CHAT_GENERATIONS
         .entry(chat_id)
@@ -2367,7 +2378,16 @@ async fn handle_send_message(
                 )
                 .await
             }
-            Routing::Chat(chat) => {
+            Routing::Chat(mut chat) => {
+                // Cleared before the prompt is built rather than after it.
+                // `prepare_chat` renders the approval rules from this flag, so
+                // setting it on the preparation instead would gate the tools
+                // while telling the model they were not gated -- and a
+                // confirmed call made on that belief would sit waiting out the
+                // approval timeout for somebody who is not there.
+                if unattended {
+                    chat.auto_approve = false;
+                }
                 let preparation = tokio::select! {
                     biased;
                     _ = request.cancel.recv() => {
@@ -2411,6 +2431,61 @@ async fn handle_send_message(
         )
         .await;
     }
+}
+
+/// Run one chat turn with nobody connected.
+///
+/// A scheduled automation has a prompt and a chat but no browser, and this is
+/// the same turn a person's message takes: the prompt is persisted as the user
+/// message and the model answers it. Nothing here is a second code path, which
+/// is the point — an automation's turn gets the same lease, the same per-chat
+/// serialisation and the same recovery as a typed one.
+///
+/// It gets one thing deliberately different: approvals are not waived. The
+/// chat's auto-approve is a person's standing yes, given while they were there
+/// to see what it applied to, and this turn runs when they are not. See the
+/// `unattended` flag on `handle_send_message` for what that withholds and what
+/// it leaves alone.
+///
+/// No socket is needed because none was ever required. `ChatStream::of` keys a
+/// broadcast channel by chat id and `publish` drops a frame nobody is
+/// subscribed to, so the frames this turn emits reach whoever is connected and
+/// are replayed to whoever connects later from the live-turn log.
+///
+/// `metadata` marks where the turn came from, so a reader can tell an
+/// automation's message from one the person typed.
+///
+/// Returns the id the answer is stored under. A caller that has to read back
+/// what this turn said — a watch keeping its own reading as the next firing's
+/// baseline — needs to name the message rather than take the chat's latest,
+/// which may by then be something the person typed. The id is allocated before
+/// the turn runs, so it is returned whether or not an answer reached that row.
+pub(crate) async fn run_turn(
+    state: &AppState,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    content: &str,
+    metadata: Option<serde_json::Value>,
+) -> Uuid {
+    let stream = ChatStream::of(chat_id);
+    let generation = Generation::new(chat_id);
+    let message_id = generation.message_id;
+    handle_send_message(
+        state,
+        &stream,
+        chat_id,
+        workspace_id,
+        user_id,
+        content,
+        metadata,
+        generation,
+        // There is no socket here and no person behind one, which is the
+        // definition of unattended.
+        true,
+    )
+    .await;
+    message_id
 }
 
 async fn prepare_message(
@@ -3339,8 +3414,13 @@ async fn handle_chat_generation(
                 spawn_message_embedding_task(state.clone(), msg.id, chat_id, full_content.clone());
             }
 
-            // CRITICAL-4: Send message end with the SAME ID we sent in MessageStart
-            // The database generates msg.id, but we use assistant_message_id for protocol consistency
+            // Send message end with the same id MessageStart carried.
+            //
+            // `msg.id` is that same id, not a new one: `finish` stores the
+            // answer under the turn's own id, and the turn is this generation's
+            // `message_id`. Said plainly because the comment that used to sit
+            // here claimed the database generated it, which is what a caller
+            // reading back the answer by id would have been misled by.
             let end_msg = if cancelled {
                 ServerMessage::Cancelled {
                     message_id: Some(assistant_message_id),
