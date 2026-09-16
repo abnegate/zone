@@ -1,12 +1,23 @@
 //! Per-run workspaces. The guard owns the directory until publication finishes
 //! and removes it when execution completes, fails, or is cancelled. Durable run
 //! and owner identifiers also let recovery remove local directories after a crash.
+//!
+//! A run with a repository works in a worktree rather than a clone of its own:
+//! one base clone per repository lives under `repos/` in the checkout root,
+//! fetched before each run, and the run's directory is a detached worktree of
+//! it, so a run costs a fetch and a checkout instead of a clone and the
+//! history is shared. What that changes about cleanup is the rule: a worktree
+//! is removed when it holds nothing nobody else has, and kept — by the guard
+//! and by recovery alike — while it holds changes no commit has or commits no
+//! remote has, because removing those would be the one way a run's work could
+//! vanish without anyone having chosen that (CC 349-410, 1487-1640; CX 19).
 
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zone_vcs::git::GitService;
+use zone_vcs::worktree;
 
 use crate::db::{
     projects,
@@ -125,6 +136,10 @@ impl Baseline {
 pub struct Checkout {
     path: PathBuf,
     baseline: Option<Baseline>,
+    /// The base clone this directory is a worktree of, once it is one. A run
+    /// with no repository has none, and its directory is removed as a plain
+    /// directory is.
+    repository: Option<PathBuf>,
 }
 
 impl Checkout {
@@ -144,17 +159,16 @@ impl Checkout {
         }
         // The run and owner are durable before a directory can exist. Recovery
         // derives names only from these identifiers, never from a stored path.
-        let mut checkout = Self::create(&Self::root(pool), run, owner)
+        let root = Self::root(pool);
+        let mut checkout = Self::create(&root, run, owner)
             .map_err(|_| "Cannot create task checkout".to_string())?;
         if let Some(repository) = repository {
-            GitService::new()
-                .clone_repository(
-                    &repository.url,
-                    checkout.path(),
-                    repository.token.as_deref(),
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+            let base = Self::base(&root, &repository.url)
+                .map_err(|_| "Cannot create the repository's base clone".to_string())?;
+            Self::refresh(&base, &repository).await?;
+            let (from, at) = (base.clone(), checkout.path().to_path_buf());
+            Self::filesystem(move || worktree::add(&from, &at, "origin/HEAD")).await?;
+            checkout.repository = Some(base);
             if task.created_by.is_some() {
                 checkout.baseline = Some(
                     Baseline::prepare(pool, task, execution, checkout.path(), repository.url)
@@ -163,6 +177,67 @@ impl Checkout {
             }
         }
         Ok(checkout)
+    }
+
+    /// The base clone a repository's runs are worktrees of, under the same
+    /// private root as the runs. Named by a digest of the URL, so two
+    /// repositories cannot share one and a URL never becomes a path.
+    fn base(root: &Path, url: &str) -> std::io::Result<PathBuf> {
+        for directory in [root.to_path_buf(), root.join("repos")] {
+            match Self::directory(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            Self::validate_root(&directory)?;
+        }
+        let base = root
+            .join("repos")
+            .join(hex::encode(Sha256::digest(url.as_bytes())));
+        match Self::directory(&base) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        Self::validate_root(&base)?;
+        Ok(base)
+    }
+
+    /// Bring the base clone to the repository's current state: a fetch when
+    /// it exists, a clone when it does not. A directory a crashed clone left
+    /// without a `.git` is emptied first, so one failure does not fail every
+    /// run after it; a clone that lost the race to another run's clone falls
+    /// back to fetching what the winner made.
+    async fn refresh(base: &Path, repository: &Repository) -> Result<(), String> {
+        let git = GitService::new();
+        let token = repository.token.as_deref();
+        if base.join(".git").is_dir() {
+            return git
+                .fetch(base, token)
+                .await
+                .map_err(|error| error.to_string());
+        }
+        let directory = base.to_path_buf();
+        Self::filesystem(move || {
+            for entry in std::fs::read_dir(&directory)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    std::fs::remove_dir_all(entry.path())?;
+                } else {
+                    std::fs::remove_file(entry.path())?;
+                }
+            }
+            Ok(())
+        })
+        .await?;
+        match git.clone_repository(&repository.url, base, token).await {
+            Ok(()) => Ok(()),
+            Err(_) if base.join(".git").is_dir() => git
+                .fetch(base, token)
+                .await
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     fn root(pool: &PgPool) -> PathBuf {
@@ -231,6 +306,7 @@ impl Checkout {
         Ok(Self {
             path,
             baseline: None,
+            repository: None,
         })
     }
 
@@ -299,6 +375,9 @@ impl Checkout {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
                     Err(error) => return Err(error),
                 };
+                if kind.is_dir() && worktree::is_worktree(&path) {
+                    return Self::reclaim_worktree(&path);
+                }
                 let result = if kind.is_symlink() {
                     std::fs::remove_file(&path)
                 } else if kind.is_dir() {
@@ -324,6 +403,33 @@ impl Checkout {
         Ok(removed)
     }
 
+    /// Remove a finished run's worktree when nothing in it is lost, and leave
+    /// it — saying so — while it still holds work nobody else has. A worktree
+    /// git cannot read is left too: recovery reclaims what it can prove is
+    /// reclaimable, and a directory it cannot read is not that.
+    fn reclaim_worktree(path: &Path) -> std::io::Result<bool> {
+        match worktree::unfinished(path) {
+            Ok(unfinished) if unfinished.any() => {
+                tracing::info!(
+                    path = %path.display(),
+                    uncommitted = unfinished.uncommitted,
+                    unpublished = unfinished.unpublished,
+                    "Leaving a finished run's worktree that still holds work nobody else has"
+                );
+                Ok(false)
+            }
+            Ok(_) => {
+                let repository = worktree::repository_of(path)?;
+                worktree::remove(&repository, path)?;
+                Ok(true)
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "Cannot read a finished run's worktree; leaving it");
+                Ok(false)
+            }
+        }
+    }
+
     pub fn baseline(&self) -> Option<&Baseline> {
         self.baseline.as_ref()
     }
@@ -342,6 +448,29 @@ impl Drop for Checkout {
             tracing::error!(path = %root.display(), "Refusing cleanup through an unsafe checkout root");
             return;
         }
+        if let Some(repository) = &self.repository {
+            // The guard's one rule: never the way a run's work vanishes.
+            match worktree::unfinished(&self.path) {
+                Ok(unfinished) if unfinished.any() => {
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        uncommitted = unfinished.uncommitted,
+                        unpublished = unfinished.unpublished,
+                        "Keeping the run's worktree: it holds work nobody else has"
+                    );
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(path = %self.path.display(), %error, "Cannot read the run's worktree; leaving it in place");
+                    return;
+                }
+            }
+            if let Err(error) = worktree::remove(repository, &self.path) {
+                tracing::error!(path = %self.path.display(), %error, "Failed to remove task worktree");
+            }
+            return;
+        }
         if let Err(error) = std::fs::remove_dir_all(&self.path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -353,6 +482,124 @@ impl Drop for Checkout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run git in a fixture with a fixed identity, panicking on failure.
+    fn git(path: &Path, arguments: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .env("GIT_AUTHOR_NAME", "Fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.test")
+            .env("GIT_COMMITTER_NAME", "Fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.test")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(arguments)
+            .current_dir(path)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// A remote with one commit and a base clone of it under `root/repos`,
+    /// laid out the way `prepare` lays them out, without the network.
+    fn base_clone(root: &Path) -> PathBuf {
+        let remote = root.join("remote");
+        std::fs::create_dir(&remote).unwrap();
+        git(&remote, &["init", "-q", "-b", "main"]);
+        std::fs::write(remote.join("README"), "fixture\n").unwrap();
+        git(&remote, &["add", "README"]);
+        git(&remote, &["commit", "-q", "-m", "fixture"]);
+        let base = Checkout::base(root, "https://github.com/fixture/repository.git").unwrap();
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                base.to_str().unwrap(),
+            ],
+        );
+        base
+    }
+
+    /// A run's worktree of `base`, as `prepare` makes one, on a branch of its
+    /// own the way `Baseline::prepare` leaves it.
+    fn run_worktree(root: &Path, base: &Path, branch: &str) -> Checkout {
+        let mut checkout = Checkout::create(root, Uuid::new_v4(), Uuid::new_v4()).unwrap();
+        worktree::add(base, checkout.path(), "origin/HEAD").unwrap();
+        git(checkout.path(), &["checkout", "-q", "-b", branch]);
+        checkout.repository = Some(base.to_path_buf());
+        checkout
+    }
+
+    /// A private root of the shape production makes: a temporary directory
+    /// is made with the process umask, which is not the 0700 the root demands.
+    fn private_root() -> (tempfile::TempDir, PathBuf) {
+        let holder = tempfile::tempdir().unwrap();
+        let root = holder.path().join("root");
+        Checkout::directory(&root).unwrap();
+        (holder, root)
+    }
+
+    /// The guard removes a worktree that holds nothing nobody else has, and
+    /// keeps one that does — with a file no commit holds, or a commit no
+    /// remote holds — because removing it is the one way a run's work could
+    /// vanish without anyone choosing that.
+    #[test]
+    fn the_guard_keeps_a_worktree_that_holds_work_and_removes_one_that_does_not() {
+        let (_holder, root) = private_root();
+        let root = root.as_path();
+        let base = base_clone(root);
+
+        let committed = run_worktree(root, &base, "zone/committed");
+        let kept = committed.path().to_path_buf();
+        std::fs::write(kept.join("work.txt"), "committed, never pushed\n").unwrap();
+        git(&kept, &["add", "work.txt"]);
+        git(&kept, &["commit", "-q", "-m", "work"]);
+        drop(committed);
+        assert!(kept.exists(), "a commit no remote has is kept");
+        assert!(
+            git(&base, &["branch", "--list", "zone/committed"]).contains("zone/committed"),
+            "the kept worktree keeps its branch"
+        );
+
+        let dirty = run_worktree(root, &base, "zone/dirty");
+        let dirty_path = dirty.path().to_path_buf();
+        std::fs::write(dirty_path.join("notes.txt"), "uncommitted\n").unwrap();
+        drop(dirty);
+        assert!(dirty_path.exists(), "a file no commit has is kept");
+
+        let clean = run_worktree(root, &base, "zone/clean");
+        let clean_path = clean.path().to_path_buf();
+        drop(clean);
+        assert!(
+            !clean_path.exists(),
+            "a worktree holding nothing of its own is removed"
+        );
+        let listed = git(&base, &["worktree", "list", "--porcelain"]);
+        assert!(listed.contains(kept.to_str().unwrap()), "{listed}");
+        assert!(!listed.contains(clean_path.to_str().unwrap()), "{listed}");
+        assert_eq!(
+            git(&base, &["branch", "--list", "zone/clean"]),
+            "",
+            "a removed worktree's branch goes with it, so the next run can make it again"
+        );
+    }
+
+    /// A run with no repository has a plain directory, removed as before.
+    #[test]
+    fn a_directory_that_is_no_worktree_is_removed_as_it_always_was() {
+        let (_holder, root) = private_root();
+        let checkout = Checkout::create(&root, Uuid::new_v4(), Uuid::new_v4()).unwrap();
+        let path = checkout.path().to_path_buf();
+        std::fs::write(path.join("scratch"), "x").unwrap();
+        drop(checkout);
+        assert!(!path.exists());
+    }
 
     #[tokio::test]
     async fn recovery_filesystem_does_not_block_the_async_executor() {
@@ -454,6 +701,93 @@ mod tests {
             recovered,
             "production recovery must remove a checkout when Drop never ran"
         );
+    }
+
+    /// Recovery reclaims a finished run's worktree only once nothing in it is
+    /// lost: while it holds a commit no remote has, the sweep leaves it and
+    /// says so; once the work is gone, the next sweep removes it.
+    #[tokio::test]
+    async fn recovery_leaves_a_finished_run_s_worktree_while_it_holds_work() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO organizations(id,name,slug) VALUES($1,'Worktree recovery',$1::text)",
+        )
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO workspaces(id,organization_id,name,slug) VALUES($1,$2,'Worktree recovery',$1::text)").bind(workspace).bind(organization).execute(&pool).await.unwrap();
+        let task = crate::db::tasks::create_task(
+            &pool,
+            workspace,
+            &[],
+            "Recover worktree",
+            "Regression",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = crate::db::tasks::create_task_run(&pool, task.id)
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4();
+        assert!(
+            crate::db::tasks::claim_task_run(&pool, run.id, owner)
+                .await
+                .unwrap()
+        );
+        let root = Checkout::root(&pool);
+        let base = base_clone(&root);
+        let mut checkout = Checkout::create(&root, run.id, owner).unwrap();
+        worktree::add(&base, checkout.path(), "origin/HEAD").unwrap();
+        git(checkout.path(), &["checkout", "-q", "-b", "zone/recovered"]);
+        checkout.repository = Some(base.clone());
+        let path = checkout.path().to_path_buf();
+        std::fs::write(path.join("work.txt"), "committed, never pushed\n").unwrap();
+        git(&path, &["add", "work.txt"]);
+        git(&path, &["commit", "-q", "-m", "work"]);
+        std::mem::forget(checkout);
+        crate::db::tasks::complete_owned_task_run(
+            &pool,
+            run.id,
+            Some(owner),
+            "failed",
+            Some("orphaned"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        Checkout::recover(&pool).await.unwrap();
+        assert!(
+            path.exists(),
+            "a finished run's worktree holding a commit no remote has is left"
+        );
+        assert!(git(&base, &["branch", "--list", "zone/recovered"]).contains("zone/recovered"));
+
+        // Nothing of its own left: the sweep may now take it, branch and all.
+        git(&path, &["reset", "-q", "--hard", "origin/HEAD"]);
+        Checkout::recover(&pool).await.unwrap();
+        assert!(
+            !path.exists(),
+            "a clean worktree of a finished run is reclaimed"
+        );
+        assert_eq!(git(&base, &["branch", "--list", "zone/recovered"]), "");
+        let _ = std::fs::remove_dir_all(root.join("remote"));
+        let _ = std::fs::remove_dir_all(&base);
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -27,6 +27,7 @@ pub mod git;
 pub mod pull_request;
 pub mod resolution;
 pub mod subject;
+pub mod worktree;
 
 pub use conflict::{
     BranchName, CommitSha, Conflict, ConflictError, ConflictRequest, ConflictService,

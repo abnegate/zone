@@ -247,6 +247,23 @@ impl GitService {
         if self.current_branch(path).await? == branch {
             return Ok(());
         }
+        // A run works in a worktree of a base clone the repository's runs
+        // share, so a branch that already exists here is one an earlier run's
+        // worktree still holds — kept because it has work no remote has. The
+        // run is refused with the reason rather than failed on git's wording.
+        let held = Self::output(
+            Self::network_command(None)
+                .args(["show-ref", "--verify", "--quiet", &reference])
+                .current_dir(path),
+        )
+        .await?;
+        if held.status.success() {
+            return Err(GitError::CommandFailed(
+                "An earlier run's worktree still holds this task's branch with work that was \
+                 never published; publish or remove it before running the task again"
+                    .into(),
+            ));
+        }
         let mut command = Self::network_command(None);
         command.args(["checkout", "-b", branch]);
         if exists.status.success() {
@@ -383,6 +400,28 @@ impl GitService {
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Bring a base clone up to date with its origin, credentials in the child
+    /// environment only. Two runs of one repository may fetch at once; git
+    /// serialises the ref updates with lock files and refuses the loser, so
+    /// one refusal is retried once before it is reported.
+    pub async fn fetch(&self, path: &Path, token: Option<&str>) -> GitResult<()> {
+        for attempt in 0..2 {
+            let mut command = Self::network_command(token);
+            command
+                .args(["fetch", "--prune", "origin"])
+                .current_dir(path);
+            match Self::finish(&mut command).await {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt == 0 => {
+                    tracing::debug!(%error, "Retrying a fetch another run may have locked");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("two attempts return or fail")
     }
 
     /// Check if there are uncommitted changes
@@ -661,6 +700,20 @@ impl GitService {
             .stdout(Stdio::piped());
         let output = Self::output(&mut command).await?;
         if output.status.success() {
+            // What was pushed is what origin has. Said in the repository's own
+            // terms so a worktree's "unpublished" reading — commits no
+            // remote-tracking ref holds — turns false the moment it is true.
+            let mut tracking = Self::network_command(None);
+            tracking
+                .args([
+                    "update-ref",
+                    &format!("refs/remotes/origin/{branch_name}"),
+                    "HEAD",
+                ])
+                .current_dir(path);
+            if let Err(error) = Self::finish(&mut tracking).await {
+                tracing::warn!(%error, "Pushed, but could not record the remote-tracking ref");
+            }
             return Ok(());
         }
         // Classify only Git's machine-readable status; never expose remote output
@@ -1227,6 +1280,43 @@ mod publication_tests {
                 .is_ancestor(&second, &first_commit, "HEAD")
                 .await
                 .unwrap()
+        );
+    }
+    /// A branch an earlier run's kept worktree still holds is refused with
+    /// the reason, not with git's "already exists".
+    #[tokio::test]
+    async fn a_branch_a_kept_worktree_holds_is_refused_with_the_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = root.path().join("remote");
+        std::fs::create_dir(&remote).unwrap();
+        crate::worktree::fixtures::remote(&remote);
+        let base = root.path().join("base");
+        crate::worktree::fixtures::clone(&remote, &base);
+        let first = root.path().join("first");
+        crate::worktree::add(&base, &first, "origin/HEAD").unwrap();
+        let service = GitService::new();
+        service
+            .prepare_branch(&first, "zone/task", false)
+            .await
+            .unwrap();
+        assert_eq!(service.current_branch(&first).await.unwrap(), "zone/task");
+        assert!(
+            service
+                .prepare_branch(&first, "zone/task", false)
+                .await
+                .is_ok(),
+            "the worktree already on the branch is prepared again without complaint"
+        );
+        let second = root.path().join("second");
+        crate::worktree::add(&base, &second, "origin/HEAD").unwrap();
+        let refused = service
+            .prepare_branch(&second, "zone/task", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("earlier run's worktree still holds"),
+            "{refused}"
         );
     }
 }
