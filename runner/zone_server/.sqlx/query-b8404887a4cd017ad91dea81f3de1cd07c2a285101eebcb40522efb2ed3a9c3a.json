@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE tasks\n        SET title = COALESCE($2, title),\n            description = COALESCE($3, description),\n            acceptance_criteria = COALESCE($4, acceptance_criteria),\n            status = COALESCE($5, status),\n            priority = COALESCE($6, priority),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by\n        ",
+  "query": "\n                SELECT id, title, description, acceptance_criteria, status, priority,\n                       model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                       pr_url, branch_name, pr_status, pr_created_at, created_by\n                FROM tasks\n                WHERE workspace_id = $1 AND status = $2\n                ORDER BY created_at DESC\n                ",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,17 @@
       },
       {
         "ordinal": 9,
+        "name": "require_plan_approval",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "require_plan_approval"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
         "name": "github_repo_url",
         "type_info": "Text",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "source_id",
         "type_info": "Uuid",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "source_ids",
         "type_info": "UuidArray",
         "origin": {
@@ -136,7 +147,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "workspace_id",
         "type_info": "Uuid",
         "origin": {
@@ -147,7 +158,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "worker_id",
         "type_info": "Text",
         "origin": {
@@ -158,7 +169,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "queued_at",
         "type_info": "Timestamp",
         "origin": {
@@ -169,7 +180,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 16,
         "name": "started_at",
         "type_info": "Timestamp",
         "origin": {
@@ -180,7 +191,7 @@
         }
       },
       {
-        "ordinal": 16,
+        "ordinal": 17,
         "name": "completed_at",
         "type_info": "Timestamp",
         "origin": {
@@ -191,7 +202,7 @@
         }
       },
       {
-        "ordinal": 17,
+        "ordinal": 18,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -202,7 +213,7 @@
         }
       },
       {
-        "ordinal": 18,
+        "ordinal": 19,
         "name": "updated_at",
         "type_info": "Timestamp",
         "origin": {
@@ -213,7 +224,7 @@
         }
       },
       {
-        "ordinal": 19,
+        "ordinal": 20,
         "name": "pr_url",
         "type_info": "Text",
         "origin": {
@@ -224,7 +235,7 @@
         }
       },
       {
-        "ordinal": 20,
+        "ordinal": 21,
         "name": "branch_name",
         "type_info": "Text",
         "origin": {
@@ -235,7 +246,7 @@
         }
       },
       {
-        "ordinal": 21,
+        "ordinal": 22,
         "name": "pr_status",
         "type_info": "Text",
         "origin": {
@@ -246,7 +257,7 @@
         }
       },
       {
-        "ordinal": 22,
+        "ordinal": 23,
         "name": "pr_created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -257,7 +268,7 @@
         }
       },
       {
-        "ordinal": 23,
+        "ordinal": 24,
         "name": "created_by",
         "type_info": "Uuid",
         "origin": {
@@ -271,11 +282,7 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Int4"
+        "Text"
       ]
     },
     "nullable": [
@@ -287,6 +294,7 @@
       true,
       true,
       true,
+      false,
       false,
       true,
       true,
@@ -305,5 +313,5 @@
       true
     ]
   },
-  "hash": "6ffb9ac7ee809025a1fb3ec3e4bb976cf1febad1e4446b36bf29f3d9c3f5b0c2"
+  "hash": "b8404887a4cd017ad91dea81f3de1cd07c2a285101eebcb40522efb2ed3a9c3a"
 }

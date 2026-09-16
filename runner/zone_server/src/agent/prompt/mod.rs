@@ -874,6 +874,13 @@ mod tests {
             "task prompt is {} chars",
             task_prompt.len()
         );
+        // A run that requires its plan approved carries one more paragraph.
+        let approving_task_prompt = task(&task_tools().with_plan_approval(), &environment());
+        assert!(
+            approving_task_prompt.len() <= TASK_MAX_CHARS,
+            "plan-approved task prompt is {} chars",
+            approving_task_prompt.len()
+        );
     }
 
     #[test]

@@ -144,19 +144,22 @@ for (const viewport of [
         }
       });
 
-      test('creation wizards keep their title, steps, content and footer visible', async ({
-        page,
-      }) => {
-        for (const wizard of [
-          { path: 'projects', button: '+ New Project', title: 'New Project' },
-          { path: 'tasks', button: '+ New Task', title: 'New Task' },
-          { path: 'sources', button: '+ Add Source', title: 'Add Source' },
-          {
-            path: 'wiki',
-            button: '+ Add Knowledge',
-            title: 'Add Knowledge Entry',
-          },
-        ]) {
+      // One test per wizard: each walkthrough gets the whole per-test budget
+      // and its own retries, and a failure names the wizard. Four of them in
+      // one test ran out of the 60-second budget on a slow WebKit runner.
+      for (const wizard of [
+        { path: 'projects', button: '+ New Project', title: 'New Project' },
+        { path: 'tasks', button: '+ New Task', title: 'New Task' },
+        { path: 'sources', button: '+ Add Source', title: 'Add Source' },
+        {
+          path: 'wiki',
+          button: '+ Add Knowledge',
+          title: 'Add Knowledge Entry',
+        },
+      ]) {
+        test(`the ${wizard.path} creation wizard keeps its title, steps, content and footer visible`, async ({
+          page,
+        }) => {
           await ready(page, wizard.path, theme);
           const button = page.getByRole('button', {
             name: wizard.button,
@@ -248,18 +251,29 @@ for (const viewport of [
               .toBeLessThanOrEqual(priorities.width);
             const toggle = await dialog
               .locator('.toggle-wrapper')
+              .first()
               .boundingBox();
             expect(toggle).not.toBeNull();
             expect.soft(toggle!.width).toBeCloseTo(44, 3);
             expect.soft(toggle!.height).toBeCloseTo(24, 3);
-            const agentic = dialog.locator('.toggle-wrapper input');
+            // Named, because enabling agentic mode reveals a second toggle
+            // (plan approval) inside the same dialog.
+            const agentic = dialog.getByRole('checkbox', {
+              name: /Enable Agentic Mode/,
+            });
+            const planApproval = dialog.getByText('Require plan approval', {
+              exact: true,
+            });
+            await expect(planApproval).toHaveCount(0);
             await dialog
               .getByText('Enable Agentic Mode', { exact: true })
               .click();
             await expect(agentic).toBeChecked();
+            await expect(planApproval).toBeVisible();
             await agentic.focus();
             await agentic.press('Space');
             await expect(agentic).not.toBeChecked();
+            await expect(planApproval).toHaveCount(0);
           }
           const footer = await dialog.locator('footer').boundingBox();
           expect(footer!.y + footer!.height).toBeLessThanOrEqual(
@@ -270,8 +284,8 @@ for (const viewport of [
             `${profile}-${wizard.path}-wizard-details`,
             theme
           );
-        }
-      });
+        });
+      }
 
       test('conversation uses a full reading pane and preserves markdown hierarchy', async ({
         page,

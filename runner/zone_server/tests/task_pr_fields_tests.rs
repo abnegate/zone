@@ -23,6 +23,7 @@ mod db_tests {
             model_name: None,
             dependencies: None,
             is_agentic: false,
+            require_plan_approval: false,
             github_repo_url: None,
             source_id: None,
             source_ids: None,

@@ -306,6 +306,7 @@ pub async fn start_task(
             acceptance_criteria: input.acceptance_criteria.as_deref(),
             priority: input.priority,
             is_agentic: true,
+            require_plan_approval: false,
             source_id: input.source_id,
             created_by: Some(user_id),
         },
@@ -1868,6 +1869,7 @@ mod tests {
                 acceptance_criteria: None,
                 priority: None,
                 is_agentic: true,
+                require_plan_approval: false,
                 source_id: None,
                 created_by: Some(user),
             },
@@ -1896,6 +1898,7 @@ mod tests {
                 status: None,
                 priority: None,
                 project_ids: None,
+                require_plan_approval: None,
             },
         )
         .await;

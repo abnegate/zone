@@ -39,6 +39,7 @@ export const TaskSchema = z.object({
   started_at: z.string().nullable(),
   completed_at: z.string().nullable(),
   is_agentic: z.boolean(),
+  require_plan_approval: z.boolean().optional().default(false),
   github_repo_url: z.string().nullable(),
   source_id: z.string().nullable(),
   source_ids: z.array(z.string()).optional().default([]),
@@ -83,6 +84,8 @@ export const TaskRunSchema = z.object({
    * parked on a wait, and an unreadable one costs the subject, never the run.
    */
   waiting_on: WaitingSchema.nullish().catch(undefined),
+  /** The plan the run submitted for approval; sent only once one was asked for. */
+  plan: z.string().optional(),
 });
 
 const TaskRunMetadataSchema = z
@@ -120,6 +123,7 @@ export const CreateTaskRequestSchema = z.object({
   model_name: z.string().optional(),
   dependencies: z.array(z.string()).optional(),
   is_agentic: z.boolean().optional(),
+  require_plan_approval: z.boolean().optional(),
   github_repo_url: z.string().optional(),
   source_id: z.string().optional(),
   source_ids: z.array(z.string()).optional(),
@@ -135,6 +139,7 @@ export const UpdateTaskRequestSchema = z.object({
   dependencies: z.array(z.string()).optional(),
   project_ids: z.array(z.string()).optional(),
   is_agentic: z.boolean().optional(),
+  require_plan_approval: z.boolean().optional(),
   github_repo_url: z.string().optional(),
   source_id: z.string().optional(),
   source_ids: z.array(z.string()).optional(),

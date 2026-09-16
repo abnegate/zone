@@ -16,6 +16,7 @@ use zone_core::llm::{
 use super::Citation;
 use super::approval::ApprovalPolicy;
 use super::citations;
+use super::plan;
 use super::question::{self, Question};
 use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
@@ -487,6 +488,9 @@ pub fn run_with_context(
                 }
                 let tier = tools.tier(&call.function.name);
                 let mutation = tier.mutating();
+                // A mutation the plan hold refuses is told why, and what it
+                // is told is something it can act on: submit the plan.
+                let held = mutation && tools.holds_for_plan();
                 let mut batch = vec![call];
                 if !mutation && !tools.ends_turn(&batch[0].function.name) {
                     while used + batch.len() < budget.max_tool_calls
@@ -573,7 +577,10 @@ pub fn run_with_context(
                         }
                     } else {
                         let novel = failures.insert(signature);
-                        progress |= !mutation && novel;
+                        // A failed mutation is no progress, since nothing
+                        // changed; a held one is, the first time, as a
+                        // failed read is: the model learned something.
+                        progress |= (!mutation || held) && novel;
                     }
                     let mut message = LlmMessage::tool_result(&finished.id, &finished.output);
                     message.images = finished
@@ -656,6 +663,7 @@ impl Parked {
         }
         let park = match self.name.as_str() {
             question::ASK_USER => Park::Question(question::parse(&self.arguments).ok()?),
+            plan::SUBMIT_PLAN => Park::Question(plan::question(&self.arguments).ok()?),
             wait::WAIT_FOR => Park::Wait(wait::bind(session, &self.id)?),
             _ => return None,
         };
@@ -1735,6 +1743,35 @@ mod tests {
             }
             _ => panic!("valid ask_user arguments park the turn on their questions"),
         }
+    }
+
+    /// A plan parks the way a question does, on the one required question
+    /// that carries it, so the store, the card and the answer route see a
+    /// question and nothing new; an empty plan parks on nothing, as an
+    /// unrenderable card does.
+    #[test]
+    fn a_submitted_plan_parks_on_its_approval_question() {
+        match parked(
+            plan::SUBMIT_PLAN,
+            r#"{"plan":"1. Add the column.\n2. Test it."}"#,
+        )
+        .park("call_7", true, session())
+        {
+            Some((tool_call_id, Park::Question(questions))) => {
+                assert_eq!(tool_call_id, "call_7");
+                assert_eq!(
+                    plan::submitted(&questions),
+                    Some("1. Add the column.\n2. Test it.")
+                );
+                assert!(questions[0].required);
+            }
+            _ => panic!("a plan parks the turn on its approval question"),
+        }
+        assert!(
+            parked(plan::SUBMIT_PLAN, r#"{"plan":""}"#)
+                .park("call_7", true, session())
+                .is_none()
+        );
     }
 
     #[test]

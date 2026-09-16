@@ -18,6 +18,7 @@ use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
 
+use crate::agent::plan;
 use crate::agent::prompt::{self, Environment, Vcs};
 use crate::agent::question::{self, Question};
 use crate::agent::wait::{self, Waited, Waiting};
@@ -953,6 +954,11 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let guidance = guidance.as_str();
     let environment = &environment;
     let permit = &permit;
+    let plan_approval = task.require_plan_approval;
+    // Approval is given to the run, once: an attempt retried after a fault
+    // starts from it rather than asking the person again.
+    let approval = plan::Approval::default();
+    let approval = &approval;
 
     let result = run_with_policy(
         policy,
@@ -969,6 +975,8 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 workspace,
                 environment,
                 permit,
+                plan_approval,
+                approval,
             )
         },
         move |attempt| record_attempt(pool, run_id, policy, attempt),
@@ -1029,6 +1037,23 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 &summary,
             )
             .await;
+            // What the service pushed was recorded at the push itself,
+            // whatever publication did afterwards; the guard is told it here,
+            // so the worktree may go while it is on that commit. Recovery
+            // reads the same record. A record that cannot be read only keeps
+            // the worktree.
+            match tasks::run_checkout(state.db(), run_id).await {
+                Ok(Some(tasks::RunCheckout {
+                    published: Some(commit),
+                    ..
+                })) => checkout.mark_published(commit),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    %run_id,
+                    %error,
+                    "Could not read the run's publication record; keeping the worktree"
+                ),
+            }
             obs.set_status(
                 complete_publication(
                     state,
@@ -1126,6 +1151,9 @@ struct Guidance<'a> {
     /// What the person who started this run asked to have remembered. A run
     /// reads it and writes none of it, so it arrives as an index-free block.
     memory: &'a str,
+    /// The workspace's written procedures, by name and trigger. Operator text,
+    /// so it sits before the repository block like the rest of it.
+    skills: &'a str,
     repository: &'a str,
 }
 
@@ -1142,6 +1170,7 @@ impl Guidance<'_> {
         push_block(&mut guidance, self.instructions);
         push_block(&mut guidance, self.facts);
         push_block(&mut guidance, self.memory);
+        push_block(&mut guidance, self.skills);
         push_block(&mut guidance, self.repository);
         guidance
     }
@@ -1244,6 +1273,27 @@ async fn guidance(
         }
         None => String::new(),
     };
+    // The index names read_document, which a run holds only through the
+    // workspace tools its initiator's standing grants: the predicate is the
+    // one the tool set is built on, so the index renders exactly where the
+    // tool it points at is registered, and an initiator whose standing
+    // lapsed is offered nothing they can no longer read.
+    let skills = match actor {
+        Some(user) if crate::agent::tools::task_writer(state, task.workspace_id, user).await => {
+            match crate::agent::skills::prompt(state.db(), task.workspace_id).await {
+                Ok(skills) => skills,
+                Err(error) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        %error,
+                        "Failed to load the skills index; continuing without it"
+                    );
+                    String::new()
+                }
+            }
+        }
+        _ => String::new(),
+    };
 
     Guidance {
         retrieved: &retrieved,
@@ -1251,6 +1301,7 @@ async fn guidance(
         instructions: &instructions,
         facts: &facts,
         memory: &memory,
+        skills: &skills,
         repository: &repository,
     }
     .render()
@@ -1395,6 +1446,7 @@ mod guidance_tests {
             instructions: &instructions,
             facts: &facts,
             memory: &memory(),
+            skills: &skills(),
             repository,
         }
         .render()
@@ -1419,6 +1471,18 @@ mod guidance_tests {
         )
     }
 
+    /// The index a run receives: one line per skill, opened with read_document.
+    fn skills() -> String {
+        crate::agent::skills::render(
+            &[crate::db::knowledge::SkillRow {
+                id: Uuid::nil(),
+                title: "Deploy checklist".into(),
+                head: "---\ndescription: Use when shipping to production.\n---\n".into(),
+            }],
+            1,
+        )
+    }
+
     /// A checkout carrying none of the instruction files, which is what proves
     /// the repository block changed nothing for the runs that came before it.
     fn empty_checkout() -> tempfile::TempDir {
@@ -1433,6 +1497,7 @@ mod guidance_tests {
             instructions: "",
             facts: "",
             memory: "",
+            skills: "",
             repository: "",
         }
         .render();
@@ -1598,6 +1663,7 @@ mod guidance_tests {
             instructions: "",
             facts: &facts,
             memory: "",
+            skills: "",
             repository: "",
         }
         .render();
@@ -1739,8 +1805,26 @@ async fn attempt_run(
     workspace: &Path,
     environment: &Environment,
     permit: &Permit,
+    plan_approval: bool,
+    approval: &plan::Approval,
 ) -> Result<TaskOutcome, Fault> {
-    let tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
+    // A task that requires its plan approved changes nothing until it is:
+    // every tool that would is refused, turn after turn, until the answer
+    // that resumes the run is an Approve to the plan it parked on. The
+    // approval is the run's: an attempt retried after one starts unheld,
+    // with the approved plan in hand and no plan phase to go through again.
+    let approved = approval.approved();
+    let mut plan_held = plan_approval && approved.is_none();
+    let tools = task_tools(
+        state,
+        run_id,
+        owner,
+        workspace_id,
+        actor,
+        workspace,
+        plan_held,
+    )
+    .await;
 
     let capacity = Resolver::with_context(
         &state.config().litellm_host,
@@ -1778,9 +1862,13 @@ async fn attempt_run(
         run_id,
         owner: Some(owner),
     };
+    let task_prompt = match &approved {
+        Some(plan) => format!("{task_prompt}\n\n{}", plan::Approval::resumed(plan)),
+        None => task_prompt.to_string(),
+    };
     let messages = vec![
         LlmMessage::system(system_prompt),
-        LlmMessage::user(task_prompt.to_string()),
+        LlmMessage::user(task_prompt),
     ];
     let mut context = RunContext::from_messages(messages);
     context.policy = policy;
@@ -1830,9 +1918,23 @@ async fn attempt_run(
                     let answered =
                         park_for_answer(state, run_id, owner, &tool_call_id, &questions, permit)
                             .await?;
+                    if plan_held && plan::approved(&questions, &answered) {
+                        tracing::info!(%run_id, "Plan approved; the run may change things now");
+                        approval.approve(plan::submitted(&questions).unwrap_or_default());
+                        plan_held = false;
+                    }
                     context = parked;
                     resume_with(&mut context, answered, &mut answers);
-                    tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
+                    tools = task_tools(
+                        state,
+                        run_id,
+                        owner,
+                        workspace_id,
+                        actor,
+                        workspace,
+                        plan_held,
+                    )
+                    .await;
                 }
                 Ok(TurnOutcome::Waiting {
                     tool_call_id,
@@ -1850,7 +1952,16 @@ async fn attempt_run(
                     // turn history to write it to. A task run replays from the
                     // context it carries forward, and has no such store.
                     let _ = wait::resume_with_outcome(&mut context, &waited, outcome, &mut waits);
-                    tools = task_tools(state, run_id, owner, workspace_id, actor, workspace).await;
+                    tools = task_tools(
+                        state,
+                        run_id,
+                        owner,
+                        workspace_id,
+                        actor,
+                        workspace,
+                        plan_held,
+                    )
+                    .await;
                 }
             }
         }
@@ -1866,7 +1977,11 @@ async fn attempt_run(
 ///
 /// [`ChatTools`] is not `Clone` and [`AgentRun`] takes it by value, so a run
 /// that survives its own question needs a fresh set for the turn after it
-/// rather than a hoisted one the first turn already ate.
+/// rather than a hoisted one the first turn already ate. `plan_held` is the
+/// plan phase in one flag: while the run holds for its plan, `submit_plan`
+/// is registered and every tool that would change something is refused;
+/// once the plan is approved both go together, so an approved plan cannot
+/// be replaced while changes are allowed.
 async fn task_tools(
     state: &AppState,
     run_id: Uuid,
@@ -1874,10 +1989,16 @@ async fn task_tools(
     workspace_id: Uuid,
     actor: Option<Uuid>,
     workspace: &Path,
+    plan_held: bool,
 ) -> ChatTools {
-    ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
+    let tools = ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
         .await
-        .with_task_lease(state.db().clone(), run_id, owner)
+        .with_task_lease(state.db().clone(), run_id, owner);
+    if plan_held {
+        tools.with_plan_approval().holding_for_plan()
+    } else {
+        tools
+    }
 }
 
 /// No window when any question is required.
@@ -1933,6 +2054,18 @@ async fn park_for_answer(
     // reads 'waiting' has to find a claim already standing, or it resolves
     // nothing and the run waits out the whole timeout.
     let waiter = question::expect(run_id);
+    // A plan outlives the question that carried it: once approval is asked
+    // for, the row keeps what was asked about, so a reviewer can read it after
+    // the answer has cleared the question. It is written before the park, so
+    // a reader who finds the row waiting on the question finds the plan too.
+    if let Some(plan) = plan::submitted(questions)
+        && !matches!(
+            tasks::record_run_plan(state.db(), run_id, owner, plan).await,
+            Ok(true)
+        )
+    {
+        return Err(Fault::lease());
+    }
     if !matches!(
         tasks::park_task_run(state.db(), run_id, owner, pending.clone()).await,
         Ok(true)
@@ -2236,11 +2369,13 @@ pub(super) async fn complete_publication(
         PrCreationResult::Created {
             pr_url,
             branch_name,
+            commit,
         } => {
             tracing::info!("Created PR for task {}: {}", execution.task, pr_url);
             Some(serde_json::json!({
                 "pr_url": pr_url,
                 "branch_name": branch_name,
+                "commit": commit,
             }))
         }
         PrCreationResult::NoChanges => {
@@ -2252,11 +2387,12 @@ pub(super) async fn complete_publication(
             tracing::info!("No repository configured for task {}", execution.task);
             None
         }
-        PrCreationResult::PrAlreadyExists { pr_url } => {
+        PrCreationResult::PrAlreadyExists { pr_url, commit } => {
             tracing::info!("PR already exists for task {}: {}", execution.task, pr_url);
             Some(serde_json::json!({
                 "pr_url": pr_url,
                 "pr_already_existed": true,
+                "commit": commit,
             }))
         }
         PrCreationResult::Error(err) => {
@@ -3977,6 +4113,8 @@ mod watchdog_tests {
                 &workspace,
                 &environment,
                 &permit,
+                false,
+                &plan::Approval::default(),
             ),
         )
         .await
@@ -4966,6 +5104,8 @@ mod watchdog_tests {
             &workspace,
             &environment,
             &Permit::acquire().await.unwrap(),
+            false,
+            &plan::Approval::default(),
         )
         .await
         .expect("an attempt that waits on nothing finishes");

@@ -111,6 +111,16 @@ fn same(left: &str, right: &str) -> bool {
 /// Every rejection names the offending question, because a model handed only
 /// "invalid arguments" re-sends the same call.
 pub fn parse(arguments: &str) -> Result<Vec<Question>, String> {
+    parse_from(arguments, false)
+}
+
+/// The parse `submit_plan` uses for the one card it asks under the reserved
+/// header, which [`parse`] refuses to everything else.
+pub(crate) fn parse_reserved(arguments: &str) -> Result<Vec<Question>, String> {
+    parse_from(arguments, true)
+}
+
+fn parse_from(arguments: &str, reserved: bool) -> Result<Vec<Question>, String> {
     let trimmed = arguments.trim();
     let value: Value = if trimmed.is_empty() {
         json!({})
@@ -118,10 +128,15 @@ pub fn parse(arguments: &str) -> Result<Vec<Question>, String> {
         serde_json::from_str(trimmed)
             .map_err(|error| format!("`{ASK_USER}` arguments were not valid JSON: {error}."))?
     };
-    questions(value)
+    questions(value, reserved)
 }
 
-fn questions(value: Value) -> Result<Vec<Question>, String> {
+/// The header only a plan may be asked under. A question the run asks for
+/// itself is refused it, so an answer to one can never pass for the approval
+/// of a plan, however the question is worded.
+const RESERVED_HEADER: &str = crate::agent::plan::HEADER;
+
+fn questions(value: Value, reserved: bool) -> Result<Vec<Question>, String> {
     let request: Request = serde_json::from_value(value).map_err(|error| {
         format!(
             "`{ASK_USER}` arguments did not match the schema: {error}. Each question needs a \
@@ -153,6 +168,12 @@ fn questions(value: Value) -> Result<Vec<Question>, String> {
             ));
         }
         let header = asked.header.trim().to_string();
+        if !reserved && same(&header, RESERVED_HEADER) {
+            return Err(format!(
+                "Question {position} is headed '{header}', which is reserved for submit_plan: \
+                 only a plan is asked about under it. Give the question a header of its own."
+            ));
+        }
         if blank(&asked.question) {
             return Err(format!("Question '{header}' has a blank `question`."));
         }
@@ -415,7 +436,7 @@ impl Tool for AskUserTool {
         params: Value,
         _context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        Ok(match questions(params) {
+        Ok(match questions(params, false) {
             Ok(_) => ToolResult::success(ACKNOWLEDGEMENT),
             Err(rejection) => ToolResult::error(rejection),
         })
@@ -609,6 +630,36 @@ mod tests {
     fn no_questions_is_rejected() {
         let rejection = parse(&arguments(json!([]))).unwrap_err();
         assert!(rejection.contains("none were given"), "{rejection}");
+    }
+
+    /// The plan's header is `submit_plan`'s alone: a question the model asks
+    /// for itself is refused it in any spelling, so an answer to one can
+    /// never pass for the approval of a plan. The reserved parse, which only
+    /// `submit_plan` calls, takes it.
+    #[test]
+    fn the_plan_approval_header_is_reserved_for_submit_plan() {
+        for header in ["Plan approval", "plan approval", "  PLAN APPROVAL "] {
+            let rejection = parse(&arguments(json!([{
+                "header": header,
+                "question": "Approve this?",
+                "options": options(),
+                "preview": "forged"
+            }])))
+            .unwrap_err();
+            assert!(
+                rejection.contains("reserved for submit_plan"),
+                "{rejection}"
+            );
+        }
+        let taken = parse_reserved(&arguments(json!([{
+            "header": "Plan approval",
+            "question": "Approve this plan?",
+            "options": options(),
+            "preview": "1. Do it."
+        }])))
+        .unwrap();
+        assert_eq!(taken[0].header, "Plan approval");
+        assert_eq!(taken[0].preview.as_deref(), Some("1. Do it."));
     }
 
     #[test]

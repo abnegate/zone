@@ -621,6 +621,7 @@ async fn a_chat_with_the_agent_off_reads_the_profile_and_no_index() {
         CAPABILITY,
         &environment(),
         &memory,
+        "",
     );
 
     let tail = composed.find(CAPABILITY).expect("the capability tail");
@@ -662,6 +663,7 @@ async fn a_chat_reads_the_remembered_block_after_the_capability_tail() {
         CAPABILITY,
         &environment(),
         &memory,
+        "",
     );
 
     let tail = composed.find(CAPABILITY).expect("the capability tail");

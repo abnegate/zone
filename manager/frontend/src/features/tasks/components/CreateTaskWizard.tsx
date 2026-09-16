@@ -49,6 +49,7 @@ export function CreateTaskWizard({
   const [criteria, setCriteria] = useState('');
   const [priority, setPriority] = useState(3);
   const [isAgentic, setIsAgentic] = useState(false);
+  const [requirePlanApproval, setRequirePlanApproval] = useState(false);
   const [sourceId, setSourceId] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -86,6 +87,7 @@ export function CreateTaskWizard({
       description: description.trim(),
       priority,
       is_agentic: isAgentic,
+      require_plan_approval: requirePlanApproval,
     };
     if (criteria.trim()) {
       request.acceptance_criteria = criteria.trim();
@@ -120,6 +122,7 @@ export function CreateTaskWizard({
     criteria,
     priority,
     isAgentic,
+    requirePlanApproval,
     sourceId,
     createTask,
     onCreated,
@@ -133,6 +136,7 @@ export function CreateTaskWizard({
     setCriteria('');
     setPriority(3);
     setIsAgentic(false);
+    setRequirePlanApproval(false);
     setSourceId('');
     setError(null);
     setFieldErrors({});
@@ -294,6 +298,27 @@ export function CreateTaskWizard({
                 </span>
               </label>
             </div>
+
+            {isAgentic && (
+              <div className="form-group">
+                <label className="toggle-label">
+                  <span className="toggle-wrapper">
+                    <input
+                      type="checkbox"
+                      checked={requirePlanApproval}
+                      onChange={(e) => setRequirePlanApproval(e.target.checked)}
+                    />
+                    <span className="toggle-slider" />
+                  </span>
+                  <span className="toggle-text">
+                    <span className="toggle-title">Require plan approval</span>
+                    <span className="toggle-desc">
+                      A run writes its plan and waits for you to approve it before changing anything
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
 
             {isAgentic && (
               <div className="form-group">

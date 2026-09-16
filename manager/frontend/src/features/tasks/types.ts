@@ -25,6 +25,8 @@ export interface Task {
   completed_at: string | null;
   /** Whether this task uses agentic tools (file read/write, KB search, etc.) */
   is_agentic: boolean;
+  /** A run submits a plan and waits for approval before changing anything */
+  require_plan_approval: boolean;
   /** @deprecated Use source_id or source_ids instead */
   github_repo_url: string | null;
   /** Single source ID for agentic tasks (overrides project source) */
@@ -92,6 +94,8 @@ export interface CreateTaskRequest {
   dependencies?: string[];
   /** Whether this task should use agentic tools */
   is_agentic?: boolean;
+  /** Require a run's plan to be approved before it changes anything */
+  require_plan_approval?: boolean;
   /** @deprecated Use source_id or source_ids instead */
   github_repo_url?: string;
   /** Single source ID for agentic tasks (overrides project source) */
@@ -111,6 +115,8 @@ export interface UpdateTaskRequest {
   project_ids?: string[];
   /** Whether this task should use agentic tools */
   is_agentic?: boolean;
+  /** Require a run's plan to be approved before it changes anything */
+  require_plan_approval?: boolean;
   /** @deprecated Use source_id or source_ids instead */
   github_repo_url?: string;
   /** Single source ID for agentic tasks (overrides project source) */

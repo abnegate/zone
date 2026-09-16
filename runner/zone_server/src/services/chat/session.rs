@@ -258,6 +258,9 @@ pub struct Preparation {
     /// the reassembly in `ws::chat` composes the same bytes rather than a
     /// second read of a table that may have moved between the two.
     pub memory: String,
+    /// The workspace's skills index, read once here for the same reason. Empty
+    /// for a chat with no `read_document`, which could open none of them.
+    pub skills: String,
 }
 
 /// Read-only common builder. It never classifies intent, executes tools, searches, or summarizes.
@@ -332,6 +335,24 @@ pub async fn build(
                 String::new()
             }
         };
+    // A skill is opened with read_document, so only a chat that can call it
+    // is shown the index: a plain chat, or one with its agent off, has no
+    // loader in front of the model and is told of nothing.
+    let skills = if agentic && tools.has("read_document") {
+        match crate::agent::skills::prompt(state.db(), workspace).await {
+            Ok(skills) => skills,
+            Err(error) => {
+                tracing::warn!(
+                    chat_id = %chat.id,
+                    %error,
+                    "Failed to load the skills index; continuing without it"
+                );
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
     let mut entries = vec![Entry {
         id: "instructions".into(),
         message: Message::system(system_prompt(
@@ -341,6 +362,7 @@ pub async fn build(
             &SearchContext::new(&state.config().web_search).capability(),
             &environment,
             &memory,
+            &skills,
         )),
         preserve: true,
         consumed: true,
@@ -448,6 +470,7 @@ pub async fn build(
         timeout: settings.timeout,
         environment,
         memory,
+        skills,
     })
 }
 
@@ -477,11 +500,12 @@ pub fn policy(settings: &Settings, capacity: &capacity::Capacity) -> Policy {
 
 /// The whole system entry: a character card if there is one, the built prompt
 /// for this surface, the web-search capability tail, then whatever this user
-/// asked to have remembered.
+/// asked to have remembered, then the workspace's skills index.
 ///
-/// `memory` is required rather than optional so the compiler enumerates every
-/// caller: a turn that quietly lost the block would answer a person the server
-/// knows about as if it had never met them.
+/// `memory` and `skills` are required rather than optional so the compiler
+/// enumerates every caller: a turn that quietly lost the block would answer a
+/// person the server knows about as if it had never met them, or start work
+/// the workspace has a written procedure for as if it had none.
 pub fn system_prompt(
     chat: &ChatRow,
     tools: &ChatTools,
@@ -489,6 +513,7 @@ pub fn system_prompt(
     capability: &str,
     environment: &Environment,
     memory: &str,
+    skills: &str,
 ) -> String {
     let prompt = match (chat.character.as_ref(), agentic) {
         (Some(card), true) => format!(
@@ -503,7 +528,7 @@ pub fn system_prompt(
         (None, true) => prompt::chat(tools, chat.auto_approve, environment),
         (None, false) => prompt::plain(environment),
     };
-    format!("{prompt}\n\n{capability}{memory}")
+    format!("{prompt}\n\n{capability}{memory}{skills}")
 }
 
 /// A minimal chat row, so prompt tests do not need a database.
@@ -742,6 +767,7 @@ mod tests {
             CAPABILITY,
             &environment,
             "",
+            "",
         );
         let agentic = system_prompt(
             &chat_row(None, true, false),
@@ -749,6 +775,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             "",
         );
         let persona = system_prompt(
@@ -758,6 +785,7 @@ mod tests {
             CAPABILITY,
             &environment,
             "",
+            "",
         );
         let persona_agentic = system_prompt(
             &chat_row(Some(card), true, false),
@@ -765,6 +793,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             "",
         );
 
@@ -837,7 +866,7 @@ mod tests {
 
         for (chat, agentic, expected) in arms {
             assert_eq!(
-                system_prompt(&chat, &tools, agentic, CAPABILITY, &environment, ""),
+                system_prompt(&chat, &tools, agentic, CAPABILITY, &environment, "", ""),
                 expected
             );
         }
@@ -853,8 +882,8 @@ mod tests {
         let memory = memory();
         assert!(!memory.is_empty());
 
-        let without = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "");
-        let with = system_prompt(&chat, &tools, true, CAPABILITY, &environment, &memory);
+        let without = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "");
+        let with = system_prompt(&chat, &tools, true, CAPABILITY, &environment, &memory, "");
 
         assert_eq!(with, format!("{without}{memory}"));
         assert!(
@@ -869,6 +898,43 @@ mod tests {
             with.ends_with("Ada, an electrical engineer in Wellington."),
             "{with}"
         );
+    }
+
+    /// The index is the last thing in the entry: after memory, so what the
+    /// person asked to have remembered is read before what the workspace wrote
+    /// about how to work, and carrying its own blank line like memory does.
+    #[test]
+    fn the_skills_index_follows_the_memory_block() {
+        let environment = environment();
+        let tools = tools();
+        let chat = chat_row(None, true, false);
+        let memory = memory();
+        let skills = crate::agent::skills::render(
+            &[crate::db::knowledge::SkillRow {
+                id: Uuid::new_v4(),
+                title: "Deploy checklist".into(),
+                head: "---\ndescription: Use when shipping to production.\n---\n".into(),
+            }],
+            1,
+        );
+        assert!(skills.starts_with("\n\n# Skills"));
+        let without = system_prompt(&chat, &tools, true, CAPABILITY, &environment, &memory, "");
+        let with = system_prompt(
+            &chat,
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+            &memory,
+            &skills,
+        );
+        assert_eq!(with, format!("{without}{skills}"));
+        assert!(
+            with.find("Ada, an electrical engineer") < with.find("# Skills"),
+            "{with}"
+        );
+        assert!(!with.contains("\n\n\n"), "{with}");
+        assert!(with.ends_with("Use when shipping to production."), "{with}");
     }
 
     /// The capability is non-empty on both `SearchContext` arms, and it has to
@@ -886,6 +952,7 @@ mod tests {
             CAPABILITY,
             &environment,
             &memory,
+            "",
         );
 
         assert!(!CAPABILITY.is_empty());

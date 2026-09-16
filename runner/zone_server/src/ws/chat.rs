@@ -2724,6 +2724,7 @@ async fn prepare_chat(
         &search.capability(),
         &preparation.environment,
         &preparation.memory,
+        &preparation.skills,
     );
     if !agentic && character.is_none() {
         let query_embedding = match state.embedding_service() {
@@ -2864,6 +2865,7 @@ async fn handle_chat_generation(
         timeout,
         environment: _,
         memory: _,
+        skills: _,
     } = preparation;
     let model_name = model.as_str();
     let mut replay = context.clone();
@@ -3690,6 +3692,7 @@ mod tests {
             CAPABILITY,
             &environment,
             "",
+            "",
         );
         assert!(persona.starts_with("Stay Ari."), "{persona}");
         assert!(persona.ends_with(CAPABILITY), "{persona}");
@@ -3701,6 +3704,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             "",
         );
         assert!(agent.contains("You can call these tools"), "{agent}");
@@ -3717,6 +3721,7 @@ mod tests {
             CAPABILITY,
             &environment,
             "",
+            "",
         );
         assert!(combined.starts_with("Stay Ari.\n\n"), "{combined}");
         assert!(
@@ -3730,6 +3735,7 @@ mod tests {
             false,
             CAPABILITY,
             &environment,
+            "",
             "",
         );
         assert!(plain.contains(IDENTITY), "{plain}");
