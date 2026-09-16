@@ -53,6 +53,7 @@ impl From<Error> for store::Error {
 
 const PAGE_CHARS: u64 = 8_000;
 const RUNNING: &str = "running";
+const INTERRUPTED: &str = "interrupted";
 
 #[derive(Clone)]
 pub struct Store {
@@ -460,7 +461,22 @@ impl Store {
     /// out of `running`: a turn id belongs to one generation, so no other
     /// writer owns that row, and it takes the same chat lease row lock every
     /// fenced writer takes, so it cannot interleave with a new owner's
-    /// recovery. False when the turn was no longer running.
+    /// recovery.
+    ///
+    /// It can, though, arrive *after* that recovery. A successor's `begin`
+    /// recovers every running turn, this one included, and recovery has the
+    /// uncertain outcomes to write but no prose: it never saw what this
+    /// generation streamed. So a turn found already `interrupted` is not
+    /// refused outright — it is given the prose once, if nothing has given it
+    /// prose yet. What says whether anything has is the partial entry itself,
+    /// an assistant entry without tool calls, which only a close writes:
+    /// streaming goes to the visible message, envelopes carry their calls,
+    /// and recovery appends tool results. The outcomes and the status are left
+    /// exactly as recovery set them, so `completed_at` does not move and no
+    /// notice is written twice.
+    ///
+    /// False when there was nothing left for this call to do: the turn was
+    /// never running, or was already given its prose.
     pub async fn settle(
         &self,
         turn_id: Uuid,
@@ -478,10 +494,32 @@ impl Store {
         .bind(turn_id)
         .fetch_optional(&mut *transaction)
         .await?;
-        if status.as_deref() != Some(RUNNING) {
-            return Ok(false);
+        match status.as_deref() {
+            Some(RUNNING) => {
+                self.settle_in(&mut transaction, turn_id, partial).await?;
+            }
+            Some(INTERRUPTED) => {
+                if content.is_none() && partial.is_none() {
+                    return Ok(false);
+                }
+                let closed: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM chat_entries WHERE chat_id = $1 AND turn_id = $2 \
+                     AND message->>'role' = 'assistant' \
+                     AND coalesce(jsonb_typeof(message->'tool_calls'), 'null') = 'null')",
+                )
+                .bind(self.chat_id)
+                .bind(turn_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+                if closed {
+                    return Ok(false);
+                }
+                if let Some(id) = self.partial_in(&mut transaction, turn_id, partial).await? {
+                    self.consume_entry_in(&mut transaction, &id).await?;
+                }
+            }
+            _ => return Ok(false),
         }
-        self.settle_in(&mut transaction, turn_id, partial).await?;
         if let Some(content) = content {
             self.visible(
                 &mut transaction,
@@ -821,25 +859,34 @@ impl Store {
         self.consume_turn_in(connection, turn_id, &recovery).await
     }
 
+    /// Returns the id of the entry it appended, so a caller that must not
+    /// consume anything else in the turn can consume that one.
     async fn partial_in(
         &self,
         connection: &mut PgConnection,
         turn_id: Uuid,
         partial: Option<&ReplayMessage>,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<String>, Error> {
         let Some(partial) = partial else {
-            return Ok(());
+            return Ok(None);
         };
-        self.append_in(
-            connection,
-            turn_id,
-            &NewEntry {
-                id: Uuid::new_v4().to_string(),
-                message: partial.clone(),
-                mutations: Vec::new(),
-            },
-        )
-        .await
+        let entry = NewEntry {
+            id: Uuid::new_v4().to_string(),
+            message: partial.clone(),
+            mutations: Vec::new(),
+        };
+        self.append_in(connection, turn_id, &entry).await?;
+        Ok(Some(entry.id))
+    }
+
+    /// Consume one entry, leaving the rest of its turn as they are.
+    async fn consume_entry_in(&self, connection: &mut PgConnection, id: &str) -> Result<(), Error> {
+        sqlx::query("UPDATE chat_entries SET consumed = TRUE WHERE chat_id = $1 AND id = $2")
+            .bind(self.chat_id)
+            .bind(id)
+            .execute(connection)
+            .await?;
+        Ok(())
     }
 
     async fn recover_in(&self, connection: &mut PgConnection) -> Result<usize, Error> {

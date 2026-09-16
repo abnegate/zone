@@ -172,7 +172,9 @@ pub trait ContextStore: Send + Sync {
 
     /// Close a turn whose lease is already gone, so a lost lease cannot leave a
     /// row running for ever. A turn id belongs to one generation, so no other
-    /// writer owns that row. False when the turn was no longer running.
+    /// writer owns that row. A turn a successor's recovery has already closed
+    /// still takes the prose this generation streamed, once. False when there
+    /// was nothing left for this call to do.
     async fn settle(
         &self,
         turn_id: Uuid,

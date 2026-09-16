@@ -1099,6 +1099,116 @@ async fn a_lost_lease_settles_only_the_turn_it_opened() {
     chats::delete_chat(&pool, chat).await.unwrap();
 }
 
+/// The race the scoping test above does not run. A successor's `begin`
+/// recovers this turn — closes it `interrupted`, writes the uncertain outcome
+/// for the call with no result, consumes the rest — before the generation that
+/// lost the lease gets to `settle`. Recovery has no prose to keep and the old
+/// generation does, so what it streamed must still land, exactly once, with the
+/// outcome recovery already wrote left alone and the successor's turn untouched.
+#[tokio::test]
+async fn a_turn_recovered_by_its_successor_still_keeps_what_it_streamed() {
+    let (pool, store, chat, _) = fixture().await;
+    let lost = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (mine, _) = begin(&store, &lost).await;
+    store
+        .append(&lost, mine, &[envelope("mutation", "call", true)])
+        .await
+        .unwrap();
+    store
+        .publish(&lost, mine, "Half an ans", None)
+        .await
+        .unwrap();
+    expire(&pool, chat).await;
+
+    let current = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (theirs, _) = begin(&store, &current).await;
+    let recovered = turn_state(&pool, chat, mine).await;
+    assert_eq!(
+        recovered.0, "interrupted",
+        "the successor's begin recovers every running turn, this one included"
+    );
+
+    let partial = ReplayMessage::from(&Message::assistant("Half an answer."));
+    assert!(
+        store
+            .settle(
+                mine,
+                Some("Half an answer.\n\n[Response interrupted]"),
+                None,
+                Some(&partial),
+            )
+            .await
+            .unwrap(),
+        "a turn recovery closed first must still take the prose its generation streamed"
+    );
+
+    assert_eq!(
+        visible(&pool, chat, mine).await.as_deref(),
+        Some("Half an answer.\n\n[Response interrupted]"),
+        "the reader must keep what was streamed, not the snapshot recovery left"
+    );
+    assert_eq!(
+        turn_state(&pool, chat, mine).await,
+        recovered,
+        "settling after recovery must not move the time recovery stopped the turn"
+    );
+    let history = store.load().await.unwrap();
+    let kept = history
+        .entries
+        .iter()
+        .find(|entry| entry.message.content.as_deref() == Some("Half an answer."))
+        .expect("the partial is stored the way an ordinary interruption stores it");
+    assert!(
+        kept.consumed,
+        "the model has already seen the prose it wrote"
+    );
+    let notices: Vec<_> = history
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("may have changed external state"))
+        })
+        .collect();
+    assert_eq!(
+        notices.len(),
+        1,
+        "recovery already wrote the uncertain outcome; settling must not write it again"
+    );
+    assert!(
+        !notices[0].consumed,
+        "the next run still has to replay the warning recovery left"
+    );
+    assert_eq!(
+        turn_state(&pool, chat, theirs).await.0,
+        "running",
+        "the successor's own turn is not this generation's to touch"
+    );
+
+    let entries = history.entries.len();
+    assert!(
+        !store
+            .settle(mine, Some("Stopped again."), None, Some(&partial))
+            .await
+            .unwrap(),
+        "a turn already given its prose has nothing left to take"
+    );
+    assert_eq!(
+        visible(&pool, chat, mine).await.as_deref(),
+        Some("Half an answer.\n\n[Response interrupted]"),
+        "a second close must not overwrite what the reader already has"
+    );
+    assert_eq!(
+        store.load().await.unwrap().entries.len(),
+        entries,
+        "a second close must not duplicate the partial"
+    );
+    chats::delete_chat(&pool, chat).await.unwrap();
+}
+
 #[tokio::test]
 async fn closing_a_session_whose_lease_was_lost_settles_its_turn() {
     use zone_server::services::chat::session::Session;
