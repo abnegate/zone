@@ -25,6 +25,7 @@ pub mod readiness;
 pub mod receipts;
 pub mod releases;
 pub mod runner;
+pub mod toolbox;
 pub mod tools;
 pub mod verification;
 pub mod wait;

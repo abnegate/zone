@@ -45,6 +45,7 @@ const ORDER: &[Section] = &[
     ("citation", section::citation::render),
     ("task", section::task::render),
     ("mcp", section::mcp::render),
+    ("toolbox", section::toolbox::render),
     ("session", section::session::render),
 ];
 
@@ -209,6 +210,7 @@ mod tests {
         "list_reminders",
         "list_sources",
         "list_tasks",
+        "load_tools",
         MCP_TOOL,
         "memory_append",
         "memory_delete",
@@ -226,6 +228,7 @@ mod tests {
         "search_chat_history",
         "search_code",
         "search_knowledge",
+        "search_tools",
         "send_message",
         "start_task",
         "tail_job",
@@ -390,6 +393,7 @@ mod tests {
                 "citation",
                 "task",
                 "mcp",
+                "toolbox",
                 "session",
             ]
         );
