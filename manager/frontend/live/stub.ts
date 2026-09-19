@@ -53,6 +53,29 @@ export async function forwardedFor(marker: string): Promise<StubRequest[]> {
   );
 }
 
+/**
+ * Wait until a real model's turn is over: its newest forwarded round answered
+ * with no tool call, or with one that ends the turn (a question or a plan).
+ * The screen alone cannot say this, since a tool running between rounds shows
+ * no status indicator.
+ */
+export async function turnDone(marker: string, timeout = 1_800_000): Promise<StubRequest[]> {
+  await expect
+    .poll(
+      async () => {
+        const rounds = await forwardedFor(marker);
+        const last = rounds[rounds.length - 1];
+        if (!last || !last.answer) return 'open';
+        const names = last.answer.calls.map((c) => c.name);
+        if (names.length === 0) return 'done';
+        return names.some((n) => n === 'ask_user' || n === 'submit_plan') ? 'done' : 'open';
+      },
+      { timeout, intervals: [5_000] }
+    )
+    .toBe('done');
+  return forwardedFor(marker);
+}
+
 /** Every tool a real model called across the forwarded rounds of a turn. */
 export function calledTools(rounds: StubRequest[]): string[] {
   return rounds.flatMap((r) => (r.answer?.calls ?? []).map((c) => c.name));

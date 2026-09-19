@@ -6,6 +6,7 @@ import {
   send,
   settled,
   stamp,
+  turnDone,
 } from './stub';
 
 /**
@@ -19,9 +20,9 @@ import {
 
 const model = process.env.ZONE_LIVE_AGENT_MODEL;
 test.skip(!model, 'set ZONE_LIVE_AGENT_MODEL to a tool-calling model behind MODEL_STUB_UPSTREAM');
-test.describe.configure({ timeout: 1_500_000 });
+test.describe.configure({ timeout: 3_600_000 });
 
-const ROUND = 900_000;
+const ROUND = 1_800_000;
 
 test('real model: asks with a question card when told not to decide alone', async ({ page }) => {
   const s = stamp();
@@ -36,8 +37,9 @@ test('real model: asks with a question card when told not to decide alone', asyn
   const first = card.getByRole('radio').first();
   await first.check();
   await card.locator('[data-testid="question-submit"]').click();
+  await expect.poll(async () => (await forwardedFor(`Marker ${s}`)).length, { timeout: ROUND, intervals: [5_000] }).toBeGreaterThan(1);
+  const rounds = await turnDone(`Marker ${s}`, ROUND);
   await settled(page, 2, ROUND);
-  const rounds = await forwardedFor(`Marker ${s}`);
   expect(calledTools(rounds)).toContain('ask_user');
   test.info().annotations.push({ type: 'model', description: `${model}: ${calledTools(rounds).join(',') || 'no tools'}; ${rounds.map((r) => r.answer?.seconds).join('s,')}s` });
 });
@@ -47,8 +49,8 @@ test('real model: stores a fact with the memory tool when asked to remember', as
   await signIn(page);
   await newChat(page, { agent: true, autoApprove: true });
   await send(page, `Marker ${s}. Please remember for future conversations that my favourite editor is Helix. Store it with your memory tool, then confirm.`);
+  const rounds = await turnDone(`Marker ${s}`, ROUND);
   await settled(page, 1, ROUND);
-  const rounds = await forwardedFor(`Marker ${s}`);
   expect(calledTools(rounds)).toContain('memory_write');
   test.info().annotations.push({ type: 'model', description: `${model}: ${calledTools(rounds).join(',')}` });
 });
@@ -61,8 +63,8 @@ test('real model: backgrounds a command, waits for it, and reports its output', 
     page,
     `Marker ${s}. Run the shell command \`sleep 20; echo real-model-done-${s}\` in the background, wait for it to finish with wait_for, then tell me exactly what it printed.`
   );
-  await settled(page, 1, ROUND * 2);
-  const rounds = await forwardedFor(`Marker ${s}`);
+  const rounds = await turnDone(`Marker ${s}`, ROUND * 2);
+  await settled(page, 1, ROUND);
   const tools = calledTools(rounds);
   expect(tools).toContain('run_shell');
   expect(tools).toContain('wait_for');
@@ -78,8 +80,8 @@ test('real model: loads the reminder tool and sets a reminder that fires', async
     page,
     `Marker ${s}. Set me a reminder for three minutes from now that says "stretch your legs ${s}". The reminder tool is not loaded yet; find and load it first.`
   );
-  await settled(page, 1, ROUND * 2);
-  const rounds = await forwardedFor(`Marker ${s}`);
+  const rounds = await turnDone(`Marker ${s}`, ROUND * 2);
+  await settled(page, 1, ROUND);
   const tools = calledTools(rounds);
   expect(tools).toContain('load_tools');
   expect(tools).toContain('create_reminder');
@@ -112,8 +114,8 @@ test('real model: reads a workspace skill before doing what it covers', async ({
   await signIn(page);
   await newChat(page, { agent: true, autoApprove: true });
   await send(page, `Marker ${s}. Say hello to me, following the workspace skill for greetings.`);
+  const rounds = await turnDone(`Marker ${s}`, ROUND);
   await settled(page, 1, ROUND);
-  const rounds = await forwardedFor(`Marker ${s}`);
   expect(calledTools(rounds)).toContain('read_document');
   await expect(page.locator('.message-assistant').last()).toContainText(`Cheers-${s}`);
   test.info().annotations.push({ type: 'model', description: `${model}: ${calledTools(rounds).join(',')}` });

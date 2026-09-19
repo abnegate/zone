@@ -285,7 +285,9 @@ test('a reminder that carries a prompt runs a turn when it fires, and can be lis
   await script(`cancel the time report ${s}`, [
     { calls: [{ name: 'load_tools', arguments: { names: ['list_reminders', 'cancel_reminder'] } }] },
     { calls: [{ name: 'list_reminders', arguments: {} }] },
-    { calls: [{ name: 'cancel_reminder', arguments: { reminder_id: `$re:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[^\\n]*Time report ${s}|Time report ${s}[^\\n]*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})` } }] },
+    // list_reminders answers JSON; inside one object, `content` precedes `id`.
+    { calls: [{ name: 'cancel_reminder', arguments: { reminder_id: `$re:"content":"Time report ${s}"[^}]*?"id":"([0-9a-f-]{36})"` } }] },
+    { calls: [{ name: 'list_reminders', arguments: {} }] },
     { text: `Cancelled the time report ${s}.` },
   ]);
 
@@ -314,9 +316,14 @@ test('a reminder that carries a prompt runs a turn when it fires, and can be lis
   await approveIfAsked(page, 5_000);
   await expect
     .poll(async () => (await roundsFor(`cancel the time report ${s}`)).length, { timeout: 120_000 })
-    .toBe(4);
+    .toBe(5);
   const cancelled = await roundsFor(`cancel the time report ${s}`);
-  expect(cancelled[3].tool_results.map((r) => r.content).join('\n')).toMatch(/cancel/i);
+  const afterCancel = cancelled[3].tool_results.map((r) => r.content).join('\n');
+  expect(afterCancel, 'cancel_reminder took the id list_reminders gave').not.toMatch(/not found|error/i);
+  // The stand-in hands back every result of the turn; the second listing is the last of them.
+  const listedAgain = cancelled[4].tool_results.at(-1)?.content ?? '';
+  const entry = new RegExp(`"content":"Time report ${s}"[^}]*"status":"([a-z_]+)"`).exec(listedAgain);
+  expect(entry?.[1], 'the hourly report is cancelled, not pending for its next firing').toBe('cancelled');
   expect((await messages(chatId)).length).toBeGreaterThan(before);
   expect(consoleErrors).toEqual([]);
 });
