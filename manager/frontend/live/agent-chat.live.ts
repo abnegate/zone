@@ -20,9 +20,16 @@ import {
 
 async function messages(chatId: string): Promise<{ role: string; content: string }[]> {
   const token = await tokenFor(state.owner);
-  const { body } = await api('GET', `/api/chats/${chatId}/messages`, { token });
-  const found = (body as { messages?: { role: string; content: string }[] }).messages;
-  return found ?? [];
+  const { status, body } = await api('GET', `/api/chats/${chatId}/messages`, { token });
+  if (status !== 200) throw new Error(`messages of ${chatId}: ${status} ${JSON.stringify(body).slice(0, 200)}`);
+  const found = (body as { messages?: unknown }).messages;
+  if (!Array.isArray(found)) throw new Error(`messages of ${chatId} are not a list: ${JSON.stringify(body).slice(0, 200)}`);
+  for (const message of found) {
+    if (typeof message?.role !== 'string' || typeof message?.content !== 'string') {
+      throw new Error(`a message of ${chatId} has no role or content: ${JSON.stringify(message).slice(0, 200)}`);
+    }
+  }
+  return found as { role: string; content: string }[];
 }
 
 async function knowledgeTitled(title: string): Promise<boolean> {

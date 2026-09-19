@@ -56,6 +56,7 @@ EMBED_DIMENSION = int(os.environ.get("MODEL_STUB_EMBED_DIMENSION", "768"))
 UPSTREAM = os.environ.get("MODEL_STUB_UPSTREAM")
 UPSTREAM_MODEL = os.environ.get("MODEL_STUB_UPSTREAM_MODEL")
 EMBED_UPSTREAM = os.environ.get("MODEL_STUB_EMBED_UPSTREAM")
+EMBED_UPSTREAM_MODEL = os.environ.get("MODEL_STUB_EMBED_UPSTREAM_MODEL")
 
 LOCK = threading.Lock()
 SCRIPTS = []
@@ -331,8 +332,10 @@ class Handler(BaseHTTPRequestHandler):
         width = dimension_for(body.get("model"))
         if EMBED_UPSTREAM:
             try:
+                upstream_model = EMBED_UPSTREAM_MODEL or body.get("model") or EMBED
                 with forward(
-                    EMBED_UPSTREAM.rstrip("/") + "/embeddings", {"input": prompt[:6000]}
+                    EMBED_UPSTREAM.rstrip("/") + "/embeddings",
+                    {"model": upstream_model, "input": prompt[:6000]},
                 ) as response:
                     payload = json.load(response)
                 vector = fitted(payload["data"][0]["embedding"], width)

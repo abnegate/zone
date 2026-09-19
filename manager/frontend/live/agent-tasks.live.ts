@@ -20,42 +20,104 @@ async function owner(): Promise<string> {
   return tokenFor(state.owner);
 }
 
+interface Project {
+  id: string;
+  name: string;
+}
+
+function isProject(value: unknown): value is Project {
+  const candidate = value as Partial<Project> | null;
+  return typeof candidate?.id === 'string' && typeof candidate?.name === 'string';
+}
+
+function isRun(value: unknown): value is Run {
+  const candidate = value as Partial<Run> | null;
+  return typeof candidate?.id === 'string' && typeof candidate?.status === 'string';
+}
+
+/** A response the server answered with success and a body of the expected shape. */
+async function fetched<T>(
+  method: string,
+  path: string,
+  pick: (body: unknown) => T | undefined,
+  options: { token: string; body?: unknown; ok?: number[] }
+): Promise<T> {
+  const { status, body } = await api(method, path, { token: options.token, body: options.body });
+  if (!(options.ok ?? [200]).includes(status)) {
+    throw new Error(`${method} ${path}: ${status} ${JSON.stringify(body).slice(0, 300)}`);
+  }
+  const picked = pick(body);
+  if (picked === undefined) {
+    throw new Error(`${method} ${path} answered an unexpected shape: ${JSON.stringify(body).slice(0, 300)}`);
+  }
+  return picked;
+}
+
 async function ensureProject(name: string): Promise<string> {
   const token = await owner();
-  const listed = await api('GET', `/api/projects?workspace_id=${state.owner.workspace.id}`, { token });
-  const text = JSON.stringify(listed.body);
-  const existing = new RegExp(`"id":"([0-9a-f-]{36})"[^}]*"name":"${name}"`).exec(text)
-    ?? new RegExp(`"name":"${name}"[^}]*"id":"([0-9a-f-]{36})"`).exec(text);
-  if (existing) return existing[1];
-  const created = await api('POST', '/api/projects', {
-    token,
-    body: { name, description: 'live verification', workspace_id: state.owner.workspace.id },
-  });
-  expect([200, 201], JSON.stringify(created.body)).toContain(created.status);
-  const id = /"id":"([0-9a-f-]{36})"/.exec(JSON.stringify(created.body))?.[1];
-  if (!id) throw new Error(`no project id in ${JSON.stringify(created.body)}`);
-  return id;
+  const projects = await fetched(
+    'GET',
+    `/api/projects?workspace_id=${state.owner.workspace.id}`,
+    (body) => {
+      const list = (body as { projects?: unknown }).projects;
+      return Array.isArray(list) && list.every(isProject) ? (list as Project[]) : undefined;
+    },
+    { token }
+  );
+  const existing = projects.find((p) => p.name === name);
+  if (existing) return existing.id;
+  const created = await fetched(
+    'POST',
+    '/api/projects',
+    (body) => {
+      const project = (body as { project?: unknown }).project ?? body;
+      return isProject(project) ? project : undefined;
+    },
+    { token, body: { name, description: 'live verification', workspace_id: state.owner.workspace.id }, ok: [200, 201] }
+  );
+  return created.id;
 }
 
 async function taskIdByTitle(title: string): Promise<string> {
   const token = await owner();
-  const { body } = await api('GET', `/api/workspaces/${state.owner.workspace.id}/tasks`, { token });
-  const tasks = (body as { tasks?: { id: string; title: string }[] }).tasks ?? [];
+  const tasks = await fetched(
+    'GET',
+    `/api/workspaces/${state.owner.workspace.id}/tasks`,
+    (body) => {
+      const list = (body as { tasks?: unknown }).tasks;
+      return Array.isArray(list) ? (list as { id: string; title: string }[]) : undefined;
+    },
+    { token }
+  );
   const found = tasks.find((t) => t.title === title);
-  if (!found) throw new Error(`no task titled ${title} in ${JSON.stringify(body).slice(0, 300)}`);
+  if (!found) throw new Error(`no task titled ${title} among ${tasks.length} tasks`);
   return found.id;
 }
 
 async function runsOf(taskId: string): Promise<Run[]> {
   const token = await owner();
-  const { body } = await api('GET', `/api/tasks/${taskId}/runs`, { token });
-  return ((body as { runs?: Run[] }).runs ?? []) as Run[];
+  return fetched(
+    'GET',
+    `/api/tasks/${taskId}/runs`,
+    (body) => {
+      const list = (body as { runs?: unknown }).runs;
+      return Array.isArray(list) && list.every(isRun) ? (list as Run[]) : undefined;
+    },
+    { token }
+  );
 }
 
 async function run(runId: string): Promise<Run> {
   const token = await owner();
-  const { body } = await api('GET', `/api/tasks/runs/${runId}`, { token });
-  return ((body as { run?: Run }).run ?? body) as Run;
+  return fetched(
+    'GET',
+    `/api/tasks/runs/${runId}`,
+    (body) => {
+      const detail = (body as { run?: unknown }).run ?? body;
+      return isRun(detail) ? detail : undefined;
+    },
+    { token }
+  );
 }
 
 async function toggle(dialog: Locator, title: string, wanted: boolean): Promise<void> {
@@ -307,9 +369,16 @@ test('a task with a repository works in a worktree, and its change is pushed and
 
   const done = await finished(taskId, 540_000);
   expect(done.status).toBe('completed');
-  const { body } = await api('GET', `/api/tasks/${taskId}`, { token });
-  const text = JSON.stringify(body);
-  expect(text).toMatch(/pull\/\d+/);
+  const task = await fetched(
+    'GET',
+    `/api/tasks/${taskId}`,
+    (body) => {
+      const detail = (body as { task?: unknown }).task ?? body;
+      return typeof (detail as { id?: unknown })?.id === 'string' ? (detail as { pr_url?: string | null }) : undefined;
+    },
+    { token }
+  );
+  expect(task.pr_url ?? '').toMatch(/pull\/\d+/);
   const rounds = await roundsFor(`REPOTASK ${s}`);
   expect(rounds).toHaveLength(3);
   expect(rounds[2].tool_results.map((r) => r.content).join('\n')).toContain(`Live verification ${s}`);

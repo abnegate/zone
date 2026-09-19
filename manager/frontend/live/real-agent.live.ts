@@ -86,12 +86,21 @@ test('real model: loads the reminder tool and sets a reminder that fires', async
   expect(tools).toContain('load_tools');
   expect(tools).toContain('create_reminder');
   const token = await tokenFor(state.owner);
+  const thread = async () => {
+    const { status, body } = await api('GET', `/api/chats/${chatId}/messages`, { token });
+    if (status !== 200) throw new Error(`messages of ${chatId}: ${status}`);
+    const list = (body as { messages?: unknown }).messages;
+    return Array.isArray(list) ? (list as { content?: string }[]) : [];
+  };
+  // The firing is a message that arrives after the turn that set it, not the
+  // turn's own words, which quote the reminder back.
+  const before = (await thread()).length;
   await expect
     .poll(
-      async () => {
-        const { body } = await api('GET', `/api/chats/${chatId}/messages`, { token });
-        return JSON.stringify(body).includes(`stretch your legs ${s}`);
-      },
+      async () =>
+        (await thread())
+          .slice(before)
+          .some((m) => typeof m.content === 'string' && m.content.includes(`stretch your legs ${s}`)),
       { timeout: 420_000, intervals: [5_000] }
     )
     .toBe(true);

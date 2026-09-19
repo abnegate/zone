@@ -94,7 +94,14 @@ export async function script(trigger: string, rounds: Round[], aside?: string): 
 
 export async function requests(): Promise<StubRequest[]> {
   const response = await fetch(`${modelStub}/_stub/requests`);
-  return ((await response.json()) as { requests: StubRequest[] }).requests;
+  if (!response.ok) {
+    throw new Error(`the stand-in refused its request log: ${response.status}`);
+  }
+  const body = (await response.json()) as { requests?: unknown };
+  if (!Array.isArray(body.requests)) {
+    throw new Error(`the stand-in's request log is not a list: ${JSON.stringify(body).slice(0, 200)}`);
+  }
+  return body.requests as StubRequest[];
 }
 
 /** The agent-loop rounds a trigger answered, in order. */
@@ -149,7 +156,11 @@ export async function setChecked(box: Locator, wanted: boolean): Promise<void> {
   const checked = await box.getAttribute('aria-checked');
   const current = checked === null ? await box.isChecked() : checked === 'true';
   if (current !== wanted) await box.click();
-  await expect(box).toHaveAttribute(checked === null ? 'checked' : 'aria-checked', /.*/).catch(() => undefined);
+  if (checked === null) {
+    await expect(box).toBeChecked({ checked: wanted });
+  } else {
+    await expect(box).toHaveAttribute('aria-checked', String(wanted));
+  }
 }
 
 /**

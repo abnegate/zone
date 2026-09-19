@@ -230,7 +230,20 @@ GIN on tags. Claudear's tables carry `confidence`, `occurrence_count`,
   observations, runs, chats, confidence, confirmed) and a partial index on
   `(workspace_id, category)` for the reserved categories, plus a CHECK that a
   reserved category carries provenance. Lock-bounded like migrations 021
-  onwards; registered with the installer and the migration census.
+  onwards; registered with the installer and the migration census. The column
+  holds what the tags encode today, typed:
+
+  ```json
+  {
+    "kind": "repository-convention",
+    "fingerprint": "3f1a9c0e7b2d4e6f8a9b0c1d2e3f4a5b",
+    "observations": 6,
+    "runs": 4,
+    "agreement": 0.83,
+    "confidence": 0.78,
+    "confirmed": "2026-09-16"
+  }
+  ```
 - Code: `LearningProvenance` and `PromotionProvenance` read and write the
   column, with the tags kept for one release as the fallback.
 - Tests: the migration test list, the upsert outcomes, and a row with
