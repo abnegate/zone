@@ -104,17 +104,27 @@ export async function requests(): Promise<StubRequest[]> {
   return body.requests as StubRequest[];
 }
 
-/** The agent-loop rounds a trigger answered, in order. */
-export async function roundsFor(trigger: string): Promise<StubRequest[]> {
-  return (await requests()).filter((r) => r.kind === 'round' && r.trigger === trigger);
+/**
+ * The sequence number of the stand-in's newest request, or 0 before any: a
+ * lane whose trigger is not stamped (the server's own "Plan approval" turn)
+ * takes it first and reads only the rounds that came after.
+ */
+export async function latest(): Promise<number> {
+  const all = await requests();
+  return all.length ? all[all.length - 1].n : 0;
 }
 
-/** Wait until a trigger has answered `count` rounds. */
-export async function settledRounds(trigger: string, count: number, timeout = 120_000) {
+/** The agent-loop rounds a trigger answered, in order, after request `since`. */
+export async function roundsFor(trigger: string, since = 0): Promise<StubRequest[]> {
+  return (await requests()).filter((r) => r.kind === 'round' && r.trigger === trigger && r.n > since);
+}
+
+/** Wait until a trigger has answered `count` rounds after request `since`. */
+export async function settledRounds(trigger: string, count: number, timeout = 120_000, since = 0) {
   await expect
-    .poll(async () => (await roundsFor(trigger)).length, { timeout, intervals: [500, 1000] })
+    .poll(async () => (await roundsFor(trigger, since)).length, { timeout, intervals: [500, 1000] })
     .toBeGreaterThanOrEqual(count);
-  return roundsFor(trigger);
+  return roundsFor(trigger, since);
 }
 
 /** A short token that keeps one test's messages apart from every other's. */

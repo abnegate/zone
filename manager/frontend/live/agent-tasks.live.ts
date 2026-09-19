@@ -1,11 +1,12 @@
 import { type Locator, type Page } from '@playwright/test';
 import { api, expect, signIn, state, test, tokenFor } from './harness';
-import { roundsFor, script, settledRounds, stamp } from './stub';
+import { latest, roundsFor, script, settledRounds, stamp } from './stub';
 
 /**
  * Task runs driven from the console with a scripted model behind them: the
- * plan-approval hold, a run parked on a question, a run parked on a wait, and
- * (opt-in) a run that works in a worktree and publishes a pull request.
+ * plan-approval hold, a run parked on a question, a run parked on a wait, a
+ * refused command corrected in the same attempt, and (opt-in) a run that works
+ * in a worktree and publishes a pull request.
  */
 
 interface Run {
@@ -137,7 +138,14 @@ async function createTask(
   await page.getByRole('button', { name: /new task/i }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
-  await dialog.locator('.project-selection-option', { hasText: options.project }).first().click();
+  // The whole name, not a prefix of it: a project named for the repository
+  // lane shares its first words with the plain one, and a task filed under it
+  // would work in a worktree and publish.
+  await dialog
+    .locator('.project-selection-option')
+    .filter({ has: page.getByText(options.project, { exact: true }) })
+    .first()
+    .click();
   await dialog.getByRole('button', { name: 'Next' }).click();
   await dialog.locator('#task-title').fill(options.title);
   await dialog.locator('#task-description').fill(options.description);
@@ -185,6 +193,8 @@ test('a task that requires plan approval refuses a write, parks on its plan, and
 }) => {
   test.setTimeout(420_000);
   const s = stamp();
+  // The resumed turn's trigger is the server's own words, so it is read from here on.
+  const since = await latest();
   await script(`PLANTASK ${s}`, [
     { calls: [{ name: 'write_file', arguments: { path: 'notes.txt', content: 'too early', reason: 'a write before the plan, which the hold refuses' } }] },
     { calls: [{ name: 'submit_plan', arguments: { plan: `1. Write notes-${s}.txt with the summary.\n2. Read it back to check.\nLeft out: nothing.` } }] },
@@ -225,7 +235,7 @@ test('a task that requires plan approval refuses a write, parks on its plan, and
   expect(held).toHaveLength(2);
   expect(held[0].tools).toContain('submit_plan');
   expect(held[1].tool_results.map((r) => r.content).join('\n')).toMatch(/plan/i);
-  const resumed = await settledRounds('Plan approval', 3, 60_000);
+  const resumed = await settledRounds('Plan approval', 3, 60_000, since);
   expect(resumed[0].tools, 'submit_plan is withdrawn with the hold').not.toContain('submit_plan');
   expect(resumed[2].tool_results.map((r) => r.content).join('\n')).toContain(`Approved and written ${s}`);
   expect(consoleErrors).toEqual([]);
@@ -328,6 +338,42 @@ test('a task run backgrounds a command, parks on the wait, and finishes with the
   expect(log).toContain(`job-${s}`);
   expect(log).toMatch(/exited 0/);
   await expect(page.locator('.execution-logs')).toContainText(/job-|Waiting|exited/);
+  expect(consoleErrors).toEqual([]);
+});
+
+test('a task run corrects a refused command in the same attempt rather than starting over', async ({
+  page,
+  consoleErrors,
+}) => {
+  test.setTimeout(300_000);
+  const s = stamp();
+  await script(`FIXTASK ${s}`, [
+    // An argument carrying a semicolon is refused. The refusal is a tool result the model can act on.
+    { calls: [{ name: 'run_command', arguments: { command: 'python3', args: ['-c', `print('first'); print('fix-${s}')`], reason: 'print the marker' } }] },
+    { calls: [{ name: 'run_command', arguments: { command: 'python3', args: ['-c', `print('fix-${s}')`], reason: 'print the marker without the semicolon' } }] },
+    { text: `The command printed fix-${s}.` },
+  ]);
+
+  await signIn(page);
+  await ensureProject(PROJECT);
+  const title = `Fix me ${s}`;
+  const taskId = await createTask(page, { title, description: `FIXTASK ${s}: print the marker.`, project: PROJECT });
+  await startRun(page, title);
+
+  const done = await finished(taskId, 240_000);
+  expect(done.status).toBe('completed');
+
+  // One attempt: the refusal reached the model as a tool result, the round
+  // after it still offered the tools, and the corrected command ran. A run
+  // told to wrap up instead would have failed the attempt on the retry and
+  // started over with a fresh context.
+  const rounds = await roundsFor(`FIXTASK ${s}`);
+  expect(rounds).toHaveLength(3);
+  const refusal = rounds[1].tool_results.map((r) => r.content).join('\n');
+  expect(refusal).toMatch(/;/);
+  expect(rounds[1].tools.length).toBeGreaterThan(0);
+  const output = rounds[2].tool_results.map((r) => r.content).join('\n');
+  expect(output).toContain(`fix-${s}`);
   expect(consoleErrors).toEqual([]);
 });
 

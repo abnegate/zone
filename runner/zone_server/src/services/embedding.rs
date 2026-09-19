@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use zone_context::embeddings::{
     EmbeddingService,
-    providers::{AiSettings, EmbeddingProviderFactory},
+    providers::{AiSettings, DEFAULT_OLLAMA_EMBEDDING_MODEL, EmbeddingProviderFactory},
 };
 use zone_context::error::Result as ContextResult;
 use zone_core::OptionalSecretExt;
@@ -16,6 +16,28 @@ use crate::db::ai_settings::EffectiveAiSettings;
 /// Environment variable selecting the self-hosted embedding engine
 /// (`ollama` or `local`).
 pub const EMBEDDING_ENGINE_ENV: &str = "EMBEDDING_ENGINE";
+
+/// Environment variable naming the self-hosted embedding model.
+pub const EMBEDDING_MODEL_ENV: &str = "OLLAMA_MODEL_EMBED";
+
+/// The embedding model the server asks its self-hosted engine for when no
+/// workspace setting names one: `OLLAMA_MODEL_EMBED`, as `.env` and the
+/// compose files carry it, with blank treated as unset, and otherwise the
+/// default the vector store is sized for.
+pub fn default_embedding_model() -> String {
+    embedding_model_or_default(std::env::var(EMBEDDING_MODEL_ENV).ok().as_deref())
+}
+
+/// `configured` trimmed when it names a model, the default otherwise.
+fn embedding_model_or_default(configured: Option<&str>) -> String {
+    configured
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(
+            || DEFAULT_OLLAMA_EMBEDDING_MODEL.to_string(),
+            str::to_string,
+        )
+}
 
 /// Create an embedding service from effective AI settings.
 ///
@@ -242,6 +264,24 @@ mod tests {
         assert_eq!(
             service.model(),
             zone_context::embeddings::providers::DEFAULT_OLLAMA_EMBEDDING_MODEL
+        );
+    }
+
+    /// `OLLAMA_MODEL_EMBED` names the default model when it is set and
+    /// nonblank; the vector store's own default stands otherwise.
+    #[test]
+    fn the_default_embedding_model_follows_the_environment_when_it_names_one() {
+        assert_eq!(
+            embedding_model_or_default(None),
+            DEFAULT_OLLAMA_EMBEDDING_MODEL
+        );
+        assert_eq!(
+            embedding_model_or_default(Some("  ")),
+            DEFAULT_OLLAMA_EMBEDDING_MODEL
+        );
+        assert_eq!(
+            embedding_model_or_default(Some(" nomic-embed-text ")),
+            "nomic-embed-text"
         );
     }
 }

@@ -1637,6 +1637,95 @@ async fn a_run_reread_without_change_is_finalised_rather_than_read_again() {
     assert_eq!(requests.len(), 3);
 }
 
+/// A mutating call that fails for a reason the model has not met is progress
+/// of a kind, as a failed read is: nothing changed, but the model learned why,
+/// and the next round offers the tools again so it can correct the call in the
+/// same turn. Before this, one refused write asked for a final answer, and a
+/// task run that tried the corrected call instead lost its whole attempt.
+#[tokio::test]
+async fn a_corrected_call_after_one_refused_write_runs_in_the_same_turn() {
+    let directory = std::env::temp_dir().join(format!("zone-correct-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let write = |id: &str, path: &Path| json!({"id": id, "name": "write_file", "arguments": {"path": path, "content": "noted"}});
+    // A directory is not a file to write, so the first call fails; the second
+    // names a file inside it.
+    let (events, requests) = exercise(vec![
+        text(&write("write_1", &directory).to_string()),
+        text(&write("write_2", &directory.join("note.txt")).to_string()),
+        text("Noted."),
+    ])
+    .await;
+    let written = std::fs::read_to_string(directory.join("note.txt"));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Finalizing(_))),
+        "one refused write asked for a final answer: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallCompleted { id, success: false, .. } if id == "write_1"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallCompleted { id, success: true, .. } if id == "write_2"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        requests[1]["tools"].is_array(),
+        "the round after the refusal offered no tools: {}",
+        requests[1]
+    );
+    assert_eq!(written.unwrap(), "noted");
+    assert_eq!(answer(&events), "Noted.");
+    assert_eq!(requests.len(), 3);
+}
+
+/// The same failure again is not progress: the repeat is not executed, and the
+/// round asks for a final answer, as before.
+#[tokio::test]
+async fn the_same_refused_write_twice_still_ends_the_round() {
+    const REPEATED: &str = "Repeated failed calls made no progress.";
+    let directory = std::env::temp_dir().join(format!("zone-repeat-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let write = |id: &str| json!({"id": id, "name": "write_file", "arguments": {"path": &directory, "content": "noted"}});
+    let (events, requests) = exercise(vec![
+        text(&write("write_1").to_string()),
+        text(&write("write_2").to_string()),
+        text("I cannot write there."),
+    ])
+    .await;
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let finalised: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Finalizing(reason) => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finalised, vec![REPEATED], "{events:?}");
+    assert_eq!(
+        started(&events),
+        vec!["write_1"],
+        "the repeat of a failed call was executed"
+    );
+    assert!(
+        requests[2].get("tools").is_none(),
+        "a finalizing round still offered tools: {}",
+        requests[2]
+    );
+    assert_eq!(answer(&events), "I cannot write there.");
+    assert_eq!(requests.len(), 3);
+}
+
 /// A wait that ended without its event is never reported as a result.
 ///
 /// `resume_with_outcome` injects the outcome as an envelope and a tool result,
