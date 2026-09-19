@@ -24,6 +24,25 @@
 # a model reaches for one is the model's decision and not a property of this
 # console. The rendering they exercise is pinned by unit tests either way.
 #
+# With ZONE_LIVE_MODEL_STUB=1 the model itself is a stand-in
+# (scripts/live-verify/model-stub.py) that serves both doors the server uses,
+# LITELLM_HOST for completions and OLLAMA_HOST for the catalog, profiles and
+# embeddings, and answers each round from a script the lane registers. The
+# agent lanes (live/agent-*.live.ts) need it: they drive every tool the agent
+# has through the real server and console and assert on what the server sent
+# the model, which no real model can promise. With MODEL_STUB_UPSTREAM naming
+# an OpenAI-compatible server (a llama-server, for one), rounds no script
+# answers are forwarded to it, which is how live/real-agent.live.ts runs a
+# real model through the same rig; MODEL_STUB_EMBED_UPSTREAM does the same for
+# embeddings.
+#
+#   ZONE_LIVE_MODEL_STUB=1 ./scripts/live-verify.sh live/agent-chat.live.ts
+#   ZONE_LIVE_MODEL_STUB=1 MODEL_STUB_UPSTREAM=http://127.0.0.1:8080/v1 \
+#     ZONE_LIVE_AGENT_MODEL=qwen2.5-7b ./scripts/live-verify.sh live/real-agent.live.ts
+#
+# ZONE_LIVE_BROWSER_PATH names an installed Chromium when the pinned Playwright
+# would otherwise download one.
+#
 # Required: DATABASE_URL, REDIS_URL, JWT_SECRET, ENCRYPTION_KEY. A migrated
 # database is not required — the server migrates on startup.
 #
@@ -42,6 +61,7 @@ work=${ZONE_LIVE_WORK:-${TMPDIR:-/tmp}/zone-live-verify}
 port=${ZONE_LIVE_PORT:-4179}
 api_port=${ZONE_LIVE_API_PORT:-8010}
 stub_port=${ZONE_LIVE_STUB_PORT:-8188}
+readonly model_port="${ZONE_LIVE_MODEL_PORT:-11435}"
 api="http://127.0.0.1:$api_port"
 real=${ZONE_LIVE_REAL_MODELS:-}
 models="$work/models"
@@ -124,6 +144,21 @@ else
   ZONE_COMFY_FIXTURES="$work/fixtures/media" COMFY_STUB_PORT="$stub_port" \
     python3 "$root/scripts/live-verify/comfy-stub.py" >"$work/comfy-stub.log" 2>&1 &
   pids="$pids $!"
+fi
+
+if [ -n "${ZONE_LIVE_MODEL_STUB:-}" ]; then
+  echo "==> model stand-in on $model_port"
+  MODEL_STUB_LOG="$work/model-stub.jsonl" \
+    python3 "$root/scripts/live-verify/model-stub.py" --port "$model_port" >"$work/model-stub.log" 2>&1 &
+  pids="$pids $!"
+  wait_for model-stub "http://127.0.0.1:$model_port/api/tags"
+  export LITELLM_HOST="http://127.0.0.1:$model_port/v1"
+  export OLLAMA_HOST="http://127.0.0.1:$model_port"
+  export OLLAMA_MODEL_FAST="${OLLAMA_MODEL_FAST:-stand-in:latest}"
+  export OLLAMA_MODEL_REASON="${OLLAMA_MODEL_REASON:-stand-in:latest}"
+  export OLLAMA_MODEL_VISION="${OLLAMA_MODEL_VISION:-stand-in:latest}"
+  export ZONE_LIVE_MODEL="${ZONE_LIVE_MODEL:-stand-in:latest}"
+  export ZONE_MODEL_STUB="http://127.0.0.1:$model_port"
 fi
 
 echo "==> server on $api_port"
