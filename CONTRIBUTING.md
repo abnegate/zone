@@ -199,6 +199,45 @@ MPS upscale defect in `inference_hooks.py` passed every check in this suite. So
 do not describe a stand-in run as verifying generation, upscaling, audio or
 training.
 
+### The agent, with a scripted model
+
+Whether a model reaches for a tool is the model's decision; whether the
+server then executes it, gates it, records it, renders it and hands the next
+round what the code says is the server's. `ZONE_LIVE_MODEL_STUB=1` puts a
+scripted model behind both doors the server uses (`LITELLM_HOST` and
+`OLLAMA_HOST`, served by `scripts/live-verify/model-stub.py`), and the agent
+lanes drive the console as a person would while each lane says what the
+"model" answers:
+
+```bash
+ZONE_LIVE_MODEL_STUB=1 make live-verify ARGS="live/agent-chat.live.ts live/agent-tasks.live.ts"
+```
+
+`live/agent-chat.live.ts` covers a streamed reply with reasoning and the tool
+catalog, an outward write approved and denied, a question card and its
+answer, a background command with `wait_for` and `tail_job`, memory across two
+chats with the badge, a deferred tool found and loaded, a reminder that fires
+and one that runs a turn, a skill indexed and read, a knowledge search cited,
+and an upstream failure reported. `live/agent-tasks.live.ts` covers the
+plan-approval hold, a run parked on a question and on a wait, and, opt-in with
+`ZONE_LIVE_REPO_URL`, a run that works in a worktree and publishes. Each lane
+reads back from the stand-in what the server sent the model, so a tool the
+catalog stopped offering or a prompt block that went missing fails the lane.
+
+The same stand-in forwards rounds no script answers to an OpenAI-compatible
+server, which is how a real model runs through the identical rig:
+
+```bash
+ZONE_LIVE_MODEL_STUB=1 MODEL_STUB_UPSTREAM=http://127.0.0.1:8080/v1 \
+  MODEL_STUB_EMBED_UPSTREAM=http://127.0.0.1:8081/v1 \
+  ZONE_LIVE_AGENT_MODEL=qwen2.5-7b make live-verify ARGS=live/real-agent.live.ts
+```
+
+`live/real-agent.live.ts` types what a person would and records which tools
+the model called; a lane there failing says something about the model, not
+the console. `ZONE_LIVE_BROWSER_PATH` names an installed Chromium when the
+pinned Playwright would otherwise download one.
+
 ### Verifying the models themselves
 
 `live/real-media.live.ts` and `live/real-train.live.ts` drive the same console

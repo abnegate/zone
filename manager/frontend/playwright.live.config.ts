@@ -7,6 +7,9 @@ import { defineConfig, devices } from '@playwright/test';
  * so it can never quietly reuse a stale one.
  */
 const port = process.env.ZONE_LIVE_PORT || '4179';
+// A box whose installed Chromium is not the revision this Playwright would
+// download names it here rather than downloading another.
+const browser = process.env.ZONE_LIVE_BROWSER_PATH;
 
 export default defineConfig({
   testDir: './live',
@@ -27,6 +30,7 @@ export default defineConfig({
     video: 'off',
     navigationTimeout: 60_000,
     actionTimeout: 30_000,
+    ...(browser ? { launchOptions: { executablePath: browser } } : {}),
   },
   projects: [{ name: 'chromium' }],
 });
