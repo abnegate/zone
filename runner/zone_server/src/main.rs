@@ -16,7 +16,9 @@ use zone_context::context::ContextService;
 use zone_server::cache::Cache;
 use zone_server::config::Config;
 use zone_server::routes;
-use zone_server::services::embedding::{create_embedding_service, embedding_engine_from_env};
+use zone_server::services::embedding::{
+    create_embedding_service, default_embedding_model, embedding_engine_from_env,
+};
 use zone_server::state::AppState;
 
 #[tokio::main]
@@ -114,9 +116,7 @@ async fn main() {
             bedrock_use_iam_role: false,
             model_fast: None,
             model_reasoning: None,
-            model_embedding: Some(
-                zone_context::embeddings::providers::DEFAULT_OLLAMA_EMBEDDING_MODEL.to_string(),
-            ),
+            model_embedding: Some(default_embedding_model()),
             model_image: None,
             model_video: None,
             model_audio: None,

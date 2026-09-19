@@ -89,14 +89,14 @@ For production, regenerate secrets for security.
   - `llama3.1:70b` (alternative large model)
 
 ### `OLLAMA_MODEL_EMBED`
-- **Default**: `nomic-embed-text`
-- **Description**: Embedding model for semantic routing and search
+- **Default**: `qwen3-embedding:0.6b`
+- **Description**: Embedding model for search, memory recall and RAG. The manager reads it at startup and uses it for every workspace without an embedding model of its own; the bundled Ollama init pulls it.
 - **RAM**: ~1-2GB
-- **Critical**: Used by auto router to analyze query complexity
 - **Options**:
-  - `nomic-embed-text` (recommended, fast)
-  - `mxbai-embed-large` (higher quality, slower)
-- **Note**: If changed, restart needed to regenerate router.json
+  - `qwen3-embedding:0.6b` (default; 1024 dimensions, the width the vector store keeps)
+  - `nomic-embed-text` (smaller and faster; 768 dimensions, padded to 1024)
+  - `mxbai-embed-large` (1024 dimensions)
+- **Note**: Vectors written by one model do not compare with another's, so switching models means re-embedding what is indexed. With `EMBEDDING_ENGINE=local`, name a model the in-process engine can run, such as `nomic-embed-text`.
 
 ### `OLLAMA_HOST`
 - **Default**: `0.0.0.0:11434`

@@ -488,9 +488,6 @@ pub fn run_with_context(
                 }
                 let tier = tools.tier(&call.function.name);
                 let mutation = tier.mutating();
-                // A mutation the plan hold refuses is told why, and what it
-                // is told is something it can act on: submit the plan.
-                let held = mutation && tools.holds_for_plan();
                 let mut batch = vec![call];
                 if !mutation && !tools.ends_turn(&batch[0].function.name) {
                     while used + batch.len() < budget.max_tool_calls
@@ -576,11 +573,12 @@ pub fn run_with_context(
                             progress = true;
                         }
                     } else {
-                        let novel = failures.insert(signature);
-                        // A failed mutation is no progress, since nothing
-                        // changed; a held one is, the first time, as a
-                        // failed read is: the model learned something.
-                        progress |= (!mutation || held) && novel;
+                        // A failure the model has not met before is progress
+                        // for a mutation as for a read: nothing changed, but
+                        // the model learned why and can correct the call, or
+                        // submit the plan a held one was refused for. The
+                        // same failure again is not.
+                        progress |= failures.insert(signature);
                     }
                     let mut message = LlmMessage::tool_result(&finished.id, &finished.output);
                     message.images = finished

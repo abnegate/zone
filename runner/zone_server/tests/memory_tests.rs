@@ -911,9 +911,9 @@ async fn a_delete_with_its_version_takes_the_entry_out_of_the_next_prompt() {
     remembering
         .turn("Remember that deploys go out on Thursdays.")
         .await;
-    // A refused delete and the delete that follows it are separate turns: a
-    // failed write is no progress, so the loop that saw one finalizes rather
-    // than offering the tools again.
+    // A refused delete and the delete that follows it are kept as separate
+    // turns: the loop offers the tools again after a refusal it has not seen
+    // before, and the script answers that first turn in prose instead.
     remembering.turn("Forget the deploy window.").await;
     remembering.turn("Try that again with the version.").await;
     remembering.turn("When do deploys go out?").await;
