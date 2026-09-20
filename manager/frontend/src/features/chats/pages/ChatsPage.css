@@ -411,12 +411,7 @@
 }
 
 .messages-empty {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: var(--ui-text-sm);
-  color: var(--ui-text-secondary);
+  margin: auto;
 }
 
 .message {

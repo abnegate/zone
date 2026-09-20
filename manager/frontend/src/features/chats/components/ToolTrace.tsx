@@ -13,19 +13,28 @@ import { QuestionCard } from './QuestionCard';
 import { Reasoning } from './Reasoning';
 
 /// Tool names are written for the model, so the trace gives the reader a plain
-/// description instead. Unknown names fall through unchanged rather than being
-/// hidden, so a newly added tool still shows up.
+/// description instead. An unknown name is spelled out from its identifier
+/// rather than hidden, so a newly added tool still shows up as words.
 const TOOL_LABELS: Record<string, string> = {
+  load_tools: 'Loaded tools',
   search_knowledge: 'Searched the knowledge base',
   search_chat_history: 'Searched earlier messages',
   list_sources: 'Listed connected sources',
   list_projects: 'Listed projects',
   list_tasks: 'Listed tasks',
+  list_chats: 'Listed chats',
+  list_members: 'Listed members',
+  list_files: 'Listed files',
+  read_file: 'Read a file',
   list_documents: 'Listed workspace documents',
   read_document: 'Read a workspace document',
+  read_chat_evidence: 'Read an earlier chat',
+  get_task_run: 'Checked a task run',
   get_build_status: 'Checked GitHub build status',
+  read_check_logs: 'Read GitHub check logs',
   list_deployments: 'Listed GitHub deployments',
   list_issues: 'Listed GitHub issues',
+  get_issue: 'Read a GitHub issue',
   read_repository_file: 'Read a repository file',
   create_task: 'Created a task',
   update_task: 'Updated a task',
@@ -34,6 +43,13 @@ const TOOL_LABELS: Record<string, string> = {
   send_message: 'Sent a message',
   create_reminder: 'Created a reminder',
   cancel_reminder: 'Cancelled a reminder',
+  list_reminders: 'Listed reminders',
+  memory_write: 'Wrote memory',
+  memory_append: 'Appended to memory',
+  memory_delete: 'Forgot memory',
+  memory_read: 'Read memory',
+  memory_list: 'Listed memories',
+  finalize_project: 'Created a project',
   generate_image: 'Generated an image',
   edit_image: 'Edited an image',
   query_prometheus: 'Queried Prometheus',
@@ -49,8 +65,13 @@ const TOOL_LABELS: Record<string, string> = {
   wait_for: 'Waited for something to finish',
 };
 
+function humanise(name: string): string {
+  const words = name.replace(/_+/g, ' ').trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 function toolLabel(name: string): string {
-  return TOOL_LABELS[name] ?? name;
+  return TOOL_LABELS[name] ?? humanise(name);
 }
 
 function formatDuration(ms: number): string {
