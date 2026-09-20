@@ -228,15 +228,17 @@ export default function TasksPage() {
                           View PR
                         </a>
                       )}
-                      {task.branch_name && (
-                        <code className="task-branch" title={task.branch_name}>
-                          {task.branch_name}
-                        </code>
-                      )}
                     </span>
                   )}
                 </div>
                 <div className="task-actions">
+                  {task.branch_name && (task.pr_status || task.pr_url) && (
+                    <span className="task-branch-slot">
+                      <code className="task-branch" title={task.branch_name}>
+                        {task.branch_name}
+                      </code>
+                    </span>
+                  )}
                   <Button size="sm" variant="secondary" onClick={() => setSelectedTask(task)}>
                     Execute
                   </Button>
