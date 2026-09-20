@@ -106,11 +106,11 @@ export function BillingSection({ orgId }: BillingSectionProps) {
 
   const metrics: UsageMetric[] = [
     {
-      label: 'Users',
-      current: usage.users,
-      limit: limits.max_users,
-      unit: 'users',
-      percentage: calculatePercentage(usage.users, limits.max_users),
+      label: 'Members',
+      current: usage.members,
+      limit: limits.max_members,
+      unit: 'members',
+      percentage: calculatePercentage(usage.members, limits.max_members),
     },
     {
       label: 'Workspaces',
@@ -120,25 +120,11 @@ export function BillingSection({ orgId }: BillingSectionProps) {
       percentage: calculatePercentage(usage.workspaces, limits.max_workspaces),
     },
     {
-      label: 'Projects',
-      current: usage.projects,
-      limit: limits.max_projects,
-      unit: 'projects',
-      percentage: calculatePercentage(usage.projects, limits.max_projects),
-    },
-    {
-      label: 'Storage',
-      current: usage.storage_gb,
-      limit: limits.max_storage_gb,
-      unit: 'GB',
-      percentage: calculatePercentage(usage.storage_gb, limits.max_storage_gb),
-    },
-    {
-      label: 'API Calls',
-      current: usage.api_calls,
-      limit: limits.max_api_calls_monthly,
-      unit: 'calls',
-      percentage: calculatePercentage(usage.api_calls, limits.max_api_calls_monthly),
+      label: 'Chat Messages',
+      current: usage.chat_messages,
+      limit: limits.max_chats_per_month,
+      unit: 'this period',
+      percentage: calculatePercentage(usage.chat_messages, limits.max_chats_per_month),
     },
   ];
 

@@ -132,7 +132,7 @@ export default function InvitationAcceptPage() {
         <div className="invitation-header">
           <h1>You've Been Invited!</h1>
           <p className="subtitle">
-            {details.invited_by_email} has invited you to join{' '}
+            {details.invited_by_email ?? 'A member'} has invited you to join{' '}
             <strong>{details.organization_name}</strong>
           </p>
         </div>
@@ -168,7 +168,7 @@ export default function InvitationAcceptPage() {
 
           <div className="detail-row">
             <span className="label">Invited By:</span>
-            <span className="value">{details.invited_by_email}</span>
+            <span className="value">{details.invited_by_email ?? '—'}</span>
           </div>
 
           <div className="detail-row">

@@ -1,6 +1,7 @@
 import { Button } from '@zone/ui';
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
+import { AUDIT_ACTIONS, AUDIT_RESOURCE_TYPES } from '../schemas';
 import type { AuditAction, AuditLog, AuditLogFilters, AuditResourceType } from '../types';
 import './AuditLogsSection.css';
 
@@ -8,27 +9,8 @@ interface AuditLogsSectionProps {
   orgId: string;
 }
 
-const ACTIONS: AuditAction[] = [
-  'create',
-  'update',
-  'delete',
-  'login',
-  'logout',
-  'invite',
-  'accept',
-  'revoke',
-];
-const RESOURCE_TYPES: AuditResourceType[] = [
-  'user',
-  'organization',
-  'workspace',
-  'project',
-  'task',
-  'source',
-  'chat',
-  'invitation',
-  'member',
-];
+const ACTIONS: readonly AuditAction[] = AUDIT_ACTIONS;
+const RESOURCE_TYPES: readonly AuditResourceType[] = AUDIT_RESOURCE_TYPES;
 
 export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
   const [loading, setLoading] = useState(true);
@@ -167,18 +149,22 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
   };
 
   const getActionBadgeClass = (action: AuditAction): string => {
-    switch (action) {
-      case 'create':
+    const outcome = action.split('.').pop() ?? '';
+    switch (outcome) {
+      case 'created':
+      case 'added':
+      case 'sent':
         return 'action-create';
-      case 'update':
+      case 'updated':
+      case 'role_changed':
         return 'action-update';
-      case 'delete':
+      case 'deleted':
+      case 'removed':
         return 'action-delete';
-      case 'login':
-      case 'accept':
+      case 'accepted':
         return 'action-success';
-      case 'logout':
-      case 'revoke':
+      case 'revoked':
+      case 'reset':
         return 'action-warning';
       default:
         return 'action-default';
@@ -340,8 +326,8 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
                       </td>
                       <td className="actor-cell">
                         <div className="actor-info">
-                          <span className="actor-email">{log.actor_email}</span>
-                          <span className="actor-id">{log.actor_id}</span>
+                          <span className="actor-email">{log.actor_email ?? 'System'}</span>
+                          <span className="actor-id">{log.actor_id ?? ''}</span>
                         </div>
                       </td>
                       <td className="action-cell">
@@ -351,7 +337,7 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
                       </td>
                       <td className="resource-type-cell">{log.resource_type}</td>
                       <td className="resource-id-cell">
-                        <code>{log.resource_id}</code>
+                        <code>{log.resource_id ?? '—'}</code>
                       </td>
                       <td className="details-cell">
                         <button
@@ -368,8 +354,18 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
                       <tr className="metadata-row">
                         <td colSpan={6}>
                           <div className="metadata-content">
-                            <h4>Metadata</h4>
-                            <pre>{JSON.stringify(log.metadata, null, 2)}</pre>
+                            <h4>Recorded values</h4>
+                            <pre>
+                              {JSON.stringify(
+                                {
+                                  workspace_id: log.workspace_id,
+                                  old_values: log.old_values,
+                                  new_values: log.new_values,
+                                },
+                                null,
+                                2
+                              )}
+                            </pre>
                           </div>
                         </td>
                       </tr>

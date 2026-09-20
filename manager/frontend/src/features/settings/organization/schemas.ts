@@ -2,12 +2,15 @@ import { z } from 'zod';
 import { WorkspaceRoleSchema } from '../../auth/schemas';
 
 // Organization Schemas
+export const OrgRoleSchema = z.enum(['owner', 'admin', 'member']);
+
 export const OrganizationSchema = z.object({
   id: z.string(),
   name: z.string(),
   slug: z.string(),
   description: z.string().nullable(),
   is_active: z.boolean(),
+  role: OrgRoleSchema.optional(),
   created_at: z.string(),
   updated_at: z.string(),
 });
@@ -38,8 +41,6 @@ export const OrganizationResponseSchema = z.object({
 });
 
 // Organization Member Schemas
-export const OrgRoleSchema = z.enum(['owner', 'admin', 'member']);
-
 export const OrganizationMemberSchema = z
   .object({
     id: z.string().min(1),
@@ -162,27 +163,23 @@ export const SubscriptionSchema = z.object({
   plan_id: z.string().min(1),
   plan_name: z.string(),
   status: SubscriptionStatusSchema,
-  current_period_start: z.string().datetime(),
-  current_period_end: z.string().datetime(),
+  current_period_start: z.string().datetime({ offset: true }),
+  current_period_end: z.string().datetime({ offset: true }),
   cancel_at_period_end: z.boolean(),
 });
 
 export const UsageSchema = z.object({
-  users: z.number().min(0),
+  members: z.number().min(0),
   workspaces: z.number().min(0),
-  projects: z.number().min(0),
-  storage_gb: z.number().min(0),
-  api_calls: z.number().min(0),
-  period_start: z.string().datetime(),
-  period_end: z.string().datetime(),
+  chat_messages: z.number().min(0),
+  period_start: z.string().datetime({ offset: true }),
+  period_end: z.string().datetime({ offset: true }),
 });
 
 export const LimitsSchema = z.object({
-  max_users: z.number().nullable(),
+  max_members: z.number().nullable(),
   max_workspaces: z.number().nullable(),
-  max_projects: z.number().nullable(),
-  max_storage_gb: z.number().nullable(),
-  max_api_calls_monthly: z.number().nullable(),
+  max_chats_per_month: z.number().nullable(),
 });
 
 export const PlansResponseSchema = z.object({
@@ -197,43 +194,84 @@ export const SubscriptionResponseSchema = z.object({
   subscription: SubscriptionSchema,
 });
 
-export const UsageResponseSchema = UsageSchema;
+// The server reports the period and the counters it meters; the console reads
+// them as one flat usage record.
+export const UsageResponseSchema = z
+  .object({
+    current_period_start: z.string().datetime({ offset: true }),
+    current_period_end: z.string().datetime({ offset: true }),
+    usage: z.object({
+      chat_messages: z.number().min(0),
+      members: z.number().min(0),
+      workspaces: z.number().min(0),
+    }),
+  })
+  .transform((response) => ({
+    members: response.usage.members,
+    workspaces: response.usage.workspaces,
+    chat_messages: response.usage.chat_messages,
+    period_start: response.current_period_start,
+    period_end: response.current_period_end,
+  }));
 
-export const LimitsResponseSchema = LimitsSchema;
+// A plan spells "unlimited" as a negative limit; the console reads it as null.
+const boundedLimit = (limit: number): number | null => (limit < 0 ? null : limit);
+
+export const LimitsResponseSchema = z
+  .object({
+    max_members: z.number(),
+    max_workspaces: z.number(),
+    max_chats_per_month: z.number(),
+  })
+  .transform((limits) => ({
+    max_members: boundedLimit(limits.max_members),
+    max_workspaces: boundedLimit(limits.max_workspaces),
+    max_chats_per_month: boundedLimit(limits.max_chats_per_month),
+  }));
 
 // Audit Log Schemas
-export const AuditActionSchema = z.enum([
-  'create',
-  'update',
-  'delete',
-  'login',
-  'logout',
-  'invite',
-  'accept',
-  'revoke',
-]);
-export const AuditResourceTypeSchema = z.enum([
-  'user',
+// Actions and resource types are the server's dotted names; the lists name the
+// ones the console offers as filters and the schema accepts any the server has.
+export const AUDIT_ACTIONS = [
+  'member.added',
+  'member.removed',
+  'member.role_changed',
+  'invitation.sent',
+  'invitation.accepted',
+  'invitation.revoked',
+  'organization.updated',
+  'organization.deleted',
+  'workspace.created',
+  'workspace.updated',
+  'workspace.deleted',
+  'settings.updated',
+  'settings.reset',
+] as const;
+export const AUDIT_RESOURCE_TYPES = [
   'organization',
   'workspace',
-  'project',
-  'task',
-  'source',
-  'chat',
-  'invitation',
   'member',
-]);
+  'invitation',
+  'ai_settings',
+] as const;
+
+export const AuditActionSchema = z.string().min(1);
+export const AuditResourceTypeSchema = z.string().min(1);
+
+const AuditValuesSchema = z.record(z.string(), z.unknown()).nullable().optional().default(null);
 
 export const AuditLogSchema = z.object({
   id: z.string().min(1),
-  organization_id: z.string().min(1),
-  actor_id: z.string().min(1),
-  actor_email: z.string().email(),
+  organization_id: z.string().nullable(),
+  workspace_id: z.string().nullable().optional().default(null),
+  actor_id: z.string().nullable(),
+  actor_email: z.string().nullable(),
   action: AuditActionSchema,
   resource_type: AuditResourceTypeSchema,
-  resource_id: z.string().min(1),
-  metadata: z.record(z.string(), z.unknown()),
-  created_at: z.string().datetime(),
+  resource_id: z.string().nullable(),
+  old_values: AuditValuesSchema,
+  new_values: AuditValuesSchema,
+  created_at: z.string().datetime({ offset: true }),
 });
 
 export const AuditLogFiltersSchema = z.object({

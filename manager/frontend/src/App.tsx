@@ -36,6 +36,7 @@ function App() {
                 <Route path="/login" element={<LoginPage />} />
                 <Route path="/register" element={<RegisterPage />} />
                 <Route path="/verify-email" element={<EmailVerificationPage />} />
+                <Route path="/verify" element={<EmailVerificationPage />} />
                 <Route path="/forgot-password" element={<ForgotPasswordPage />} />
                 <Route path="/reset-password" element={<ResetPasswordPage />} />
                 <Route path="/invitations" element={<InvitationAcceptPage />} />
@@ -117,7 +118,10 @@ function App() {
                   <Route
                     path="org-settings"
                     element={
-                      <ProtectedRoute requiredPermission={PERMISSIONS.ORGANIZATIONS.UPDATE}>
+                      <ProtectedRoute
+                        requiredPermission={PERMISSIONS.ORGANIZATIONS.UPDATE}
+                        requiredOrganizationRole="admin"
+                      >
                         <OrgSettingsPage />
                       </ProtectedRoute>
                     }
