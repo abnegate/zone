@@ -43,7 +43,32 @@
 
 .audit-logs-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
+}
+
+.audit-logs-table col.audit-col-time {
+  width: 17%;
+}
+
+.audit-logs-table col.audit-col-actor {
+  width: 27%;
+}
+
+.audit-logs-table col.audit-col-action {
+  width: 20%;
+}
+
+.audit-logs-table col.audit-col-type {
+  width: 13%;
+}
+
+.audit-logs-table col.audit-col-id {
+  width: 15%;
+}
+
+.audit-logs-table col.audit-col-details {
+  width: 8%;
 }
 
 .audit-logs-table th {
@@ -63,12 +88,22 @@
   height: var(--ui-list-row-2);
 }
 
-.timestamp-cell span {
+.timestamp-cell .timestamp-relative {
+  display: block;
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text-primary);
+  white-space: nowrap;
+}
+
+.timestamp-cell .timestamp-absolute {
   display: block;
   font-family: var(--ui-font-mono);
-  font-size: var(--ui-text-xs);
-  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-2xs);
+  line-height: var(--ui-space-4);
+  color: var(--ui-text-muted);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .actor-cell .actor-info {
@@ -98,8 +133,11 @@
 .action-badge {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
   height: var(--ui-badge-height);
   padding: 0 var(--ui-space-1-5);
+  overflow: hidden;
+  text-overflow: ellipsis;
   border-radius: var(--ui-radius-md);
   font-family: var(--ui-font-mono);
   font-size: var(--ui-text-2xs);
@@ -154,8 +192,12 @@
 }
 
 .resource-id-cell code {
+  display: block;
+  max-width: 100%;
   color: var(--ui-text-secondary);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .details-cell {
@@ -182,6 +224,8 @@
   margin: 0;
   max-height: 18rem;
   overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .load-more-section {

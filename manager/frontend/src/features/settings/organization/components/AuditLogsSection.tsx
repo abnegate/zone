@@ -115,7 +115,7 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
     setExpandedLog(expandedLog === logId ? null : logId);
   };
 
-  const formatTimestamp = (timestamp: string): string => {
+  const formatTimestamp = (timestamp: string): { relative: string; absolute: string } => {
     const date = new Date(timestamp);
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
@@ -144,8 +144,7 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
       minute: '2-digit',
       second: '2-digit',
     });
-
-    return `${absolute} (${relative})`;
+    return { relative, absolute };
   };
 
   const getActionBadgeClass = (action: AuditAction): string => {
@@ -309,6 +308,14 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
         <>
           <div className="audit-logs-table-wrapper">
             <table className="audit-logs-table">
+              <colgroup>
+                <col className="audit-col-time" />
+                <col className="audit-col-actor" />
+                <col className="audit-col-action" />
+                <col className="audit-col-type" />
+                <col className="audit-col-id" />
+                <col className="audit-col-details" />
+              </colgroup>
               <thead>
                 <tr>
                   <th>Time</th>
@@ -323,8 +330,13 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
                 {logs.map((log) => (
                   <Fragment key={log.id}>
                     <tr className="audit-log-row">
-                      <td className="timestamp-cell">
-                        <span title={log.created_at}>{formatTimestamp(log.created_at)}</span>
+                      <td className="timestamp-cell" title={log.created_at}>
+                        <span className="timestamp-relative">
+                          {formatTimestamp(log.created_at).relative}
+                        </span>
+                        <span className="timestamp-absolute">
+                          {formatTimestamp(log.created_at).absolute}
+                        </span>
                       </td>
                       <td className="actor-cell">
                         <div className="actor-info">
@@ -339,7 +351,7 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
                       </td>
                       <td className="resource-type-cell">{log.resource_type}</td>
                       <td className="resource-id-cell">
-                        <code>{log.resource_id ?? '—'}</code>
+                        <code title={log.resource_id ?? undefined}>{log.resource_id ?? '—'}</code>
                       </td>
                       <td className="details-cell">
                         <Button
