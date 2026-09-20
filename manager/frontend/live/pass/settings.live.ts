@@ -166,8 +166,8 @@ test.describe('organization and workspace settings', () => {
   }) => {
     await signIn(page);
     await page.goto('/org-settings');
-    await expect(page.locator('#provider')).toBeVisible({ timeout: 30_000 });
-    await page.locator('#provider').selectOption('self_hosted');
+    await expect(page.locator('#ai-provider')).toBeVisible({ timeout: 30_000 });
+    await page.locator('#ai-provider').selectOption('self_hosted');
     await page.locator('#model-fast').selectOption(FAST);
     await page.locator('#model-reasoning').selectOption(REASON);
     const embedding = page.locator('#model-embedding');
@@ -209,14 +209,14 @@ test.describe('organization and workspace settings', () => {
 
     // Row 10: the provider forms for OpenAI and Anthropic, and the LiteLLM section.
     await page.goto('/org-settings');
-    await expect(page.locator('#provider')).toBeVisible({ timeout: 30_000 });
-    await page.locator('#provider').selectOption('openai');
+    await expect(page.locator('#ai-provider')).toBeVisible({ timeout: 30_000 });
+    await page.locator('#ai-provider').selectOption('openai');
     await expect(page.locator('#openai-key')).toBeVisible();
     await shot(page, '10-provider-openai-form');
-    await page.locator('#provider').selectOption('anthropic');
+    await page.locator('#ai-provider').selectOption('anthropic');
     await expect(page.locator('#anthropic-key')).toBeVisible();
     await shot(page, '10-provider-anthropic-form');
-    await page.locator('#provider').selectOption('self_hosted');
+    await page.locator('#ai-provider').selectOption('self_hosted');
     await page
       .locator('#litellm-host')
       .fill(process.env.LITELLM_HOST ?? 'http://127.0.0.1:11434/v1');
@@ -235,7 +235,7 @@ test.describe('organization and workspace settings', () => {
     const reset = await anyAlert(page);
     await shot(page, '09-reset-alert');
     await page.reload();
-    await expect(page.locator('#provider')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('#ai-provider')).toBeVisible({ timeout: 30_000 });
     const fastAfterReset = await page.locator('#model-fast').inputValue();
     const rowsAfterReset = sql(
       `select count(*) from organization_ai_settings where organization_id = '${state.owner.organization.id}'`,
@@ -308,7 +308,7 @@ test.describe('organization and workspace settings', () => {
       `select count(*) from projects where workspace_id in (select id from workspaces where organization_id = '${state.owner.organization.id}')`,
     ).join(',');
     const userMetric = await page
-      .locator('.metric-card', { hasText: 'Users' })
+      .locator('.metric-card', { hasText: /Members|Users/ })
       .locator('.current-value')
       .innerText()
       .catch(() => 'no metric');

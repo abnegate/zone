@@ -244,8 +244,8 @@ test.describe('sources, projects and tasks', () => {
       await expect(existing).toHaveCount(0, { timeout: 30_000 });
     }
     await page
-      .locator('.sources-header')
       .getByRole('button', { name: 'Add source' })
+      .first()
       .click();
     const wizard = page.getByRole('dialog');
     await expect(wizard).toContainText('Add Source');
@@ -343,8 +343,8 @@ test.describe('sources, projects and tasks', () => {
       name: string,
     ): Promise<string> {
       await page
-        .locator('.sources-header')
         .getByRole('button', { name: 'Add source' })
+      .first()
         .click();
       const wizard = page.getByRole('dialog');
       await wizard
@@ -389,8 +389,8 @@ test.describe('sources, projects and tasks', () => {
 
     const kinds = await (async () => {
       await page
-        .locator('.sources-header')
         .getByRole('button', { name: 'Add source' })
+      .first()
         .click();
       const wizard = page.getByRole('dialog');
       const names = await wizard

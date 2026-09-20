@@ -22,9 +22,12 @@ if docker ps --format '{{.Names}}' | grep -qx postgres; then
     exit 1
 fi
 
-source=$(docker inspect postgres \
-    --format "{{range .Mounts}}{{if eq .Destination \"$pgdata\"}}{{.Name}}{{end}}{{end}}" \
-    2>/dev/null || true)
+source=${ZONE_PGDATA_SOURCE:-}
+if [ -z "$source" ]; then
+    source=$(docker inspect postgres \
+        --format "{{range .Mounts}}{{if eq .Destination \"$pgdata\"}}{{.Name}}{{end}}{{end}}" \
+        2>/dev/null || true)
+fi
 
 if [ -z "$source" ] || [ "$source" = "$target" ]; then
     source=''
@@ -38,7 +41,6 @@ if [ -z "$source" ] || [ "$source" = "$target" ]; then
         fi
     done
 fi
-source=${ZONE_PGDATA_SOURCE:-$source}
 
 if [ -z "$source" ]; then
     printf '%s\n' "no anonymous PGDATA volume found; nothing to move (a fresh install already keeps its cluster in $target)"

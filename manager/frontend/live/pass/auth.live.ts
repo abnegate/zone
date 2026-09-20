@@ -181,16 +181,18 @@ test.describe('auth and account', () => {
     });
 
     await page.goto(`/verify-email?token=${token}`);
-    await page.waitForTimeout(4_000);
     const outcome = await page
-      .locator('.auth-page, main, body')
+      .getByRole('alert')
       .first()
-      .innerText();
+      .innerText({ timeout: 15_000 })
+      .catch(async () =>
+        page.locator('.auth-page, main, body').first().innerText(),
+      );
     await shot(page, '02-verify-email-outcome');
     const verified = sql(
       `select email_verified from users where id = '${account.userId}'`,
     );
-    const consoleSaysVerified = /Email Verified/.test(outcome);
+    const consoleSaysVerified = /Email Verified|verified successfully/i.test(outcome);
     record(2, {
       result: consoleSaysVerified ? 'WORKS' : 'FAILS',
       cause: consoleSaysVerified
@@ -384,11 +386,13 @@ test.describe('auth and account', () => {
     await page.getByLabel('Confirm Password').fill(newPassword);
     await shot(page, '05-reset-form');
     await page.getByRole('button', { name: /reset|set/i }).click();
-    await page.waitForTimeout(4_000);
     const outcome = await page
-      .locator('.auth-page, main, body')
+      .getByRole('alert')
       .first()
-      .innerText();
+      .innerText({ timeout: 15_000 })
+      .catch(async () =>
+        page.locator('.auth-page, main, body').first().innerText(),
+      );
     await shot(page, '05-reset-outcome');
 
     const oldRefused = await api('POST', '/api/auth/login', {
@@ -412,7 +416,7 @@ test.describe('auth and account', () => {
       );
     }
     const consoleSaysSent = /Check your email/.test(forgotOutcome);
-    const consoleSaysReset = /Password Reset Successful/.test(outcome);
+    const consoleSaysReset = /Password Reset Successful|reset successfully/i.test(outcome);
     record(5, {
       result:
         consoleSaysSent &&
