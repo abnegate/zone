@@ -216,6 +216,25 @@ describe('tasks page layout', () => {
     expect(rule(css, '.task-branch')).toContain('height: var(--ui-badge-height)');
   });
 
+  it('gives the pull request a 20px row of its own so the branch is not squeezed by the meta', () => {
+    const pr = rule(css, '.task-pr');
+    expect(pr).toContain('display: flex');
+    expect(pr).toContain('height: var(--ui-badge-height)');
+    expect(pr).toContain('margin: var(--ui-space-2) 0 0');
+    expect(pr).not.toContain('margin-left: auto');
+    expect(css).toContain('.task-meta > * + *::before');
+    const branch = rule(css, '.task-branch');
+    expect(branch).toContain('min-width: 0');
+    expect(branch).toContain('text-overflow: ellipsis');
+    expect(branch).not.toContain('max-width');
+  });
+
+  it('lets a wizard toggle keep its description on the line under the title', () => {
+    expect(css).not.toContain('.task-wizard .toggle-text');
+    expect(css).not.toContain('.task-wizard .toggle-desc');
+    expect(css).not.toContain('.task-wizard .toggle-label');
+  });
+
   it('shows the execution log as bounded rows', () => {
     expect(rule(css, '.logs-container')).toContain('max-height: 40vh');
     expect(rule(css, '.log-entry')).toContain('min-height: var(--ui-control-height-sm)');

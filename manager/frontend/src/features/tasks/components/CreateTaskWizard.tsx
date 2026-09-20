@@ -293,10 +293,7 @@ export function CreateTaskWizard({
                 </span>
                 <span className="toggle-text">
                   <span className="toggle-title">Enable Agentic Mode</span>
-                  <span
-                    className="toggle-desc"
-                    title="Allow this task to autonomously read/write code and query the knowledge base"
-                  >
+                  <span className="toggle-desc">
                     Allow this task to autonomously read/write code and query the knowledge base
                   </span>
                 </span>
@@ -316,10 +313,7 @@ export function CreateTaskWizard({
                   </span>
                   <span className="toggle-text">
                     <span className="toggle-title">Require plan approval</span>
-                    <span
-                      className="toggle-desc"
-                      title="A run writes its plan and waits for you to approve it before changing anything"
-                    >
+                    <span className="toggle-desc">
                       A run writes its plan and waits for you to approve it before changing anything
                     </span>
                   </span>
