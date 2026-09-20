@@ -31,6 +31,7 @@ pub mod sources;
 pub mod subscriptions;
 pub mod sync_config;
 pub mod task_access;
+pub mod task_tool_calls;
 pub mod tasks;
 pub mod usage;
 pub mod users;
