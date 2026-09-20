@@ -175,32 +175,17 @@
   }
 
   .ui-btn-destructive {
-    background-color: var(--ui-error-500);
-    color: var(--ui-text-inverse);
-  }
-
-  .ui-btn-destructive:hover {
-    background-color: var(--ui-error-600);
-  }
-
-  .ui-btn-destructive-outline {
-    border-color: color-mix(in srgb, var(--ui-error-500) 45%, transparent);
+    border-color: var(--ui-error);
     background-color: transparent;
     color: var(--ui-error-600);
   }
 
-  .ui-btn-destructive-outline:hover {
-    border-color: var(--ui-error-600);
-    background-color: var(--ui-error-600);
-    color: var(--ui-text-inverse);
+  .ui-btn-destructive:hover {
+    background-color: color-mix(in srgb, var(--ui-error) 12%, transparent);
   }
 
-  :root[data-theme='dark'] .ui-btn-destructive-outline {
+  :root[data-theme='dark'] .ui-btn-destructive {
     color: var(--ui-error-400);
-  }
-
-  :root[data-theme='dark'] .ui-btn-destructive-outline:hover {
-    color: var(--ui-text-inverse);
   }
 
   .ui-btn-outline {
@@ -900,6 +885,18 @@
     gap: var(--ui-space-1);
     text-align: left;
     padding-right: var(--ui-control-height);
+  }
+
+  .ui-dialog-title-row {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    min-width: 0;
+  }
+
+  .ui-dialog-title-row .ui-dialog-title {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .ui-dialog-footer {

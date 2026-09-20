@@ -559,7 +559,7 @@ test.describe('sources, projects and tasks', () => {
       ['active', 'Active'],
     ]) {
       await details.getByRole('button', { name: 'Edit Project' }).click();
-      const modal = page.locator('.modal-content', { hasText: 'Edit Project' });
+      const modal = page.getByRole('dialog', { name: 'Edit Project' });
       await modal.locator('#edit-status').selectOption(value);
       const saved = page
         .waitForResponse(
@@ -617,9 +617,7 @@ test.describe('sources, projects and tasks', () => {
 
     // External sync (row 24).
     await details.getByRole('button', { name: '+ Add Sync' }).click();
-    const sync = page.locator('.modal-content', {
-      hasText: 'Add External Sync',
-    });
+    const sync = page.getByRole('dialog', { name: 'Add External Sync' });
     await expect(sync).toBeVisible();
     const providers = await sync
       .locator('#sync-provider option')
@@ -659,9 +657,7 @@ test.describe('sources, projects and tasks', () => {
       .locator('aside.project-details')
       .getByRole('button', { name: 'Delete', exact: true })
       .click();
-    const confirm = page.locator('.modal-content', {
-      hasText: 'Delete Project',
-    });
+    const confirm = page.getByRole('dialog', { name: 'Delete Project' });
     await confirm.getByRole('button', { name: 'Delete Project' }).click();
     await expect(
       page.locator('.project-card', { hasText: 'Real pass throwaway' }),

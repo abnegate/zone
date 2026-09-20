@@ -46,32 +46,6 @@
   color: var(--ui-error);
 }
 
-.invitation-dialog {
-  position: fixed;
-  inset: 0;
-  z-index: var(--ui-layer-modal);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--ui-gutter);
-  background: var(--ui-overlay-heavy);
-  backdrop-filter: blur(8px);
-  animation: ui-fade-in var(--ui-duration-fast) var(--ui-ease-out) both;
-}
-
-.invitation-dialog .modal-header {
-  margin-bottom: var(--ui-space-4);
-}
-
-.invitation-dialog .modal-header h3 {
-  margin: 0;
-}
-
-.invitation-dialog .modal-close {
-  font-size: var(--ui-text-xl);
-  line-height: 1;
-}
-
 .invitation-form .form-group:last-of-type {
   margin-bottom: 0;
 }

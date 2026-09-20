@@ -658,10 +658,7 @@ export default function ProjectsPage() {
                   <Button variant="secondary" onClick={() => openEditModal(selectedProject)}>
                     Edit Project
                   </Button>
-                  <Button
-                    variant="destructive-outline"
-                    onClick={() => openModal(setShowDeleteConfirm)}
-                  >
+                  <Button variant="destructive" onClick={() => openModal(setShowDeleteConfirm)}>
                     Delete
                   </Button>
                 </div>
@@ -791,7 +788,7 @@ export default function ProjectsPage() {
             Cancel
           </Button>
           <Button
-            variant="destructive-outline"
+            variant="destructive"
             type="button"
             onClick={handleDeleteProject}
             disabled={submitting}

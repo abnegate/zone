@@ -79,11 +79,11 @@ test.describe('models page', () => {
       .filter({ hasText: process.env.ZONE_LIVE_AGENT_MODEL ?? 'qwen3.8:27b' })
       .first();
     await agentRow.click();
-    const details = page.locator('.modal-details');
+    const details = page.getByRole('dialog');
     await expect(details).toBeVisible();
     const detailText = (await details.innerText()).replace(/\s+/g, ' ');
     await shot(page, '14-model-details');
-    await details.locator('.modal-close').click();
+    await details.locator('.ui-dialog-close').click();
 
     // Sort lives on the Browse tab; the Installed tab has no sort control.
     await page.getByRole('tab', { name: 'Browse' }).click();
@@ -127,12 +127,12 @@ test.describe('models page', () => {
         await chip.click();
       } else if (
         await page
-          .locator('.modal-details')
+          .getByRole('dialog')
           .isVisible()
           .catch(() => false)
       ) {
         await page
-          .locator('.modal-details')
+          .getByRole('dialog')
           .getByRole('button', { name: 'Install Model' })
           .click();
       }

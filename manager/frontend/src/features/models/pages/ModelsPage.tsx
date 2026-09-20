@@ -560,72 +560,134 @@ export default function ModelsPage() {
         </div>
       </Modal>
 
-      {/* Model Details Modal */}
       {detailsModel && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setDetailsModel(null)}
-            onKeyDown={(e) => e.key === 'Escape' && setDetailsModel(null)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content modal-details">
-            <button
-              className="modal-close"
-              onClick={() => setDetailsModel(null)}
-              type="button"
-              aria-label="Close"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                width="16"
-                height="16"
-                aria-hidden="true"
-              >
-                <path d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-
-            <div className="modal-details-header">
-              <h3>
-                {!isInstalledModel(detailsModel) && detailsModel.display_name
-                  ? detailsModel.display_name
-                  : detailsModel.name}
-              </h3>
-              <span className="details-source">
-                {isInstalledModel(detailsModel)
-                  ? 'Installed'
-                  : sourceLabel(detailsModel.source || browse.source)}
-              </span>
+        <Modal
+          isOpen
+          onClose={() => setDetailsModel(null)}
+          title={
+            !isInstalledModel(detailsModel) && detailsModel.display_name
+              ? detailsModel.display_name
+              : detailsModel.name
+          }
+          badge={
+            isInstalledModel(detailsModel) ? (
+              <Badge variant="accent">Installed</Badge>
+            ) : (
+              <Badge variant="info">{sourceLabel(detailsModel.source || browse.source)}</Badge>
+            )
+          }
+          size="lg"
+        >
+          {sourceUrl && (
+            <div className="details-link">
+              <a href={sourceUrl} target="_blank" rel="noreferrer">
+                View source
+              </a>
             </div>
+          )}
 
-            {sourceUrl && (
-              <div className="details-link">
-                <a href={sourceUrl} target="_blank" rel="noreferrer">
-                  View source
-                </a>
-              </div>
-            )}
-
-            {isInstalledModel(detailsModel) ? (
-              <>
-                {detailsModel.details?.description && (
-                  <p className="details-description">{detailsModel.details.description}</p>
-                )}
-                <div className="details-meta">
+          {isInstalledModel(detailsModel) ? (
+            <>
+              {detailsModel.details?.description && (
+                <p className="details-description">{detailsModel.details.description}</p>
+              )}
+              <div className="details-meta">
+                <div className="details-meta-item">
+                  <span className="details-label">Size</span>
+                  <span>{formatBytes(detailsModel.size)}</span>
+                </div>
+                {detailsModel.details?.parameter_size && (
                   <div className="details-meta-item">
-                    <span className="details-label">Size</span>
-                    <span>{formatBytes(detailsModel.size)}</span>
+                    <span className="details-label">Parameters</span>
+                    <span>{detailsModel.details.parameter_size}</span>
                   </div>
+                )}
+                {detailsModel.details?.quantization_level && (
+                  <div className="details-meta-item">
+                    <span className="details-label">Quantization</span>
+                    <span>{detailsModel.details.quantization_level}</span>
+                  </div>
+                )}
+                {detailsModel.details?.family && (
+                  <div className="details-meta-item">
+                    <span className="details-label">Family</span>
+                    <span>{detailsModel.details.family}</span>
+                  </div>
+                )}
+                <div className="details-meta-item">
+                  <span className="details-label">Modified</span>
+                  <span>{formatDate(detailsModel.modified_at)}</span>
+                </div>
+              </div>
+              <div className="modal-actions">
+                <Button variant="ghost" onClick={() => setDetailsModel(null)}>
+                  Close
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    setDetailsModel(null);
+                    setDeleteConfirm(detailsModel.name);
+                  }}
+                >
+                  Delete Model
+                </Button>
+              </div>
+            </>
+          ) : (
+            <>
+              {detailsModel.description && (
+                <p className="details-description">{detailsModel.description}</p>
+              )}
+
+              {(detailsModel.details?.parameter_size ||
+                detailsModel.size ||
+                modelSize ||
+                detailsModel.details?.context_length) && (
+                <div className="details-stats">
                   {detailsModel.details?.parameter_size && (
+                    <div className="details-stat">
+                      <span className="details-stat-value">
+                        {detailsModel.details.parameter_size}
+                      </span>
+                      <span className="details-stat-label">Parameters</span>
+                    </div>
+                  )}
+                  {(detailsModel.size || modelSize) && (
+                    <div className="details-stat">
+                      <span className="details-stat-value">
+                        {formatBytes(detailsModel.size || modelSize || 0)}
+                      </span>
+                      <span className="details-stat-label">
+                        {detailsModel.source === 'huggingface' ? 'Repo size' : 'Size'}
+                      </span>
+                    </div>
+                  )}
+                  {detailsModel.details?.context_length && (
+                    <div className="details-stat">
+                      <span className="details-stat-value">
+                        {formatContextLength(detailsModel.details.context_length)}
+                      </span>
+                      <span className="details-stat-label">Context</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {(detailsModel.details?.family ||
+                detailsModel.details?.quantization_level ||
+                detailsModel.details?.format ||
+                detailsModel.details?.license ||
+                detailsModel.details?.ram_required_gb ||
+                detailsModel.author ||
+                detailsModel.downloads != null ||
+                detailsModel.likes != null ||
+                detailsModel.modified_at) && (
+                <div className="details-meta">
+                  {detailsModel.details?.family && (
                     <div className="details-meta-item">
-                      <span className="details-label">Parameters</span>
-                      <span>{detailsModel.details.parameter_size}</span>
+                      <span className="details-label">Family</span>
+                      <span>{detailsModel.details.family}</span>
                     </div>
                   )}
                   {detailsModel.details?.quantization_level && (
@@ -634,226 +696,134 @@ export default function ModelsPage() {
                       <span>{detailsModel.details.quantization_level}</span>
                     </div>
                   )}
-                  {detailsModel.details?.family && (
+                  {detailsModel.details?.format && (
                     <div className="details-meta-item">
-                      <span className="details-label">Family</span>
-                      <span>{detailsModel.details.family}</span>
+                      <span className="details-label">Format</span>
+                      <span>{detailsModel.details.format}</span>
                     </div>
                   )}
-                  <div className="details-meta-item">
-                    <span className="details-label">Modified</span>
-                    <span>{formatDate(detailsModel.modified_at)}</span>
-                  </div>
+                  {detailsModel.details?.license && (
+                    <div className="details-meta-item">
+                      <span className="details-label">License</span>
+                      <span>{detailsModel.details.license}</span>
+                    </div>
+                  )}
+                  {detailsModel.details?.ram_required_gb && (
+                    <div className="details-meta-item">
+                      <span className="details-label">RAM</span>
+                      <span>{detailsModel.details.ram_required_gb} GB</span>
+                    </div>
+                  )}
+                  {detailsModel.author && (
+                    <div className="details-meta-item details-author">
+                      <span className="details-label">Author</span>
+                      <span>{detailsModel.author}</span>
+                    </div>
+                  )}
+                  {detailsModel.downloads != null && (
+                    <div className="details-meta-item">
+                      <span className="details-label">
+                        {detailsModel.source === 'ollama' ? 'Pulls' : 'Downloads'}
+                      </span>
+                      <span>{formatNumber(detailsModel.downloads)}</span>
+                    </div>
+                  )}
+                  {detailsModel.likes != null && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Likes</span>
+                      <span>{formatNumber(detailsModel.likes)}</span>
+                    </div>
+                  )}
+                  {detailsModel.modified_at && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Updated</span>
+                      <span>{formatDate(detailsModel.modified_at)}</span>
+                    </div>
+                  )}
                 </div>
+              )}
+
+              <div className="details-use-cases">
+                <span className="details-label">Capabilities</span>
+                <Capabilities capabilities={detailsModel.capabilities} tags={detailsModel.tags} />
+              </div>
+
+              {download?.name && (
+                <DownloadOptions
+                  model={detailsModel}
+                  options={modelDownloadSizes(detailsModel)}
+                  pulling={!pull.canStart(download.name)}
+                  onInstall={(name) => handleInstall(detailsModel, name)}
+                />
+              )}
+
+              {download?.name && modelDownloadSizes(detailsModel).length < 2 && (
+                <div className="details-install">
+                  <span className="details-label">Install command</span>
+                  <code>{download.name}</code>
+                </div>
+              )}
+              {download?.reason && <p className="help-text">{download.reason}</p>}
+
+              {modelCard !== null && (
+                <div className="details-card">
+                  <div className="details-card-header">
+                    <span className="details-label">Model Card</span>
+                    <button
+                      className={`details-card-toggle ${modelCardExpanded ? 'expanded' : ''}`}
+                      onClick={() => setModelCardExpanded(!modelCardExpanded)}
+                      type="button"
+                    >
+                      {modelCardExpanded ? 'Collapse' : 'Expand'}
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        width="12"
+                        height="12"
+                        aria-hidden="true"
+                      >
+                        <path d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                  </div>
+                  {modelCardExpanded && (
+                    <div
+                      className="details-card-content details-card-text"
+                      // biome-ignore lint/security/noDangerouslySetInnerHtml: Content is sanitized with DOMPurify
+                      dangerouslySetInnerHTML={{
+                        __html: DOMPurify.sanitize(modelCard),
+                      }}
+                    />
+                  )}
+                </div>
+              )}
+
+              {modelCardLoading && (
+                <div className="details-card-loading">
+                  <span className="spinner" /> Loading model card...
+                </div>
+              )}
+
+              {modelDownloadSizes(detailsModel).length < 2 && (
                 <div className="modal-actions">
                   <Button variant="ghost" onClick={() => setDetailsModel(null)}>
                     Close
                   </Button>
                   <Button
-                    variant="destructive"
-                    onClick={() => {
-                      setDetailsModel(null);
-                      setDeleteConfirm(detailsModel.name);
-                    }}
+                    disabled={!download?.name || !pull.canStart(download.name)}
+                    onClick={() =>
+                      handleInstall(detailsModel, selectedSize || defaultDownloadName(detailsModel))
+                    }
                   >
-                    Delete Model
+                    {download?.name ? 'Install Model' : download?.label}
                   </Button>
                 </div>
-              </>
-            ) : (
-              <>
-                {detailsModel.description && (
-                  <p className="details-description">{detailsModel.description}</p>
-                )}
-
-                {(detailsModel.details?.parameter_size ||
-                  detailsModel.size ||
-                  modelSize ||
-                  detailsModel.details?.context_length) && (
-                  <div className="details-stats">
-                    {detailsModel.details?.parameter_size && (
-                      <div className="details-stat">
-                        <span className="details-stat-value">
-                          {detailsModel.details.parameter_size}
-                        </span>
-                        <span className="details-stat-label">Parameters</span>
-                      </div>
-                    )}
-                    {(detailsModel.size || modelSize) && (
-                      <div className="details-stat">
-                        <span className="details-stat-value">
-                          {formatBytes(detailsModel.size || modelSize || 0)}
-                        </span>
-                        <span className="details-stat-label">
-                          {detailsModel.source === 'huggingface' ? 'Repo size' : 'Size'}
-                        </span>
-                      </div>
-                    )}
-                    {detailsModel.details?.context_length && (
-                      <div className="details-stat">
-                        <span className="details-stat-value">
-                          {formatContextLength(detailsModel.details.context_length)}
-                        </span>
-                        <span className="details-stat-label">Context</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {(detailsModel.details?.family ||
-                  detailsModel.details?.quantization_level ||
-                  detailsModel.details?.format ||
-                  detailsModel.details?.license ||
-                  detailsModel.details?.ram_required_gb ||
-                  detailsModel.author ||
-                  detailsModel.downloads != null ||
-                  detailsModel.likes != null ||
-                  detailsModel.modified_at) && (
-                  <div className="details-meta">
-                    {detailsModel.details?.family && (
-                      <div className="details-meta-item">
-                        <span className="details-label">Family</span>
-                        <span>{detailsModel.details.family}</span>
-                      </div>
-                    )}
-                    {detailsModel.details?.quantization_level && (
-                      <div className="details-meta-item">
-                        <span className="details-label">Quantization</span>
-                        <span>{detailsModel.details.quantization_level}</span>
-                      </div>
-                    )}
-                    {detailsModel.details?.format && (
-                      <div className="details-meta-item">
-                        <span className="details-label">Format</span>
-                        <span>{detailsModel.details.format}</span>
-                      </div>
-                    )}
-                    {detailsModel.details?.license && (
-                      <div className="details-meta-item">
-                        <span className="details-label">License</span>
-                        <span>{detailsModel.details.license}</span>
-                      </div>
-                    )}
-                    {detailsModel.details?.ram_required_gb && (
-                      <div className="details-meta-item">
-                        <span className="details-label">RAM</span>
-                        <span>{detailsModel.details.ram_required_gb} GB</span>
-                      </div>
-                    )}
-                    {detailsModel.author && (
-                      <div className="details-meta-item details-author">
-                        <span className="details-label">Author</span>
-                        <span>{detailsModel.author}</span>
-                      </div>
-                    )}
-                    {detailsModel.downloads != null && (
-                      <div className="details-meta-item">
-                        <span className="details-label">
-                          {detailsModel.source === 'ollama' ? 'Pulls' : 'Downloads'}
-                        </span>
-                        <span>{formatNumber(detailsModel.downloads)}</span>
-                      </div>
-                    )}
-                    {detailsModel.likes != null && (
-                      <div className="details-meta-item">
-                        <span className="details-label">Likes</span>
-                        <span>{formatNumber(detailsModel.likes)}</span>
-                      </div>
-                    )}
-                    {detailsModel.modified_at && (
-                      <div className="details-meta-item">
-                        <span className="details-label">Updated</span>
-                        <span>{formatDate(detailsModel.modified_at)}</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <div className="details-use-cases">
-                  <span className="details-label">Capabilities</span>
-                  <Capabilities capabilities={detailsModel.capabilities} tags={detailsModel.tags} />
-                </div>
-
-                {download?.name && (
-                  <DownloadOptions
-                    model={detailsModel}
-                    options={modelDownloadSizes(detailsModel)}
-                    pulling={!pull.canStart(download.name)}
-                    onInstall={(name) => handleInstall(detailsModel, name)}
-                  />
-                )}
-
-                {download?.name && modelDownloadSizes(detailsModel).length < 2 && (
-                  <div className="details-install">
-                    <span className="details-label">Install command</span>
-                    <code>{download.name}</code>
-                  </div>
-                )}
-                {download?.reason && <p className="help-text">{download.reason}</p>}
-
-                {modelCard !== null && (
-                  <div className="details-card">
-                    <div className="details-card-header">
-                      <span className="details-label">Model Card</span>
-                      <button
-                        className={`details-card-toggle ${modelCardExpanded ? 'expanded' : ''}`}
-                        onClick={() => setModelCardExpanded(!modelCardExpanded)}
-                        type="button"
-                      >
-                        {modelCardExpanded ? 'Collapse' : 'Expand'}
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          width="12"
-                          height="12"
-                          aria-hidden="true"
-                        >
-                          <path d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </button>
-                    </div>
-                    {modelCardExpanded && (
-                      <div
-                        className="details-card-content details-card-text"
-                        // biome-ignore lint/security/noDangerouslySetInnerHtml: Content is sanitized with DOMPurify
-                        dangerouslySetInnerHTML={{
-                          __html: DOMPurify.sanitize(modelCard),
-                        }}
-                      />
-                    )}
-                  </div>
-                )}
-
-                {modelCardLoading && (
-                  <div className="details-card-loading">
-                    <span className="spinner" /> Loading model card...
-                  </div>
-                )}
-
-                {modelDownloadSizes(detailsModel).length < 2 && (
-                  <div className="modal-actions">
-                    <Button variant="ghost" onClick={() => setDetailsModel(null)}>
-                      Close
-                    </Button>
-                    <Button
-                      disabled={!download?.name || !pull.canStart(download.name)}
-                      onClick={() =>
-                        handleInstall(
-                          detailsModel,
-                          selectedSize || defaultDownloadName(detailsModel)
-                        )
-                      }
-                    >
-                      {download?.name ? 'Install Model' : download?.label}
-                    </Button>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </div>
+              )}
+            </>
+          )}
+        </Modal>
       )}
     </div>
   );

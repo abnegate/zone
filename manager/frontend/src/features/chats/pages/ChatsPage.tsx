@@ -1441,7 +1441,10 @@ export default function ChatsPage() {
           <Button variant="secondary" onClick={() => setDeleteConfirm(null)}>
             Cancel
           </Button>
-          <Button variant="danger" onClick={() => deleteConfirm && handleDeleteChat(deleteConfirm)}>
+          <Button
+            variant="destructive"
+            onClick={() => deleteConfirm && handleDeleteChat(deleteConfirm)}
+          >
             Delete
           </Button>
         </div>

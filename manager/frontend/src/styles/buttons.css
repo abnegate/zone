@@ -64,15 +64,6 @@ a.btn.btn-secondary:hover {
   background-color: var(--ui-bg-hover);
 }
 
-.btn.btn-danger {
-  background-color: var(--ui-error);
-  color: var(--ui-text-inverse);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background-color: var(--ui-error-600);
-}
-
 .btn-xs {
   height: 1.5rem;
   padding: 0 var(--ui-space-2);
