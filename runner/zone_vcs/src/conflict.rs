@@ -71,6 +71,9 @@ pub enum ConflictError {
     #[error("The branch merges cleanly; there is no conflict to repair")]
     NoConflict,
 
+    #[error("The branch conflicts with its base and cannot be refreshed without a repair")]
+    Conflicted,
+
     #[error("Conflicted file {0} carries no conflict markers and cannot be repaired as text")]
     NotTextual(String),
 
@@ -255,6 +258,15 @@ const CHECKOUT_DIRECTORY: &str = "checkout";
 
 /// The subdirectory a repair is given as its home, cache and temporary space.
 const ISOLATION_DIRECTORY: &str = "isolation";
+
+/// What a refresh left at the head of the branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refreshed {
+    pub commit: CommitSha,
+    /// Whether a merge commit was made and pushed; false when the base was
+    /// already contained in the head.
+    pub pushed: bool,
+}
 
 /// A reproduced conflict, and the throwaway directory holding it.
 ///
@@ -454,6 +466,88 @@ impl ConflictService {
             head,
             base,
             files,
+        })
+    }
+
+    /// Merge the base into the head and push the result, so a branch opened
+    /// before the base grew something -- a workflow, say -- picks it up and the
+    /// push that carries it runs whatever now watches the branch.
+    ///
+    /// A base already contained in the head makes no commit and pushes nothing:
+    /// there is nothing to pick up. A merge that conflicts is
+    /// [`ConflictError::Conflicted`], for the caller to hand to a repair.
+    pub async fn refresh(
+        &self,
+        request: &ConflictRequest,
+        branch: &BranchName,
+        message: &str,
+    ) -> ConflictResult<Refreshed> {
+        let root = TempDir::new()?;
+        let checkout = root.path().join(CHECKOUT_DIRECTORY);
+        std::fs::create_dir(&checkout)?;
+
+        self.run(&checkout, &["init", "--quiet"]).await?;
+
+        let remote = request.remote.clone();
+        self.run_authenticated(
+            &checkout,
+            &[
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                &remote,
+                &format!("+refs/heads/{}:{HEAD_REF}", request.head),
+                &format!("+refs/heads/{}:{BASE_REF}", request.base),
+            ],
+            request.token.as_deref(),
+        )
+        .await?;
+
+        let head = self.rev_parse(&checkout, HEAD_REF).await?;
+        let base = self.rev_parse(&checkout, BASE_REF).await?;
+        expect(&request.expected_head, &head, &request.head)?;
+        expect(&request.expected_base, &base, &request.base)?;
+
+        self.run(&checkout, &["checkout", "--detach", "--quiet", HEAD_REF])
+            .await?;
+
+        let contained = self
+            .attempt(
+                &checkout,
+                &["merge-base", "--is-ancestor", BASE_REF, HEAD_REF],
+            )
+            .await?;
+        if contained {
+            return Ok(Refreshed {
+                commit: head,
+                pushed: false,
+            });
+        }
+
+        let merged = self
+            .attempt(
+                &checkout,
+                &["merge", "--no-ff", "--no-edit", "-m", message, BASE_REF],
+            )
+            .await?;
+        if !merged {
+            return Err(ConflictError::Conflicted);
+        }
+        let commit = self.rev_parse(&checkout, "HEAD").await?;
+        self.run_authenticated(
+            &checkout,
+            &[
+                "push",
+                "--quiet",
+                &remote,
+                &format!("HEAD:refs/heads/{branch}"),
+            ],
+            request.token.as_deref(),
+        )
+        .await?;
+        Ok(Refreshed {
+            commit,
+            pushed: true,
         })
     }
 

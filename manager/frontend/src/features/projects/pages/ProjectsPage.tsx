@@ -9,12 +9,14 @@ import {
   TabsList,
   TabsTrigger,
 } from '@zone/ui';
-import { type FormEvent, useCallback, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
+import { projectsApi } from '../../../api/projects';
 import { useAuth } from '../../../features/auth';
 import { getErrors } from '../../../validation';
-import { CreateProjectWizard } from '../components';
-import { useProjects, useSyncConfigs } from '../hooks';
+import { AutomationPanel, AutoProjectModal, CreateProjectWizard } from '../components';
+import { useAutomation, useProjects, useSyncConfigs } from '../hooks';
 import { CreateSyncConfigRequestSchema, UpdateProjectRequestSchema } from '../schemas';
 import type {
   CreateSyncConfigRequest,
@@ -42,6 +44,9 @@ const statusVariants: Record<ProjectStatus, 'success' | 'warning' | 'destructive
 
 export default function ProjectsPage() {
   const { isAuthenticated } = useAuth();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedProjectId = searchParams.get('id');
 
   // Use projects hook with status filter
   const [statusFilter, setStatusFilter] = useState<ProjectStatus | 'all'>('all');
@@ -66,6 +71,9 @@ export default function ProjectsPage() {
   // State
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showAutoModal, setShowAutoModal] = useState(false);
+  const [togglingAuto, setTogglingAuto] = useState(false);
+  const [automationActionError, setAutomationActionError] = useState<string | null>(null);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showSourceModal, setShowSourceModal] = useState(false);
@@ -78,6 +86,50 @@ export default function ProjectsPage() {
     createSyncConfig: createSyncConfigMutation,
     deleteSyncConfig: deleteSyncConfigMutation,
   } = useSyncConfigs(selectedProject?.id || null);
+
+  // A link such as /projects?id=… (from a planner receipt) selects that project once
+  // loaded, once: the router applies a URL change as a transition, so closing the
+  // panel would otherwise be re-selected by this effect before the parameter is gone
+  const honouredLink = useRef<string | null>(null);
+  useEffect(() => {
+    // Once the URL has really moved on, the same link may be followed again
+    if (honouredLink.current && honouredLink.current !== requestedProjectId) {
+      honouredLink.current = null;
+    }
+    if (!requestedProjectId || selectedProject) return;
+    if (honouredLink.current === requestedProjectId) return;
+    const match = projects.find((project) => project.id === requestedProjectId);
+    if (match) {
+      honouredLink.current = requestedProjectId;
+      setSelectedProject(match);
+    }
+  }, [requestedProjectId, projects, selectedProject]);
+
+  // An automation error belongs to the project it happened on
+  const selectProject = (project: Project) => {
+    setAutomationActionError(null);
+    setSelectedProject(project);
+  };
+
+  // Closing the panel also clears the deep link from the URL
+  const closeDetails = () => {
+    setSelectedProject(null);
+    setAutomationActionError(null);
+    if (searchParams.has('id')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('id');
+      setSearchParams(next, { replace: true });
+    }
+  };
+
+  // Automation state, re-read while the selected project runs itself
+  const {
+    automation,
+    loading: automationLoading,
+    error: automationError,
+    resume: resumeAutomation,
+    resuming,
+  } = useAutomation(selectedProject?.auto ? selectedProject.id : null, !!selectedProject?.auto);
 
   // Form state
   const [formName, setFormName] = useState('');
@@ -121,6 +173,38 @@ export default function ProjectsPage() {
       console.error('Failed to update project:', err);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleToggleAuto = async () => {
+    if (!isAuthenticated || !selectedProject) return;
+
+    setAutomationActionError(null);
+    setTogglingAuto(true);
+    try {
+      const updated = await updateProjectMutation(selectedProject.id, {
+        auto: !selectedProject.auto,
+      });
+      setSelectedProject(updated);
+    } catch (err) {
+      setAutomationActionError(
+        err instanceof Error ? err.message : 'Could not change automation for this project'
+      );
+    } finally {
+      setTogglingAuto(false);
+    }
+  };
+
+  const handleResumeAutomation = async () => {
+    if (!isAuthenticated || !selectedProject) return;
+    setAutomationActionError(null);
+    try {
+      const updated = await resumeAutomation();
+      setSelectedProject(updated);
+    } catch (err) {
+      setAutomationActionError(
+        err instanceof Error ? err.message : 'Could not resume automation for this project'
+      );
     }
   };
 
@@ -250,14 +334,23 @@ export default function ProjectsPage() {
             <TabsTrigger value="cancelled">Cancelled</TabsTrigger>
           </TabsList>
         </Tabs>
-        <Button
-          onClick={() => {
-            resetForm();
-            setShowCreateModal(true);
-          }}
-        >
-          + New Project
-        </Button>
+        <div className="projects-header-actions">
+          <Button
+            variant="secondary"
+            onClick={() => setShowAutoModal(true)}
+            data-testid="auto-project-button"
+          >
+            Auto project
+          </Button>
+          <Button
+            onClick={() => {
+              resetForm();
+              setShowCreateModal(true);
+            }}
+          >
+            + New Project
+          </Button>
+        </div>
       </header>
 
       <div className="projects-workspace">
@@ -304,17 +397,24 @@ export default function ProjectsPage() {
                   <Card
                     key={project.id}
                     className={`project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
-                    onClick={() => setSelectedProject(project)}
-                    onKeyDown={(e) => e.key === 'Enter' && setSelectedProject(project)}
+                    onClick={() => selectProject(project)}
+                    onKeyDown={(e) => e.key === 'Enter' && selectProject(project)}
                     role="button"
                     tabIndex={0}
                   >
                     <CardContent className="project-card-body">
                       <div className="project-card-header">
                         <h3 className="project-name">{project.name}</h3>
-                        <Badge variant={statusVariants[project.status]}>
-                          {statusLabels[project.status]}
-                        </Badge>
+                        <span className="project-card-badges">
+                          {project.auto && (
+                            <Badge variant="default" data-testid="auto-badge">
+                              Auto
+                            </Badge>
+                          )}
+                          <Badge variant={statusVariants[project.status]}>
+                            {statusLabels[project.status]}
+                          </Badge>
+                        </span>
                       </div>
                       {project.description && (
                         <p className="project-description">{project.description}</p>
@@ -348,12 +448,7 @@ export default function ProjectsPage() {
               <aside className="project-details">
                 <div className="details-header">
                   <h2>{selectedProject.name}</h2>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setSelectedProject(null)}
-                    aria-label="Close"
-                  >
+                  <Button variant="ghost" size="icon" onClick={closeDetails} aria-label="Close">
                     <svg
                       viewBox="0 0 24 24"
                       fill="none"
@@ -374,6 +469,44 @@ export default function ProjectsPage() {
                       {statusLabels[selectedProject.status]}
                     </Badge>
                   </div>
+
+                  <div className="detail-row">
+                    <span className="detail-label">Automation</span>
+                    <button
+                      type="button"
+                      className="auto-toggle"
+                      aria-pressed={!!selectedProject.auto}
+                      data-testid="auto-toggle"
+                      disabled={togglingAuto}
+                      onClick={handleToggleAuto}
+                      title={
+                        selectedProject.auto
+                          ? 'Stop running the tasks of this project on their own'
+                          : 'Run, review and merge every task of this project on its own'
+                      }
+                    >
+                      <span className="auto-toggle-track" aria-hidden="true">
+                        <span className="auto-toggle-thumb" />
+                      </span>
+                      Auto
+                    </button>
+                  </div>
+
+                  {automationActionError && (
+                    <p className="field-error" role="alert" data-testid="automation-action-error">
+                      {automationActionError}
+                    </p>
+                  )}
+
+                  {selectedProject.auto && (
+                    <AutomationPanel
+                      automation={automation}
+                      loading={automationLoading}
+                      error={automationError}
+                      resuming={resuming}
+                      onResume={handleResumeAutomation}
+                    />
+                  )}
 
                   {selectedProject.description && (
                     <div className="detail-row">
@@ -528,6 +661,22 @@ export default function ProjectsPage() {
         onClose={() => setShowCreateModal(false)}
         onCreated={handleProjectCreated}
         createProject={createProjectMutation}
+      />
+
+      {/* Auto project: a brief, then the planner chat asks the rest */}
+      <AutoProjectModal
+        isOpen={showAutoModal}
+        onClose={() => setShowAutoModal(false)}
+        start={(request) => {
+          if (!workspaceId) {
+            return Promise.reject(new Error('Select a workspace first'));
+          }
+          return projectsApi.startAutoProject(workspaceId, request);
+        }}
+        onStarted={(chatId) => {
+          setShowAutoModal(false);
+          navigate(`/chats?id=${chatId}`);
+        }}
       />
 
       {/* Edit Project Modal */}

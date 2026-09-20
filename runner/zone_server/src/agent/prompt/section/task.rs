@@ -43,11 +43,24 @@ const PLAN: &str = "Plan first: this task requires its plan approved, and until 
      change that and submit again. If you would ask a question to settle the approach, put it in \
      the plan instead. A plan is not a stopping point: once it is approved, do the work.";
 
+/// Rendered for a run automation started. The people who would answer it
+/// read its report and its pull request instead, so the report has to carry
+/// what a question would have carried.
+const UNATTENDED: &str = "Unattended: this run belongs to a project that runs itself, so nobody is watching it. \
+     Decide what a person would have been asked and record each decision and the assumption \
+     behind it in your report; a reviewer model reads the report against the diff, and a \
+     fix-up run that follows a review must say, by id, which findings it addressed and how. \
+     Honour the project brief above the task: its platforms, stack, design and quality \
+     decisions are settled, and a feature ships with its tests.";
+
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
     match context.surface {
         Surface::Chat => None,
         Surface::Task => {
             let mut blocks = vec![RUN];
+            if context.tools.is_unattended() {
+                blocks.push(UNATTENDED);
+            }
             if context.tools.has(SUBMIT_PLAN) {
                 blocks.push(PLAN);
             }
@@ -100,6 +113,15 @@ mod tests {
         };
         assert!(at("You are completing a background coding task") < at("Plan first"));
         assert!(at("Plan first") < at("Testing:"));
+    }
+
+    #[test]
+    fn an_unattended_run_is_told_to_decide_and_record() {
+        let environment = environment();
+        let rendered = render(&task_context(&task_tools().unattended(), &environment)).unwrap();
+        assert!(rendered.contains(UNATTENDED), "{rendered}");
+        let plain = render(&task_context(&task_tools(), &environment)).unwrap();
+        assert!(!plain.contains("Unattended:"), "{plain}");
     }
 
     #[test]

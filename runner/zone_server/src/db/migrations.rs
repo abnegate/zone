@@ -72,11 +72,34 @@ const WAITING_PENDING: &str = "SELECT NOT EXISTS(SELECT 1 FROM _sqlx_migrations 
 /// no [`MEMORY`] build to recover.
 const MEMORY_PENDING: &str = "SELECT NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=34)";
 
+/// The partial indexes the auto-project driver and the project chat lookups
+/// read, built by 044 and 045. `pg_get_indexdef` renders a bare boolean
+/// predicate without parentheses and a null test with them.
+const AUTO: [Interrupted; 2] = [
+    Interrupted {
+        version: 44,
+        name: "idx_projects_auto",
+        definition: "CREATE INDEX idx_projects_auto ON public.projects USING btree (id) WHERE auto",
+        undo: "DROP INDEX CONCURRENTLY public.idx_projects_auto",
+    },
+    Interrupted {
+        version: 45,
+        name: "idx_chats_project",
+        definition: "CREATE INDEX idx_chats_project ON public.chats USING btree (project_id) WHERE (project_id IS NOT NULL)",
+        undo: "DROP INDEX CONCURRENTLY public.idx_chats_project",
+    },
+];
+
+/// Nothing after 045 proves either [`AUTO`] index valid, so 045's own record is
+/// what leaves no build to recover.
+const AUTO_PENDING: &str = "SELECT NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=45)";
+
 /// Each repair runs between the migrations it recovers and the ones before
 /// them: a leftover has to be gone before the build that would adopt it.
 const BEFORE_LEGACY: i64 = 18;
 const BEFORE_WAITING: i64 = 26;
 const BEFORE_MEMORY: i64 = 33;
+const BEFORE_AUTO: i64 = 43;
 
 /// Hold SQLx's migration lock across validation, repair and migration execution.
 /// Closing this dedicated connection also releases the lock on cancellation.
@@ -149,6 +172,10 @@ pub async fn run(pool: &PgPool) -> Result<(), MigrateError> {
             .run_direct(Some(BEFORE_MEMORY), &mut *connection, false)
             .await?;
         repair(&mut connection, MEMORY_PENDING, &MEMORY).await?;
+        migrator
+            .run_direct(Some(BEFORE_AUTO), &mut *connection, false)
+            .await?;
+        repair(&mut connection, AUTO_PENDING, &AUTO).await?;
         migrator.run_direct(None, &mut *connection, false).await
     }
     .await;
@@ -210,6 +237,7 @@ mod tests {
             .iter()
             .chain(WAITING.iter())
             .chain(MEMORY.iter())
+            .chain(AUTO.iter())
             .map(|index| index.name)
             .collect();
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");

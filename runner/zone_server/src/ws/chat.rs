@@ -3317,6 +3317,17 @@ async fn handle_chat_generation(
             user_id,
         })
         .await;
+        // A planner chat keeps its two closing calls across a rebuilt
+        // catalog, as `session::build` gave them to the first turn.
+        tools = match crate::db::chats::link(state.db(), chat_id).await {
+            Ok(Some(link))
+                if link.purpose == crate::db::chats::ChatPurpose::ProjectPlanner
+                    && link.project_id.is_none() =>
+            {
+                tools.with_planner()
+            }
+            _ => tools,
+        };
         context = replay.clone();
         budget = budget.less(spent);
     }

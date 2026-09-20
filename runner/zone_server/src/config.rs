@@ -74,6 +74,8 @@ pub struct Config {
     /// and clips inline as base64, and the whole body is held in memory while
     /// it is read, so the ceiling is a memory budget rather than a policy.
     pub train_upload_limit_mb: u64,
+    /// Auto projects: what the driver admits, how it reviews, when it merges.
+    pub auto: AutoProjectConfig,
 }
 
 /// Periodic source indexing settings loaded from `SOURCE_RESYNC_*` env vars.
@@ -88,6 +90,7 @@ pub struct SourceIndexConfig {
 }
 
 impl Default for SourceIndexConfig {
+    /// The defaults, before the environment is read.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -98,6 +101,7 @@ impl Default for SourceIndexConfig {
 }
 
 impl SourceIndexConfig {
+    /// Read the settings from the environment, falling back to the defaults.
     pub fn from_env() -> Self {
         Self {
             enabled: env_truthy("SOURCE_RESYNC_ENABLED", true),
@@ -105,6 +109,116 @@ impl SourceIndexConfig {
             interval_secs: env_u64("SOURCE_RESYNC_INTERVAL_SECS", 3600, 60, 7 * 86_400),
         }
     }
+}
+
+/// Auto projects, loaded from `ZONE_AUTO_*`: what the driver admits, how it
+/// reviews a change, and when it merges one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoProjectConfig {
+    /// Master switch for the driver.
+    pub enabled: bool,
+    /// How often the driver looks for projects to advance.
+    pub tick_secs: u64,
+    /// Tasks one project may have in flight at once.
+    pub parallel_tasks: u64,
+    /// Unattended runs across every project, so automation cannot starve a
+    /// run somebody started by hand.
+    pub max_active_runs: u64,
+    /// Runs one task gets -- the first, fix-ups and retries -- before the
+    /// project pauses on it.
+    pub max_runs_per_task: u32,
+    /// Review rounds one pull request gets before the project pauses on it.
+    pub max_review_rounds: u32,
+    /// Refuse to merge on a review by the model that wrote the change when no
+    /// other model and no bot reviewed it.
+    pub require_distinct_reviewer: bool,
+    /// Models to review with, tried before the workspace's own settings.
+    pub review_models: Vec<String>,
+    /// Review bots to wait for and read; empty means every bot this build knows.
+    pub review_bots: Vec<String>,
+    /// How long to wait for an expected bot to review a new head.
+    pub bot_review_grace_secs: u64,
+    /// How long checks may stay silent on a head before they count as absent.
+    pub checks_grace_secs: u64,
+    /// How long checks may stay pending before the project pauses.
+    pub checks_timeout_secs: u64,
+    /// Retry a merge branch protection refused through the merge mutation an
+    /// administrator can use.
+    pub admin_merge: bool,
+    /// Delete the branch once its pull request merged.
+    pub delete_branch: bool,
+    /// How long to watch the jobs a merge triggers on the base branch.
+    pub post_merge_secs: u64,
+    /// Fix tasks the driver may add to one project for jobs that failed after a merge.
+    pub max_fix_tasks: u32,
+}
+
+impl Default for AutoProjectConfig {
+    /// The defaults, before the environment is read.
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tick_secs: 15,
+            parallel_tasks: 3,
+            max_active_runs: 4,
+            max_runs_per_task: 3,
+            max_review_rounds: 4,
+            require_distinct_reviewer: false,
+            review_models: Vec::new(),
+            review_bots: Vec::new(),
+            bot_review_grace_secs: 600,
+            checks_grace_secs: 120,
+            checks_timeout_secs: 3600,
+            admin_merge: true,
+            delete_branch: true,
+            post_merge_secs: 1800,
+            max_fix_tasks: 5,
+        }
+    }
+}
+
+impl AutoProjectConfig {
+    /// Read the settings from the environment, keeping every value inside its bounds.
+    pub fn from_env() -> Self {
+        Self {
+            enabled: env_truthy("ZONE_AUTO_ENABLED", true),
+            tick_secs: env_u64("ZONE_AUTO_TICK_SECS", 15, 5, 300),
+            parallel_tasks: env_u64("ZONE_AUTO_PARALLEL_TASKS", 3, 1, 5),
+            max_active_runs: env_u64("ZONE_AUTO_MAX_ACTIVE_RUNS", 4, 1, 5),
+            max_runs_per_task: env_u64("ZONE_AUTO_MAX_RUNS_PER_TASK", 3, 1, 10) as u32,
+            max_review_rounds: env_u64("ZONE_AUTO_MAX_REVIEW_ROUNDS", 4, 1, 10) as u32,
+            require_distinct_reviewer: env_truthy("ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL", false),
+            review_models: env_list("ZONE_AUTO_REVIEW_MODELS"),
+            review_bots: env_list("ZONE_AUTO_REVIEW_BOTS"),
+            bot_review_grace_secs: env_u64("ZONE_AUTO_BOT_REVIEW_GRACE_SECS", 600, 60, 3600),
+            checks_grace_secs: env_u64("ZONE_AUTO_CHECKS_GRACE_SECS", 120, 30, 1800),
+            checks_timeout_secs: env_u64("ZONE_AUTO_CHECKS_TIMEOUT_SECS", 3600, 300, 86_400),
+            admin_merge: env_truthy("ZONE_AUTO_ADMIN_MERGE", true),
+            delete_branch: env_truthy("ZONE_AUTO_DELETE_BRANCH", true),
+            post_merge_secs: env_u64("ZONE_AUTO_POST_MERGE_SECS", 1800, 0, 86_400),
+            max_fix_tasks: env_u64("ZONE_AUTO_MAX_FIX_TASKS", 5, 0, 50) as u32,
+        }
+    }
+
+    /// How often the driver looks for due projects.
+    pub fn tick(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.tick_secs)
+    }
+}
+
+/// A comma-separated list, trimmed, with blanks dropped.
+fn env_list(name: &str) -> Vec<String> {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Live cluster metrics and dashboards loaded from `MONITORING_*`.
@@ -119,6 +233,7 @@ pub struct MonitoringConfig {
 }
 
 impl Default for MonitoringConfig {
+    /// The defaults, before the environment is read.
     fn default() -> Self {
         Self {
             enabled: false,
@@ -151,6 +266,7 @@ impl std::fmt::Debug for MonitoringConfig {
 }
 
 impl MonitoringConfig {
+    /// Read the settings from the environment, falling back to the defaults.
     pub fn from_env() -> Self {
         Self {
             enabled: env_truthy("MONITORING_ENABLED", true),
@@ -445,6 +561,7 @@ impl Config {
             source_index: SourceIndexConfig::from_env(),
             monitoring: MonitoringConfig::from_env(),
             train_upload_limit_mb: env_u64("TRAIN_UPLOAD_LIMIT_MB", 512, 4, 8192),
+            auto: AutoProjectConfig::from_env(),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -483,6 +600,7 @@ impl std::fmt::Debug for Config {
             .field("comfyui", &self.comfyui)
             .field("source_index", &self.source_index)
             .field("monitoring", &self.monitoring)
+            .field("auto", &self.auto)
             .finish()
     }
 }
@@ -574,6 +692,7 @@ mod tests {
             monitoring: MonitoringConfig::default(),
             chat: Default::default(),
             train_upload_limit_mb: 512,
+            auto: Default::default(),
         }
     }
 

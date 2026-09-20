@@ -20,6 +20,7 @@ pub mod integrations;
 pub mod memory;
 pub mod monitoring;
 pub mod plan;
+pub mod planner;
 pub mod prompt;
 pub mod question;
 pub mod readiness;

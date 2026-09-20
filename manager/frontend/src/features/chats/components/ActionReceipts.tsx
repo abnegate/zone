@@ -14,6 +14,7 @@ const ACTION_LABELS: Record<string, { ok: string; failed: string }> = {
   memory_write: { ok: 'Wrote memory', failed: 'Write memory failed' },
   memory_append: { ok: 'Appended to memory', failed: 'Append to memory failed' },
   memory_delete: { ok: 'Forgot memory', failed: 'Forget memory failed' },
+  finalize_project: { ok: 'Created project', failed: 'Create project failed' },
 };
 
 const LINK_LABELS: Record<ActionTarget, string> = {
@@ -22,6 +23,7 @@ const LINK_LABELS: Record<ActionTarget, string> = {
   message: 'Open message',
   reminder: 'Open chat',
   memory: 'Open memory',
+  project: 'Open project',
 };
 
 function actionLabel(receipt: ActionReceipt): string {

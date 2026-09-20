@@ -17,6 +17,7 @@
 //! not because a clock struck.
 
 pub mod analytics;
+pub mod auto_project;
 pub mod conflict;
 pub mod embeddings;
 pub mod evaluation;

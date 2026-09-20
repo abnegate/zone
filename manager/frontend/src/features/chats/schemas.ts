@@ -247,6 +247,8 @@ export const ChatSchema = z.object({
   character: ChatCharacterSchema.nullish(),
   tools: z.boolean().nullish(),
   needs_character: z.boolean().nullish(),
+  purpose: z.string().nullish(),
+  project_id: z.string().nullish(),
 });
 
 const tokenCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);

@@ -371,6 +371,102 @@ Inside Docker the manager image does not include magents. Install it on the host
 
 ---
 
+## 🤖 Auto projects
+
+An auto project runs itself: every agentic task in it is executed unattended, its pull request waits for checks, is reviewed by a model other than the one that wrote it and by the review bots already installed on the repository (CodeRabbit, Greptile), is fixed until nothing raised is left open, is merged — with administrator privileges when branch protection would otherwise refuse — and is reported with a high-level and a low-level summary. Start one from **Projects → Auto project**, which opens a planner chat that interviews you and creates the project and its tasks, or turn **Auto** on for an existing project. All settings are optional.
+
+### `ZONE_AUTO_ENABLED`
+- **Default**: `true`
+- **Description**: Master switch for the driver. With it off, `POST /api/workspaces/{id}/projects/auto`, turning **Auto** on for a project and `POST /api/projects/{id}/automation/resume` answer `409`, since nothing on this server would pick the project up.
+
+### `ZONE_AUTO_TICK_SECS`
+- **Default**: `15` (5–300)
+- **Description**: How often the driver looks for projects to advance. A finished run wakes it sooner.
+
+### `ZONE_AUTO_PARALLEL_TASKS`
+- **Default**: `3` (1–5)
+- **Description**: Tasks one project may have in flight at once. Tasks whose dependencies are not merged wait.
+
+### `ZONE_AUTO_MAX_ACTIVE_RUNS`
+- **Default**: `4` (1–5)
+- **Description**: Unattended runs across every project, so automation cannot take every execution slot from runs people start by hand.
+
+### `ZONE_AUTO_MAX_RUNS_PER_TASK`
+- **Default**: `3` (1–10)
+- **Description**: Runs one task gets — the first, fix-ups after reviews, retries after failures — before the project pauses on it.
+
+### `ZONE_AUTO_MAX_REVIEW_ROUNDS`
+- **Default**: `4` (1–10)
+- **Description**: Review rounds one pull request gets before the project pauses on it.
+
+### `ZONE_AUTO_REVIEW_MODELS`
+- **Default**: *empty*
+- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the installed catalogue. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers.
+
+### `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL`
+- **Default**: `false`
+- **Description**: When `true`, a change reviewed only by its own model — because nothing else is installed and no bot answered — pauses instead of merging. When `false`, the same model reviews under a reviewer persona and the merge notice says so.
+
+### `ZONE_AUTO_REVIEW_BOTS`
+- **Default**: *empty* (every bot this build knows: `coderabbit`, `greptile`)
+- **Description**: Review bots to wait for and read. A bot named here is always expected; otherwise a bot is expected once it has commented on the repository.
+
+### `ZONE_AUTO_BOT_REVIEW_GRACE_SECS`
+- **Default**: `600` (60–3600)
+- **Description**: How long to wait for an expected bot to review a head, measured from when the head's checks passed, before asking it with its trigger comment; then the same again from the moment it was asked, before going on without it.
+
+### `ZONE_AUTO_CHECKS_GRACE_SECS`
+- **Default**: `120` (30–1800)
+- **Description**: How long checks may stay silent on a head before they count as absent. Absent checks are never skipped: the project's continuous-integration task is added or waited for and the branch is refreshed to run it.
+
+### `ZONE_AUTO_CHECKS_TIMEOUT_SECS`
+- **Default**: `3600` (300–86400)
+- **Description**: How long checks may stay pending before the task pauses.
+
+### `ZONE_AUTO_ADMIN_MERGE`
+- **Default**: `true`
+- **Description**: When branch protection refuses the merge, try again through the merge mutation an administrator merges with. Works when the project token belongs to a repository administrator the protection does not include, or a ruleset bypass actor.
+
+### `ZONE_AUTO_DELETE_BRANCH`
+- **Default**: `true`
+- **Description**: Delete the branch once its pull request merged.
+
+### `ZONE_AUTO_POST_MERGE_SECS`
+- **Default**: `1800` (0–86400)
+- **Description**: How long to watch the jobs a merge triggers on the base branch — deployments, releases. A failed job becomes a fix task; `0` watches nothing.
+
+### `ZONE_AUTO_MAX_FIX_TASKS`
+- **Default**: `5` (0–50)
+- **Description**: Fix tasks the driver may add to one project for jobs that failed after a merge.
+
+---
+
+## 🔔 Notifications
+
+Every notice — an auto-project merge, pause or completion, a regression alert, a scheduled digest — lands in the project's updates chat whatever is configured here. These add Slack, Discord and email on top.
+
+### `ZONE_NOTIFY_SLACK_WEBHOOK`
+- **Default**: *empty*
+- **Description**: A Slack incoming-webhook URL. Only `hooks.slack.com` is accepted.
+
+### `ZONE_NOTIFY_DISCORD_WEBHOOK`
+- **Default**: *empty*
+- **Description**: A Discord webhook URL. Only `discord.com` is accepted.
+
+### `ZONE_NOTIFY_EMAIL_TO`
+- **Default**: *empty*
+- **Description**: Comma-separated recipients. Needs the `SMTP_*` relay below.
+
+### `ZONE_NOTIFY_TIMEOUT_SECONDS`
+- **Default**: `10` (max 120)
+- **Description**: How long one channel is given per notice.
+
+### `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_FROM_NAME`
+- **Default**: *empty* (`SMTP_PORT` 587, `SMTP_FROM_NAME` Zone)
+- **Description**: The relay notices, sign-up verification, password resets and invitations send through. `ALERT_SMTP_*` is Grafana's relay and is separate.
+
+---
+
 ## 🔒 VPN Configuration - Optional
 
 **VPN is completely optional!** Enable it to send all stack internet traffic through Gluetun, including private web search.
@@ -567,6 +663,8 @@ Need to find a specific config? Quick lookup:
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
 - **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS
+- **Auto projects**: ZONE_AUTO_ENABLED, ZONE_AUTO_PARALLEL_TASKS, ZONE_AUTO_REVIEW_MODELS, ZONE_AUTO_REVIEW_BOTS, ZONE_AUTO_ADMIN_MERGE, ZONE_AUTO_*
+- **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ
 - **VPN**: VPN_*, OPENVPN_*

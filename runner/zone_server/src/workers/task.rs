@@ -732,6 +732,7 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         )
         .await;
     }
+    crate::workers::auto_project::poke_task(state, task_id);
     reap(run_id).await;
 }
 
@@ -858,26 +859,32 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
         return;
     }
 
-    let checkout =
-        match crate::services::checkout::Checkout::prepare(state.db(), &task, execution).await {
-            Ok(checkout) => checkout,
-            Err(error) => {
-                obs.set_status("failed");
-                if let Err(failure) = tasks::complete_owned_task_run(
-                    state.db(),
-                    run_id,
-                    Some(owner),
-                    "failed",
-                    Some(&error),
-                    None,
-                )
-                .await
-                {
-                    tracing::error!(%run_id, %failure, "Failed to record checkout failure");
-                }
-                return;
+    let checkout = match crate::services::checkout::Checkout::prepare(
+        state.db(),
+        state.encryption_key(),
+        &task,
+        execution,
+    )
+    .await
+    {
+        Ok(checkout) => checkout,
+        Err(error) => {
+            obs.set_status("failed");
+            if let Err(failure) = tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                "failed",
+                Some(&error),
+                None,
+            )
+            .await
+            {
+                tracing::error!(%run_id, %failure, "Failed to record checkout failure");
             }
-        };
+            return;
+        }
+    };
     let workspace_path = checkout.path().to_path_buf();
 
     let run = match tasks::get_task_run(state.db(), run_id).await {
@@ -910,6 +917,20 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
             );
         }
         return;
+    }
+
+    // A run automation started answers its own questions; the model it runs
+    // on is written down so the reviewer can be chosen against it.
+    let unattended = tasks::run_mode(state.db(), run_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|mode| mode.unattended);
+    if !matches!(
+        tasks::record_run_model(state.db(), run_id, owner, &model).await,
+        Ok(true)
+    ) {
+        tracing::warn!(%run_id, "Could not record the run's model; a reviewer is chosen without it");
     }
 
     let evaluator = Evaluator::detect(
@@ -954,7 +975,9 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let guidance = guidance.as_str();
     let environment = &environment;
     let permit = &permit;
-    let plan_approval = task.require_plan_approval;
+    // A run nobody is watching would approve its own plan after the window,
+    // which is no approval at all, so an unattended run is not asked for one.
+    let plan_approval = task.require_plan_approval && !unattended;
     // Approval is given to the run, once: an attempt retried after a fault
     // starts from it rather than asking the person again.
     let approval = plan::Approval::default();
@@ -976,6 +999,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 environment,
                 permit,
                 plan_approval,
+                unattended,
                 approval,
             )
         },
@@ -1146,6 +1170,11 @@ async fn resolve_model(state: &AppState, task: &tasks::TaskRow) -> String {
 struct Guidance<'a> {
     retrieved: &'a [SearchResultWithAnalysis],
     criteria: Option<&'a str>,
+    /// The brief an auto project was commissioned with, the roadmap of its
+    /// tasks, and the findings a review left open. Empty outside one.
+    brief: &'a str,
+    roadmap: &'a str,
+    review: &'a str,
     instructions: &'a str,
     facts: &'a str,
     /// What the person who started this run asked to have remembered. A run
@@ -1167,6 +1196,9 @@ impl Guidance<'_> {
                 &format!("\n\n# Acceptance Criteria\n{}", criteria.trim()),
             );
         }
+        push_block(&mut guidance, self.brief);
+        push_block(&mut guidance, self.roadmap);
+        push_block(&mut guidance, self.review);
         push_block(&mut guidance, self.instructions);
         push_block(&mut guidance, self.facts);
         push_block(&mut guidance, self.memory);
@@ -1295,9 +1327,14 @@ async fn guidance(
         _ => String::new(),
     };
 
+    let automation = crate::workers::auto_project::guidance::blocks(state.db(), task).await;
+
     Guidance {
         retrieved: &retrieved,
         criteria: task.acceptance_criteria.as_deref(),
+        brief: &automation.brief,
+        roadmap: &automation.roadmap,
+        review: &automation.review,
         instructions: &instructions,
         facts: &facts,
         memory: &memory,
@@ -1447,6 +1484,9 @@ mod guidance_tests {
             facts: &facts,
             memory: &memory(),
             skills: &skills(),
+            brief: "",
+            roadmap: "",
+            review: "",
             repository,
         }
         .render()
@@ -1498,6 +1538,9 @@ mod guidance_tests {
             facts: "",
             memory: "",
             skills: "",
+            brief: "",
+            roadmap: "",
+            review: "",
             repository: "",
         }
         .render();
@@ -1664,6 +1707,9 @@ mod guidance_tests {
             facts: &facts,
             memory: "",
             skills: "",
+            brief: "",
+            roadmap: "",
+            review: "",
             repository: "",
         }
         .render();
@@ -1806,6 +1852,7 @@ async fn attempt_run(
     environment: &Environment,
     permit: &Permit,
     plan_approval: bool,
+    unattended: bool,
     approval: &plan::Approval,
 ) -> Result<TaskOutcome, Fault> {
     // A task that requires its plan approved changes nothing until it is:
@@ -1823,6 +1870,7 @@ async fn attempt_run(
         actor,
         workspace,
         plan_held,
+        unattended,
     )
     .await;
 
@@ -1915,9 +1963,16 @@ async fn attempt_run(
                 }) => {
                     carried.absorb(turn);
                     budget = budget.less(spent);
-                    let answered =
-                        park_for_answer(state, run_id, owner, &tool_call_id, &questions, permit)
-                            .await?;
+                    let answered = park_for_answer(
+                        state,
+                        run_id,
+                        owner,
+                        &tool_call_id,
+                        &questions,
+                        permit,
+                        unattended,
+                    )
+                    .await?;
                     if plan_held && plan::approved(&questions, &answered) {
                         tracing::info!(%run_id, "Plan approved; the run may change things now");
                         approval.approve(plan::submitted(&questions).unwrap_or_default());
@@ -1933,6 +1988,7 @@ async fn attempt_run(
                         actor,
                         workspace,
                         plan_held,
+                        unattended,
                     )
                     .await;
                 }
@@ -1960,6 +2016,7 @@ async fn attempt_run(
                         actor,
                         workspace,
                         plan_held,
+                        unattended,
                     )
                     .await;
                 }
@@ -1990,10 +2047,16 @@ async fn task_tools(
     actor: Option<Uuid>,
     workspace: &Path,
     plan_held: bool,
+    unattended: bool,
 ) -> ChatTools {
     let tools = ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
         .await
         .with_task_lease(state.db().clone(), run_id, owner);
+    let tools = if unattended {
+        tools.unattended()
+    } else {
+        tools
+    };
     if plan_held {
         tools.with_plan_approval().holding_for_plan()
     } else {
@@ -2001,8 +2064,12 @@ async fn task_tools(
     }
 }
 
-/// No window when any question is required.
-fn answer_window(questions: &[Question]) -> Option<Duration> {
+/// No window when any question is required -- unless nobody is there to
+/// answer it, in which case the window is the only way the run goes on.
+fn answer_window(questions: &[Question], unattended: bool) -> Option<Duration> {
+    if unattended {
+        return Some(OPTIONAL_ANSWER_WINDOW);
+    }
     questions
         .iter()
         .all(|question| !question.required)
@@ -2017,10 +2084,13 @@ fn proceeding_on_defaults(questions: &[Question]) -> String {
     questions
         .iter()
         .map(|question| {
+            // The model marks a recommended choice; when it marked none, the
+            // first option is the default the prompt promised an unattended run.
             let recommended = question
                 .choices
                 .iter()
                 .find(|choice| choice.recommended)
+                .or_else(|| question.choices.first())
                 .map(|choice| choice.label.as_str())
                 .unwrap_or_default();
             format!(
@@ -2045,6 +2115,7 @@ async fn park_for_answer(
     tool_call_id: &str,
     questions: &[Question],
     permit: &Permit,
+    unattended: bool,
 ) -> Result<String, Fault> {
     let pending = serde_json::json!({
         "tool_call_id": tool_call_id,
@@ -2087,7 +2158,7 @@ async fn park_for_answer(
         tracing::warn!(%run_id, %error, "Could not record a parked run");
     }
 
-    let window = answer_window(questions);
+    let window = answer_window(questions, unattended);
     // The park is symmetric: every way out of the wait unparks the row before
     // it propagates. An early return would leave the run reading 'waiting' with
     // a live card while the retry re-executed it, and answering that card would
@@ -3683,10 +3754,13 @@ mod watchdog_tests {
     #[test]
     fn an_all_optional_call_is_raced_against_the_window() {
         assert_eq!(
-            answer_window(&[
-                asked("Scope", false, &["Backfill", "Forward only"]),
-                asked("Branch", false, &["main", "release"]),
-            ]),
+            answer_window(
+                &[
+                    asked("Scope", false, &["Backfill", "Forward only"]),
+                    asked("Branch", false, &["main", "release"]),
+                ],
+                false
+            ),
             Some(OPTIONAL_ANSWER_WINDOW),
             "nothing here blocks the run, so it may proceed on what it recommended"
         );
@@ -3696,12 +3770,25 @@ mod watchdog_tests {
     #[test]
     fn one_required_question_removes_the_window_for_all_of_them() {
         assert_eq!(
-            answer_window(&[
-                asked("Scope", false, &["Backfill", "Forward only"]),
-                asked("Branch", true, &["main", "release"]),
-            ]),
+            answer_window(
+                &[
+                    asked("Scope", false, &["Backfill", "Forward only"]),
+                    asked("Branch", true, &["main", "release"]),
+                ],
+                false
+            ),
             None,
             "a required question is the run's only way forward"
+        );
+    }
+
+    /// Nobody answers an unattended run, so a required question is given the
+    /// same window an optional one gets rather than the run's whole timeout.
+    #[test]
+    fn an_unattended_run_keeps_the_window_even_for_a_required_question() {
+        assert_eq!(
+            answer_window(&[asked("Branch", true, &["main", "release"])], true),
+            Some(OPTIONAL_ANSWER_WINDOW)
         );
     }
 
@@ -3717,6 +3804,20 @@ mod watchdog_tests {
                 asked("Branch", false, &["main", "release"]),
             ]),
             "No answer arrived within 30 seconds. Proceeding on the stated default \u{2014} Scope: Backfill.\nNo answer arrived within 30 seconds. Proceeding on the stated default \u{2014} Branch: main."
+        );
+    }
+
+    /// The model marks the recommended choice; when it marked none, the first
+    /// option is the default the prompt promised, not an empty label.
+    #[test]
+    fn the_default_resume_falls_back_to_the_first_choice() {
+        let mut question = asked("Branch", true, &["main", "release"]);
+        for choice in &mut question.choices {
+            choice.recommended = false;
+        }
+        assert_eq!(
+            proceeding_on_defaults(&[question]),
+            "No answer arrived within 30 seconds. Proceeding on the stated default \u{2014} Branch: main."
         );
     }
 
@@ -3861,7 +3962,7 @@ mod watchdog_tests {
             let questions = questions.clone();
             let permit = permit.clone();
             let parking = tokio::spawn(async move {
-                park_for_answer(&state, run, owner, "call-1", &questions, &permit).await
+                park_for_answer(&state, run, owner, "call-1", &questions, &permit, false).await
             });
             // The row has to carry the envelope while the run is still waiting
             // on it: a console that can only read it afterwards reads nothing.
@@ -3928,6 +4029,7 @@ mod watchdog_tests {
                 "call-1",
                 &asked_for_park,
                 &permit_for_park,
+                false,
             )
             .await
         });
@@ -3984,7 +4086,7 @@ mod watchdog_tests {
             let questions = questions.clone();
             let permit = permit.clone();
             tokio::spawn(async move {
-                park_for_answer(&state, run, owner, "call-1", &questions, &permit).await
+                park_for_answer(&state, run, owner, "call-1", &questions, &permit, false).await
             })
         };
         loop {
@@ -4113,6 +4215,7 @@ mod watchdog_tests {
                 &workspace,
                 &environment,
                 &permit,
+                false,
                 false,
                 &plan::Approval::default(),
             ),
@@ -5104,6 +5207,7 @@ mod watchdog_tests {
             &workspace,
             &environment,
             &Permit::acquire().await.unwrap(),
+            false,
             false,
             &plan::Approval::default(),
         )

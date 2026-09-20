@@ -328,6 +328,7 @@ pub(crate) fn test_config() -> Config {
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,
+        auto: Default::default(),
     }
 }
 
@@ -364,6 +365,7 @@ mod tests {
             monitoring: Default::default(),
             chat: Default::default(),
             train_upload_limit_mb: 512,
+            auto: Default::default(),
         }
     }
 

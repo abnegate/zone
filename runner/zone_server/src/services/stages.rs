@@ -108,7 +108,8 @@ impl Catalog {
             .find(|model| same_model(&model.name, name))
     }
 
-    fn completions(&self) -> impl Iterator<Item = &Installed> {
+    /// Every installed model that completes chats, in catalog order.
+    pub(crate) fn completions(&self) -> impl Iterator<Item = &Installed> {
         self.models.iter().filter(|model| model.completion())
     }
 }
@@ -267,7 +268,8 @@ fn reason_name(name: &str) -> bool {
         || name.contains("deepseek")
 }
 
-fn same_model(left: &str, right: &str) -> bool {
+/// Whether two model names refer to one model, compared the way the catalog compares them.
+pub(crate) fn same_model(left: &str, right: &str) -> bool {
     fn strip(name: &str) -> &str {
         name.strip_suffix(":latest")
             .or_else(|| name.strip_suffix(":LATEST"))

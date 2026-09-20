@@ -198,6 +198,9 @@ async fn main() {
     // Start background workers
     zone_server::workers::housekeeping::spawn(state.clone());
     zone_server::workers::reminders::spawn(state.clone());
+    if state.config().auto.enabled {
+        zone_server::workers::auto_project::spawn(state.clone());
+    }
     let recovery = zone_server::workers::task::spawn_recovery(state.clone());
 
     // Every layer belongs to `create_router`, so what runs here is what the
