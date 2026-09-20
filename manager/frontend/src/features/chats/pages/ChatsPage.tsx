@@ -218,6 +218,22 @@ export default function ChatsPage() {
     scrollToBottom();
   }, [activeChat?.messages, chatError, chatStatus, streaming, linkedMessageId, scrollToBottom]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the scroller mounts with the displayed chat
+  useEffect(() => {
+    const node = messagesContainerRef.current;
+    if (!node) {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (!stickToBottom.current) {
+        return;
+      }
+      node.scrollTo({ top: node.scrollHeight, behavior: 'instant' });
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [displayedChat?.id]);
+
   useEffect(() => {
     if (!linkedMessageId || !displayedChat) return;
     const node = document.getElementById(`chat-message-${linkedMessageId}`);
@@ -613,7 +629,21 @@ export default function ChatsPage() {
           ) : searchError ? (
             <div className="chats-error">{searchError}</div>
           ) : searchResults.length === 0 ? (
-            <div className="chats-empty">No messages found</div>
+            <EmptyState
+              icon={
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="M21 21l-4.3-4.3" />
+                </svg>
+              }
+              title="No messages match"
+              description="Try another search"
+              action={
+                <Button variant="secondary" onClick={handleClearSearch}>
+                  Clear search
+                </Button>
+              }
+            />
           ) : (
             <div className="chats-list" data-testid="search-results-list">
               {searchResults.map((result) => (
@@ -683,7 +713,8 @@ export default function ChatsPage() {
                 <div className="chat-item-content">
                   <span className="chat-title">{chat.title}</span>
                   <span className="chat-meta">
-                    {modelLabel(chat.model_name)} · {formatDate(chat.updated_at)}
+                    <span className="chat-meta-model">{modelLabel(chat.model_name)}</span>
+                    <span className="chat-meta-time">· {formatDate(chat.updated_at)}</span>
                   </span>
                 </div>
                 <div className="chat-item-actions">
@@ -805,7 +836,11 @@ export default function ChatsPage() {
               </Button>
               <div className="chat-header-info">
                 <h3>{displayedChat.title}</h3>
-                <Badge variant="neutral" className="chat-model">
+                <Badge
+                  variant="neutral"
+                  className="chat-model"
+                  title={modelLabel(displayedChat.model_name)}
+                >
                   {modelLabel(displayedChat.model_name)}
                 </Badge>
                 {displayedChat.purpose === 'project_planner' && (

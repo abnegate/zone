@@ -138,14 +138,24 @@
 }
 
 .chat-meta {
-  display: block;
+  display: flex;
+  gap: var(--ui-space-1);
   margin-top: var(--ui-space-0-5);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
   white-space: nowrap;
   font-size: var(--ui-text-xs);
   line-height: var(--ui-space-4);
   color: var(--ui-text-muted);
+}
+
+.chat-meta-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-meta-time {
+  flex-shrink: 0;
 }
 
 .chat-item-actions {
@@ -184,8 +194,7 @@
 }
 
 .chats-loading,
-.chats-error,
-.chats-empty {
+.chats-error {
   padding: var(--ui-space-8) var(--ui-space-5);
   text-align: center;
   font-size: var(--ui-text-sm);
@@ -308,7 +317,13 @@
 }
 
 .chat-model {
-  flex-shrink: 0;
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: calc(40% - var(--ui-space-2));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: var(--ui-badge-height);
   font-family: var(--ui-font-mono);
   font-weight: 500;
 }

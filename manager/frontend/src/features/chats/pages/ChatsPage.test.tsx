@@ -1767,6 +1767,75 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('labels the model badge with the full model id and splits the list meta', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        model_name: 'hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest',
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+
+      const item = screen.getByText('Chat 1').closest('.chat-item');
+      expect(item?.querySelector('.chat-meta-model')).toHaveTextContent('llama2');
+      expect(item?.querySelector('.chat-meta-time')).toHaveTextContent('·');
+
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Hello')).toBeInTheDocument();
+      });
+      const badge = document.querySelector('.chat-header-info .chat-model');
+      expect(badge).toHaveAttribute(
+        'title',
+        'hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest'
+      );
+    });
+
+    it('keeps the messages anchored to the bottom when the scroller resizes', async () => {
+      const Original = globalThis.ResizeObserver;
+      const callbacks: ResizeObserverCallback[] = [];
+      class StubObserver {
+        constructor(callback: ResizeObserverCallback) {
+          callbacks.push(callback);
+        }
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      }
+      globalThis.ResizeObserver = StubObserver as unknown as typeof ResizeObserver;
+      try {
+        renderChatsPage();
+
+        await waitFor(() => {
+          expect(screen.getByText('Chat 1')).toBeInTheDocument();
+        });
+
+        fireEvent.click(screen.getByText('Chat 1'));
+
+        await waitFor(() => {
+          expect(screen.getByText('Hello')).toBeInTheDocument();
+        });
+        const container = document.querySelector('.messages-container') as HTMLDivElement;
+        Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 900 });
+        const scrollTo = spyOn(container, 'scrollTo').mockImplementation(() => {});
+        expect(callbacks.length).toBeGreaterThan(0);
+
+        act(() => {
+          for (const callback of callbacks) {
+            callback([], {} as ResizeObserver);
+          }
+        });
+
+        expect(scrollTo).toHaveBeenCalledWith({ top: 900, behavior: 'instant' });
+      } finally {
+        globalThis.ResizeObserver = Original;
+      }
+    });
+
     it('badges an assistant reply that read stored memory, never a user message', async () => {
       mockClient.getChat.mockResolvedValueOnce({
         ...mockChatWithMessages,
@@ -2036,7 +2105,7 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(screen.getByText('llama2')).toBeInTheDocument();
+        expect(document.querySelector('.chat-header-info .chat-model')).toHaveTextContent('llama2');
       });
     });
   });
@@ -2379,8 +2448,20 @@ describe('ChatsPage', () => {
       fireEvent.submit(searchInput.closest('form')!);
 
       await waitFor(() => {
-        expect(screen.getByText('No messages found')).toBeInTheDocument();
+        expect(screen.getByText('No messages match')).toBeInTheDocument();
       });
+      const empty = screen.getByText('No messages match').closest('.ui-empty');
+      expect(empty).not.toBeNull();
+      expect(empty).toHaveTextContent('Try another search');
+      expect(screen.queryByTestId('search-results-list')).not.toBeInTheDocument();
+
+      fireEvent.click(empty?.querySelector('.ui-empty-action button') as HTMLButtonElement);
+
+      await waitFor(() => {
+        expect(screen.queryByText('No messages match')).not.toBeInTheDocument();
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      expect(searchInput).toHaveValue('');
     });
 
     it('shows searching state while searching', async () => {
