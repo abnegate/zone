@@ -1051,9 +1051,10 @@ mod tests {
         let run = tasks::create_task_run(&pool, task.id).await.unwrap();
         let owner = Uuid::new_v4();
         assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
+        let key: [u8; 32] = rand::random();
         let checkout = Checkout::prepare(
             &pool,
-            &[0u8; 32],
+            &key,
             &task,
             tasks::Execution {
                 task: task.id,

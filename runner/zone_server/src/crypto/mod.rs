@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn open_reads_ciphertext_and_hands_back_what_it_cannot_open() {
-        let key = [7u8; 32];
+        let key = random_key();
         let sealed = encrypt(&key, "ghp_secret").unwrap();
         assert_eq!(open(&key, &sealed), "ghp_secret");
         // A value stored before encryption at rest comes back as it was, even
@@ -176,7 +176,7 @@ mod tests {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         );
         // The wrong key cannot open it and must not pretend to.
-        assert_eq!(open(&[8u8; 32], &sealed), sealed);
+        assert_eq!(open(&random_key(), &sealed), sealed);
     }
 
     fn random_key() -> [u8; 32] {

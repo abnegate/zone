@@ -857,11 +857,11 @@ mod tests {
             };
             let mut sandbox = task.clone();
             sandbox.project_ids.clear();
-            let checkout = crate::services::checkout::Checkout::prepare(
-                &pool, &[0u8; 32], &sandbox, execution,
-            )
-            .await
-            .unwrap();
+            let key: [u8; 32] = rand::random();
+            let checkout =
+                crate::services::checkout::Checkout::prepare(&pool, &key, &sandbox, execution)
+                    .await
+                    .unwrap();
             let path = checkout.path().to_path_buf();
             for arguments in [
                 vec!["init", "--quiet", "--initial-branch=main"],
