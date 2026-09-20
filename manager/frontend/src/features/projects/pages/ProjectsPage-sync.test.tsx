@@ -168,8 +168,34 @@ describe('ProjectsPage - Sync Configuration', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText(/No sync configurations/)).toBeInTheDocument();
+      expect(screen.getByText(/No sync configured/)).toBeInTheDocument();
     });
+  });
+
+  it('says a configuration is configured but not yet synced, and where its webhook lands', async () => {
+    mockGetSyncConfigs.mockResolvedValue([
+      {
+        ...mockSyncConfigs[0],
+        status: 'configured',
+        last_synced_at: null,
+        webhook_path: '/api/webhooks/sync/sync-1/github',
+      },
+    ]);
+
+    renderWithQueryClient(<ProjectsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Test Project')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Test Project').closest('.project-card')!);
+
+    await waitFor(() => {
+      expect(screen.getByText('Configured, not yet synced')).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(`${window.location.origin}/api/webhooks/sync/sync-1/github`)
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Synced /)).toBeNull();
   });
 
   it('should open add sync modal when clicking add button', async () => {
