@@ -120,9 +120,10 @@ export async function ask(
     replies: 1,
   },
 ): Promise<string> {
+  const assistant = page.locator('.message-assistant');
+  const before = await assistant.count();
   await send(page, message);
   const deadline = Date.now() + (options.timeout ?? 900_000);
-  const assistant = page.locator('.message-assistant');
   for (;;) {
     if (options.approve !== false) {
       const approve = page.locator('[data-testid="tool-approve"]').first();
@@ -133,7 +134,7 @@ export async function ask(
     const replies = await assistant.count();
     const status = await page.locator('.message-status').count();
     const alert = await page.getByRole('alert').count();
-    if (replies >= options.replies && status === 0) break;
+    if (replies >= options.replies && replies > before && status === 0) break;
     if (alert > 0 && replies < options.replies && status === 0) break;
     if (Date.now() > deadline) {
       throw new Error(`turn did not finish within the timeout: ${message}`);

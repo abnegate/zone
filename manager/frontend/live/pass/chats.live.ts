@@ -476,13 +476,26 @@ test.describe('chats', () => {
       agent: true,
       autoApprove: true,
     });
-    const sourcesControl = await page
-      .getByRole('button', { name: /^sources$/i })
-      .count();
-    const chip = await page
-      .locator('.attachment-chip', { hasText: /repository/ })
-      .count();
-    await shot(page, '37-composer-no-sources-chip');
+    const sourcesBar = page.locator('[data-testid="chat-sources"]');
+    const sourcesControl = await sourcesBar.locator('button').count();
+    await shot(page, '37-composer-sources-chip');
+    await sourcesBar.locator('button').first().click();
+    const popover = page.getByRole('group', { name: 'Attach sources' });
+    await expect(popover).toBeVisible();
+    const option = popover.locator('label.chat-sources-option', {
+      hasText: 'Scratch repo',
+    });
+    await option.locator('input[type="checkbox"]').click();
+    await expect(popover).toContainText('Saved per chat');
+    await expect(
+      page.locator('[data-testid="chat-source-chip"]', { hasText: 'Scratch repo' }),
+    ).toBeVisible({ timeout: 30_000 });
+    await shot(page, '37-repository-attached');
+    await page.keyboard.press('Escape');
+    const chip = await page.locator('[data-testid="chat-source-chip"]').count();
+    const attachedRows = sql(
+      `select count(*) from chat_attached_sources where chat_id = '${chatId}'`,
+    ).join(',');
     const reply = await ask(
       page,
       'In the GitHub source called "Scratch repo" in this workspace, read check.sh and tell me exactly which script it runs. Cite the file you read.',
@@ -497,24 +510,34 @@ test.describe('chats', () => {
       `select left((metadata->'citations')::text, 400) from messages where chat_id = '${chatId}' and role = 'assistant' and metadata ? 'citations' order by created_at desc limit 1`,
     );
     record(37, {
-      result: 'FAILS',
+      result:
+        sourcesControl > 0 && chip > 0 && attachedRows !== '0' && citations.length > 0
+          ? 'WORKS'
+          : 'FAILS',
       cause:
-        'product: the composer has no Sources chip and no way to attach a repository to a chat; the only "Sources" element is the read-only citations block on a reply',
+        sourcesControl > 0 && chip > 0
+          ? citations.length > 0
+            ? undefined
+            : 'the answer carried no citation'
+          : 'product: the composer has no Sources chip',
       chat_id: chatId,
       sources_controls_in_composer: sourcesControl,
       repository_chips: chip,
+      attached_rows: attachedRows,
       code_question_reply: reply.slice(0, 300),
       tools_the_agent_used: tools,
       citations_rendered: citations.map((c) =>
         c.replace(/\s+/g, ' ').slice(0, 120),
       ),
       citations_stored: storedCitations,
-      screenshots: ['37-composer-no-sources-chip.png', '37-code-question.png'],
+      screenshots: [
+        '37-composer-sources-chip.png',
+        '37-repository-attached.png',
+        '37-code-question.png',
+      ],
     });
-    expect(
-      sourcesControl + chip,
-      'no repository attachment control exists',
-    ).toBe(0);
+    expect(chip, 'no repository chip after attaching').toBeGreaterThan(0);
+    expect(citations.length, 'no citation on the answer').toBeGreaterThan(0);
   });
 
   test('39: an upstream model failure is reported, and the chat is usable after', async ({

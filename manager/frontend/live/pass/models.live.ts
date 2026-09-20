@@ -185,7 +185,7 @@ test.describe('models page', () => {
     record(14, {
       result:
         listed >= 1 &&
-        /Size/.test(detailText) &&
+        /Size/i.test(detailText) &&
         diskShown &&
         !afterDelete.includes(SMALL)
           ? 'WORKS'
