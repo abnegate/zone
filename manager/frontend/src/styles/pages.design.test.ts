@@ -248,6 +248,13 @@ describe('tasks page layout', () => {
     expect(rule(css, '.task-actions')).toContain('margin-top: auto');
   });
 
+  it('sizes every card at 176 including its border so grid rows step on the 4px grid', () => {
+    const card = rule(css, '.task-card');
+    expect(card).toContain('box-sizing: border-box');
+    expect(card).toContain('height: 11rem');
+    expect(card).toContain('padding: calc(var(--ui-card-padding-list) - 1px)');
+  });
+
   it('guarantees the title 60% of its row and keeps the badges from pushing it out', () => {
     expect(rule(css, '.task-card-title h3')).toContain('min-width: 60%');
     expect(rule(css, '.task-badges')).toContain('overflow: hidden');
