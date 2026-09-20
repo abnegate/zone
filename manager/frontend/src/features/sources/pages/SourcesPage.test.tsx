@@ -448,7 +448,7 @@ describe('SourcesPage', () => {
   it('displays verified date', async () => {
     render(<SourcesPage />);
     await waitFor(() => {
-      expect(screen.getByText(/Verified:/)).toBeInTheDocument();
+      expect(screen.getByText(/^Verified \w{3} \d/)).toBeInTheDocument();
     });
   });
 

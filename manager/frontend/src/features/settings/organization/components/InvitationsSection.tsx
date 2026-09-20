@@ -1,4 +1,4 @@
-import { Button } from '@zone/ui';
+import { Button, EmptyState } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import type { Workspace, WorkspaceRole } from '../../workspace/types';
@@ -102,20 +102,23 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
 
   return (
     <div className="invitations-section">
-      <div className="section-header">
-        <h2>Pending Invitations</h2>
-        <Button onClick={() => setShowModal(true)} variant="primary">
-          Invite Member
-        </Button>
-      </div>
-
-      {error && <div className="alert alert-error">{error}</div>}
-
-      {invitations.length === 0 ? (
-        <div className="empty-state">
-          <p>No pending invitations</p>
-          <p className="text-muted">Invite team members to join this organization</p>
+      <div className="section-row">
+        <div className="section-row-copy">
+          <h2 className="section-title">Pending Invitations</h2>
+          <p className="section-description">Invitations expire seven days after they are sent.</p>
         </div>
+        <div className="section-row-actions">
+          <Button size="sm" onClick={() => setShowModal(true)}>
+            Invite Member
+          </Button>
+        </div>
+      </div>
+      {error && <div className="alert alert-error">{error}</div>}
+      {invitations.length === 0 ? (
+        <EmptyState
+          title="No pending invitations"
+          description="Invite team members to join this organization"
+        />
       ) : (
         <div className="table-container">
           <table className="invitations-table">
@@ -162,8 +165,13 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
                     {formatDate(invitation.expires_at)}
                     {isExpired(invitation.expires_at) && ' (Expired)'}
                   </td>
-                  <td>
-                    <Button onClick={() => handleRevoke(invitation.id)} variant="danger" size="sm">
+                  <td className="invitation-actions">
+                    <Button
+                      className="invitation-revoke"
+                      onClick={() => handleRevoke(invitation.id)}
+                      variant="ghost"
+                      size="sm"
+                    >
                       Revoke
                     </Button>
                   </td>

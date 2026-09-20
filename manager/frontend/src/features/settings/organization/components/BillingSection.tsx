@@ -1,3 +1,4 @@
+import { Button } from '@zone/ui';
 import { useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import type { Limits, Subscription, Usage } from '../types';
@@ -86,22 +87,20 @@ export function BillingSection({ orgId }: BillingSectionProps) {
   };
 
   if (loading) {
-    return <div className="billing-loading">Loading billing information...</div>;
+    return <div className="loading-state">Loading billing information...</div>;
   }
-
   if (error) {
     return (
-      <div className="billing-error">
-        <p>{error}</p>
-        <button type="button" onClick={loadBillingData} className="retry-button">
+      <div className="alert alert-error alert-inline" role="alert">
+        <span>{error}</span>
+        <Button type="button" variant="ghost" size="sm" onClick={loadBillingData}>
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
-
   if (!subscription || !usage || !limits) {
-    return <div className="billing-error">No billing data available</div>;
+    return <div className="alert alert-error">No billing data available</div>;
   }
 
   const metrics: UsageMetric[] = [
@@ -131,40 +130,44 @@ export function BillingSection({ orgId }: BillingSectionProps) {
   return (
     <div className="billing-section">
       <section className="subscription-info">
-        <h2 className="section-title">Current Subscription</h2>
-        <div className="subscription-card">
+        <div className="section-row">
+          <div className="section-row-copy">
+            <h2 className="section-title">Current Subscription</h2>
+          </div>
+        </div>
+        <div className="settings-card subscription-card">
           <div className="subscription-header">
             <h3 className="plan-name">{subscription.plan_name}</h3>
             <span className={`status-badge ${getStatusBadgeClass(subscription.status)}`}>
               {subscription.status}
             </span>
           </div>
-          <div className="subscription-details">
-            <div className="detail-row">
-              <span className="detail-label">Billing Period:</span>
-              <span className="detail-value">
-                {formatDate(subscription.current_period_start)} -{' '}
-                {formatDate(subscription.current_period_end)}
-              </span>
-            </div>
-            {subscription.cancel_at_period_end && (
-              <div className="cancel-warning">
-                Subscription will be canceled at the end of the current billing period.
-              </div>
-            )}
+          <div className="detail-row">
+            <span className="detail-label">Billing period</span>
+            <span className="detail-value">
+              {formatDate(subscription.current_period_start)} -{' '}
+              {formatDate(subscription.current_period_end)}
+            </span>
           </div>
+          {subscription.cancel_at_period_end && (
+            <div className="alert alert-warning">
+              Subscription will be canceled at the end of the current billing period.
+            </div>
+          )}
         </div>
       </section>
-
       <section className="usage-dashboard">
-        <h2 className="section-title">Usage & Limits</h2>
-        <p className="usage-period">
-          Current period: {formatDate(usage.period_start)} - {formatDate(usage.period_end)}
-        </p>
-
+        <div className="section-row">
+          <div className="section-row-copy">
+            <h2 className="section-title">Usage & Limits</h2>
+            <p className="section-description usage-period">
+              Current period: {formatDate(usage.period_start)} - {formatDate(usage.period_end)}
+            </p>
+          </div>
+        </div>
         <div className="metrics-grid">
           {metrics.map((metric) => (
-            <div key={metric.label} className="metric-card">
+            <div key={metric.label} className="settings-card metric-card">
               <div className="metric-header">
                 <h3 className="metric-label">{metric.label}</h3>
                 {metric.percentage >= 95 && (

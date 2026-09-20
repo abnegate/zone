@@ -1,4 +1,4 @@
-import { Button, Modal, Select } from '@zone/ui';
+import { Button, EmptyState, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
@@ -276,18 +276,19 @@ export default function WorkspaceMembersSection({
 
   return (
     <div className="org-members-section">
-      <div className="section-header">
-        <div>
+      <div className="section-row">
+        <div className="section-row-copy">
           <h2 className="section-title">Workspace Members</h2>
           <p className="section-description">Manage members and their roles in this workspace.</p>
         </div>
         {canManageMembers && (
-          <Button onClick={() => setShowAddModal(true)} variant="primary">
-            Add Member
-          </Button>
+          <div className="section-row-actions">
+            <Button size="sm" onClick={() => setShowAddModal(true)}>
+              Add Member
+            </Button>
+          </div>
         )}
       </div>
-
       {error && (
         <div className="alert alert-error" role="alert">
           {error}
@@ -298,21 +299,17 @@ export default function WorkspaceMembersSection({
           {success}
         </div>
       )}
-
       {members.length === 0 ? (
-        <div className="empty-state">
-          <p>No members found</p>
-        </div>
+        <EmptyState title="No members found" />
       ) : (
         <div className="members-table-container">
           <table className="members-table">
             <thead>
               <tr>
                 <th>Member</th>
-                <th>Email</th>
                 <th>Role</th>
                 <th>Joined</th>
-                <th>Actions</th>
+                <th className="members-actions-head">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -320,22 +317,27 @@ export default function WorkspaceMembersSection({
                 const isUpdating = updatingMemberId === member.id;
                 const canModify = canModifyMember(member);
                 const availableRoles = getAvailableRoles(member);
-
                 return (
                   <tr key={member.id}>
                     <td>
                       <div className="member-info">
-                        <div className="member-avatar">{memberLabel(member)[0].toUpperCase()}</div>
-                        <div className="member-name">{memberLabel(member)}</div>
+                        <div className="member-avatar" aria-hidden="true">
+                          {memberLabel(member)[0].toUpperCase()}
+                        </div>
+                        <div className="member-identity">
+                          <div className="member-name">{memberLabel(member)}</div>
+                          {member.display_name && member.email && (
+                            <div className="member-email">{member.email}</div>
+                          )}
+                        </div>
                       </div>
                     </td>
-                    <td>{member.email || '—'}</td>
                     <td>
                       <span className={getRoleBadgeClass(member.role)}>
                         {member.role.charAt(0).toUpperCase() + member.role.slice(1)}
                       </span>
                     </td>
-                    <td>{formatDate(member.joined_at)}</td>
+                    <td className="member-joined">{formatDate(member.joined_at)}</td>
                     <td>
                       <div className="member-actions">
                         <select
@@ -354,17 +356,18 @@ export default function WorkspaceMembersSection({
                           ))}
                         </select>
                         {isUpdating && (
-                          <span className="loading-spinner" aria-live="polite">
+                          <span className="member-updating" aria-live="polite">
                             Updating...
                           </span>
                         )}
                         <Button
+                          className="member-remove"
                           onClick={() => {
                             setMemberToRemove(member);
                             setShowRemoveModal(true);
                           }}
                           disabled={!canModify || isUpdating}
-                          variant="secondary"
+                          variant="ghost"
                           size="sm"
                         >
                           Remove
@@ -378,8 +381,6 @@ export default function WorkspaceMembersSection({
           </table>
         </div>
       )}
-
-      {/* Add Member Modal */}
       <Modal
         isOpen={showAddModal}
         onClose={() => {
@@ -428,14 +429,13 @@ export default function WorkspaceMembersSection({
           </div>
         </form>
       </Modal>
-
-      {/* Remove Member Confirmation Modal */}
       <Modal
         isOpen={showRemoveModal}
         onClose={() => setShowRemoveModal(false)}
         title="Remove Member"
+        size="sm"
       >
-        <div className="remove-member-modal">
+        <div className="confirm-modal">
           <p>
             Are you sure you want to remove{' '}
             <strong>{memberToRemove ? memberLabel(memberToRemove) : ''}</strong> from this
@@ -451,8 +451,6 @@ export default function WorkspaceMembersSection({
           </div>
         </div>
       </Modal>
-
-      {/* Role Elevation Confirmation Modal */}
       <Modal
         isOpen={showRoleConfirmModal}
         onClose={() => {
@@ -460,8 +458,9 @@ export default function WorkspaceMembersSection({
           setPendingRoleChange(null);
         }}
         title="Confirm Role Change"
+        size="sm"
       >
-        <div className="role-confirm-modal">
+        <div className="confirm-modal">
           <p>
             Are you sure you want to promote{' '}
             <strong>{pendingRoleChange ? memberLabel(pendingRoleChange.member) : ''}</strong> to{' '}

@@ -46,8 +46,6 @@ export const githubSource: SourceDefinition = {
     hint: 'Token required for private repos and write access',
   },
 
-  formHint: 'Token required for private repos and write access',
-
   buildConfig: (state): GitHubConfig => ({
     owner: state.ghOwner as string,
     repo: state.ghRepo as string,

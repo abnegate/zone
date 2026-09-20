@@ -139,6 +139,18 @@ function FormFieldsRenderer({
   );
 }
 
+function withCredentialField(
+  fields: (FormField | FormRow)[],
+  credentialField: FormField | undefined
+): (FormField | FormRow)[] {
+  if (!credentialField) return fields;
+  const last = fields[fields.length - 1];
+  if (last && 'fields' in last && last.fields.length === 1) {
+    return [...fields.slice(0, -1), { fields: [...last.fields, credentialField] }];
+  }
+  return [...fields, credentialField];
+}
+
 const WIZARD_STEPS: WizardStep[] = [
   {
     id: 'type',
@@ -326,20 +338,22 @@ export function CreateSourceWizard({
                   Configure the connection settings for your {currentSource.name} source.
                 </p>
                 <FormFieldsRenderer
-                  fields={currentSource.formFields}
-                  state={formState}
-                  onChange={handleFieldChange}
+                  fields={withCredentialField(
+                    currentSource.formFields,
+                    currentSource.credentialField
+                  )}
+                  state={
+                    currentSource.credentialField
+                      ? { ...formState, [currentSource.credentialField.id]: credentials }
+                      : formState
+                  }
+                  onChange={(id, value) =>
+                    id === currentSource.credentialField?.id
+                      ? setCredentials(value as string)
+                      : handleFieldChange(id, value)
+                  }
                 />
-                {currentSource.credentialField && (
-                  <FormFieldRenderer
-                    field={currentSource.credentialField}
-                    value={credentials}
-                    onChange={(_, value) => setCredentials(value as string)}
-                  />
-                )}
-                {currentSource.formHint && (
-                  <p className="form-section-hint">{currentSource.formHint}</p>
-                )}
+                {currentSource.formHint && <p className="form-hint">{currentSource.formHint}</p>}
               </>
             ) : (
               <p className="wizard-step-intro">{currentSource?.name} integration is coming soon.</p>
