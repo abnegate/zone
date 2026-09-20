@@ -55,6 +55,7 @@ struct Step<'a> {
 }
 
 impl Step<'_> {
+    /// Move the task to a stage, with the reason it is there.
     async fn set(&self, stage: Stage, reason: Option<&str>) -> Result<(), String> {
         auto_projects::set_stage(
             self.drive.state.db(),
@@ -84,6 +85,7 @@ impl Step<'_> {
         Ok(())
     }
 
+    /// How long checks have been absent or pending on this head.
     fn seconds_since_checks(&self) -> i64 {
         self.task
             .checks_since
@@ -91,6 +93,7 @@ impl Step<'_> {
             .unwrap_or(0)
     }
 
+    /// The pull request as GitHub sees it now.
     async fn pull(&self) -> Result<PullRequestDetail, String> {
         self.drive
             .services
@@ -100,6 +103,7 @@ impl Step<'_> {
             .map_err(|error| error.to_string())
     }
 
+    /// Whether the pull request's head is no longer the one recorded.
     fn head_moved(&self, pull: &PullRequestDetail) -> bool {
         self.task.head.as_deref() != Some(pull.head_sha.as_str())
     }
@@ -198,6 +202,7 @@ async fn settled_elsewhere(step: &Step<'_>, pull: &PullRequestDetail) -> Result<
     Ok(false)
 }
 
+/// Wait for checks on the head, repairing conflicts and holding for the CI task when there are none.
 async fn awaiting_checks(step: &Step<'_>) -> Result<(), String> {
     let pool = step.drive.state.db();
     let config = step.drive.config;
@@ -444,6 +449,7 @@ async fn refresh_from_base(step: &Step<'_>, pull: &PullRequestDetail) -> Result<
     }
 }
 
+/// Gather bot and Zone reviews of the head and decide what happens next.
 async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
     let pool = step.drive.state.db();
     let config = step.drive.config;
@@ -839,6 +845,7 @@ pub fn decide(rows: &[ReviewRow], open: &[Finding], head: &str, distinct: bool) 
     Decision::Merge
 }
 
+/// The open findings as one line, for a reason.
 fn describe(open: &[Finding]) -> String {
     if open.is_empty() {
         return "no open findings".to_string();
@@ -855,6 +862,7 @@ fn describe(open: &[Finding]) -> String {
     text
 }
 
+/// Admit a fix-up run of the task on its own branch.
 async fn fixing(step: &Step<'_>) -> Result<(), String> {
     let config = step.drive.config;
     if step.task.runs >= i32::try_from(config.max_runs_per_task).unwrap_or(i32::MAX) {
@@ -877,6 +885,7 @@ async fn fixing(step: &Step<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Squash-merge the pull request, through the administrator path when protection refuses.
 async fn merging(step: &Step<'_>) -> Result<(), String> {
     let config = step.drive.config;
     let pr = &step.drive.services.pr;
@@ -940,10 +949,20 @@ async fn merging(step: &Step<'_>) -> Result<(), String> {
             step.pause(&format!("GitHub refused the merge: {reason}"))
                 .await
         }
+        // A revoked or under-scoped token fails the same way every tick; a
+        // person has to relink the repository, so stop asking.
+        Err(PrError::AuthFailed) => {
+            step.pause(
+                "GitHub no longer accepts the project token for this pull request; relink the \
+                 repository with a token that can merge it",
+            )
+            .await
+        }
         Err(error) => Err(error.to_string()),
     }
 }
 
+/// Who reviewed the pull request, for the notice.
 fn reviewer_names(rows: &[ReviewRow]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for row in rows {
@@ -959,6 +978,7 @@ fn reviewer_names(rows: &[ReviewRow]) -> Vec<String> {
     names
 }
 
+/// Everything a merge leaves to do: the branch, the task, reception, the notice.
 async fn finish_merged(
     step: &Step<'_>,
     pull: &PullRequestDetail,
@@ -1055,6 +1075,7 @@ async fn finish_merged(
     step.set(Stage::PostMerge, None).await
 }
 
+/// Watch the jobs the merge triggered and file a fix task when one fails.
 async fn post_merge(step: &Step<'_>) -> Result<(), String> {
     let pool = step.drive.state.db();
     let config = step.drive.config;
@@ -1161,6 +1182,7 @@ async fn post_merge(step: &Step<'_>) -> Result<(), String> {
     }
 }
 
+/// The first seven characters of a commit sha.
 fn short(sha: &str) -> &str {
     if sha.len() >= 12 { &sha[..12] } else { sha }
 }

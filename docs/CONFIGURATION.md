@@ -377,7 +377,7 @@ An auto project runs itself: every agentic task in it is executed unattended, it
 
 ### `ZONE_AUTO_ENABLED`
 - **Default**: `true`
-- **Description**: Master switch for the driver.
+- **Description**: Master switch for the driver. With it off, `POST /api/workspaces/{id}/projects/auto`, turning **Auto** on for a project and `POST /api/projects/{id}/automation/resume` answer `409`, since nothing on this server would pick the project up.
 
 ### `ZONE_AUTO_TICK_SECS`
 - **Default**: `15` (5–300)

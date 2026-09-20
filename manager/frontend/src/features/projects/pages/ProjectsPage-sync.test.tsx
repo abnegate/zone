@@ -108,6 +108,7 @@ const mockProject: Project = {
   status: 'active',
   github_repo_url: null,
   source_id: null,
+  auto: false,
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
 };

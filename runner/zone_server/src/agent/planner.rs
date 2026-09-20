@@ -85,6 +85,7 @@ pub struct TaskSpec {
 }
 
 impl Blueprint {
+    /// Read a blueprint from the tool's arguments, refusing one that fails validation.
     pub fn parse(arguments: &Value) -> Result<Self, String> {
         let blueprint: Self = serde_json::from_value(arguments.clone()).map_err(|error| {
             format!(
@@ -270,6 +271,7 @@ impl Blueprint {
     }
 }
 
+/// Add the planner's two tools to a chat's registry, bound to its workspace scope.
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
     registry.register(Arc::new(CreateRepositoryTool(scope.clone())));
     registry.register(Arc::new(FinalizeProjectTool(scope.clone())));
@@ -282,6 +284,7 @@ struct SourceCredential {
     repo: Option<String>,
 }
 
+/// The token and repository a connected GitHub source holds, decrypted for one call.
 async fn source_credential(
     scope: &WorkspaceScope,
     source_id: Uuid,
@@ -306,6 +309,7 @@ async fn source_credential(
     })
 }
 
+/// Refuse unless the chat's user may still write to the workspace.
 async fn authorized_writer(scope: &WorkspaceScope) -> Result<(), String> {
     match workspace_members::can_write(scope.state.db(), scope.workspace_id, scope.user_id).await {
         Ok(true) => Ok(()),
@@ -329,20 +333,24 @@ struct CreateRepositoryArguments {
     private: bool,
 }
 
+/// A new repository is private unless the model says otherwise.
 fn default_private() -> bool {
     true
 }
 
 #[async_trait]
 impl Tool for CreateRepositoryTool {
+    /// The tool's name, as the model calls it.
     fn name(&self) -> &str {
         CREATE_REPOSITORY
     }
 
+    /// What the model is told the tool does.
     fn description(&self) -> &str {
         CREATE_REPOSITORY_DESCRIPTION
     }
 
+    /// The JSON schema of the tool's arguments.
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -358,10 +366,12 @@ impl Tool for CreateRepositoryTool {
         })
     }
 
+    /// An outward call: the person confirms it on an approval card first.
     fn tier(&self) -> Tier {
         Tier::Outward
     }
 
+    /// The one line the approval card shows: owner, name and visibility.
     fn preview(&self, params: &Value) -> Option<String> {
         let name = params["name"].as_str()?;
         let owner = params["owner"].as_str().unwrap_or("the source's owner");
@@ -375,6 +385,7 @@ impl Tool for CreateRepositoryTool {
         ))
     }
 
+    /// Create the repository through the source's credential and report its URL.
     async fn execute(
         &self,
         params: Value,
@@ -433,14 +444,17 @@ struct FinalizeProjectTool(WorkspaceScope);
 
 #[async_trait]
 impl Tool for FinalizeProjectTool {
+    /// The tool's name, as the model calls it.
     fn name(&self) -> &str {
         FINALIZE_PROJECT
     }
 
+    /// What the model is told the tool does.
     fn description(&self) -> &str {
         FINALIZE_PROJECT_DESCRIPTION
     }
 
+    /// The JSON schema of the tool's arguments.
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -483,10 +497,12 @@ impl Tool for FinalizeProjectTool {
         })
     }
 
+    /// A workspace write: recorded as a receipt, no approval card.
     fn tier(&self) -> Tier {
         Tier::Write
     }
 
+    /// The one line the receipt shows: the project and how many tasks it creates.
     fn preview(&self, params: &Value) -> Option<String> {
         let name = params["name"].as_str()?;
         let tasks = params["tasks"].as_array().map_or(0, Vec::len);
@@ -495,6 +511,7 @@ impl Tool for FinalizeProjectTool {
         ))
     }
 
+    /// Validate the blueprint, create the project and its tasks in one transaction, and wake the driver.
     async fn execute(
         &self,
         params: Value,
@@ -527,7 +544,20 @@ impl Tool for FinalizeProjectTool {
                         }
                     },
                 };
-                (Some(url), Some(credential.token))
+                // Stored the way the source keeps it: encrypted at rest, opened
+                // by the checkout and pull request code that uses it.
+                let sealed = match crate::crypto::encrypt(
+                    self.0.state.encryption_key(),
+                    &credential.token,
+                ) {
+                    Ok(sealed) => sealed,
+                    Err(_) => {
+                        return Ok(ToolResult::error(
+                            "The repository token could not be encrypted for storage.",
+                        ));
+                    }
+                };
+                (Some(url), Some(sealed))
             }
             Some(RepositoryRef {
                 source_id: None,

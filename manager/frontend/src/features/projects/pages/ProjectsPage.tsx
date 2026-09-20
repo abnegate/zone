@@ -9,7 +9,7 @@ import {
   TabsList,
   TabsTrigger,
 } from '@zone/ui';
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
 import { projectsApi } from '../../../api/projects';
@@ -45,7 +45,7 @@ const statusVariants: Record<ProjectStatus, 'success' | 'warning' | 'destructive
 export default function ProjectsPage() {
   const { isAuthenticated } = useAuth();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const requestedProjectId = searchParams.get('id');
 
   // Use projects hook with status filter
@@ -73,6 +73,7 @@ export default function ProjectsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showAutoModal, setShowAutoModal] = useState(false);
   const [togglingAuto, setTogglingAuto] = useState(false);
+  const [automationActionError, setAutomationActionError] = useState<string | null>(null);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showSourceModal, setShowSourceModal] = useState(false);
@@ -86,12 +87,36 @@ export default function ProjectsPage() {
     deleteSyncConfig: deleteSyncConfigMutation,
   } = useSyncConfigs(selectedProject?.id || null);
 
-  // A link such as /projects?id=… (from a planner receipt) selects that project once loaded
+  // A link such as /projects?id=… (from a planner receipt) selects that project once
+  // loaded, once: the router applies a URL change as a transition, so closing the
+  // panel would otherwise be re-selected by this effect before the parameter is gone
+  const honouredLink = useRef<string | null>(null);
   useEffect(() => {
     if (!requestedProjectId || selectedProject) return;
+    if (honouredLink.current === requestedProjectId) return;
     const match = projects.find((project) => project.id === requestedProjectId);
-    if (match) setSelectedProject(match);
+    if (match) {
+      honouredLink.current = requestedProjectId;
+      setSelectedProject(match);
+    }
   }, [requestedProjectId, projects, selectedProject]);
+
+  // An automation error belongs to the project it happened on
+  const selectProject = (project: Project) => {
+    setAutomationActionError(null);
+    setSelectedProject(project);
+  };
+
+  // Closing the panel also clears the deep link from the URL
+  const closeDetails = () => {
+    setSelectedProject(null);
+    setAutomationActionError(null);
+    if (searchParams.has('id')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('id');
+      setSearchParams(next, { replace: true });
+    }
+  };
 
   // Automation state, re-read while the selected project runs itself
   const {
@@ -150,6 +175,7 @@ export default function ProjectsPage() {
   const handleToggleAuto = async () => {
     if (!isAuthenticated || !selectedProject) return;
 
+    setAutomationActionError(null);
     setTogglingAuto(true);
     try {
       const updated = await updateProjectMutation(selectedProject.id, {
@@ -157,7 +183,9 @@ export default function ProjectsPage() {
       });
       setSelectedProject(updated);
     } catch (err) {
-      console.error('Failed to toggle automation:', err);
+      setAutomationActionError(
+        err instanceof Error ? err.message : 'Could not change automation for this project'
+      );
     } finally {
       setTogglingAuto(false);
     }
@@ -165,11 +193,14 @@ export default function ProjectsPage() {
 
   const handleResumeAutomation = async () => {
     if (!isAuthenticated || !selectedProject) return;
+    setAutomationActionError(null);
     try {
       const updated = await resumeAutomation();
       setSelectedProject(updated);
     } catch (err) {
-      console.error('Failed to resume automation:', err);
+      setAutomationActionError(
+        err instanceof Error ? err.message : 'Could not resume automation for this project'
+      );
     }
   };
 
@@ -362,8 +393,8 @@ export default function ProjectsPage() {
                   <Card
                     key={project.id}
                     className={`project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
-                    onClick={() => setSelectedProject(project)}
-                    onKeyDown={(e) => e.key === 'Enter' && setSelectedProject(project)}
+                    onClick={() => selectProject(project)}
+                    onKeyDown={(e) => e.key === 'Enter' && selectProject(project)}
                     role="button"
                     tabIndex={0}
                   >
@@ -413,12 +444,7 @@ export default function ProjectsPage() {
               <aside className="project-details">
                 <div className="details-header">
                   <h2>{selectedProject.name}</h2>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setSelectedProject(null)}
-                    aria-label="Close"
-                  >
+                  <Button variant="ghost" size="icon" onClick={closeDetails} aria-label="Close">
                     <svg
                       viewBox="0 0 24 24"
                       fill="none"
@@ -461,6 +487,12 @@ export default function ProjectsPage() {
                       Auto
                     </button>
                   </div>
+
+                  {automationActionError && (
+                    <p className="field-error" role="alert" data-testid="automation-action-error">
+                      {automationActionError}
+                    </p>
+                  )}
 
                   {selectedProject.auto && (
                     <AutomationPanel

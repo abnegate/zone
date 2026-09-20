@@ -92,6 +92,7 @@ pub struct ProjectData {
 }
 
 impl ProjectData {
+    /// Carry the project's automation state into the response.
     fn with_automation(mut self, automation: Option<&auto_projects::ProjectAutomation>) -> Self {
         if let Some(automation) = automation {
             self.auto = automation.auto;
@@ -224,6 +225,9 @@ pub async fn start_auto(
         }
     };
     if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
+        return refusal;
+    }
+    if let Some(refusal) = refuse_unless_driven(&state) {
         return refusal;
     }
     let brief = req.brief.trim();
@@ -560,6 +564,9 @@ pub async fn update(
     }
 
     if let Some(auto) = req.auto {
+        if auto && let Some(refusal) = refuse_unless_driven(&state) {
+            return refusal;
+        }
         match auto_projects::set_auto(state.db(), id, auto, user_id).await {
             Ok(Some(automation)) => {
                 if auto {
@@ -748,7 +755,23 @@ pub async fn link_github(
         return refusal;
     }
 
-    match projects::link_github(state.db(), id, &req.repo_url, req.access_token.as_deref()).await {
+    // The token is stored the way source credentials are: encrypted at rest,
+    // opened by the checkout and pull request code that uses it.
+    let sealed = match req.access_token.as_deref() {
+        Some(token) => match crate::crypto::encrypt(state.encryption_key(), token) {
+            Ok(sealed) => Some(sealed),
+            Err(error) => {
+                tracing::error!(%error, "Could not encrypt the repository token");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    match projects::link_github(state.db(), id, &req.repo_url, sealed.as_deref()).await {
         Ok(Some(proj)) => Json(respond(&state, proj).await).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -879,6 +902,25 @@ pub struct AutomationResponse {
     updates_chat_id: Option<Uuid>,
     counts: AutomationCounts,
     tasks: Vec<AutomationTask>,
+}
+
+/// The conflict a request to start, enable or resume automation is told when
+/// this server runs no driver: enabling a project nothing will pick up would
+/// only look like progress.
+fn refuse_unless_driven(state: &AppState) -> Option<Response> {
+    if state.config().auto.enabled {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new(
+                "Automation is disabled on this server (ZONE_AUTO_ENABLED=false); enable the \
+                 driver before starting, enabling or resuming an auto project",
+            )),
+        )
+            .into_response(),
+    )
 }
 
 /// The project's workspace, or the not-found a non-member is told.
@@ -1046,6 +1088,9 @@ pub async fn resume_automation(
         Err(refusal) => return *refusal,
     };
     if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
+        return refusal;
+    }
+    if let Some(refusal) = refuse_unless_driven(&state) {
         return refusal;
     }
     if let Err(e) = auto_projects::resume(state.db(), id).await {

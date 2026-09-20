@@ -90,6 +90,7 @@ pub struct SourceIndexConfig {
 }
 
 impl Default for SourceIndexConfig {
+    /// The defaults, before the environment is read.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -100,6 +101,7 @@ impl Default for SourceIndexConfig {
 }
 
 impl SourceIndexConfig {
+    /// Read the settings from the environment, falling back to the defaults.
     pub fn from_env() -> Self {
         Self {
             enabled: env_truthy("SOURCE_RESYNC_ENABLED", true),
@@ -152,6 +154,7 @@ pub struct AutoProjectConfig {
 }
 
 impl Default for AutoProjectConfig {
+    /// The defaults, before the environment is read.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -175,6 +178,7 @@ impl Default for AutoProjectConfig {
 }
 
 impl AutoProjectConfig {
+    /// Read the settings from the environment, keeping every value inside its bounds.
     pub fn from_env() -> Self {
         Self {
             enabled: env_truthy("ZONE_AUTO_ENABLED", true),
@@ -196,6 +200,7 @@ impl AutoProjectConfig {
         }
     }
 
+    /// How often the driver looks for due projects.
     pub fn tick(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.tick_secs)
     }
@@ -228,6 +233,7 @@ pub struct MonitoringConfig {
 }
 
 impl Default for MonitoringConfig {
+    /// The defaults, before the environment is read.
     fn default() -> Self {
         Self {
             enabled: false,
@@ -260,6 +266,7 @@ impl std::fmt::Debug for MonitoringConfig {
 }
 
 impl MonitoringConfig {
+    /// Read the settings from the environment, falling back to the defaults.
     pub fn from_env() -> Self {
         Self {
             enabled: env_truthy("MONITORING_ENABLED", true),

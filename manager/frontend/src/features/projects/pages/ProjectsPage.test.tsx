@@ -26,7 +26,15 @@ const createWrapper = (initialPath: string) => {
     <MemoryRouter initialEntries={[initialPath]}>
       <QueryClientProvider client={queryClient}>
         <Routes>
-          <Route path="/projects" element={children} />
+          <Route
+            path="/projects"
+            element={
+              <>
+                <LocationProbe />
+                {children}
+              </>
+            }
+          />
           <Route path="*" element={<LocationProbe />} />
         </Routes>
       </QueryClientProvider>
@@ -663,6 +671,7 @@ describe('ProjectsPage', () => {
         status: 'on_hold',
         github_repo_url: null,
         source_id: null,
+        auto: false,
         created_at: '2024-01-03T00:00:00Z',
         updated_at: '2024-01-03T00:00:00Z',
       },
@@ -692,6 +701,7 @@ describe('ProjectsPage', () => {
         status: 'cancelled',
         github_repo_url: null,
         source_id: null,
+        auto: false,
         created_at: '2024-01-04T00:00:00Z',
         updated_at: '2024-01-04T00:00:00Z',
       },
@@ -810,7 +820,7 @@ describe('ProjectsPage', () => {
         expect(screen.getByText('Choose a model first')).toBeInTheDocument();
       });
       expect(screen.getByTestId('auto-project-modal')).toBeInTheDocument();
-      expect(screen.queryByTestId('location')).not.toBeInTheDocument();
+      expect(screen.getByTestId('location')).toHaveTextContent('/projects');
     });
 
     it('toggles automation on the selected project', async () => {
@@ -894,6 +904,52 @@ describe('ProjectsPage', () => {
         },
         { timeout: 3000 }
       );
+    });
+
+    it('closing the panel consumes the deep link instead of reopening it', async () => {
+      renderWithQueryClient(<ProjectsPage />, '/projects?id=proj-2');
+      await waitFor(
+        () => {
+          expect(
+            screen.getByRole('heading', { name: 'Project Beta', level: 2 })
+          ).toBeInTheDocument();
+        },
+        { timeout: 3000 }
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => {
+        expect(document.querySelector('.project-details')).not.toBeInTheDocument();
+      });
+      expect(screen.getByTestId('location')).toHaveTextContent('/projects');
+      expect(screen.getByTestId('location')).not.toHaveTextContent('id=');
+      // The effect that honours the link must not bring the panel back
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(document.querySelector('.project-details')).not.toBeInTheDocument();
+    });
+
+    it('shows why a toggle failed next to the control', async () => {
+      mockUpdateProject.mockImplementation(() =>
+        Promise.reject(new Error('Automation is disabled on this server'))
+      );
+
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Project Alpha'));
+      fireEvent.click(await screen.findByTestId('auto-toggle'));
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent('Automation is disabled on this server');
+      expect(screen.getByTestId('auto-toggle')).toHaveAttribute('aria-pressed', 'false');
+
+      // Choosing another project clears a message that was about this one
+      fireEvent.click(screen.getByText('Project Beta'));
+      await waitFor(() => {
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      });
     });
   });
 

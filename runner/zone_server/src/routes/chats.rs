@@ -160,6 +160,7 @@ impl From<chats::ChatRow> for ChatResponse {
 }
 
 impl ChatResponse {
+    /// Carry the chat's purpose and project into the response.
     fn with_link(mut self, link: Option<chats::ChatLink>) -> Self {
         if let Some(link) = link {
             if link.purpose != chats::ChatPurpose::Assistant {

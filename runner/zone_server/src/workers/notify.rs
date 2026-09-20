@@ -241,6 +241,7 @@ pub struct ChatNotifier {
 }
 
 impl ChatNotifier {
+    /// A notifier that posts into one chat as the assistant.
     pub fn new(pool: sqlx::PgPool, chat_id: uuid::Uuid, kind: &'static str) -> Self {
         Self {
             pool,
@@ -252,10 +253,12 @@ impl ChatNotifier {
 
 #[async_trait::async_trait]
 impl Notifier for ChatNotifier {
+    /// The custom `chat` channel.
     fn channel(&self) -> zone_notify::Channel {
         zone_notify::Channel::custom("chat")
     }
 
+    /// Insert the notification as an assistant message and publish it to the open chat.
     async fn deliver(&self, notification: &zone_notify::Notification) -> Result<(), NotifyError> {
         let failed = |error: sqlx::Error| NotifyError::Unreachable {
             host: "database".to_string(),

@@ -6,7 +6,9 @@
 -- review-and-merge pipeline and the reviews its pull request received get
 -- tables of their own. Everything here is metadata with a default -- no scan,
 -- no backfill -- and every constraint is added NOT VALID and validated in 043,
--- the way 035 adds what 036 validates.
+-- the way 035 adds what 036 validates. The two partial indexes the driver and
+-- the chat lookups read are built concurrently in 044 and 045, so this
+-- transaction never holds a lock that blocks writes for the length of a build.
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS auto BOOLEAN NOT NULL DEFAULT FALSE;
@@ -18,7 +20,6 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS auto_completed_at TIMESTAMPTZ;
 ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_auto_actor_id_fkey;
 ALTER TABLE projects ADD CONSTRAINT projects_auto_actor_id_fkey
     FOREIGN KEY (auto_actor_id) REFERENCES users(id) ON DELETE SET NULL NOT VALID;
-CREATE INDEX IF NOT EXISTS idx_projects_auto ON projects(id) WHERE auto;
 
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'assistant';
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS project_id UUID;
@@ -28,7 +29,6 @@ ALTER TABLE chats ADD CONSTRAINT chats_purpose_check
 ALTER TABLE chats DROP CONSTRAINT IF EXISTS chats_project_id_fkey;
 ALTER TABLE chats ADD CONSTRAINT chats_project_id_fkey
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL NOT VALID;
-CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id) WHERE project_id IS NOT NULL;
 
 ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS model TEXT;
 ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS unattended BOOLEAN NOT NULL DEFAULT FALSE;

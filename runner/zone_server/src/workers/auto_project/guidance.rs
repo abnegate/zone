@@ -32,6 +32,7 @@ pub struct Blocks {
 }
 
 impl Blocks {
+    /// Whether nothing at all was rendered.
     pub fn is_empty(&self) -> bool {
         self.brief.is_empty() && self.roadmap.is_empty() && self.review.is_empty()
     }
@@ -103,6 +104,7 @@ pub fn brief_block(brief: Option<&Value>) -> String {
 /// Nesting past this renders as JSON: a brief is decisions, not a document tree.
 const MAX_DEPTH: usize = 4;
 
+/// One JSON value as prose: lists joined by commas, maps as `key value` pairs.
 fn render_value(value: &Value, depth: usize) -> String {
     if depth > MAX_DEPTH && (value.is_array() || value.is_object()) {
         return value.to_string();
@@ -201,6 +203,7 @@ pub fn review_block(findings: &[Finding], reason: Option<&str>) -> String {
     )
 }
 
+/// Text trimmed to a budget, with the cut marked.
 fn cut(text: &str, budget: usize) -> String {
     if text.chars().count() <= budget {
         return text.to_string();

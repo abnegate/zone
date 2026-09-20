@@ -663,6 +663,7 @@ impl ChatPurpose {
         }
     }
 
+    /// The purpose a stored name denotes; an unknown name reads as an assistant chat.
     pub fn parse(value: &str) -> Self {
         match value {
             "project_planner" => Self::ProjectPlanner,
@@ -678,6 +679,7 @@ pub struct ChatLink {
     pub project_id: Option<Uuid>,
 }
 
+/// What a chat is for and which project it belongs to.
 pub async fn link(pool: &PgPool, chat_id: Uuid) -> DbResult<Option<ChatLink>> {
     let row: Option<(String, Option<Uuid>)> =
         sqlx::query_as("SELECT purpose, project_id FROM chats WHERE id = $1")

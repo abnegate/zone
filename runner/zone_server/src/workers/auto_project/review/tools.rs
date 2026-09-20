@@ -20,6 +20,7 @@ pub struct Shared {
     pub files: Vec<ChangedFile>,
 }
 
+/// The read-only tools a reviewer session gets, backed by the pull request service.
 pub fn registry(shared: Arc<Shared>) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ReadPrFile(Arc::clone(&shared))));
@@ -32,15 +33,18 @@ struct ReadPrFile(Arc<Shared>);
 
 #[async_trait]
 impl Tool for ReadPrFile {
+    /// The tool's name, as the model calls it.
     fn name(&self) -> &str {
         "read_pr_file"
     }
 
+    /// What the model is told the tool does.
     fn description(&self) -> &str {
         "Read one file as it is at the head of the pull request under review. Use it to see the \
          context around a change; the diff alone shows only the changed lines."
     }
 
+    /// The JSON schema of the tool's arguments.
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -52,10 +56,12 @@ impl Tool for ReadPrFile {
         })
     }
 
+    /// A read: nothing to approve.
     fn tier(&self) -> Tier {
         Tier::Read
     }
 
+    /// Answer the model from the pull request through the shared service.
     async fn execute(
         &self,
         params: Value,
@@ -93,22 +99,27 @@ struct ListPrFiles(Arc<Shared>);
 
 #[async_trait]
 impl Tool for ListPrFiles {
+    /// The tool's name, as the model calls it.
     fn name(&self) -> &str {
         "list_pr_files"
     }
 
+    /// What the model is told the tool does.
     fn description(&self) -> &str {
         "List every file the pull request changes, with its status and line counts."
     }
 
+    /// The JSON schema of the tool's arguments.
     fn parameters_schema(&self) -> Value {
         json!({"type": "object", "properties": {}, "additionalProperties": false})
     }
 
+    /// A read: nothing to approve.
     fn tier(&self) -> Tier {
         Tier::Read
     }
 
+    /// Answer the model from the pull request through the shared service.
     async fn execute(
         &self,
         _params: Value,
@@ -137,22 +148,27 @@ struct ReadDiff(Arc<Shared>);
 
 #[async_trait]
 impl Tool for ReadDiff {
+    /// The tool's name, as the model calls it.
     fn name(&self) -> &str {
         "read_diff"
     }
 
+    /// What the model is told the tool does.
     fn description(&self) -> &str {
         "Read the pull request's unified diff again, in full, as it was given to you."
     }
 
+    /// The JSON schema of the tool's arguments.
     fn parameters_schema(&self) -> Value {
         json!({"type": "object", "properties": {}, "additionalProperties": false})
     }
 
+    /// A read: nothing to approve.
     fn tier(&self) -> Tier {
         Tier::Read
     }
 
+    /// Answer the model from the pull request through the shared service.
     async fn execute(
         &self,
         _params: Value,

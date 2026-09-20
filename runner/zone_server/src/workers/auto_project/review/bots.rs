@@ -26,22 +26,23 @@ pub fn recognised(config: &AutoProjectConfig) -> Vec<SignalKind> {
     if config.review_bots.is_empty() {
         return SignalKind::ALL.to_vec();
     }
-    config
-        .review_bots
-        .iter()
-        .filter_map(|name| {
-            let kind = SignalKind::parse(name);
-            if kind.is_none() {
-                tracing::warn!(
-                    name,
-                    "ZONE_AUTO_REVIEW_BOTS names a review bot this build does not know"
-                );
-            }
-            kind
-        })
-        .collect()
+    // Aliases (`coderabbit`, `coderabbitai`) parse to one kind; naming both
+    // must not make the pipeline wait for, trigger or record the bot twice.
+    let mut kinds: Vec<SignalKind> = Vec::new();
+    for name in &config.review_bots {
+        match SignalKind::parse(name) {
+            Some(kind) if !kinds.contains(&kind) => kinds.push(kind),
+            Some(_) => {}
+            None => tracing::warn!(
+                name,
+                "ZONE_AUTO_REVIEW_BOTS names a review bot this build does not know"
+            ),
+        }
+    }
+    kinds
 }
 
+/// Whether a comment's author is this bot.
 fn authored(kind: SignalKind, author: &str) -> bool {
     kind.as_signal().authored(author)
 }
@@ -160,6 +161,7 @@ pub fn round(
     })
 }
 
+/// The first line of a comment, cut to a limit.
 fn first_line(body: &str, limit: usize) -> String {
     let line = body
         .lines()
@@ -169,6 +171,7 @@ fn first_line(body: &str, limit: usize) -> String {
     excerpt(line, limit)
 }
 
+/// Text cut to a limit, with the cut marked.
 fn excerpt(text: &str, limit: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= limit {
@@ -194,6 +197,24 @@ mod tests {
     use zone_vcs::pull_request::ThreadComment;
 
     const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn aliases_of_one_bot_are_recognised_once() {
+        let config = AutoProjectConfig {
+            review_bots: vec![
+                "coderabbit".to_string(),
+                "coderabbitai".to_string(),
+                "unknown-bot".to_string(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(recognised(&config), vec![SignalKind::CodeRabbit]);
+        assert_eq!(
+            recognised(&AutoProjectConfig::default()),
+            SignalKind::ALL.to_vec(),
+            "no configuration means every bot the build knows"
+        );
+    }
 
     fn comment(author: &str, body: &str) -> IssueComment {
         IssueComment {

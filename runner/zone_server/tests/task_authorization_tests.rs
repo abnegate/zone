@@ -377,7 +377,7 @@ async fn pr_worker_rejects_legacy_foreign_project_associations() {
         .await
         .expect("task is readable")
         .expect("task exists");
-    let error = match Repository::resolve(&pool, &row).await {
+    let error = match Repository::resolve(&pool, &[0u8; 32], &row).await {
         Err(error) => error,
         Ok(_) => panic!("a foreign project must not resolve to a repository"),
     };

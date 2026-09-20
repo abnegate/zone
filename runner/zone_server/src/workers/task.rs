@@ -859,26 +859,32 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
         return;
     }
 
-    let checkout =
-        match crate::services::checkout::Checkout::prepare(state.db(), &task, execution).await {
-            Ok(checkout) => checkout,
-            Err(error) => {
-                obs.set_status("failed");
-                if let Err(failure) = tasks::complete_owned_task_run(
-                    state.db(),
-                    run_id,
-                    Some(owner),
-                    "failed",
-                    Some(&error),
-                    None,
-                )
-                .await
-                {
-                    tracing::error!(%run_id, %failure, "Failed to record checkout failure");
-                }
-                return;
+    let checkout = match crate::services::checkout::Checkout::prepare(
+        state.db(),
+        state.encryption_key(),
+        &task,
+        execution,
+    )
+    .await
+    {
+        Ok(checkout) => checkout,
+        Err(error) => {
+            obs.set_status("failed");
+            if let Err(failure) = tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                "failed",
+                Some(&error),
+                None,
+            )
+            .await
+            {
+                tracing::error!(%run_id, %failure, "Failed to record checkout failure");
             }
-        };
+            return;
+        }
+    };
     let workspace_path = checkout.path().to_path_buf();
 
     let run = match tasks::get_task_run(state.db(), run_id).await {
@@ -2078,10 +2084,13 @@ fn proceeding_on_defaults(questions: &[Question]) -> String {
     questions
         .iter()
         .map(|question| {
+            // The model marks a recommended choice; when it marked none, the
+            // first option is the default the prompt promised an unattended run.
             let recommended = question
                 .choices
                 .iter()
                 .find(|choice| choice.recommended)
+                .or_else(|| question.choices.first())
                 .map(|choice| choice.label.as_str())
                 .unwrap_or_default();
             format!(
@@ -3795,6 +3804,20 @@ mod watchdog_tests {
                 asked("Branch", false, &["main", "release"]),
             ]),
             "No answer arrived within 30 seconds. Proceeding on the stated default \u{2014} Scope: Backfill.\nNo answer arrived within 30 seconds. Proceeding on the stated default \u{2014} Branch: main."
+        );
+    }
+
+    /// The model marks the recommended choice; when it marked none, the first
+    /// option is the default the prompt promised, not an empty label.
+    #[test]
+    fn the_default_resume_falls_back_to_the_first_choice() {
+        let mut question = asked("Branch", true, &["main", "release"]);
+        for choice in &mut question.choices {
+            choice.recommended = false;
+        }
+        assert_eq!(
+            proceeding_on_defaults(&[question]),
+            "No answer arrived within 30 seconds. Proceeding on the stated default \u{2014} Branch: main."
         );
     }
 

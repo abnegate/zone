@@ -39,6 +39,7 @@ const PROJECT_COLUMNS: &str = "id AS project_id, workspace_id, name, auto, auto_
      auto_paused_reason AS paused_reason, auto_claimed_at AS claimed_at, \
      auto_completed_at AS completed_at, github_repo_url AS repository_url";
 
+/// What automation knows about one project, if the project exists.
 pub async fn automation(pool: &PgPool, project_id: Uuid) -> DbResult<Option<ProjectAutomation>> {
     sqlx::query_as::<_, ProjectAutomation>(sqlx::AssertSqlSafe(format!(
         "SELECT {PROJECT_COLUMNS} FROM projects WHERE id = $1"
@@ -48,6 +49,7 @@ pub async fn automation(pool: &PgPool, project_id: Uuid) -> DbResult<Option<Proj
     .await
 }
 
+/// The automation state of every project in a workspace, for the list.
 pub async fn automation_for_workspace(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -87,6 +89,7 @@ pub async fn set_auto(
     .await
 }
 
+/// Store the interview's decisions on the project.
 pub async fn set_brief(
     connection: &mut PgConnection,
     project_id: Uuid,
@@ -128,6 +131,7 @@ pub async fn claim_due(pool: &PgPool, lease: Duration, limit: i64) -> DbResult<V
     Ok(due)
 }
 
+/// Give up the driver's lease on a project once its pass is over.
 pub async fn release(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
     sqlx::query("UPDATE projects SET auto_claimed_at = NULL WHERE id = $1")
         .bind(project_id)
@@ -150,6 +154,7 @@ pub async fn pause(pool: &PgPool, project_id: Uuid, reason: &str) -> DbResult<bo
         == 1)
 }
 
+/// Clear a project's pause so the driver picks it up again; false when it does not exist.
 pub async fn resume(pool: &PgPool, project_id: Uuid) -> DbResult<bool> {
     Ok(sqlx::query(
         "UPDATE projects SET auto_paused_reason = NULL, updated_at = NOW() \
@@ -186,6 +191,7 @@ pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u6
     Ok(checked + restarted)
 }
 
+/// Record that every agentic task merged; false when the project does not exist.
 pub async fn complete(pool: &PgPool, project_id: Uuid) -> DbResult<bool> {
     Ok(sqlx::query(
         "UPDATE projects SET auto_completed_at = NOW(), auto_claimed_at = NULL, updated_at = NOW() \
@@ -229,6 +235,7 @@ impl Stage {
         }
     }
 
+    /// The stage a stored name denotes, if any.
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "idle" => Self::Idle,
@@ -284,6 +291,7 @@ impl Kind {
         }
     }
 
+    /// The task kind a stored name denotes, if any.
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "scaffold" => Self::Scaffold,
@@ -319,10 +327,12 @@ pub struct TaskAutomation {
 }
 
 impl TaskAutomation {
+    /// Where the task is in the pipeline.
     pub fn stage(&self) -> Stage {
         Stage::parse(&self.stage).unwrap_or(Stage::Idle)
     }
 
+    /// What kind of task this is, when the planner or the driver said.
     pub fn kind(&self) -> Option<Kind> {
         self.kind.as_deref().and_then(Kind::parse)
     }
@@ -331,6 +341,7 @@ impl TaskAutomation {
 const TASK_COLUMNS: &str = "task_id, project_id, kind, stage, reason, runs, review_rounds, head, checks, \
      checks_since, bot_trigger_head, merge_sha, auto_created, last_run_id, updated_at";
 
+/// A task's automation row, if the driver has touched the task.
 pub async fn task_stage(pool: &PgPool, task_id: Uuid) -> DbResult<Option<TaskAutomation>> {
     sqlx::query_as::<_, TaskAutomation>(sqlx::AssertSqlSafe(format!(
         "SELECT {TASK_COLUMNS} FROM task_automation WHERE task_id = $1"
@@ -362,6 +373,7 @@ pub async fn set_stage(
     Ok(())
 }
 
+/// Record what kind of task this is, creating its automation row when needed.
 pub async fn set_kind(
     connection: &mut PgConnection,
     task_id: Uuid,
@@ -408,6 +420,7 @@ pub async fn set_head(
     Ok(())
 }
 
+/// Remember the head a review bot was asked to review, so it is asked once per head.
 pub async fn set_bot_trigger_head(pool: &PgPool, task_id: Uuid, head: &str) -> DbResult<()> {
     sqlx::query(
         "UPDATE task_automation SET bot_trigger_head = $2, updated_at = NOW() WHERE task_id = $1",
@@ -419,6 +432,7 @@ pub async fn set_bot_trigger_head(pool: &PgPool, task_id: Uuid, head: &str) -> D
     Ok(())
 }
 
+/// Record the commit the squash merge produced.
 pub async fn set_merge_sha(pool: &PgPool, task_id: Uuid, sha: &str) -> DbResult<()> {
     sqlx::query("UPDATE task_automation SET merge_sha = $2, updated_at = NOW() WHERE task_id = $1")
         .bind(task_id)
@@ -449,6 +463,7 @@ pub async fn record_admission(
     .await
 }
 
+/// Count one more review round and return the new total.
 pub async fn bump_review_round(pool: &PgPool, task_id: Uuid) -> DbResult<i32> {
     sqlx::query_scalar(
         "UPDATE task_automation SET review_rounds = review_rounds + 1, updated_at = NOW() \
@@ -574,6 +589,7 @@ pub async fn ci_task(pool: &PgPool, project_id: Uuid) -> DbResult<Option<(Uuid, 
     .await
 }
 
+/// How many tasks of a kind the driver itself added to the project.
 pub async fn count_auto_created(pool: &PgPool, project_id: Uuid, kind: Kind) -> DbResult<i64> {
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM task_automation WHERE project_id = $1 AND auto_created AND kind = $2",
@@ -606,6 +622,7 @@ pub struct ProjectTask {
     pub reviewers: Option<String>,
 }
 
+/// Every task of a project with its automation state, for the report.
 pub async fn project_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<Vec<ProjectTask>> {
     sqlx::query_as::<_, ProjectTask>(
         "SELECT t.id AS task_id, t.title, t.status, t.is_agentic, t.priority, t.pr_url, t.dependencies, \
@@ -673,6 +690,7 @@ impl Verdict {
         }
     }
 
+    /// The variant a stored name denotes, if any.
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "approve" => Self::Approve,
@@ -732,6 +750,7 @@ impl ReviewRow {
             .unwrap_or_default()
     }
 
+    /// The finding ids this round declared addressed.
     pub fn addressed(&self) -> Vec<String> {
         self.addressed
             .as_array()
@@ -744,10 +763,12 @@ impl ReviewRow {
             .unwrap_or_default()
     }
 
+    /// The round's verdict; unparseable when the stored name is unknown.
     pub fn verdict(&self) -> Verdict {
         Verdict::parse(&self.verdict).unwrap_or(Verdict::Unparseable)
     }
 
+    /// Whether a review bot, rather than a Zone reviewer session, wrote this round.
     pub fn is_bot(&self) -> bool {
         self.reviewer_kind == ReviewerKind::Bot.as_str()
     }
@@ -756,6 +777,7 @@ impl ReviewRow {
 const REVIEW_COLUMNS: &str = "id, task_id, run_id, round, head, reviewer_kind, reviewer, author_model, same_model, \
      verdict, summary, findings, addressed, external_id, created_at";
 
+/// Store one review round and return its id.
 pub async fn record_review(pool: &PgPool, review: ReviewInsert<'_>) -> DbResult<Uuid> {
     sqlx::query_scalar(
         "INSERT INTO task_reviews (task_id, run_id, round, head, reviewer_kind, reviewer, author_model, \
@@ -779,6 +801,7 @@ pub async fn record_review(pool: &PgPool, review: ReviewInsert<'_>) -> DbResult<
     .await
 }
 
+/// Every review round of a task, oldest first.
 pub async fn reviews(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<ReviewRow>> {
     sqlx::query_as::<_, ReviewRow>(sqlx::AssertSqlSafe(format!(
         "SELECT {REVIEW_COLUMNS} FROM task_reviews WHERE task_id = $1 ORDER BY round, created_at"
@@ -788,6 +811,7 @@ pub async fn reviews(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<ReviewRow>> {
     .await
 }
 
+/// The number of the last review round recorded; zero before any.
 pub async fn latest_round(pool: &PgPool, task_id: Uuid) -> DbResult<i32> {
     sqlx::query_scalar("SELECT COALESCE(MAX(round), 0) FROM task_reviews WHERE task_id = $1")
         .bind(task_id)
@@ -835,6 +859,7 @@ pub fn open_findings_of(rows: &[ReviewRow]) -> Vec<Finding> {
     open
 }
 
+/// Every finding raised on a task that no later round has addressed.
 pub async fn open_findings(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<Finding>> {
     Ok(open_findings_of(&reviews(pool, task_id).await?))
 }
@@ -884,6 +909,7 @@ pub struct Finalized {
     pub updates_chat_id: Uuid,
 }
 
+/// Translate a task mutation refusal into the database error the transaction reports.
 fn project_error(error: MutationError) -> sqlx::Error {
     match error {
         MutationError::Database(error) => error,

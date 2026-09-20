@@ -194,6 +194,7 @@ pub struct ReviewSummary {
 /// on, and how to read a score and a reviewed commit out of a comment body.
 /// Nothing above this trait knows any of that.
 pub trait ReviewSignal: Send + Sync {
+    /// The account the bot reviews as, without the `[bot]` suffix.
     fn reviewer(&self) -> &str;
 
     fn required(&self) -> Confidence;
@@ -417,6 +418,7 @@ static REVIEWED_RANGE_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
 pub struct Greptile;
 
 impl ReviewSignal for Greptile {
+    /// The account this bot reviews as.
     fn reviewer(&self) -> &str {
         GREPTILE_REVIEWER
     }
@@ -458,6 +460,7 @@ impl ReviewSignal for Greptile {
 pub struct CodeRabbit;
 
 impl ReviewSignal for CodeRabbit {
+    /// The account this bot reviews as.
     fn reviewer(&self) -> &str {
         CODERABBIT_REVIEWER
     }

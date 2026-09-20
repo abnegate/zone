@@ -1750,6 +1750,30 @@ impl PrService {
         })
     }
 
+    /// Every element of a paged object endpoint's array field, page after page
+    /// until a short page, capped at `MAXIMUM_PAGES`.
+    async fn paged(&self, url: &str, field: &str, token: &str) -> PrResult<Vec<Value>> {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let mut collected: Vec<Value> = Vec::new();
+        for page in 1..=MAXIMUM_PAGES {
+            let body = self
+                .json(
+                    reqwest::Method::GET,
+                    &format!("{url}{separator}per_page={PAGE_SIZE}&page={page}"),
+                    token,
+                    None,
+                )
+                .await?;
+            let batch: Vec<Value> = body[field].as_array().cloned().unwrap_or_default();
+            let complete = batch.len() < PAGE_SIZE;
+            collected.extend(batch);
+            if complete {
+                break;
+            }
+        }
+        Ok(collected)
+    }
+
     /// What the check runs and commit statuses on a commit add up to.
     ///
     /// A run still going is pending unless something else already failed; a
@@ -1767,26 +1791,22 @@ impl PrService {
             return Err(PrError::GitHubApi(format!("Invalid commit: {sha}")));
         }
         let scope = self.repos(owner, repo);
+        // Both endpoints page: a failing run past the first page must count,
+        // or a head with many checks would merge on the ones that fit.
         let runs = self
-            .json(
-                reqwest::Method::GET,
-                &format!("{scope}/commits/{sha}/check-runs?filter=latest&per_page={PAGE_SIZE}"),
+            .paged(
+                &format!("{scope}/commits/{sha}/check-runs?filter=latest"),
+                "check_runs",
                 token,
-                None,
             )
             .await?;
         let statuses = self
-            .json(
-                reqwest::Method::GET,
-                &format!("{scope}/commits/{sha}/status?per_page={PAGE_SIZE}"),
-                token,
-                None,
-            )
+            .paged(&format!("{scope}/commits/{sha}/status"), "statuses", token)
             .await?;
         let mut seen = 0usize;
         let mut pending = false;
         let mut failed: Vec<String> = Vec::new();
-        for run in runs["check_runs"].as_array().into_iter().flatten() {
+        for run in &runs {
             seen += 1;
             let name = run["name"].as_str().unwrap_or("check").to_string();
             if run["status"].as_str() != Some("completed") {
@@ -1798,7 +1818,7 @@ impl PrService {
                 failed.push(name);
             }
         }
-        for status in statuses["statuses"].as_array().into_iter().flatten() {
+        for status in &statuses {
             seen += 1;
             let name = status["context"].as_str().unwrap_or("status").to_string();
             match status["state"].as_str().unwrap_or_default() {
@@ -2163,7 +2183,9 @@ nodes{databaseId body url createdAt author{login}}}}}}}}";
         branch: &str,
         token: &str,
     ) -> PrResult<()> {
-        if branch.is_empty() || branch.contains("..") || branch.starts_with('/') {
+        // The name lands in a URL path: every segment has to be a plain ref
+        // segment, so `#`, `?` or an empty segment cannot redirect the request.
+        if branch.is_empty() || branch.contains("..") || !branch.split('/').all(named) {
             return Err(PrError::GitHubApi(format!("Invalid branch: {branch}")));
         }
         let response = self
@@ -2243,6 +2265,82 @@ mod automation_tests {
             outcome,
             ChecksOutcome::Pending,
             "a run still going is pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn checks_follow_every_page_before_judging() {
+        use wiremock::matchers::query_param;
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+        let sha = "3333333333333333333333333333333333333333";
+        let full_page: Vec<serde_json::Value> = (0..PAGE_SIZE)
+            .map(|index| json!({"name": format!("check-{index}"), "status": "completed", "conclusion": "success"}))
+            .collect();
+
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/acme/project/commits/{sha}/check-runs"
+            )))
+            .and(query_param("page", "1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"check_runs": full_page})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/acme/project/commits/{sha}/check-runs"
+            )))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "check_runs": [{"name": "deploy", "status": "completed", "conclusion": "failure"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/acme/project/commits/{sha}/status")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "state": "success",
+                "statuses": []
+            })))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            service
+                .fetch_checks("acme", "project", sha, "token")
+                .await
+                .unwrap(),
+            ChecksOutcome::Failure(vec!["deploy".to_string()]),
+            "the failure on the second page decides the outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_branch_that_could_change_the_request_target_is_refused() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+        for branch in [
+            "feature#x",
+            "a?b=c",
+            "zone//task",
+            "trailing/",
+            "/leading",
+            "a/../b",
+        ] {
+            let error = service
+                .delete_branch("acme", "project", branch, "token")
+                .await
+                .expect_err(branch);
+            assert!(
+                matches!(error, PrError::GitHubApi(ref message) if message.contains("Invalid branch")),
+                "{branch}: {error:?}"
+            );
+        }
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "nothing reached GitHub"
         );
     }
 

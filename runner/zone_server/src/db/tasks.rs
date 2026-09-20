@@ -1475,6 +1475,7 @@ pub(crate) async fn set_dependencies_in(
     Ok(())
 }
 
+/// Replace a task's dependencies in a transaction of its own.
 pub async fn set_dependencies(pool: &PgPool, task_id: Uuid, dependencies: &[Uuid]) -> DbResult<()> {
     let mut transaction = pool.begin().await?;
     set_dependencies_in(&mut transaction, task_id, dependencies).await?;
@@ -1494,6 +1495,14 @@ pub async fn create_unattended_task_run(
     actor: Uuid,
 ) -> DbResult<RunMutation> {
     let mut transaction = pool.begin().await?;
+    // Membership before the task lock, as every user-triggered admission
+    // orders them; then the row is held so two drivers cannot both find no
+    // active run and each insert one.
+    authorize_task_in(&mut transaction, task_id, actor, true).await?;
+    sqlx::query("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
+        .bind(task_id)
+        .fetch_one(&mut *transaction)
+        .await?;
     let active = sqlx::query_as::<_, TaskRunRow>(sqlx::AssertSqlSafe(format!(
         "SELECT id, task_id, triggered_by, status, current_phase, progress_percent, started_at, \
                 completed_at, error_message, artifacts, pending_question, pending_wait, plan \
@@ -1506,7 +1515,7 @@ pub async fn create_unattended_task_run(
     if let Some(run) = active {
         return Ok(RunMutation::Active(run));
     }
-    let run = create_task_run_in(&mut transaction, task_id, Some(actor)).await?;
+    let run = insert_task_run(&mut transaction, task_id, Some(actor)).await?;
     sqlx::query("UPDATE task_runs SET unattended = TRUE WHERE id = $1")
         .bind(run.id)
         .execute(&mut *transaction)
@@ -1523,6 +1532,7 @@ pub struct RunMode {
     pub model: Option<String>,
 }
 
+/// Whether a run is unattended, and the model it resolved to.
 pub async fn run_mode(pool: &PgPool, run_id: Uuid) -> DbResult<Option<RunMode>> {
     let row: Option<(bool, Option<String>)> =
         sqlx::query_as("SELECT unattended, model FROM task_runs WHERE id = $1")

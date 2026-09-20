@@ -37,6 +37,7 @@ pub async fn high_level(
     }
 }
 
+/// Ask the classifier model for the high-level summary, within its timeout.
 async fn generate(
     state: &AppState,
     task: &TaskRow,

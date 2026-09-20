@@ -145,6 +145,7 @@ impl Drive<'_> {
     }
 }
 
+/// One pass over a claimed project: settle finished runs, advance every task's pipeline, admit what can run, and notice completion.
 pub async fn drive_project(
     state: &AppState,
     services: &Services,

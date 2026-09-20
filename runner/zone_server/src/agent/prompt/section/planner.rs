@@ -45,6 +45,7 @@ const REPOSITORY: &str = "- A new repository is made with create_repository from
      person confirms it; pass the URL it returns to finalize_project together with the \
      source_id, so the runs have a credential.";
 
+/// The planner section, rendered only for a chat whose catalog holds `finalize_project`.
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
     if !context.tools.has(FINALIZE_PROJECT) {
         return None;

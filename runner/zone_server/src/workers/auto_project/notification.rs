@@ -39,6 +39,7 @@ pub struct MergeReport {
 /// Paths named in the low-level summary before the rest are counted.
 const TOP_PATHS: usize = 8;
 
+/// The notice a merged pull request sends, at both levels.
 pub fn merged(report: &MergeReport) -> Notification {
     let mut body = String::new();
     let _ = writeln!(body, "## High level");
@@ -128,6 +129,7 @@ pub fn merged(report: &MergeReport) -> Notification {
     .field("Task", report.task_title.clone())
 }
 
+/// The notice a paused project sends, with the reason.
 pub fn paused(project: &str, reason: &str, link: Option<&str>) -> Notification {
     let notification = Notification::new(
         format!("Paused: {}", project.trim()),
@@ -145,6 +147,7 @@ pub fn paused(project: &str, reason: &str, link: Option<&str>) -> Notification {
     }
 }
 
+/// The notice a finished project sends.
 pub fn completed(
     project: &str,
     merged: usize,
@@ -171,6 +174,7 @@ pub fn completed(
         .field("Project", project.to_string())
 }
 
+/// The notice sent when the driver adds a task of its own.
 pub fn task_added(project: &str, kind: &str, title: &str, why: &str) -> Notification {
     Notification::new(
         format!("Added a {kind} task to {}", project.trim()),
@@ -180,6 +184,7 @@ pub fn task_added(project: &str, kind: &str, title: &str, why: &str) -> Notifica
     .field("Project", project.to_string())
 }
 
+/// The first seven characters of a commit sha.
 fn short(sha: &str) -> &str {
     let trimmed = sha.trim();
     if trimmed.len() >= 12 {

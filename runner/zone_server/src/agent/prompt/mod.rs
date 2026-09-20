@@ -856,10 +856,17 @@ mod tests {
 
     #[test]
     fn a_planner_chat_prompt_stays_inside_its_own_budget() {
-        let mut names: Vec<&str> = CHAT_CATALOG.to_vec();
-        names.push(crate::agent::planner::FINALIZE_PROJECT);
-        names.push(crate::agent::planner::CREATE_REPOSITORY);
-        let tools = ChatTools::with_names(ToolProfile::Chat, &names, None);
+        // The planner tools are workspace tools the host registry does not
+        // know, so their production tiers are stated outright: the outward
+        // tier adds its own paragraph, and the budget has to hold with it.
+        let mut tiers = tiered(ToolProfile::Chat, CHAT_CATALOG);
+        tiers.push((crate::agent::planner::FINALIZE_PROJECT, Tier::Write));
+        tiers.push((crate::agent::planner::CREATE_REPOSITORY, Tier::Outward));
+        let tools = ChatTools::with_tiers(
+            ToolProfile::Chat,
+            &tiers,
+            zone_core::mcp::guidance_for_tools(&[MCP_TOOL]),
+        );
         let prompt = chat(&tools, false, &environment());
         assert!(prompt.contains("Planning a project:"), "{prompt}");
         assert!(

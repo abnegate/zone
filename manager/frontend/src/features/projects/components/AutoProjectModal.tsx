@@ -1,4 +1,4 @@
-import { Button } from '@zone/ui';
+import { Button, Modal } from '@zone/ui';
 import { type FormEvent, useId, useState } from 'react';
 import { getErrors } from '../../../validation';
 import { AutoProjectRequestSchema } from '../schemas';
@@ -50,47 +50,52 @@ export function AutoProjectModal({ isOpen, onClose, start, onStarted }: AutoProj
     }
   };
 
+  // Dismissal while start() is pending would let its completion navigate a
+  // page the person had already closed; the dialog stays until it settles.
+  const close = () => {
+    if (!submitting) onClose();
+  };
+
   return (
-    <div className="modal" data-testid="auto-project-modal">
-      <div
-        className="modal-backdrop"
-        onClick={onClose}
-        onKeyDown={(e) => e.key === 'Escape' && onClose()}
-        role="button"
-        tabIndex={0}
-        aria-label="Close modal"
-      />
-      <div className="modal-content">
-        <h3>Auto project</h3>
-        <p className="auto-project-intro">
-          Describe what you want built. Zone interviews you in a chat until every task can be
-          written without guessing, then creates the project and its tasks and runs them: each
-          change is checked, reviewed by a second model, fixed, merged and reported.
-        </p>
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label htmlFor={briefId}>Brief</label>
-            <textarea
-              id={briefId}
-              value={brief}
-              onChange={(e) => setBrief(e.target.value)}
-              placeholder={PLACEHOLDER}
-              rows={6}
-              className={error ? 'input-error' : ''}
-              data-testid="auto-project-brief"
-            />
-            {error && <span className="field-error">{error}</span>}
-          </div>
-          <div className="modal-actions">
-            <Button type="button" variant="secondary" onClick={onClose} disabled={submitting}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={submitting || !brief.trim()}>
-              {submitting ? 'Opening the interview…' : 'Start the interview'}
-            </Button>
-          </div>
-        </form>
-      </div>
-    </div>
+    <Modal
+      isOpen={isOpen}
+      onClose={close}
+      title="Auto project"
+      size="lg"
+      data-testid="auto-project-modal"
+    >
+      <p className="auto-project-intro">
+        Describe what you want built. Zone interviews you in a chat until every task can be written
+        without guessing, then creates the project and its tasks and runs them: each change is
+        checked, reviewed by a second model, fixed, merged and reported.
+      </p>
+      <form className="ui-form" onSubmit={handleSubmit}>
+        <div className="form-group">
+          <label htmlFor={briefId}>Brief</label>
+          <textarea
+            id={briefId}
+            value={brief}
+            onChange={(e) => setBrief(e.target.value)}
+            placeholder={PLACEHOLDER}
+            rows={6}
+            className={error ? 'input-error' : ''}
+            data-testid="auto-project-brief"
+          />
+          {error && (
+            <span className="field-error" role="alert">
+              {error}
+            </span>
+          )}
+        </div>
+        <div className="modal-actions">
+          <Button type="button" variant="secondary" onClick={close} disabled={submitting}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={submitting || !brief.trim()}>
+            {submitting ? 'Opening the interview…' : 'Start the interview'}
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }

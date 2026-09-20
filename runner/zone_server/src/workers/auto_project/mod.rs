@@ -67,6 +67,7 @@ pub struct Services {
 }
 
 impl Services {
+    /// The pull request and conflict services the driver talks to GitHub through.
     pub fn from_config(config: &Config) -> Self {
         Self {
             pr: PrService::configured(config.github_api_url.clone()),
@@ -83,6 +84,7 @@ impl Services {
     }
 }
 
+/// Start the driver loop: a tick every interval and whenever a project is poked.
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let services = Arc::new(Services::from_config(state.config()));
