@@ -834,24 +834,33 @@ fn default_threshold() -> f32 {
     0.7
 }
 
+/// How much of a matched message a search row carries as its snippet.
+const SEARCH_SNIPPET_CHARS: usize = 200;
+
 /// Message search result response
 #[derive(Debug, Serialize)]
 pub struct MessageSearchResponse {
     message_id: Uuid,
     chat_id: Uuid,
+    chat_title: String,
     similarity: f32,
+    relevance_score: f32,
     role: String,
     content: String,
+    snippet: String,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
 
-impl From<message_embeddings::MessageSearchResult> for MessageSearchResponse {
-    fn from(result: message_embeddings::MessageSearchResult) -> Self {
+impl MessageSearchResponse {
+    fn from_hit(result: message_embeddings::MessageSearchResult, chat_title: String) -> Self {
         Self {
             message_id: result.message_id,
             chat_id: result.chat_id,
+            chat_title,
             similarity: result.similarity,
+            relevance_score: result.similarity.clamp(0.0, 1.0),
+            snippet: zone_core::tools::excerpt(&result.content, SEARCH_SNIPPET_CHARS),
             role: result.role,
             content: result.content,
             timestamps: Timestamps::from_naive(Some(result.created_at), Some(result.created_at)),
@@ -1005,9 +1014,27 @@ pub async fn search_messages(
     };
 
     let results = message_embeddings::fuse_message_hits(semantic, keyword, &params.query, limit);
+    let mut chat_ids: Vec<Uuid> = results.iter().map(|result| result.chat_id).collect();
+    chat_ids.sort_unstable();
+    chat_ids.dedup();
+    let titles: std::collections::HashMap<Uuid, String> =
+        match chats::titles(state.db(), &chat_ids).await {
+            Ok(titles) => titles.into_iter().collect(),
+            Err(e) => {
+                tracing::error!("Database error reading chat titles: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+        };
     let response: Vec<MessageSearchResponse> = results
         .into_iter()
-        .map(MessageSearchResponse::from)
+        .map(|result| {
+            let title = titles.get(&result.chat_id).cloned().unwrap_or_default();
+            MessageSearchResponse::from_hit(result, title)
+        })
         .collect();
     let total = response.len();
 

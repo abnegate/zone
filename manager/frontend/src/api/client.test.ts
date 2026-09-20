@@ -471,7 +471,10 @@ describe('Client', () => {
           json: async () => mockResponse,
         });
 
-        const result = await client.searchChatMessages({ query: 'TypeScript' });
+        const result = await client.searchChatMessages({
+          query: 'TypeScript',
+          workspace_id: 'ws-1',
+        });
 
         expect(result).toEqual(mockResponse);
         expect(mockFetch).toHaveBeenCalledWith(
@@ -480,6 +483,10 @@ describe('Client', () => {
         );
         expect(mockFetch).toHaveBeenCalledWith(
           expect.stringContaining('query=TypeScript'),
+          expect.any(Object)
+        );
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining('workspace_id=ws-1'),
           expect.any(Object)
         );
       });
@@ -495,7 +502,11 @@ describe('Client', () => {
           json: async () => mockResponse,
         });
 
-        await client.searchChatMessages({ query: 'test', chat_id: 'chat-1' });
+        await client.searchChatMessages({
+          query: 'test',
+          workspace_id: 'ws-1',
+          chat_id: 'chat-1',
+        });
 
         const url = mockFetch.mock.calls[0][0];
         expect(url).toContain('query=test');
@@ -513,7 +524,11 @@ describe('Client', () => {
           json: async () => mockResponse,
         });
 
-        await client.searchChatMessages({ query: 'test', limit: 10 });
+        await client.searchChatMessages({
+          query: 'test',
+          workspace_id: 'ws-1',
+          limit: 10,
+        });
 
         const url = mockFetch.mock.calls[0][0];
         expect(url).toContain('query=test');
@@ -533,6 +548,7 @@ describe('Client', () => {
 
         await client.searchChatMessages({
           query: 'test',
+          workspace_id: 'ws-1',
           chat_id: 'chat-1',
           limit: 5,
         });
@@ -554,7 +570,10 @@ describe('Client', () => {
           json: async () => mockResponse,
         });
 
-        const result = await client.searchChatMessages({ query: 'nonexistent' });
+        const result = await client.searchChatMessages({
+          query: 'nonexistent',
+          workspace_id: 'ws-1',
+        });
 
         expect(result.results).toHaveLength(0);
         expect(result.total).toBe(0);
@@ -575,7 +594,10 @@ describe('Client', () => {
           json: async () => mockResponse,
         });
 
-        const result = await client.searchChatMessages({ query: 'TypeScript' });
+        const result = await client.searchChatMessages({
+          query: 'TypeScript',
+          workspace_id: 'ws-1',
+        });
 
         expect(result.results).toHaveLength(3);
         expect(result.results[0].relevance_score).toBeGreaterThanOrEqual(
@@ -589,9 +611,21 @@ describe('Client', () => {
       it('throws error on failed request', async () => {
         mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
-        await expect(client.searchChatMessages({ query: 'test' })).rejects.toThrow(
-          'Failed to search chat messages: 500'
-        );
+        await expect(
+          client.searchChatMessages({ query: 'test', workspace_id: 'ws-1' })
+        ).rejects.toThrow('Failed to search chat messages: 500');
+      });
+
+      it('names the server error text on a failed request', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () => JSON.stringify({ error: 'missing field workspace_id' }),
+        });
+
+        await expect(
+          client.searchChatMessages({ query: 'test', workspace_id: 'ws-1' })
+        ).rejects.toThrow('Failed to search chat messages: missing field workspace_id');
       });
 
       it('includes Authorization header when authenticated', async () => {
@@ -601,7 +635,10 @@ describe('Client', () => {
           json: async () => ({ results: [], total: 0 }),
         });
 
-        await client.searchChatMessages({ query: 'test' });
+        await client.searchChatMessages({
+          query: 'test',
+          workspace_id: 'ws-1',
+        });
 
         expect(mockFetch).toHaveBeenCalledWith(
           expect.any(String),
@@ -707,7 +744,10 @@ describe('Client', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          project: { ...mockProject, github_repo_url: 'https://github.com/test' },
+          project: {
+            ...mockProject,
+            github_repo_url: 'https://github.com/test',
+          },
         }),
       });
 
@@ -1007,7 +1047,9 @@ describe('Client', () => {
     it('updateOrganization updates organization', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ organization: { ...mockOrganization, name: 'Updated' } }),
+        json: async () => ({
+          organization: { ...mockOrganization, name: 'Updated' },
+        }),
       });
 
       await client.updateOrganization('1', { name: 'Updated' });
@@ -1074,7 +1116,9 @@ describe('Client', () => {
     it('updateWorkspace updates workspace', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ workspace: { ...mockWorkspace, name: 'Updated' } }),
+        json: async () => ({
+          workspace: { ...mockWorkspace, name: 'Updated' },
+        }),
       });
 
       await client.updateWorkspace('org-1', 'ws-1', { name: 'Updated' });
@@ -1126,10 +1170,14 @@ describe('Client', () => {
     it('updateWorkspaceTheme updates theme', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ theme: { ...mockTheme, primary_color_light: '#ff0000' } }),
+        json: async () => ({
+          theme: { ...mockTheme, primary_color_light: '#ff0000' },
+        }),
       });
 
-      await client.updateWorkspaceTheme('org-1', 'ws-1', { primary_color_light: '#ff0000' });
+      await client.updateWorkspaceTheme('org-1', 'ws-1', {
+        primary_color_light: '#ff0000',
+      });
 
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/workspaces/ws-1/theme',
@@ -1155,7 +1203,10 @@ describe('Client', () => {
         font_size_base: null,
         border_radius: null,
       };
-      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ theme }) });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ theme }),
+      });
       expect(await client.getWorkspaceTheme('org-1', 'ws-1')).toEqual(theme);
     });
   });
@@ -1301,7 +1352,11 @@ describe('Client', () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
       await expect(
-        client.createTask({ project_id: 'p1', title: 'Task', description: 'Do something' })
+        client.createTask({
+          project_id: 'p1',
+          title: 'Task',
+          description: 'Do something',
+        })
       ).rejects.toThrow('Failed to create task: 400');
     });
 
@@ -1678,7 +1733,10 @@ describe('Client', () => {
 
     describe('resendVerification', () => {
       it('resends verification email successfully', async () => {
-        const mockResponse = { success: true, message: 'Verification email sent' };
+        const mockResponse = {
+          success: true,
+          message: 'Verification email sent',
+        };
         mockFetch.mockResolvedValueOnce({
           ok: true,
           json: async () => mockResponse,
@@ -1781,7 +1839,10 @@ describe('Client', () => {
           '/api/auth/reset-password',
           expect.objectContaining({
             method: 'POST',
-            body: JSON.stringify({ token: 'reset-token-123', new_password: 'NewPassword123' }),
+            body: JSON.stringify({
+              token: 'reset-token-123',
+              new_password: 'NewPassword123',
+            }),
           })
         );
       });
@@ -2069,7 +2130,10 @@ describe('Client', () => {
       });
 
       it('can add admin role', async () => {
-        const adminRequest = { email: 'admin@test.com', role: 'admin' as const };
+        const adminRequest = {
+          email: 'admin@test.com',
+          role: 'admin' as const,
+        };
         const newAdmin = {
           ...mockMember,
           email: adminRequest.email,
@@ -2262,7 +2326,9 @@ describe('Client', () => {
           json: async () => mockMember,
         });
 
-        await client.updateOrgMemberRole(specialOrgId, specialUserId, { role: 'admin' });
+        await client.updateOrgMemberRole(specialOrgId, specialUserId, {
+          role: 'admin',
+        });
 
         expect(mockFetch).toHaveBeenCalledWith(
           `/api/organizations/${encodeURIComponent(specialOrgId)}/members/${encodeURIComponent(specialUserId)}`,
@@ -2296,7 +2362,10 @@ describe('Client', () => {
           json: async () => mockMember,
         });
 
-        await client.addOrgMember(unicodeOrgId, { email: 'test@example.com', role: 'member' });
+        await client.addOrgMember(unicodeOrgId, {
+          email: 'test@example.com',
+          role: 'member',
+        });
 
         expect(mockFetch).toHaveBeenCalledWith(
           `/api/organizations/${encodeURIComponent(unicodeOrgId)}/members`,
@@ -2326,7 +2395,10 @@ describe('Client', () => {
         });
 
         await expect(
-          client.addOrgMember(orgId, { email: 'test@example.com', role: 'member' })
+          client.addOrgMember(orgId, {
+            email: 'test@example.com',
+            role: 'member',
+          })
         ).rejects.toThrow('User already in organization');
       });
 
@@ -2564,7 +2636,10 @@ describe('Client', () => {
         });
 
         await expect(
-          client.addWorkspaceMember(workspaceId, { user_id: 'invalid-user', role: 'member' })
+          client.addWorkspaceMember(workspaceId, {
+            user_id: 'invalid-user',
+            role: 'member',
+          })
         ).rejects.toThrow('Failed to add workspace member: 404');
       });
 
@@ -2786,7 +2861,10 @@ describe('Client', () => {
         });
 
         await expect(
-          client.addWorkspaceMember(workspaceId, { user_id: 'test-user', role: 'member' })
+          client.addWorkspaceMember(workspaceId, {
+            user_id: 'test-user',
+            role: 'member',
+          })
         ).rejects.toThrow('User already in workspace');
       });
 
@@ -2798,7 +2876,9 @@ describe('Client', () => {
         });
 
         await expect(
-          client.updateWorkspaceMemberRole(workspaceId, userId, { role: 'member' })
+          client.updateWorkspaceMemberRole(workspaceId, userId, {
+            role: 'member',
+          })
         ).rejects.toThrow('Cannot modify last owner');
       });
 
@@ -2921,7 +3001,10 @@ describe('Client', () => {
         });
 
         await expect(
-          client.createInvitation(orgId, { email: 'invalid', org_role: 'member' })
+          client.createInvitation(orgId, {
+            email: 'invalid',
+            org_role: 'member',
+          })
         ).rejects.toThrow('Invalid email');
       });
 
@@ -2929,11 +3012,16 @@ describe('Client', () => {
         mockFetch.mockResolvedValueOnce({
           ok: false,
           status: 409,
-          json: async () => ({ message: 'User already exists in organization' }),
+          json: async () => ({
+            message: 'User already exists in organization',
+          }),
         });
 
         await expect(
-          client.createInvitation(orgId, { email: 'existing@test.com', org_role: 'member' })
+          client.createInvitation(orgId, {
+            email: 'existing@test.com',
+            org_role: 'member',
+          })
         ).rejects.toThrow('User already exists in organization');
       });
 
@@ -2944,7 +3032,10 @@ describe('Client', () => {
           json: async () => mockInvitation,
         });
 
-        await client.createInvitation(specialOrgId, { email: 'test@test.com', org_role: 'member' });
+        await client.createInvitation(specialOrgId, {
+          email: 'test@test.com',
+          org_role: 'member',
+        });
 
         expect(mockFetch).toHaveBeenCalledWith(
           `/api/organizations/${encodeURIComponent(specialOrgId)}/invitations`,
@@ -3223,11 +3314,16 @@ describe('Client', () => {
         mockFetch.mockResolvedValueOnce({
           ok: false,
           status: 403,
-          json: async () => ({ message: 'Insufficient permissions to create invitations' }),
+          json: async () => ({
+            message: 'Insufficient permissions to create invitations',
+          }),
         });
 
         await expect(
-          client.createInvitation(orgId, { email: 'test@test.com', org_role: 'member' })
+          client.createInvitation(orgId, {
+            email: 'test@test.com',
+            org_role: 'member',
+          })
         ).rejects.toThrow('Insufficient permissions to create invitations');
       });
 
@@ -3559,7 +3655,9 @@ describe('Client', () => {
         mockFetch.mockResolvedValueOnce({
           ok: false,
           status: 403,
-          json: async () => ({ message: 'Access denied to billing information' }),
+          json: async () => ({
+            message: 'Access denied to billing information',
+          }),
         });
 
         await expect(client.getUsage(orgId)).rejects.toThrow(
@@ -3883,11 +3981,12 @@ describe('Client', () => {
         const result = await client.createKnowledge(request);
 
         expect(result).toEqual(mockEntry);
+        const { type: _kind, ...sent } = request;
         expect(mockFetch).toHaveBeenCalledWith(
           '/api/knowledge',
           expect.objectContaining({
             method: 'POST',
-            body: JSON.stringify(request),
+            body: JSON.stringify(sent),
           })
         );
       });

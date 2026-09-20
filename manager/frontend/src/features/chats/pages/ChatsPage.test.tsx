@@ -2128,6 +2128,7 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(mockClient.searchChatMessages).toHaveBeenCalledWith({
           query: 'TypeScript',
+          workspace_id: 'ws-1',
           limit: 20,
         });
       });

@@ -350,6 +350,7 @@ export interface ChatSearchResult {
 
 export interface ChatSearchOptions {
   query: string;
+  workspace_id: string;
   chat_id?: string;
   limit?: number;
 }
