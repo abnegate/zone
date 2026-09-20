@@ -53,10 +53,22 @@ describe('ToolTrace', () => {
     expect(screen.getByText('3 passages')).toBeInTheDocument();
   });
 
-  it('falls back to the raw name for a tool it does not know', () => {
+  it('spells out a tool it does not know instead of printing its identifier', () => {
     render(<ToolTrace calls={[call({ name: 'some_new_tool' })]} />);
 
-    expect(screen.getByText('some_new_tool')).toBeInTheDocument();
+    expect(screen.getByText('Some new tool')).toBeInTheDocument();
+    expect(screen.queryByText('some_new_tool')).not.toBeInTheDocument();
+  });
+
+  it('labels the tools the receipts already know by the same words', () => {
+    render(
+      <ToolTrace
+        calls={[call({ id: 'a', name: 'load_tools' }), call({ id: 'b', name: 'memory_write' })]}
+      />
+    );
+
+    expect(screen.getByText('Loaded tools')).toBeInTheDocument();
+    expect(screen.getByText('Wrote memory')).toBeInTheDocument();
   });
 
   it('marks failed and running calls distinctly', () => {

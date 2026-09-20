@@ -240,29 +240,32 @@ export default function WikiPage() {
                 >
                   <div className="knowledge-card-header">
                     <h3 className="knowledge-card-title">{entry.title}</h3>
-                    {entry.indexed === false && (
-                      <Badge variant="warning" title="Semantic search cannot find this entry yet">
-                        Not indexed
-                      </Badge>
-                    )}
                     <Badge variant={entry.type === 'url' ? 'info' : 'neutral'}>{entry.type}</Badge>
                   </div>
 
-                  {excerpt ? (
-                    <div className="knowledge-card-content">{excerpt}</div>
-                  ) : entry.tags.length > 0 ? (
-                    <div className="knowledge-card-tags">
-                      {entry.tags.map((tag) => (
-                        <span key={tag} className="knowledge-tag">
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                  ) : entry.category ? (
-                    <div className="knowledge-card-content knowledge-card-content--empty">
-                      {entry.category}
-                    </div>
-                  ) : null}
+                  <div className="knowledge-card-body">
+                    {excerpt && (
+                      <div
+                        className={`knowledge-card-content${entry.tags.length > 0 ? ' knowledge-card-content--line' : ''}`}
+                      >
+                        {excerpt}
+                      </div>
+                    )}
+                    {entry.tags.length > 0 && (
+                      <div className="knowledge-card-tags">
+                        {entry.tags.map((tag) => (
+                          <span key={tag} className="knowledge-tag">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {!excerpt && entry.tags.length === 0 && entry.category && (
+                      <div className="knowledge-card-content knowledge-card-content--empty">
+                        {entry.category}
+                      </div>
+                    )}
+                  </div>
 
                   <div className="knowledge-card-footer">
                     <span className="knowledge-card-date">
@@ -271,6 +274,14 @@ export default function WikiPage() {
                         ? ` · Refreshed ${formatDate(entry.last_refreshed_at)}`
                         : ''}
                     </span>
+                    {entry.indexed === false && (
+                      <span
+                        className="knowledge-card-flag"
+                        title="Semantic search cannot find this entry yet"
+                      >
+                        Not indexed
+                      </span>
+                    )}
                     {entry.type === 'url' && (
                       <a
                         href={entry.content}
@@ -282,15 +293,6 @@ export default function WikiPage() {
                         {entry.content}
                       </a>
                     )}
-                    {excerpt && entry.tags.length > 0 ? (
-                      <span className="knowledge-card-tagline">
-                        {entry.tags.map((tag) => (
-                          <span key={tag} className="knowledge-card-tagline-item">
-                            {tag}
-                          </span>
-                        ))}
-                      </span>
-                    ) : null}
                   </div>
 
                   <div className="knowledge-card-actions">

@@ -960,7 +960,7 @@ describe('WikiPage card anatomy', () => {
     expect(card.querySelector('.knowledge-card-date')).toHaveTextContent(/Updated Mar 4, 2024/);
   });
 
-  it('puts the excerpt in the body and the tags in the meta row when content exists', () => {
+  it('clamps the excerpt to one line and keeps the tags as chips under it when both exist', () => {
     getMockState = () => ({
       entries: [{ ...bare, excerpt: 'The bridge opened in 1959.' }],
       loading: false,
@@ -968,11 +968,27 @@ describe('WikiPage card anatomy', () => {
     });
     renderWikiPage();
     const card = screen.getByText('Bare Entry').closest('.knowledge-card') as HTMLElement;
-    expect(card.querySelector('.knowledge-card-content')).toHaveTextContent(
-      'The bridge opened in 1959.'
-    );
-    expect(card.querySelector('.knowledge-card-tags')).toBeNull();
-    expect(card.querySelector('.knowledge-card-tagline')).toHaveTextContent('history');
+    const content = card.querySelector('.knowledge-card-content');
+    expect(content).toHaveTextContent('The bridge opened in 1959.');
+    expect(content).toHaveClass('knowledge-card-content--line');
+    const tags = card.querySelector('.knowledge-card-tags');
+    expect(tags).toHaveTextContent('history');
+    expect(within(tags as HTMLElement).getByText('history')).toHaveClass('knowledge-tag');
+    expect(card.querySelector('.knowledge-card-footer')).not.toHaveTextContent('history');
+  });
+
+  it('flags an unindexed entry in the meta row and leaves the title row to the type badge', () => {
+    getMockState = () => ({
+      entries: [{ ...bare, indexed: false }],
+      loading: false,
+      error: null,
+    });
+    renderWikiPage();
+    const card = screen.getByText('Bare Entry').closest('.knowledge-card') as HTMLElement;
+    expect(card.querySelectorAll('.knowledge-card-header .ui-badge')).toHaveLength(1);
+    const flag = card.querySelector('.knowledge-card-footer .knowledge-card-flag');
+    expect(flag).toHaveTextContent('Not indexed');
+    expect(flag).toHaveAttribute('title', 'Semantic search cannot find this entry yet');
   });
 
   it('renders the page bar and body the frame scrolls', () => {

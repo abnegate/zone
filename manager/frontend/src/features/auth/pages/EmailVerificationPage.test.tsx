@@ -164,7 +164,8 @@ describe('EmailVerificationPage', () => {
       renderPage();
 
       await waitFor(() => {
-        expect(screen.getByText('Verification Failed')).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'Verification failed' })).toBeInTheDocument();
+        expect(screen.queryByText('Verification Failed')).not.toBeInTheDocument();
         expect(screen.getByText('Invalid or expired token')).toBeInTheDocument();
       });
     });
@@ -200,7 +201,8 @@ describe('EmailVerificationPage', () => {
       renderPage();
 
       await waitFor(() => {
-        expect(screen.getByText('Verification Failed')).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'Verification failed' })).toBeInTheDocument();
+        expect(screen.queryByText('Verification Failed')).not.toBeInTheDocument();
         expect(screen.getByText('An error occurred')).toBeInTheDocument();
       });
     });

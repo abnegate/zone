@@ -75,7 +75,7 @@ export default function EmailVerificationPage() {
       ? 'Verifying your email...'
       : status === 'success'
         ? 'Email Verified'
-        : 'Verification Failed';
+        : undefined;
 
   return (
     <AuthCard subtitle={subtitle}>

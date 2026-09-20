@@ -1746,7 +1746,8 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 2'));
 
       await waitFor(() => {
-        expect(screen.getByText('No messages yet. Start a conversation!')).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'No messages yet' })).toBeInTheDocument();
+        expect(screen.getByText('Send a message to start the conversation')).toBeInTheDocument();
       });
     });
 
