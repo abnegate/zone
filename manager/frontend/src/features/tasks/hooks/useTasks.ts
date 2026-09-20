@@ -5,13 +5,13 @@ import type { CreateTaskRequest, UpdateTaskRequest } from '../types';
 
 export function useTasks(projectId?: string, status?: string) {
   const queryClient = useQueryClient();
-  const { currentWorkspace } = useWorkspace();
+  const { currentWorkspace, loading: workspaceLoading } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
   const queryKey = ['tasks', workspaceId, projectId, status];
 
   const {
     data: tasks = [],
-    isLoading: loading,
+    isLoading,
     error,
     refetch,
   } = useQuery({
@@ -52,7 +52,7 @@ export function useTasks(projectId?: string, status?: string) {
 
   return {
     tasks,
-    loading,
+    loading: workspaceId ? isLoading : workspaceLoading,
     error: error instanceof Error ? error.message : error ? 'Failed to load tasks' : null,
     createTask: createTaskMutation.mutateAsync,
     updateTask: (id: string, request: UpdateTaskRequest) =>

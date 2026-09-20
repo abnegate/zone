@@ -65,8 +65,16 @@ function SourceSkeleton() {
 }
 
 export default function SourcesPage() {
-  const { sources, loading, error, createSource, updateSource, deleteSource, verifySource } =
-    useSources();
+  const {
+    sources,
+    loading,
+    error,
+    createSource,
+    updateSource,
+    deleteSource,
+    verifySource,
+    refresh,
+  } = useSources();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [verifying, setVerifying] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
@@ -107,6 +115,7 @@ export default function SourcesPage() {
   };
 
   const displayError = error || operationError;
+  const unloaded = error !== null && sources.length === 0;
 
   return (
     <div className="page page--workspace sources-page">
@@ -123,13 +132,18 @@ export default function SourcesPage() {
       <div className="page-body sources-body">
         {displayError && (
           <div className="sources-banner sources-banner--error" role="alert">
-            {displayError}
+            <span>{displayError}</span>
+            {error && (
+              <Button variant="ghost" size="sm" onClick={() => refresh()}>
+                Retry
+              </Button>
+            )}
           </div>
         )}
 
         {loading ? (
           <SourceSkeleton />
-        ) : sources.length === 0 ? (
+        ) : unloaded ? null : sources.length === 0 ? (
           <EmptyState
             className="sources-empty"
             icon={

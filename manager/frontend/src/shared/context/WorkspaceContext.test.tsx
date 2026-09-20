@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { Organization, Workspace } from '../../types';
 
 const mockClient = {
@@ -129,6 +129,64 @@ describe('WorkspaceContext', () => {
       expect(screen.getByTestId('current-org')).toHaveTextContent('Org 1');
     });
 
+    it('stays loading until the picked organization has its workspaces', async () => {
+      let resolveWorkspaces: (workspaces: Workspace[]) => void = () => undefined;
+      mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations);
+      mockClient.getWorkspaces.mockReturnValueOnce(
+        new Promise<Workspace[]>((resolve) => {
+          resolveWorkspaces = resolve;
+        })
+      );
+
+      render(
+        <WorkspaceProvider useAuthHook={useAuthHook}>
+          <TestComponent />
+        </WorkspaceProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('current-org')).toHaveTextContent('Org 1');
+      });
+      expect(screen.getByTestId('loading')).toHaveTextContent('loading');
+      expect(screen.getByTestId('current-ws')).toHaveTextContent('none');
+
+      await act(async () => {
+        resolveWorkspaces(mockWorkspaces);
+      });
+
+      expect(screen.getByTestId('loading')).toHaveTextContent('done');
+      expect(screen.getByTestId('current-ws')).toHaveTextContent('Workspace 1');
+    });
+
+    it('goes back to loading when the session authenticates after mounting', async () => {
+      authState = { ...authState, isAuthenticated: false };
+      mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations);
+      mockClient.getWorkspaces.mockResolvedValueOnce(mockWorkspaces);
+
+      const { rerender } = render(
+        <WorkspaceProvider useAuthHook={useAuthHook}>
+          <TestComponent />
+        </WorkspaceProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('done');
+      });
+
+      authState = { ...authState, isAuthenticated: true };
+      rerender(
+        <WorkspaceProvider useAuthHook={useAuthHook}>
+          <TestComponent />
+        </WorkspaceProvider>
+      );
+
+      expect(screen.getByTestId('loading')).toHaveTextContent('loading');
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('done');
+      });
+      expect(screen.getByTestId('current-ws')).toHaveTextContent('Workspace 1');
+    });
+
     it('restores organization from localStorage', async () => {
       localStorage.setItem('manager_current_org', 'org-2');
       mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations);
@@ -205,6 +263,7 @@ describe('WorkspaceContext', () => {
       await waitFor(() => {
         expect(screen.getByTestId('error')).toHaveTextContent('Workspace error');
       });
+      expect(screen.getByTestId('loading')).toHaveTextContent('done');
     });
 
     it('handles empty organizations list', async () => {

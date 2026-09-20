@@ -27,20 +27,23 @@ mock.module('../../../api/sources', () => ({
   },
 }));
 
-// Mock useWorkspace to provide a test workspace
+const mockRefreshOrganizations = mock(() => Promise.resolve());
+const resolvedWorkspace = {
+  currentWorkspace: { id: 'test-workspace-id', name: 'Test Workspace' } as { id: string } | null,
+  currentOrganization: { id: 'test-org-id', name: 'Test Org' } as { id: string } | null,
+  workspaces: [],
+  organizations: [],
+  loading: false,
+  error: null as string | null,
+  setCurrentWorkspace: mock(),
+  setCurrentOrganization: mock(),
+  refreshWorkspaces: mock(),
+  refreshOrganizations: mockRefreshOrganizations,
+};
+let workspaceState = { ...resolvedWorkspace };
+
 mock.module('../../../shared/context/WorkspaceContext', () => ({
-  useWorkspace: () => ({
-    currentWorkspace: { id: 'test-workspace-id', name: 'Test Workspace' },
-    currentOrganization: { id: 'test-org-id', name: 'Test Org' },
-    workspaces: [],
-    organizations: [],
-    loading: false,
-    error: null,
-    setCurrentWorkspace: mock(),
-    setCurrentOrganization: mock(),
-    refreshWorkspaces: mock(),
-    refreshOrganizations: mock(),
-  }),
+  useWorkspace: () => workspaceState,
 }));
 
 let useSources: typeof import('./useSources').useSources;
@@ -103,6 +106,44 @@ describe('useSources', () => {
     mockDeleteSource.mockReset();
     mockVerifySource.mockReset();
     mockGetSource.mockReset();
+    mockRefreshOrganizations.mockClear();
+    workspaceState = { ...resolvedWorkspace };
+  });
+
+  it('stays loading while the workspace context is still resolving', async () => {
+    workspaceState = { ...resolvedWorkspace, currentWorkspace: null, loading: true };
+
+    const { result } = renderHook(() => useSources(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(mockGetSources).not.toHaveBeenCalled();
+    });
+    expect(result.current.loading).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(result.current.sources).toEqual([]);
+  });
+
+  it('surfaces the organizations failure and retries it when no workspace resolved', async () => {
+    workspaceState = {
+      ...resolvedWorkspace,
+      currentWorkspace: null,
+      currentOrganization: null,
+      error: 'Failed to load organizations',
+    };
+
+    const { result } = renderHook(() => useSources(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.error).toBe('Failed to load organizations');
+    expect(mockGetSources).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(mockRefreshOrganizations).toHaveBeenCalledTimes(1);
+    expect(mockGetSources).not.toHaveBeenCalled();
   });
 
   it('should fetch sources on mount', async () => {

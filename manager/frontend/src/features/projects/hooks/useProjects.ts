@@ -5,7 +5,7 @@ import type { CreateProjectRequest, ProjectStatus, UpdateProjectRequest } from '
 
 export function useProjects(statusFilter?: ProjectStatus | 'all') {
   const queryClient = useQueryClient();
-  const { currentWorkspace } = useWorkspace();
+  const { currentWorkspace, loading: workspaceLoading } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
   const queryKey = ['projects', workspaceId, statusFilter];
 
@@ -27,8 +27,7 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
     enabled: !!workspaceId,
   });
 
-  // Only show loading when we have a workspace and are actually fetching
-  const loading = !!workspaceId && (isLoading || isFetching);
+  const loading = workspaceId ? isLoading || isFetching : workspaceLoading;
 
   const createProjectMutation = useMutation({
     mutationFn: (request: CreateProjectRequest) => projectsApi.createProject(request),

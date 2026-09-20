@@ -8,7 +8,7 @@ export function useKnowledge() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState<string | null>(null);
-  const { currentWorkspace } = useWorkspace();
+  const { currentWorkspace, loading: workspaceLoading } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
 
   const loadEntries = useCallback(async () => {
@@ -75,7 +75,7 @@ export function useKnowledge() {
 
   return {
     entries,
-    loading,
+    loading: workspaceId ? loading : workspaceLoading,
     error,
     refreshing,
     createEntry,

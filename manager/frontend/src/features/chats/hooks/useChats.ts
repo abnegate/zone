@@ -9,7 +9,7 @@ export interface UseChatsOptions {
 
 export function useChats(options: UseChatsOptions = {}) {
   const { archived = false } = options;
-  const { currentWorkspace } = useWorkspace();
+  const { currentWorkspace, loading: workspaceLoading } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
   const [chats, setChats] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(true);
@@ -100,7 +100,7 @@ export function useChats(options: UseChatsOptions = {}) {
 
   return {
     chats,
-    loading,
+    loading: workspaceId ? loading : workspaceLoading,
     error,
     createChat,
     deleteChat,
