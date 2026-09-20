@@ -103,12 +103,14 @@ function ObservedPreview({ call }: { call: ToolCallRecord }) {
 
 function ToolTraceRow({
   call,
+  thinking,
   answered,
   live,
   onDecide,
   onAnswer,
 }: {
   call: ToolCallRecord;
+  thinking: boolean;
   answered: boolean;
   live: boolean;
   onDecide?: (id: string, approved: boolean) => void;
@@ -127,7 +129,7 @@ function ToolTraceRow({
 
   return (
     <li className={`tool-call tool-call--${status}`}>
-      {call.reasoning?.trim() ? <Reasoning content={call.reasoning} open /> : null}
+      {call.reasoning?.trim() ? <Reasoning content={call.reasoning} open={thinking} /> : null}
       <button
         type="button"
         className="tool-call-summary"
@@ -180,12 +182,15 @@ function ToolTraceRow({
 
 export function ToolTrace({
   calls,
+  thinking = true,
   answered = false,
   live = false,
   onDecide,
   onAnswer,
 }: {
   calls: ToolCallRecord[];
+  /** Whether the thinking written before each call is shown or folded away. */
+  thinking?: boolean;
   /**
    * Whether a question on this trace has already been answered. An answer is an
    * ordinary user message, so the caller decides this by looking for a user
@@ -210,6 +215,7 @@ export function ToolTrace({
         <ToolTraceRow
           key={call.id}
           call={call}
+          thinking={thinking}
           answered={answered}
           live={live}
           onDecide={onDecide}

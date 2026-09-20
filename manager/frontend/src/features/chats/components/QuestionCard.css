@@ -135,6 +135,8 @@
 }
 
 .question-card-text {
+  width: calc(100% - var(--ui-space-8) - var(--ui-space-2));
+  min-width: 0;
   height: var(--ui-control-height);
   margin: 0 var(--ui-space-2) 0 var(--ui-space-8);
   padding: 0 var(--ui-space-2-5);

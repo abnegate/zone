@@ -219,130 +219,134 @@ export default function ContextSearchPage() {
       />
 
       <div className="page-body context-search-body">
-        <div className="search-toolbar">
-          <form onSubmit={handleSearch} className="search-form">
-            <div className="search-input-wrapper">
-              <span className="search-icon-wrapper">
-                <SearchIcon />
-              </span>
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search your knowledge base..."
-                className="search-input"
-                disabled={loading}
-              />
-            </div>
-            <Button type="submit" disabled={loading || !query.trim()}>
-              {loading ? <span className="ui-btn-spinner" /> : 'Search'}
-            </Button>
-          </form>
+        <div className="page-container context-search-content">
+          <div className="search-toolbar">
+            <form onSubmit={handleSearch} className="search-form">
+              <div className="search-input-wrapper">
+                <span className="search-icon-wrapper">
+                  <SearchIcon />
+                </span>
+                <input
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search your knowledge base..."
+                  className="search-input"
+                  disabled={loading}
+                />
+              </div>
+              <Button type="submit" disabled={loading || !query.trim()}>
+                {loading ? <span className="ui-btn-spinner" /> : 'Search'}
+              </Button>
+            </form>
 
-          <div className="filter-group">
-            <span className="filter-label">Mode</span>
-            <Tabs value={mode} onValueChange={(v) => setMode(v as SearchMode)}>
-              <TabsList>
-                <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
-                <TabsTrigger value="semantic">Semantic</TabsTrigger>
-                <TabsTrigger value="keyword">Keyword</TabsTrigger>
-              </TabsList>
-            </Tabs>
+            <div className="filter-group">
+              <span className="filter-label">Mode</span>
+              <Tabs value={mode} onValueChange={(v) => setMode(v as SearchMode)}>
+                <TabsList>
+                  <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
+                  <TabsTrigger value="semantic">Semantic</TabsTrigger>
+                  <TabsTrigger value="keyword">Keyword</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+
+            {sources.length > 0 && (
+              <div className="filter-group">
+                <span className="filter-label">Sources</span>
+                <div className="source-pills">
+                  {sourcesLoading ? (
+                    <span className="filter-loading">Loading...</span>
+                  ) : (
+                    sources.map((source) => (
+                      <button
+                        key={source.id}
+                        type="button"
+                        className={`source-pill ${selectedSources.includes(source.id) ? 'active' : ''}`}
+                        onClick={() => toggleSource(source.id)}
+                        disabled={loading}
+                      >
+                        {source.name}
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
-          {sources.length > 0 && (
-            <div className="filter-group">
-              <span className="filter-label">Sources</span>
-              <div className="source-pills">
-                {sourcesLoading ? (
-                  <span className="filter-loading">Loading...</span>
-                ) : (
-                  sources.map((source) => (
-                    <button
-                      key={source.id}
-                      type="button"
-                      className={`source-pill ${selectedSources.includes(source.id) ? 'active' : ''}`}
-                      onClick={() => toggleSource(source.id)}
-                      disabled={loading}
-                    >
-                      {source.name}
-                    </button>
-                  ))
-                )}
+          {error && (
+            <div className="error-banner" role="alert">
+              <span>{error}</span>
+              <Button variant="ghost" size="sm" onClick={() => search({ query, mode, limit: 20 })}>
+                Retry
+              </Button>
+            </div>
+          )}
+
+          {results.length > 0 && (
+            <div className="results-section">
+              <div className="results-header">
+                <h2 className="results-title">Results</h2>
+                <Badge variant="neutral">{total} found</Badge>
+              </div>
+
+              <div className="results-grid">
+                {results.map((result) => {
+                  const level = relevanceLevel(result.relevance_score);
+                  const path = typeof result.metadata.path === 'string' ? result.metadata.path : '';
+                  return (
+                    <article key={result.id} className="card card--list result-card">
+                      <div className="result-card-header">
+                        <span className="result-source">
+                          <FolderIcon />
+                          <span className="result-source-name">{result.source_name}</span>
+                        </span>
+                        <Badge variant={RELEVANCE_VARIANTS[level]}>
+                          {resultScoreLabel(result)}
+                        </Badge>
+                      </div>
+
+                      <div
+                        className="result-snippet"
+                        // biome-ignore lint/security/noDangerouslySetInnerHtml: Sanitized with DOMPurify
+                        dangerouslySetInnerHTML={{ __html: highlightText(result.snippet) }}
+                      />
+
+                      {path && (
+                        <div className="result-meta">
+                          <FileIcon />
+                          <span className="result-path">{path}</span>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
               </div>
             </div>
           )}
+
+          {!loading && results.length === 0 && query && !error && (
+            <EmptyState
+              icon={<SearchEmptyIcon />}
+              title="No results found"
+              description="Try adjusting your search terms or broadening your filters"
+              action={
+                <Button variant="outline" onClick={() => setQuery('')}>
+                  Clear search
+                </Button>
+              }
+            />
+          )}
+
+          {!loading && !query && (
+            <EmptyState
+              icon={<SparklesIcon />}
+              title="Search your knowledge"
+              description="Enter a query to search across all your connected sources using semantic, keyword, or hybrid search"
+            />
+          )}
         </div>
-
-        {error && (
-          <div className="error-banner" role="alert">
-            <span>{error}</span>
-            <Button variant="ghost" size="sm" onClick={() => search({ query, mode, limit: 20 })}>
-              Retry
-            </Button>
-          </div>
-        )}
-
-        {results.length > 0 && (
-          <div className="results-section">
-            <div className="results-header">
-              <h2 className="results-title">Results</h2>
-              <Badge variant="neutral">{total} found</Badge>
-            </div>
-
-            <div className="results-grid">
-              {results.map((result) => {
-                const level = relevanceLevel(result.relevance_score);
-                const path = typeof result.metadata.path === 'string' ? result.metadata.path : '';
-                return (
-                  <article key={result.id} className="card card--list result-card">
-                    <div className="result-card-header">
-                      <span className="result-source">
-                        <FolderIcon />
-                        <span className="result-source-name">{result.source_name}</span>
-                      </span>
-                      <Badge variant={RELEVANCE_VARIANTS[level]}>{resultScoreLabel(result)}</Badge>
-                    </div>
-
-                    <div
-                      className="result-snippet"
-                      // biome-ignore lint/security/noDangerouslySetInnerHtml: Sanitized with DOMPurify
-                      dangerouslySetInnerHTML={{ __html: highlightText(result.snippet) }}
-                    />
-
-                    {path && (
-                      <div className="result-meta">
-                        <FileIcon />
-                        <span className="result-path">{path}</span>
-                      </div>
-                    )}
-                  </article>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {!loading && results.length === 0 && query && !error && (
-          <EmptyState
-            icon={<SearchEmptyIcon />}
-            title="No results found"
-            description="Try adjusting your search terms or broadening your filters"
-            action={
-              <Button variant="outline" onClick={() => setQuery('')}>
-                Clear search
-              </Button>
-            }
-          />
-        )}
-
-        {!loading && !query && (
-          <EmptyState
-            icon={<SparklesIcon />}
-            title="Search your knowledge"
-            description="Enter a query to search across all your connected sources using semantic, keyword, or hybrid search"
-          />
-        )}
       </div>
     </div>
   );

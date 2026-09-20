@@ -1,10 +1,15 @@
 .context-search-body {
   display: flex;
   flex-direction: column;
+}
+
+.context-search-content {
+  display: flex;
+  flex-direction: column;
   gap: var(--ui-space-4);
 }
 
-.context-search-body > .ui-empty {
+.context-search-content > .ui-empty {
   margin: auto;
 }
 

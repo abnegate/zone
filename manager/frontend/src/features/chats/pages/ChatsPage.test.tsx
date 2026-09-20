@@ -730,9 +730,16 @@ describe('ChatsPage', () => {
 
       const blocks = screen.getAllByTestId('reasoning');
       expect(blocks).toHaveLength(3);
-      expect(blocks[0]).toHaveAttribute('open');
-      expect(blocks[1]).toHaveAttribute('open');
-      expect(blocks[2]).not.toHaveAttribute('open');
+      expect(document.querySelectorAll('.message-activity-toggle')).toHaveLength(1);
+      for (const block of blocks) {
+        expect(block).toHaveAttribute('hidden');
+      }
+
+      fireEvent.click(screen.getByRole('button', { name: 'Reasoning' }));
+
+      for (const block of blocks) {
+        expect(block).not.toHaveAttribute('hidden');
+      }
     });
 
     it('shows error when chat loading fails', async () => {
@@ -2189,6 +2196,19 @@ describe('ChatsPage', () => {
         expect(screen.getByTestId('chat-sources')).toBeInTheDocument();
       });
     };
+
+    it('keeps the Sources chip, the attach button, the draft and Send on one composer row', async () => {
+      await openChat();
+      const row = screen.getByPlaceholderText('Type a message, or drop a file...').parentElement;
+      expect(row).toHaveClass('message-form-row');
+      expect(
+        screen
+          .getByRole('button', { name: 'Sources: whole workspace' })
+          .closest('.message-form-row')
+      ).toBe(row);
+      expect(screen.getByRole('button', { name: 'Attach files' }).parentElement).toBe(row);
+      expect(screen.getByRole('button', { name: 'Send' }).parentElement).toBe(row);
+    });
 
     it('offers a Sources chip in the composer that reads whole-workspace when nothing is attached', async () => {
       await openChat();

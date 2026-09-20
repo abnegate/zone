@@ -84,6 +84,30 @@ describe('chats layout', () => {
     expect(rule(chats, '.message-images,\n.message-videos,\n.message-audios')).toContain('30rem');
     expect(rule(chats, '.chat-composer')).toContain('max-width: var(--chat-column)');
   });
+
+  it('lays the composer out as one row of 28px controls around a 24px draft line', () => {
+    expect(chats).not.toContain('.message-form-tools');
+    expect(rule(chats, '.message-form')).toContain('padding: var(--ui-space-2) var(--ui-space-3)');
+    expect(rule(chats, '.message-form-row')).toContain('align-items: flex-end');
+    const draft = rule(chats, '.message-form textarea');
+    expect(draft).toContain('flex: 1 1 8rem');
+    expect(draft).toContain('min-height: var(--ui-control-height-sm)');
+    expect(draft).toContain('max-height: 12.5rem');
+    expect(draft).toContain('line-height: 1.5rem');
+    expect(rule(chats, '.chat-sources-toggle,\n.chat-source-chip')).toContain(
+      'height: var(--ui-control-height-sm)'
+    );
+  });
+
+  it('labels the reasoning of a turn once, on one activity block with one left rule', () => {
+    expect(chats).not.toContain('.message-reasoning summary');
+    expect(rule(chats, '.message-activity')).toContain('border-left: 2px solid var(--ui-border)');
+    expect(rule(chats, '.message-activity-toggle')).toContain('height: var(--ui-space-5)');
+    expect(rule(chats, '.message-activity-toggle')).toContain('text-transform: uppercase');
+    expect(rule(chats, '.message-reasoning')).not.toContain('border-left');
+    expect(rule(chats, '.message-reasoning')).toContain('line-height: var(--ui-space-5)');
+    expect(rule(chats, '.tool-trace')).not.toContain('border-left');
+  });
 });
 
 describe('context meter', () => {
@@ -112,6 +136,9 @@ describe('question card and receipts', () => {
     expect(rule(question, '.question-card-choices')).toContain('gap: var(--ui-space-1)');
     expect(rule(question, '.question-card-text')).toContain('height: var(--ui-control-height)');
     expect(rule(question, '.question-card-text')).not.toContain('flex-basis');
+    expect(rule(question, '.question-card-text')).toContain(
+      'width: calc(100% - var(--ui-space-8) - var(--ui-space-2))'
+    );
     expect(rule(question, '.question-card-choice-description::before')).toContain("content: '— '");
   });
 
@@ -147,7 +174,8 @@ describe('knowledge layout', () => {
 
   it('centres the search empty state in the body like the other list pages', () => {
     expect(rule(search, '.context-search-body')).toContain('flex-direction: column');
-    expect(rule(search, '.context-search-body > .ui-empty')).toContain('margin: auto');
+    expect(rule(search, '.context-search-content')).toContain('flex-direction: column');
+    expect(rule(search, '.context-search-content > .ui-empty')).toContain('margin: auto');
   });
 
   it('mutes the wiki card excerpt slot when an entry has nothing to show there', () => {

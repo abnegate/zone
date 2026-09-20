@@ -28,9 +28,8 @@ import {
   Generation,
   MemoryBadge,
   MessageContent,
-  Reasoning,
-  ToolTrace,
 } from '../components';
+import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
 import { useChat, useChatSearch, useChatSources, useChats } from '../hooks';
 import { type ChatSearchResult, REASONING_EFFORT_OPTIONS, type ReasoningEffort } from '../types';
@@ -936,10 +935,6 @@ export default function ChatsPage() {
                   const videos = videoAttachments(message.metadata);
                   const audios = audioAttachments(message.metadata);
                   const toolCalls = message.metadata?.tool_calls ?? [];
-                  const leftoverReasoning = message.metadata?.reasoning;
-                  const toolsHaveReasoning = toolCalls.some((call) =>
-                    Boolean(call.reasoning?.trim())
-                  );
                   const citations = message.metadata?.citations ?? [];
                   const receipts = message.metadata?.action_receipts ?? [];
                   const memoryUsed =
@@ -1021,21 +1016,14 @@ export default function ChatsPage() {
                           ))}
                         </div>
                       )}
-                      {!toolsHaveReasoning && leftoverReasoning ? (
-                        <Reasoning content={leftoverReasoning} open={live} />
-                      ) : null}
-                      {toolCalls.length > 0 && (
-                        <ToolTrace
-                          calls={toolCalls}
-                          answered={index < lastUserIndex}
-                          live={live}
-                          onDecide={approveTool}
-                          onAnswer={handleAnswerQuestions}
-                        />
-                      )}
-                      {toolsHaveReasoning && leftoverReasoning ? (
-                        <Reasoning content={leftoverReasoning} open={live} />
-                      ) : null}
+                      <Activity
+                        reasoning={message.metadata?.reasoning}
+                        calls={toolCalls}
+                        live={live}
+                        answered={index < lastUserIndex}
+                        onDecide={approveTool}
+                        onAnswer={handleAnswerQuestions}
+                      />
                       {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                       {body && !awaitingAnswer ? (
                         <div className="message-content">
@@ -1130,25 +1118,6 @@ export default function ChatsPage() {
                   </p>
                 ) : null}
 
-                <textarea
-                  placeholder="Type a message, or drop a file..."
-                  value={messageInput}
-                  onChange={(e) => setMessageInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage(e);
-                    }
-                  }}
-                  onPaste={(e) => {
-                    if (e.clipboardData.files.length > 0) {
-                      e.preventDefault();
-                      void handleIncomingFiles(e.clipboardData.files);
-                    }
-                  }}
-                  disabled={sending}
-                  rows={1}
-                />
                 <div className="message-form-row">
                   <ChatSources
                     attached={attachedSources}
@@ -1157,58 +1126,70 @@ export default function ChatsPage() {
                     error={attachedError}
                     onChange={setAttachedSources}
                   />
-                  <div className="message-form-tools">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      multiple
-                      hidden
-                      onChange={(e) => {
-                        void handleIncomingFiles(e.target.files);
-                        e.target.value = '';
-                      }}
-                    />
-                    <button
-                      type="button"
-                      className="btn-icon"
-                      onClick={() => fileInputRef.current?.click()}
-                      aria-label="Attach files"
-                      title="Attach files"
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      void handleIncomingFiles(e.target.files);
+                      e.target.value = '';
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn-icon"
+                    onClick={() => fileInputRef.current?.click()}
+                    aria-label="Attach files"
+                    title="Attach files"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.75"
+                      width="16"
+                      height="16"
+                      aria-hidden="true"
                     >
-                      <svg
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.75"
-                        width="16"
-                        height="16"
-                        aria-hidden="true"
-                      >
-                        <rect x="4.5" y="4.5" width="15" height="15" rx="3.5" />
-                        <path d="M12 8.75v6.5M8.75 12h6.5" strokeLinecap="square" />
-                      </svg>
-                    </button>
-                    {streaming ? (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        onClick={cancelGeneration}
-                      >
-                        Stop
-                      </Button>
-                    ) : (
-                      <Button
-                        type="submit"
-                        variant="primary"
-                        size="sm"
-                        loading={sending}
-                        disabled={!messageInput.trim() && !attachments.some(isSendable)}
-                      >
-                        Send
-                      </Button>
-                    )}
-                  </div>
+                      <rect x="4.5" y="4.5" width="15" height="15" rx="3.5" />
+                      <path d="M12 8.75v6.5M8.75 12h6.5" strokeLinecap="square" />
+                    </svg>
+                  </button>
+                  <textarea
+                    placeholder="Type a message, or drop a file..."
+                    value={messageInput}
+                    onChange={(e) => setMessageInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage(e);
+                      }
+                    }}
+                    onPaste={(e) => {
+                      if (e.clipboardData.files.length > 0) {
+                        e.preventDefault();
+                        void handleIncomingFiles(e.clipboardData.files);
+                      }
+                    }}
+                    disabled={sending}
+                    rows={1}
+                  />
+                  {streaming ? (
+                    <Button type="button" variant="secondary" size="sm" onClick={cancelGeneration}>
+                      Stop
+                    </Button>
+                  ) : (
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      size="sm"
+                      loading={sending}
+                      disabled={!messageInput.trim() && !attachments.some(isSendable)}
+                    >
+                      Send
+                    </Button>
+                  )}
                 </div>
               </form>
               <ContextUsage usage={context ?? null} error={contextError} previewing={previewing} />

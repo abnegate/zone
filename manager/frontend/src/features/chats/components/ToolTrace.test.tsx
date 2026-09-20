@@ -30,7 +30,19 @@ describe('ToolTrace', () => {
     render(<ToolTrace calls={[call({ reasoning: 'I should search workspace docs first.' })]} />);
 
     expect(screen.getByText('I should search workspace docs first.')).toBeInTheDocument();
-    expect(screen.getByTestId('reasoning')).toHaveAttribute('open');
+    expect(screen.getByTestId('reasoning')).not.toHaveAttribute('hidden');
+  });
+
+  it('folds the thinking away when the turn has closed it', () => {
+    render(
+      <ToolTrace
+        calls={[call({ reasoning: 'I should search workspace docs first.' })]}
+        thinking={false}
+      />
+    );
+
+    expect(screen.getByTestId('reasoning')).toHaveAttribute('hidden');
+    expect(screen.getByTestId('tool-call').closest('[hidden]')).toBeNull();
   });
 
   it('describes the tool in plain language rather than by its wire name', () => {
