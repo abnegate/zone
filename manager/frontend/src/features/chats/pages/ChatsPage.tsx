@@ -527,18 +527,20 @@ export default function ChatsPage() {
     <div className={`page page--workspace chats-page ${selectedChatId ? 'has-chat' : ''}`}>
       <div className="chats-sidebar">
         <PageBar title="Chats" className="chats-sidebar-header">
-          {!showSearchResults && (
-            <Tabs
-              value={showArchived ? 'archived' : 'active'}
-              onValueChange={(v) => setShowArchived(v === 'archived')}
-              className="chats-filter"
-            >
-              <TabsList>
-                <TabsTrigger value="active">Active</TabsTrigger>
-                <TabsTrigger value="archived">Archived</TabsTrigger>
-              </TabsList>
-            </Tabs>
-          )}
+          <Tabs
+            value={showArchived ? 'archived' : 'active'}
+            onValueChange={(v) => setShowArchived(v === 'archived')}
+            className="chats-filter"
+          >
+            <TabsList>
+              <TabsTrigger value="active" disabled={showSearchResults}>
+                Active
+              </TabsTrigger>
+              <TabsTrigger value="archived" disabled={showSearchResults}>
+                Archived
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
           <button
             type="button"
             className="btn-icon"
@@ -627,9 +629,6 @@ export default function ChatsPage() {
                   <div className="search-result-header">
                     <span className="search-result-chat">{searchResultTitle(result)}</span>
                     <span className="search-result-date">{formatDate(result.created_at)}</span>
-                    <span className="search-result-score">
-                      {Math.round(result.relevance_score * 100)}%
-                    </span>
                   </div>
                   <div className="search-result-snippet">{result.snippet}</div>
                 </div>
@@ -981,7 +980,7 @@ export default function ChatsPage() {
                                 />
                                 <button
                                   type="button"
-                                  className="message-image-use"
+                                  className="btn btn-secondary btn-sm message-image-use"
                                   onClick={() => addStartingImage(a)}
                                   disabled={starting}
                                 >

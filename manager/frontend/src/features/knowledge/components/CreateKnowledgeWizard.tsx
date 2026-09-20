@@ -166,9 +166,7 @@ export function CreateKnowledgeWizard({
                 </div>
                 <div className="knowledge-type-info">
                   <span className="knowledge-type-name">Text Content</span>
-                  <span className="knowledge-type-desc">
-                    Store text directly in the knowledge base
-                  </span>
+                  <span className="knowledge-type-desc">Store text in the knowledge base</span>
                 </div>
               </button>
               <button

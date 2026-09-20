@@ -91,6 +91,15 @@ describe('QuestionCard', () => {
     expect(markers[1]).toHaveTextContent('Optional');
   });
 
+  it('titles each question in a row inside its group rather than on a legend', () => {
+    render(<QuestionCard questions={[question()]} answered={false} onSubmit={() => {}} />);
+
+    const group = screen.getByRole('group', { name: /Scope/ });
+    expect(group.querySelector('legend')).toBeNull();
+    expect(group.firstElementChild).toHaveClass('question-card-header');
+    expect(group.firstElementChild).toHaveTextContent('Scope');
+  });
+
   it('offers radios for a single-select question and keeps one answer', () => {
     render(<QuestionCard questions={[question()]} answered={false} onSubmit={() => {}} />);
 

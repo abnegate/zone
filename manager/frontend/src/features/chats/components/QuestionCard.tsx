@@ -91,13 +91,17 @@ export function QuestionCard({
         const group = `${cardId}-${questionIndex}`;
         const chosen = selections[question.header] ?? [];
         return (
-          <fieldset className="question-card-question" key={question.header}>
-            <legend className="question-card-header">
+          <fieldset
+            className="question-card-question"
+            key={question.header}
+            aria-labelledby={`${group}-header`}
+          >
+            <div className="question-card-header" id={`${group}-header`}>
               <span className="question-card-header-text">{question.header}</span>
               <span className="question-card-marker" data-testid="question-marker">
                 {question.required ? REQUIRED_LABEL : OPTIONAL_LABEL}
               </span>
-            </legend>
+            </div>
             <p className="question-card-prompt">{question.question}</p>
             {question.preview?.trim() ? (
               <p className="tool-call-preview" data-testid="question-preview">

@@ -30,15 +30,24 @@ describe('chats layout', () => {
     ).toContain('display: flex');
   });
 
-  it('fades the title under the hover actions instead of cutting it', () => {
+  it('ellipsises the title before the hover actions on a matching background', () => {
     const fade = rule(chats, '.chat-item-actions::before');
     expect(fade).toContain('right: 100%');
     expect(fade).toContain('width: var(--ui-space-2)');
     expect(fade).toContain('linear-gradient(to right, transparent, var(--chat-item-bg))');
     expect(rule(chats, '.chat-item-actions')).toContain('background: var(--chat-item-bg)');
+    expect(rule(chats, '.chat-item:hover,\n.chat-item:focus-within')).toContain(
+      '--chat-item-bg: var(--ui-bg-hover)'
+    );
+    expect(rule(chats, '.chat-item.active')).toContain('--chat-item-bg: var(--ui-accent-muted)');
     expect(
-      rule(chats, '.chat-item:hover .chat-title,\n.chat-item:focus-within .chat-title')
-    ).toContain('text-overflow: clip');
+      rule(
+        chats,
+        '.chat-item:hover .chat-item-content,\n.chat-item:focus-within .chat-item-content'
+      )
+    ).toContain('padding-right: calc(var(--chat-item-actions) + var(--ui-space-2))');
+    expect(rule(chats, '.chat-title')).toContain('text-overflow: ellipsis');
+    expect(chats).not.toContain('text-overflow: clip');
   });
 
   it('sets a chat item to 52px: 8 + 18 + 2 + 16 + 8', () => {
@@ -48,12 +57,16 @@ describe('chats layout', () => {
     expect(rule(chats, '.chat-meta')).toContain('line-height: var(--ui-space-4)');
   });
 
-  it('gives a search result a title row, a two-line snippet and a score badge', () => {
-    expect(rule(chats, '.search-result-item')).toContain('height: 4.25rem');
+  it('gives a search result a title row and a two-line snippet with no score badge', () => {
+    expect(rule(chats, '.search-result-item')).not.toContain('height:');
+    expect(rule(chats, '.search-result-item')).toContain(
+      'padding: var(--ui-space-2) var(--ui-space-3)'
+    );
     expect(rule(chats, '.search-result-header')).toContain('height: var(--ui-space-5)');
+    expect(rule(chats, '.search-result-chat')).toContain('flex: 1');
     expect(rule(chats, '.search-result-snippet')).toContain('-webkit-line-clamp: 2');
     expect(rule(chats, '.search-result-snippet')).toContain('height: var(--ui-space-8)');
-    expect(rule(chats, '.search-result-score')).toContain('height: var(--ui-badge-height)');
+    expect(chats).not.toContain('.search-result-score');
   });
 
   it('positions the message column so hidden text cannot stretch the document', () => {
