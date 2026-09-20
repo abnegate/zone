@@ -116,14 +116,12 @@ export async function renderedToolCalls(page: Page): Promise<string[]> {
 export async function ask(
   page: Page,
   message: string,
-  options: { replies: number; approve?: boolean; timeout?: number } = {
-    replies: 1,
-  },
+  options: { replies: number; approve?: boolean; timeout?: number } = { replies: 1 },
 ): Promise<string> {
-  const assistant = page.locator('.message-assistant');
-  const before = await assistant.count();
   await send(page, message);
   const deadline = Date.now() + (options.timeout ?? 900_000);
+  const assistant = page.locator('.message-assistant');
+  let quiet = 0;
   for (;;) {
     if (options.approve !== false) {
       const approve = page.locator('[data-testid="tool-approve"]').first();
@@ -131,11 +129,21 @@ export async function ask(
         await approve.click();
       }
     }
-    const replies = await assistant.count();
     const status = await page.locator('.message-status').count();
     const alert = await page.getByRole('alert').count();
-    if (replies >= options.replies && replies > before && status === 0) break;
-    if (alert > 0 && replies < options.replies && status === 0) break;
+    const answered = await page.evaluate((text) => {
+      const users = Array.from(document.querySelectorAll('.message-user'));
+      const last = users[users.length - 1];
+      if (!last || !(last.textContent ?? '').includes(text)) return false;
+      return Array.from(document.querySelectorAll('.message-assistant')).some(
+        (reply) =>
+          Boolean(last.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+          (reply.textContent ?? '').trim().length > 0,
+      );
+    }, message.slice(0, 60));
+    quiet = answered && status === 0 ? quiet + 1 : 0;
+    if (quiet >= 3) break;
+    if (alert > 0 && !answered && status === 0) break;
     if (Date.now() > deadline) {
       throw new Error(`turn did not finish within the timeout: ${message}`);
     }
