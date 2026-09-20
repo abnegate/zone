@@ -60,7 +60,7 @@ async function messagesOf(
 function findFile(name: string): string[] {
   const roots = [
     process.env.ZONE_CHAT_AGENT_CWD ?? '',
-    join(__dirname, '..', '..', '..', '..'),
+    join(process.cwd(), '..', '..'),
     work,
     tmpdir(),
     `${process.env.HOME}/Library/Application Support/Zone`,
