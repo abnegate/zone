@@ -33,20 +33,23 @@ mock.module('../../../api/sources', () => ({
   },
 }));
 
-// Mock useWorkspace context - required by useSources hook
+const mockRefreshOrganizations = mock(() => Promise.resolve());
+const resolvedWorkspace = {
+  currentWorkspace: { id: 'test-workspace-id', name: 'Test Workspace' } as { id: string } | null,
+  currentOrganization: { id: 'test-org-id', name: 'Test Org' } as { id: string } | null,
+  workspaces: [],
+  organizations: [],
+  loading: false,
+  error: null as string | null,
+  setCurrentWorkspace: mock(),
+  setCurrentOrganization: mock(),
+  refreshWorkspaces: mock(),
+  refreshOrganizations: mockRefreshOrganizations,
+};
+let workspaceState = { ...resolvedWorkspace };
+
 mock.module('../../../shared/context/WorkspaceContext', () => ({
-  useWorkspace: () => ({
-    currentWorkspace: { id: 'test-workspace-id', name: 'Test Workspace' },
-    currentOrganization: { id: 'test-org-id', name: 'Test Org' },
-    workspaces: [],
-    organizations: [],
-    loading: false,
-    error: null,
-    setCurrentWorkspace: mock(),
-    setCurrentOrganization: mock(),
-    refreshWorkspaces: mock(),
-    refreshOrganizations: mock(),
-  }),
+  useWorkspace: () => workspaceState,
   WorkspaceProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
@@ -115,7 +118,8 @@ describe('SourcesPage', () => {
     mockVerifySource.mockReset();
     mockGetSource.mockReset();
     mockGetSources.mockImplementation(() => Promise.resolve(mockSources));
-    // Mock window.confirm
+    mockRefreshOrganizations.mockClear();
+    workspaceState = { ...resolvedWorkspace };
     mockConfirm = mock(() => true);
     window.confirm = mockConfirm as typeof window.confirm;
   });
@@ -132,6 +136,32 @@ describe('SourcesPage', () => {
     await waitFor(() => {
       expect(screen.getByText('No sources configured')).toBeInTheDocument();
     });
+  });
+
+  it('keeps the skeleton rows while the workspace is still resolving', () => {
+    workspaceState = { ...resolvedWorkspace, currentWorkspace: null, loading: true };
+    render(<SourcesPage />);
+    expect(document.querySelectorAll('.skeleton-card').length).toBe(3);
+    expect(screen.queryByText('No sources configured')).toBeNull();
+    expect(mockGetSources).not.toHaveBeenCalled();
+  });
+
+  it('shows the organizations failure with a retry instead of the empty state', () => {
+    workspaceState = {
+      ...resolvedWorkspace,
+      currentWorkspace: null,
+      currentOrganization: null,
+      error: 'Failed to load organizations',
+    };
+    render(<SourcesPage />);
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Failed to load organizations');
+    expect(screen.queryByText('No sources configured')).toBeNull();
+    expect(document.querySelectorAll('.skeleton-card').length).toBe(0);
+
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+    expect(mockRefreshOrganizations).toHaveBeenCalledTimes(1);
+    expect(mockGetSources).not.toHaveBeenCalled();
   });
 
   it('renders sources list', async () => {
@@ -367,6 +397,14 @@ describe('SourcesPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Network error')).toBeInTheDocument();
     });
+    expect(screen.queryByText('No sources configured')).toBeNull();
+
+    mockGetSources.mockImplementation(() => Promise.resolve(mockSources));
+    fireEvent.click(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }));
+    await waitFor(() => {
+      expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
+    });
+    expect(mockGetSources).toHaveBeenCalledTimes(2);
   });
 
   it('shows error when delete fails', async () => {

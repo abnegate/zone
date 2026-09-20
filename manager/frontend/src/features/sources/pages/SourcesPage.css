@@ -14,16 +14,25 @@
 }
 
 .sources-banner {
-  padding: var(--ui-space-2) var(--ui-space-3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-space-2);
+  min-height: var(--ui-list-row);
+  padding: var(--ui-space-1) var(--ui-space-1) var(--ui-space-1) var(--ui-space-3);
   border-radius: var(--ui-radius-md);
   font-size: var(--ui-text-sm);
   line-height: var(--ui-leading-normal);
 }
 
 .sources-banner--error {
-  background: color-mix(in srgb, var(--ui-error) 12%, transparent);
+  background: var(--ui-error-muted);
   border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
-  color: var(--ui-error);
+  color: var(--ui-error-600);
+}
+
+:root[data-theme='dark'] .sources-banner--error {
+  color: var(--ui-error-400);
 }
 
 .sources-list {

@@ -29,7 +29,12 @@ export function useSources(options: UseSourcesOptions = {}): UseSourcesResult {
   const [sources, setSources] = useState<Source[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const { currentWorkspace } = useWorkspace();
+  const {
+    currentWorkspace,
+    loading: workspaceLoading,
+    error: workspaceError,
+    refreshOrganizations,
+  } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
 
   const { type, activeOnly = false } = options;
@@ -99,13 +104,17 @@ export function useSources(options: UseSourcesOptions = {}): UseSourcesResult {
   );
 
   const refresh = useCallback(async () => {
+    if (!workspaceId) {
+      await refreshOrganizations();
+      return;
+    }
     await loadSources();
-  }, [loadSources]);
+  }, [workspaceId, loadSources, refreshOrganizations]);
 
   return {
     sources,
-    loading,
-    error,
+    loading: workspaceId ? loading : workspaceLoading,
+    error: workspaceId ? error : workspaceError,
     createSource,
     updateSource,
     deleteSource,

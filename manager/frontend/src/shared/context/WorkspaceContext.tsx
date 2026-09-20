@@ -34,13 +34,16 @@ export function WorkspaceProvider({
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [currentOrganization, setCurrentOrgState] = useState<Organization | null>(null);
   const [currentWorkspace, setCurrentWsState] = useState<Workspace | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [organizationsLoading, setOrganizationsLoading] = useState(true);
+  const [workspacesFor, setWorkspacesFor] = useState<string | null>(null);
   const [unresolvedRoleOrganizationId, setUnresolvedRoleOrganizationId] = useState<string | null>(
     null
   );
   const [error, setError] = useState<string | null>(null);
   const organizationId = currentOrganization?.id;
   const userId = user?.id;
+  const workspacesLoading = organizationId !== undefined && workspacesFor !== organizationId;
+  const loading = organizationsLoading || workspacesLoading;
   const resolvingRole =
     currentOrganization !== null &&
     currentOrganization.role === undefined &&
@@ -95,6 +98,8 @@ export function WorkspaceProvider({
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load workspaces');
+    } finally {
+      setWorkspacesFor(organizationId);
     }
   }, [organizationId]);
 
@@ -123,11 +128,11 @@ export function WorkspaceProvider({
       setWorkspaces([]);
       setCurrentOrgState(null);
       setCurrentWsState(null);
-      setLoading(false);
+      setOrganizationsLoading(false);
       return;
     }
-    // Authenticated - load organizations
-    refreshOrganizations().finally(() => setLoading(false));
+    setOrganizationsLoading(true);
+    refreshOrganizations().finally(() => setOrganizationsLoading(false));
   }, [authLoading, isAuthenticated, refreshOrganizations]);
 
   // Load workspaces when organization changes
