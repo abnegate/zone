@@ -453,6 +453,7 @@
   display: inline-flex;
   align-items: center;
   height: var(--ui-control-height-sm);
+  margin: 0;
   padding: 0 var(--ui-space-3);
   border-radius: var(--ui-radius-md);
   font-size: var(--ui-text-sm);
