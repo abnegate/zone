@@ -185,9 +185,14 @@
 }
 
 .form-grid > .form-group--full,
+.form-grid > .form-grid--3,
 .form-grid > .alert,
 .form-grid > .form-group:only-child {
   grid-column: 1 / -1;
+}
+
+.form-grid--3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .settings-page .form-hint {
@@ -464,6 +469,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--ui-space-3);
+  font-family: var(--ui-font-body);
 }
 
 .preview-text {
@@ -548,6 +554,7 @@
   }
 
   .form-grid,
+  .form-grid--3,
   .theme-groups,
   .effective-settings {
     grid-template-columns: minmax(0, 1fr);

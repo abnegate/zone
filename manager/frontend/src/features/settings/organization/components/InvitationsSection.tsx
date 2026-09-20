@@ -222,7 +222,9 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
           </div>
 
           <div className="form-group">
-            <label htmlFor="workspace">Workspace (Optional)</label>
+            <label htmlFor="workspace">
+              Workspace <span className="label-optional">optional</span>
+            </label>
             <select
               id="workspace"
               value={workspaceId}

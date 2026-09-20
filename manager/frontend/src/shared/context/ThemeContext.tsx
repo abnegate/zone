@@ -11,7 +11,7 @@ import {
 import { client } from '../../api/client';
 import type { BorderRadius, FontFamily, WorkspaceTheme } from '../../types';
 
-type Theme = 'light' | 'dark';
+export type Theme = 'light' | 'dark';
 
 interface ThemeContextType {
   theme: Theme;
@@ -89,8 +89,10 @@ function foreground(value: string): string {
   return luminance > 0.179 ? '#000000' : '#ffffff';
 }
 
-function applyWorkspaceTheme(workspace: WorkspaceTheme | null, mode: Theme): () => void {
-  const root = document.documentElement;
+export function workspaceThemeProperties(
+  workspace: WorkspaceTheme | null,
+  mode: Theme
+): Map<string, string> {
   const properties = new Map<string, string>();
   const primary = color(
     mode === 'dark' ? workspace?.primary_color_dark : workspace?.primary_color_light
@@ -145,6 +147,12 @@ function applyWorkspaceTheme(workspace: WorkspaceTheme | null, mode: Theme): () 
       properties.set(`--ui-radius-${size}`, radius);
     }
   }
+  return properties;
+}
+
+function applyWorkspaceTheme(workspace: WorkspaceTheme | null, mode: Theme): () => void {
+  const root = document.documentElement;
+  const properties = workspaceThemeProperties(workspace, mode);
   const previous = new Map<string, string>();
   for (const [name, value] of properties) {
     previous.set(name, root.style.getPropertyValue(name));

@@ -296,6 +296,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                 const isUpdating = updatingMemberId === member.id;
                 const canModify = canModifyMember(member);
                 const availableRoles = getAvailableRoles(member);
+                const editable = canModify && availableRoles.length > 1;
                 return (
                   <tr key={member.id}>
                     <td>
@@ -312,19 +313,13 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                       </div>
                     </td>
                     <td>
-                      <span className={getRoleBadgeClass(member.role)}>
-                        {member.role.charAt(0).toUpperCase() + member.role.slice(1)}
-                      </span>
-                    </td>
-                    <td className="member-joined">{formatDate(member.joined_at)}</td>
-                    <td>
-                      <div className="member-actions">
+                      {editable ? (
                         <select
                           value={member.role}
                           onChange={(e) =>
                             handleRoleChangeRequest(member, e.target.value as OrgRole)
                           }
-                          disabled={!canModify || isUpdating}
+                          disabled={isUpdating}
                           className="role-select"
                           aria-label={`Change role for ${memberLabel(member)}`}
                         >
@@ -334,6 +329,15 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                             </option>
                           ))}
                         </select>
+                      ) : (
+                        <span className={getRoleBadgeClass(member.role)}>
+                          {member.role.charAt(0).toUpperCase() + member.role.slice(1)}
+                        </span>
+                      )}
+                    </td>
+                    <td className="member-joined">{formatDate(member.joined_at)}</td>
+                    <td>
+                      <div className="member-actions">
                         {isUpdating && (
                           <span className="member-updating" aria-live="polite">
                             Updating...

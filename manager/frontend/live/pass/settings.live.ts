@@ -99,11 +99,11 @@ test.describe('organization and workspace settings', () => {
     await expect(table).toBeVisible({ timeout: 30_000 });
     const memberRows = await table.locator('tbody tr').count();
     const tableText = (await table.innerText()).replace(/\s+/g, ' ');
-    // The members table carries no email (the API sends user ids only), so the
-    // second tenant's row is the one that is not the owner's own.
+    // The owner's own row shows its role as a badge; the second tenant's row
+    // is the one that offers a role select.
     const row = table
       .locator('tbody tr')
-      .filter({ hasNot: page.locator('select:disabled') })
+      .filter({ has: page.locator('select.role-select') })
       .first();
     await expect(
       row,
@@ -116,7 +116,7 @@ test.describe('organization and workspace settings', () => {
     await expect(dialog).toContainText('Confirm Role Change');
     await dialog.getByRole('button', { name: 'Confirm' }).click();
     const saved = await successAlert(page, /Role updated successfully/);
-    await expect(row.locator('.role-badge')).toContainText(/admin/i, {
+    await expect(row.locator('select.role-select')).toHaveValue('admin', {
       timeout: 30_000,
     });
     await shot(page, '08-role-changed');
@@ -137,7 +137,7 @@ test.describe('organization and workspace settings', () => {
     await page.getByRole('tab', { name: 'Members' }).click();
     await table
       .locator('tbody tr')
-      .filter({ hasNot: page.locator('select:disabled') })
+      .filter({ has: page.locator('select.role-select') })
       .first()
       .locator('select.role-select')
       .selectOption('member');

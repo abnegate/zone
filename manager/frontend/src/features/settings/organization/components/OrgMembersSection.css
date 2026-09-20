@@ -149,6 +149,7 @@
   height: var(--ui-control-height-sm);
   padding-right: var(--ui-space-6);
   font-size: var(--ui-text-xs);
+  color: var(--ui-text-primary);
 }
 
 .member-updating {
