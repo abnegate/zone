@@ -9,6 +9,7 @@ import { Button, Modal } from '@zone/ui';
 import { formatDistanceToNow } from 'date-fns';
 import { useState } from 'react';
 import { toast } from 'sonner';
+import PageBar from '../../../shared/components/PageBar/PageBar';
 import { useSessions } from '../hooks';
 import type { Session } from '../types';
 import { parseUserAgent } from '../utils';
@@ -38,7 +39,7 @@ export default function SessionsPage() {
       cell: (info) => (
         <div className="device-info">
           {info.getValue()}
-          {info.row.original.is_current && <span className="current-badge">Current Session</span>}
+          {info.row.original.is_current && <span className="current-badge">Current</span>}
         </div>
       ),
     }),
@@ -76,7 +77,7 @@ export default function SessionsPage() {
             setShowRevokeModal(true);
           }}
           disabled={info.row.original.is_current || isRevoking}
-          variant="secondary"
+          variant="ghost"
           size="sm"
           aria-label={
             info.row.original.is_current
@@ -123,79 +124,70 @@ export default function SessionsPage() {
   const nonCurrentSessions = sessions.filter((s) => !s.is_current);
   const hasOtherSessions = nonCurrentSessions.length > 0;
 
-  if (isLoading) {
-    return (
-      <div className="sessions-page page--workspace">
-        <div className="page-header">
-          <h1 className="page-title">Active Sessions</h1>
-        </div>
-        <div className="loading-state">Loading sessions...</div>
-      </div>
-    );
-  }
+  const revokeAll = (
+    <Button
+      onClick={() => setShowRevokeAllModal(true)}
+      disabled={isLoading || !hasOtherSessions || isRevokingAll}
+      variant="secondary"
+    >
+      Revoke All Other Sessions
+    </Button>
+  );
 
   return (
-    <div className="sessions-page page--workspace">
-      <div className="page-header">
-        <h1 className="page-title">Active Sessions</h1>
-        <p className="page-description">
-          Manage your active sessions across all devices. You can revoke access to any session at
-          any time.
-        </p>
-      </div>
+    <div className="page page--workspace sessions-page">
+      <PageBar
+        title="Active Sessions"
+        subtitle="Manage your active sessions across all devices. You can revoke access to any session at any time."
+      >
+        {revokeAll}
+      </PageBar>
 
-      {error && (
-        <div className="alert alert-error" role="alert" aria-live="assertive">
-          {error}
-        </div>
-      )}
+      <div className="page-body sessions-body">
+        {error && (
+          <div className="alert alert-error" role="alert" aria-live="assertive">
+            {error}
+          </div>
+        )}
 
-      <div className="sessions-container">
-        {sessions.length === 0 ? (
+        {isLoading ? (
+          <div className="loading-state">
+            <span className="loading-spinner" aria-hidden="true" />
+            <span className="loading-text">Loading sessions...</span>
+          </div>
+        ) : sessions.length === 0 ? (
           <div className="empty-state">
-            <p>No active sessions found.</p>
+            <p className="empty-state-description">No active sessions found.</p>
           </div>
         ) : (
-          <>
-            <div className="sessions-table-wrapper">
-              <table className="sessions-table" aria-label="Active sessions">
-                <thead>
-                  {table.getHeaderGroups().map((headerGroup) => (
-                    <tr key={headerGroup.id}>
-                      {headerGroup.headers.map((header) => (
-                        <th key={header.id}>
-                          {header.isPlaceholder
-                            ? null
-                            : flexRender(header.column.columnDef.header, header.getContext())}
-                        </th>
-                      ))}
-                    </tr>
-                  ))}
-                </thead>
-                <tbody>
-                  {table.getRowModel().rows.map((row) => (
-                    <tr key={row.id} className={row.original.is_current ? 'current-session' : ''}>
-                      {row.getVisibleCells().map((cell) => (
-                        <td key={cell.id}>
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="sessions-actions">
-              <Button
-                onClick={() => setShowRevokeAllModal(true)}
-                disabled={!hasOtherSessions || isRevokingAll}
-                variant="danger"
-              >
-                Revoke All Other Sessions
-              </Button>
-            </div>
-          </>
+          <div className="sessions-table-wrapper">
+            <table className="sessions-table" aria-label="Active sessions">
+              <thead>
+                {table.getHeaderGroups().map((headerGroup) => (
+                  <tr key={headerGroup.id}>
+                    {headerGroup.headers.map((header) => (
+                      <th key={header.id}>
+                        {header.isPlaceholder
+                          ? null
+                          : flexRender(header.column.columnDef.header, header.getContext())}
+                      </th>
+                    ))}
+                  </tr>
+                ))}
+              </thead>
+              <tbody>
+                {table.getRowModel().rows.map((row) => (
+                  <tr key={row.id} className={row.original.is_current ? 'current-session' : ''}>
+                    {row.getVisibleCells().map((cell) => (
+                      <td key={cell.id}>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 

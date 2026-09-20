@@ -81,7 +81,7 @@ export interface JwtPayload {
 // Session Types
 export interface Session {
   id: string;
-  user_id: string;
+  user_id?: string;
   ip_address: string | null;
   user_agent: string | null;
   device_info: string | null;

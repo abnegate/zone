@@ -97,7 +97,7 @@ export const JwtPayloadSchema = z.object({
 
 export const SessionSchema = z.object({
   id: z.string().min(1),
-  user_id: z.string().min(1),
+  user_id: z.string().min(1).optional(),
   ip_address: z.string().nullable(),
   user_agent: z.string().nullable(),
   device_info: z.string().nullable(),

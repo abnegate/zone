@@ -44,7 +44,7 @@ export default function ForgotPasswordPage() {
       <div className="auth-page">
         <div className="auth-container">
           <div className="auth-header">
-            <ZoneLogo size="xl" />
+            <ZoneLogo size="md" />
             <p>Check your email</p>
           </div>
 
@@ -86,7 +86,7 @@ export default function ForgotPasswordPage() {
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <ZoneLogo size="xl" />
+          <ZoneLogo size="md" />
           <p>Reset your password</p>
         </div>
 

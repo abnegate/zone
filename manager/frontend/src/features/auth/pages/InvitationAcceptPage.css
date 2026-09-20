@@ -3,189 +3,194 @@
   display: flex;
   align-items: center;
   justify-content: center;
-
   padding: var(--ui-gutter);
-  background: var(--bg-secondary);
+  background: var(--ui-bg-base);
 }
 
 .invitation-card {
-  background: var(--bg-primary);
-
-  border-radius: var(--ui-radius-xl);
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-
-  max-width: 28rem;
   width: 100%;
-
-  padding: var(--ui-panel-padding);
+  max-width: 25rem;
+  padding: var(--ui-space-8) var(--ui-space-6);
+  background: var(--ui-bg-elevated);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-card);
+  box-shadow: var(--ui-shadow-sm);
 }
 
 .invitation-header {
+  margin-bottom: var(--ui-space-5);
+  padding-bottom: var(--ui-space-4);
+  border-bottom: 1px solid var(--ui-border);
   text-align: center;
-  margin-bottom: var(--ui-space-8);
-  padding-bottom: var(--ui-space-6);
-  border-bottom: 2px solid var(--border-color);
 }
 
 .invitation-header h1 {
-  margin: 0 0 var(--ui-space-4) 0;
-
-  font-size: var(--ui-auth-title-size);
-
+  margin: 0 0 var(--ui-space-1);
+  font-family: var(--ui-font-display);
+  font-size: var(--ui-text-xl);
   font-weight: 600;
-  color: var(--text-primary);
   line-height: var(--ui-leading-tight);
-  margin-bottom: var(--ui-space-2);
+  letter-spacing: var(--ui-tracking-tight);
+  color: var(--ui-text-primary);
 }
 
 .invitation-header .subtitle {
-  font-size: var(--ui-text-base);
-  color: var(--text-secondary);
   margin: 0;
-
-  line-height: var(--ui-leading-normal);
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+  color: var(--ui-text-secondary);
 }
 
 .invitation-header .subtitle strong {
-  color: var(--color-primary);
+  color: var(--ui-text-primary);
   font-weight: 600;
 }
 
 .invitation-details {
-  margin-bottom: var(--ui-space-8);
+  display: grid;
+  grid-template-columns: 8rem 1fr;
+  gap: var(--ui-space-2) var(--ui-space-3);
+  align-items: center;
+  margin-bottom: var(--ui-space-5);
 }
 
 .invitation-accept-page .detail-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: var(--ui-space-4) 0;
-  border-bottom: 1px solid var(--border-color);
-}
-
-.invitation-accept-page .detail-row:last-child {
-  border-bottom: none;
+  display: contents;
 }
 
 .invitation-accept-page .detail-row .label {
+  font-size: var(--ui-text-2xs);
   font-weight: 600;
-  color: var(--text-secondary);
-  font-size: var(--ui-text-sm);
+  letter-spacing: var(--ui-tracking-wider);
+  line-height: var(--ui-space-5);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  color: var(--ui-text-muted);
 }
 
 .invitation-accept-page .detail-row .value {
-  font-size: var(--ui-text-base);
-  color: var(--text-primary);
-  font-weight: 500;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+  color: var(--ui-text-primary);
 }
 
 .invitation-accept-page .role-badge {
-  display: inline-block;
-  padding: var(--ui-space-1) var(--ui-space-3);
-  border-radius: 4px;
-  font-size: var(--ui-text-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  height: var(--ui-badge-height);
+  padding: 0 var(--ui-space-1-5);
+  border-radius: var(--ui-radius-md);
+  font-size: var(--ui-text-2xs);
   font-weight: 600;
+  line-height: 1;
   text-transform: capitalize;
 }
 
-.invitation-accept-page .role-badge.role-owner {
-  background: var(--color-purple-100);
-  color: var(--color-purple-800);
-}
-
+.invitation-accept-page .role-badge.role-owner,
 .invitation-accept-page .role-badge.role-admin {
-  background: var(--color-blue-100);
-  color: var(--color-blue-800);
+  background: var(--ui-accent-muted);
+  color: var(--ui-accent);
 }
 
-.invitation-accept-page .role-badge.role-member {
-  background: var(--color-gray-100);
-  color: var(--color-gray-800);
-}
-
+.invitation-accept-page .role-badge.role-member,
 .invitation-accept-page .role-badge.role-viewer {
-  background: var(--color-green-100);
-  color: var(--color-green-800);
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-secondary);
 }
 
 .invitation-accept-page .text-danger {
-  color: var(--color-error);
+  color: var(--ui-error);
   font-weight: 600;
 }
 
+.invitation-accept-page .alert {
+  margin-bottom: var(--ui-space-4);
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-error-muted);
+  color: var(--ui-error-600);
+  font-size: var(--ui-text-sm);
+}
+
 .invitation-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--ui-space-3);
   text-align: center;
-  margin-top: var(--ui-space-8);
+}
+
+.invitation-actions .ui-btn {
+  height: var(--ui-control-height-lg);
+  font-size: var(--ui-text-md);
+  font-weight: 600;
 }
 
 .auth-notice {
-  font-size: var(--ui-text-base);
-  color: var(--text-secondary);
-  margin-bottom: var(--ui-space-6);
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+  color: var(--ui-text-secondary);
 }
 
 .auth-buttons {
   display: flex;
-  gap: var(--ui-space-4);
-  justify-content: center;
+  gap: var(--ui-space-2);
 }
 
 .auth-buttons button {
   flex: 1;
-  max-width: 200px;
+}
+
+.invitation-accept-page .error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ui-space-1);
+  max-width: none;
+  padding: 0;
+  text-align: center;
 }
 
 .invitation-accept-page .error-state h1 {
-  font-size: var(--ui-auth-title-size);
-  margin: 0 0 var(--ui-space-4) 0;
-  color: var(--text-primary);
+  margin: 0;
+  font-family: var(--ui-font-display);
+  font-size: var(--ui-text-xl);
+  font-weight: 600;
+  line-height: var(--ui-leading-tight);
+  letter-spacing: var(--ui-tracking-tight);
+  color: var(--ui-text-primary);
 }
 
 .invitation-accept-page .error-state p {
-  color: var(--text-secondary);
-  margin: 0 0 var(--ui-space-8) 0;
-  font-size: var(--ui-text-base);
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+  color: var(--ui-text-secondary);
 }
 
-@media (max-width: 768px) {
-  .invitation-accept-page {
-    padding: var(--ui-space-4);
+.invitation-accept-page .error-state .ui-btn {
+  margin-top: var(--ui-space-3);
+}
+
+.invitation-accept-page .loading-state {
+  padding: 0;
+}
+
+@media (max-width: 480px) {
+  .invitation-details {
+    grid-template-columns: 1fr;
+    gap: var(--ui-space-1);
   }
 
-  .invitation-card {
-    padding: var(--ui-panel-padding);
-  }
-
-  .invitation-header h1 {
-    font-size: var(--ui-auth-title-size);
-  }
-
-  .invitation-header .subtitle {
-    font-size: var(--ui-text-base);
-  }
-
-  .invitation-accept-page .detail-row {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--ui-space-2);
+  .invitation-accept-page .detail-row .value {
+    margin-bottom: var(--ui-space-2);
   }
 
   .auth-buttons {
     flex-direction: column;
   }
-
-  .auth-buttons button {
-    max-width: 100%;
-  }
-}
-
-.invitation-accept-page .error-state {
-  padding: 0;
-  gap: var(--ui-field-gap);
-}
-.invitation-accept-page .error-state h1,
-.invitation-accept-page .error-state p {
-  margin: 0;
 }

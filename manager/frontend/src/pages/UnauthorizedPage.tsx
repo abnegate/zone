@@ -6,20 +6,12 @@ export default function UnauthorizedPage() {
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <h1
-            style={{
-              background: 'linear-gradient(135deg, #ef4444, #f59e0b)',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-            }}
-          >
-            Access Denied
-          </h1>
+          <h1>Access Denied</h1>
           <p>You don't have permission to access this page</p>
         </div>
 
         <div className="auth-footer auth-footer--plain">
-          <Link to="/" className="btn btn-primary btn-block">
+          <Link to="/" className="btn btn-primary btn-lg btn-block">
             Go to Home
           </Link>
         </div>

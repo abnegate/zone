@@ -1,18 +1,14 @@
-.sessions-container {
-  margin-top: 0;
-  padding: var(--ui-section-gap) var(--ui-gutter);
-  overflow: auto;
-  min-height: 0;
-  flex: 1;
+.sessions-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4);
 }
 
 .sessions-table-wrapper {
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  margin-bottom: var(--ui-space-6);
   overflow-x: auto;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-card);
+  background: var(--ui-bg-elevated);
 }
 
 .sessions-table {
@@ -20,124 +16,68 @@
   border-collapse: collapse;
 }
 
-.sessions-table thead {
-  background: var(--color-bg);
-  border-bottom: 1px solid var(--color-border);
-}
-
 .sessions-table th {
-  padding: var(--ui-space-3) var(--ui-space-4);
-  text-align: left;
-  font-size: var(--ui-text-xs);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-text-muted);
+  white-space: nowrap;
 }
 
-.sessions-table tbody tr {
-  border-bottom: 1px solid var(--color-border);
-  transition: background var(--transition-fast);
+.sessions-table th:last-child,
+.sessions-table td:last-child {
+  width: 1%;
+  text-align: right;
 }
 
-.sessions-table tbody tr:last-child {
+.sessions-table tbody tr:last-child td {
   border-bottom: none;
 }
 
-.sessions-table tbody tr:hover {
-  background: var(--color-bg-hover);
-}
-
-.sessions-table tbody tr.current-session {
-  background: var(--color-success-bg, rgba(16, 185, 129, 0.05));
-}
-
-.sessions-table td {
-  padding: var(--ui-space-3) var(--ui-space-4);
-  font-size: var(--ui-text-sm);
-  color: var(--color-text);
+.sessions-table tbody tr.current-session td {
+  background: color-mix(in srgb, var(--ui-success) 6%, transparent);
 }
 
 .device-info {
   display: flex;
-  flex-direction: column;
-  gap: var(--ui-space-1);
+  align-items: center;
+  gap: var(--ui-space-2);
+  font-weight: 600;
 }
 
 .current-badge {
-  display: inline-block;
-  padding: var(--ui-space-0-5) var(--ui-space-2);
-  background: var(--color-success);
-  color: var(--color-text-inverse, white);
-
-  font-size: var(--ui-text-xs);
+  display: inline-flex;
+  align-items: center;
+  height: var(--ui-badge-height);
+  padding: 0 var(--ui-space-1-5);
+  border-radius: var(--ui-radius-md);
+  background: color-mix(in srgb, var(--ui-success) 14%, transparent);
+  color: var(--ui-success-600);
+  font-size: var(--ui-text-2xs);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border-radius: var(--radius-sm);
-  width: fit-content;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .ip-address {
   font-family: var(--ui-font-mono);
-  font-size: var(--ui-text-sm);
-  color: var(--color-text-muted);
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-secondary);
 }
 
 .timestamp {
-  color: var(--color-text-muted);
-}
-
-.sessions-actions {
-  display: flex;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: var(--ui-space-3);
-  padding-top: var(--ui-space-6);
-  border-top: 1px solid var(--color-border);
-}
-
-/* Responsive Design */
-@media (max-width: 768px) {
-  .sessions-table-wrapper {
-    overflow-x: auto;
-  }
-
-  .sessions-table {
-    min-width: 900px;
-  }
-
-  .sessions-actions {
-    justify-content: stretch;
-  }
-
-  .sessions-actions button {
-    width: 100%;
-  }
-}
-
-.sessions-page {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-.sessions-page .page-header {
-  padding: var(--ui-space-1) var(--ui-gutter);
-  min-height: var(--ui-header-height);
-  flex-shrink: 0;
-  margin: 0;
-}
-.sessions-page .page-description {
   font-size: var(--ui-text-xs);
-  margin-top: var(--ui-space-1);
-}
-.sessions-page .page-title {
-  font-size: var(--ui-title-size);
-}
-.sessions-page > .alert {
-  margin: var(--ui-space-4) var(--ui-gutter) 0;
+  color: var(--ui-text-muted);
+  white-space: nowrap;
 }
 
-.sessions-page .page-header h1 {
-  margin: 0;
+.sessions-page .alert {
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-error-muted);
+  color: var(--ui-error-600);
+  font-size: var(--ui-text-sm);
+}
+
+@media (max-width: 768px) {
+  .sessions-table {
+    min-width: 48rem;
+  }
 }

@@ -30,3 +30,16 @@ describe('UnauthorizedPage', () => {
     expect(screen.getByRole('link', { name: 'Go to Home' })).toHaveAttribute('href', '/');
   });
 });
+
+describe('UnauthorizedPage title', () => {
+  it('sets the title in plain ink instead of a gradient', () => {
+    render(
+      <BrowserRouter>
+        <UnauthorizedPage />
+      </BrowserRouter>
+    );
+    const heading = screen.getByRole('heading', { name: 'Access Denied' });
+    expect(heading.getAttribute('style')).toBeNull();
+    expect(heading.closest('.auth-container')).not.toBeNull();
+  });
+});

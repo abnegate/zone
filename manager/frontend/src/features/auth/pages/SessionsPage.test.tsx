@@ -271,7 +271,7 @@ describe('SessionsPage', () => {
     it('shows current session badge', async () => {
       renderSessionsPage();
       await waitFor(() => {
-        expect(screen.getByText(/current session/i)).toBeInTheDocument();
+        expect(screen.getByText(/^current$/i)).toBeInTheDocument();
       });
     });
 
@@ -336,7 +336,7 @@ describe('SessionsPage', () => {
     it('disables revoke button for current session', async () => {
       renderSessionsPage();
       await waitFor(() => {
-        const currentSessionRow = screen.getByText(/current session/i).closest('tr');
+        const currentSessionRow = screen.getByText(/^current$/i).closest('tr');
         const revokeButton = currentSessionRow?.querySelector('button');
         expect(revokeButton).toBeDisabled();
       });

@@ -68,7 +68,7 @@ export default function ResetPasswordPage() {
       <div className="auth-page">
         <div className="auth-container">
           <div className="auth-header">
-            <ZoneLogo size="xl" />
+            <ZoneLogo size="md" />
             <p>Invalid reset link</p>
           </div>
 
@@ -104,7 +104,7 @@ export default function ResetPasswordPage() {
       <div className="auth-page">
         <div className="auth-container">
           <div className="auth-header">
-            <ZoneLogo size="xl" />
+            <ZoneLogo size="md" />
             <p>Password Reset Successful</p>
           </div>
 
@@ -136,7 +136,7 @@ export default function ResetPasswordPage() {
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <ZoneLogo size="xl" />
+          <ZoneLogo size="md" />
           <p>Set new password</p>
         </div>
 

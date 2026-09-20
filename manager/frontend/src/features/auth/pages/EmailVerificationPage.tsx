@@ -74,7 +74,7 @@ export default function EmailVerificationPage() {
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <ZoneLogo size="xl" />
+          <ZoneLogo size="md" />
           {status === 'loading' && <p>Verifying your email...</p>}
           {status === 'success' && <p>Email Verified</p>}
           {status === 'error' && <p>Verification Failed</p>}
