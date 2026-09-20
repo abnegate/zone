@@ -99,7 +99,6 @@ export default function Sidebar() {
     });
   };
 
-  // Set initial collapsed state on mount
   if (typeof document !== 'undefined') {
     document.documentElement.setAttribute('data-sidebar-collapsed', String(collapsed));
   }
@@ -125,7 +124,7 @@ export default function Sidebar() {
 
       <aside className={`sidebar ${mobileOpen ? 'open' : ''} ${collapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          <ZoneLogo size={collapsed ? 'sm' : 'md'} showText={!collapsed} />
+          <ZoneLogo size="sm" showText={!collapsed} />
           <button
             className="theme-toggle"
             onClick={toggleTheme}

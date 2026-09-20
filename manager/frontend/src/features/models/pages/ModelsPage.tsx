@@ -2,6 +2,7 @@ import { Badge, Button, EmptyState, Modal, Tabs, TabsList, TabsTrigger } from '@
 import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
+import PageBar from '../../../shared/components/PageBar/PageBar';
 import Capabilities from '../components/Capabilities';
 import DownloadOptions from '../components/DownloadOptions';
 import PullJobs from '../components/PullJobs';
@@ -31,6 +32,15 @@ import {
 import './ModelsPage.css';
 
 type Tab = 'installed' | 'browse' | 'train';
+
+const DISK_WARNING_PERCENT = 80;
+const DISK_ERROR_PERCENT = 90;
+
+function diskLevel(percent: number): string {
+  if (percent >= DISK_ERROR_PERCENT) return 'models-disk-fill--error';
+  if (percent >= DISK_WARNING_PERCENT) return 'models-disk-fill--warning';
+  return '';
+}
 
 export default function ModelsPage() {
   const {
@@ -171,11 +181,7 @@ export default function ModelsPage() {
 
   return (
     <div className="page page--workspace models-page">
-      <header className="models-header">
-        <div className="models-header-copy">
-          <h1>Models</h1>
-          <p>Manage local chat models and image adapters</p>
-        </div>
+      <PageBar title="Models" subtitle="Local chat models and image adapters">
         {disk && (
           <div
             className="models-disk"
@@ -193,7 +199,7 @@ export default function ModelsPage() {
               aria-label="Disk space used"
             >
               <div
-                className="models-disk-fill"
+                className={`models-disk-fill ${diskLevel(disk.percent)}`}
                 style={{ width: `${Math.min(100, Math.max(0, disk.percent))}%` }}
               />
             </div>
@@ -206,17 +212,17 @@ export default function ModelsPage() {
           className="models-tabs"
         >
           <TabsList>
-            <TabsTrigger value="installed" className="gap-2">
+            <TabsTrigger value="installed">
               Installed
-              {models.length > 0 && <Badge variant="secondary">{models.length}</Badge>}
+              {models.length > 0 && <Badge variant="neutral">{models.length}</Badge>}
             </TabsTrigger>
             <TabsTrigger value="browse">Browse</TabsTrigger>
             <TabsTrigger value="train">Train</TabsTrigger>
           </TabsList>
         </Tabs>
-      </header>
+      </PageBar>
 
-      <div className="models-body">
+      <div className="page-body models-body">
         {pull.jobs.length > 0 && (
           <section className="card pull-jobs-panel">
             <div className="pull-jobs-panel-header">

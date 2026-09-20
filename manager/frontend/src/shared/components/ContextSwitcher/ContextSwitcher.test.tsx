@@ -109,6 +109,16 @@ describe('ContextSwitcher', () => {
     expect(screen.getByText('Workspace 1')).toBeInTheDocument();
   });
 
+  it('shows the organization as an eyebrow above the workspace name', () => {
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
+    const label = screen.getByRole('button', { expanded: false }).querySelector('.context-label');
+    expect(label?.children[0]).toHaveClass('org-name');
+    expect(label?.children[0]).toHaveTextContent('Org 1');
+    expect(label?.children[1]).toHaveClass('ws-name');
+    expect(label?.children[1]).toHaveTextContent('Workspace 1');
+    expect(label?.querySelector('.separator')).toBeNull();
+  });
+
   it('opens dropdown on click', async () => {
     const user = userEvent.setup();
     render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);

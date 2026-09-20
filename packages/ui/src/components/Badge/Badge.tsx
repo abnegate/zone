@@ -14,6 +14,8 @@ const badgeVariants = cva(
         success: 'ui-badge-success',
         warning: 'ui-badge-warning',
         info: 'ui-badge-info',
+        neutral: 'ui-badge-neutral',
+        accent: 'ui-badge-accent',
       },
     },
     defaultVariants: {

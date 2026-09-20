@@ -240,6 +240,64 @@ function Advice({ findings }: { findings: DatasetFinding[] }): ReactElement | nu
   );
 }
 
+const MIME_BY_EXTENSION: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+};
+
+function previewOf(image: Pick<Draft, 'filename' | 'bytes_base64'>): string | null {
+  if (!image.bytes_base64) return null;
+  const extension = image.filename.split('.').pop()?.toLowerCase() ?? '';
+  return `data:${MIME_BY_EXTENSION[extension] ?? 'image/png'};base64,${image.bytes_base64}`;
+}
+
+function Thumbnail({ image }: { image: Draft }): ReactElement {
+  const source = previewOf(image);
+  return (
+    <div className="train-pair-thumb" aria-hidden="true">
+      {source && <img src={source} alt="" />}
+    </div>
+  );
+}
+
+function ArrowIcon({ direction }: { direction: 'up' | 'down' }): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {direction === 'up' ? (
+        <path d="M12 19V5M5 12l7-7 7 7" />
+      ) : (
+        <path d="M12 5v14M19 12l-7 7-7-7" />
+      )}
+    </svg>
+  );
+}
+
+function CloseIcon(): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M18 6L6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -692,89 +750,91 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                   aria-label={`Target pair ${number}: ${named}`}
                   aria-busy={image.reading || Boolean(image.reference?.reading)}
                 >
-                  <legend className="train-pair-title">
-                    <span>Target {number}</span>
-                    <span className="train-pair-filename">{named}</span>
-                  </legend>
-                  {edit && (
-                    <>
+                  <Thumbnail image={image} />
+                  <div className="train-pair-main">
+                    <div className="train-pair-head">
+                      <span className="train-pair-index">Target {number}</span>
+                      <span className="train-pair-filename">{named}</span>
+                    </div>
+                    <div className={`train-pair-fields ${edit ? 'train-pair-fields--edit' : ''}`}>
+                      {edit && (
+                        <Input
+                          id={`train-reference-${image.key}`}
+                          aria-label={referenceLabel}
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          disabled={busy}
+                          aria-required="true"
+                          helpText={
+                            image.reference ? `Reference: ${image.reference.filename}` : undefined
+                          }
+                          error={
+                            missingReference(image)
+                              ? 'Choose one reference image for this target.'
+                              : undefined
+                          }
+                          onChange={(event) => {
+                            const files = event.target.files;
+                            void handleReference(image.key, files);
+                          }}
+                        />
+                      )}
                       <Input
-                        id={`train-reference-${image.key}`}
-                        label={referenceLabel}
-                        type="file"
-                        accept="image/png,image/jpeg,image/webp"
+                        id={edit ? `train-instruction-${image.key}` : `train-caption-${image.key}`}
+                        aria-label={edit ? instructionLabel : `Caption for ${named}`}
+                        placeholder={edit ? 'Describe the edit' : 'Caption'}
+                        value={edit ? image.instruction : image.caption}
                         disabled={busy}
-                        aria-required="true"
+                        required={edit}
                         error={
-                          missingReference(image)
-                            ? 'Choose one reference image for this target.'
+                          edit && missingInstruction(image)
+                            ? 'Describe the edit that turns the reference into this target.'
                             : undefined
                         }
                         onChange={(event) => {
-                          const files = event.target.files;
-                          void handleReference(image.key, files);
+                          if (busy) return;
+                          const value = event.target.value;
+                          setImages((current) =>
+                            current.map((currentImage) =>
+                              currentImage.key === image.key
+                                ? edit
+                                  ? { ...currentImage, instruction: value }
+                                  : {
+                                      ...currentImage,
+                                      caption: value,
+                                      captionRevision: currentImage.captionRevision + 1,
+                                    }
+                                : currentImage
+                            )
+                          );
                         }}
                       />
-                      {image.reference && (
-                        <p className="train-reference-name">
-                          Reference: {image.reference.filename}
-                        </p>
-                      )}
-                    </>
-                  )}
-                  <Input
-                    id={edit ? `train-instruction-${image.key}` : `train-caption-${image.key}`}
-                    label={edit ? instructionLabel : `Caption for ${named}`}
-                    value={edit ? image.instruction : image.caption}
-                    disabled={busy}
-                    required={edit}
-                    error={
-                      edit && missingInstruction(image)
-                        ? 'Describe the edit that turns the reference into this target.'
-                        : undefined
-                    }
-                    onChange={(event) => {
-                      if (busy) return;
-                      const value = event.target.value;
-                      setImages((current) =>
-                        current.map((currentImage) =>
-                          currentImage.key === image.key
-                            ? edit
-                              ? { ...currentImage, instruction: value }
-                              : {
-                                  ...currentImage,
-                                  caption: value,
-                                  captionRevision: currentImage.captionRevision + 1,
-                                }
-                            : currentImage
-                        )
-                      );
-                    }}
-                  />
+                    </div>
+                  </div>
                   <div className="train-pair-actions" role="group" aria-label={`Arrange ${named}`}>
                     <Button
                       type="button"
-                      size="sm"
+                      size="icon"
                       variant="ghost"
                       disabled={busy || index === 0}
                       aria-label={`Move target ${number}: ${named} up`}
                       onClick={() => move(image.key, -1)}
                     >
-                      Move up
+                      <ArrowIcon direction="up" />
                     </Button>
                     <Button
                       type="button"
-                      size="sm"
+                      size="icon"
                       variant="ghost"
                       disabled={busy || index === images.length - 1}
                       aria-label={`Move target ${number}: ${named} down`}
                       onClick={() => move(image.key, 1)}
                     >
-                      Move down
+                      <ArrowIcon direction="down" />
                     </Button>
                     <Button
                       type="button"
-                      size="sm"
+                      size="icon"
                       variant="ghost"
                       disabled={busy}
                       aria-label={`Remove target ${number}: ${named}`}
@@ -785,7 +845,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                         );
                       }}
                     >
-                      Remove
+                      <CloseIcon />
                     </Button>
                   </div>
                 </fieldset>

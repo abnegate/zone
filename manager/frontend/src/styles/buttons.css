@@ -2,13 +2,13 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--ui-space-2);
+  gap: var(--ui-space-1-5);
   height: var(--ui-control-height);
-  padding: 0 var(--ui-space-4);
+  padding: 0 var(--ui-space-3);
   font-family: var(--ui-font-body);
   font-size: var(--ui-text-sm);
   font-weight: 500;
-  line-height: var(--ui-leading-normal);
+  line-height: 1;
   white-space: nowrap;
   border: 1px solid transparent;
   border-radius: var(--ui-radius-md);
@@ -34,104 +34,63 @@
   pointer-events: none;
 }
 
-.btn-primary,
-.ui-btn.ui-btn-primary {
+.btn svg {
+  width: var(--ui-icon-size);
+  height: var(--ui-icon-size);
+  flex-shrink: 0;
+}
+
+.btn.btn-primary,
+a.btn.btn-primary,
+a.btn.btn-primary:hover {
   background-color: var(--ui-accent);
-  color: var(--ui-accent-foreground, var(--ui-text-inverse));
+  color: var(--ui-text-inverse);
+  text-decoration: none;
 }
 
 .btn-primary:hover:not(:disabled) {
   background-color: var(--ui-accent-hover);
 }
 
-.btn-secondary,
-.ui-btn.ui-btn-secondary {
-  background-color: var(--ui-secondary, var(--ui-bg-surface));
-  color: var(--ui-secondary-foreground, var(--ui-text-primary));
+.btn.btn-secondary,
+a.btn.btn-secondary,
+a.btn.btn-secondary:hover {
+  background-color: var(--ui-bg-surface);
+  color: var(--ui-text-primary);
+  text-decoration: none;
 }
 
-.btn-secondary:hover:not(:disabled),
-.ui-btn.ui-btn-secondary:hover:not(:disabled) {
-  background-color: var(--ui-secondary-hover, var(--ui-bg-hover));
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--ui-bg-hover);
 }
 
-.btn-danger {
+.btn.btn-danger {
   background-color: var(--ui-error);
   color: var(--ui-text-inverse);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--ui-error) 90%, transparent);
-}
-
-.btn-success {
-  background-color: var(--ui-success);
-  color: var(--ui-text-inverse);
-}
-
-.btn-success:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--ui-success) 90%, transparent);
-}
-
-.btn-warning {
-  background-color: var(--ui-warning);
-  color: var(--ui-text-inverse);
-}
-
-.btn-warning:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--ui-warning) 90%, transparent);
-}
-
-.btn-outline,
-.btn-accent-outline {
-  background-color: transparent;
-  border-color: var(--ui-border);
-  color: var(--ui-text-primary);
-}
-
-.btn-outline:hover:not(:disabled),
-.btn-accent-outline:hover:not(:disabled) {
-  background-color: var(--ui-bg-surface);
-}
-
-.btn-ghost {
-  background-color: transparent;
-  color: var(--ui-text-primary);
-}
-
-.btn-ghost:hover:not(:disabled) {
-  background-color: var(--ui-bg-surface);
-}
-
-.btn-link {
-  height: auto;
-  padding: 0;
-  background-color: transparent;
-  color: var(--ui-accent);
-  text-underline-offset: 4px;
-}
-
-.btn-link:hover:not(:disabled) {
-  text-decoration: underline;
+  background-color: var(--ui-error-600);
 }
 
 .btn-xs {
-  height: var(--ui-control-height-sm);
+  height: 1.5rem;
   padding: 0 var(--ui-space-2);
-  font-size: var(--ui-text-xs);
+  font-size: var(--ui-text-2xs);
 }
 
 .btn-sm,
 .btn-small {
   height: var(--ui-control-height-sm);
-  padding: 0 var(--ui-space-3);
-  font-size: var(--ui-text-sm);
+  padding: 0 var(--ui-space-2-5);
+  font-size: var(--ui-text-xs);
 }
 
-.btn-lg,
-.btn-large {
+.btn-lg {
   height: var(--ui-control-height-lg);
-  padding: 0 var(--ui-space-6);
+  padding: 0 var(--ui-space-4);
+  font-size: var(--ui-text-md);
+  font-weight: 600;
 }
 
 .btn-block {
@@ -143,8 +102,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--ui-control-height);
-  height: var(--ui-control-height);
+  width: var(--ui-control-height-sm);
+  height: var(--ui-control-height-sm);
   padding: 0;
   background-color: transparent;
   border: 1px solid transparent;
@@ -156,13 +115,19 @@
     color var(--ui-transition-fast);
 }
 
+.btn-icon svg,
+.btn-danger-icon svg {
+  width: var(--ui-icon-size);
+  height: var(--ui-icon-size);
+}
+
 .btn-icon:hover:not(:disabled) {
-  background-color: var(--ui-bg-surface);
+  background-color: var(--ui-bg-hover);
   color: var(--ui-text-primary);
 }
 
 .btn-danger-icon:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--ui-error) 12%, transparent);
+  background-color: var(--ui-error-muted);
   color: var(--ui-error);
 }
 
@@ -179,31 +144,6 @@
   opacity: 0.5;
   cursor: not-allowed;
   pointer-events: none;
-}
-
-.btn-group {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--ui-space-3);
-}
-
-.btn-group--connected {
-  gap: 0;
-}
-
-.btn-group--connected .btn {
-  border-radius: 0;
-}
-
-.btn-group--connected .btn:first-child {
-  border-top-left-radius: var(--ui-radius-md);
-  border-bottom-left-radius: var(--ui-radius-md);
-}
-
-.btn-group--connected .btn:last-child {
-  border-top-right-radius: var(--ui-radius-md);
-  border-bottom-right-radius: var(--ui-radius-md);
 }
 
 .btn-spinner {
