@@ -633,6 +633,38 @@ fn names_existing_media(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool
         || has_phrase(&["of", "it"])
 }
 
+/// Words that open a request stated as a bare noun phrase: "a short clip of
+/// a sunset", "some ambient music for the intro". With no verb there is
+/// nothing for the action-based rules to find, and the pass showed a model
+/// declining requests phrased this way while granting the imperative ones.
+const REQUEST_OPENERS: &[&str] = &["a", "an", "another", "one", "some"];
+
+/// How far past the opener the media noun may sit, allowing a few
+/// adjectives: "a short ten second clip of".
+const OPENER_WINDOW: usize = 4;
+
+/// True when the message opens as a noun phrase whose head is one of `nouns`
+/// and is followed by "of", the shape of an order rather than a mention:
+/// "a clip of a sunset" asks for one; "a clip in the README" talks about one.
+fn opens_as_request_for(tokens: &[String], nouns: &[&str]) -> bool {
+    if !tokens
+        .first()
+        .is_some_and(|token| REQUEST_OPENERS.contains(&token.as_str()))
+    {
+        return false;
+    }
+    tokens
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(OPENER_WINDOW)
+        .take_while(|(_, token)| !OBJECT_BREAKS.contains(&token.as_str()))
+        .any(|(index, token)| {
+            nouns.contains(&token.as_str())
+                && tokens.get(index + 1).is_some_and(|next| next == "of")
+        })
+}
+
 fn is_video_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
     const ACTIONS: &[&str] = &["generate", "create", "make", "render", "animate"];
     let animate = tokens
@@ -648,6 +680,7 @@ fn is_video_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) ->
                 .any(|candidate| VIDEO_NOUNS.contains(&candidate.as_str()))
     });
     explicit
+        || opens_as_request_for(tokens, VIDEO_NOUNS)
         || animate
         || has_phrase(&["text", "to", "video"])
         || has_phrase(&["image", "to", "video"])
@@ -694,6 +727,8 @@ const AUDIO_OBJECTS: &[&str] = &[
     "sfx",
     "song",
     "songs",
+    "soundscape",
+    "soundscapes",
     "soundtrack",
     "soundtracks",
     "track",
@@ -785,7 +820,7 @@ fn audio_signal(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> Aud
             verbs.contains(&token.as_str()) && governs_object(tokens, index, AUDIO_OBJECTS)
         })
     };
-    if commanded(ACTIONS) {
+    if commanded(ACTIONS) || opens_as_request_for(tokens, AUDIO_OBJECTS) {
         return AudioSignal::Certain;
     }
 
@@ -1129,6 +1164,43 @@ mod tests {
         ] {
             assert_eq!(decide(audio, false), RuleDecision::Audio, "{audio}");
         }
+    }
+
+    /// The live pass asked for media as a bare noun phrase and the router let
+    /// the imperative phrasing through while declining the noun phrase, so
+    /// the model answered that it had no such tool. The four sentences are
+    /// the lane's own; the negatives keep a mention from reading as an order.
+    #[test]
+    fn bare_noun_phrase_requests_route_to_their_medium() {
+        for audio in [
+            "a soundscape of rain on a tin roof with distant thunder, about ten seconds",
+            "make a background audio track that sounds like rain on a tin roof with distant thunder",
+            "some ambient music of a rainy night for the intro",
+            "a ten second jingle of a doorbell",
+        ] {
+            assert_eq!(decide(audio, false), RuleDecision::Audio, "{audio}");
+        }
+        for video in [
+            "a short clip of a sunset over the ocean",
+            "make a video of a sunset over the ocean",
+            "a music video of a fox running",
+            "an animation of a spinning globe",
+        ] {
+            assert_eq!(decide(video, false), RuleDecision::Video, "{video}");
+        }
+        for mention in [
+            "a short clip in the README means a code excerpt",
+            "a clip that long would not fit the slide",
+            "some footage was lost in the migration",
+        ] {
+            let decision = decide(mention, false);
+            assert_ne!(decision, RuleDecision::Video, "{mention}");
+            assert_ne!(decision, RuleDecision::Audio, "{mention}");
+        }
+        assert_eq!(
+            decide("a short clip in the README means a code excerpt", false),
+            RuleDecision::Chat
+        );
     }
 
     #[test]
