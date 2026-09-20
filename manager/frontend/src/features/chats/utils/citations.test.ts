@@ -5,11 +5,14 @@ import {
   citationEvidenceLabel,
   citationHref,
   citationKindLabel,
+  formatCitationTimes,
   formatObservedAt,
-  formatRevision,
   isRevisionTimestamp,
   mergeCitations,
 } from './citations';
+
+const revisionOf = (revision: string, observed_at = '2026-09-21T09:24:11Z'): string | null =>
+  formatCitationTimes({ revision, observed_at }).revision;
 
 const citation = (overrides: Partial<Citation> = {}): Citation => ({
   kind: 'github_build',
@@ -70,30 +73,64 @@ describe('citation presentation', () => {
     expect(citationHref({ kind: 'knowledge_passage', url: 'notes/guide.md' })).toBe('/wiki');
     expect(citationHref({ kind: 'workspace_document', url: 'src/guide.md' })).toBe('/wiki');
     expect(citationHref({ kind: 'github_file', url: 'src/guide.md' })).toBeNull();
-    expect(formatRevision('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toBe('aaaaaaa');
-    expect(formatRevision('content-hash')).toBe('content-hash');
+    expect(revisionOf('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toBe('aaaaaaa');
+    expect(revisionOf('content-hash')).toBe('content-hash');
   });
 
   it('reads a timestamp revision as the date it was revised, on the server clock', () => {
     const revised = formatObservedAt('2026-09-20T20:22:20.046608Z');
 
-    expect(formatRevision('2026-09-20T20:22:20.046608', '2026-09-20T20:24:11Z')).toBe(
+    expect(revisionOf('2026-09-20T20:22:20.046608', '2026-09-21T09:24:11Z')).toBe(
       `Revised ${revised}`
     );
-    expect(formatRevision('2026-09-20T20:22:20Z')).toBe(`Revised ${revised}`);
-    expect(formatRevision('2026-09-20T20:22:20+00:00')).toBe(`Revised ${revised}`);
+    expect(revisionOf('2026-09-20T20:22:20Z')).toBe(`Revised ${revised}`);
+    expect(revisionOf('2026-09-20T20:22:20+00:00')).toBe(`Revised ${revised}`);
     expect(isRevisionTimestamp('2026-09-20T20:22:20.046608')).toBe(true);
     expect(isRevisionTimestamp('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toBe(false);
     expect(isRevisionTimestamp(null)).toBe(false);
   });
 
   it('omits a timestamp revision that would print the same minute as the observation', () => {
-    expect(formatRevision('2026-09-20T20:24:05', '2026-09-20T20:24:40Z')).toBeNull();
-    expect(formatRevision('2026-09-20T20:24:05')).not.toBeNull();
+    expect(revisionOf('2026-09-20T20:24:05', '2026-09-20T20:24:40Z')).toBeNull();
+    expect(revisionOf('2026-09-20T20:24:05')).not.toBeNull();
   });
 
   it('passes through a stamp-shaped revision that is not a real date', () => {
-    expect(formatRevision('2026-13-45T99:99:99')).toBe('2026-13-45T99:99:99');
+    expect(revisionOf('2026-13-45T99:99:99')).toBe('2026-13-45T99:99:99');
+  });
+
+  it('drops the date the observation shares with the revision, and the current year everywhere', () => {
+    const now = new Date('2026-09-21T12:00:00Z');
+
+    const shared = formatCitationTimes(
+      { revision: '2026-09-20T20:22:20Z', observed_at: '2026-09-20T20:24:11Z' },
+      now
+    );
+    expect(shared.observed).toBe(
+      new Date('2026-09-20T20:24:11Z').toLocaleTimeString([], {
+        hour: 'numeric',
+        minute: '2-digit',
+      })
+    );
+    expect(shared.revision).not.toContain('2026');
+
+    const apart = formatCitationTimes(
+      { revision: '2026-09-18T20:22:20Z', observed_at: '2026-09-20T20:24:11Z' },
+      now
+    );
+    expect(apart.observed).toBe(formatObservedAt('2026-09-20T20:24:11Z', now));
+    expect(apart.observed).not.toContain('2026');
+
+    const lastYear = formatCitationTimes(
+      { revision: null, observed_at: '2025-09-05T12:00:00Z' },
+      now
+    );
+    expect(lastYear.revision).toBeNull();
+    expect(lastYear.observed).toContain('2025');
+
+    expect(formatCitationTimes({ revision: null, observed_at: 'never' }, now).observed).toBe(
+      'never'
+    );
   });
 
   it('sends a knowledge citation to the index when its suffix cannot name an entry', () => {

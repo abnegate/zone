@@ -258,6 +258,7 @@
 
   --ui-accent: var(--ui-accent-600);
   --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 14%, transparent);
+  --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 14%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-700);
   --ui-accent-glow: rgb(164 72 29 / 0.22);
 
@@ -281,6 +282,7 @@
 
   --ui-accent: var(--ui-accent-600);
   --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 18%, transparent);
+  --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 18%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-500);
   --ui-accent-glow: rgb(212 125 63 / 0.24);
 
@@ -304,6 +306,7 @@
 
   --ui-accent: var(--ui-accent-600);
   --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 14%, transparent);
+  --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 14%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-700);
   --ui-accent-glow: hsl(221.2 83.2% 53.3% / 0.2);
 
@@ -326,6 +329,7 @@
 
   --ui-accent: var(--ui-accent-400);
   --ui-accent-muted: color-mix(in srgb, var(--ui-accent-400) 16%, transparent);
+  --ui-bg-selected: color-mix(in srgb, var(--ui-accent-400) 16%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-300);
   --ui-accent-glow: hsl(217.2 91.2% 59.8% / 0.2);
 
@@ -350,6 +354,7 @@
 
   --ui-accent: var(--ui-accent-500);
   --ui-accent-muted: hsl(210 40% 96.1%);
+  --ui-bg-selected: var(--ui-accent-muted);
   --ui-accent-hover: hsl(222.2 47.4% 15%);
   --ui-accent-glow: hsl(222.2 47.4% 11.2% / 0.2);
 
@@ -374,6 +379,7 @@
 
   --ui-accent: var(--ui-accent-500);
   --ui-accent-muted: hsl(217.2 32.6% 17.5%);
+  --ui-bg-selected: var(--ui-accent-muted);
   --ui-accent-hover: hsl(210 40% 90%);
   --ui-accent-glow: hsl(210 40% 98% / 0.2);
 

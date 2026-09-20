@@ -152,7 +152,27 @@ test('chat titles keep the row width and the conversation header stays one row',
   expect(widths.title).toBeGreaterThanOrEqual(widths.item * 0.6);
   expect(widths.height).toBe(52);
 
+  await item.hover();
+  const covered = await item.evaluate((element) => {
+    const overlay = element.querySelector('.chat-item-actions')?.getBoundingClientRect();
+    const title = element.querySelector('.chat-title')?.getBoundingClientRect();
+    return Boolean(
+      overlay && title && overlay.top <= title.top && overlay.bottom >= title.bottom
+    );
+  });
+  expect(covered, 'the hover actions leave the title showing above them').toBe(true);
+
   await item.click();
+  await expect(item).toHaveClass(/active/);
+  await item.hover();
+  const alpha = await item.evaluate((element) => {
+    const actions = element.querySelector('.chat-item-actions');
+    const colour = actions ? getComputedStyle(actions).backgroundColor : '';
+    const channel = colour.match(/\/\s*([\d.]+)\)$/) ?? colour.match(/^rgba\(.*,\s*([\d.]+)\)$/);
+    return channel ? Number(channel[1]) : 1;
+  });
+  expect(alpha, 'the active row shows its title through the hover actions').toBe(1);
+
   const header = page.locator('.chat-header');
   await expect(header).toBeVisible();
   const box = await header.boundingBox();

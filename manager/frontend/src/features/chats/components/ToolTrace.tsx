@@ -100,24 +100,82 @@ function isString(value: unknown): value is string {
   return typeof value === 'string';
 }
 
+function text(value: unknown): string | null {
+  return isString(value) && value.trim() ? value.trim() : null;
+}
+
+function reference(value: unknown): string | null {
+  return typeof value === 'number' ? `#${value}` : null;
+}
+
+function join(parts: (string | null)[], separator: string): string | null {
+  const present = parts.filter((part): part is string => part !== null);
+  return present.length ? present.join(separator) : null;
+}
+
+function formatDue(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+const SOURCE_HANDLE = /\s*\[source_id: [^\]]*\]/g;
+const COMMIT_SHA = /^[0-9a-f]{40}$/i;
+const SHORT_SHA = 7;
+
+function gitReference(value: unknown): string | null {
+  const reference = text(value);
+  return reference && COMMIT_SHA.test(reference) ? reference.slice(0, SHORT_SHA) : reference;
+}
+
+type Derive = (args: Arguments, detail: string) => string | null;
+
 /// The detail column carries the first line of what the tool returned, and for
-/// these tools that line is a preamble written for the model: it tells it where
-/// the schemas will be, or that a page is data and not instructions. The
-/// arguments say what the call was actually about, so the reader gets those.
-const DETAIL_FROM_ARGUMENTS: Record<string, (args: Arguments) => string | null> = {
+/// these tools that line is written for the model: a preamble saying where the
+/// schemas will be or that a page is data and not instructions, or the opening
+/// of a JSON record. The arguments say what the call was actually about, so the
+/// reader gets those.
+const DETAIL_FROM_ARGUMENTS: Partial<Record<string, Derive>> = {
   load_tools: (args) =>
     Array.isArray(args.names) ? args.names.filter(isString).map(humanise).join(', ') || null : null,
-  fetch_url: (args) => (isString(args.url) ? args.url : null),
+  fetch_url: (args) => text(args.url),
   web_search: (args) => (isString(args.query) ? `“${args.query}”` : null),
+  list_sources: (_, detail) => detail.replace(SOURCE_HANDLE, ''),
+  read_repository_file: (args) => join([text(args.path), gitReference(args.ref)], ' @ '),
+  get_build_status: (args) => gitReference(args.ref),
+  list_deployments: (args) => gitReference(args.ref),
+  read_check_logs: (args) =>
+    join(
+      [typeof args.job_id === 'number' ? `job ${args.job_id}` : null, reference(args.number)],
+      ' · '
+    ),
+  list_issues: (args) => text(args.state),
+  get_issue: (args) => reference(args.number),
+  comment_on_issue: (args) => reference(args.number),
+  assess_pull_requests: (args) => reference(args.number) ?? text(args.state),
+  assess_release_pipelines: (args) => text(args.tag),
+  create_pull_request: (args) =>
+    join([text(args.title), join([text(args.head), text(args.base)], ' → ')], ' · '),
+  list_documents: (args) => (isString(args.query) ? `“${args.query}”` : null),
+  read_document: (args) => text(args.id),
+  create_document: (args) => text(args.title),
+  update_document: (args) => text(args.title) ?? text(args.id),
+  create_reminder: (args) =>
+    join([text(args.content), isString(args.due_at) ? formatDue(args.due_at) : null], ' · '),
 };
 
+const JSON_LINE = /^\s*(?:\{\s*(?:"|\})|\[\s*(?:[{["\]]|\d))/;
+
 /// A failed call's detail is its error and a waiting call's is its state, and
-/// both are the server's words about this call rather than a preamble.
+/// both are the server's words about this call rather than a preamble. A JSON
+/// record nothing here can summarise is left out rather than shown as braces.
 function toolDetail(call: ToolCallRecord): string {
+  if (!call.success || call.pending || call.approval === 'pending') return call.detail;
   const derive = DETAIL_FROM_ARGUMENTS[call.name];
-  if (!derive || !call.success || call.pending || call.approval === 'pending') return call.detail;
-  const args = parseArguments(call.arguments);
-  return (args && derive(args)) ?? call.detail;
+  const args = derive ? parseArguments(call.arguments) : null;
+  const derived = derive && args ? derive(args, call.detail) : null;
+  if (derived) return derived;
+  return JSON_LINE.test(call.detail) ? '' : call.detail;
 }
 
 function formatDuration(ms: number): string {

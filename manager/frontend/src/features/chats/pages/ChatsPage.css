@@ -111,7 +111,7 @@
 }
 
 .chat-item.active {
-  --chat-item-bg: var(--ui-accent-muted);
+  --chat-item-bg: var(--ui-bg-selected);
   background: var(--chat-item-bg);
   box-shadow: inset 2px 0 0 var(--ui-accent);
 }
@@ -155,10 +155,11 @@
 
 .chat-item-actions {
   position: absolute;
-  top: 50%;
+  top: 0;
   right: var(--ui-space-2);
-  transform: translateY(-50%);
+  bottom: 0;
   display: none;
+  align-items: center;
   gap: var(--ui-space-0-5);
   background: var(--chat-item-bg);
 }
@@ -797,10 +798,15 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--ui-space-2);
+  gap: var(--ui-space-1);
   color: var(--ui-text-muted);
   font-size: var(--ui-text-2xs);
   line-height: var(--ui-space-4);
+}
+
+.citation-meta > * + *:not(.citation-provenance)::before {
+  content: '·';
+  margin-right: var(--ui-space-1);
 }
 
 .citation-revision {
