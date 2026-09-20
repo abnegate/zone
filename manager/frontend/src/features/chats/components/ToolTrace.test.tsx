@@ -231,13 +231,14 @@ describe('ToolTrace', () => {
             id: 'a',
             name: 'read_document',
             arguments: '{"id":"931a61f8-f8a9-4883-9afe-ba8b0aa9c4f0"}',
-            detail: '{"complete":true,"content_state":"stored_text"}',
+            detail:
+              '{"complete":true,"content_state":"stored_text","document":{"content":"Rotate the key.","editable":true,"fetched_at":null,"id":"931a61f8-f8a9-4883-9afe-ba8b0aa9c4f0","identifier":"doc:b9655d","revision":null,"source":"knowledge","source_id":null,"title":"Deploy \\"notes\\"","updated_…',
           }),
           call({
             id: 'b',
             name: 'create_document',
             arguments: '{"title":"Runbook","content":"Step one."}',
-            detail: '{"created":true,"id":"6894f43a"}',
+            detail: '{"id":"6894f43a","created":true,"searchable":true}',
           }),
           call({
             id: 'c',
@@ -249,7 +250,8 @@ describe('ToolTrace', () => {
             id: 'd',
             name: 'list_documents',
             arguments: '{"query":"deployment"}',
-            detail: '{"documents":[{"content":null}]}',
+            detail:
+              '{"documents":[{"content":null,"editable":true,"fetched_at":null,"id":"77aa","identifier":"doc:c1d2e3","revision":null,"source":"knowledge","source_id":null,"title":"Rollout plan","updated_at":null}],"limit":25,"offset":0}',
           }),
           call({
             id: 'e',
@@ -257,6 +259,18 @@ describe('ToolTrace', () => {
             arguments:
               '{"content":"stretch","due_at":"2026-09-20T19:45:30+00:00","reason":"asked"}',
             detail: '{"anchor_at":null,"chat_id":"f0b66701"}',
+          }),
+          call({
+            id: 'f',
+            name: 'read_document',
+            arguments: '{"id":"77aa"}',
+            detail: '{"complete":true,"content_state":"stored_text"}',
+          }),
+          call({
+            id: 'g',
+            name: 'read_document',
+            arguments: '{"id":"0b1c2d3e-0000-4000-8000-000000000000"}',
+            detail: '{"complete":true,"content_state":"stored_text"}',
           }),
         ]}
       />
@@ -266,34 +280,73 @@ describe('ToolTrace', () => {
       dateStyle: 'medium',
       timeStyle: 'short',
     });
-    expect(screen.getByText('931a61f8-f8a9-4883-9afe-ba8b0aa9c4f0')).toBeInTheDocument();
-    expect(screen.getByText('Runbook')).toBeInTheDocument();
-    expect(screen.getByText('6894f43a')).toBeInTheDocument();
+    expect(screen.getByText('Deploy "notes"')).toBeInTheDocument();
+    expect(screen.getAllByText('Runbook')).toHaveLength(2);
+    expect(screen.getByText('Rollout plan')).toBeInTheDocument();
     expect(screen.getByText('“deployment”')).toBeInTheDocument();
     expect(screen.getByText(`stretch · ${due}`)).toBeInTheDocument();
+    expect(screen.queryByText(/[0-9a-f]{8}-/)).not.toBeInTheDocument();
+    expect(screen.queryByText('6894f43a')).not.toBeInTheDocument();
     expect(screen.queryByText(/\{"/)).not.toBeInTheDocument();
+    const details = [...document.querySelectorAll('.tool-call-detail')].map(
+      (detail) => detail.textContent
+    );
+    expect(details.at(-1)).toBe('');
   });
 
-  it('drops the source handle from a listing of connected sources', () => {
+  it('names the connected sources a listing returned, or counts them past three', () => {
     render(
       <ToolTrace
         calls={[
           call({
+            id: 'a',
             name: 'list_sources',
             arguments: '{}',
             detail:
               'Scratch repo [github, active] [source_id: f29acba3-c463-4986-a158-41206d9dfecd] https://github.com/o/r — The scratch repository',
           }),
+          call({
+            id: 'b',
+            name: 'list_sources',
+            arguments: '{}',
+            detail:
+              'Scratch repo [github, active] [source_id: f29acba3] https://github.com/o/r\nTeam calendar [google_calendar, active] [source_id: 1c2d3e4f]',
+          }),
+          call({
+            id: 'c',
+            name: 'list_sources',
+            arguments: '{}',
+            detail:
+              'Scratch repo [github, active] [source_id: f29acba3] https://github.com/o/r (2 lines)',
+          }),
+          call({
+            id: 'd',
+            name: 'list_sources',
+            arguments: '{}',
+            detail:
+              'Scratch repo [github, active] [source_id: f29acba3] https://github.com/o/r (4 lines)',
+          }),
+          call({
+            id: 'e',
+            name: 'list_sources',
+            arguments: '{}',
+            detail: 'This workspace has no connected sources.',
+          }),
         ]}
       />
     );
 
-    expect(
-      screen.getByText(
-        'Scratch repo [github, active] https://github.com/o/r — The scratch repository'
-      )
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/source_id/)).not.toBeInTheDocument();
+    const details = [...document.querySelectorAll('.tool-call-detail')].map(
+      (detail) => detail.textContent
+    );
+    expect(details).toEqual([
+      'Scratch repo',
+      'Scratch repo, Team calendar',
+      '2 sources',
+      '4 sources',
+      'This workspace has no connected sources.',
+    ]);
+    expect(screen.queryByText(/source_id|github|https:/)).not.toBeInTheDocument();
   });
 
   it('shows nothing rather than a JSON record for a call it cannot summarise', () => {

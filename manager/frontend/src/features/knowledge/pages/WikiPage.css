@@ -210,7 +210,8 @@
 }
 
 .knowledge-card-url {
-  flex: 1;
+  flex: 1 1 40%;
+  min-width: 6rem;
   color: var(--ui-text-muted);
   font-family: var(--ui-font-mono);
 }

@@ -324,10 +324,27 @@ describe('WikiPage', () => {
       expect(badges.length).toBeGreaterThan(0);
     });
 
-    it('displays URL link for URL entries', () => {
+    it('links a URL entry by its host and keeps the full address as the tooltip', () => {
       renderWikiPage();
-      const link = screen.getByText('https://example.com') as HTMLAnchorElement;
+      const link = screen.getByText('example.com') as HTMLAnchorElement;
+      expect(link).toHaveClass('knowledge-card-url');
       expect(link.href).toBe('https://example.com/');
+      expect(link.title).toBe('https://example.com');
+    });
+
+    it('keeps the refresh date out of the card footer and in the details', () => {
+      renderWikiPage();
+      const card = screen.getByText('URL Entry').closest('.knowledge-card') as HTMLElement;
+      const footer = card.querySelector('.knowledge-card-footer');
+      expect(footer).toHaveTextContent('Updated Jan 2, 2024');
+      expect(footer).not.toHaveTextContent('Refreshed');
+      fireEvent.click(card);
+      const dialog = screen.getByRole('dialog', { name: 'URL Entry' });
+      expect(within(dialog).getByText('Last refreshed')).toBeInTheDocument();
+      expect(within(dialog).getByText('https://example.com')).toHaveAttribute(
+        'href',
+        'https://example.com'
+      );
     });
 
     it('displays fetched content for URL entries', () => {

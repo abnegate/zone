@@ -248,9 +248,9 @@ describe('auth layout', () => {
     expect(invitation).not.toContain('.loading-state');
   });
 
-  it('sizes session rows at 44 with a 28px pager', () => {
+  it('sizes session rows at 40 with a 28px pager', () => {
     const sessions = read(join(features, 'auth', 'pages', 'SessionsPage.css'));
-    expect(rule(sessions, '.sessions-table td')).toContain('height: 2.75rem');
+    expect(rule(sessions, '.sessions-table td')).toContain('height: var(--ui-list-row)');
     expect(rule(sessions, '.sessions-table td')).toContain('padding: 0 var(--ui-space-3)');
     expect(rule(sessions, '.sessions-table td')).toContain('box-shadow: inset 0 -1px');
     expect(rule(sessions, '.sessions-pager')).toContain('height: var(--ui-control-height-sm)');
