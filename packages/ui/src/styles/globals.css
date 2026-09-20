@@ -596,10 +596,6 @@
     min-width: 0;
   }
 
-  .ui-form > .modal-actions {
-    margin-top: 0;
-  }
-
   .ui-select-wrapper {
     display: flex;
     flex-direction: column;

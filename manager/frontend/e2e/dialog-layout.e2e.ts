@@ -1,7 +1,7 @@
 import type { Page, TestInfo } from '@playwright/test';
 import { expect, test } from './fixtures';
 import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
-import { blockServiceWorker } from './test-utils';
+import { blockServiceWorker, routeApi } from './test-utils';
 
 async function prepare(page: Page): Promise<void> {
   await blockServiceWorker(page.context());
@@ -9,6 +9,67 @@ async function prepare(page: Page): Promise<void> {
   await page.goto('/login', { waitUntil: 'domcontentloaded' });
   await setupAdminAuth(page);
 }
+
+async function footerGap(page: Page): Promise<number> {
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.modal-actions')).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+  return dialog.evaluate((element) => {
+    const actions = element.querySelector('.modal-actions');
+    if (!actions) throw new Error('dialog has no footer');
+    let previous = actions.previousElementSibling;
+    while (previous && previous.getBoundingClientRect().height === 0) {
+      previous = previous.previousElementSibling;
+    }
+    if (!previous) throw new Error('dialog footer has nothing above it');
+    return actions.getBoundingClientRect().top - previous.getBoundingClientRect().bottom;
+  });
+}
+
+async function expectFooterGap(page: Page, name: string): Promise<void> {
+  const gap = await footerGap(page);
+  expect(gap, `${name}: last field to footer rule`).toBeGreaterThanOrEqual(16);
+  expect(gap, `${name}: last field to footer rule`).toBeLessThanOrEqual(20);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toBeHidden();
+}
+
+test.describe('Dialog footers', () => {
+  test.use({ viewport: { width: 1440, height: 1000 } });
+  test.beforeEach(async ({ page }) => {
+    await prepare(page);
+  });
+
+  test('every md dialog keeps 16 to 20px between its last field and the footer rule', async ({
+    page,
+  }) => {
+    await routeApi(page, /\/organizations\/[^/]+\/invitations(?:\?|$)/, (route) =>
+      route.fulfill({ json: { invitations: [] } })
+    );
+
+    await page.goto('/chats', { waitUntil: 'domcontentloaded' });
+    await page.locator('.btn-icon[aria-label="New chat"]').click();
+    await expectFooterGap(page, 'New Chat');
+    const chat = page.locator('.chat-item').first();
+    await chat.hover();
+    await chat.getByRole('button', { name: /^Rename / }).click();
+    await expectFooterGap(page, 'Rename chat');
+
+    await page.goto('/projects', { waitUntil: 'domcontentloaded' });
+    await page.locator('.project-card').first().click();
+    const details = page.locator('.details-actions');
+    await details.getByRole('button', { name: 'Edit Project' }).click();
+    await expectFooterGap(page, 'Edit Project');
+    await page.getByRole('button', { name: /Add Sync/ }).click();
+    await expectFooterGap(page, 'Add External Sync');
+
+    await page.goto('/org-settings', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('tab', { name: 'Invitations', exact: true }).click();
+    await page.getByRole('button', { name: 'Invite Member', exact: true }).click();
+    await expectFooterGap(page, 'Invite Member');
+  });
+});
 
 async function capture(page: Page, information: TestInfo): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
@@ -52,10 +113,7 @@ for (const width of [1440, 390]) {
         await page.getByRole('button', { name: 'New project', exact: true }).click();
         await expect(dialog).toBeVisible();
         await expect(page.locator('.ui-wizard-overlay')).toHaveCSS('position', 'fixed');
-        await expect(dialog.locator('.ui-wizard-content')).toHaveCSS(
-          'padding-left',
-          width <= 768 ? '16px' : '24px'
-        );
+        await expect(dialog.locator('.ui-wizard-content')).toHaveCSS('padding-left', '20px');
         if (motion === 'reduce') {
           await expect(dialog).toHaveCSS('animation-name', 'none');
           await expect(page.locator('.ui-wizard-overlay')).toHaveCSS('animation-name', 'none');
@@ -72,7 +130,7 @@ for (const width of [1440, 390]) {
         const dialog = page.getByRole('dialog');
         await expect(dialog).toBeVisible();
         await expect(dialog).toHaveCSS('position', 'fixed');
-        await expect(dialog).toHaveCSS('padding', width <= 768 ? '16px' : '24px');
+        await expect(dialog).toHaveCSS('padding', '20px');
         await expect(dialog).toHaveCSS('border-top-width', '1px');
         await expect(dialog).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
         await expect(page.locator('.ui-dialog-overlay')).toHaveCSS('position', 'fixed');
