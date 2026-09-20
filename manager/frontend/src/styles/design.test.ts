@@ -99,6 +99,21 @@ describe('shared surfaces', () => {
     expect(hidden).toContain('overflow: hidden');
   });
 
+  it('outlines a destructive button and fills it only on hover', () => {
+    const globals = read(join(kit, 'globals.css'));
+    const outline = rule(globals, '  .ui-btn-destructive-outline');
+    expect(outline).toContain('background-color: transparent');
+    expect(outline).toContain('color: var(--ui-error-600)');
+    expect(rule(globals, '  .ui-btn-destructive-outline:hover')).toContain(
+      'background-color: var(--ui-error-600)'
+    );
+  });
+
+  it('gives a dialog title a 24px line so the panel lands on the grid', () => {
+    const globals = read(join(kit, 'globals.css'));
+    expect(rule(globals, '  .ui-dialog-title')).toContain('line-height: var(--ui-space-6)');
+  });
+
   it('tints badges instead of filling them', () => {
     const globals = read(join(kit, 'globals.css'));
     expect(rule(globals, '  .ui-badge')).toContain('height: var(--ui-badge-height)');

@@ -212,9 +212,13 @@ describe('ModelsPage', () => {
       expect(screen.getByRole('tab', { name: 'Browse' })).toBeInTheDocument();
     });
 
-    it('shows installed tab by default', () => {
+    it('shows installed tab by default with an inline add-model row', () => {
       renderModelsPage();
-      expect(screen.getByRole('heading', { name: 'Add Model' })).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Add Model' })).not.toBeInTheDocument();
+      const add = screen.getByRole('region', { name: 'Add model' });
+      expect(within(add).getByLabelText('Model name')).toBeInTheDocument();
+      expect(within(add).getByRole('button', { name: 'Install' })).toBeInTheDocument();
+      expect(add.querySelector('.models-section-head')).toBeNull();
       expect(screen.getByRole('heading', { name: 'Installed Models' })).toBeInTheDocument();
     });
   });
@@ -1201,6 +1205,7 @@ describe('ModelsPage', () => {
             size: 3800000000,
             description: 'A general-purpose local chat model.',
             capabilities: ['text', 'tools'],
+            tags: ['tools', 'thinking', 'cloud'],
             details: {
               family: 'llama',
               parameter_size: '7B',
@@ -1227,8 +1232,14 @@ describe('ModelsPage', () => {
         expect(screen.getByText('A general-purpose local chat model.')).toBeInTheDocument();
         expect(screen.getByText('Capabilities')).toBeInTheDocument();
         const capabilities = screen.getByRole('group', { name: 'Model capabilities' });
-        expect(within(capabilities).getByText('Text')).toBeInTheDocument();
-        expect(within(capabilities).getByText('Tools')).toBeInTheDocument();
+        expect([...capabilities.querySelectorAll('.tag')].map((tag) => tag.textContent)).toEqual([
+          'Text',
+          'Tools',
+          'Thinking',
+          'Cloud',
+        ]);
+        expect(document.querySelector('.details-tags')).toBeNull();
+        expect(screen.queryByText('tools')).not.toBeInTheDocument();
         expect(screen.getByText('Parameters')).toBeInTheDocument();
         expect(screen.getByText('128K')).toBeInTheDocument();
       });

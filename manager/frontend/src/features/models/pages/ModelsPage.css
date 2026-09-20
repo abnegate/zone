@@ -67,6 +67,7 @@
 .models-install-form {
   display: flex;
   gap: var(--ui-space-2);
+  height: var(--ui-control-height);
 }
 
 .models-install-form input {
@@ -75,8 +76,13 @@
 }
 
 .models-install-panel .help-text {
+  height: var(--ui-space-4);
   margin: var(--ui-hint-gap) 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--ui-text-2xs);
+  line-height: var(--ui-space-4);
   color: var(--ui-text-muted);
 }
 

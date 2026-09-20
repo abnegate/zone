@@ -240,10 +240,7 @@ export default function ModelsPage() {
 
         {activeTab === 'installed' && (
           <>
-            <section className="models-install-panel">
-              <div className="models-section-head">
-                <h2>Add Model</h2>
-              </div>
+            <section className="models-install-panel" aria-label="Add model">
               <form className="models-install-form" onSubmit={handlePull}>
                 <input
                   type="text"
@@ -774,18 +771,8 @@ export default function ModelsPage() {
 
                 <div className="details-use-cases">
                   <span className="details-label">Capabilities</span>
-                  <Capabilities capabilities={detailsModel.capabilities} />
+                  <Capabilities capabilities={detailsModel.capabilities} tags={detailsModel.tags} />
                 </div>
-
-                {detailsModel.tags && detailsModel.tags.length > 0 && (
-                  <div className="details-tags">
-                    {detailsModel.tags.slice(0, 8).map((tag) => (
-                      <span key={tag} className="tag">
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                )}
 
                 {download?.name && (
                   <DownloadOptions

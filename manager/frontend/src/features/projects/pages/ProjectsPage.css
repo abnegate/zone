@@ -43,10 +43,12 @@
   gap: var(--ui-space-1);
 }
 
-.project-card {
+.project-card.card--list {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-0-5);
+  box-sizing: border-box;
+  height: 4.5rem;
+  padding: var(--ui-space-2) var(--ui-space-3);
   border: 1px solid var(--ui-border);
   background: var(--ui-bg-elevated);
   cursor: pointer;
@@ -85,13 +87,13 @@
 }
 
 .project-description {
-  height: var(--ui-space-4);
+  height: 1.125rem;
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--ui-text-xs);
-  line-height: var(--ui-space-4);
+  line-height: 1.125rem;
   color: var(--ui-text-secondary);
 }
 
@@ -177,11 +179,10 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--ui-font-display);
-  font-size: var(--ui-title-size);
+  font-family: var(--ui-font-body);
+  font-size: var(--ui-heading-size);
   font-weight: 600;
-  letter-spacing: var(--ui-tracking-tight);
-  line-height: var(--ui-leading-tight);
+  line-height: var(--ui-space-6);
 }
 
 .details-content {

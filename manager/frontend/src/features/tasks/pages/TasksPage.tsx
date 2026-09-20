@@ -201,7 +201,6 @@ export default function TasksPage() {
                   <div className="task-badges">
                     {task.is_agentic && <Badge variant="accent">Agentic</Badge>}
                     <TaskStatusBadge status={task.status} />
-                    {task.pr_status && <PrStatusBadge status={task.pr_status} />}
                   </div>
                 </div>
                 <p className="task-project">{getProjectNames(task.project_ids)}</p>
@@ -214,16 +213,19 @@ export default function TasksPage() {
                       {sources.find((s) => s.id === task.source_id)?.name || 'Source'}
                     </span>
                   )}
-                  {task.pr_url && (
+                  {(task.pr_status || task.pr_url) && (
                     <span className="task-pr">
-                      <a
-                        href={task.pr_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="task-pr-link"
-                      >
-                        View PR
-                      </a>
+                      {task.pr_status && <PrStatusBadge status={task.pr_status} />}
+                      {task.pr_url && (
+                        <a
+                          href={task.pr_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="task-pr-link"
+                        >
+                          View PR
+                        </a>
+                      )}
                       {task.branch_name && (
                         <code className="task-branch" title={task.branch_name}>
                           {task.branch_name}

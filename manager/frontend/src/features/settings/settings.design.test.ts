@@ -94,7 +94,9 @@ describe('sources surfaces', () => {
     expect(css).not.toContain('radial-gradient');
     expect(css).not.toContain('.sources-header');
     expect(rule(css, '.sources-list')).toContain('gap: var(--ui-space-3)');
-    expect(rule(css, '.source-card')).not.toContain('padding');
+    expect(rule(css, '.source-card.card--list')).toContain(
+      'padding: var(--ui-space-2) var(--ui-space-3)'
+    );
     expect(rule(css, '.source-name')).toContain('text-overflow: ellipsis');
     expect(rule(css, '.source-url')).toContain('font-family: var(--ui-font-mono)');
   });

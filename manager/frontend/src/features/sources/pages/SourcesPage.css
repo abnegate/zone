@@ -33,11 +33,11 @@
   align-items: start;
 }
 
-.source-card {
+.source-card.card--list {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-1);
   min-width: 0;
+  padding: var(--ui-space-2) var(--ui-space-3);
 }
 
 .source-card.source-inactive {
@@ -52,7 +52,7 @@
   display: flex;
   align-items: center;
   gap: var(--ui-space-2);
-  min-height: var(--ui-badge-height);
+  height: var(--ui-badge-height);
 }
 
 .source-provider-icon {
@@ -94,9 +94,10 @@
 }
 
 .source-description {
+  height: 1.125rem;
   margin: 0;
   font-size: var(--ui-text-sm);
-  line-height: var(--ui-leading-normal);
+  line-height: 1.125rem;
   color: var(--ui-text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -137,7 +138,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--ui-space-2);
-  min-height: var(--ui-control-height-sm);
+  height: var(--ui-control-height-sm);
   margin-top: var(--ui-space-1);
 }
 

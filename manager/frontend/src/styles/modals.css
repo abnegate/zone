@@ -198,13 +198,6 @@
   margin-bottom: var(--ui-space-1);
 }
 
-.details-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--ui-space-1-5);
-  margin-bottom: var(--ui-space-4);
-}
-
 .details-author {
   margin-bottom: var(--ui-space-3);
 }
@@ -231,10 +224,6 @@
 
 .details-use-cases {
   margin-bottom: var(--ui-space-3);
-}
-
-.details-use-cases .details-tags {
-  margin-bottom: 0;
 }
 
 .details-meta-item {
@@ -500,4 +489,11 @@
 
 .ui-dialog-content > .modal-actions {
   margin-top: 0;
+}
+
+.ui-dialog-content > p {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+  color: var(--ui-text-secondary);
 }

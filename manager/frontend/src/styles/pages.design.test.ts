@@ -203,6 +203,12 @@ describe('tasks page layout', () => {
     expect(rule(css, '.task-actions')).toContain('margin-top: auto');
   });
 
+  it('guarantees the title 60% of its row and keeps the badges from pushing it out', () => {
+    expect(rule(css, '.task-card-title h3')).toContain('min-width: 60%');
+    expect(rule(css, '.task-badges')).toContain('overflow: hidden');
+    expect(rule(css, '.task-badges')).not.toContain('flex-shrink: 0');
+  });
+
   it('keeps badges and pull request rows on the palette', () => {
     expect(css).not.toMatch(legacyScales);
     expect(css).not.toContain('.task-agentic-badge');
@@ -224,6 +230,24 @@ describe('projects page layout', () => {
     expect(rule(css, '.projects-list-pane')).toContain('width: 20rem');
   });
 
+  it('makes every list card exactly 72px on 8/12 padding', () => {
+    const card = rule(css, '.project-card.card--list');
+    expect(card).toContain('height: 4.5rem');
+    expect(card).toContain('box-sizing: border-box');
+    expect(card).toContain('padding: var(--ui-space-2) var(--ui-space-3)');
+    expect(card).not.toContain('gap:');
+    expect(rule(css, '.project-card-header')).toContain('height: var(--ui-space-5)');
+    expect(rule(css, '.project-description')).toContain('line-height: 1.125rem');
+    expect(rule(css, '.project-card-footer')).toContain('height: var(--ui-space-4)');
+  });
+
+  it('sets the detail title in the body face', () => {
+    const title = rule(css, '.details-header h2');
+    expect(title).toContain('font-family: var(--ui-font-body)');
+    expect(title).toContain('font-size: var(--ui-heading-size)');
+    expect(title).not.toContain('display');
+  });
+
   it('lays the detail pane out as a 48px header, a facts grid and a 48px footer', () => {
     expect(rule(css, '.details-header')).toContain('height: var(--ui-header-height)');
     expect(rule(css, '.detail-facts')).toContain('grid-template-columns: 6rem minmax(0, 1fr)');
@@ -232,8 +256,39 @@ describe('projects page layout', () => {
   });
 });
 
+describe('sources page layout', () => {
+  const css = read(join(features, 'sources', 'pages', 'SourcesPage.css'));
+
+  it('makes every source card exactly 104px on 8/12 padding', () => {
+    const card = rule(css, '.source-card.card--list');
+    expect(card).toContain('padding: var(--ui-space-2) var(--ui-space-3)');
+    expect(card).not.toContain('gap:');
+    expect(rule(css, '.source-card-title')).toContain('height: var(--ui-badge-height)');
+    expect(rule(css, '.source-description')).toContain('height: 1.125rem');
+    expect(rule(css, '.source-description')).toContain('line-height: 1.125rem');
+    expect(rule(css, '.source-url')).toContain('line-height: var(--ui-space-4)');
+    expect(rule(css, '.source-card-meta')).toContain('height: var(--ui-control-height-sm)');
+    expect(rule(css, '.source-card-meta')).toContain('margin-top: var(--ui-space-1)');
+  });
+});
+
 describe('models page layout', () => {
   const css = read(join(features, 'models', 'pages', 'ModelsPage.css'));
+  const page = read(join(features, 'models', 'pages', 'ModelsPage.tsx'));
+  const modals = read(join(import.meta.dir, 'modals.css'));
+
+  it('adds a model from one 32px row with the hint under it', () => {
+    expect(page).not.toContain('<h2>Add Model</h2>');
+    expect(rule(css, '.models-install-form')).toContain('height: var(--ui-control-height)');
+    const hint = rule(css, '.models-install-panel .help-text');
+    expect(hint).toContain('line-height: var(--ui-space-4)');
+    expect(hint).toContain('font-size: var(--ui-text-2xs)');
+  });
+
+  it('shows capabilities and raw tags as one row', () => {
+    expect(page).not.toContain('details-tags');
+    expect(modals).not.toContain('.details-tags');
+  });
   const browse = read(join(features, 'models', 'components', 'VirtualBrowseList.tsx'));
   const pulls = read(join(features, 'models', 'components', 'PullJobs.css'));
 

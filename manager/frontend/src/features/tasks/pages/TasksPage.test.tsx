@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
@@ -816,6 +816,39 @@ describe('TasksPage', () => {
       expect(prLink).toHaveAttribute('rel', 'noopener noreferrer');
       expect(prLink.closest('.task-meta')).not.toBeNull();
     });
+  });
+
+  it('keeps the pull request badge in the meta row so the title row holds at most two badges', async () => {
+    mockGetTasks.mockImplementation(() =>
+      Promise.resolve([
+        {
+          ...mockTasks[0],
+          pr_status: 'open',
+          pr_url: 'https://github.com/test/repo/pull/7',
+          branch_name: 'zone/task-7',
+        },
+      ])
+    );
+
+    renderTasksPage();
+    const badge = await screen.findByText('PR: open');
+    const pr = badge.closest('.task-pr') as HTMLElement | null;
+    expect(pr).not.toBeNull();
+    expect(pr?.closest('.task-meta')).not.toBeNull();
+    expect(badge.closest('.task-card-title')).toBeNull();
+    expect(within(pr as HTMLElement).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
+    expect(document.querySelectorAll('.task-card-title .ui-badge')).toHaveLength(2);
+  });
+
+  it('shows the pull request status before a link exists', async () => {
+    mockGetTasks.mockImplementation(() =>
+      Promise.resolve([{ ...mockTasks[0], pr_status: 'pending', pr_url: null }])
+    );
+
+    renderTasksPage();
+    const badge = await screen.findByText('PR: pending');
+    expect(badge.closest('.task-meta')).not.toBeNull();
+    expect(screen.queryByRole('link', { name: 'View PR' })).not.toBeInTheDocument();
   });
 
   it('displays branch name when branch_name exists', async () => {
