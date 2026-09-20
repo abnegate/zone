@@ -258,15 +258,28 @@ describe('tasks page layout', () => {
     expect(rule(css, '.task-branch')).toContain('height: var(--ui-badge-height)');
   });
 
-  it('folds the pull request into the meta row and lets only the branch tag give way', () => {
+  it('folds the pull request into the meta row and lets the model and source give way', () => {
     expect(rule(css, '.task-pr')).toContain('display: contents');
     expect(rule(css, '.task-pr::before')).toContain('margin-right: 0');
     expect(css).toContain('.task-meta > * + *::before');
+    const giveWay = rule(css, '.task-model,\n.task-source');
+    expect(giveWay).toContain('flex: 0 1 auto');
+    expect(giveWay).toContain('min-width: 0');
+    expect(giveWay).toContain('text-overflow: ellipsis');
+  });
+
+  it('sets the branch tag on the footer where it takes the width the actions leave', () => {
+    expect(rule(css, '.task-actions')).toContain('align-items: center');
+    const slot = rule(css, '.task-branch-slot');
+    expect(slot).toContain('flex: 1 1 0');
+    expect(slot).toContain('min-width: 0');
+    expect(slot).toContain('height: var(--ui-badge-height)');
     const branch = rule(css, '.task-branch');
-    expect(branch).toContain('flex: 0 1 auto');
-    expect(branch).toContain('min-width: 0');
-    expect(branch).toContain('max-width: 50%');
+    expect(branch).toContain('display: block');
+    expect(branch).toContain('max-width: max-content');
     expect(branch).toContain('text-overflow: ellipsis');
+    expect(branch).not.toContain('max-width: 50%');
+    expect(branch).not.toContain('flex:');
   });
 
   it('lets a wizard toggle keep its description on the line under the title', () => {
