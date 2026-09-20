@@ -274,5 +274,5 @@ test('a training target title sits inside its box, not on the border', async ({ 
     return { top: box.top, height: box.height, headTop: head?.top ?? -1 };
   });
   expect(geometry.headTop).toBeGreaterThanOrEqual(geometry.top + 8);
-  expect(geometry.height).toBeLessThanOrEqual(80);
+  expect(geometry.height).toBe(72);
 });

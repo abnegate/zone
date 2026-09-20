@@ -206,4 +206,15 @@ describe('page chrome', () => {
     expect(rule(modals, '.details-meta--row')).toContain('grid-auto-flow: column');
     expect(rule(modals, '.details-meta--row')).toContain('grid-auto-columns: minmax(0, 1fr)');
   });
+
+  it('keeps a training target row at 72px including its border', () => {
+    const train = read(join(app, 'features', 'models', 'components', 'TrainPanel.css'));
+    const pair = rule(train, '.train-pair');
+    expect(pair).toContain('box-sizing: border-box');
+    expect(pair).toContain('min-height: 4.5rem');
+    expect(pair).toContain('border: 1px solid var(--ui-border)');
+    expect(rule(train, '.train-pair-fields .ui-input')).toContain(
+      'height: var(--ui-control-height-sm)'
+    );
+  });
 });
