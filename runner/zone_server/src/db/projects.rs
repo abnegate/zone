@@ -137,39 +137,74 @@ pub async fn get_project_in_workspace(
     .await
 }
 
+/// Everything a project is created with; `status` defaults to active.
+#[derive(Debug, Clone, Copy)]
+pub struct NewProject<'a> {
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub workspace_id: Option<Uuid>,
+    pub source_id: Option<Uuid>,
+    pub status: Option<&'a str>,
+}
+
 /// Create a new project
+pub async fn create(pool: &PgPool, project: NewProject<'_>) -> DbResult<ProjectRow> {
+    sqlx::query_as::<_, ProjectRow>(
+        r#"
+        INSERT INTO projects (name, description, workspace_id, source_id, status)
+        VALUES ($1, $2, $3, $4, COALESCE($5, 'active'))
+        RETURNING id, workspace_id, source_id, name, description, status,
+                  github_repo_url, github_access_token, created_at, updated_at
+        "#,
+    )
+    .bind(project.name)
+    .bind(project.description)
+    .bind(project.workspace_id)
+    .bind(project.source_id)
+    .bind(project.status)
+    .fetch_one(pool)
+    .await
+}
+
+/// Create a new active project with no source
 pub async fn create_project(
     pool: &PgPool,
     name: &str,
     description: Option<&str>,
     workspace_id: Option<Uuid>,
 ) -> DbResult<ProjectRow> {
-    let row = sqlx::query!(
+    create(
+        pool,
+        NewProject {
+            name,
+            description,
+            workspace_id,
+            source_id: None,
+            status: None,
+        },
+    )
+    .await
+}
+
+/// Point a project at one of its workspace's sources, or at none
+pub async fn set_source(
+    pool: &PgPool,
+    id: Uuid,
+    source_id: Option<Uuid>,
+) -> DbResult<Option<ProjectRow>> {
+    sqlx::query_as::<_, ProjectRow>(
         r#"
-        INSERT INTO projects (name, description, workspace_id, status)
-        VALUES ($1, $2, $3, 'active')
+        UPDATE projects
+        SET source_id = $2, updated_at = NOW()
+        WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
                   github_repo_url, github_access_token, created_at, updated_at
         "#,
-        name,
-        description,
-        workspace_id
     )
-    .fetch_one(pool)
-    .await?;
-
-    Ok(ProjectRow {
-        id: row.id,
-        workspace_id: row.workspace_id,
-        source_id: row.source_id,
-        name: row.name,
-        description: row.description,
-        status: row.status,
-        github_repo_url: row.github_repo_url,
-        github_access_token: row.github_access_token,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
+    .bind(id)
+    .bind(source_id)
+    .fetch_optional(pool)
+    .await
 }
 
 /// Update a project

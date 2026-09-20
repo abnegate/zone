@@ -52,6 +52,11 @@ export interface SyncConfig {
   external_project_id?: string;
   is_active: boolean;
   created_at: string;
+  /** What the server knows about the sync: `configured` until an engine has run it */
+  status?: string;
+  last_synced_at?: string | null;
+  /** Where the provider's webhooks are received, relative to the console's origin */
+  webhook_path?: string;
 }
 
 export interface CreateSyncConfigRequest {

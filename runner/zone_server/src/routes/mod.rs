@@ -18,6 +18,7 @@ pub mod organizations;
 pub mod projects;
 pub mod sessions;
 pub mod sources;
+pub mod sync;
 pub mod tasks;
 pub mod webhooks;
 pub mod workspace_themes;
@@ -28,7 +29,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     middleware,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -181,12 +182,22 @@ pub fn create_router(state: AppState) -> Router {
             "/api/projects/{id}",
             get(projects::get)
                 .put(projects::update)
+                .patch(projects::update)
                 .delete(projects::delete),
+        )
+        .route(
+            "/api/projects/{id}/source",
+            put(projects::link_source).delete(projects::unlink_source),
         )
         .route(
             "/api/projects/{id}/github",
             post(projects::link_github).delete(projects::unlink_github),
         )
+        .route(
+            "/api/projects/{id}/sync",
+            get(sync::list).post(sync::create),
+        )
+        .route("/api/projects/{id}/sync/{config_id}", delete(sync::delete))
         // Tasks (workspace-scoped)
         .route(
             "/api/workspaces/{workspace_id}/tasks",

@@ -490,14 +490,22 @@ async fn test_sources_types_with_auth() {
     response.assert_status(StatusCode::OK);
 
     let body = response.json_value();
-    assert!(body["types"].is_array());
-    let types = body["types"].as_array().unwrap();
-    assert!(!types.is_empty());
-    // Verify source type structure
-    let first = &types[0];
-    assert!(first["name"].is_string());
-    assert!(first["display_name"].is_string());
-    assert!(first["category"].is_string());
+    let types = body["types"].as_array().expect("a list of kinds");
+    let mut kinds: Vec<&str> = types
+        .iter()
+        .map(|kind| kind["id"].as_str().expect("a kind id"))
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        ["filesystem", "github", "gitlab", "text", "web"],
+        "the console may only be offered kinds a registered adapter can verify"
+    );
+    for kind in types {
+        assert!(kind["name"].is_string());
+        assert!(kind["category"].is_string());
+        assert_eq!(kind["enabled"], true);
+    }
 }
 
 // Organizations - CRUD Tests
@@ -2125,7 +2133,6 @@ async fn test_source_verify() {
         .unwrap()
         .to_string();
 
-    // Verify source - accepts both NO_CONTENT (success) and SERVICE_UNAVAILABLE (no verification service in test)
     let response = client
         .post_json_auth(
             &format!(
@@ -2137,12 +2144,87 @@ async fn test_source_verify() {
         )
         .await;
 
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
     assert!(
-        response.status == StatusCode::NO_CONTENT
-            || response.status == StatusCode::SERVICE_UNAVAILABLE,
-        "Expected NO_CONTENT or SERVICE_UNAVAILABLE, got {}",
-        response.status
+        body["verified"].is_boolean(),
+        "verify answers a verdict: {body}"
     );
+    assert!(body["message"].is_string());
+}
+
+#[tokio::test]
+async fn a_web_source_is_accepted_and_verified_by_its_adapter() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{}/sources", workspace_id),
+            &json!({
+                "name": test_source_name(),
+                "source_type": "web",
+                "config": { "url": "http://127.0.0.1/private" }
+            }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    let source_id = response.json_value()["source"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = client
+        .post_json_auth(
+            &format!(
+                "/api/workspaces/{}/sources/{}/verify",
+                workspace_id, source_id
+            ),
+            &json!({}),
+            &token,
+        )
+        .await;
+
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["verified"], false);
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Invalid configuration"),
+        "the web adapter judged the URL, not a missing adapter: {message}"
+    );
+}
+
+#[tokio::test]
+async fn a_kind_without_an_adapter_is_refused_naming_the_kinds_that_work() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+
+    for kind in ["notion", "slack", "imap"] {
+        let response = client
+            .post_json_auth(
+                &format!("/api/workspaces/{}/sources", workspace_id),
+                &json!({
+                    "name": test_source_name(),
+                    "source_type": kind,
+                    "config": {}
+                }),
+                &token,
+            )
+            .await;
+
+        response.assert_status(StatusCode::BAD_REQUEST);
+        let error = response.json_value()["error"].as_str().unwrap().to_string();
+        assert_eq!(
+            error,
+            format!(
+                "Invalid source_type \"{kind}\". Must be one of: filesystem, github, gitlab, text, web"
+            )
+        );
+    }
 }
 
 #[tokio::test]
@@ -3372,14 +3454,36 @@ async fn test_source_with_gitlab_type() {
             &json!({
                 "name": &name,
                 "source_type": "gitlab",
-                "config": { "project_id": "test/project" }
+                "config": { "project_id": "test/project", "host": "http://127.0.0.1:9" }
             }),
             &token,
         )
         .await;
 
     response.assert_status(StatusCode::CREATED);
-    assert_eq!(response.json_value()["source"]["source_type"], "gitlab");
+    let body = response.json_value();
+    assert_eq!(body["source"]["source_type"], "gitlab");
+    let source_id = body["source"]["id"].as_str().unwrap().to_string();
+
+    let response = client
+        .post_json_auth(
+            &format!(
+                "/api/workspaces/{}/sources/{}/verify",
+                workspace_id, source_id
+            ),
+            &json!({}),
+            &token,
+        )
+        .await;
+
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["verified"], false);
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        !message.contains("No adapter") && !message.contains("Must be one of"),
+        "the GitLab adapter reached the project it was given: {message}"
+    );
 }
 
 // Auth Edge Cases - Header Format Tests
@@ -4810,4 +4914,158 @@ async fn test_chat_single_responses_carry_messages() {
             label
         );
     }
+}
+
+// Projects - the console's edit, source and link flows
+
+async fn create_project(client: &TestClient, token: &str, body: serde_json::Value) -> String {
+    let response = client.post_json_auth("/api/projects", &body, token).await;
+    response.assert_status(StatusCode::CREATED);
+    response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn create_github_source(client: &TestClient, token: &str, workspace_id: &str) -> String {
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{}/sources", workspace_id),
+            &json!({
+                "name": test_source_name(),
+                "source_type": "github",
+                "config": { "owner": "acme", "repo": "project" }
+            }),
+            token,
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    response.json_value()["source"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_project_edit_saves_with_patch_and_touches_only_the_fields_sent() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+    let project_id = create_project(
+        &client,
+        &token,
+        json!({"workspace_id": workspace_id, "name": "Edited", "description": "Kept as it was"}),
+    )
+    .await;
+
+    let response = client
+        .patch_json_auth(
+            &format!("/api/projects/{}", project_id),
+            &json!({ "status": "on_hold" }),
+            &token,
+        )
+        .await;
+
+    response.assert_status(StatusCode::OK);
+    let project = &response.json_value()["project"];
+    assert_eq!(project["status"], "on_hold");
+    assert_eq!(project["name"], "Edited");
+    assert_eq!(project["description"], "Kept as it was");
+
+    let response = client
+        .patch_json_auth(
+            &format!("/api/projects/{}", project_id),
+            &json!({ "status": "nowhere" }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value()["error"],
+        "Invalid status \"nowhere\". Must be one of: active, on_hold, cancelled"
+    );
+}
+
+#[tokio::test]
+async fn a_project_keeps_the_source_it_was_created_with_and_can_be_relinked() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+    let source_id = create_github_source(&client, &token, &workspace_id).await;
+
+    let response = client
+        .post_json_auth(
+            "/api/projects",
+            &json!({"workspace_id": workspace_id, "name": "Linked", "source_id": source_id, "status": "on_hold"}),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    let created = response.json_value();
+    assert_eq!(created["project"]["source_id"], source_id);
+    assert_eq!(created["project"]["status"], "on_hold");
+    let project_id = created["project"]["id"].as_str().unwrap().to_string();
+
+    let response = client
+        .get_auth(&format!("/api/projects/{}", project_id), &token)
+        .await;
+    assert_eq!(response.json_value()["project"]["source_id"], source_id);
+
+    let response = client
+        .delete_auth(&format!("/api/projects/{}/source", project_id), &token)
+        .await;
+    response.assert_status(StatusCode::OK);
+    assert!(response.json_value()["project"]["source_id"].is_null());
+
+    let response = client
+        .put_json_auth(
+            &format!("/api/projects/{}/source", project_id),
+            &json!({ "source_id": source_id }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::OK);
+    assert_eq!(response.json_value()["project"]["source_id"], source_id);
+}
+
+#[tokio::test]
+async fn a_source_from_another_workspace_cannot_be_linked() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+    let (_other_org, other_workspace) = setup_test_workspace(&client, &token).await;
+    let foreign_source = create_github_source(&client, &token, &other_workspace).await;
+
+    let response = client
+        .post_json_auth(
+            "/api/projects",
+            &json!({"workspace_id": workspace_id, "name": "Crossed", "source_id": foreign_source}),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value()["error"],
+        "Source not found in this workspace"
+    );
+
+    let project_id = create_project(
+        &client,
+        &token,
+        json!({"workspace_id": workspace_id, "name": "Crossed"}),
+    )
+    .await;
+    let response = client
+        .put_json_auth(
+            &format!("/api/projects/{}/source", project_id),
+            &json!({ "source_id": foreign_source }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+
+    let response = client
+        .get_auth(&format!("/api/projects/{}", project_id), &token)
+        .await;
+    assert!(response.json_value()["project"]["source_id"].is_null());
 }

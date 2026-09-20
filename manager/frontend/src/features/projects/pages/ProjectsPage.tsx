@@ -20,6 +20,7 @@ import type {
   CreateSyncConfigRequest,
   Project,
   ProjectStatus,
+  SyncConfig,
   SyncDirection,
   SyncProvider,
   UpdateProjectRequest,
@@ -90,6 +91,16 @@ export default function ProjectsPage() {
   const [formSyncProjectId, setFormSyncProjectId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [operationError, setOperationError] = useState<string | null>(null);
+
+  const failed = (err: unknown, fallback: string) =>
+    setOperationError(err instanceof Error ? err.message : fallback);
+  const modalOpen = showEditModal || showDeleteConfirm || showSourceModal || showSyncModal;
+
+  const openModal = (open: (value: boolean) => void) => {
+    setOperationError(null);
+    open(true);
+  };
 
   const handleProjectCreated = useCallback((_project: Project) => {
     // Project is already added to the list by the hook
@@ -113,12 +124,13 @@ export default function ProjectsPage() {
 
     setFieldErrors({});
     setSubmitting(true);
+    setOperationError(null);
     try {
       const updated = await updateProjectMutation(selectedProject.id, request);
       setSelectedProject(updated);
       setShowEditModal(false);
     } catch (err) {
-      console.error('Failed to update project:', err);
+      failed(err, 'Failed to update project');
     } finally {
       setSubmitting(false);
     }
@@ -128,12 +140,13 @@ export default function ProjectsPage() {
     if (!isAuthenticated || !selectedProject) return;
 
     setSubmitting(true);
+    setOperationError(null);
     try {
       await deleteProjectMutation(selectedProject.id);
       setSelectedProject(null);
       setShowDeleteConfirm(false);
     } catch (err) {
-      console.error('Failed to delete project:', err);
+      failed(err, 'Failed to delete project');
     } finally {
       setSubmitting(false);
     }
@@ -144,13 +157,14 @@ export default function ProjectsPage() {
     if (!isAuthenticated || !selectedProject || !formSourceId) return;
 
     setSubmitting(true);
+    setOperationError(null);
     try {
       const updated = await client.linkSource(selectedProject.id, formSourceId);
       setSelectedProject(updated);
       setShowSourceModal(false);
       setFormSourceId('');
     } catch (err) {
-      console.error('Failed to link source:', err);
+      failed(err, 'Failed to link source');
     } finally {
       setSubmitting(false);
     }
@@ -159,11 +173,12 @@ export default function ProjectsPage() {
   const handleUnlinkSource = async () => {
     if (!isAuthenticated || !selectedProject) return;
 
+    setOperationError(null);
     try {
       const updated = await client.unlinkSource(selectedProject.id);
       setSelectedProject(updated);
     } catch (err) {
-      console.error('Failed to unlink source:', err);
+      failed(err, 'Failed to unlink source');
     }
   };
 
@@ -171,7 +186,7 @@ export default function ProjectsPage() {
     setFormName(project.name);
     setFormDescription(project.description || '');
     setFormStatus(project.status);
-    setShowEditModal(true);
+    openModal(setShowEditModal);
   };
 
   const resetForm = () => {
@@ -205,12 +220,13 @@ export default function ProjectsPage() {
 
     setFieldErrors({});
     setSubmitting(true);
+    setOperationError(null);
     try {
       await createSyncConfigMutation(request);
       setShowSyncModal(false);
       resetForm();
     } catch (err) {
-      console.error('Failed to create sync config:', err);
+      failed(err, 'Failed to add sync');
     } finally {
       setSubmitting(false);
     }
@@ -219,12 +235,18 @@ export default function ProjectsPage() {
   const handleDeleteSyncConfig = async (configId: string) => {
     if (!isAuthenticated || !selectedProject) return;
 
+    setOperationError(null);
     try {
       await deleteSyncConfigMutation(configId);
     } catch (err) {
-      console.error('Failed to delete sync config:', err);
+      failed(err, 'Failed to remove sync');
     }
   };
+
+  const syncState = (config: SyncConfig) =>
+    config.last_synced_at
+      ? `Synced ${formatDate(config.last_synced_at)}`
+      : 'Configured, not yet synced';
 
   // Helper to get source info for display
   const getProjectSource = (project: Project) => {
@@ -368,11 +390,26 @@ export default function ProjectsPage() {
                 </div>
 
                 <div className="details-content">
-                  <div className="detail-row">
-                    <span className="detail-label">Status</span>
-                    <Badge variant={statusVariants[selectedProject.status]}>
-                      {statusLabels[selectedProject.status]}
-                    </Badge>
+                  {operationError && !modalOpen && (
+                    <div className="form-error details-error" role="alert">
+                      {operationError}
+                    </div>
+                  )}
+                  <div className="detail-meta">
+                    <div className="detail-row">
+                      <span className="detail-label">Status</span>
+                      <Badge variant={statusVariants[selectedProject.status]}>
+                        {statusLabels[selectedProject.status]}
+                      </Badge>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-label">Created</span>
+                      <span className="detail-value">{formatDate(selectedProject.created_at)}</span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-label">Updated</span>
+                      <span className="detail-value">{formatDate(selectedProject.updated_at)}</span>
+                    </div>
                   </div>
 
                   {selectedProject.description && (
@@ -412,7 +449,7 @@ export default function ProjectsPage() {
                           size="sm"
                           onClick={() => {
                             setFormSourceId('');
-                            setShowSourceModal(true);
+                            openModal(setShowSourceModal);
                           }}
                         >
                           Link Source
@@ -421,17 +458,6 @@ export default function ProjectsPage() {
                     })()}
                   </div>
 
-                  <div className="detail-row">
-                    <span className="detail-label">Created</span>
-                    <span className="detail-value">{formatDate(selectedProject.created_at)}</span>
-                  </div>
-
-                  <div className="detail-row">
-                    <span className="detail-label">Updated</span>
-                    <span className="detail-value">{formatDate(selectedProject.updated_at)}</span>
-                  </div>
-
-                  {/* Sync Configuration Section */}
                   <div className="sync-config-section">
                     <div className="sync-config-header">
                       <h3>External Sync</h3>
@@ -440,7 +466,7 @@ export default function ProjectsPage() {
                         size="sm"
                         onClick={() => {
                           resetForm();
-                          setShowSyncModal(true);
+                          openModal(setShowSyncModal);
                         }}
                       >
                         + Add Sync
@@ -453,7 +479,8 @@ export default function ProjectsPage() {
                       </div>
                     ) : syncConfigs.length === 0 ? (
                       <div className="sync-config-empty">
-                        No sync configurations. Add one to sync with GitHub or Linear.
+                        No sync configured. Add one to point this project at a GitHub repository or
+                        a Linear project.
                       </div>
                     ) : (
                       <div className="sync-config-list">
@@ -480,14 +507,30 @@ export default function ProjectsPage() {
                                   {config.external_project_id}
                                 </span>
                               )}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="sync-config-remove"
+                                onClick={() => handleDeleteSyncConfig(config.id)}
+                              >
+                                Remove
+                              </Button>
                             </div>
-                            <Button
-                              variant="destructive"
-                              size="sm"
-                              onClick={() => handleDeleteSyncConfig(config.id)}
-                            >
-                              Remove
-                            </Button>
+                            <div className="sync-config-state">
+                              <span
+                                className={`sync-status ${config.last_synced_at ? 'synced' : ''}`}
+                              >
+                                {syncState(config)}
+                              </span>
+                              {config.webhook_path && (
+                                <code
+                                  className="sync-webhook"
+                                  title="Register this webhook URL with the provider"
+                                >
+                                  {`${window.location.origin}${config.webhook_path}`}
+                                </code>
+                              )}
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -506,7 +549,7 @@ export default function ProjectsPage() {
                   <Button
                     variant="destructive"
                     className="flex-1"
-                    onClick={() => setShowDeleteConfirm(true)}
+                    onClick={() => openModal(setShowDeleteConfirm)}
                   >
                     Delete
                   </Button>
@@ -578,6 +621,11 @@ export default function ProjectsPage() {
                   <option value="cancelled">Cancelled</option>
                 </select>
               </div>
+              {operationError && (
+                <div className="form-error" role="alert">
+                  {operationError}
+                </div>
+              )}
               <div className="modal-actions">
                 <Button variant="secondary" type="button" onClick={() => setShowEditModal(false)}>
                   Cancel
@@ -608,6 +656,11 @@ export default function ProjectsPage() {
               Are you sure you want to delete <strong>{selectedProject.name}</strong>? This action
               cannot be undone.
             </p>
+            {operationError && (
+              <div className="form-error" role="alert">
+                {operationError}
+              </div>
+            )}
             <div className="modal-actions">
               <Button variant="secondary" type="button" onClick={() => setShowDeleteConfirm(false)}>
                 Cancel
@@ -663,6 +716,11 @@ export default function ProjectsPage() {
                   </span>
                 )}
               </div>
+              {operationError && (
+                <div className="form-error" role="alert">
+                  {operationError}
+                </div>
+              )}
               <div className="modal-actions">
                 <Button variant="secondary" type="button" onClick={() => setShowSourceModal(false)}>
                   Cancel
@@ -743,6 +801,11 @@ export default function ProjectsPage() {
                   {fieldErrors.external_project_id && (
                     <span className="field-error">{fieldErrors.external_project_id}</span>
                   )}
+                </div>
+              )}
+              {operationError && (
+                <div className="form-error" role="alert">
+                  {operationError}
                 </div>
               )}
               <div className="modal-actions">

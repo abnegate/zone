@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -562,9 +562,10 @@ describe('ProjectsPage', () => {
     });
   });
 
-  it('handles update project error', async () => {
-    const consoleErrorSpy = spyOn(console, 'error').mockImplementation();
-    mockUpdateProject.mockImplementation(() => Promise.reject(new Error('Update failed')));
+  it('shows the server error in the edit modal and keeps it open', async () => {
+    mockUpdateProject.mockImplementation(() =>
+      Promise.reject(new Error('Workspace write access required'))
+    );
 
     renderWithQueryClient(<ProjectsPage />);
     await waitFor(() => {
@@ -580,14 +581,12 @@ describe('ProjectsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
 
     await waitFor(() => {
-      expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to update project:', expect.any(Error));
+      expect(screen.getByRole('alert')).toHaveTextContent('Workspace write access required');
     });
-
-    consoleErrorSpy.mockRestore();
+    expect(screen.getByRole('heading', { name: 'Edit Project' })).toBeInTheDocument();
   });
 
-  it('handles delete project error', async () => {
-    const consoleErrorSpy = spyOn(console, 'error').mockImplementation();
+  it('shows the server error in the delete dialog and keeps it open', async () => {
     mockDeleteProject.mockImplementation(() => Promise.reject(new Error('Delete failed')));
 
     renderWithQueryClient(<ProjectsPage />);
@@ -604,10 +603,29 @@ describe('ProjectsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete Project' }));
 
     await waitFor(() => {
-      expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to delete project:', expect.any(Error));
+      expect(screen.getByRole('alert')).toHaveTextContent('Delete failed');
+    });
+    expect(screen.getByRole('heading', { name: 'Delete Project' })).toBeInTheDocument();
+  });
+
+  it('shows an unlink failure beside the project instead of swallowing it', async () => {
+    mockUnlinkSource.mockImplementation(() => Promise.reject(new Error('Project not found')));
+
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
     });
 
-    consoleErrorSpy.mockRestore();
+    fireEvent.click(screen.getByText('Project Alpha'));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Unlink' })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unlink' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Project not found');
+    });
   });
 
   it('can create project from empty state', async () => {

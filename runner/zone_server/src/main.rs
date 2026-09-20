@@ -11,7 +11,6 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use zone_context::adapters::{AdapterRegistry, FilesystemAdapter, GitHubAdapter, TextAdapter};
 use zone_context::context::ContextService;
 use zone_server::cache::Cache;
 use zone_server::config::Config;
@@ -19,7 +18,7 @@ use zone_server::routes;
 use zone_server::services::embedding::{
     create_embedding_service, default_embedding_model, embedding_engine_from_env,
 };
-use zone_server::state::AppState;
+use zone_server::state::{AppState, default_adapter_registry};
 
 #[tokio::main]
 async fn main() {
@@ -85,10 +84,7 @@ async fn main() {
     // Note: These are optional and will only be initialized if we can get default settings
     // For now, we'll use config-based settings as a fallback
     let adapter_registry = {
-        let mut registry = AdapterRegistry::new();
-        registry.register(TextAdapter::new());
-        registry.register(FilesystemAdapter::new());
-        registry.register(GitHubAdapter::new());
+        let registry = default_adapter_registry();
         tracing::info!(
             "Initialized adapter registry with {} adapters",
             registry.len()
