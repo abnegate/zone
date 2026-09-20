@@ -5,6 +5,7 @@ import type { Organization, Workspace } from '../../types';
 const mockClient = {
   getOrganizations: mock(),
   getWorkspaces: mock(),
+  getOrgMembers: mock(async () => ({ members: [] })),
 };
 
 let authState = {
@@ -84,6 +85,8 @@ function TestComponent() {
       <span data-testid="error">{ctx.error || 'none'}</span>
       <span data-testid="orgs-count">{ctx.organizations.length}</span>
       <span data-testid="current-org">{ctx.currentOrganization?.name || 'none'}</span>
+      <span data-testid="current-role">{ctx.currentOrganization?.role ?? 'unknown'}</span>
+      <span data-testid="resolving-role">{ctx.resolvingRole ? 'resolving' : 'settled'}</span>
       <span data-testid="ws-count">{ctx.workspaces.length}</span>
       <span data-testid="current-ws">{ctx.currentWorkspace?.name || 'none'}</span>
       <button onClick={() => ctx.setCurrentOrganization(mockOrganizations[1])}>Switch Org</button>
@@ -236,6 +239,86 @@ describe('WorkspaceContext', () => {
       });
 
       expect(screen.getByTestId('current-ws')).toHaveTextContent('none');
+    });
+  });
+
+  describe('organization role', () => {
+    const member = (user_id: string, role: 'owner' | 'admin' | 'member') => ({
+      id: `member-${user_id}`,
+      user_id,
+      organization_id: 'org-1',
+      role,
+      email: '',
+      display_name: null,
+      joined_at: '',
+    });
+
+    it('keeps the role the organizations list already carries', async () => {
+      mockClient.getOrganizations.mockResolvedValueOnce([
+        { ...mockOrganizations[0], role: 'admin' },
+      ]);
+      mockClient.getWorkspaces.mockResolvedValueOnce([]);
+
+      render(
+        <WorkspaceProvider useAuthHook={useAuthHook}>
+          <TestComponent />
+        </WorkspaceProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('current-role')).toHaveTextContent('admin');
+      });
+      expect(screen.getByTestId('resolving-role')).toHaveTextContent('settled');
+      expect(mockClient.getOrgMembers).not.toHaveBeenCalled();
+    });
+
+    it('resolves a missing role from the membership list', async () => {
+      mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations);
+      mockClient.getWorkspaces.mockResolvedValue([]);
+      let answer: (members: { members: ReturnType<typeof member>[] }) => void = () => {};
+      mockClient.getOrgMembers.mockReturnValueOnce(
+        new Promise((resolve) => {
+          answer = resolve;
+        })
+      );
+
+      render(
+        <WorkspaceProvider useAuthHook={useAuthHook}>
+          <TestComponent />
+        </WorkspaceProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('current-org')).toHaveTextContent('Org 1');
+      });
+      expect(screen.getByTestId('resolving-role')).toHaveTextContent('resolving');
+      expect(screen.getByTestId('current-role')).toHaveTextContent('unknown');
+
+      answer({ members: [member('user-2', 'admin'), member('user-1', 'owner')] });
+      await waitFor(() => {
+        expect(screen.getByTestId('current-role')).toHaveTextContent('owner');
+      });
+      expect(screen.getByTestId('resolving-role')).toHaveTextContent('settled');
+      expect(mockClient.getOrgMembers).toHaveBeenCalledWith('org-1');
+      expect(mockClient.getWorkspaces).toHaveBeenCalledTimes(1);
+    });
+
+    it('settles without a role when the membership list cannot be read', async () => {
+      mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations);
+      mockClient.getWorkspaces.mockResolvedValue([]);
+      mockClient.getOrgMembers.mockRejectedValueOnce(new Error('offline'));
+
+      render(
+        <WorkspaceProvider useAuthHook={useAuthHook}>
+          <TestComponent />
+        </WorkspaceProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('resolving-role')).toHaveTextContent('settled');
+      });
+      expect(screen.getByTestId('current-role')).toHaveTextContent('unknown');
+      expect(mockClient.getOrgMembers).toHaveBeenCalledTimes(1);
     });
   });
 

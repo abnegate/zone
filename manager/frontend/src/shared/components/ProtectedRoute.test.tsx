@@ -283,7 +283,7 @@ describe('ProtectedRoute', () => {
       updated_at: '2026-01-01T00:00:00Z',
     });
     const workspaceHook =
-      (role: 'owner' | 'admin' | 'member' | undefined, loading = false) =>
+      (role: 'owner' | 'admin' | 'member' | undefined, loading = false, resolvingRole = false) =>
       () =>
         ({
           organizations: [organization(role)],
@@ -291,6 +291,7 @@ describe('ProtectedRoute', () => {
           currentWorkspace: null,
           workspaces: [],
           loading,
+          resolvingRole,
           error: null,
           setCurrentOrganization: () => {},
           setCurrentWorkspace: () => {},
@@ -351,6 +352,36 @@ describe('ProtectedRoute', () => {
       );
 
       expect(screen.getByText('Loading...')).toBeInTheDocument();
+      expect(mockCurrentRoute).toBe('/');
+    });
+
+    it('waits while the role is being resolved from the membership list', () => {
+      renderProtectedRoute(
+        <ProtectedRoute
+          requiredOrganizationRole="admin"
+          useAuthHook={useAuthHook}
+          useWorkspaceHook={workspaceHook(undefined, false, true)}
+        >
+          <ProtectedContent />
+        </ProtectedRoute>
+      );
+
+      expect(screen.getByText('Loading...')).toBeInTheDocument();
+      expect(mockCurrentRoute).toBe('/');
+    });
+
+    it('renders children when the server never says the role, denying only an explicit one', () => {
+      renderProtectedRoute(
+        <ProtectedRoute
+          requiredOrganizationRole="admin"
+          useAuthHook={useAuthHook}
+          useWorkspaceHook={workspaceHook(undefined)}
+        >
+          <ProtectedContent />
+        </ProtectedRoute>
+      );
+
+      expect(screen.getByTestId('protected-content')).toBeInTheDocument();
       expect(mockCurrentRoute).toBe('/');
     });
 
