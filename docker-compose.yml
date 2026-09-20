@@ -86,7 +86,9 @@ services:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
-      - postgres_data:/var/lib/postgresql
+      # PGDATA. The image declares this exact path a VOLUME, so a mount one
+      # level up would leave the cluster in an anonymous volume no backup sees.
+      - postgres_data:/var/lib/postgresql/data
       - ./postgres/init-manager-db.sh:/docker-entrypoint-initdb.d/init-manager-db.sh:ro
     networks:
       internal:
@@ -165,6 +167,7 @@ services:
       - "host.docker.internal:host-gateway"
     networks:
       - internal
+      - edge  # host.docker.internal is unroutable from the internal-only network
 
   comfyui:
     build:
