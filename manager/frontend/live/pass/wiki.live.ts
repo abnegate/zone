@@ -88,6 +88,7 @@ test.describe('wiki and search', () => {
       await expect
         .poll(urlRow, { timeout: 120_000, intervals: [3_000] })
         .not.toMatch(/\| \| $/);
+      await urlCard.hover();
       await refresh.click();
       await page.waitForTimeout(5_000);
     }
@@ -131,10 +132,9 @@ test.describe('wiki and search', () => {
     await shot(page, '54-agent-cites-entry');
 
     await page.goto('/wiki');
-    await page
-      .locator('.knowledge-card', { hasText: urlTitle })
-      .locator('button[aria-label="Delete entry"]')
-      .click();
+    const urlEntry = page.locator('.knowledge-card', { hasText: urlTitle });
+    await urlEntry.hover();
+    await urlEntry.locator('button[aria-label="Delete entry"]').click();
     await expect(
       page.locator('.knowledge-card', { hasText: urlTitle }),
     ).toHaveCount(0, { timeout: 30_000 });
