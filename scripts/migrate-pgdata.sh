@@ -56,5 +56,5 @@ if holds_cluster "$target"; then
 fi
 
 printf '%s\n' "copying the cluster from $source into $target..."
-docker run --rm -v "$source:/source:ro" -v "$target:/target" alpine sh -c 'cp -a /source/. /target/'
+docker run --rm -v "$source:/source:ro" -v "$target:/target" alpine sh -c 'rmdir /target/data 2>/dev/null; cp -a /source/. /target/'
 printf '%s\n' "done. Start the stack (make up), check the data is there, then remove the old volume: docker volume rm $source"

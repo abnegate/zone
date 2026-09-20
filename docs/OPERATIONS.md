@@ -34,10 +34,14 @@ make up
 - refuses to overwrite `zone_postgres_data` when it already holds a cluster,
 - copies with `cp -a` from an Alpine container, preserving ownership.
 
-If `make up` already ran on the new mount, `zone_postgres_data` holds the
-fresh, empty cluster the image initialised. Stop the stack, remove that
-volume (`docker volume rm zone_postgres_data`), and run the migration; the
-old anonymous volume is still there, dangling.
+If `make up` already ran on the new mount, `postgres` refused to start:
+the old mount left an empty `data/` directory inside `zone_postgres_data`,
+and `initdb` stops at `directory "/var/lib/postgresql/data" exists but is
+not empty`. Nothing was overwritten; `make stop` and run the migration, which
+removes that empty directory before copying. A volume that was empty instead
+holds the fresh cluster the image initialised: stop the stack, remove it
+(`docker volume rm zone_postgres_data`), and run the migration; the old
+anonymous volume is still there, dangling.
 
 Once the stack is healthy and the data is back, remove the old volume with
 the name the script printed: `docker volume rm <64-hex-name>`.
