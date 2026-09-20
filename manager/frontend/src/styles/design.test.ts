@@ -92,3 +92,34 @@ describe('shared surfaces', () => {
     expect(globals).toContain('.ui-badge-accent');
   });
 });
+
+describe('page chrome', () => {
+  const app = join(import.meta.dir, '..');
+
+  it('keeps the context switcher at control height with a 12 + 16 label stack', () => {
+    const css = read(join(app, 'shared', 'components', 'ContextSwitcher', 'ContextSwitcher.css'));
+    expect(rule(css, '.context-switcher-button')).toContain('height: var(--ui-control-height)');
+    expect(rule(css, '.org-name')).toContain('line-height: 0.75rem');
+    expect(rule(css, '.ws-name')).toContain('line-height: 1rem');
+    expect(rule(css, '.context-label')).not.toContain('gap');
+  });
+
+  it('replaces the Train file pickers with 96px dashed drop zones and right-aligns Train', () => {
+    const zone = read(join(app, 'features', 'models', 'components', 'DropZone.css'));
+    expect(rule(zone, '.drop-zone')).toContain('min-height: 6rem');
+    expect(rule(zone, '.drop-zone')).toContain('1px dashed');
+    expect(rule(zone, '.drop-zone svg')).toContain('width: 1.25rem');
+    expect(rule(zone, '.drop-zone-prompt')).toContain('var(--ui-text-sm)');
+    expect(rule(zone, '.drop-zone-hint')).toContain('var(--ui-text-2xs)');
+
+    const train = read(join(app, 'features', 'models', 'components', 'TrainPanel.css'));
+    expect(rule(train, '.train-identity,\n.train-drops')).toContain(
+      'grid-template-columns: repeat(2, minmax(0, 1fr))'
+    );
+    expect(rule(train, '.train-identity,\n.train-drops')).toContain(
+      'gap: var(--ui-space-3) var(--ui-space-4)'
+    );
+    expect(rule(train, '.train-footer')).toContain('justify-content: flex-end');
+    expect(rule(train, '.train-caption')).toContain('display: flex');
+  });
+});
