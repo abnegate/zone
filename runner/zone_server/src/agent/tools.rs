@@ -670,17 +670,19 @@ impl ChatTools {
     /// until every one of them is registered — the two that do the listing are
     /// themselves registered partway through.
     fn publish_catalog(&mut self) {
-        let listed = self
+        let listed = |definition: &ToolDefinition| Listed {
+            name: definition.function.name.clone(),
+            purpose: purpose(&definition.function.description),
+            remote: self.remote.contains(&definition.function.name),
+        };
+        let (core, deferred): (Vec<&ToolDefinition>, Vec<&ToolDefinition>) = self
             .definitions
             .iter()
-            .filter(|definition| !self.core.contains(&definition.function.name))
-            .map(|definition| Listed {
-                name: definition.function.name.clone(),
-                purpose: purpose(&definition.function.description),
-                remote: self.remote.contains(&definition.function.name),
-            })
-            .collect();
-        self.toolbox.publish(listed);
+            .partition(|definition| self.core.contains(&definition.function.name));
+        self.toolbox
+            .publish(deferred.into_iter().map(listed).collect());
+        self.toolbox
+            .publish_core(core.into_iter().map(listed).collect());
     }
 
     fn cache_catalog(&mut self) {
