@@ -159,6 +159,13 @@ describe('shared surfaces', () => {
     expect(rule(globals, '  .ui-dialog-title-row')).toContain('align-items: center');
   });
 
+  it('gives a wizard the same 48px header bar as a page', () => {
+    const globals = read(join(kit, 'globals.css'));
+    expect(rule(globals, '  .ui-wizard-header')).toContain('min-height: var(--ui-header-height)');
+    expect(rule(globals, '  .ui-wizard-header')).toContain('padding: 0 var(--ui-space-5)');
+    expect(rule(globals, '  .ui-wizard-header')).toContain('border-bottom: 1px solid');
+  });
+
   it('tints badges instead of filling them', () => {
     const globals = read(join(kit, 'globals.css'));
     expect(rule(globals, '  .ui-badge')).toContain('height: var(--ui-badge-height)');

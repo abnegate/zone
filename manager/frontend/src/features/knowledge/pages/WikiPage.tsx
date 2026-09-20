@@ -16,6 +16,14 @@ function cardSize(entry: KnowledgeEntry): string {
   return entry.token_count === null ? entry.type : `${entry.token_count.toLocaleString()} tokens`;
 }
 
+function urlHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 export default function WikiPage() {
   const { entries, loading, error, refreshing, createEntry, deleteEntry, refreshEntry, readEntry } =
     useKnowledge();
@@ -270,9 +278,6 @@ export default function WikiPage() {
                   <div className="knowledge-card-footer">
                     <span className="knowledge-card-date">
                       {updated ? `Updated ${formatDate(updated)}` : cardSize(entry)}
-                      {entry.type === 'url' && entry.last_refreshed_at
-                        ? ` · Refreshed ${formatDate(entry.last_refreshed_at)}`
-                        : ''}
                     </span>
                     {entry.indexed === false && (
                       <span
@@ -289,8 +294,9 @@ export default function WikiPage() {
                         onClick={(e) => e.stopPropagation()}
                         target="_blank"
                         rel="noopener noreferrer"
+                        title={entry.content}
                       >
-                        {entry.content}
+                        {urlHost(entry.content)}
                       </a>
                     )}
                   </div>
