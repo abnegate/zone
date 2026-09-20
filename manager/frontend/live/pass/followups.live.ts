@@ -51,9 +51,11 @@ test.describe('follow-ups', () => {
       await page.waitForTimeout(500);
       await shot(page, '34-context-meter-details');
     }
-    const numbers = readings.map((r) =>
-      Number((r.match(/([\d,]+) tokens/)?.[1] ?? '0').replace(/,/g, '')),
-    );
+    const numbers = readings.map((r) => {
+      const short = r.match(/≈\s*([\d.]+)k/i);
+      if (short) return Math.round(Number(short[1]) * 1000);
+      return Number((r.match(/([\d,]+) tokens/)?.[1] ?? '0').replace(/,/g, ''));
+    });
     const moved = numbers[2] > numbers[0];
     record(34.5, {
       result: moved ? 'WORKS' : 'FAILS',
