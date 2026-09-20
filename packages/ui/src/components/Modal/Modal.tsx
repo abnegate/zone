@@ -11,6 +11,7 @@ export interface ModalProps extends Omit<React.HTMLAttributes<HTMLDivElement>, '
   isOpen: boolean;
   onClose?: () => void;
   title: string;
+  titleClassName?: string;
   badge?: React.ReactNode;
   size?: 'sm' | 'md' | 'lg' | 'xl' | 'full';
 }
@@ -24,18 +25,21 @@ const SIZE_CLASS_MAP: Record<NonNullable<ModalProps['size']>, string> = {
 };
 
 const Modal = React.forwardRef<HTMLDivElement, ModalProps>(
-  ({ isOpen, onClose, title, badge, size = 'md', children, className, ...props }, ref) => {
+  (
+    { isOpen, onClose, title, titleClassName, badge, size = 'md', children, className, ...props },
+    ref
+  ) => {
     return (
       <Dialog open={isOpen} onOpenChange={(open) => (!open ? onClose?.() : undefined)}>
         <DialogContent ref={ref} className={cn(SIZE_CLASS_MAP[size], className)} {...props}>
           <DialogHeader>
             {badge ? (
               <div className="ui-dialog-title-row">
-                <DialogTitle>{title}</DialogTitle>
+                <DialogTitle className={titleClassName}>{title}</DialogTitle>
                 {badge}
               </div>
             ) : (
-              <DialogTitle>{title}</DialogTitle>
+              <DialogTitle className={titleClassName}>{title}</DialogTitle>
             )}
           </DialogHeader>
           {children}

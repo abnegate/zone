@@ -171,6 +171,8 @@ export default function ModelsPage() {
     detailsModel && !isInstalledModel(detailsModel)
       ? modelDownload(detailsModel, selectedSize || undefined, browse.source)
       : null;
+  const detailsDisplayName =
+    detailsModel && !isInstalledModel(detailsModel) ? detailsModel.display_name : undefined;
   const sourceUrl = detailsModel
     ? modelSourceUrl(
         detailsModel.name,
@@ -564,11 +566,8 @@ export default function ModelsPage() {
         <Modal
           isOpen
           onClose={() => setDetailsModel(null)}
-          title={
-            !isInstalledModel(detailsModel) && detailsModel.display_name
-              ? detailsModel.display_name
-              : detailsModel.name
-          }
+          title={detailsDisplayName || detailsModel.name}
+          titleClassName={detailsDisplayName ? undefined : 'ui-dialog-title--mono'}
           badge={
             isInstalledModel(detailsModel) ? (
               <Badge variant="accent">Installed</Badge>

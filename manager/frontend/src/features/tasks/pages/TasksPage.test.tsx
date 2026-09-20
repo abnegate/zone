@@ -821,11 +821,11 @@ describe('TasksPage', () => {
       expect(prLink).toHaveAttribute('target', '_blank');
       expect(prLink).toHaveAttribute('rel', 'noopener noreferrer');
       expect(prLink.closest('.task-pr')).not.toBeNull();
-      expect(prLink.closest('.task-meta')).toBeNull();
+      expect(prLink.closest('.task-meta')).not.toBeNull();
     });
   });
 
-  it('gives the pull request its own row under the meta so the title row holds at most two badges', async () => {
+  it('folds the pull request into the meta row so every card keeps the same height', async () => {
     mockGetTasks.mockImplementation(() =>
       Promise.resolve([
         {
@@ -841,9 +841,9 @@ describe('TasksPage', () => {
     const badge = await screen.findByText('PR: open');
     const pr = badge.closest('.task-pr') as HTMLElement | null;
     expect(pr).not.toBeNull();
-    expect(pr?.parentElement).toHaveClass('task-card');
-    expect(pr?.previousElementSibling).toHaveClass('task-meta');
-    expect(pr?.nextElementSibling).toHaveClass('task-actions');
+    expect(pr?.parentElement).toHaveClass('task-meta');
+    expect(pr?.nextElementSibling).toBeNull();
+    expect(pr?.parentElement?.nextElementSibling).toHaveClass('task-actions');
     expect(badge.closest('.task-card-title')).toBeNull();
     expect(within(pr as HTMLElement).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(within(pr as HTMLElement).getByText('zone/task-7')).toHaveClass('task-branch');
@@ -858,7 +858,7 @@ describe('TasksPage', () => {
     renderTasksPage();
     const badge = await screen.findByText('PR: pending');
     expect(badge.closest('.task-pr')).not.toBeNull();
-    expect(badge.closest('.task-meta')).toBeNull();
+    expect(badge.closest('.task-meta')).not.toBeNull();
     expect(screen.queryByRole('link', { name: 'View PR' })).not.toBeInTheDocument();
   });
 
@@ -869,7 +869,7 @@ describe('TasksPage', () => {
       expect(branch).toHaveClass('task-branch');
       expect(branch).toHaveAttribute('title', 'feature/fix-button-styling');
       expect(branch.closest('.task-pr')).not.toBeNull();
-      expect(branch.closest('.task-meta')).toBeNull();
+      expect(branch.closest('.task-meta')).not.toBeNull();
     });
   });
 
