@@ -2,6 +2,7 @@ import { Badge, Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import PageBar from '../../../shared/components/PageBar/PageBar';
+import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { CreateKnowledgeWizard } from '../components';
 import { useKnowledge } from '../hooks';
 import type { KnowledgeEntry } from '../types';
@@ -164,7 +165,10 @@ export default function WikiPage() {
             aria-label="Search knowledge"
           />
         </div>
-        <Button onClick={() => setShowCreateWizard(true)}>Add knowledge</Button>
+        <Button onClick={() => setShowCreateWizard(true)}>
+          <PlusIcon />
+          Add knowledge
+        </Button>
       </PageBar>
 
       <div className="page-body wiki-body">

@@ -1,7 +1,7 @@
 import type { WizardStep } from '@zone/ui';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { client } from '../../../api/client';
-import { Wizard } from '../../../components';
+import { Button, Wizard } from '../../../components';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Source } from '../../../types';
 import { getErrors } from '../../../validation';
@@ -13,6 +13,7 @@ interface CreateProjectWizardProps {
   onClose: () => void;
   onCreated: (project: Project) => void;
   createProject: (request: CreateProjectRequest) => Promise<Project>;
+  onAuto?: () => void;
 }
 
 const WIZARD_STEPS: WizardStep[] = [
@@ -50,6 +51,7 @@ export function CreateProjectWizard({
   onClose,
   onCreated,
   createProject,
+  onAuto,
 }: CreateProjectWizardProps) {
   const { currentWorkspace } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
@@ -186,6 +188,22 @@ export function CreateProjectWizard({
                 rows={3}
               />
             </div>
+            {onAuto && (
+              <div className="project-wizard-auto">
+                <p>Or describe what you want and let Zone plan the project and its tasks.</p>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    handleClose();
+                    onAuto();
+                  }}
+                  data-testid="auto-project-button"
+                >
+                  Auto project
+                </Button>
+              </div>
+            )}
           </div>
         );
 

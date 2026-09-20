@@ -206,7 +206,7 @@ async function createProjectInConsole(
   status: string,
 ): Promise<void> {
   await page.goto('/projects');
-  await page.getByRole('button', { name: '+ New Project' }).click();
+  await page.getByRole('button', { name: 'New project' }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
   await dialog.locator('#project-name').fill(name);
@@ -245,7 +245,7 @@ test.describe('sources, projects and tasks', () => {
     }
     await page
       .locator('.sources-header')
-      .getByRole('button', { name: '+ Add Source' })
+      .getByRole('button', { name: 'Add source' })
       .click();
     const wizard = page.getByRole('dialog');
     await expect(wizard).toContainText('Add Source');
@@ -344,7 +344,7 @@ test.describe('sources, projects and tasks', () => {
     ): Promise<string> {
       await page
         .locator('.sources-header')
-        .getByRole('button', { name: '+ Add Source' })
+        .getByRole('button', { name: 'Add source' })
         .click();
       const wizard = page.getByRole('dialog');
       await wizard
@@ -390,7 +390,7 @@ test.describe('sources, projects and tasks', () => {
     const kinds = await (async () => {
       await page
         .locator('.sources-header')
-        .getByRole('button', { name: '+ Add Source' })
+        .getByRole('button', { name: 'Add source' })
         .click();
       const wizard = page.getByRole('dialog');
       const names = await wizard

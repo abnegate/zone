@@ -150,11 +150,10 @@ describe('SourcesPage', () => {
     expect(screen.getByText(/Connect repositories, calendars/)).toBeInTheDocument();
   });
 
-  it('renders Add Source button', async () => {
+  it('renders the Add source primary in sentence case with the plus icon', async () => {
     render(<SourcesPage />);
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
-    });
+    const button = await screen.findByRole('button', { name: 'Add source' });
+    expect(button.querySelector('svg.plus-icon')).not.toBeNull();
   });
 
   it('displays source type badges', async () => {
@@ -213,20 +212,20 @@ describe('SourcesPage', () => {
   it('opens create source wizard', async () => {
     render(<SourcesPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
     expect(screen.getByRole('heading', { name: 'Add Source' })).toBeInTheDocument();
   });
 
   it('closes create wizard on cancel', async () => {
     render(<SourcesPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
     expect(screen.getByRole('heading', { name: 'Add Source' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -238,10 +237,10 @@ describe('SourcesPage', () => {
   it('closes create wizard on close button', async () => {
     render(<SourcesPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
     fireEvent.click(
       within(screen.getByRole('dialog')).getByRole('button', { name: 'Close wizard' })
     );
@@ -465,10 +464,10 @@ describe('SourcesPage', () => {
   it('shows source type options in create wizard', async () => {
     render(<SourcesPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
     // Should show source type selection (first step of wizard)
     expect(screen.getByText('Source Type')).toBeInTheDocument();
@@ -493,10 +492,10 @@ describe('SourcesPage', () => {
 
     render(<SourcesPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
     // Step 1: Source type is already GitHub (default), click Next
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
@@ -545,10 +544,10 @@ describe('SourcesPage', () => {
     it('renders toggle field for filesystem source', async () => {
       render(<SourcesPage />);
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
       // Switch to filesystem source in step 1
       const filesystemOption = findSourceTypeOption('Filesystem');
@@ -574,10 +573,10 @@ describe('SourcesPage', () => {
     it('allows toggling the toggle field', async () => {
       render(<SourcesPage />);
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
       // Switch to filesystem source
       const filesystemOption = findSourceTypeOption('Filesystem');
@@ -605,10 +604,10 @@ describe('SourcesPage', () => {
     it('renders textarea field for text source', async () => {
       render(<SourcesPage />);
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
       // Switch to text source
       const textOption = findSourceTypeOption('Text');
@@ -629,10 +628,10 @@ describe('SourcesPage', () => {
     it('allows input in textarea field', async () => {
       render(<SourcesPage />);
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
       // Switch to text source
       const textOption = findSourceTypeOption('Text');
@@ -653,10 +652,10 @@ describe('SourcesPage', () => {
     it('changes source type and shows different config fields', async () => {
       render(<SourcesPage />);
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
       // GitHub is selected by default, go to config step
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
@@ -693,10 +692,10 @@ describe('SourcesPage', () => {
 
       render(<SourcesPage />);
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
       // Step 1: Next to config
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
@@ -730,10 +729,10 @@ describe('SourcesPage', () => {
 
       render(<SourcesPage />);
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ Add Source' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
       // Step 1: Next to config
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));

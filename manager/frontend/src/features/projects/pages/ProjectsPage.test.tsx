@@ -308,11 +308,20 @@ describe('ProjectsPage', () => {
   it('opens create project wizard', async () => {
     renderWithQueryClient(<ProjectsPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Project' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New project' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Project' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }));
     expect(screen.getByRole('heading', { name: 'New Project' })).toBeInTheDocument();
+  });
+
+  it('offers one New project primary with the plus icon and keeps Auto project in the wizard', async () => {
+    renderWithQueryClient(<ProjectsPage />);
+    const button = await screen.findByRole('button', { name: 'New project' });
+    expect(button.querySelector('svg.plus-icon')).not.toBeNull();
+    expect(screen.queryByRole('button', { name: 'Auto project' })).toBeNull();
+    fireEvent.click(button);
+    expect(screen.getByRole('button', { name: 'Auto project' })).toBeInTheDocument();
   });
 
   // Note: Wizard step progression doesn't work correctly in test environment
@@ -332,10 +341,10 @@ describe('ProjectsPage', () => {
 
     renderWithQueryClient(<ProjectsPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Project' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New project' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Project' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }));
 
     // Step 1: Project details
     fireEvent.change(screen.getByLabelText('Project Name'), { target: { value: 'New Project' } });
@@ -506,10 +515,10 @@ describe('ProjectsPage', () => {
   it('cancels create wizard', async () => {
     renderWithQueryClient(<ProjectsPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Project' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New project' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Project' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }));
     expect(screen.getByRole('heading', { name: 'New Project' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -628,10 +637,10 @@ describe('ProjectsPage', () => {
 
     renderWithQueryClient(<ProjectsPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Project' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New project' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Project' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }));
     fireEvent.change(screen.getByLabelText('Project Name'), { target: { value: 'New Project' } });
 
     // Navigate through wizard steps
@@ -848,9 +857,10 @@ describe('ProjectsPage', () => {
     it('starts the interview from a brief and opens the planner chat', async () => {
       renderWithQueryClient(<ProjectsPage />);
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'Auto project' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'New project' })).toBeInTheDocument();
       });
 
+      fireEvent.click(screen.getByRole('button', { name: 'New project' }));
       fireEvent.click(screen.getByRole('button', { name: 'Auto project' }));
       expect(screen.getByTestId('auto-project-modal')).toBeInTheDocument();
 
@@ -879,9 +889,10 @@ describe('ProjectsPage', () => {
       );
       renderWithQueryClient(<ProjectsPage />);
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'Auto project' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'New project' })).toBeInTheDocument();
       });
 
+      fireEvent.click(screen.getByRole('button', { name: 'New project' }));
       fireEvent.click(screen.getByRole('button', { name: 'Auto project' }));
       fireEvent.change(screen.getByTestId('auto-project-brief'), {
         target: { value: 'Something' },

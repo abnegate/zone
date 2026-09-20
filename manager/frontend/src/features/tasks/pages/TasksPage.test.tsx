@@ -348,18 +348,24 @@ describe('TasksPage', () => {
   it('opens create task wizard', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New task' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
     expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
+  });
+
+  it('labels the primary New task in sentence case with the plus icon', async () => {
+    renderTasksPage();
+    const button = await screen.findByRole('button', { name: 'New task' });
+    expect(button.querySelector('svg.plus-icon')).not.toBeNull();
   });
 
   it('disables new task button when no projects', async () => {
     mockGetProjects.mockImplementation(() => Promise.resolve([]));
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'New task' })).toBeDisabled();
     });
   });
 
@@ -394,10 +400,10 @@ describe('TasksPage', () => {
 
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New task' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Project Alpha/i })).toBeInTheDocument();
@@ -433,10 +439,10 @@ describe('TasksPage', () => {
   it('cancels create task wizard', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New task' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
     expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -551,10 +557,10 @@ describe('TasksPage', () => {
   it('enables agentic mode in create wizard', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).not.toBeDisabled();
+      expect(screen.getByRole('button', { name: 'New task' })).not.toBeDisabled();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
 
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
@@ -590,10 +596,10 @@ describe('TasksPage', () => {
   it('shows project source info when agentic mode enabled', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).not.toBeDisabled();
+      expect(screen.getByRole('button', { name: 'New task' })).not.toBeDisabled();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
 
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
@@ -762,10 +768,10 @@ describe('TasksPage', () => {
 
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).not.toBeDisabled();
+      expect(screen.getByRole('button', { name: 'New task' })).not.toBeDisabled();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
 
     // Wait for wizard to appear
     await waitFor(() => {

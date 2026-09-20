@@ -34,7 +34,7 @@ for (const width of [1440, 390]) {
         page,
       }, information) => {
         await page.goto('/projects', { waitUntil: 'domcontentloaded' });
-        await page.getByRole('button', { name: '+ New Project', exact: true }).click();
+        await page.getByRole('button', { name: 'New project', exact: true }).click();
         const dialog = page.getByRole('dialog');
         await expect(dialog).toBeVisible();
         await expect(
@@ -49,7 +49,7 @@ for (const width of [1440, 390]) {
         await capture(page, information);
         await page.mouse.click(8, 8);
         await expect(dialog).toBeHidden();
-        await page.getByRole('button', { name: '+ New Project', exact: true }).click();
+        await page.getByRole('button', { name: 'New project', exact: true }).click();
         await expect(dialog).toBeVisible();
         await expect(page.locator('.ui-wizard-overlay')).toHaveCSS('position', 'fixed');
         await expect(dialog.locator('.ui-wizard-content')).toHaveCSS(

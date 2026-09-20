@@ -421,6 +421,23 @@
   border-radius: var(--ui-radius-md);
 }
 
+.project-wizard-auto {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  margin-top: var(--ui-space-4);
+  padding-top: var(--ui-space-3);
+  border-top: 1px solid var(--ui-border-subtle);
+}
+
+.project-wizard-auto p {
+  flex: 1;
+  margin: 0;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-muted);
+}
+
 .project-wizard .source-selection-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

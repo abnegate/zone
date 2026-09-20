@@ -13,6 +13,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
+import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
 import { useSources } from '../../sources/hooks/useSources';
@@ -542,17 +543,7 @@ export default function ChatsPage() {
               setShowNewChatModal(true);
             }}
           >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              width="16"
-              height="16"
-              aria-hidden="true"
-            >
-              <path d="M12 5v14M5 12h14" strokeLinecap="round" />
-            </svg>
+            <PlusIcon />
           </button>
         </PageBar>
 

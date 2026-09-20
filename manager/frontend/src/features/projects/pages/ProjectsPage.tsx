@@ -6,6 +6,7 @@ import { client } from '../../../api/client';
 import { projectsApi } from '../../../api/projects';
 import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
+import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { getErrors } from '../../../validation';
 import { AutomationPanel, AutoProjectModal, CreateProjectWizard } from '../components';
 import { useAutomation, useProjects, useSyncConfigs } from '../hooks';
@@ -345,19 +346,13 @@ export default function ProjectsPage() {
           </TabsList>
         </Tabs>
         <Button
-          variant="secondary"
-          onClick={() => setShowAutoModal(true)}
-          data-testid="auto-project-button"
-        >
-          Auto project
-        </Button>
-        <Button
           onClick={() => {
             resetForm();
             setShowCreateModal(true);
           }}
         >
-          + New Project
+          <PlusIcon />
+          New project
         </Button>
       </PageBar>
 
@@ -684,6 +679,7 @@ export default function ProjectsPage() {
         onClose={() => setShowCreateModal(false)}
         onCreated={handleProjectCreated}
         createProject={createProjectMutation}
+        onAuto={() => setShowAutoModal(true)}
       />
 
       {/* Auto project: a brief, then the planner chat asks the rest */}
