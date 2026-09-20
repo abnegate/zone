@@ -13,10 +13,28 @@ mock.module('../../../api/chats', () => ({
   },
 }));
 
+let workspace: { id: string; name: string } | null = { id: 'ws-1', name: 'Test Workspace' };
+
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentWorkspace: workspace,
+    currentOrganization: { id: 'org-1', name: 'Test Org' },
+    workspaces: [],
+    organizations: [],
+    loading: false,
+    error: null,
+    setCurrentWorkspace: mock(),
+    setCurrentOrganization: mock(),
+    refreshWorkspaces: mock(),
+    refreshOrganizations: mock(),
+  }),
+}));
+
 let useChatSearch: typeof import('./useChatSearch').useChatSearch;
+let NO_WORKSPACE_TO_SEARCH: string;
 
 beforeAll(async () => {
-  ({ useChatSearch } = await import('./useChatSearch'));
+  ({ useChatSearch, NO_WORKSPACE_TO_SEARCH } = await import('./useChatSearch'));
 });
 
 afterAll(() => {
@@ -58,6 +76,7 @@ describe('useChatSearch', () => {
 
   beforeEach(() => {
     mockSearchChatMessages.mockReset();
+    workspace = { id: 'ws-1', name: 'Test Workspace' };
   });
 
   it('should not search on mount', () => {
@@ -93,7 +112,7 @@ describe('useChatSearch', () => {
     expect(result.current.results).toEqual(mockSearchResults);
     expect(result.current.total).toBe(2);
     expect(result.current.error).toBeNull();
-    expect(mockSearchChatMessages).toHaveBeenCalledWith({ query: 'hello' });
+    expect(mockSearchChatMessages).toHaveBeenCalledWith({ query: 'hello', workspace_id: 'ws-1' });
   });
 
   it('should search with chat_id filter', async () => {
@@ -114,7 +133,11 @@ describe('useChatSearch', () => {
 
     expect(result.current.results).toEqual([mockSearchResults[0]]);
     expect(result.current.total).toBe(1);
-    expect(mockSearchChatMessages).toHaveBeenCalledWith({ query: 'hello', chat_id: 'c1' });
+    expect(mockSearchChatMessages).toHaveBeenCalledWith({
+      query: 'hello',
+      workspace_id: 'ws-1',
+      chat_id: 'c1',
+    });
   });
 
   it('should search with limit', async () => {
@@ -135,7 +158,11 @@ describe('useChatSearch', () => {
 
     expect(result.current.results).toEqual([mockSearchResults[0]]);
     expect(result.current.total).toBe(2);
-    expect(mockSearchChatMessages).toHaveBeenCalledWith({ query: 'hello', limit: 1 });
+    expect(mockSearchChatMessages).toHaveBeenCalledWith({
+      query: 'hello',
+      workspace_id: 'ws-1',
+      limit: 1,
+    });
   });
 
   it('should handle errors when searching', async () => {
@@ -198,6 +225,38 @@ describe('useChatSearch', () => {
 
     expect(result.current.searching).toBe(false);
     expect(mockSearchChatMessages).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the server failure text instead of an empty result list', async () => {
+    mockSearchChatMessages.mockRejectedValue(
+      new Error('Failed to search chat messages: missing field workspace_id')
+    );
+
+    const { result } = renderHook(() => useChatSearch(), { wrapper: createWrapper() });
+
+    act(() => {
+      result.current.search('zebra');
+    });
+
+    await waitFor(() => {
+      expect(result.current.searching).toBe(false);
+    });
+
+    expect(result.current.error).toBe('Failed to search chat messages: missing field workspace_id');
+    expect(result.current.results).toEqual([]);
+  });
+
+  it('refuses to search without a workspace and says so', async () => {
+    workspace = null;
+
+    const { result } = renderHook(() => useChatSearch(), { wrapper: createWrapper() });
+
+    await act(async () => {
+      await result.current.search('hello');
+    });
+
+    expect(mockSearchChatMessages).not.toHaveBeenCalled();
+    expect(result.current.error).toBe(NO_WORKSPACE_TO_SEARCH);
   });
 
   it('should handle multiple searches in sequence', async () => {

@@ -3,7 +3,9 @@
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::{OnceCell, Semaphore};
-use zone_context::adapters::AdapterRegistry;
+use zone_context::adapters::{
+    AdapterRegistry, FilesystemAdapter, GitHubAdapter, GitLabAdapter, TextAdapter, WebAdapter,
+};
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
 use zone_core::mcp::McpHub;
@@ -21,6 +23,22 @@ const MAX_CONCURRENT_INDEX: usize = 3;
 /// One, because a training upload holds its whole body in memory and a second
 /// run would be waiting on the same ComfyUI and the same GPU regardless.
 const MAX_CONCURRENT_TRAIN: usize = 1;
+
+/// The adapters a source can be verified and fetched with.
+///
+/// Every kind offered anywhere (the console's wizard, `GET /api/sources/types`,
+/// the create route's validation) is read from this registry, so a kind without
+/// a working adapter cannot be offered. Notion stays out until its adapter does
+/// more than refuse.
+pub fn default_adapter_registry() -> AdapterRegistry {
+    let mut registry = AdapterRegistry::new();
+    registry.register(FilesystemAdapter::new());
+    registry.register(GitHubAdapter::new());
+    registry.register(GitLabAdapter::new());
+    registry.register(TextAdapter::new());
+    registry.register(WebAdapter::new());
+    registry
+}
 
 /// Shared application state
 ///
@@ -60,7 +78,7 @@ struct AppStateInner {
 }
 
 impl AppState {
-    /// Create a new application state without zone_context services
+    /// Create a new application state without embedding or context services
     pub fn new(config: Config, db: PgPool, cache: Option<Cache>) -> Self {
         // Derive encryption key from config
         let encryption_key = crate::crypto::derive_key(config.encryption_key())
@@ -86,7 +104,7 @@ impl AppState {
                 config,
                 db,
                 cache,
-                adapter_registry: None,
+                adapter_registry: Some(Arc::new(default_adapter_registry())),
                 embedding_service: None,
                 context_service: None,
                 email_service: None,
@@ -283,7 +301,14 @@ impl AppState {
 
     /// Install an empty hub so tests never spawn MCP children.
     pub fn disable_mcp(&self) {
-        let _ = self.inner.mcp.set(McpHub::new());
+        self.install_mcp(McpHub::new());
+    }
+
+    /// Install an already connected hub, for a test that attaches its own
+    /// server instead of whatever the process environment names. A hub that
+    /// is already installed stays.
+    pub fn install_mcp(&self, hub: McpHub) {
+        let _ = self.inner.mcp.set(hub);
     }
 }
 
@@ -335,7 +360,6 @@ pub(crate) fn test_config() -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zone_context::adapters::{FilesystemAdapter, GitHubAdapter, TextAdapter};
     use zone_context::embeddings::providers::MockEmbeddingService;
     use zone_email::EmailConfig;
 
@@ -370,25 +394,15 @@ mod tests {
     }
 
     #[test]
-    fn test_adapter_registry_initialization() {
-        // Given: Empty adapter registry
-        let mut registry = AdapterRegistry::new();
-
-        // When: Registering text, filesystem, and github adapters
-        registry.register(TextAdapter::new());
-        registry.register(FilesystemAdapter::new());
-        registry.register(GitHubAdapter::new());
-
-        // Then: Should have all three adapters registered
-        assert_eq!(registry.len(), 3);
-        assert!(registry.has_adapter("text"));
-        assert!(registry.has_adapter("filesystem"));
-        assert!(registry.has_adapter("github"));
-
-        let types = registry.registered_types();
-        assert!(types.contains(&"text".to_string()));
-        assert!(types.contains(&"filesystem".to_string()));
-        assert!(types.contains(&"github".to_string()));
+    fn the_default_registry_holds_exactly_the_kinds_that_can_verify() {
+        let registry = default_adapter_registry();
+        let mut kinds = registry.registered_types();
+        kinds.sort();
+        assert_eq!(kinds, ["filesystem", "github", "gitlab", "text", "web"]);
+        assert!(
+            !registry.has_adapter("notion"),
+            "the Notion adapter is a stub that refuses every verify; offering it would strand the source"
+        );
     }
 
     // Note: AppState with services requires a real database connection and embedding service.
@@ -405,8 +419,7 @@ mod tests {
             // When: Creating AppState without services
             let state = AppState::new(config, pool, None);
 
-            // Then: Service accessors should return None
-            assert!(state.adapter_registry().is_none());
+            assert!(state.adapter_registry().is_some());
             assert!(state.embedding_service().is_none());
             assert!(state.context_service().is_none());
         }

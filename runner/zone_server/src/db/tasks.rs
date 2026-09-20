@@ -1432,6 +1432,15 @@ pub async fn update_task_pr(
         .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(url).bind(branch).bind(status).execute(pool).await?.rows_affected() == 1)
 }
 
+/// Record how a task's pull request stands once its reception has been read.
+///
+/// Only a task that has a pull request is touched, and a row that already says
+/// so is left alone, so `updated_at` moves only when the status really changes.
+pub async fn update_task_pr_status(pool: &PgPool, task_id: Uuid, status: &str) -> DbResult<bool> {
+    Ok(sqlx::query("UPDATE tasks SET pr_status=$2, updated_at=NOW() WHERE id=$1 AND pr_url IS NOT NULL AND pr_status IS DISTINCT FROM $2")
+        .bind(task_id).bind(status).execute(pool).await?.rows_affected() == 1)
+}
+
 pub async fn update_task_branch(
     pool: &PgPool,
     execution: &Execution,

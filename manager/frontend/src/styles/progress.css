@@ -1,12 +1,12 @@
 .progress-section {
-  margin-top: var(--ui-space-6);
-  padding-top: var(--ui-space-6);
+  margin-top: var(--ui-space-4);
+  padding-top: var(--ui-space-4);
   border-top: 1px solid var(--ui-border);
 }
 
 .progress-header {
-  margin-bottom: var(--ui-space-4);
-  font-size: var(--ui-text-sm);
+  margin-bottom: var(--ui-space-2);
+  font-size: var(--ui-text-2xs);
   font-weight: 600;
   color: var(--ui-text-muted);
   text-transform: uppercase;
@@ -16,25 +16,27 @@
 .steps-list {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-2);
+  gap: var(--ui-space-1);
 }
 
 .step-item {
   display: flex;
   align-items: flex-start;
-  gap: var(--ui-space-3);
-  padding: var(--ui-space-3) var(--ui-space-4);
+  gap: var(--ui-space-2);
+  padding: var(--ui-space-2) var(--ui-space-3);
   background: var(--ui-bg-surface);
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius-md);
   font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
   animation: ui-fade-up var(--ui-duration-normal) var(--ui-ease-out);
 }
 
 .step-icon {
   flex-shrink: 0;
-  width: 20px;
-  height: 20px;
+  width: var(--ui-icon-size);
+  height: var(--ui-icon-size);
+  margin-top: var(--ui-space-0-5);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -46,7 +48,7 @@
 }
 
 .step-running .step-icon {
-  color: var(--ui-accent-500);
+  color: var(--ui-accent);
   animation: ui-spin 1s linear infinite;
 }
 
@@ -62,92 +64,134 @@
   flex-shrink: 0;
   font-weight: 500;
   color: var(--ui-text-primary);
-  min-width: 80px;
+  min-width: 5rem;
 }
 
 .step-message {
   color: var(--ui-text-secondary);
   flex: 1;
+  min-width: 0;
 }
 
 .result-message {
-  margin-top: var(--ui-space-4);
-  padding: var(--ui-space-4);
-  border-radius: var(--ui-radius-lg);
+  margin-top: var(--ui-space-3);
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border-radius: var(--ui-radius-md);
+  font-size: var(--ui-text-sm);
   font-weight: 500;
   display: flex;
   align-items: center;
-  gap: var(--ui-space-3);
+  gap: var(--ui-space-2);
   animation: ui-fade-up var(--ui-duration-normal) var(--ui-ease-out);
 }
 
 .result-success {
-  color: var(--ui-success-500);
+  color: var(--ui-success-600);
   background: var(--ui-success-muted);
-  border: 1px solid rgba(34, 197, 94, 0.2);
+  border: 1px solid color-mix(in srgb, var(--ui-success) 28%, transparent);
 }
 
 .result-error {
-  color: var(--ui-error-500);
+  color: var(--ui-error-600);
   background: var(--ui-error-muted);
-  border: 1px solid rgba(239, 68, 68, 0.2);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 28%, transparent);
+}
+
+:root[data-theme='dark'] .result-success {
+  color: var(--ui-success-400);
+}
+
+:root[data-theme='dark'] .result-error {
+  color: var(--ui-error-400);
 }
 
 .result-icon {
-  width: 24px;
-  height: 24px;
+  width: var(--ui-icon-size);
+  height: var(--ui-icon-size);
   flex-shrink: 0;
 }
 
 .progress-bar {
   width: 100%;
-  height: 6px;
-  background: var(--ui-bg-surface);
+  height: var(--ui-space-1);
+  background: var(--ui-bg-muted);
   border-radius: var(--ui-radius-full);
   overflow: hidden;
-  box-shadow: var(--ui-shadow-inner);
 }
 
 .progress-bar-fill {
   height: 100%;
-  background: linear-gradient(
-    90deg,
-    var(--ui-accent-600) 0%,
-    var(--ui-accent-400) 100%
-  );
+  background: var(--ui-accent);
   border-radius: var(--ui-radius-full);
   transition: width 400ms var(--ui-ease-out);
-  position: relative;
-}
-
-.progress-bar-fill::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    rgba(255, 255, 255, 0.2) 50%,
-    transparent 100%
-  );
-  animation: ui-shimmer 2s infinite;
-  background-size: 200% 100%;
 }
 
 .progress-bar--thin {
-  height: 3px;
+  height: var(--ui-space-0-5);
 }
 
-.progress-label {
+.spinner {
+  display: inline-block;
+  width: var(--ui-icon-size);
+  height: var(--ui-icon-size);
+  vertical-align: -3px;
+  border: 2px solid var(--ui-border);
+  border-top-color: var(--ui-accent);
+  border-radius: 50%;
+  animation: ui-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+.loading-placeholder,
+.empty-placeholder,
+.error-placeholder {
   display: flex;
-  justify-content: space-between;
-  margin-bottom: var(--ui-space-2);
-  font-size: var(--ui-text-xs);
-  font-weight: 500;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ui-space-2);
+  padding: var(--ui-space-8) var(--ui-space-5);
+  text-align: center;
+  font-size: var(--ui-text-sm);
   color: var(--ui-text-muted);
-  text-transform: uppercase;
-  letter-spacing: var(--ui-tracking-wider);
+}
+
+.loading-placeholder {
+  flex-direction: row;
+}
+
+.empty-placeholder {
+  background: var(--ui-bg-surface);
+  border: 1px dashed var(--ui-border);
+  border-radius: var(--ui-radius-card);
+}
+
+.error-placeholder {
+  color: var(--ui-error-600);
+  background: var(--ui-error-muted);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 28%, transparent);
+  border-radius: var(--ui-radius-card);
+}
+
+:root[data-theme='dark'] .error-placeholder {
+  color: var(--ui-error-400);
+}
+
+.placeholder-icon {
+  width: var(--ui-empty-icon-size);
+  height: var(--ui-empty-icon-size);
+  margin-bottom: var(--ui-space-1);
+  color: var(--ui-text-muted);
+}
+
+.placeholder-title {
+  font-size: var(--ui-text-md);
+  font-weight: 600;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+}
+
+.placeholder-message {
+  font-size: var(--ui-text-sm);
+  max-width: 22.5rem;
 }

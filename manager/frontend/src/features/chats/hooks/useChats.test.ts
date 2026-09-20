@@ -189,7 +189,7 @@ describe('useChats', () => {
     expect(result.current.chats).not.toContainEqual(mockChats[0]);
   });
 
-  it('should archive a chat', async () => {
+  it('archiving a chat drops it from the active list at once', async () => {
     const archivedChat: Chat = { ...mockChats[0], archived: true };
     mockGetChats.mockResolvedValue(mockChats);
     mockArchiveChat.mockResolvedValue(archivedChat);
@@ -203,14 +203,18 @@ describe('useChats', () => {
     await result.current.archiveChat('1');
 
     await waitFor(() => {
-      expect(result.current.chats.find((c) => c.id === '1')?.archived).toBe(true);
+      expect(result.current.chats.map((c) => c.id)).toEqual(['2']);
     });
     expect(mockArchiveChat).toHaveBeenCalledWith('1');
+    expect(mockGetChats).toHaveBeenCalledTimes(1);
   });
 
-  it('should unarchive a chat', async () => {
+  it('unarchiving a chat drops it from the archived list at once', async () => {
     const unarchivedChat: Chat = { ...mockChats[0], archived: false };
-    const archivedChats: Chat[] = [{ ...mockChats[0], archived: true }];
+    const archivedChats: Chat[] = [
+      { ...mockChats[0], archived: true },
+      { ...mockChats[1], archived: true },
+    ];
     mockGetChats.mockResolvedValue(archivedChats);
     mockUnarchiveChat.mockResolvedValue(unarchivedChat);
 
@@ -223,9 +227,27 @@ describe('useChats', () => {
     await result.current.unarchiveChat('1');
 
     await waitFor(() => {
-      expect(result.current.chats.find((c) => c.id === '1')?.archived).toBe(false);
+      expect(result.current.chats.map((c) => c.id)).toEqual(['2']);
     });
     expect(mockUnarchiveChat).toHaveBeenCalledWith('1');
+  });
+
+  it('keeps a chat listed when the server reports it still belongs to this list', async () => {
+    mockGetChats.mockResolvedValue(mockChats);
+    mockArchiveChat.mockResolvedValue({ ...mockChats[0], title: 'Renamed', archived: false });
+
+    const { result } = renderHook(() => useChats(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await result.current.archiveChat('1');
+
+    await waitFor(() => {
+      expect(result.current.chats.find((c) => c.id === '1')?.title).toBe('Renamed');
+    });
+    expect(result.current.chats).toHaveLength(2);
   });
 
   it('should refresh chats', async () => {

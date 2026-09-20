@@ -16,6 +16,7 @@ use crate::{db::workspace_members, state::AppState};
 pub struct WorkspaceMember {
     pub workspace_id: Uuid,
     pub user_id: Uuid,
+    pub email: String,
     pub role: workspace_members::WorkspaceRole,
 }
 
@@ -85,6 +86,7 @@ where
         Ok(WorkspaceMember {
             workspace_id,
             user_id,
+            email: auth_user.0.email,
             role: member.role,
         })
     }
@@ -95,6 +97,7 @@ where
 pub struct WorkspaceWriter {
     pub workspace_id: Uuid,
     pub user_id: Uuid,
+    pub email: String,
     pub role: workspace_members::WorkspaceRole,
 }
 
@@ -120,6 +123,7 @@ where
         Ok(WorkspaceWriter {
             workspace_id: member.workspace_id,
             user_id: member.user_id,
+            email: member.email,
             role: member.role,
         })
     }
@@ -130,6 +134,7 @@ where
 pub struct WorkspaceAdmin {
     pub workspace_id: Uuid,
     pub user_id: Uuid,
+    pub email: String,
     pub role: workspace_members::WorkspaceRole,
 }
 
@@ -155,6 +160,7 @@ where
         Ok(WorkspaceAdmin {
             workspace_id: member.workspace_id,
             user_id: member.user_id,
+            email: member.email,
             role: member.role,
         })
     }
@@ -165,6 +171,7 @@ where
 pub struct WorkspaceOwner {
     pub workspace_id: Uuid,
     pub user_id: Uuid,
+    pub email: String,
 }
 
 impl<S> FromRequestParts<S> for WorkspaceOwner
@@ -187,6 +194,7 @@ where
         Ok(WorkspaceOwner {
             workspace_id: member.workspace_id,
             user_id: member.user_id,
+            email: member.email,
         })
     }
 }

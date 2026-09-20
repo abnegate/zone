@@ -127,6 +127,17 @@ pub async fn list_chats(
     }
 }
 
+/// The titles of the given chats, for labelling rows that carry only a chat id.
+pub async fn titles(pool: &PgPool, ids: &[Uuid]) -> DbResult<Vec<(Uuid, String)>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, (Uuid, String)>("SELECT id, title FROM chats WHERE id = ANY($1)")
+        .bind(ids)
+        .fetch_all(pool)
+        .await
+}
+
 /// Get chat by ID
 pub async fn get_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> {
     let row = sqlx::query!(

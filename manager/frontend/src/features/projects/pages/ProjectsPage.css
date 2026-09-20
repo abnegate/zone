@@ -267,6 +267,22 @@
   margin-bottom: var(--ui-section-gap);
 }
 
+.detail-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--ui-space-4);
+  margin-bottom: var(--ui-section-gap);
+}
+
+.detail-meta .detail-row {
+  margin-bottom: 0;
+  min-width: 0;
+}
+
+.details-error {
+  margin-bottom: var(--ui-space-4);
+}
+
 .detail-label {
   display: block;
   margin-bottom: var(--ui-label-gap);
@@ -358,13 +374,12 @@
 
 .sync-config-item {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--ui-space-3);
-  padding: var(--ui-row-padding);
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  padding: var(--ui-space-3) var(--ui-space-4);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-md);
-  flex-wrap: wrap;
+  background: var(--ui-bg-surface);
 }
 
 .sync-config-info {
@@ -372,7 +387,60 @@
   align-items: center;
   gap: var(--ui-space-2);
   min-width: 0;
-  flex: 1;
+  flex-wrap: wrap;
+}
+
+.sync-config-remove {
+  margin-left: auto;
+  color: var(--ui-text-secondary);
+}
+
+.sync-config-remove:hover {
+  color: var(--ui-error);
+}
+
+.sync-config-state {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.sync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-1);
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-secondary);
+  white-space: nowrap;
+}
+
+.sync-status::before {
+  content: '';
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: var(--ui-radius-full);
+  background: var(--ui-warning);
+}
+
+.sync-status.synced::before {
+  background: var(--ui-success);
+}
+
+.sync-webhook {
+  font-family: var(--ui-font-mono, monospace);
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-secondary);
+  padding: 0.125rem 0.375rem;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-bg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .sync-provider-badge {
@@ -537,8 +605,8 @@
   .projects-detail-placeholder {
     display: none;
   }
-  .sync-config-info {
-    flex-wrap: wrap;
+  .detail-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .details-actions {
     padding: var(--ui-space-4) var(--ui-gutter);

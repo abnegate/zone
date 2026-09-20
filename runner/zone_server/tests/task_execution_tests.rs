@@ -962,6 +962,57 @@ async fn a_task_holding_for_its_plan_refuses_to_change_anything_until_it_is_appr
 /// The artifacts describe the run, and a run that asked something ran more
 /// than the turn that answered. Reporting only the last turn hides the work
 /// every earlier one did and throws away what it said before it stopped.
+/// Anything reporting on `task_tool_calls` is blind unless every tool a run
+/// executes leaves a row there, finished with what it answered.
+#[tokio::test]
+async fn every_tool_a_run_executes_leaves_a_finished_task_tool_calls_row() {
+    use zone_server::db::task_tool_calls;
+
+    let parked = park(optional()).await;
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+
+    let mut calls = Vec::new();
+    for _ in 0..100 {
+        calls = task_tool_calls::list_for_run(&parked.pool, parked.run)
+            .await
+            .unwrap();
+        if calls
+            .iter()
+            .all(|call| call.status == task_tool_calls::STATUS_COMPLETED)
+            && !calls.is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let [call] = calls.as_slice() else {
+        panic!("the run made one tool call; rows: {calls:?}");
+    };
+    assert_eq!(call.tool_name, "ask_user");
+    assert_eq!(call.status, task_tool_calls::STATUS_COMPLETED);
+    assert_eq!(
+        call.tool_input["questions"][0]["header"], "Scope",
+        "the arguments the model sent are the row's input"
+    );
+    assert!(
+        call.tool_output
+            .as_ref()
+            .and_then(|output| output.as_str())
+            .is_some(),
+        "the tool's answer is the row's output: {:?}",
+        call.tool_output
+    );
+    assert!(call.error_message.is_none());
+    assert!(call.completed_at.is_some());
+
+    parked.finish().await;
+}
+
 #[tokio::test]
 async fn a_parked_turn_still_counts_towards_the_run_it_belongs_to() {
     let parked = park(optional()).await;

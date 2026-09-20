@@ -2,6 +2,7 @@ export { ActionReceipts } from './ActionReceipts';
 export { AuthenticatedAudio } from './AuthenticatedAudio';
 export { AuthenticatedImage } from './AuthenticatedImage';
 export { AuthenticatedVideo } from './AuthenticatedVideo';
+export { ChatSources } from './ChatSources';
 export { Citations } from './Citations';
 export { Generation } from './Generation';
 export { JobCard } from './JobCard';

@@ -198,6 +198,8 @@ export const SourceTypeInfoSchema = z.object({
   name: z.string(),
   category: SourceCategorySchema,
   enabled: z.boolean(),
+  description: z.string().optional(),
+  config_schema: z.unknown().optional(),
 });
 
 export const SourceTypesResponseSchema = z.object({

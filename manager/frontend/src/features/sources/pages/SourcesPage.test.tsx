@@ -9,6 +9,16 @@ const mockUpdateSource = mock(() => Promise.resolve({} as Source));
 const mockDeleteSource = mock(() => Promise.resolve());
 const mockVerifySource = mock(() => Promise.resolve({ verified: true, message: 'OK' }));
 const mockGetSource = mock(() => Promise.resolve({} as Source));
+const mockGetSourceTypes = mock(() =>
+  Promise.resolve(
+    (['github', 'gitlab', 'filesystem', 'web', 'text'] as const).map((id) => ({
+      id,
+      name: id,
+      category: 'file' as const,
+      enabled: true,
+    }))
+  )
+);
 
 // Mock sources API module
 mock.module('../../../api/sources', () => ({
@@ -19,6 +29,7 @@ mock.module('../../../api/sources', () => ({
     deleteSource: mockDeleteSource,
     verifySource: mockVerifySource,
     getSource: mockGetSource,
+    getSourceTypes: mockGetSourceTypes,
   },
 }));
 

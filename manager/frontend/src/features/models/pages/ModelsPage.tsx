@@ -2,6 +2,7 @@ import { Badge, Button, EmptyState, Modal, Tabs, TabsList, TabsTrigger } from '@
 import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
+import PageBar from '../../../shared/components/PageBar/PageBar';
 import Capabilities from '../components/Capabilities';
 import DownloadOptions from '../components/DownloadOptions';
 import PullJobs from '../components/PullJobs';
@@ -32,15 +33,26 @@ import './ModelsPage.css';
 
 type Tab = 'installed' | 'browse' | 'train';
 
+const DISK_WARNING_PERCENT = 80;
+const DISK_ERROR_PERCENT = 90;
+
+function diskLevel(percent: number): string {
+  if (percent >= DISK_ERROR_PERCENT) return 'models-disk-fill--error';
+  if (percent >= DISK_WARNING_PERCENT) return 'models-disk-fill--warning';
+  return '';
+}
+
 export default function ModelsPage() {
   const {
     models,
     disk,
     loading: modelsLoading,
     error: modelsError,
+    providerErrors,
     refresh,
     deleteModel,
   } = useModels();
+  const ollamaError = modelsError ?? providerErrors.ollama ?? null;
   const browse = useBrowse();
   const pull = usePull();
 
@@ -171,11 +183,7 @@ export default function ModelsPage() {
 
   return (
     <div className="page page--workspace models-page">
-      <header className="models-header">
-        <div className="models-header-copy">
-          <h1>Models</h1>
-          <p>Manage local chat models and image adapters</p>
-        </div>
+      <PageBar title="Models" subtitle="Local chat models and image adapters">
         {disk && (
           <div
             className="models-disk"
@@ -193,7 +201,7 @@ export default function ModelsPage() {
               aria-label="Disk space used"
             >
               <div
-                className="models-disk-fill"
+                className={`models-disk-fill ${diskLevel(disk.percent)}`}
                 style={{ width: `${Math.min(100, Math.max(0, disk.percent))}%` }}
               />
             </div>
@@ -206,17 +214,17 @@ export default function ModelsPage() {
           className="models-tabs"
         >
           <TabsList>
-            <TabsTrigger value="installed" className="gap-2">
+            <TabsTrigger value="installed">
               Installed
-              {models.length > 0 && <Badge variant="secondary">{models.length}</Badge>}
+              {models.length > 0 && <Badge variant="neutral">{models.length}</Badge>}
             </TabsTrigger>
             <TabsTrigger value="browse">Browse</TabsTrigger>
             <TabsTrigger value="train">Train</TabsTrigger>
           </TabsList>
         </Tabs>
-      </header>
+      </PageBar>
 
-      <div className="models-body">
+      <div className="page-body models-body">
         {pull.jobs.length > 0 && (
           <section className="card pull-jobs-panel">
             <div className="pull-jobs-panel-header">
@@ -288,7 +296,7 @@ export default function ModelsPage() {
                 <div className="loading-placeholder">
                   <span className="spinner" /> Loading models...
                 </div>
-              ) : modelsError ? (
+              ) : ollamaError && models.length === 0 ? (
                 <EmptyState
                   icon={
                     <svg
@@ -304,12 +312,12 @@ export default function ModelsPage() {
                     </svg>
                   }
                   title={
-                    modelsError.includes('401')
+                    ollamaError.includes('401')
                       ? 'Authentication required'
                       : 'Cannot connect to Ollama'
                   }
                   description={
-                    modelsError.includes('401')
+                    ollamaError.includes('401')
                       ? 'Please log in to view installed models.'
                       : 'Unable to fetch models. Make sure Ollama is running and accessible.'
                   }
@@ -338,62 +346,89 @@ export default function ModelsPage() {
                   action={<Button onClick={() => setActiveTab('browse')}>Browse Models</Button>}
                 />
               ) : (
-                <div className="models-list">
-                  {models.map((model) => (
-                    <div
-                      key={model.name}
-                      className={`model-item ${deleting === model.name ? 'deleting' : ''}`}
-                      onClick={() => handleShowDetails(model)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleShowDetails(model)}
-                      role="button"
-                      tabIndex={0}
-                    >
-                      <div className="model-info">
-                        <span className="model-name">{model.name}</span>
-                        {model.details?.format === 'lora' && <span className="tag">adapter</span>}
-                        {model.ready === false && (
-                          <span className="tag">
-                            Requires {model.required_files?.[0] || 'base model'}
-                          </span>
-                        )}
-                        <span className="model-meta">
-                          {[
-                            formatBytes(model.size),
-                            model.details?.parameter_size,
-                            model.details?.quantization_level,
-                            formatDate(model.modified_at),
-                          ]
-                            .filter(Boolean)
-                            .join(' · ')}
+                <>
+                  {ollamaError ? (
+                    <div className="models-provider-banner" role="alert">
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.75"
+                        width="18"
+                        height="18"
+                        aria-hidden="true"
+                      >
+                        <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                      </svg>
+                      <div className="models-provider-banner-text">
+                        <strong>Cannot connect to Ollama</strong>
+                        <span>
+                          Chat and embedding models are missing from this list until Ollama is
+                          reachable. {ollamaError}
                         </span>
-                        <Capabilities capabilities={model.capabilities} />
                       </div>
-                      <div className="model-actions">
-                        <button
-                          className="btn btn-danger-icon"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDeleteConfirm(model.name);
-                          }}
-                          title="Delete model"
-                          type="button"
-                        >
-                          <svg
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            width="16"
-                            height="16"
-                            aria-hidden="true"
-                          >
-                            <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
-                      </div>
+                      <Button onClick={refresh} variant="secondary" size="sm">
+                        Retry
+                      </Button>
                     </div>
-                  ))}
-                </div>
+                  ) : null}
+                  <div className="models-list">
+                    {models.map((model) => (
+                      <div
+                        key={model.name}
+                        className={`model-item ${deleting === model.name ? 'deleting' : ''}`}
+                        onClick={() => handleShowDetails(model)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleShowDetails(model)}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <div className="model-info">
+                          <span className="model-name">{model.name}</span>
+                          {model.details?.format === 'lora' && <span className="tag">adapter</span>}
+                          {model.ready === false && (
+                            <span className="tag">
+                              Requires {model.required_files?.[0] || 'base model'}
+                            </span>
+                          )}
+                          <span className="model-meta">
+                            {[
+                              formatBytes(model.size),
+                              model.details?.parameter_size,
+                              model.details?.quantization_level,
+                              formatDate(model.modified_at),
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')}
+                          </span>
+                          <Capabilities capabilities={model.capabilities} />
+                        </div>
+                        <div className="model-actions">
+                          <button
+                            className="btn btn-danger-icon"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteConfirm(model.name);
+                            }}
+                            title="Delete model"
+                            type="button"
+                          >
+                            <svg
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              width="16"
+                              height="16"
+                              aria-hidden="true"
+                            >
+                              <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
               )}
             </section>
           </>
@@ -808,7 +843,9 @@ export default function ModelsPage() {
                       <div
                         className="details-card-content details-card-text"
                         // biome-ignore lint/security/noDangerouslySetInnerHtml: Content is sanitized with DOMPurify
-                        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(modelCard) }}
+                        dangerouslySetInnerHTML={{
+                          __html: DOMPurify.sanitize(modelCard),
+                        }}
                       />
                     )}
                   </div>

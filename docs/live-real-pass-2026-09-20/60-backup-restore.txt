@@ -1,0 +1,26 @@
+backup: backups/zone_backup_20260920_185807.tar.gz (1.6G)
+entries under ./postgres/:
+./postgres/
+./postgres/data/
+
+all top-level entries:
+   1 
+1425 grafana
+  11 manager_artifacts
+   1 manager_repos
+  23 ollama
+   2 postgres
+  85 prometheus
+   1 traefik
+   2 valkey
+
+postgres container mounts:
+volume zone_postgres_data -> /var/lib/postgresql
+bind  -> /docker-entrypoint-initdb.d/init-manager-db.sh
+volume 2a6334db351f90cb32d8bc4a68eee6b834daff3c93e63cebe155de031ad91fc7 -> /var/lib/postgresql/data
+
+image PGDATA=/var/lib/postgresql/data, image VOLUME /var/lib/postgresql/data
+
+stack database after restore:
+0
+0

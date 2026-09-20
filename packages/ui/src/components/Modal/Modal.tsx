@@ -15,11 +15,11 @@ export interface ModalProps extends Omit<React.HTMLAttributes<HTMLDivElement>, '
 }
 
 const SIZE_CLASS_MAP: Record<NonNullable<ModalProps['size']>, string> = {
-  sm: 'max-w-sm',
-  md: 'max-w-md',
-  lg: 'max-w-lg',
-  xl: 'max-w-xl',
-  full: 'max-w-[90vw]',
+  sm: 'ui-dialog--sm',
+  md: 'ui-dialog--md',
+  lg: 'ui-dialog--lg',
+  xl: 'ui-dialog--xl',
+  full: 'ui-dialog--full',
 };
 
 const Modal = React.forwardRef<HTMLDivElement, ModalProps>(

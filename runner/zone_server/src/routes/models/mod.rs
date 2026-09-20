@@ -188,6 +188,35 @@ async fn browse_huggingface(
     Ok(response)
 }
 
+/// The installed inventory when one provider could not be read.
+///
+/// The rows that could be read are still listed, and the provider that could
+/// not is named under `errors` so the console can say so beside them rather
+/// than presenting a partial inventory as the whole one.
+#[derive(Debug, Serialize)]
+pub struct PartialInventory {
+    pub models: Vec<ModelResponse>,
+    pub errors: ProviderErrors,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderErrors {
+    pub ollama: String,
+}
+
+/// Why Ollama's inventory could not be read, with the status it earns on its own.
+#[derive(Debug)]
+struct OllamaFailure {
+    status: StatusCode,
+    message: String,
+}
+
+impl IntoResponse for OllamaFailure {
+    fn into_response(self) -> axum::response::Response {
+        (self.status, Json(ErrorResponse::new(self.message))).into_response()
+    }
+}
+
 async fn list_installed_models(state: AppState) -> axum::response::Response {
     let comfy = list_comfy_models(&state);
     match list_ollama_model_rows(&state).await {
@@ -195,13 +224,14 @@ async fn list_installed_models(state: AppState) -> axum::response::Response {
             models.extend(comfy);
             Json(models).into_response()
         }
-        Err(error) => {
-            if comfy.is_empty() {
-                *error
-            } else {
-                Json(comfy).into_response()
-            }
-        }
+        Err(failure) if comfy.is_empty() => failure.into_response(),
+        Err(failure) => Json(PartialInventory {
+            models: comfy,
+            errors: ProviderErrors {
+                ollama: failure.message,
+            },
+        })
+        .into_response(),
     }
 }
 
@@ -237,9 +267,7 @@ fn list_comfy_models(state: &AppState) -> Vec<ModelResponse> {
 }
 
 /// List models from local Ollama installation
-async fn list_ollama_model_rows(
-    state: &AppState,
-) -> Result<Vec<ModelResponse>, Box<axum::response::Response>> {
+async fn list_ollama_model_rows(state: &AppState) -> Result<Vec<ModelResponse>, OllamaFailure> {
     let ollama_host = &state.config().ollama_host;
 
     // Try to fetch from Ollama API
@@ -282,37 +310,22 @@ async fn list_ollama_model_rows(
                         .await;
                         Ok(models)
                     }
-                    Err(e) => Err(Box::new(
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse::new(format!(
-                                "Failed to parse response: {}",
-                                e
-                            ))),
-                        )
-                            .into_response(),
-                    )),
+                    Err(e) => Err(OllamaFailure {
+                        status: StatusCode::INTERNAL_SERVER_ERROR,
+                        message: format!("Failed to parse response: {}", e),
+                    }),
                 }
             } else {
-                Err(Box::new(
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(ErrorResponse::new("Ollama service unavailable")),
-                    )
-                        .into_response(),
-                ))
+                Err(OllamaFailure {
+                    status: StatusCode::BAD_GATEWAY,
+                    message: "Ollama service unavailable".to_string(),
+                })
             }
         }
-        Err(e) => Err(Box::new(
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse::new(format!(
-                    "Failed to connect to Ollama: {}",
-                    e
-                ))),
-            )
-                .into_response(),
-        )),
+        Err(e) => Err(OllamaFailure {
+            status: StatusCode::BAD_GATEWAY,
+            message: format!("Failed to connect to Ollama: {}", e),
+        }),
     }
 }
 

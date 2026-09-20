@@ -67,21 +67,22 @@ fn validate(update: &Update<'_>) -> AccessResult<()> {
     Ok(())
 }
 
+/// The organization's own settings carry its provider credentials, so reading
+/// them takes an administrator, not just a seat; `minimum` says which.
 async fn authorize_organization(
     connection: &mut PgConnection,
     organization_id: Uuid,
     user_id: Uuid,
-    write: bool,
+    minimum: OrgRole,
 ) -> AccessResult<()> {
     let role = organization_members::lock_role(connection, organization_id, user_id).await?;
 
     match role {
-        Some(OrgRole::Owner | OrgRole::Admin) => Ok(()),
-        Some(OrgRole::Member) if !write => Ok(()),
-        _ if write => Err(AccessError::Forbidden(
-            "Only organization admins can change AI settings",
+        Some(role) if role >= minimum => Ok(()),
+        Some(_) => Err(AccessError::Forbidden(
+            "Only organization admins can manage AI settings",
         )),
-        _ => Err(AccessError::NotFound("Organization not found")),
+        None => Err(AccessError::NotFound("Organization not found")),
     }
 }
 
@@ -108,7 +109,7 @@ async fn authorize_workspace(
     // Membership proves the caller belongs to the tenant that owns the
     // workspace; the workspace role below decides whether they may write. The
     // organization admin rule guards organization-wide settings only.
-    authorize_organization(&mut *connection, organization_id, user_id, false).await?;
+    authorize_organization(&mut *connection, organization_id, user_id, OrgRole::Member).await?;
 
     let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
 
@@ -266,7 +267,7 @@ pub async fn get_org_authorized(
     user_id: Uuid,
 ) -> AccessResult<Option<OrgAiSettingsRow>> {
     let mut transaction = pool.begin().await?;
-    authorize_organization(&mut transaction, organization_id, user_id, false).await?;
+    authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
     let settings = get_org(&mut *transaction, organization_id).await?;
     transaction.commit().await?;
     Ok(settings)
@@ -361,7 +362,7 @@ pub async fn upsert_org_authorized(
     update: Update<'_>,
 ) -> AccessResult<OrgAiSettingsRow> {
     let mut transaction = pool.begin().await?;
-    authorize_organization(&mut transaction, organization_id, user_id, true).await?;
+    authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
     validate(&update)?;
     let settings = upsert_org(&mut *transaction, organization_id, &update).await?;
     transaction.commit().await?;
@@ -387,7 +388,7 @@ pub async fn delete_org_authorized(
     user_id: Uuid,
 ) -> AccessResult<bool> {
     let mut transaction = pool.begin().await?;
-    authorize_organization(&mut transaction, organization_id, user_id, true).await?;
+    authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
     let deleted = delete_org(&mut *transaction, organization_id).await?;
     transaction.commit().await?;
     Ok(deleted)

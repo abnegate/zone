@@ -8,14 +8,16 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{AuthUser, OrgAdmin};
-use crate::db::{invitations, organization_members, organizations, workspaces};
+use crate::db::audit::{actions, resources};
+use crate::db::{invitations, organization_members, organizations, users, workspaces};
 use crate::state::AppState;
 
-use super::common::Timestamps;
+use super::common::{AuditEvent, Timestamps, audit};
 
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -40,11 +42,15 @@ pub struct InvitationResponse {
     org_role: String,
     workspace_role: String,
     invited_by: Uuid,
-    expires_at: String,
+    expires_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     organization_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invited_by_email: Option<String>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -59,15 +65,37 @@ impl InvitationResponse {
             org_role: inv.org_role,
             workspace_role: inv.workspace_role,
             invited_by: inv.invited_by,
-            expires_at: inv.expires_at.to_rfc3339(),
+            expires_at: inv.expires_at,
             token,
             organization_name: None,
+            workspace_name: None,
+            invited_by_email: None,
             timestamps: Timestamps::from_utc(inv.created_at, inv.created_at),
         }
     }
 
     fn with_org_name(mut self, name: String) -> Self {
         self.organization_name = Some(name);
+        self
+    }
+
+    /// Name the first workspace the invitation seats and the inviter, the
+    /// details the acceptance page shows before the invitee signs in.
+    async fn with_details(mut self, state: &AppState) -> Self {
+        if let Some(workspace_id) = self.workspace_ids.first() {
+            match workspaces::get_workspace(state.db(), *workspace_id).await {
+                Ok(workspace) => self.workspace_name = workspace.map(|workspace| workspace.name),
+                Err(error) => {
+                    tracing::warn!(%error, %workspace_id, "Failed to name the invited workspace")
+                }
+            }
+        }
+        match users::get_user_by_id(state.db(), self.invited_by).await {
+            Ok(inviter) => self.invited_by_email = inviter.map(|inviter| inviter.email),
+            Err(error) => {
+                tracing::warn!(%error, inviter = %self.invited_by, "Failed to name the inviter")
+            }
+        }
         self
     }
 }
@@ -117,6 +145,7 @@ pub async fn create_invitation(
     OrgAdmin {
         org_id,
         user_id,
+        email: inviter_email,
         role: inviter_role,
     }: OrgAdmin,
     Json(req): Json<CreateInvitationRequest>,
@@ -245,7 +274,15 @@ pub async fn create_invitation(
         ));
     }
 
-    // Create invitation
+    invitations::delete_expired_invitations_for_email(state.db(), &req.email, org_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(format!("Database error: {}", e))),
+            )
+        })?;
+
     let (invitation, token) = invitations::create_invitation(
         state.db(),
         &req.email,
@@ -273,7 +310,27 @@ pub async fn create_invitation(
         }
     })?;
 
-    // Return invitation with token (for email sending)
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(org_id),
+            workspace_id: None,
+            actor_id: user_id,
+            actor_email: &inviter_email,
+            action: actions::INVITATION_SENT,
+            resource_type: resources::INVITATION,
+            resource_id: Some(invitation.id),
+            old_values: None,
+            new_values: Some(serde_json::json!({
+                "email": invitation.email,
+                "org_role": invitation.org_role,
+                "workspace_ids": invitation.workspace_ids,
+                "workspace_role": invitation.workspace_role,
+            })),
+        },
+    )
+    .await;
+
     let response = InvitationResponse::from_invitation(invitation, Some(token));
 
     Ok((StatusCode::CREATED, Json(response)))
@@ -312,7 +369,12 @@ pub async fn list_invitations(
 /// Requires: Organization Admin or Owner
 pub async fn revoke_invitation(
     State(state): State<AppState>,
-    OrgAdmin { org_id, .. }: OrgAdmin,
+    OrgAdmin {
+        org_id,
+        user_id,
+        email,
+        ..
+    }: OrgAdmin,
     Path((_org_id, invitation_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     // First get the invitation to verify org ownership
@@ -341,7 +403,6 @@ pub async fn revoke_invitation(
         ));
     }
 
-    // Now safe to delete
     invitations::revoke_invitation(state.db(), invitation_id)
         .await
         .map_err(|e| {
@@ -357,6 +418,22 @@ pub async fn revoke_invitation(
                 )
             }
         })?;
+
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(org_id),
+            workspace_id: None,
+            actor_id: user_id,
+            actor_email: &email,
+            action: actions::INVITATION_REVOKED,
+            resource_type: resources::INVITATION,
+            resource_id: Some(invitation_id),
+            old_values: Some(serde_json::json!({ "email": invitation.email })),
+            new_values: None,
+        },
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -397,7 +474,10 @@ pub async fn get_invitation(
             Json(ErrorResponse::new("Organization not found")),
         ))?;
 
-    let response = InvitationResponse::from_invitation(invitation, None).with_org_name(org.name);
+    let response = InvitationResponse::from_invitation(invitation, None)
+        .with_org_name(org.name)
+        .with_details(&state)
+        .await;
 
     Ok(Json(response))
 }
@@ -487,7 +567,28 @@ pub async fn accept_invitation(
             }
         })?;
 
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(invitation.organization_id),
+            workspace_id: None,
+            actor_id: user_id,
+            actor_email: &user.email,
+            action: actions::INVITATION_ACCEPTED,
+            resource_type: resources::INVITATION,
+            resource_id: Some(invitation.id),
+            old_values: None,
+            new_values: Some(serde_json::json!({
+                "email": invitation.email,
+                "org_role": invitation.org_role,
+                "workspace_ids": invitation.workspace_ids,
+            })),
+        },
+    )
+    .await;
+
     Ok(Json(serde_json::json!({
+        "success": true,
         "message": "Invitation accepted successfully"
     })))
 }

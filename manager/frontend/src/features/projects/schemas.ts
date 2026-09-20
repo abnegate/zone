@@ -126,6 +126,9 @@ export const SyncConfigSchema = z.object({
   external_project_id: z.string().optional(),
   is_active: z.boolean(),
   created_at: z.string().datetime(),
+  status: z.string().optional(),
+  last_synced_at: z.string().nullable().optional(),
+  webhook_path: z.string().optional(),
 });
 
 export const CreateSyncConfigRequestSchema = z

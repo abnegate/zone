@@ -296,6 +296,30 @@ pub async fn get_pending_invitation_for_email(
     }))
 }
 
+/// Drop the expired, never accepted invitations for an email in an
+/// organization so a fresh one can take their place.
+pub async fn delete_expired_invitations_for_email(
+    pool: &PgPool,
+    email: &str,
+    organization_id: Uuid,
+) -> DbResult<u64> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM invitations
+        WHERE email = $1
+          AND organization_id = $2
+          AND accepted_at IS NULL
+          AND expires_at <= NOW()
+        "#,
+    )
+    .bind(email)
+    .bind(organization_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Get an invitation by ID (regardless of status)
 ///
 /// Returns the invitation if it exists, None otherwise

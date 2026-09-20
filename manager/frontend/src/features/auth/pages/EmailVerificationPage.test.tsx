@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { render, screen, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
 
 // Mock client
 const mockVerifyEmail = mock();
@@ -224,6 +225,34 @@ describe('EmailVerificationPage', () => {
       await waitFor(() => {
         expect(screen.getByText(/invalid verification link/i)).toBeInTheDocument();
       });
+    });
+  });
+
+  // The verification token is single use, so the two mounts StrictMode makes
+  // in development must share one request instead of consuming it twice.
+  describe('StrictMode', () => {
+    it('verifies a token once across a double mount', async () => {
+      mockSearchParams.set('token', 'strict-mode-token-1234567890');
+      let resolveVerify: (value: { success: boolean; message: string }) => void = () => {};
+      mockVerifyEmail.mockImplementation(
+        () =>
+          new Promise<{ success: boolean; message: string }>((resolve) => {
+            resolveVerify = resolve;
+          })
+      );
+
+      render(
+        <StrictMode>
+          <EmailVerificationPage />
+        </StrictMode>
+      );
+
+      resolveVerify({ success: true, message: 'Email verified successfully' });
+
+      await waitFor(() => {
+        expect(screen.getByText('Email Verified')).toBeInTheDocument();
+      });
+      expect(mockVerifyEmail).toHaveBeenCalledTimes(1);
     });
   });
 });

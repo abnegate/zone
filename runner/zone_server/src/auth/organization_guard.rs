@@ -16,6 +16,7 @@ use crate::{db::organization_members, state::AppState};
 pub struct OrgMember {
     pub org_id: Uuid,
     pub user_id: Uuid,
+    pub email: String,
     pub role: organization_members::OrgRole,
 }
 
@@ -85,6 +86,7 @@ where
         Ok(OrgMember {
             org_id,
             user_id,
+            email: auth_user.0.email,
             role: member.role,
         })
     }
@@ -95,6 +97,7 @@ where
 pub struct OrgAdmin {
     pub org_id: Uuid,
     pub user_id: Uuid,
+    pub email: String,
     pub role: organization_members::OrgRole,
 }
 
@@ -120,6 +123,7 @@ where
         Ok(OrgAdmin {
             org_id: member.org_id,
             user_id: member.user_id,
+            email: member.email,
             role: member.role,
         })
     }
@@ -130,6 +134,7 @@ where
 pub struct OrgOwner {
     pub org_id: Uuid,
     pub user_id: Uuid,
+    pub email: String,
 }
 
 impl<S> FromRequestParts<S> for OrgOwner
@@ -154,6 +159,7 @@ where
         Ok(OrgOwner {
             org_id: member.org_id,
             user_id: member.user_id,
+            email: member.email,
         })
     }
 }

@@ -527,3 +527,183 @@ async fn test_linear_webhook_signature_verification() {
     // Cleanup
     cleanup_project(state.db(), project.id).await;
 }
+
+// The console's External Sync section: configuration only, no engine yet.
+
+async fn signed_in(client: &common::TestClient) -> String {
+    let response = client
+        .post_json(
+            "/api/auth/register",
+            &json!({ "email": common::test_email(), "password": common::test_password() }),
+        )
+        .await;
+    response.json_value()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn workspace_project(client: &common::TestClient, token: &str) -> (String, String) {
+    let response = client
+        .post_json_auth(
+            "/api/organizations",
+            &json!({ "name": "Sync Org", "slug": format!("sync-{}", Uuid::new_v4()) }),
+            token,
+        )
+        .await;
+    let organization = response.json_value()["organization"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let response = client
+        .post_json_auth(
+            &format!("/api/organizations/{}/workspaces", organization),
+            &json!({ "name": "Sync Workspace", "slug": format!("sync-{}", Uuid::new_v4()) }),
+            token,
+        )
+        .await;
+    let workspace = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let response = client
+        .post_json_auth(
+            "/api/projects",
+            &json!({ "workspace_id": workspace, "name": "Synced project" }),
+            token,
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    let project = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (workspace, project)
+}
+
+#[tokio::test]
+async fn a_sync_is_configured_listed_and_removed_through_the_project() {
+    let client = common::TestClient::with_db().await;
+    let token = signed_in(&client).await;
+    let (_workspace, project) = workspace_project(&client, &token).await;
+
+    let response = client
+        .get_auth(&format!("/api/projects/{}/sync", project), &token)
+        .await;
+    response.assert_status(StatusCode::OK);
+    assert_eq!(response.json_value()["configs"], json!([]));
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/projects/{}/sync", project),
+            &json!({
+                "provider": "github",
+                "direction": "bidirectional",
+                "external_repo_url": "https://github.com/abnegate/zone-tests"
+            }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    let config = response.json_value()["config"].clone();
+    assert_eq!(config["provider"], "github");
+    assert_eq!(config["direction"], "bidirectional");
+    assert_eq!(
+        config["external_repo_url"],
+        "https://github.com/abnegate/zone-tests"
+    );
+    assert_eq!(config["is_active"], true);
+    assert_eq!(config["status"], "configured");
+    assert!(config["last_synced_at"].is_null());
+    assert!(
+        config["created_at"].as_str().unwrap().ends_with('Z'),
+        "the console parses created_at as a UTC datetime: {}",
+        config["created_at"]
+    );
+    let config_id = config["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        config["webhook_path"],
+        format!("/api/webhooks/sync/{config_id}/github")
+    );
+
+    let response = client
+        .get_auth(&format!("/api/projects/{}/sync", project), &token)
+        .await;
+    let listed = response.json_value();
+    assert_eq!(listed["configs"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["configs"][0]["id"], config_id);
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/projects/{}/sync", project),
+            &json!({
+                "provider": "github",
+                "direction": "inbound",
+                "external_repo_url": "https://github.com/abnegate/other"
+            }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::CONFLICT);
+    assert_eq!(
+        response.json_value()["error"],
+        "A github sync is already configured for this project; remove it first"
+    );
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/projects/{}/sync", project),
+            &json!({ "provider": "linear", "direction": "inbound" }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value()["error"],
+        "A Linear sync needs external_project_id"
+    );
+
+    let response = client
+        .delete_auth(
+            &format!("/api/projects/{}/sync/{}", project, config_id),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::NO_CONTENT);
+
+    let response = client
+        .get_auth(&format!("/api/projects/{}/sync", project), &token)
+        .await;
+    assert_eq!(response.json_value()["configs"], json!([]));
+}
+
+#[tokio::test]
+async fn a_strangers_project_has_no_sync_to_read_or_write() {
+    let client = common::TestClient::with_db().await;
+    let owner = signed_in(&client).await;
+    let (_workspace, project) = workspace_project(&client, &owner).await;
+    let stranger = signed_in(&client).await;
+
+    let response = client
+        .get_auth(&format!("/api/projects/{}/sync", project), &stranger)
+        .await;
+    response.assert_status(StatusCode::NOT_FOUND);
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/projects/{}/sync", project),
+            &json!({
+                "provider": "github",
+                "direction": "outbound",
+                "external_repo_url": "https://github.com/abnegate/zone-tests"
+            }),
+            &stranger,
+        )
+        .await;
+    response.assert_status(StatusCode::NOT_FOUND);
+
+    let response = client
+        .get_auth(&format!("/api/projects/{}/sync", project), &owner)
+        .await;
+    assert_eq!(response.json_value()["configs"], json!([]));
+}

@@ -63,34 +63,44 @@ pub async fn create_verification_token(
     Ok((token, expires_at))
 }
 
-/// Verify an email verification token
-///
-/// This function:
-/// 1. Hashes the provided token
-/// 2. Checks if a matching hash exists in the database
-/// 3. Verifies the token is not expired
-/// 4. Deletes the token (single-use)
-/// 5. Returns the user_id
-///
-/// Note: DELETE...RETURNING is atomic, so no transaction is needed.
-///
-/// Returns an error if token is invalid, expired, or already used
+const REPLAY_GRACE_MINUTES: i32 = 10;
+
+/// Consume a verification token and return its user. A token is single use:
+/// the second call for the same token fails.
 pub async fn verify_token(pool: &PgPool, token: &str) -> DbResult<Uuid> {
     let token_hash = hash_token(token);
 
-    // Get and delete the token in one atomic query
-    let row = sqlx::query!(
+    let user_id: Option<Uuid> = sqlx::query_scalar(
         r#"
-        DELETE FROM email_verification_tokens
-        WHERE token_hash = $1 AND expires_at > NOW()
+        UPDATE email_verification_tokens
+        SET used_at = NOW()
+        WHERE token_hash = $1 AND expires_at > NOW() AND used_at IS NULL
         RETURNING user_id
         "#,
-        token_hash
     )
+    .bind(token_hash)
     .fetch_optional(pool)
     .await?;
 
-    let user_id = row.ok_or(sqlx::Error::RowNotFound)?.user_id;
+    user_id.ok_or(sqlx::Error::RowNotFound)
+}
+
+/// The user a token verified within the last few minutes, so a link opened
+/// twice (a browser prefetch, a double-mounted page) still reads as verified.
+pub async fn recently_verified_user(pool: &PgPool, token: &str) -> DbResult<Option<Uuid>> {
+    let token_hash = hash_token(token);
+
+    let user_id: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT user_id
+        FROM email_verification_tokens
+        WHERE token_hash = $1 AND used_at > NOW() - make_interval(mins => $2)
+        "#,
+    )
+    .bind(token_hash)
+    .bind(REPLAY_GRACE_MINUTES)
+    .fetch_optional(pool)
+    .await?;
 
     Ok(user_id)
 }

@@ -38,21 +38,17 @@ describe('BillingSection', () => {
   };
 
   const mockUsage: Usage = {
-    users: 15,
+    members: 15,
     workspaces: 3,
-    projects: 42,
-    storage_gb: 5.7,
-    api_calls: 12543,
+    chat_messages: 12543,
     period_start: '2024-01-01T00:00:00Z',
     period_end: '2024-02-01T00:00:00Z',
   };
 
   const mockLimits: Limits = {
-    max_users: 50,
+    max_members: 50,
     max_workspaces: 10,
-    max_projects: 100,
-    max_storage_gb: 50,
-    max_api_calls_monthly: 50000,
+    max_chats_per_month: 50000,
   };
 
   beforeEach(() => {
@@ -112,6 +108,34 @@ describe('BillingSection', () => {
       await waitFor(() => {
         expect(screen.getByText('Pro')).toBeInTheDocument();
       });
+    });
+
+    it('displays the default plan of an organization that was never billed', async () => {
+      mockClient.getSubscription.mockResolvedValue({
+        ...mockSubscription,
+        plan_id: 'plan-free',
+        plan_name: 'Free',
+      });
+      mockClient.getUsage.mockResolvedValue({
+        ...mockUsage,
+        members: 1,
+        workspaces: 1,
+        chat_messages: 0,
+      });
+      mockClient.getLimits.mockResolvedValue({
+        max_members: 3,
+        max_workspaces: 1,
+        max_chats_per_month: 100,
+      });
+
+      render(<BillingSection orgId={orgId} />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Free')).toBeInTheDocument();
+        expect(screen.getByText(/3 members/)).toBeInTheDocument();
+        expect(screen.getByText(/100 this period/)).toBeInTheDocument();
+      });
+      expect(screen.queryByText(/No subscription found/)).not.toBeInTheDocument();
     });
 
     it('displays subscription status badge', async () => {
@@ -193,15 +217,13 @@ describe('BillingSection', () => {
       mockClient.getLimits.mockResolvedValue(mockLimits);
     });
 
-    it('displays all usage metrics', async () => {
+    it('displays the metered usage metrics', async () => {
       render(<BillingSection orgId={orgId} />);
 
       await waitFor(() => {
-        expect(screen.getByText('Users')).toBeInTheDocument();
+        expect(screen.getByText('Members')).toBeInTheDocument();
         expect(screen.getByText('Workspaces')).toBeInTheDocument();
-        expect(screen.getByText('Projects')).toBeInTheDocument();
-        expect(screen.getByText('Storage')).toBeInTheDocument();
-        expect(screen.getByText('API Calls')).toBeInTheDocument();
+        expect(screen.getByText('Chat Messages')).toBeInTheDocument();
       });
     });
 
@@ -209,10 +231,9 @@ describe('BillingSection', () => {
       render(<BillingSection orgId={orgId} />);
 
       await waitFor(() => {
-        expect(screen.getByText('15')).toBeInTheDocument(); // users
-        expect(screen.getByText('3')).toBeInTheDocument(); // workspaces
-        expect(screen.getByText('42')).toBeInTheDocument(); // projects
-        expect(screen.getByText(/12,543/)).toBeInTheDocument(); // api_calls
+        expect(screen.getByText('15')).toBeInTheDocument();
+        expect(screen.getByText('3')).toBeInTheDocument();
+        expect(screen.getByText(/12,543/)).toBeInTheDocument();
       });
     });
 
@@ -220,11 +241,9 @@ describe('BillingSection', () => {
       render(<BillingSection orgId={orgId} />);
 
       await waitFor(() => {
-        expect(screen.getByText(/50 users/)).toBeInTheDocument();
+        expect(screen.getByText(/50 members/)).toBeInTheDocument();
         expect(screen.getByText(/10 workspaces/)).toBeInTheDocument();
-        expect(screen.getByText(/100 projects/)).toBeInTheDocument();
-        expect(screen.getByText(/50 GB/)).toBeInTheDocument();
-        expect(screen.getByText(/50,000 calls/)).toBeInTheDocument();
+        expect(screen.getByText(/50,000 this period/)).toBeInTheDocument();
       });
     });
 
@@ -232,12 +251,10 @@ describe('BillingSection', () => {
       render(<BillingSection orgId={orgId} />);
 
       await waitFor(() => {
-        // users: 15/50 = 30%
         const percentageElements = document.querySelectorAll('.percentage-label');
         const percentages = Array.from(percentageElements).map((el) => el.textContent);
         expect(percentages).toContain('30.0% used');
-        // projects: 42/100 = 42%
-        expect(percentages).toContain('42.0% used');
+        expect(percentages).toContain('25.1% used');
       });
     });
 
@@ -247,20 +264,15 @@ describe('BillingSection', () => {
       await waitFor(() => {
         const progressBars = screen.getAllByRole('progressbar');
         expect(progressBars.length).toBeGreaterThan(0);
-
-        // Users: 15/50 = 30%
-        const usersProgress = progressBars[0];
-        expect(usersProgress).toHaveStyle({ width: '30%' });
+        expect(progressBars[0]).toHaveStyle({ width: '30%' });
       });
     });
 
     it('displays unlimited label for null limits', async () => {
       const unlimitedLimits: Limits = {
-        max_users: null,
+        max_members: null,
         max_workspaces: null,
-        max_projects: null,
-        max_storage_gb: 100,
-        max_api_calls_monthly: 100000,
+        max_chats_per_month: 100000,
       };
       mockClient.getLimits.mockResolvedValue(unlimitedLimits);
 
@@ -268,7 +280,7 @@ describe('BillingSection', () => {
 
       await waitFor(() => {
         const unlimitedLabels = screen.getAllByText('(unlimited)');
-        expect(unlimitedLabels.length).toBeGreaterThan(0);
+        expect(unlimitedLabels).toHaveLength(2);
       });
     });
   });
@@ -277,7 +289,7 @@ describe('BillingSection', () => {
     it('displays warning badge when usage is above 80%', async () => {
       const highUsage: Usage = {
         ...mockUsage,
-        users: 45, // 45/50 = 90%
+        members: 45,
       };
       mockClient.getSubscription.mockResolvedValue(mockSubscription);
       mockClient.getUsage.mockResolvedValue(highUsage);
@@ -293,7 +305,7 @@ describe('BillingSection', () => {
     it('displays critical badge when usage is above 95%', async () => {
       const criticalUsage: Usage = {
         ...mockUsage,
-        users: 49, // 49/50 = 98%
+        members: 49,
       };
       mockClient.getSubscription.mockResolvedValue(mockSubscription);
       mockClient.getUsage.mockResolvedValue(criticalUsage);
@@ -308,13 +320,13 @@ describe('BillingSection', () => {
 
     it('applies correct progress bar color for different usage levels', async () => {
       const testCases = [
-        { users: 25, expectedClass: 'ok' }, // 50%
-        { users: 42, expectedClass: 'warning' }, // 84%
-        { users: 49, expectedClass: 'critical' }, // 98%
+        { members: 25, expectedClass: 'ok' },
+        { members: 42, expectedClass: 'warning' },
+        { members: 49, expectedClass: 'critical' },
       ];
 
       for (const testCase of testCases) {
-        const usage: Usage = { ...mockUsage, users: testCase.users };
+        const usage: Usage = { ...mockUsage, members: testCase.members };
         mockClient.getSubscription.mockResolvedValue(mockSubscription);
         mockClient.getUsage.mockResolvedValue(usage);
         mockClient.getLimits.mockResolvedValue(mockLimits);
@@ -341,7 +353,7 @@ describe('BillingSection', () => {
     it('formats large numbers with commas', async () => {
       const largeUsage: Usage = {
         ...mockUsage,
-        api_calls: 1234567,
+        chat_messages: 1234567,
       };
       mockClient.getUsage.mockResolvedValue(largeUsage);
 
@@ -356,7 +368,6 @@ describe('BillingSection', () => {
       render(<BillingSection orgId={orgId} />);
 
       await waitFor(() => {
-        // Check for formatted date like "January 1, 2024"
         expect(screen.getAllByText(/January 1, 2024/).length).toBeGreaterThan(0);
       });
     });
@@ -410,7 +421,6 @@ describe('BillingSection', () => {
 
       render(<BillingSection orgId={orgId} />);
 
-      // All calls should be initiated before any completes (parallel execution)
       await waitFor(() => {
         expect(getSubscriptionCalled).toBe(true);
         expect(getUsageCalled).toBe(true);
@@ -422,11 +432,9 @@ describe('BillingSection', () => {
   describe('Edge Cases', () => {
     it('handles zero usage values', async () => {
       const zeroUsage: Usage = {
-        users: 0,
+        members: 0,
         workspaces: 0,
-        projects: 0,
-        storage_gb: 0,
-        api_calls: 0,
+        chat_messages: 0,
         period_start: '2024-01-01T00:00:00Z',
         period_end: '2024-02-01T00:00:00Z',
       };
@@ -446,7 +454,7 @@ describe('BillingSection', () => {
     it('handles usage at exactly 100%', async () => {
       const fullUsage: Usage = {
         ...mockUsage,
-        users: 50, // Exactly at limit
+        members: 50,
       };
       mockClient.getSubscription.mockResolvedValue(mockSubscription);
       mockClient.getUsage.mockResolvedValue(fullUsage);
@@ -464,7 +472,7 @@ describe('BillingSection', () => {
     it('caps percentage at 100% for over-limit usage', async () => {
       const overUsage: Usage = {
         ...mockUsage,
-        users: 60, // Over limit
+        members: 60,
       };
       mockClient.getSubscription.mockResolvedValue(mockSubscription);
       mockClient.getUsage.mockResolvedValue(overUsage);
@@ -475,24 +483,7 @@ describe('BillingSection', () => {
       await waitFor(() => {
         expect(screen.getAllByRole('progressbar')[0]).toBeInTheDocument();
       });
-      // Capped at 100% even though the metric itself is over.
       expect(screen.getAllByRole('progressbar')[0]).toHaveStyle({ width: '100%' });
-    });
-
-    it('handles fractional storage values', async () => {
-      const fractionalUsage: Usage = {
-        ...mockUsage,
-        storage_gb: 5.73,
-      };
-      mockClient.getSubscription.mockResolvedValue(mockSubscription);
-      mockClient.getUsage.mockResolvedValue(fractionalUsage);
-      mockClient.getLimits.mockResolvedValue(mockLimits);
-
-      render(<BillingSection orgId={orgId} />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/5.73/)).toBeInTheDocument();
-      });
     });
   });
 });

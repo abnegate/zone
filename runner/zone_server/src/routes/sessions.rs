@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::auth::AuthUser;
+use crate::auth::{AuthSession, AuthUser};
 use crate::db::sessions;
 use crate::error::ServerError;
 use crate::state::AppState;
@@ -23,9 +23,11 @@ use super::common::Timestamps;
 #[derive(Debug, Serialize)]
 pub struct SessionResponse {
     pub id: Uuid,
+    pub user_id: Uuid,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
-    pub device_info: Option<serde_json::Value>,
+    pub device_info: Option<String>,
+    pub location: Option<String>,
     pub last_active_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -35,20 +37,32 @@ pub struct SessionResponse {
 }
 
 impl SessionResponse {
-    fn from_session(session: sessions::Session, current_session_id: Option<Uuid>) -> Self {
-        let is_current = current_session_id == Some(session.id);
-
+    fn from_session(session: sessions::Session, current_session_id: Uuid) -> Self {
         Self {
             id: session.id,
+            user_id: session.user_id,
             ip_address: session.ip_address,
             user_agent: session.user_agent,
-            device_info: session.device_info,
+            device_info: session.device_info.as_ref().map(describe_device),
+            location: None,
             last_active_at: session.last_active_at,
             expires_at: session.expires_at,
             revoked_at: session.revoked_at,
             timestamps: Timestamps::from_utc(session.created_at, session.created_at),
-            is_current,
+            is_current: current_session_id == session.id,
         }
+    }
+}
+
+fn describe_device(info: &serde_json::Value) -> String {
+    match info {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Object(fields) => fields
+            .values()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>()
+            .join(" · "),
+        other => other.to_string(),
     }
 }
 
@@ -70,10 +84,9 @@ pub struct RevokeSessionsResponse {
 /// List all active sessions for the current user.
 pub async fn list_sessions(
     State(state): State<AppState>,
-    AuthUser(user): AuthUser,
+    auth: AuthSession,
 ) -> Result<impl IntoResponse, ServerError> {
-    // Get active sessions for the user
-    let user_id = user.user_id().map_err(|e| {
+    let user_id = auth.claims.user_id().map_err(|e| {
         tracing::error!("Invalid user ID in JWT: {}", e);
         ServerError::BadRequest("Invalid user ID".to_string())
     })?;
@@ -85,10 +98,9 @@ pub async fn list_sessions(
             ServerError::Internal("Failed to retrieve sessions".to_string())
         })?;
 
-    // Convert to response format
     let session_responses: Vec<SessionResponse> = sessions
         .into_iter()
-        .map(|s| SessionResponse::from_session(s, None))
+        .map(|s| SessionResponse::from_session(s, auth.session_id))
         .collect();
 
     Ok(Json(ListSessionsResponse {
@@ -109,7 +121,6 @@ pub async fn revoke_session(
         ServerError::BadRequest("Invalid user ID".to_string())
     })?;
 
-    // First, verify the session belongs to the user
     let session_belongs_to_user = sessions::is_user_session(state.db(), session_id, user_id)
         .await
         .map_err(|e| {
@@ -127,7 +138,6 @@ pub async fn revoke_session(
         ));
     }
 
-    // Revoke the session
     sessions::revoke_session(state.db(), session_id)
         .await
         .map_err(|e| {
@@ -145,26 +155,29 @@ pub async fn revoke_session(
 
 /// DELETE /api/auth/sessions
 ///
-/// Revoke all sessions for the current user (logout everywhere).
+/// Revoke every session of the current user except the one making the call.
 pub async fn revoke_all_sessions(
     State(state): State<AppState>,
-    AuthUser(user): AuthUser,
+    auth: AuthSession,
 ) -> Result<impl IntoResponse, ServerError> {
-    let user_id = user.user_id().map_err(|e| {
+    let user_id = auth.claims.user_id().map_err(|e| {
         tracing::error!("Invalid user ID in JWT: {}", e);
         ServerError::BadRequest("Invalid user ID".to_string())
     })?;
 
-    // Revoke all sessions for the user
-    let revoked_count = sessions::revoke_all_user_sessions(state.db(), user_id)
+    let revoked_count = sessions::revoke_other_user_sessions(state.db(), user_id, auth.session_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to revoke all sessions for user {}: {}", user_id, e);
+            tracing::error!(
+                "Failed to revoke other sessions for user {}: {}",
+                user_id,
+                e
+            );
             ServerError::Internal("Failed to revoke sessions".to_string())
         })?;
 
     Ok(Json(RevokeSessionsResponse {
-        message: "All sessions revoked successfully".to_string(),
+        message: "All other sessions revoked successfully".to_string(),
         revoked_count,
     }))
 }
@@ -190,10 +203,14 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        let response = SessionResponse::from_session(session.clone(), Some(session.id));
+        let response = SessionResponse::from_session(session.clone(), session.id);
         assert!(response.is_current);
+        assert_eq!(response.user_id, session.user_id);
+        assert_eq!(response.device_info.as_deref(), Some("Desktop"));
 
-        let json = serde_json::to_string(&response).expect("Failed to serialize");
-        assert!(json.contains("ip_address"));
+        let json: serde_json::Value = serde_json::to_value(&response).expect("Failed to serialize");
+        assert!(json["ip_address"].is_string());
+        assert!(json["user_id"].is_string());
+        assert!(json["location"].is_null());
     }
 }

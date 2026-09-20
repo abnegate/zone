@@ -46,6 +46,49 @@ pub struct TokenMetadata {
     pub email: String,
 }
 
+/// The body `POST /api/auth/login` and `POST /api/auth/refresh` answer with:
+/// the tokens at the top level beside the user, roles and permissions. Only
+/// the fields the CLI keeps are named.
+#[derive(Debug, Deserialize)]
+struct Tokens {
+    access_token: String,
+    refresh_token: String,
+    expires_in: i64,
+    user: Option<User>,
+}
+
+impl Tokens {
+    fn expires_at(&self, now: i64) -> i64 {
+        now + self.expires_in
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct User {
+    id: String,
+    email: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorBody {
+    error: String,
+}
+
+/// A 401 is refused credentials, any other failure carries `{"error": ...}`,
+/// and success is the flat token body.
+fn parse_tokens(status: reqwest::StatusCode, body: &str) -> Result<Tokens, AuthError> {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(AuthError::InvalidCredentials);
+    }
+    if !status.is_success() {
+        let message = serde_json::from_str::<ErrorBody>(body)
+            .map(|error| error.error)
+            .unwrap_or_else(|_| format!("HTTP {status}"));
+        return Err(AuthError::Server(message));
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 /// Authentication manager
 pub struct AuthManager {
     client: reqwest::Client,
@@ -72,63 +115,34 @@ impl AuthManager {
             password: &'a str,
         }
 
-        #[derive(Deserialize)]
-        struct LoginResponse {
-            success: bool,
-            data: Option<LoginData>,
-            error: Option<String>,
-        }
-
-        #[derive(Deserialize)]
-        struct LoginData {
-            access_token: String,
-            refresh_token: String,
-            expires_in: i64,
-            user: UserInfo,
-        }
-
-        #[derive(Deserialize)]
-        struct UserInfo {
-            id: String,
-            email: String,
-        }
-
-        let url = format!("{}/api/auth/login", host.trim_end_matches('/'));
-        let response: LoginResponse = self
+        let host = host.trim_end_matches('/');
+        let response = self
             .client
-            .post(&url)
+            .post(format!("{host}/api/auth/login"))
             .json(&LoginRequest { email, password })
             .send()
-            .await?
-            .json()
             .await?;
+        let status = response.status();
+        let tokens = parse_tokens(status, &response.text().await?)?;
+        let expires_at = tokens.expires_at(chrono::Utc::now().timestamp());
+        let user = tokens
+            .user
+            .ok_or_else(|| AuthError::Server("The login response carried no user".to_string()))?;
 
-        if !response.success {
-            return Err(AuthError::Server(
-                response
-                    .error
-                    .unwrap_or_else(|| "Unknown error".to_string()),
-            ));
-        }
-
-        let data = response.data.ok_or(AuthError::InvalidCredentials)?;
-        let expires_at = chrono::Utc::now().timestamp() + data.expires_in;
-
-        // Store tokens in keychain
-        self.store_token(ACCESS_TOKEN_KEY, &data.access_token)?;
-        self.store_token(REFRESH_TOKEN_KEY, &data.refresh_token)?;
+        self.store_token(ACCESS_TOKEN_KEY, &tokens.access_token)?;
+        self.store_token(REFRESH_TOKEN_KEY, &tokens.refresh_token)?;
 
         let metadata = TokenMetadata {
             host: host.to_string(),
             expires_at,
-            user_id: data.user.id,
-            email: data.user.email,
+            user_id: user.id,
+            email: user.email,
         };
         self.store_token(METADATA_KEY, &serde_json::to_string(&metadata)?)?;
 
         match crate::config::Config::load() {
             Ok(mut cfg) => {
-                cfg.host = Some(host.trim_end_matches('/').to_string());
+                cfg.host = Some(host.to_string());
                 if let Err(err) = cfg.save() {
                     eprintln!("warning: could not save host to config: {err}");
                 }
@@ -170,51 +184,35 @@ impl AuthManager {
             refresh_token: &'a str,
         }
 
-        #[derive(Deserialize)]
-        struct RefreshResponse {
-            success: bool,
-            data: Option<RefreshData>,
-        }
-
-        #[derive(Deserialize)]
-        struct RefreshData {
-            access_token: String,
-            refresh_token: String,
-            expires_in: i64,
-        }
-
         let url = format!("{}/api/auth/refresh", metadata.host.trim_end_matches('/'));
-        let response: RefreshResponse = self
+        let response = self
             .client
             .post(&url)
             .json(&RefreshRequest {
                 refresh_token: &refresh_token,
             })
             .send()
-            .await?
-            .json()
             .await?;
+        let status = response.status();
+        let tokens = match parse_tokens(status, &response.text().await?) {
+            Ok(tokens) => tokens,
+            Err(AuthError::InvalidCredentials) => {
+                self.logout()?;
+                return Err(AuthError::TokenExpired);
+            }
+            Err(error) => return Err(error),
+        };
 
-        if !response.success {
-            // Clear tokens on refresh failure
-            self.logout()?;
-            return Err(AuthError::TokenExpired);
-        }
-
-        let data = response.data.ok_or(AuthError::TokenExpired)?;
-        let expires_at = chrono::Utc::now().timestamp() + data.expires_in;
-
-        // Store new tokens
-        self.store_token(ACCESS_TOKEN_KEY, &data.access_token)?;
-        self.store_token(REFRESH_TOKEN_KEY, &data.refresh_token)?;
+        self.store_token(ACCESS_TOKEN_KEY, &tokens.access_token)?;
+        self.store_token(REFRESH_TOKEN_KEY, &tokens.refresh_token)?;
 
         let new_metadata = TokenMetadata {
-            expires_at,
+            expires_at: tokens.expires_at(chrono::Utc::now().timestamp()),
             ..metadata
         };
         self.store_token(METADATA_KEY, &serde_json::to_string(&new_metadata)?)?;
 
-        Ok(data.access_token)
+        Ok(tokens.access_token)
     }
 
     /// Get stored metadata
@@ -454,6 +452,81 @@ mod tests {
             let debug_str = format!("{:?}", err);
             assert!(!debug_str.is_empty());
         }
+    }
+
+    /// A literal copy of what `POST /api/auth/login` answers, so the CLI is
+    /// tested against the shape the server sends and not one it imagined.
+    const LOGIN_BODY: &str = r#"{
+        "access_token": "eyJhbGciOiJIUzI1NiJ9.access",
+        "refresh_token": "3f1c2b7a9e",
+        "token_type": "Bearer",
+        "expires_in": 900,
+        "user": {
+            "id": "0d9f4a2e-6b1c-4e3a-9f2d-1a2b3c4d5e6f",
+            "email": "owner@zone.test",
+            "display_name": "Owner",
+            "is_admin": false,
+            "is_active": true,
+            "email_verified": true,
+            "created_at": "2026-09-20T01:02:03Z",
+            "updated_at": "2026-09-20T01:02:03Z",
+            "last_login_at": null
+        },
+        "roles": ["member"],
+        "permissions": ["chats:read", "chats:write"]
+    }"#;
+
+    #[test]
+    fn login_body_is_read_flat_as_the_server_sends_it() {
+        let tokens = parse_tokens(reqwest::StatusCode::OK, LOGIN_BODY).unwrap();
+        assert_eq!(tokens.access_token, "eyJhbGciOiJIUzI1NiJ9.access");
+        assert_eq!(tokens.refresh_token, "3f1c2b7a9e");
+        assert_eq!(tokens.expires_at(1_000), 1_900);
+        let user = tokens.user.unwrap();
+        assert_eq!(user.id, "0d9f4a2e-6b1c-4e3a-9f2d-1a2b3c4d5e6f");
+        assert_eq!(user.email, "owner@zone.test");
+    }
+
+    #[test]
+    fn refresh_body_needs_no_user() {
+        let body =
+            r#"{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":900}"#;
+        let tokens = parse_tokens(reqwest::StatusCode::OK, body).unwrap();
+        assert_eq!(tokens.access_token, "a");
+        assert!(tokens.user.is_none());
+    }
+
+    #[test]
+    fn a_401_is_refused_credentials_and_other_failures_carry_the_server_message() {
+        let refused = parse_tokens(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":"Invalid email or password"}"#,
+        );
+        assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
+
+        let disabled = parse_tokens(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":"Account is disabled"}"#,
+        );
+        assert_eq!(
+            disabled.unwrap_err().to_string(),
+            "Server error: Account is disabled"
+        );
+
+        let opaque = parse_tokens(reqwest::StatusCode::BAD_GATEWAY, "<html>bad gateway</html>");
+        assert_eq!(
+            opaque.unwrap_err().to_string(),
+            "Server error: HTTP 502 Bad Gateway"
+        );
+    }
+
+    #[test]
+    fn the_old_wrapped_shape_is_not_what_the_server_sends() {
+        let wrapped = r#"{"success":true,"data":{"access_token":"a"}}"#;
+        assert!(matches!(
+            parse_tokens(reqwest::StatusCode::OK, wrapped),
+            Err(AuthError::Json(_))
+        ));
     }
 
     // Note: We can't easily test the actual keyring operations in unit tests

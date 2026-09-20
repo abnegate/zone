@@ -126,15 +126,59 @@ pub async fn update_last_active(pool: &PgPool, session_id: Uuid) -> DbResult<()>
     Ok(())
 }
 
-/// Revoke a specific session
-///
-/// Marks a session as revoked, preventing further use of its refresh token.
+/// Bind a live session to a freshly issued refresh token, so a refresh keeps
+/// the same session instead of leaving the old row active beside a new one.
+pub async fn rotate_session(
+    pool: &PgPool,
+    session_id: Uuid,
+    refresh_token_hash: &str,
+    expires_at: NaiveDateTime,
+) -> DbResult<Option<Session>> {
+    let session: Option<Session> = sqlx::query_as(
+        r#"
+        UPDATE sessions
+        SET refresh_token_hash = $2,
+            expires_at = $3,
+            last_active_at = NOW()
+        WHERE id = $1
+          AND revoked_at IS NULL
+          AND expires_at > NOW()
+        RETURNING
+            id,
+            user_id,
+            refresh_token_hash,
+            CAST(ip_address AS text) as "ip_address",
+            user_agent,
+            device_info,
+            last_active_at,
+            expires_at,
+            revoked_at,
+            created_at
+        "#,
+    )
+    .bind(session_id)
+    .bind(refresh_token_hash)
+    .bind(expires_at)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(session)
+}
+
+/// Revoke a specific session together with the refresh token bound to it.
 pub async fn revoke_session(pool: &PgPool, session_id: Uuid) -> DbResult<()> {
     sqlx::query(
         r#"
-        UPDATE sessions
+        WITH revoked AS (
+            UPDATE sessions
+            SET revoked_at = NOW()
+            WHERE id = $1 AND revoked_at IS NULL
+            RETURNING refresh_token_hash
+        )
+        UPDATE refresh_tokens
         SET revoked_at = NOW()
-        WHERE id = $1 AND revoked_at IS NULL
+        WHERE token_hash IN (SELECT refresh_token_hash FROM revoked)
+          AND revoked_at IS NULL
         "#,
     )
     .bind(session_id)
@@ -161,6 +205,34 @@ pub async fn revoke_all_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult<
     .await?;
 
     Ok(result.rows_affected() as i64)
+}
+
+/// Revoke every session of a user except `keep`, refresh tokens included, and
+/// return how many sessions were revoked.
+pub async fn revoke_other_user_sessions(pool: &PgPool, user_id: Uuid, keep: Uuid) -> DbResult<i64> {
+    let revoked: Option<i64> = sqlx::query_scalar(
+        r#"
+        WITH revoked AS (
+            UPDATE sessions
+            SET revoked_at = NOW()
+            WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL
+            RETURNING refresh_token_hash
+        ),
+        tokens AS (
+            UPDATE refresh_tokens
+            SET revoked_at = NOW()
+            WHERE token_hash IN (SELECT refresh_token_hash FROM revoked)
+              AND revoked_at IS NULL
+        )
+        SELECT COUNT(*) FROM revoked
+        "#,
+    )
+    .bind(user_id)
+    .bind(keep)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(revoked.unwrap_or(0))
 }
 
 /// List all sessions for a user

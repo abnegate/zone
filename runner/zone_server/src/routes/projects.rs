@@ -10,12 +10,61 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::{auto_projects, chats, projects, workspace_members};
+use crate::db::projects::{self, NewProject, ProjectRow};
+use crate::db::{auto_projects, chats, sources, workspace_members};
+use crate::error::ServerError;
 use crate::state::AppState;
 
-use super::common::{ErrorResponse, Timestamps};
+use super::common::Timestamps;
 
-/// Refuse a write to `workspace_id`, or `None` when the caller may make it.
+/// The statuses `projects.status` accepts.
+pub const PROJECT_STATUSES: [&str; 3] = ["active", "on_hold", "cancelled"];
+
+fn not_found() -> ServerError {
+    ServerError::NotFound("Project not found".to_string())
+}
+
+fn user_id(auth: &AuthUser) -> Result<Uuid, ServerError> {
+    Uuid::parse_str(&auth.0.sub)
+        .map_err(|_| ServerError::Unauthorized("Invalid user ID in token".to_string()))
+}
+
+/// A project and the workspace it belongs to.
+///
+/// A project without a workspace is treated as absent: nothing can be
+/// authorised against it.
+async fn load(state: &AppState, id: Uuid) -> Result<(ProjectRow, Uuid), ServerError> {
+    let project = projects::get_project(state.db(), id)
+        .await?
+        .ok_or_else(not_found)?;
+    let workspace_id = project.workspace_id.ok_or_else(not_found)?;
+    Ok((project, workspace_id))
+}
+
+/// The project `id` names, for a caller who may read its workspace.
+async fn readable(state: &AppState, auth: &AuthUser, id: Uuid) -> Result<ProjectRow, ServerError> {
+    let user_id = user_id(auth)?;
+    let (project, workspace_id) = load(state, id).await?;
+    if workspace_members::is_member(state.db(), user_id, workspace_id).await? {
+        Ok(project)
+    } else {
+        Err(not_found())
+    }
+}
+
+/// The project `id` names and its workspace, for a caller who may change it.
+async fn writable(
+    state: &AppState,
+    auth: &AuthUser,
+    id: Uuid,
+) -> Result<(ProjectRow, Uuid), ServerError> {
+    let user_id = user_id(auth)?;
+    let (project, workspace_id) = load(state, id).await?;
+    refuse_unless_writable(state, workspace_id, user_id).await?;
+    Ok((project, workspace_id))
+}
+
+/// Refuse a write to `workspace_id` unless the caller may make it.
 ///
 /// A caller who is not a member is told the project does not exist, so the
 /// id-addressed routes cannot be used to enumerate ids across tenants -- the
@@ -25,50 +74,70 @@ async fn refuse_unless_writable(
     state: &AppState,
     workspace_id: Uuid,
     user_id: Uuid,
-) -> Option<Response> {
-    match workspace_members::is_member(state.db(), user_id, workspace_id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return Some(
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new("Project not found")),
-                )
-                    .into_response(),
-            );
-        }
-        Err(e) => {
-            tracing::error!("Database error checking membership: {}", e);
-            return Some(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response(),
-            );
-        }
+) -> Result<(), ServerError> {
+    if !workspace_members::is_member(state.db(), user_id, workspace_id).await? {
+        return Err(not_found());
     }
+    if !workspace_members::can_write(state.db(), workspace_id, user_id).await? {
+        return Err(ServerError::Forbidden(
+            "Workspace write access required".to_string(),
+        ));
+    }
+    Ok(())
+}
 
-    match workspace_members::can_write(state.db(), workspace_id, user_id).await {
-        Ok(true) => None,
-        Ok(false) => Some(
-            (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Workspace write access required")),
-            )
-                .into_response(),
-        ),
-        Err(e) => {
-            tracing::error!("Database error checking permissions: {}", e);
-            Some(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response(),
-            )
-        }
+/// A source id the caller gave, once it is confirmed to live in `workspace_id`.
+async fn source_in_workspace(
+    state: &AppState,
+    source_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<Uuid, ServerError> {
+    sources::get_source(state.db(), source_id, workspace_id)
+        .await?
+        .map(|_| source_id)
+        .ok_or_else(|| ServerError::BadRequest("Source not found in this workspace".to_string()))
+}
+
+fn known_status(status: &str) -> Result<&str, ServerError> {
+    if PROJECT_STATUSES.contains(&status) {
+        Ok(status)
+    } else {
+        Err(ServerError::BadRequest(format!(
+            "Invalid status \"{}\". Must be one of: {}",
+            status,
+            PROJECT_STATUSES.join(", ")
+        )))
     }
+}
+
+/// The conflict a request to start, enable or resume automation is told when
+/// this server runs no driver: enabling a project nothing will pick up would
+/// only look like progress.
+fn refuse_unless_driven(state: &AppState) -> Result<(), ServerError> {
+    if state.config().auto.enabled {
+        return Ok(());
+    }
+    Err(ServerError::Conflict(
+        "Automation is disabled on this server (ZONE_AUTO_ENABLED=false); enable the \
+         driver before starting, enabling or resuming an auto project"
+            .to_string(),
+    ))
+}
+
+/// One project's response, with what automation knows about it.
+async fn describe(state: &AppState, row: ProjectRow) -> ProjectResponse {
+    let automation = auto_projects::automation(state.db(), row.id)
+        .await
+        .ok()
+        .flatten();
+    ProjectResponse {
+        project: ProjectData::from(row).with_automation(automation.as_ref()),
+    }
+}
+
+async fn respond(state: &AppState, project: Option<ProjectRow>) -> Result<Response, ServerError> {
+    let project = project.ok_or_else(not_found)?;
+    Ok(Json(describe(state, project).await).into_response())
 }
 
 /// Project data
@@ -103,17 +172,6 @@ impl ProjectData {
     }
 }
 
-/// One project's response, with what automation knows about it.
-async fn respond(state: &AppState, row: projects::ProjectRow) -> ProjectResponse {
-    let automation = auto_projects::automation(state.db(), row.id)
-        .await
-        .ok()
-        .flatten();
-    ProjectResponse {
-        project: ProjectData::from(row).with_automation(automation.as_ref()),
-    }
-}
-
 /// Single project response
 #[derive(Debug, Serialize)]
 pub struct ProjectResponse {
@@ -126,8 +184,8 @@ pub struct ProjectsListResponse {
     projects: Vec<ProjectData>,
 }
 
-impl From<projects::ProjectRow> for ProjectData {
-    fn from(row: projects::ProjectRow) -> Self {
+impl From<ProjectRow> for ProjectData {
+    fn from(row: ProjectRow) -> Self {
         Self {
             id: row.id,
             workspace_id: row.workspace_id,
@@ -140,14 +198,6 @@ impl From<projects::ProjectRow> for ProjectData {
             auto_paused_reason: None,
             auto_completed_at: None,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
-        }
-    }
-}
-
-impl From<projects::ProjectRow> for ProjectResponse {
-    fn from(row: projects::ProjectRow) -> Self {
-        Self {
-            project: ProjectData::from(row),
         }
     }
 }
@@ -165,9 +215,11 @@ pub struct CreateProjectRequest {
     name: String,
     description: Option<String>,
     workspace_id: Uuid,
+    source_id: Option<Uuid>,
+    status: Option<String>,
 }
 
-/// Update project request
+/// Update project request; every field is optional and only the given ones change
 #[derive(Debug, Deserialize)]
 pub struct UpdateProjectRequest {
     name: Option<String>,
@@ -176,6 +228,12 @@ pub struct UpdateProjectRequest {
     /// Turn automation on or off: on, every agentic task of the project is
     /// run, reviewed and merged without anyone in the loop.
     auto: Option<bool>,
+}
+
+/// Link source request
+#[derive(Debug, Deserialize)]
+pub struct LinkSourceRequest {
+    source_id: Uuid,
 }
 
 /// Link GitHub request
@@ -213,37 +271,16 @@ pub async fn start_auto(
     auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
     Json(req): Json<AutoProjectRequest>,
-) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
-    if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
-        return refusal;
-    }
-    if let Some(refusal) = refuse_unless_driven(&state) {
-        return refusal;
-    }
+) -> Result<Response, ServerError> {
+    let user_id = user_id(&auth)?;
+    refuse_unless_writable(&state, workspace_id, user_id).await?;
+    refuse_unless_driven(&state)?;
     let brief = req.brief.trim();
     if brief.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("A brief is required")),
-        )
-            .into_response();
+        return Err(ServerError::BadRequest("A brief is required".to_string()));
     }
     if brief.chars().count() > BRIEF_CHARS {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("The brief is too long")),
-        )
-            .into_response();
+        return Err(ServerError::BadRequest("The brief is too long".to_string()));
     }
     let model = req
         .model_name
@@ -255,11 +292,9 @@ pub async fn start_auto(
     if crate::services::model::Model::completion(&state.config().ollama_host, &model).await
         == Some(false)
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(crate::services::model::UNSUPPORTED)),
-        )
-            .into_response();
+        return Err(ServerError::BadRequest(
+            crate::services::model::UNSUPPORTED.to_string(),
+        ));
     }
     let first_line: String = brief
         .lines()
@@ -268,7 +303,7 @@ pub async fn start_auto(
         .chars()
         .take(BRIEF_TITLE_CHARS)
         .collect();
-    let chat = match chats::create_purposed_chat(
+    let chat = chats::create_purposed_chat(
         state.db(),
         workspace_id,
         &format!("Plan: {}", first_line.trim()),
@@ -277,18 +312,7 @@ pub async fn start_auto(
         None,
         true,
     )
-    .await
-    {
-        Ok(chat) => chat,
-        Err(error) => {
-            tracing::error!("Database error: {}", error);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
+    .await?;
     let chat_id = chat.id;
     let brief = brief.to_string();
     let turn_state = state.clone();
@@ -303,7 +327,7 @@ pub async fn start_auto(
         )
         .await;
     });
-    (StatusCode::ACCEPTED, Json(AutoProjectResponse { chat_id })).into_response()
+    Ok((StatusCode::ACCEPTED, Json(AutoProjectResponse { chat_id })).into_response())
 }
 
 /// GET /api/projects?workspace_id=xxx
@@ -311,67 +335,27 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(query): Query<ListProjectsQuery>,
-) -> impl IntoResponse {
-    // Verify workspace membership
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
-
-    // Check if user is a member of the workspace
-    match workspace_members::is_member(state.db(), user_id, query.workspace_id).await {
-        Ok(true) => {
-            // User is a member, proceed
-        }
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Workspace not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error checking membership: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
+) -> Result<Response, ServerError> {
+    let user_id = user_id(&auth)?;
+    if !workspace_members::is_member(state.db(), user_id, query.workspace_id).await? {
+        return Err(ServerError::NotFound("Workspace not found".to_string()));
     }
 
-    match projects::list_projects(state.db(), query.workspace_id, query.status.as_deref()).await {
-        Ok(projs) => {
-            let automation =
-                auto_projects::automation_for_workspace(state.db(), query.workspace_id)
-                    .await
-                    .unwrap_or_default();
-            Json(ProjectsListResponse {
-                projects: projs
-                    .into_iter()
-                    .map(|row| {
-                        let known = automation.iter().find(|entry| entry.project_id == row.id);
-                        ProjectData::from(row).with_automation(known)
-                    })
-                    .collect(),
+    let rows =
+        projects::list_projects(state.db(), query.workspace_id, query.status.as_deref()).await?;
+    let automation = auto_projects::automation_for_workspace(state.db(), query.workspace_id)
+        .await
+        .unwrap_or_default();
+    Ok(Json(ProjectsListResponse {
+        projects: rows
+            .into_iter()
+            .map(|row| {
+                let known = automation.iter().find(|entry| entry.project_id == row.id);
+                ProjectData::from(row).with_automation(known)
             })
-            .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+            .collect(),
+    })
+    .into_response())
 }
 
 /// POST /api/projects
@@ -379,59 +363,32 @@ pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(req): Json<CreateProjectRequest>,
-) -> impl IntoResponse {
-    // Verify workspace membership (must be writer or higher)
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
+) -> Result<Response, ServerError> {
+    let user_id = user_id(&auth)?;
+    if !workspace_members::can_write(state.db(), req.workspace_id, user_id).await? {
+        return Err(ServerError::Forbidden(
+            "Workspace write access required".to_string(),
+        ));
+    }
+
+    let status = req.status.as_deref().map(known_status).transpose()?;
+    let source_id = match req.source_id {
+        Some(source_id) => Some(source_in_workspace(&state, source_id, req.workspace_id).await?),
+        None => None,
     };
 
-    // Check if user can write to the workspace
-    match workspace_members::can_write(state.db(), req.workspace_id, user_id).await {
-        Ok(true) => {
-            // User can write, proceed
-        }
-        Ok(false) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse::new("Workspace write access required")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error checking permissions: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    }
-
-    match projects::create_project(
+    let project = projects::create(
         state.db(),
-        &req.name,
-        req.description.as_deref(),
-        Some(req.workspace_id),
+        NewProject {
+            name: &req.name,
+            description: req.description.as_deref(),
+            workspace_id: Some(req.workspace_id),
+            source_id,
+            status,
+        },
     )
-    .await
-    {
-        Ok(proj) => (StatusCode::CREATED, Json(respond(&state, proj).await)).into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+    .await?;
+    Ok((StatusCode::CREATED, Json(describe(&state, project).await)).into_response())
 }
 
 /// GET /api/projects/:id
@@ -439,193 +396,57 @@ pub async fn get(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
-
-    // Get the project first to check its workspace
-    let proj = match projects::get_project(state.db(), id).await {
-        Ok(Some(proj)) => proj,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    // NEW-CRITICAL-1: Verify user has access to the project's workspace
-    // If workspace_id is None, deny access (project should always have a workspace)
-    let workspace_id = match proj.workspace_id {
-        Some(id) => id,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-    };
-
-    match workspace_members::is_member(state.db(), user_id, workspace_id).await {
-        Ok(true) => {
-            // User is a member, proceed
-        }
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error checking membership: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    }
-
-    Json(respond(&state, proj).await).into_response()
+) -> Result<Response, ServerError> {
+    let project = readable(&state, &auth, id).await?;
+    Ok(Json(describe(&state, project).await).into_response())
 }
 
-/// PUT /api/projects/:id
+/// PUT|PATCH /api/projects/:id
 pub async fn update(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateProjectRequest>,
-) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
-
-    // Get the project first to check its workspace
-    let proj = match projects::get_project(state.db(), id).await {
-        Ok(Some(proj)) => proj,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    // NEW-CRITICAL-1: Verify user can write to the project's workspace
-    // If workspace_id is None, deny access (project should always have a workspace)
-    let workspace_id = match proj.workspace_id {
-        Some(id) => id,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-    };
-
-    if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
-        return refusal;
-    }
+) -> Result<Response, ServerError> {
+    let (_, workspace_id) = writable(&state, &auth, id).await?;
+    let user_id = user_id(&auth)?;
+    let status = req.status.as_deref().map(known_status).transpose()?;
 
     if let Some(auto) = req.auto {
-        if auto && let Some(refusal) = refuse_unless_driven(&state) {
-            return refusal;
+        if auto {
+            refuse_unless_driven(&state)?;
         }
-        match auto_projects::set_auto(state.db(), id, auto, user_id).await {
-            Ok(Some(automation)) => {
-                if auto {
-                    if let Err(error) = chats::ensure_project_chat(
-                        state.db(),
-                        workspace_id,
-                        id,
-                        &automation.name,
-                        chats::ChatPurpose::ProjectUpdates,
-                    )
-                    .await
-                    {
-                        tracing::warn!(project_id = %id, %error, "Could not open the project's updates chat");
-                    }
-                    crate::workers::auto_project::poke(id);
-                }
+        let automation = auto_projects::set_auto(state.db(), id, auto, user_id)
+            .await?
+            .ok_or_else(not_found)?;
+        if auto {
+            if let Err(error) = chats::ensure_project_chat(
+                state.db(),
+                workspace_id,
+                id,
+                &automation.name,
+                chats::ChatPurpose::ProjectUpdates,
+            )
+            .await
+            {
+                tracing::warn!(project_id = %id, %error, "Could not open the project's updates chat");
             }
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new("Project not found")),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                tracing::error!("Database error: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
+            crate::workers::auto_project::poke(id);
         }
     }
 
-    match projects::update_project(
-        state.db(),
-        id,
-        req.name.as_deref(),
-        req.description.as_deref(),
-        req.status.as_deref(),
+    respond(
+        &state,
+        projects::update_project(
+            state.db(),
+            id,
+            req.name.as_deref(),
+            req.description.as_deref(),
+            status,
+        )
+        .await?,
     )
     .await
-    {
-        Ok(Some(proj)) => Json(respond(&state, proj).await).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Project not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
 }
 
 /// DELETE /api/projects/:id
@@ -633,71 +454,42 @@ pub async fn delete(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
+) -> Result<Response, ServerError> {
+    writable(&state, &auth, id).await?;
 
-    // Get the project first to check its workspace
-    let proj = match projects::get_project(state.db(), id).await {
-        Ok(Some(proj)) => proj,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    // NEW-CRITICAL-1: Verify user can write to the project's workspace (delete requires write access)
-    // If workspace_id is None, deny access (project should always have a workspace)
-    let workspace_id = match proj.workspace_id {
-        Some(id) => id,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-    };
-
-    if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
-        return refusal;
+    if projects::delete_project(state.db(), id).await? {
+        Ok(StatusCode::NO_CONTENT.into_response())
+    } else {
+        Err(not_found())
     }
+}
 
-    match projects::delete_project(state.db(), id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Project not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+/// PUT /api/projects/:id/source
+pub async fn link_source(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(req): Json<LinkSourceRequest>,
+) -> Result<Response, ServerError> {
+    let (_, workspace_id) = writable(&state, &auth, id).await?;
+    let source_id = source_in_workspace(&state, req.source_id, workspace_id).await?;
+
+    respond(
+        &state,
+        projects::set_source(state.db(), id, Some(source_id)).await?,
+    )
+    .await
+}
+
+/// DELETE /api/projects/:id/source
+pub async fn unlink_source(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ServerError> {
+    writable(&state, &auth, id).await?;
+
+    respond(&state, projects::set_source(state.db(), id, None).await?).await
 }
 
 /// POST /api/projects/:id/github
@@ -706,87 +498,25 @@ pub async fn link_github(
     auth: AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<LinkGitHubRequest>,
-) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
-
-    // Get the project first to check its workspace
-    let proj = match projects::get_project(state.db(), id).await {
-        Ok(Some(proj)) => proj,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    // NEW-CRITICAL-1: Verify user can write to the project's workspace
-    // If workspace_id is None, deny access (project should always have a workspace)
-    let workspace_id = match proj.workspace_id {
-        Some(id) => id,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-    };
-
-    if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
-        return refusal;
-    }
+) -> Result<Response, ServerError> {
+    writable(&state, &auth, id).await?;
 
     // The token is stored the way source credentials are: encrypted at rest,
     // opened by the checkout and pull request code that uses it.
-    let sealed = match req.access_token.as_deref() {
-        Some(token) => match crate::crypto::encrypt(state.encryption_key(), token) {
-            Ok(sealed) => Some(sealed),
-            Err(error) => {
-                tracing::error!(%error, "Could not encrypt the repository token");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        },
-        None => None,
-    };
-    match projects::link_github(state.db(), id, &req.repo_url, sealed.as_deref()).await {
-        Ok(Some(proj)) => Json(respond(&state, proj).await).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Project not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+    let sealed = req
+        .access_token
+        .as_deref()
+        .map(|token| crate::crypto::encrypt(state.encryption_key(), token))
+        .transpose()
+        .map_err(|error| {
+            tracing::error!(%error, "Could not encrypt the repository token");
+            ServerError::Internal("Internal server error".to_string())
+        })?;
+    respond(
+        &state,
+        projects::link_github(state.db(), id, &req.repo_url, sealed.as_deref()).await?,
+    )
+    .await
 }
 
 /// DELETE /api/projects/:id/github
@@ -794,71 +524,10 @@ pub async fn unlink_github(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
+) -> Result<Response, ServerError> {
+    writable(&state, &auth, id).await?;
 
-    // Get the project first to check its workspace
-    let proj = match projects::get_project(state.db(), id).await {
-        Ok(Some(proj)) => proj,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    // NEW-CRITICAL-1: Verify user can write to the project's workspace
-    // If workspace_id is None, deny access (project should always have a workspace)
-    let workspace_id = match proj.workspace_id {
-        Some(id) => id,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response();
-        }
-    };
-
-    if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
-        return refusal;
-    }
-
-    match projects::unlink_github(state.db(), id).await {
-        Ok(Some(proj)) => Json(respond(&state, proj).await).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Project not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+    respond(&state, projects::unlink_github(state.db(), id).await?).await
 }
 
 /// One task of a project as automation sees it.
@@ -904,112 +573,21 @@ pub struct AutomationResponse {
     tasks: Vec<AutomationTask>,
 }
 
-/// The conflict a request to start, enable or resume automation is told when
-/// this server runs no driver: enabling a project nothing will pick up would
-/// only look like progress.
-fn refuse_unless_driven(state: &AppState) -> Option<Response> {
-    if state.config().auto.enabled {
-        return None;
-    }
-    Some(
-        (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse::new(
-                "Automation is disabled on this server (ZONE_AUTO_ENABLED=false); enable the \
-                 driver before starting, enabling or resuming an auto project",
-            )),
-        )
-            .into_response(),
-    )
-}
-
-/// The project's workspace, or the not-found a non-member is told.
-async fn project_workspace(
-    state: &AppState,
-    id: Uuid,
-    user_id: Uuid,
-) -> Result<(projects::ProjectRow, Uuid), Box<Response>> {
-    let proj = match projects::get_project(state.db(), id).await {
-        Ok(Some(proj)) => proj,
-        Ok(None) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Project not found")),
-            )
-                .into_response()
-                .into());
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-                .into());
-        }
-    };
-    let Some(workspace_id) = proj.workspace_id else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Project not found")),
-        )
-            .into_response()
-            .into());
-    };
-    match workspace_members::is_member(state.db(), user_id, workspace_id).await {
-        Ok(true) => Ok((proj, workspace_id)),
-        Ok(false) => Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Project not found")),
-        )
-            .into_response()
-            .into()),
-        Err(e) => {
-            tracing::error!("Database error checking membership: {}", e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-                .into())
-        }
-    }
-}
-
 /// GET /api/projects/:id/automation
 pub async fn automation(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
-    if let Err(refusal) = project_workspace(&state, id, user_id).await {
-        return *refusal;
-    }
+) -> Result<Response, ServerError> {
+    readable(&state, &auth, id).await?;
     let (automation, tasks, planner, updates) = tokio::join!(
         auto_projects::automation(state.db(), id),
         auto_projects::project_tasks(state.db(), id),
         chats::project_chat(state.db(), id, chats::ChatPurpose::ProjectPlanner),
         chats::project_chat(state.db(), id, chats::ChatPurpose::ProjectUpdates),
     );
-    let (Ok(Some(automation)), Ok(tasks)) = (automation, tasks) else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        )
-            .into_response();
-    };
-    let listed: Vec<AutomationTask> = tasks
+    let automation = automation?.ok_or_else(not_found)?;
+    let listed: Vec<AutomationTask> = tasks?
         .into_iter()
         .map(|task| AutomationTask {
             task_id: task.task_id,
@@ -1050,7 +628,7 @@ pub async fn automation(
             .filter(|task| task.stage.as_deref() == Some("paused"))
             .count(),
     };
-    Json(AutomationResponse {
+    Ok(Json(AutomationResponse {
         project_id: id,
         auto: automation.auto,
         actor_id: automation.actor_id,
@@ -1062,7 +640,7 @@ pub async fn automation(
         counts,
         tasks: listed,
     })
-    .into_response()
+    .into_response())
 }
 
 /// POST /api/projects/:id/automation/resume
@@ -1072,50 +650,11 @@ pub async fn resume_automation(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&auth.0.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
-    let (_, workspace_id) = match project_workspace(&state, id, user_id).await {
-        Ok(found) => found,
-        Err(refusal) => return *refusal,
-    };
-    if let Some(refusal) = refuse_unless_writable(&state, workspace_id, user_id).await {
-        return refusal;
-    }
-    if let Some(refusal) = refuse_unless_driven(&state) {
-        return refusal;
-    }
-    if let Err(e) = auto_projects::resume(state.db(), id).await {
-        tracing::error!("Database error: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        )
-            .into_response();
-    }
-    if let Err(e) = auto_projects::resume_paused_tasks(state.db(), id).await {
-        tracing::error!("Database error: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("Internal server error")),
-        )
-            .into_response();
-    }
+) -> Result<Response, ServerError> {
+    writable(&state, &auth, id).await?;
+    refuse_unless_driven(&state)?;
+    auto_projects::resume(state.db(), id).await?;
+    auto_projects::resume_paused_tasks(state.db(), id).await?;
     crate::workers::auto_project::poke(id);
-    match projects::get_project(state.db(), id).await {
-        Ok(Some(proj)) => Json(respond(&state, proj).await).into_response(),
-        _ => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Project not found")),
-        )
-            .into_response(),
-    }
+    respond(&state, projects::get_project(state.db(), id).await?).await
 }

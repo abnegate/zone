@@ -413,6 +413,18 @@ pub fn reception_artifacts(reception: &PullRequestReception) -> (Value, Value) {
     )
 }
 
+/// The `pr_status` a task carries for a reception: merged once GitHub says so,
+/// closed when the pull request was shut without merging, otherwise still open.
+pub fn pr_status_from(reception: &PullRequestReception) -> &'static str {
+    if reception.merged_at.is_some() {
+        "merged"
+    } else if reception.state.as_deref() == Some("closed") {
+        "closed"
+    } else {
+        "open"
+    }
+}
+
 /// Merge one reception into a run's artifacts, leaving every other key untouched.
 ///
 /// The `pr` key is folded into rather than replaced, so the URL and branch name
@@ -485,7 +497,13 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
     };
 
     match record_reception(state, run_id, &reception).await {
-        Ok(true) => ReceptionSyncResult::Recorded(Box::new(reception)),
+        Ok(true) => {
+            let status = pr_status_from(&reception);
+            if let Err(error) = tasks::update_task_pr_status(state.db(), task_id, status).await {
+                tracing::warn!("Could not record pr_status {status} for task {task_id}: {error}");
+            }
+            ReceptionSyncResult::Recorded(Box::new(reception))
+        }
         Ok(false) => ReceptionSyncResult::Error(format!("Task run {} not found", run_id)),
         Err(error) => ReceptionSyncResult::Error(format!("Failed to record reception: {}", error)),
     }
@@ -1934,6 +1952,27 @@ mod reception_tests {
                 "rename this".to_string(),
             ],
         }
+    }
+
+    #[test]
+    fn a_merged_pull_request_reads_merged_on_its_task() {
+        assert_eq!(pr_status_from(&reception()), "merged");
+    }
+
+    #[test]
+    fn a_pull_request_shut_without_merging_reads_closed_and_an_open_one_stays_open() {
+        let mut shut = reception();
+        shut.merged_at = None;
+        shut.minutes_to_merge = None;
+        assert_eq!(pr_status_from(&shut), "closed");
+
+        let mut open = shut.clone();
+        open.state = Some("open".to_string());
+        assert_eq!(pr_status_from(&open), "open");
+
+        let mut unknown = shut;
+        unknown.state = None;
+        assert_eq!(pr_status_from(&unknown), "open");
     }
 
     #[test]

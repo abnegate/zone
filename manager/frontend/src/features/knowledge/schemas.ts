@@ -47,12 +47,31 @@ export const KnowledgeEntrySchema = z
     };
   });
 
-export const CreateKnowledgeRequestSchema = z.object({
-  title: z.string().min(1, 'Title is required'),
-  type: KnowledgeTypeSchema,
-  content: z.string().min(1, 'Content is required'),
-  tags: z.array(z.string()).optional(),
-});
+export const CreateKnowledgeRequestSchema = z
+  .object({
+    title: z.string().min(1, 'Title is required'),
+    type: KnowledgeTypeSchema,
+    content: z.string().optional(),
+    source_url: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+  })
+  .superRefine((request, context) => {
+    if (request.type === 'text' && !request.content?.trim()) {
+      context.addIssue({ code: 'custom', path: ['content'], message: 'Content is required' });
+    }
+    if (request.type === 'url') {
+      const url = request.source_url?.trim() ?? '';
+      if (!url) {
+        context.addIssue({ code: 'custom', path: ['source_url'], message: 'URL is required' });
+      } else if (!/^https?:\/\/\S+$/i.test(url)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['source_url'],
+          message: 'Enter a full http:// or https:// address',
+        });
+      }
+    }
+  });
 
 export const KnowledgeResponseSchema = z.preprocess(
   (data) => (Array.isArray(data) ? { entries: data } : data),
