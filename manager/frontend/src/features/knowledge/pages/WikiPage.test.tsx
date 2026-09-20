@@ -827,3 +827,55 @@ describe('WikiPage', () => {
     });
   });
 });
+
+describe('WikiPage card anatomy', () => {
+  const bare: KnowledgeEntry = {
+    id: 'kb-bare',
+    workspace_id: 'ws-1',
+    title: 'Bare Entry',
+    type: 'text',
+    content: '',
+    fetched_content: null,
+    tags: ['history', 'pass'],
+    last_refreshed_at: null,
+    indexed: true,
+    created_at: '2024-03-04T00:00:00Z',
+    updated_at: '',
+  };
+
+  beforeEach(() => {
+    getMockState = () => ({ entries: [bare], loading: false, error: null });
+  });
+
+  it('fills the excerpt slot with the tags and the meta row with the created date', () => {
+    renderWikiPage();
+    const card = screen.getByText('Bare Entry').closest('.knowledge-card') as HTMLElement;
+    expect(card.querySelector('.knowledge-card-content')).toBeNull();
+    const tags = card.querySelector('.knowledge-card-tags');
+    expect(tags).toHaveTextContent('history');
+    expect(tags).toHaveTextContent('pass');
+    expect(card.querySelector('.knowledge-card-date')).toHaveTextContent(/Updated Mar 4, 2024/);
+  });
+
+  it('puts the excerpt in the body and the tags in the meta row when content exists', () => {
+    getMockState = () => ({
+      entries: [{ ...bare, content: 'The bridge opened in 1959.' }],
+      loading: false,
+      error: null,
+    });
+    renderWikiPage();
+    const card = screen.getByText('Bare Entry').closest('.knowledge-card') as HTMLElement;
+    expect(card.querySelector('.knowledge-card-content')).toHaveTextContent(
+      'The bridge opened in 1959.'
+    );
+    expect(card.querySelector('.knowledge-card-tags')).toBeNull();
+    expect(card.querySelector('.knowledge-card-tagline')).toHaveTextContent('history');
+  });
+
+  it('renders the page bar and body the frame scrolls', () => {
+    renderWikiPage();
+    const page = document.querySelector('.wiki-page') as HTMLElement;
+    expect(page.querySelector(':scope > .page-bar')).not.toBeNull();
+    expect(page.querySelector(':scope > .page-body .knowledge-grid')).not.toBeNull();
+  });
+});

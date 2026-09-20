@@ -239,7 +239,7 @@ export function CreateKnowledgeWizard({
                     }
                   }}
                   placeholder="Enter your text content here..."
-                  rows={8}
+                  rows={5}
                   className={fieldErrors.content ? 'input-error' : ''}
                 />
               )}

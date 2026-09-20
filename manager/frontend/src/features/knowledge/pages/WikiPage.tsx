@@ -1,6 +1,7 @@
 import { Badge, Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import PageBar from '../../../shared/components/PageBar/PageBar';
 import { CreateKnowledgeWizard } from '../components';
 import { useKnowledge } from '../hooks';
 import type { KnowledgeEntry } from '../types';
@@ -125,11 +126,10 @@ export default function WikiPage() {
 
   return (
     <div className="page page--workspace wiki-page">
-      <header className="wiki-header">
-        <div className="wiki-header-copy">
-          <h1>Knowledge Base</h1>
-          <p>Manage documentation, links, and content for your AI models</p>
-        </div>
+      <PageBar
+        title="Knowledge Base"
+        subtitle="Manage documentation, links, and content for your AI models"
+      >
         <Tabs
           value={filterType}
           onValueChange={(v) => setFilterType(v as FilterType)}
@@ -141,133 +141,137 @@ export default function WikiPage() {
             <TabsTrigger value="url">URL</TabsTrigger>
           </TabsList>
         </Tabs>
-        <div className="wiki-actions">
-          <div className="wiki-search">
-            <svg
-              className="wiki-search-icon"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-              />
-            </svg>
-            <input
-              type="search"
-              placeholder="Search knowledge..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              aria-label="Search knowledge"
+        <div className="wiki-search">
+          <svg
+            className="wiki-search-icon"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
             />
+          </svg>
+          <input
+            type="search"
+            placeholder="Search knowledge..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            aria-label="Search knowledge"
+          />
+        </div>
+        <Button onClick={() => setShowCreateWizard(true)}>Add knowledge</Button>
+      </PageBar>
+
+      <div className="page-body wiki-body">
+        {(error || deleteError || refreshError) && (
+          <div className="wiki-banner wiki-banner--error" role="alert" aria-live="assertive">
+            {error || deleteError || refreshError}
           </div>
-          <Button onClick={() => setShowCreateWizard(true)}>+ Add Knowledge</Button>
-        </div>
-      </header>
+        )}
 
-      {(error || deleteError || refreshError) && (
-        <div className="wiki-banner wiki-banner--error" role="alert" aria-live="assertive">
-          {error || deleteError || refreshError}
-        </div>
-      )}
-
-      {loading ? (
-        <div className="wiki-empty">
-          <p>Loading knowledge...</p>
-        </div>
-      ) : filteredEntries.length === 0 ? (
-        <EmptyState
-          className="wiki-empty-state"
-          icon={
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              width="40"
-              height="40"
-            >
-              <path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-            </svg>
-          }
-          title="No knowledge entries found"
-          description={
-            searchQuery || filterType !== 'all'
-              ? 'Try adjusting your filters or search query'
-              : 'Add your first knowledge entry to build your knowledge base'
-          }
-          action={
-            !searchQuery && filterType === 'all' ? (
-              <Button onClick={() => setShowCreateWizard(true)}>Add Entry</Button>
-            ) : undefined
-          }
-        />
-      ) : (
-        <div className="wiki-workspace">
+        {loading ? (
+          <div className="loading-state">
+            <span className="loading-spinner" aria-hidden="true" />
+            <span className="loading-text">Loading knowledge...</span>
+          </div>
+        ) : filteredEntries.length === 0 ? (
+          <EmptyState
+            className="wiki-empty-state"
+            icon={
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+              </svg>
+            }
+            title="No knowledge entries found"
+            description={
+              searchQuery || filterType !== 'all'
+                ? 'Try adjusting your filters or search query'
+                : 'Add your first knowledge entry to build your knowledge base'
+            }
+            action={
+              !searchQuery && filterType === 'all' ? (
+                <Button onClick={() => setShowCreateWizard(true)}>Add Entry</Button>
+              ) : undefined
+            }
+          />
+        ) : (
           <div className="knowledge-grid">
-            {filteredEntries.map((entry) => (
-              <div
-                key={entry.id}
-                className="knowledge-card"
-                onClick={() => openEntry(entry)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    openEntry(entry);
-                  }
-                }}
-                role="button"
-                tabIndex={0}
-              >
-                <div className="knowledge-card-header">
-                  <h3 className="knowledge-card-title">{entry.title}</h3>
-                  <Badge variant={entry.type === 'url' ? 'info' : 'secondary'}>{entry.type}</Badge>
-                  {entry.indexed === false && (
-                    <Badge variant="warning" title="Semantic search cannot find this entry yet">
-                      Not indexed
-                    </Badge>
-                  )}
-                </div>
-
-                {entry.type === 'url' && (
-                  <a
-                    href={entry.content}
-                    className="knowledge-card-url"
-                    onClick={(e) => e.stopPropagation()}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    {entry.content}
-                  </a>
-                )}
-
-                <div className="knowledge-card-content">
-                  {entry.type === 'url' && entry.fetched_content
-                    ? entry.fetched_content
-                    : entry.content}
-                </div>
-
-                {entry.tags.length > 0 && (
-                  <div className="knowledge-card-tags">
-                    {entry.tags.map((tag) => (
-                      <span key={tag} className="knowledge-tag">
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-                <div className="knowledge-card-footer">
-                  <div className="knowledge-card-date">
-                    {entry.updated_at ? <span>Updated {formatDate(entry.updated_at)}</span> : null}
-                    {entry.type === 'url' && entry.last_refreshed_at && (
-                      <span> • Refreshed {formatDate(entry.last_refreshed_at)}</span>
+            {filteredEntries.map((entry) => {
+              const excerpt =
+                entry.type === 'url' && entry.fetched_content
+                  ? entry.fetched_content
+                  : entry.content;
+              const updated = entry.updated_at || entry.created_at;
+              return (
+                <div
+                  key={entry.id}
+                  className="knowledge-card"
+                  onClick={() => openEntry(entry)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openEntry(entry);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div className="knowledge-card-header">
+                    <h3 className="knowledge-card-title">{entry.title}</h3>
+                    {entry.indexed === false && (
+                      <Badge variant="warning" title="Semantic search cannot find this entry yet">
+                        Not indexed
+                      </Badge>
                     )}
+                    <Badge variant={entry.type === 'url' ? 'info' : 'neutral'}>{entry.type}</Badge>
                   </div>
+
+                  {excerpt ? (
+                    <div className="knowledge-card-content">{excerpt}</div>
+                  ) : (
+                    <div className="knowledge-card-tags">
+                      {entry.tags.map((tag) => (
+                        <span key={tag} className="knowledge-tag">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="knowledge-card-footer">
+                    <span className="knowledge-card-date">
+                      {updated ? `Updated ${formatDate(updated)}` : ''}
+                      {entry.type === 'url' && entry.last_refreshed_at
+                        ? ` · Refreshed ${formatDate(entry.last_refreshed_at)}`
+                        : ''}
+                    </span>
+                    {entry.type === 'url' && (
+                      <a
+                        href={entry.content}
+                        className="knowledge-card-url"
+                        onClick={(e) => e.stopPropagation()}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {entry.content}
+                      </a>
+                    )}
+                    {excerpt && entry.tags.length > 0 ? (
+                      <span className="knowledge-card-tagline">
+                        {entry.tags.map((tag) => (
+                          <span key={tag} className="knowledge-card-tagline-item">
+                            {tag}
+                          </span>
+                        ))}
+                      </span>
+                    ) : null}
+                  </div>
+
                   <div className="knowledge-card-actions">
                     {entry.type === 'url' && (
                       <button
@@ -317,11 +321,11 @@ export default function WikiPage() {
                     </button>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Create Knowledge Wizard */}
       <CreateKnowledgeWizard
@@ -353,12 +357,10 @@ export default function WikiPage() {
             aria-labelledby="knowledge-entry-title"
           >
             <div className="wiki-dialog-header">
-              <div className="flex items-center gap-3">
-                <h2 id="knowledge-entry-title">{selectedEntry.title}</h2>
-                <Badge variant={selectedEntry.type === 'url' ? 'info' : 'secondary'}>
-                  {selectedEntry.type}
-                </Badge>
-              </div>
+              <h2 id="knowledge-entry-title">{selectedEntry.title}</h2>
+              <Badge variant={selectedEntry.type === 'url' ? 'info' : 'neutral'}>
+                {selectedEntry.type}
+              </Badge>
               <button
                 type="button"
                 className="wiki-dialog-close"
@@ -377,53 +379,56 @@ export default function WikiPage() {
             </div>
             <div className="wiki-dialog-body">
               {selectedEntry.type === 'url' && (
-                <div className="form-group">
-                  <span className="form-label">URL</span>
-                  <a
-                    href={selectedEntry.content}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{ color: 'var(--primary)' }}
-                  >
-                    {selectedEntry.content}
-                  </a>
-                </div>
+                <a
+                  href={selectedEntry.content}
+                  className="wiki-dialog-url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {selectedEntry.content}
+                </a>
               )}
 
-              <div className="form-group">
-                <span className="form-label">Content</span>
-                <div className="wiki-dialog-content">
-                  {selectedEntry.type === 'url' && selectedEntry.fetched_content
-                    ? selectedEntry.fetched_content
-                    : selectedEntry.content}
-                </div>
+              <div className="wiki-dialog-content">
+                {selectedEntry.type === 'url' && selectedEntry.fetched_content
+                  ? selectedEntry.fetched_content
+                  : selectedEntry.content}
               </div>
 
               {selectedEntry.tags.length > 0 && (
-                <div className="form-group">
-                  <span className="form-label">Tags</span>
-                  <div className="knowledge-card-tags">
-                    {selectedEntry.tags.map((tag) => (
-                      <span key={tag} className="knowledge-tag">
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
+                <div className="knowledge-card-tags">
+                  {selectedEntry.tags.map((tag) => (
+                    <span key={tag} className="knowledge-tag">
+                      {tag}
+                    </span>
+                  ))}
                 </div>
               )}
 
-              <div className="form-group">
-                <span className="form-label">Details</span>
-                <div className="wiki-dialog-details">
-                  <p>Created: {formatDate(selectedEntry.created_at)}</p>
-                  <p>Updated: {formatDate(selectedEntry.updated_at)}</p>
-                  {selectedEntry.type === 'url' && selectedEntry.last_refreshed_at && (
-                    <p>Last Refreshed: {formatDate(selectedEntry.last_refreshed_at)}</p>
-                  )}
-                </div>
-              </div>
+              <dl className="wiki-dialog-details">
+                <dt>Created</dt>
+                <dd>{formatDate(selectedEntry.created_at)}</dd>
+                <dt>Updated</dt>
+                <dd>{formatDate(selectedEntry.updated_at)}</dd>
+                {selectedEntry.type === 'url' && selectedEntry.last_refreshed_at && (
+                  <>
+                    <dt>Last refreshed</dt>
+                    <dd>{formatDate(selectedEntry.last_refreshed_at)}</dd>
+                  </>
+                )}
+              </dl>
             </div>
             <div className="wiki-dialog-footer">
+              <Button
+                variant="destructive"
+                onClick={() => {
+                  handleDeleteKnowledge(selectedEntry.id);
+                  closeSelectedEntry();
+                }}
+              >
+                Delete
+              </Button>
+              <span className="wiki-dialog-footer-spacer" />
               {selectedEntry.type === 'url' && (
                 <Button
                   variant="secondary"
@@ -434,14 +439,8 @@ export default function WikiPage() {
                   {refreshing === selectedEntry.id ? 'Refreshing...' : 'Refresh Content'}
                 </Button>
               )}
-              <Button
-                variant="destructive"
-                onClick={() => {
-                  handleDeleteKnowledge(selectedEntry.id);
-                  closeSelectedEntry();
-                }}
-              >
-                Delete
+              <Button variant="secondary" onClick={closeSelectedEntry}>
+                Close
               </Button>
             </div>
           </div>

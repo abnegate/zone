@@ -36,7 +36,7 @@ test.describe('wiki and search', () => {
       title: string,
       tags: string[],
     ): Promise<void> {
-      await page.getByRole('button', { name: '+ Add Knowledge' }).click();
+      await page.getByRole('button', { name: /add knowledge/i }).click();
       const wizard = page.getByRole('dialog');
       await expect(wizard).toContainText('Add Knowledge Entry');
       await wizard.getByRole('button', { name: kind }).click();
