@@ -765,4 +765,25 @@ describe('OrgMembersSection table anatomy', () => {
     expect(memberRow.querySelector('.member-remove')).not.toBeNull();
     expect(memberRow.querySelector('.role-select')).not.toBeNull();
   });
+
+  it('labels a seat whose account is unresolved by its user id instead of a shared word', async () => {
+    mockClient.getOrgMembers.mockResolvedValue({
+      members: [
+        {
+          ...mockAdmin,
+          email: '',
+          display_name: null,
+          user_id: 'a27bd650-3602-430a-884a-3cb91f97e084',
+        },
+        { ...mockMember, email: '', user_id: '3c92e73e-c4bd-4a66-91c9-15cb6b30fbd7' },
+      ],
+    });
+    render(<OrgMembersSection orgId="org-123" />);
+    await waitFor(() => {
+      expect(screen.getByText('a27bd650')).toBeInTheDocument();
+    });
+    const names = [...document.querySelectorAll('.member-name')].map((name) => name.textContent);
+    expect(names).toEqual(['a27bd650', '3c92e73e']);
+    expect(screen.queryByText('Member', { selector: '.member-name' })).toBeNull();
+  });
 });

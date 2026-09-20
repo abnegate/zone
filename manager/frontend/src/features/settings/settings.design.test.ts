@@ -79,9 +79,10 @@ describe('settings surfaces', () => {
     expect(actions).toContain('min-height: var(--ui-toolbar-height)');
   });
 
-  it('draws the theme radius picker as a 32px segmented control', () => {
+  it('draws the theme radius picker as a 32px segmented control with the pills centred', () => {
     expect(rule(shell, '.radio-group')).toContain('height: var(--ui-control-height)');
     expect(rule(shell, '.radio-option')).toContain('height: var(--ui-control-height-sm)');
+    expect(rule(shell, '.radio-option')).toContain('margin: 0;');
   });
 
   it('tints role, status and action badges from the semantic palette at 20px', () => {

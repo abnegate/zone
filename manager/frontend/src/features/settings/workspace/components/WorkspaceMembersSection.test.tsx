@@ -233,6 +233,34 @@ describe('WorkspaceMembersSection', () => {
       });
     });
 
+    it('shows the email under the name and never labels two unresolved seats alike', async () => {
+      mockClient.getWorkspaceMembers.mockResolvedValue({
+        members: [
+          mockOwner,
+          { ...mockMember, email: '', user_id: 'a27bd650-3602-430a-884a-3cb91f97e084' },
+          {
+            ...mockViewer,
+            email: '',
+            display_name: null,
+            user_id: '3c92e73e-c4bd-4a66-91c9-15cb6b30fbd7',
+          },
+        ],
+      });
+      render(<WorkspaceMembersSection workspaceId="ws-123" orgId="org-123" />);
+      await waitFor(() => {
+        expect(screen.getByText('Test Owner')).toBeInTheDocument();
+      });
+      const identity = screen.getByText('Test Owner').closest('.member-identity');
+      expect(within(identity as HTMLElement).getByText('owner@test.com')).toHaveClass(
+        'member-email'
+      );
+      const names = [...document.querySelectorAll('.member-name')].map((name) => name.textContent);
+      expect(names).toEqual(['Test Owner', 'a27bd650', '3c92e73e']);
+      expect(
+        screen.getByRole('combobox', { name: 'Change role for a27bd650' })
+      ).toBeInTheDocument();
+    });
+
     it('shows one role control per row: a badge where it is fixed, a select where it can change', async () => {
       render(<WorkspaceMembersSection workspaceId="ws-123" orgId="org-123" />);
       await waitFor(() => {
