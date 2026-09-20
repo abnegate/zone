@@ -101,6 +101,12 @@ export default function TasksPage() {
 
   const loading = tasksLoading || projectsLoading;
   const displayError = tasksError || error;
+  const filtered = filterProject !== '' || filterStatus !== '';
+
+  const clearFilters = () => {
+    setFilterProject('');
+    setFilterStatus('');
+  };
 
   const getProjectNames = (projectIds: string[]) => {
     if (!projectIds || projectIds.length === 0) return 'No projects';
@@ -187,9 +193,21 @@ export default function TasksPage() {
                 <path d="M9 12l2 2 4-4" />
               </svg>
             }
-            title="No tasks yet"
-            description="Create your first task to automate your workflow"
-            action={<Button onClick={() => setShowCreateModal(true)}>Create Task</Button>}
+            title={filtered ? 'No tasks match' : 'No tasks yet'}
+            description={
+              filtered
+                ? 'Try adjusting your filters'
+                : 'Create your first task to automate your workflow'
+            }
+            action={
+              filtered ? (
+                <Button variant="secondary" onClick={clearFilters}>
+                  Show all tasks
+                </Button>
+              ) : (
+                <Button onClick={() => setShowCreateModal(true)}>Create Task</Button>
+              )
+            }
           />
         ) : (
           <div className="tasks-list">

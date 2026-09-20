@@ -234,6 +234,33 @@ describe('TasksPage', () => {
     });
   });
 
+  it('offers a way back when the active filters match nothing', async () => {
+    mockGetTasks.mockImplementation((_workspace: string, _project?: string, status?: string) =>
+      Promise.resolve(status ? [] : mockTasks)
+    );
+    renderTasksPage();
+    await waitFor(() => {
+      expect(screen.getByText('Implement login')).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by status' }), {
+      target: { value: 'blocked' },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('No tasks match')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Try adjusting your filters')).toBeInTheDocument();
+    expect(screen.queryByText('No tasks yet')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show all tasks' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Implement login')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('combobox', { name: 'Filter by status' })).toHaveValue('');
+  });
+
   it('renders tasks list', async () => {
     renderTasksPage();
     await waitFor(() => {
