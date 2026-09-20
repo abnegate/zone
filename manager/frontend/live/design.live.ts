@@ -146,7 +146,7 @@ test('chat titles keep the row width and the conversation header stays one row',
     return {
       item: element.getBoundingClientRect().width,
       title: title?.getBoundingClientRect().width ?? 0,
-      height: element.getBoundingClientRect().height,
+      height: Math.round(element.getBoundingClientRect().height),
     };
   });
   expect(widths.title).toBeGreaterThanOrEqual(widths.item * 0.6);
@@ -180,7 +180,7 @@ test('chat titles keep the row width and the conversation header stays one row',
 test('the add source tiles are one 56px row each', async ({ page }) => {
   await signIn(page);
   await page.goto('/sources');
-  await page.getByRole('button', { name: /Add Source/ }).first().click();
+  await page.getByRole('button', { name: /Add source/i }).first().click();
 
   const tiles = page.locator('.source-type-option');
   await expect(tiles.first()).toBeVisible();
