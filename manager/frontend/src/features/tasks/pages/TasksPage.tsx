@@ -215,27 +215,27 @@ export default function TasksPage() {
                       {sources.find((s) => s.id === task.source_id)?.name || 'Source'}
                     </span>
                   )}
+                  {(task.pr_status || task.pr_url) && (
+                    <span className="task-pr">
+                      {task.pr_status && <PrStatusBadge status={task.pr_status} />}
+                      {task.pr_url && (
+                        <a
+                          href={task.pr_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="task-pr-link"
+                        >
+                          View PR
+                        </a>
+                      )}
+                      {task.branch_name && (
+                        <code className="task-branch" title={task.branch_name}>
+                          {task.branch_name}
+                        </code>
+                      )}
+                    </span>
+                  )}
                 </div>
-                {(task.pr_status || task.pr_url) && (
-                  <div className="task-pr">
-                    {task.pr_status && <PrStatusBadge status={task.pr_status} />}
-                    {task.pr_url && (
-                      <a
-                        href={task.pr_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="task-pr-link"
-                      >
-                        View PR
-                      </a>
-                    )}
-                    {task.branch_name && (
-                      <code className="task-branch" title={task.branch_name}>
-                        {task.branch_name}
-                      </code>
-                    )}
-                  </div>
-                )}
                 <div className="task-actions">
                   <Button size="sm" variant="secondary" onClick={() => setSelectedTask(task)}>
                     Execute

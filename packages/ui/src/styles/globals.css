@@ -920,6 +920,13 @@
     letter-spacing: -0.025em;
   }
 
+  .ui-dialog-title--mono {
+    font-family: var(--ui-font-mono);
+    font-size: var(--ui-heading-size);
+    letter-spacing: 0;
+    overflow-wrap: anywhere;
+  }
+
   .ui-dialog-description {
     font-size: var(--ui-text-xs);
     line-height: var(--ui-leading-normal);

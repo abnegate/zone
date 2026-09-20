@@ -224,8 +224,9 @@ describe('tasks page layout', () => {
   const css = read(join(features, 'tasks', 'pages', 'TasksPage.css'));
 
   it('gives every card the same slots so a grid row shares one height', () => {
-    expect(rule(css, '.tasks-list')).toContain('grid-auto-rows: 1fr');
+    expect(rule(css, '.tasks-list')).not.toContain('grid-auto-rows');
     expect(rule(css, '.task-card-title')).toContain('height: var(--ui-space-5)');
+    expect(rule(css, '.task-project')).toContain('height: var(--ui-space-4)');
     expect(rule(css, '.task-card .task-description')).toContain('height: var(--ui-space-10)');
     expect(rule(css, '.task-card .task-meta')).toContain('height: var(--ui-badge-height)');
     expect(rule(css, '.task-actions')).toContain('margin-top: auto');
@@ -244,17 +245,15 @@ describe('tasks page layout', () => {
     expect(rule(css, '.task-branch')).toContain('height: var(--ui-badge-height)');
   });
 
-  it('gives the pull request a 20px row of its own so the branch is not squeezed by the meta', () => {
-    const pr = rule(css, '.task-pr');
-    expect(pr).toContain('display: flex');
-    expect(pr).toContain('height: var(--ui-badge-height)');
-    expect(pr).toContain('margin: var(--ui-space-2) 0 0');
-    expect(pr).not.toContain('margin-left: auto');
+  it('folds the pull request into the meta row and lets only the branch tag give way', () => {
+    expect(rule(css, '.task-pr')).toContain('display: contents');
+    expect(rule(css, '.task-pr::before')).toContain('margin-right: 0');
     expect(css).toContain('.task-meta > * + *::before');
     const branch = rule(css, '.task-branch');
+    expect(branch).toContain('flex: 0 1 auto');
     expect(branch).toContain('min-width: 0');
+    expect(branch).toContain('max-width: 50%');
     expect(branch).toContain('text-overflow: ellipsis');
-    expect(branch).not.toContain('max-width');
   });
 
   it('lets a wizard toggle keep its description on the line under the title', () => {
@@ -286,6 +285,14 @@ describe('projects page layout', () => {
     expect(rule(css, '.project-card-header')).toContain('height: var(--ui-space-5)');
     expect(rule(css, '.project-description')).toContain('line-height: 1.125rem');
     expect(rule(css, '.project-card-footer')).toContain('height: var(--ui-space-4)');
+  });
+
+  it('stacks a wizard source tile as a 56px name-over-description row so nothing truncates', () => {
+    expect(rule(css, '.source-selection-option')).toContain('min-height: var(--ui-list-row-2)');
+    expect(rule(css, '.source-selection-info')).toContain('flex-direction: column');
+    expect(rule(css, '.source-selection-name')).toContain('line-height: var(--ui-space-5)');
+    expect(rule(css, '.source-selection-desc')).toContain('line-height: var(--ui-space-4)');
+    expect(css).toContain('.status-selection-option {\n  min-height: var(--ui-space-12);');
   });
 
   it('sets the detail title in the body face', () => {

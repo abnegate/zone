@@ -778,6 +778,43 @@ describe('ModelsPage', () => {
       expect(source).toHaveAttribute('href', 'https://ollama.com/library/llama2');
     });
 
+    it('sets an installed model id in the mono face in the details title', async () => {
+      mockUseModels.mockReturnValue({
+        ...defaultModelsHook,
+        models: [
+          {
+            name: 'hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M',
+            size: 1,
+            modified_at: '',
+            digest: '',
+          },
+        ],
+      });
+
+      renderModelsPage();
+
+      fireEvent.click(screen.getByText('hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M'));
+
+      const dialog = await screen.findByRole('dialog', {
+        name: 'hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M',
+      });
+      expect(dialog.querySelector('.ui-dialog-title')).toHaveClass('ui-dialog-title--mono');
+    });
+
+    it('keeps a browse display name in the display face in the details title', async () => {
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        models: [{ id: 'llama', name: 'llama3.2', display_name: 'Llama 3.2', source: 'ollama' }],
+      });
+
+      renderModelsPage();
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Browse' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+
+      const dialog = await screen.findByRole('dialog', { name: 'Llama 3.2' });
+      expect(dialog.querySelector('.ui-dialog-title')).not.toHaveClass('ui-dialog-title--mono');
+    });
+
     it('closes modal on close button click', async () => {
       mockUseModels.mockReturnValue({
         ...defaultModelsHook,

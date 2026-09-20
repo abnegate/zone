@@ -19,7 +19,6 @@
 .tasks-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
-  grid-auto-rows: 1fr;
   gap: var(--ui-space-3);
 }
 
@@ -112,13 +111,11 @@
 }
 
 .task-pr {
-  display: flex;
-  align-items: center;
-  gap: var(--ui-space-1-5);
-  height: var(--ui-badge-height);
-  margin: var(--ui-space-2) 0 0;
-  font-size: var(--ui-text-xs);
-  line-height: var(--ui-space-4);
+  display: contents;
+}
+
+.task-pr::before {
+  margin-right: 0;
 }
 
 .task-pr-link {
@@ -137,7 +134,9 @@
 }
 
 .task-branch {
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 50%;
   height: var(--ui-badge-height);
   padding: 0 var(--ui-space-1-5);
   overflow: hidden;
