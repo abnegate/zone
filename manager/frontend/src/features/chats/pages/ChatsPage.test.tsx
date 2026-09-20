@@ -2405,6 +2405,40 @@ describe('ChatsPage', () => {
       expect(screen.queryByText('95%')).not.toBeInTheDocument();
     });
 
+    it('shows a snippet as prose, without the markdown marks or collapsed line breaks', async () => {
+      mockClient.searchChatMessages.mockResolvedValueOnce({
+        results: [
+          {
+            ...mockSearchResults[0],
+            snippet:
+              'Here are the documents in the wiki: ⏎ - **Deployment checklist mua9iw0u1qg** — knowledge base note',
+          },
+        ],
+        total: 1,
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-search-input')).toBeInTheDocument();
+      });
+
+      const searchInput = screen.getByTestId('chat-search-input');
+      fireEvent.change(searchInput, { target: { value: 'deployment' } });
+      fireEvent.submit(searchInput.closest('form')!);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('search-results-list')).toBeInTheDocument();
+      });
+
+      expect(
+        screen.getByText(
+          'Here are the documents in the wiki: Deployment checklist mua9iw0u1qg — knowledge base note'
+        )
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/\*\*|⏎/)).not.toBeInTheDocument();
+    });
+
     it('names a result after the loaded chat when the server sent no title', async () => {
       mockClient.searchChatMessages.mockResolvedValueOnce({
         results: [

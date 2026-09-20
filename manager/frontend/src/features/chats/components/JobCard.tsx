@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import type {
   JobExited,
   JobStarted,
@@ -143,6 +143,43 @@ function Deadline({ deadline }: { deadline: string }) {
   );
 }
 
+function Fact({
+  label,
+  children,
+  mono = false,
+  wide = false,
+}: {
+  label: string;
+  children: ReactNode;
+  mono?: boolean;
+  wide?: boolean;
+}) {
+  return (
+    <div className={`job-card-fact${wide ? ' job-card-fact--wide' : ''}`}>
+      <dt>{label}</dt>
+      <dd className={mono ? 'job-card-mono' : undefined}>{children}</dd>
+    </div>
+  );
+}
+
+/// A path is told apart by its end, so the row keeps the file name and lets
+/// the ellipsis eat the directories; a click shows the whole thing.
+function Path({ value }: { value: string }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <button
+      type="button"
+      className={`job-card-path${expanded ? ' job-card-path--expanded' : ''}`}
+      title={value}
+      aria-expanded={expanded}
+      onClick={() => setExpanded((open) => !open)}
+    >
+      <bdi>{value}</bdi>
+    </button>
+  );
+}
+
 function Job({ job, exited, live }: { job?: JobStarted; exited?: JobExited; live: boolean }) {
   const state = jobState(exited, live);
 
@@ -153,21 +190,18 @@ function Job({ job, exited, live }: { job?: JobStarted; exited?: JobExited; live
         <span className="job-card-title">{jobTitle(exited, live)}</span>
       </p>
       <dl className="job-card-meta">
-        <div>
-          <dt>Job</dt>
-          <dd className="job-card-mono">{job?.id ?? exited?.id}</dd>
-        </div>
+        <Fact label="Job" mono>
+          {job?.id ?? exited?.id}
+        </Fact>
         {job ? (
-          <div>
-            <dt>Process</dt>
-            <dd className="job-card-mono">{job.pid}</dd>
-          </div>
+          <Fact label="Process" mono>
+            {job.pid}
+          </Fact>
         ) : null}
         {job ? (
-          <div className="job-card-wide">
-            <dt>Log</dt>
-            <dd className="job-card-mono">{job.log_path}</dd>
-          </div>
+          <Fact label="Log" mono wide>
+            <Path value={job.log_path} />
+          </Fact>
         ) : null}
       </dl>
     </div>
@@ -185,23 +219,18 @@ function Wait({ waiting, settled }: { waiting?: Waiting; settled?: WaitSettled }
       </p>
       {waiting ? (
         <dl className="job-card-meta">
-          <div>
-            <dt>Id</dt>
-            <dd className="job-card-mono">{waiting.id}</dd>
-          </div>
+          <Fact label="Id" mono>
+            {waiting.id}
+          </Fact>
           {waiting.reference ? (
-            <div>
-              <dt>Reference</dt>
-              <dd className="job-card-mono">{waiting.reference}</dd>
-            </div>
+            <Fact label="Reference" mono>
+              {waiting.reference}
+            </Fact>
           ) : null}
           {settled ? null : (
-            <div className="job-card-wide">
-              <dt>Until</dt>
-              <dd>
-                <Deadline deadline={waiting.deadline} />
-              </dd>
-            </div>
+            <Fact label="Until" wide>
+              <Deadline deadline={waiting.deadline} />
+            </Fact>
           )}
         </dl>
       ) : null}

@@ -121,11 +121,6 @@
   flex: 1;
 }
 
-.chat-item:hover .chat-item-content,
-.chat-item:focus-within .chat-item-content {
-  padding-right: calc(var(--chat-item-actions) + var(--ui-space-2));
-}
-
 .chat-title {
   display: block;
   overflow: hidden;
@@ -810,6 +805,10 @@
 
 .citation-revision {
   font-family: var(--ui-font-mono);
+}
+
+.citation-revision--time {
+  font-family: inherit;
 }
 
 .citation-evidence {

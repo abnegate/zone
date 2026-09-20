@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { JobExited, JobStarted, Waiting, WaitSettled } from '../types';
 import { JobCard } from './JobCard';
 
@@ -54,6 +54,22 @@ describe('JobCard', () => {
     expect(screen.getByText('48213')).toBeInTheDocument();
     expect(screen.getByText('/srv/zone/.zone/jobs/job_9f3c1a7b2e04.log')).toBeInTheDocument();
     expect(screen.queryByTestId('wait-card')).not.toBeInTheDocument();
+  });
+
+  it('keeps the log path to one row and opens the whole path on a click', () => {
+    render(<JobCard call={{ job: started }} live />);
+
+    const path = screen.getByRole('button', { name: started.log_path });
+    expect(path).toHaveAttribute('title', started.log_path);
+    expect(path).toHaveAttribute('aria-expanded', 'false');
+    expect(path).not.toHaveClass('job-card-path--expanded');
+
+    fireEvent.click(path);
+    expect(path).toHaveAttribute('aria-expanded', 'true');
+    expect(path).toHaveClass('job-card-path--expanded');
+
+    fireEvent.click(path);
+    expect(path).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('shows a clean exit as the one state that is a pass', () => {

@@ -17,6 +17,9 @@ import { Reasoning } from './Reasoning';
 /// rather than hidden, so a newly added tool still shows up as words.
 const TOOL_LABELS: Record<string, string> = {
   load_tools: 'Loaded tools',
+  search_tools: 'Searched for tools',
+  fetch_url: 'Fetched a web page',
+  web_search: 'Searched the web',
   search_knowledge: 'Searched the knowledge base',
   search_chat_history: 'Searched earlier messages',
   list_sources: 'Listed connected sources',
@@ -65,13 +68,56 @@ const TOOL_LABELS: Record<string, string> = {
   wait_for: 'Waited for something to finish',
 };
 
+const ACRONYMS = new Set(['url', 'id', 'api', 'pr', 'ci', 'sha', 'http', 'json', 'html']);
+
 function humanise(name: string): string {
-  const words = name.replace(/_+/g, ' ').trim();
+  const words = name
+    .split(/_+/)
+    .filter(Boolean)
+    .map((word) => (ACRONYMS.has(word) ? word.toUpperCase() : word))
+    .join(' ');
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 function toolLabel(name: string): string {
   return TOOL_LABELS[name] ?? humanise(name);
+}
+
+type Arguments = Record<string, unknown>;
+
+function parseArguments(raw: string): Arguments | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Arguments)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+/// The detail column carries the first line of what the tool returned, and for
+/// these tools that line is a preamble written for the model: it tells it where
+/// the schemas will be, or that a page is data and not instructions. The
+/// arguments say what the call was actually about, so the reader gets those.
+const DETAIL_FROM_ARGUMENTS: Record<string, (args: Arguments) => string | null> = {
+  load_tools: (args) =>
+    Array.isArray(args.names) ? args.names.filter(isString).map(humanise).join(', ') || null : null,
+  fetch_url: (args) => (isString(args.url) ? args.url : null),
+  web_search: (args) => (isString(args.query) ? `“${args.query}”` : null),
+};
+
+/// A failed call's detail is its error and a waiting call's is its state, and
+/// both are the server's words about this call rather than a preamble.
+function toolDetail(call: ToolCallRecord): string {
+  const derive = DETAIL_FROM_ARGUMENTS[call.name];
+  if (!derive || !call.success || call.pending || call.approval === 'pending') return call.detail;
+  const args = parseArguments(call.arguments);
+  return (args && derive(args)) ?? call.detail;
 }
 
 function formatDuration(ms: number): string {
@@ -161,7 +207,7 @@ function ToolTraceRow({
       >
         <span className="tool-call-status" aria-hidden="true" />
         <span className="tool-call-name">{toolLabel(call.name)}</span>
-        <span className="tool-call-detail">{call.detail}</span>
+        <span className="tool-call-detail">{toolDetail(call)}</span>
         {!call.pending && call.duration_ms > 0 && (
           <span className="tool-call-duration">{formatDuration(call.duration_ms)}</span>
         )}

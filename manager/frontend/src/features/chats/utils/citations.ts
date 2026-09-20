@@ -99,16 +99,43 @@ export function citationHref(citation: Pick<Citation, 'url' | 'kind'>): string |
   return null;
 }
 
-export function formatRevision(revision?: string | null): string | null {
+const COMMIT_SHA = /^[0-9a-f]{40}$/i;
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+const ZONED = /(?:Z|[+-]\d{2}:?\d{2})$/;
+const REVISED_LABEL = 'Revised';
+
+export function isRevisionTimestamp(revision?: string | null): boolean {
+  return Boolean(revision && ISO_TIMESTAMP.test(revision));
+}
+
+/// A zoneless stamp is the server's own clock, which keeps UTC.
+function parseTimestamp(value: string): Date {
+  return new Date(ZONED.test(value) ? value : `${value}Z`);
+}
+
+function formatDate(date: Date): string {
+  return date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/// A git source is named by its commit, shortened the way git shows it. A
+/// document's revision is the time it was last edited, which reads as a date
+/// beside the observation time — or not at all when the two would print the
+/// same minute, since a reader gains nothing from seeing it twice.
+export function formatRevision(revision?: string | null, observedAt?: string): string | null {
   if (!revision) return null;
-  if (/^[0-9a-f]{40}$/i.test(revision)) return revision.slice(0, 7);
-  return revision;
+  if (COMMIT_SHA.test(revision)) return revision.slice(0, 7);
+  if (!ISO_TIMESTAMP.test(revision)) return revision;
+  const revised = parseTimestamp(revision);
+  if (Number.isNaN(revised.getTime())) return revision;
+  const label = formatDate(revised);
+  if (observedAt && label === formatObservedAt(observedAt)) return null;
+  return `${REVISED_LABEL} ${label}`;
 }
 
 export function formatObservedAt(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  return formatDate(date);
 }
 
 /// An identifier names a source; an address only says where to read one. One
