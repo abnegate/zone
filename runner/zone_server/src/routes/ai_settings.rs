@@ -13,7 +13,10 @@ use zone_core::{OptionalSecretExt, SecretValue};
 
 use crate::auth::AuthUser;
 use crate::db::ai_settings;
+use crate::db::audit::{actions, resources};
 use crate::state::AppState;
+
+use super::common::{AuditEvent, audit};
 
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
@@ -242,7 +245,25 @@ pub async fn upsert_org(
         Err(response) => return *response,
     };
     match ai_settings::upsert_org_authorized(state.db(), org_id, user_id, req.update()).await {
-        Ok(settings) => Json(AiSettingsResponse::from(settings)).into_response(),
+        Ok(settings) => {
+            let response = AiSettingsResponse::from(settings);
+            audit(
+                state.db(),
+                AuditEvent {
+                    organization_id: Some(org_id),
+                    workspace_id: None,
+                    actor_id: user_id,
+                    actor_email: &auth.0.email,
+                    action: actions::SETTINGS_UPDATED,
+                    resource_type: resources::AI_SETTINGS,
+                    resource_id: Some(org_id),
+                    old_values: None,
+                    new_values: serde_json::to_value(&response).ok(),
+                },
+            )
+            .await;
+            Json(response).into_response()
+        }
         Err(error) => *access_error(error),
     }
 }
@@ -258,7 +279,24 @@ pub async fn delete_org(
         Err(response) => return *response,
     };
     match ai_settings::delete_org_authorized(state.db(), org_id, user_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            audit(
+                state.db(),
+                AuditEvent {
+                    organization_id: Some(org_id),
+                    workspace_id: None,
+                    actor_id: user_id,
+                    actor_email: &auth.0.email,
+                    action: actions::SETTINGS_RESET,
+                    resource_type: resources::AI_SETTINGS,
+                    resource_id: Some(org_id),
+                    old_values: None,
+                    new_values: None,
+                },
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("AI settings not found")),
@@ -333,7 +371,25 @@ pub async fn upsert_workspace(
     )
     .await
     {
-        Ok(settings) => Json(AiSettingsResponse::from(settings)).into_response(),
+        Ok(settings) => {
+            let response = AiSettingsResponse::from(settings);
+            audit(
+                state.db(),
+                AuditEvent {
+                    organization_id: Some(path.org_id),
+                    workspace_id: Some(path.ws_id),
+                    actor_id: user_id,
+                    actor_email: &auth.0.email,
+                    action: actions::SETTINGS_UPDATED,
+                    resource_type: resources::AI_SETTINGS,
+                    resource_id: Some(path.ws_id),
+                    old_values: None,
+                    new_values: serde_json::to_value(&response).ok(),
+                },
+            )
+            .await;
+            Json(response).into_response()
+        }
         Err(error) => *access_error(error),
     }
 }
@@ -351,7 +407,24 @@ pub async fn delete_workspace(
     match ai_settings::delete_workspace_authorized(state.db(), path.org_id, path.ws_id, user_id)
         .await
     {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            audit(
+                state.db(),
+                AuditEvent {
+                    organization_id: Some(path.org_id),
+                    workspace_id: Some(path.ws_id),
+                    actor_id: user_id,
+                    actor_email: &auth.0.email,
+                    action: actions::SETTINGS_RESET,
+                    resource_type: resources::AI_SETTINGS,
+                    resource_id: Some(path.ws_id),
+                    old_values: None,
+                    new_values: None,
+                },
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("AI settings not found")),

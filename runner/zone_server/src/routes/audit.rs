@@ -9,7 +9,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -61,6 +61,26 @@ pub struct ListAuditLogsQuery {
 
 fn default_limit() -> i64 {
     50
+}
+
+/// A bound given either as an RFC 3339 instant or as a calendar date; a date
+/// on its own means the start of that day.
+fn parse_start(value: &str) -> Option<DateTime<Utc>> {
+    parse_bound(value, NaiveTime::MIN)
+}
+
+/// A bound given either as an RFC 3339 instant or as a calendar date; a date
+/// on its own means the end of that day.
+fn parse_end(value: &str) -> Option<DateTime<Utc>> {
+    parse_bound(value, NaiveTime::from_hms_opt(23, 59, 59)?)
+}
+
+fn parse_bound(value: &str, time: NaiveTime) -> Option<DateTime<Utc>> {
+    if let Ok(instant) = DateTime::parse_from_rfc3339(value) {
+        return Some(instant.with_timezone(&Utc));
+    }
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    Some(date.and_time(time).and_utc())
 }
 
 /// Query parameters for exporting audit logs
@@ -126,39 +146,30 @@ pub async fn list_audit_logs(
             .into_response();
     }
 
-    // Parse date filters if provided
-    let start_date = if let Some(ref date_str) = query.start_date {
-        match DateTime::parse_from_rfc3339(date_str) {
-            Ok(dt) => Some(dt.with_timezone(&Utc)),
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::new(
-                        "Invalid start_date format. Use ISO 8601 format.",
-                    )),
-                )
-                    .into_response();
-            }
+    let start_date = match query.start_date.as_deref().map(parse_start) {
+        Some(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "Invalid start_date format. Use ISO 8601 format.",
+                )),
+            )
+                .into_response();
         }
-    } else {
-        None
+        bound => bound.flatten(),
     };
 
-    let end_date = if let Some(ref date_str) = query.end_date {
-        match DateTime::parse_from_rfc3339(date_str) {
-            Ok(dt) => Some(dt.with_timezone(&Utc)),
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::new(
-                        "Invalid end_date format. Use ISO 8601 format.",
-                    )),
-                )
-                    .into_response();
-            }
+    let end_date = match query.end_date.as_deref().map(parse_end) {
+        Some(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "Invalid end_date format. Use ISO 8601 format.",
+                )),
+            )
+                .into_response();
         }
-    } else {
-        None
+        bound => bound.flatten(),
     };
 
     // Validate limit
@@ -334,31 +345,24 @@ pub async fn export_audit_logs_csv(
             .into_response();
     }
 
-    // Parse dates
-    let start_date = match DateTime::parse_from_rfc3339(&query.start_date) {
-        Ok(dt) => dt.with_timezone(&Utc),
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Invalid start_date format. Use ISO 8601 format.",
-                )),
-            )
-                .into_response();
-        }
+    let Some(start_date) = parse_start(&query.start_date) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "Invalid start_date format. Use ISO 8601 format.",
+            )),
+        )
+            .into_response();
     };
 
-    let end_date = match DateTime::parse_from_rfc3339(&query.end_date) {
-        Ok(dt) => dt.with_timezone(&Utc),
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "Invalid end_date format. Use ISO 8601 format.",
-                )),
-            )
-                .into_response();
-        }
+    let Some(end_date) = parse_end(&query.end_date) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "Invalid end_date format. Use ISO 8601 format.",
+            )),
+        )
+            .into_response();
     };
 
     // Export logs as CSV

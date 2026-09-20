@@ -2,6 +2,12 @@
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Serialize;
+use serde_json::Value;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::db::audit::{AuditContext, log_action};
+use crate::db::workspaces;
 
 /// Macro to define a response struct with automatic timestamps.
 ///
@@ -182,6 +188,59 @@ impl Timestamps {
 }
 
 /// Standard error response format
+/// One recorded change: who did what to which resource, and in which tenant.
+/// Either `organization_id` or `workspace_id` names the tenant; a workspace
+/// alone is resolved to its organization when the entry is written.
+#[derive(Debug)]
+pub struct AuditEvent<'a> {
+    pub organization_id: Option<Uuid>,
+    pub workspace_id: Option<Uuid>,
+    pub actor_id: Uuid,
+    pub actor_email: &'a str,
+    pub action: &'a str,
+    pub resource_type: &'a str,
+    pub resource_id: Option<Uuid>,
+    pub old_values: Option<Value>,
+    pub new_values: Option<Value>,
+}
+
+/// Write an audit entry. A failure to record one is logged and never fails the
+/// request that caused it.
+pub async fn audit(pool: &PgPool, event: AuditEvent<'_>) {
+    let organization_id = match (event.organization_id, event.workspace_id) {
+        (Some(organization_id), _) => Some(organization_id),
+        (None, Some(workspace_id)) => match workspaces::get_workspace(pool, workspace_id).await {
+            Ok(workspace) => workspace.map(|workspace| workspace.organization_id),
+            Err(error) => {
+                tracing::error!(%error, %workspace_id, "Failed to resolve the workspace's organization for an audit log");
+                None
+            }
+        },
+        (None, None) => None,
+    };
+    let context = AuditContext {
+        org_id: organization_id,
+        workspace_id: event.workspace_id,
+        actor_id: Some(event.actor_id),
+        actor_email: Some(event.actor_email.to_string()),
+        ip_address: None,
+        user_agent: None,
+    };
+    if let Err(error) = log_action(
+        pool,
+        &context,
+        event.action,
+        event.resource_type,
+        event.resource_id,
+        event.old_values,
+        event.new_values,
+    )
+    .await
+    {
+        tracing::error!(%error, action = event.action, "Failed to record audit log");
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
