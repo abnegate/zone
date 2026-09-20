@@ -145,6 +145,74 @@ describe('TrainPanel', () => {
     ).toBeDisabled();
   });
 
+  it('lays the form out as paired drop zones, an identity row and a right-aligned footer', async () => {
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit');
+    });
+    await selectBase('FLUX.1 Schnell');
+
+    const targets = screen.getByLabelText('Target images');
+    const clips = screen.getByLabelText('Video');
+    expect(targets.closest('.drop-zone')).toHaveTextContent('Drop images here, or browse');
+    expect(clips.closest('.drop-zone')).toHaveTextContent('Drop a clip here, or browse');
+    expect(targets.closest('.train-drops')).toBe(clips.closest('.train-drops'));
+    expect(targets.closest('.train-drops')).not.toHaveClass('train-drops--single');
+    expect(screen.getByText('Target images')).toHaveAttribute(
+      'id',
+      targets.getAttribute('aria-labelledby')
+    );
+    expect(screen.getByText('Video')).toHaveAttribute('id', clips.getAttribute('aria-labelledby'));
+    expect(screen.getByText('Choose the images this LoRA should learn from.')).toHaveAttribute(
+      'id',
+      targets.getAttribute('aria-describedby')
+    );
+    expect(document.querySelector('.ui-input[type="file"]')).toBeNull();
+
+    const identity = screen.getByLabelText('Name').closest('.train-identity');
+    expect(identity).not.toBeNull();
+    expect(screen.getByLabelText('Trigger word').closest('.train-identity')).toBe(identity);
+    expect(screen.getByLabelText('Base').closest('.train-identity')).toBeNull();
+
+    const train = screen.getByRole('button', { name: 'Train' });
+    expect(train.parentElement).toHaveClass('train-footer');
+
+    await addTargets(file('frame-0000.png', 'a'));
+    const caption = screen.getByRole('button', { name: 'Auto-caption images' });
+    expect(caption.parentElement).toHaveClass('train-caption');
+    expect(caption.nextElementSibling).toHaveClass('train-caption-hint');
+
+    await selectBase('Qwen Image Edit');
+    expect(screen.queryByLabelText('Video')).toBeNull();
+    expect(screen.getByLabelText('Target images').closest('.train-drops')).toHaveClass(
+      'train-drops--single'
+    );
+  });
+
+  it('adds dropped images as targets and ignores files the zone does not accept', async () => {
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit');
+    });
+    await selectBase('FLUX.1 Schnell');
+
+    const zone = screen.getByLabelText('Target images').closest('.drop-zone') as HTMLElement;
+    fireEvent.dragOver(zone);
+    expect(zone).toHaveClass('drop-zone--over');
+    fireEvent.drop(zone, {
+      dataTransfer: {
+        files: [file('frame-0000.png', 'a'), new File(['x'], 'notes.txt', { type: 'text/plain' })],
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getAllByRole('group', { name: /target pair/i })).toHaveLength(1);
+    });
+    expect(
+      screen.getByRole('group', { name: 'Target pair 1: frame-0000.png' })
+    ).toBeInTheDocument();
+    expect(zone).not.toHaveClass('drop-zone--over');
+  });
+
   it('gives every field its own labelled control', async () => {
     render(<TrainPanel onTrained={mock()} />);
 
