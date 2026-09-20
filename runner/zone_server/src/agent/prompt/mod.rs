@@ -44,6 +44,7 @@ const ORDER: &[Section] = &[
     ("web", section::web::render),
     ("citation", section::citation::render),
     ("task", section::task::render),
+    ("planner", section::planner::render),
     ("mcp", section::mcp::render),
     ("toolbox", section::toolbox::render),
     ("session", section::session::render),
@@ -67,6 +68,9 @@ const PLAIN: &[Section] = &[
 /// without automations, automations 21,162 without memory — which is what the
 /// rule is for.
 pub const CHAT_MAX_CHARS: usize = 22_700;
+/// A planner chat adds the interview section to the chat prompt; measured
+/// the same way and rounded up the same way.
+pub const PLANNER_MAX_CHARS: usize = 26_000;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 14_000;
 
@@ -392,6 +396,7 @@ mod tests {
                 "web",
                 "citation",
                 "task",
+                "planner",
                 "mcp",
                 "toolbox",
                 "session",
@@ -847,6 +852,21 @@ mod tests {
         let task_prompt = task(&task_tools, &environment);
 
         assert!(task_prompt.contains(&for_task), "{task_prompt}");
+    }
+
+    #[test]
+    fn a_planner_chat_prompt_stays_inside_its_own_budget() {
+        let mut names: Vec<&str> = CHAT_CATALOG.to_vec();
+        names.push(crate::agent::planner::FINALIZE_PROJECT);
+        names.push(crate::agent::planner::CREATE_REPOSITORY);
+        let tools = ChatTools::with_names(ToolProfile::Chat, &names, None);
+        let prompt = chat(&tools, false, &environment());
+        assert!(prompt.contains("Planning a project:"), "{prompt}");
+        assert!(
+            prompt.len() <= PLANNER_MAX_CHARS,
+            "planner prompt is {} chars",
+            prompt.len()
+        );
     }
 
     #[test]

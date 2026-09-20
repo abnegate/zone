@@ -1,6 +1,6 @@
 import { Button, Checkbox, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
@@ -786,6 +786,28 @@ export default function ChatsPage() {
               <div className="chat-header-info">
                 <h3>{displayedChat.title}</h3>
                 <span className="chat-model">{modelLabel(displayedChat.model_name)}</span>
+                {displayedChat.purpose === 'project_planner' && (
+                  <span className="chat-purpose" data-testid="chat-purpose">
+                    Project planner
+                    {displayedChat.project_id && (
+                      <>
+                        {' · '}
+                        <Link to={`/projects?id=${displayedChat.project_id}`}>Open project</Link>
+                      </>
+                    )}
+                  </span>
+                )}
+                {displayedChat.purpose === 'project_updates' && (
+                  <span className="chat-purpose" data-testid="chat-purpose">
+                    Project updates
+                    {displayedChat.project_id && (
+                      <>
+                        {' · '}
+                        <Link to={`/projects?id=${displayedChat.project_id}`}>Open project</Link>
+                      </>
+                    )}
+                  </span>
+                )}
               </div>
               <div className="chat-header-actions">
                 {showReasoning && (

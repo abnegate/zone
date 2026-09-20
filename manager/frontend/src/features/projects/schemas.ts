@@ -13,8 +13,71 @@ export const ProjectSchema = z.object({
   status: ProjectStatusSchema,
   github_repo_url: z.string().nullable(),
   source_id: z.string().nullable(),
+  // Servers predating auto projects omit these; such a project is not automated.
+  auto: z.boolean().default(false),
+  auto_paused_reason: z.string().nullish(),
+  auto_completed_at: z.string().nullish(),
   created_at: z.string(),
   updated_at: z.string(),
+});
+
+export const AutoProjectRequestSchema = z.object({
+  brief: z.string().trim().min(1, 'Describe the project first').max(8000, 'The brief is too long'),
+  model_name: z.string().optional(),
+});
+
+export const AutoProjectResponseSchema = z.object({
+  chat_id: z.string(),
+});
+
+export const AutomationStageSchema = z.enum([
+  'idle',
+  'running',
+  'no_changes',
+  'awaiting_checks',
+  'awaiting_reviews',
+  'fixing',
+  'merging',
+  'post_merge',
+  'merged',
+  'paused',
+]);
+
+export const AutomationTaskSchema = z.object({
+  task_id: z.string(),
+  title: z.string(),
+  status: z.string(),
+  is_agentic: z.boolean(),
+  kind: z.string().nullable(),
+  stage: AutomationStageSchema.nullable(),
+  reason: z.string().nullable(),
+  runs: z.number().int(),
+  review_rounds: z.number().int(),
+  reviewers: z.string().nullable(),
+  pr_url: z.string().nullable(),
+  head: z.string().nullable(),
+  checks: z.string().nullable(),
+  merge_sha: z.string().nullable(),
+  auto_created: z.boolean(),
+});
+
+export const ProjectAutomationSchema = z.object({
+  project_id: z.string(),
+  auto: z.boolean(),
+  actor_id: z.string().nullable(),
+  paused_reason: z.string().nullable(),
+  completed_at: z.string().nullable(),
+  parallelism: z.number().int(),
+  planner_chat_id: z.string().nullable(),
+  updates_chat_id: z.string().nullable(),
+  counts: z.object({
+    total: z.number().int(),
+    agentic: z.number().int(),
+    complete: z.number().int(),
+    in_flight: z.number().int(),
+    paused: z.number().int(),
+  }),
+  tasks: z.array(AutomationTaskSchema),
 });
 
 export const CreateProjectRequestSchema = z.object({
@@ -30,6 +93,7 @@ export const UpdateProjectRequestSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
   status: ProjectStatusSchema.optional(),
+  auto: z.boolean().optional(),
   github_repo_url: z.string().optional(),
   source_id: z.string().optional(),
 });

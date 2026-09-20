@@ -299,6 +299,17 @@ pub async fn build(
     let (history, capacity, tools) =
         tokio::join!(store.load(), resolver.resolve(&chat.model_name), catalog);
     let history = history.map_err(|error| error.to_string())?;
+    // A planner chat carries the two calls that end its interview until it
+    // has made its project; after that it is a chat about the project.
+    let tools = match crate::db::chats::link(state.db(), chat.id).await {
+        Ok(Some(link))
+            if link.purpose == crate::db::chats::ChatPurpose::ProjectPlanner
+                && link.project_id.is_none() =>
+        {
+            tools.with_planner()
+        }
+        _ => tools,
+    };
     let agentic = chat.agent_enabled && !tools.is_empty();
     let policy = policy(settings, &capacity);
     let request = pending

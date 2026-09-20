@@ -638,3 +638,160 @@ pub async fn delete_message(pool: &PgPool, chat_id: Uuid, message_id: Uuid) -> D
 
     Ok(result.rows_affected() > 0)
 }
+
+// ---------------------------------------------------------------------------
+// What a chat is for. An ordinary chat is an assistant; a planner chat is the
+// interview an auto project comes out of; an updates chat is where every
+// notice about a project lands. The purpose and the project are read through
+// a query of their own rather than widened onto `ChatRow`, which the compile
+// time queries above produce.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatPurpose {
+    Assistant,
+    ProjectPlanner,
+    ProjectUpdates,
+}
+
+impl ChatPurpose {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Assistant => "assistant",
+            Self::ProjectPlanner => "project_planner",
+            Self::ProjectUpdates => "project_updates",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "project_planner" => Self::ProjectPlanner,
+            "project_updates" => Self::ProjectUpdates,
+            _ => Self::Assistant,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatLink {
+    pub purpose: ChatPurpose,
+    pub project_id: Option<Uuid>,
+}
+
+pub async fn link(pool: &PgPool, chat_id: Uuid) -> DbResult<Option<ChatLink>> {
+    let row: Option<(String, Option<Uuid>)> =
+        sqlx::query_as("SELECT purpose, project_id FROM chats WHERE id = $1")
+            .bind(chat_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(purpose, project_id)| ChatLink {
+        purpose: ChatPurpose::parse(&purpose),
+        project_id,
+    }))
+}
+
+/// Make a chat with a purpose inside a caller's transaction.
+///
+/// An updates chat has no agent: it is written to, never talked to. A planner
+/// chat runs the agent, sandboxed, without auto-approval, so the one outward
+/// call the interview can make -- creating a repository -- is confirmed.
+pub(crate) async fn create_project_chat_in(
+    connection: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    title: &str,
+    purpose: ChatPurpose,
+    project_id: Uuid,
+) -> DbResult<Uuid> {
+    sqlx::query_scalar(
+        "INSERT INTO chats (workspace_id, title, model_name, agent_enabled, agent_sandboxed, \
+           auto_approve, reasoning_effort, purpose, project_id) \
+         VALUES ($1, $2, 'auto', FALSE, TRUE, FALSE, 'auto', $3, $4) RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(title)
+    .bind(purpose.as_str())
+    .bind(project_id)
+    .fetch_one(connection)
+    .await
+}
+
+/// Make a chat with a purpose, agent on or off, bound to a project or not yet.
+pub async fn create_purposed_chat(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    title: &str,
+    model_name: &str,
+    purpose: ChatPurpose,
+    project_id: Option<Uuid>,
+    agent_enabled: bool,
+) -> DbResult<ChatRow> {
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO chats (workspace_id, title, model_name, agent_enabled, agent_sandboxed, \
+           auto_approve, reasoning_effort, purpose, project_id) \
+         VALUES ($1, $2, $3, $4, TRUE, FALSE, 'auto', $5, $6) RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(title)
+    .bind(model_name)
+    .bind(agent_enabled)
+    .bind(purpose.as_str())
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    get_chat(pool, id)
+        .await?
+        .ok_or_else(|| sqlx::Error::RowNotFound)
+}
+
+/// Bind a chat to the project it produced, once: a chat that already has one
+/// keeps it.
+pub async fn attach_project(pool: &PgPool, chat_id: Uuid, project_id: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE chats SET project_id = $2, updated_at = NOW() WHERE id = $1 AND project_id IS NULL",
+    )
+    .bind(chat_id)
+    .bind(project_id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// The oldest chat of a purpose bound to a project, if there is one.
+pub async fn project_chat(
+    pool: &PgPool,
+    project_id: Uuid,
+    purpose: ChatPurpose,
+) -> DbResult<Option<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM chats WHERE project_id = $1 AND purpose = $2 ORDER BY created_at, id LIMIT 1",
+    )
+    .bind(project_id)
+    .bind(purpose.as_str())
+    .fetch_optional(pool)
+    .await
+}
+
+/// The project's updates chat, made if the project has none yet.
+pub async fn ensure_project_chat(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    project_name: &str,
+    purpose: ChatPurpose,
+) -> DbResult<Uuid> {
+    if let Some(existing) = project_chat(pool, project_id, purpose).await? {
+        return Ok(existing);
+    }
+    let mut transaction = pool.begin().await?;
+    let id = create_project_chat_in(
+        &mut transaction,
+        workspace_id,
+        &format!("{} · updates", project_name.trim()),
+        purpose,
+        project_id,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(id)
+}

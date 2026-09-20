@@ -299,6 +299,25 @@
   line-height: var(--ui-leading-tight);
 }
 
+.chat-purpose {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-1);
+  padding: 0 var(--ui-space-2);
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--ui-accent) 12%, transparent);
+  color: var(--ui-accent);
+  font-size: var(--ui-text-xs);
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.chat-purpose a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 .chat-model {
   font-size: var(--ui-text-xs);
   color: var(--ui-text-secondary);

@@ -7,6 +7,7 @@
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -79,6 +80,18 @@ pub enum PrError {
 
     #[error("Invalid repository URL: {0}")]
     InvalidRepoUrl(String),
+
+    #[error("The pull request cannot be merged: {0}")]
+    NotMergeable(String),
+
+    #[error("Branch protection refused the merge: {0}")]
+    Protected(String),
+
+    #[error("The pull request head moved since it was read")]
+    HeadMoved,
+
+    #[error("A repository named {0} already exists")]
+    RepositoryExists(String),
 }
 
 pub type PrResult<T> = Result<T, PrError>;
@@ -1326,5 +1339,1254 @@ mod tests {
             .expect_err("an unauthorised read must not look like an empty pull request");
 
         assert!(matches!(failure, PrError::AuthFailed));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What an auto project needs beyond opening a pull request: reading it back,
+// reading its checks and its review threads, answering them, and merging.
+// ---------------------------------------------------------------------------
+
+/// A repository GitHub just made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedRepository {
+    pub html_url: String,
+    pub clone_url: String,
+    pub default_branch: String,
+}
+
+/// A pull request as GitHub describes it now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestDetail {
+    pub node_id: String,
+    pub number: i64,
+    pub title: String,
+    pub body: Option<String>,
+    pub state: String,
+    pub draft: bool,
+    pub merged: bool,
+    pub merge_commit_sha: Option<String>,
+    pub head_sha: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub mergeable: Mergeability,
+    pub mergeable_state: Option<String>,
+    pub changed_files: u32,
+    pub additions: u32,
+    pub deletions: u32,
+    pub commits: u32,
+    pub html_url: String,
+}
+
+/// What the checks on a commit add up to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChecksOutcome {
+    /// Every check and status finished without failing.
+    Success,
+    /// At least one failed; the names say which.
+    Failure(Vec<String>),
+    /// At least one is still running and none has failed.
+    Pending,
+    /// Nothing reports on this commit at all.
+    Absent,
+}
+
+impl ChecksOutcome {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure(_) => "failure",
+            Self::Pending => "pending",
+            Self::Absent => "absent",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    pub filename: String,
+    pub status: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+/// A comment on the pull request's conversation, where bots leave summaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueComment {
+    pub id: u64,
+    pub author: String,
+    pub body: String,
+    pub url: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadComment {
+    pub database_id: Option<u64>,
+    pub author: String,
+    pub body: String,
+    pub url: String,
+    pub created_at: String,
+}
+
+/// One review thread on the diff and every comment in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewThreadRecord {
+    pub id: String,
+    pub resolved: bool,
+    pub outdated: bool,
+    pub path: Option<String>,
+    pub line: Option<u32>,
+    pub comments: Vec<ThreadComment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewEvent {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl ReviewEvent {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Comment => "COMMENT",
+            Self::Approve => "APPROVE",
+            Self::RequestChanges => "REQUEST_CHANGES",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeMethod {
+    Squash,
+    Merge,
+    Rebase,
+}
+
+impl MergeMethod {
+    const fn rest(self) -> &'static str {
+        match self {
+            Self::Squash => "squash",
+            Self::Merge => "merge",
+            Self::Rebase => "rebase",
+        }
+    }
+
+    const fn graphql(self) -> &'static str {
+        match self {
+            Self::Squash => "SQUASH",
+            Self::Merge => "MERGE",
+            Self::Rebase => "REBASE",
+        }
+    }
+}
+
+/// A merge that happened, and whether it took administrator privileges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedPr {
+    pub sha: String,
+    pub admin: bool,
+}
+
+/// The marker a truncated body ends with.
+pub const TRUNCATED: &str = "\n[truncated]";
+
+/// Conclusions that fail a commit, as GitHub names them.
+const FAILING_CONCLUSIONS: [&str; 6] = [
+    "failure",
+    "error",
+    "cancelled",
+    "timed_out",
+    "action_required",
+    "startup_failure",
+];
+
+fn truncated(text: String, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut kept = text[..cut].to_string();
+    kept.push_str(TRUNCATED);
+    kept
+}
+
+/// A repository path safe to interpolate into a request URL: every segment
+/// named, so no `..` and no empty segment can reach a different endpoint.
+fn repository_path(path: &str) -> PrResult<String> {
+    let trimmed = path.trim().trim_matches('/');
+    if trimmed.is_empty() || !trimmed.split('/').all(named) {
+        return Err(PrError::GitHubApi(format!(
+            "Invalid repository path: {path}"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn login(user: &Value) -> String {
+    user["login"].as_str().unwrap_or_default().to_string()
+}
+
+impl PrService {
+    fn repos(&self, owner: &str, repo: &str) -> String {
+        format!("{}/repos/{}/{}", self.origin.url, owner, repo)
+    }
+
+    fn pulls(&self, reference: &PullRequestReference) -> String {
+        format!(
+            "{}/pulls/{}",
+            self.repos(&reference.owner, &reference.repository),
+            reference.number
+        )
+    }
+
+    /// Where GraphQL lives for this origin: beside REST on github.com, under
+    /// `/api/graphql` on an Enterprise install whose REST is `/api/v3`.
+    fn graphql_url(&self) -> String {
+        match self.origin.url.strip_suffix("/api/v3") {
+            Some(host) => format!("{host}/api/graphql"),
+            None => format!("{}/graphql", self.origin.url),
+        }
+    }
+
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        token: &str,
+        accept: &str,
+        body: Option<&Value>,
+    ) -> PrResult<reqwest::Response> {
+        let mut request = self
+            .client
+            .request(method, url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", accept)
+            .header("User-Agent", "zone-pr-service");
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        Ok(request.send().await?)
+    }
+
+    /// Send, and turn any status outside 2xx into the error it stands for.
+    async fn send_checked(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        token: &str,
+        accept: &str,
+        body: Option<&Value>,
+    ) -> PrResult<reqwest::Response> {
+        let response = self.send(method, url, token, accept, body).await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(PrError::AuthFailed);
+        }
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(PrError::GitHubApi(format!(
+                "GitHub API returned {}: {}",
+                status, error_text
+            )));
+        }
+        Ok(response)
+    }
+
+    async fn json(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        token: &str,
+        body: Option<&Value>,
+    ) -> PrResult<Value> {
+        Ok(self
+            .send_checked(method, url, token, "application/vnd.github+json", body)
+            .await?
+            .json()
+            .await?)
+    }
+
+    /// One GraphQL call; an `errors` array is a refusal, named by its first message.
+    async fn graphql(&self, token: &str, query: &str, variables: Value) -> PrResult<Value> {
+        let response: Value = self
+            .send_checked(
+                reqwest::Method::POST,
+                &self.graphql_url(),
+                token,
+                "application/vnd.github+json",
+                Some(&json!({"query": query, "variables": variables})),
+            )
+            .await?
+            .json()
+            .await?;
+        if let Some(errors) = response.get("errors").and_then(Value::as_array)
+            && !errors.is_empty()
+        {
+            let message = errors
+                .iter()
+                .filter_map(|error| error["message"].as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(PrError::GitHubApi(format!("GraphQL: {message}")));
+        }
+        Ok(response["data"].clone())
+    }
+
+    /// Make a repository, with an initial commit so the first task has a
+    /// default branch to start from.
+    ///
+    /// `owner` names an organisation; `None`, or the token's own login, makes
+    /// the repository under the token's user.
+    pub async fn create_repository(
+        &self,
+        token: &str,
+        owner: Option<&str>,
+        name: &str,
+        description: &str,
+        private: bool,
+    ) -> PrResult<CreatedRepository> {
+        if !named(name) {
+            return Err(PrError::GitHubApi(format!(
+                "Invalid repository name: {name}"
+            )));
+        }
+        let me = self
+            .json(
+                reqwest::Method::GET,
+                &format!("{}/user", self.origin.url),
+                token,
+                None,
+            )
+            .await?;
+        let me = login(&me);
+        let url = match owner.map(str::trim).filter(|owner| !owner.is_empty()) {
+            Some(organisation) if !organisation.eq_ignore_ascii_case(&me) => {
+                if !named(organisation) {
+                    return Err(PrError::GitHubApi(format!(
+                        "Invalid repository owner: {organisation}"
+                    )));
+                }
+                format!("{}/orgs/{}/repos", self.origin.url, organisation)
+            }
+            _ => format!("{}/user/repos", self.origin.url),
+        };
+        let response = self
+            .send(
+                reqwest::Method::POST,
+                &url,
+                token,
+                "application/vnd.github+json",
+                Some(&json!({
+                    "name": name,
+                    "description": description,
+                    "private": private,
+                    "auto_init": true,
+                })),
+            )
+            .await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(PrError::AuthFailed);
+        }
+        let text = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY && text.contains("already exists") {
+            return Err(PrError::RepositoryExists(name.to_string()));
+        }
+        if !status.is_success() {
+            return Err(PrError::GitHubApi(format!(
+                "GitHub API returned {}: {}",
+                status, text
+            )));
+        }
+        let created: Value = serde_json::from_str(&text)
+            .map_err(|error| PrError::GitHubApi(format!("Unreadable repository: {error}")))?;
+        Ok(CreatedRepository {
+            html_url: created["html_url"].as_str().unwrap_or_default().to_string(),
+            clone_url: created["clone_url"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            default_branch: created["default_branch"]
+                .as_str()
+                .unwrap_or("main")
+                .to_string(),
+        })
+    }
+
+    /// Read a pull request back.
+    pub async fn fetch_pull(
+        &self,
+        reference: &PullRequestReference,
+        token: &str,
+    ) -> PrResult<PullRequestDetail> {
+        let pull = self
+            .json(reqwest::Method::GET, &self.pulls(reference), token, None)
+            .await?;
+        let count = |key: &str| u32::try_from(pull[key].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
+        Ok(PullRequestDetail {
+            node_id: pull["node_id"].as_str().unwrap_or_default().to_string(),
+            number: pull["number"].as_i64().unwrap_or(reference.number),
+            title: pull["title"].as_str().unwrap_or_default().to_string(),
+            body: pull["body"].as_str().map(str::to_string),
+            state: pull["state"].as_str().unwrap_or_default().to_string(),
+            draft: pull["draft"].as_bool().unwrap_or(false),
+            merged: pull["merged"].as_bool().unwrap_or(false),
+            merge_commit_sha: pull["merge_commit_sha"].as_str().map(str::to_string),
+            head_sha: pull["head"]["sha"].as_str().unwrap_or_default().to_string(),
+            head_ref: pull["head"]["ref"].as_str().unwrap_or_default().to_string(),
+            base_ref: pull["base"]["ref"].as_str().unwrap_or_default().to_string(),
+            mergeable: Mergeability::from_flag(pull["mergeable"].as_bool()),
+            mergeable_state: pull["mergeable_state"].as_str().map(str::to_string),
+            changed_files: count("changed_files"),
+            additions: count("additions"),
+            deletions: count("deletions"),
+            commits: count("commits"),
+            html_url: pull["html_url"].as_str().unwrap_or_default().to_string(),
+        })
+    }
+
+    /// What the check runs and commit statuses on a commit add up to.
+    ///
+    /// A run still going is pending unless something else already failed; a
+    /// neutral or skipped conclusion is neither. Nothing reporting at all is
+    /// `Absent`, which a caller decides the meaning of: a new repository has no
+    /// checks yet, and that is not a pass.
+    pub async fn fetch_checks(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        token: &str,
+    ) -> PrResult<ChecksOutcome> {
+        if !sha.chars().all(|character| character.is_ascii_hexdigit()) || sha.is_empty() {
+            return Err(PrError::GitHubApi(format!("Invalid commit: {sha}")));
+        }
+        let scope = self.repos(owner, repo);
+        let runs = self
+            .json(
+                reqwest::Method::GET,
+                &format!("{scope}/commits/{sha}/check-runs?filter=latest&per_page={PAGE_SIZE}"),
+                token,
+                None,
+            )
+            .await?;
+        let statuses = self
+            .json(
+                reqwest::Method::GET,
+                &format!("{scope}/commits/{sha}/status?per_page={PAGE_SIZE}"),
+                token,
+                None,
+            )
+            .await?;
+        let mut seen = 0usize;
+        let mut pending = false;
+        let mut failed: Vec<String> = Vec::new();
+        for run in runs["check_runs"].as_array().into_iter().flatten() {
+            seen += 1;
+            let name = run["name"].as_str().unwrap_or("check").to_string();
+            if run["status"].as_str() != Some("completed") {
+                pending = true;
+                continue;
+            }
+            let conclusion = run["conclusion"].as_str().unwrap_or_default();
+            if FAILING_CONCLUSIONS.contains(&conclusion) {
+                failed.push(name);
+            }
+        }
+        for status in statuses["statuses"].as_array().into_iter().flatten() {
+            seen += 1;
+            let name = status["context"].as_str().unwrap_or("status").to_string();
+            match status["state"].as_str().unwrap_or_default() {
+                "pending" => pending = true,
+                "failure" | "error" => failed.push(name),
+                _ => {}
+            }
+        }
+        Ok(if !failed.is_empty() {
+            failed.sort();
+            failed.dedup();
+            ChecksOutcome::Failure(failed)
+        } else if pending {
+            ChecksOutcome::Pending
+        } else if seen == 0 {
+            ChecksOutcome::Absent
+        } else {
+            ChecksOutcome::Success
+        })
+    }
+
+    /// The unified diff of a pull request, cut at `max_bytes`.
+    pub async fn fetch_diff(
+        &self,
+        reference: &PullRequestReference,
+        token: &str,
+        max_bytes: usize,
+    ) -> PrResult<String> {
+        let text = self
+            .send_checked(
+                reqwest::Method::GET,
+                &self.pulls(reference),
+                token,
+                "application/vnd.github.diff",
+                None,
+            )
+            .await?
+            .text()
+            .await?;
+        Ok(truncated(text, max_bytes))
+    }
+
+    pub async fn fetch_files(
+        &self,
+        reference: &PullRequestReference,
+        token: &str,
+    ) -> PrResult<Vec<ChangedFile>> {
+        let rows: Vec<Value> = self
+            .get_all(
+                &format!(
+                    "repos/{}/{}/pulls/{}/files",
+                    reference.owner, reference.repository, reference.number
+                ),
+                token,
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| ChangedFile {
+                filename: row["filename"].as_str().unwrap_or_default().to_string(),
+                status: row["status"].as_str().unwrap_or_default().to_string(),
+                additions: u32::try_from(row["additions"].as_u64().unwrap_or(0))
+                    .unwrap_or(u32::MAX),
+                deletions: u32::try_from(row["deletions"].as_u64().unwrap_or(0))
+                    .unwrap_or(u32::MAX),
+            })
+            .collect())
+    }
+
+    /// One file at one ref, as text, cut at `max_bytes`.
+    pub async fn fetch_file(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        git_ref: &str,
+        token: &str,
+        max_bytes: usize,
+    ) -> PrResult<String> {
+        let path = repository_path(path)?;
+        if git_ref.is_empty()
+            || !git_ref
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+        {
+            return Err(PrError::GitHubApi(format!("Invalid ref: {git_ref}")));
+        }
+        let bytes = self
+            .send_checked(
+                reqwest::Method::GET,
+                &format!("{}/contents/{path}?ref={git_ref}", self.repos(owner, repo)),
+                token,
+                "application/vnd.github.raw+json",
+                None,
+            )
+            .await?
+            .bytes()
+            .await?;
+        Ok(truncated(
+            String::from_utf8_lossy(&bytes).into_owned(),
+            max_bytes,
+        ))
+    }
+
+    /// Comments on the conversation tab, where review bots post their summaries.
+    pub async fn fetch_issue_comments(
+        &self,
+        reference: &PullRequestReference,
+        token: &str,
+    ) -> PrResult<Vec<IssueComment>> {
+        let rows: Vec<Value> = self
+            .get_all(
+                &format!(
+                    "repos/{}/{}/issues/{}/comments",
+                    reference.owner, reference.repository, reference.number
+                ),
+                token,
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| IssueComment {
+                id: row["id"].as_u64().unwrap_or(0),
+                author: login(&row["user"]),
+                body: row["body"].as_str().unwrap_or_default().to_string(),
+                url: row["html_url"].as_str().unwrap_or_default().to_string(),
+                created_at: row["created_at"].as_str().unwrap_or_default().to_string(),
+            })
+            .collect())
+    }
+
+    /// Every review thread on the diff, with the comments in it.
+    pub async fn fetch_review_threads(
+        &self,
+        reference: &PullRequestReference,
+        token: &str,
+    ) -> PrResult<Vec<ReviewThreadRecord>> {
+        const QUERY: &str = "query($owner:String!,$name:String!,$number:Int!,$after:String){\
+repository(owner:$owner,name:$name){pullRequest(number:$number){\
+reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}\
+nodes{id isResolved isOutdated path line comments(first:20){\
+nodes{databaseId body url createdAt author{login}}}}}}}}";
+        let mut threads = Vec::new();
+        let mut after: Option<String> = None;
+        for _ in 0..MAXIMUM_PAGES {
+            let data = self
+                .graphql(
+                    token,
+                    QUERY,
+                    json!({
+                        "owner": reference.owner,
+                        "name": reference.repository,
+                        "number": reference.number,
+                        "after": after,
+                    }),
+                )
+                .await?;
+            let page = &data["repository"]["pullRequest"]["reviewThreads"];
+            for node in page["nodes"].as_array().into_iter().flatten() {
+                threads.push(ReviewThreadRecord {
+                    id: node["id"].as_str().unwrap_or_default().to_string(),
+                    resolved: node["isResolved"].as_bool().unwrap_or(false),
+                    outdated: node["isOutdated"].as_bool().unwrap_or(false),
+                    path: node["path"].as_str().map(str::to_string),
+                    line: node["line"]
+                        .as_u64()
+                        .and_then(|line| u32::try_from(line).ok()),
+                    comments: node["comments"]["nodes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|comment| ThreadComment {
+                            database_id: comment["databaseId"].as_u64(),
+                            author: login(&comment["author"]),
+                            body: comment["body"].as_str().unwrap_or_default().to_string(),
+                            url: comment["url"].as_str().unwrap_or_default().to_string(),
+                            created_at: comment["createdAt"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        })
+                        .collect(),
+                });
+            }
+            if page["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+                break;
+            }
+            after = page["pageInfo"]["endCursor"].as_str().map(str::to_string);
+            if after.is_none() {
+                break;
+            }
+        }
+        Ok(threads)
+    }
+
+    /// Submit a review. A token that opened the pull request may only comment:
+    /// GitHub refuses it an approval of its own change.
+    pub async fn submit_review(
+        &self,
+        reference: &PullRequestReference,
+        token: &str,
+        commit_id: &str,
+        event: ReviewEvent,
+        body: &str,
+    ) -> PrResult<i64> {
+        let review = self
+            .json(
+                reqwest::Method::POST,
+                &format!("{}/reviews", self.pulls(reference)),
+                token,
+                Some(&json!({
+                    "commit_id": commit_id,
+                    "body": body,
+                    "event": event.as_str(),
+                })),
+            )
+            .await?;
+        Ok(review["id"].as_i64().unwrap_or(0))
+    }
+
+    /// Answer a review comment in its thread.
+    pub async fn reply_to_review_comment(
+        &self,
+        reference: &PullRequestReference,
+        comment_id: u64,
+        body: &str,
+        token: &str,
+    ) -> PrResult<()> {
+        self.json(
+            reqwest::Method::POST,
+            &format!("{}/comments/{comment_id}/replies", self.pulls(reference)),
+            token,
+            Some(&json!({"body": body})),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn resolve_review_thread(&self, thread_id: &str, token: &str) -> PrResult<()> {
+        const MUTATION: &str =
+            "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}";
+        self.graphql(token, MUTATION, json!({"id": thread_id}))
+            .await?;
+        Ok(())
+    }
+
+    /// Comment on the conversation tab; how a review bot is asked to look again.
+    pub async fn post_issue_comment(
+        &self,
+        reference: &PullRequestReference,
+        body: &str,
+        token: &str,
+    ) -> PrResult<u64> {
+        let comment = self
+            .json(
+                reqwest::Method::POST,
+                &format!(
+                    "{}/issues/{}/comments",
+                    self.repos(&reference.owner, &reference.repository),
+                    reference.number
+                ),
+                token,
+                Some(&json!({"body": body})),
+            )
+            .await?;
+        Ok(comment["id"].as_u64().unwrap_or(0))
+    }
+
+    /// Merge a pull request whose head is still `expected_head`.
+    ///
+    /// The REST merge honours branch protection; when it answers 405 and the
+    /// caller allows it, the merge is asked for again through the mutation an
+    /// administrator merges with, which succeeds for a token that may bypass
+    /// the protection and refuses everyone else. A refusal there is reported
+    /// as `Protected` with GitHub's own reason, and a head that moved as
+    /// `HeadMoved`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn merge(
+        &self,
+        reference: &PullRequestReference,
+        token: &str,
+        node_id: Option<&str>,
+        expected_head: &str,
+        title: &str,
+        message: &str,
+        method: MergeMethod,
+        admin: bool,
+    ) -> PrResult<MergedPr> {
+        let response = self
+            .send(
+                reqwest::Method::PUT,
+                &format!("{}/merge", self.pulls(reference)),
+                token,
+                "application/vnd.github+json",
+                Some(&json!({
+                    "commit_title": title,
+                    "commit_message": message,
+                    "sha": expected_head,
+                    "merge_method": method.rest(),
+                })),
+            )
+            .await?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if status.is_success() {
+            let merged: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            return Ok(MergedPr {
+                sha: merged["sha"].as_str().unwrap_or_default().to_string(),
+                admin: false,
+            });
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(PrError::AuthFailed);
+        }
+        if status == reqwest::StatusCode::CONFLICT {
+            return Err(PrError::HeadMoved);
+        }
+        let reason: String = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|body| body["message"].as_str().map(str::to_string))
+            .unwrap_or(text);
+        if status != reqwest::StatusCode::METHOD_NOT_ALLOWED {
+            return Err(PrError::NotMergeable(format!("{status}: {reason}")));
+        }
+        let Some(node_id) = node_id.filter(|_| admin) else {
+            return Err(PrError::Protected(reason));
+        };
+        const MUTATION: &str = "mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){pullRequest{mergeCommit{oid}}}}";
+        match self
+            .graphql(
+                token,
+                MUTATION,
+                json!({"input": {
+                    "pullRequestId": node_id,
+                    "mergeMethod": method.graphql(),
+                    "commitHeadline": title,
+                    "commitBody": message,
+                    "expectedHeadOid": expected_head,
+                }}),
+            )
+            .await
+        {
+            Ok(data) => Ok(MergedPr {
+                sha: data["mergePullRequest"]["pullRequest"]["mergeCommit"]["oid"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                admin: true,
+            }),
+            Err(PrError::GitHubApi(message)) => Err(PrError::Protected(format!(
+                "{reason}; administrator merge refused: {message}"
+            ))),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Delete a branch; one already gone is not an error.
+    pub async fn delete_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        token: &str,
+    ) -> PrResult<()> {
+        if branch.is_empty() || branch.contains("..") || branch.starts_with('/') {
+            return Err(PrError::GitHubApi(format!("Invalid branch: {branch}")));
+        }
+        let response = self
+            .send(
+                reqwest::Method::DELETE,
+                &format!("{}/git/refs/heads/{branch}", self.repos(owner, repo)),
+                token,
+                "application/vnd.github+json",
+                None,
+            )
+            .await?;
+        let status = response.status();
+        if status.is_success()
+            || status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        {
+            return Ok(());
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(PrError::AuthFailed);
+        }
+        let text = response.text().await.unwrap_or_default();
+        Err(PrError::GitHubApi(format!(
+            "GitHub API returned {}: {}",
+            status, text
+        )))
+    }
+}
+
+#[cfg(test)]
+mod automation_tests {
+    use super::*;
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn reference() -> PullRequestReference {
+        PullRequestReference {
+            owner: "acme".to_string(),
+            repository: "project".to_string(),
+            number: 7,
+        }
+    }
+
+    #[tokio::test]
+    async fn checks_fold_runs_and_statuses_into_one_outcome() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/acme/project/commits/{sha}/check-runs"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "check_runs": [
+                    {"name": "build", "status": "completed", "conclusion": "success"},
+                    {"name": "lint", "status": "completed", "conclusion": "skipped"},
+                    {"name": "test", "status": "in_progress", "conclusion": null}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/acme/project/commits/{sha}/status")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "state": "pending",
+                "statuses": [{"context": "ci/deploy", "state": "success"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let outcome = service
+            .fetch_checks("acme", "project", sha, "token")
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ChecksOutcome::Pending,
+            "a run still going is pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_status_names_itself_and_silence_is_absent() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+        let failing = "1111111111111111111111111111111111111111";
+        let silent = "2222222222222222222222222222222222222222";
+
+        for (sha, runs, statuses) in [
+            (
+                failing,
+                json!({"check_runs": [{"name": "test", "status": "completed", "conclusion": "failure"}]}),
+                json!({"state": "failure", "statuses": [{"context": "ci/deploy", "state": "error"}]}),
+            ),
+            (
+                silent,
+                json!({"check_runs": []}),
+                json!({"state": "pending", "statuses": []}),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/repos/acme/project/commits/{sha}/check-runs"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(runs))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/repos/acme/project/commits/{sha}/status")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(statuses))
+                .mount(&server)
+                .await;
+        }
+
+        assert_eq!(
+            service
+                .fetch_checks("acme", "project", failing, "token")
+                .await
+                .unwrap(),
+            ChecksOutcome::Failure(vec!["ci/deploy".to_string(), "test".to_string()])
+        );
+        assert_eq!(
+            service
+                .fetch_checks("acme", "project", silent, "token")
+                .await
+                .unwrap(),
+            ChecksOutcome::Absent
+        );
+    }
+
+    #[tokio::test]
+    async fn a_protected_merge_is_retried_through_the_administrator_mutation() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+
+        Mock::given(method("PUT"))
+            .and(path("/repos/acme/project/pulls/7/merge"))
+            .respond_with(ResponseTemplate::new(405).set_body_json(json!({
+                "message": "At least 1 approving review is required by reviewers with write access."
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_partial_json(json!({"variables": {"input": {
+                "pullRequestId": "PR_node",
+                "mergeMethod": "SQUASH",
+                "expectedHeadOid": "abc"
+            }}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"mergePullRequest": {"pullRequest": {"mergeCommit": {"oid": "def"}}}}
+            })))
+            .mount(&server)
+            .await;
+
+        let merged = service
+            .merge(
+                &reference(),
+                "token",
+                Some("PR_node"),
+                "abc",
+                "title",
+                "body",
+                MergeMethod::Squash,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            merged,
+            MergedPr {
+                sha: "def".to_string(),
+                admin: true
+            }
+        );
+
+        let refused = service
+            .merge(
+                &reference(),
+                "token",
+                Some("PR_node"),
+                "abc",
+                "title",
+                "body",
+                MergeMethod::Squash,
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&refused, PrError::Protected(reason) if reason.contains("approving review")),
+            "{refused:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_administrator_merge_carries_both_reasons_and_a_moved_head_is_named() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+
+        Mock::given(method("PUT"))
+            .and(path("/repos/acme/project/pulls/7/merge"))
+            .respond_with(
+                ResponseTemplate::new(405).set_body_json(
+                    json!({"message": "Required status check \"test\" is expected."}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": null,
+                "errors": [{"message": "Base branch was modified. Review and try the merge again."}]
+            })))
+            .mount(&server)
+            .await;
+
+        let refused = service
+            .merge(
+                &reference(),
+                "token",
+                Some("PR_node"),
+                "abc",
+                "t",
+                "b",
+                MergeMethod::Squash,
+                true,
+            )
+            .await
+            .unwrap_err();
+        match refused {
+            PrError::Protected(reason) => {
+                assert!(reason.contains("Required status check"), "{reason}");
+                assert!(reason.contains("Base branch was modified"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let moved = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/repos/acme/project/pulls/7/merge"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(json!({"message": "Head branch was modified."})),
+            )
+            .mount(&moved)
+            .await;
+        let service = PrService::standing_in_for("github.com", moved.uri());
+        assert!(matches!(
+            service
+                .merge(
+                    &reference(),
+                    "token",
+                    None,
+                    "abc",
+                    "t",
+                    "b",
+                    MergeMethod::Squash,
+                    true
+                )
+                .await,
+            Err(PrError::HeadMoved)
+        ));
+    }
+
+    #[tokio::test]
+    async fn review_threads_are_read_with_their_comments_and_resolved_by_id() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_partial_json(json!({"variables": {"number": 7}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"repository": {"pullRequest": {"reviewThreads": {
+                    "pageInfo": {"hasNextPage": false, "endCursor": null},
+                    "nodes": [{
+                        "id": "PRRT_1", "isResolved": false, "isOutdated": false,
+                        "path": "src/cart.ts", "line": 12,
+                        "comments": {"nodes": [{
+                            "databaseId": 99, "body": "handle the empty cart", "url": "https://github.com/acme/project/pull/7#discussion_r99",
+                            "createdAt": "2026-09-20T10:00:00Z", "author": {"login": "coderabbitai"}
+                        }]}
+                    }]
+                }}}}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_partial_json(json!({"variables": {"id": "PRRT_1"}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"resolveReviewThread": {"thread": {"isResolved": true}}}
+            })))
+            .mount(&server)
+            .await;
+
+        let threads = service
+            .fetch_review_threads(&reference(), "token")
+            .await
+            .unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "PRRT_1");
+        assert_eq!(threads[0].path.as_deref(), Some("src/cart.ts"));
+        assert_eq!(threads[0].line, Some(12));
+        assert_eq!(threads[0].comments[0].author, "coderabbitai");
+        assert_eq!(threads[0].comments[0].database_id, Some(99));
+        service
+            .resolve_review_thread("PRRT_1", "token")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_repository_is_created_under_the_organisation_or_the_user() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "ada"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/orgs/acme/repos"))
+            .and(body_partial_json(
+                json!({"name": "shop", "auto_init": true, "private": true}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "html_url": "https://github.com/acme/shop",
+                "clone_url": "https://github.com/acme/shop.git",
+                "default_branch": "main"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/repos"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+                "message": "Repository creation failed.",
+                "errors": [{"message": "name already exists on this account"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let created = service
+            .create_repository("token", Some("acme"), "shop", "A shop", true)
+            .await
+            .unwrap();
+        assert_eq!(created.html_url, "https://github.com/acme/shop");
+        assert_eq!(created.default_branch, "main");
+
+        let taken = service
+            .create_repository("token", Some("ada"), "shop", "A shop", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(taken, PrError::RepositoryExists(name) if name == "shop"));
+        assert!(matches!(
+            service
+                .create_repository("token", None, "../x", "", false)
+                .await,
+            Err(PrError::GitHubApi(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_diff_is_cut_at_the_budget_and_a_deleted_branch_is_tolerated() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/project/pulls/7"))
+            .and(header("Accept", "application/vnd.github.diff"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n+".repeat(20)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/repos/acme/project/git/refs/heads/zone/task-1"))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_json(json!({"message": "Reference does not exist"})),
+            )
+            .mount(&server)
+            .await;
+
+        let diff = service.fetch_diff(&reference(), "token", 50).await.unwrap();
+        assert!(diff.ends_with(TRUNCATED), "{diff}");
+        assert!(diff.len() <= 50 + TRUNCATED.len());
+        service
+            .delete_branch("acme", "project", "zone/task-1", "token")
+            .await
+            .unwrap();
+        assert!(repository_path("../etc/passwd").is_err());
+        assert_eq!(repository_path("/src/a.rs/").unwrap(), "src/a.rs");
+    }
+
+    #[tokio::test]
+    async fn a_review_is_submitted_as_a_comment_with_its_commit() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/repos/acme/project/pulls/7/reviews"))
+            .and(body_partial_json(
+                json!({"event": "COMMENT", "commit_id": "abc"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 5})))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            service
+                .submit_review(
+                    &reference(),
+                    "token",
+                    "abc",
+                    ReviewEvent::Comment,
+                    "Zone review"
+                )
+                .await
+                .unwrap(),
+            5
+        );
     }
 }

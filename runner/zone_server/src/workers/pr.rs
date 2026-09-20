@@ -709,7 +709,7 @@ async fn repair_model(state: &AppState, task: &tasks::TaskRow) -> String {
     )
 }
 
-async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Option<String> {
+pub(crate) async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Option<String> {
     for project_id in &task.project_ids {
         if let Ok(Some(project)) = projects::get_project(state.db(), *project_id).await
             && let Some(token) = project.github_access_token

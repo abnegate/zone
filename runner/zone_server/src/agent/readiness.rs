@@ -252,6 +252,28 @@ impl SignalKind {
         }
     }
 
+    /// The account the bot comments as, without the `[bot]` suffix REST adds.
+    pub fn reviewer(self) -> &'static str {
+        match self {
+            Self::CodeRabbit => CODERABBIT_REVIEWER,
+            Self::Greptile => GREPTILE_REVIEWER,
+        }
+    }
+
+    /// The comment that asks the bot to review, or review again, when it has
+    /// not done so on its own.
+    pub fn trigger_command(self) -> &'static str {
+        match self {
+            Self::CodeRabbit => "@coderabbitai review",
+            Self::Greptile => "@greptileai review",
+        }
+    }
+
+    /// The one signal, for a caller that reads bots one at a time.
+    pub fn as_signal(self) -> Box<dyn ReviewSignal> {
+        self.signal()
+    }
+
     fn signal(self) -> Box<dyn ReviewSignal> {
         match self {
             Self::CodeRabbit => Box::new(CodeRabbit),

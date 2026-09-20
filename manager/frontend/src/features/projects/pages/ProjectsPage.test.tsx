@@ -3,12 +3,19 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type React from 'react';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { Source } from '../../../types';
-import type { Project } from '../types';
+import type { Project, ProjectAutomation } from '../types';
 
 let ProjectsPage: typeof import('./ProjectsPage').default;
 
-const createWrapper = () => {
+/** Where the page navigated to, for routes the test does not render. */
+const LocationProbe = () => {
+  const location = useLocation();
+  return <div data-testid="location">{`${location.pathname}${location.search}`}</div>;
+};
+
+const createWrapper = (initialPath: string) => {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: 0 },
@@ -16,12 +23,19 @@ const createWrapper = () => {
     },
   });
   return ({ children }: { children: React.ReactNode }) => (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    <MemoryRouter initialEntries={[initialPath]}>
+      <QueryClientProvider client={queryClient}>
+        <Routes>
+          <Route path="/projects" element={children} />
+          <Route path="*" element={<LocationProbe />} />
+        </Routes>
+      </QueryClientProvider>
+    </MemoryRouter>
   );
 };
 
-const renderWithQueryClient = (ui: React.ReactElement) => {
-  const Wrapper = createWrapper();
+const renderWithQueryClient = (ui: React.ReactElement, initialPath = '/projects') => {
+  const Wrapper = createWrapper(initialPath);
   return render(<Wrapper>{ui}</Wrapper>);
 };
 
@@ -33,6 +47,9 @@ const mockDeleteProject = mock(() => Promise.resolve());
 const mockGetSyncConfigs = mock(() => Promise.resolve([]));
 const mockCreateSyncConfig = mock(() => Promise.resolve({}));
 const mockDeleteSyncConfig = mock(() => Promise.resolve());
+const mockStartAutoProject = mock(() => Promise.resolve({ chat_id: 'chat-9' }));
+const mockGetAutomation = mock(() => Promise.resolve({} as ProjectAutomation));
+const mockResumeAutomation = mock(() => Promise.resolve({} as Project));
 
 // Create mock functions for the client
 const mockGetSources = mock(() => Promise.resolve([] as Source[]));
@@ -49,6 +66,9 @@ mock.module('../../../api/projects', () => ({
     getSyncConfigs: mockGetSyncConfigs,
     createSyncConfig: mockCreateSyncConfig,
     deleteSyncConfig: mockDeleteSyncConfig,
+    startAutoProject: mockStartAutoProject,
+    getAutomation: mockGetAutomation,
+    resumeAutomation: mockResumeAutomation,
   },
 }));
 
@@ -107,6 +127,7 @@ const mockProjects: Project[] = [
     status: 'active',
     github_repo_url: null,
     source_id: 'src-1',
+    auto: false,
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-15T00:00:00Z',
   },
@@ -117,6 +138,7 @@ const mockProjects: Project[] = [
     status: 'on_hold',
     github_repo_url: null,
     source_id: null,
+    auto: false,
     created_at: '2024-01-02T00:00:00Z',
     updated_at: '2024-01-16T00:00:00Z',
   },
@@ -149,6 +171,10 @@ describe('ProjectsPage', () => {
     mockGetSources.mockReset();
     mockLinkSource.mockReset();
     mockUnlinkSource.mockReset();
+    mockStartAutoProject.mockReset();
+    mockGetAutomation.mockReset();
+    mockResumeAutomation.mockReset();
+    mockStartAutoProject.mockImplementation(() => Promise.resolve({ chat_id: 'chat-9' }));
     mockGetProjects.mockImplementation(() => Promise.resolve(mockProjects));
     mockGetSyncConfigs.mockImplementation(() => Promise.resolve([]));
     mockGetSources.mockImplementation(() => Promise.resolve(mockSources));
@@ -236,6 +262,7 @@ describe('ProjectsPage', () => {
       status: 'active',
       github_repo_url: null,
       source_id: null,
+      auto: false,
       created_at: '2024-01-17T00:00:00Z',
       updated_at: '2024-01-17T00:00:00Z',
     };
@@ -684,6 +711,189 @@ describe('ProjectsPage', () => {
 
     await waitFor(() => {
       expect(mockGetProjects).toHaveBeenCalledWith('workspace-1', 'cancelled');
+    });
+  });
+
+  describe('auto projects', () => {
+    const automation: ProjectAutomation = {
+      project_id: 'proj-1',
+      auto: true,
+      actor_id: 'user-1',
+      paused_reason: null,
+      completed_at: null,
+      parallelism: 3,
+      planner_chat_id: 'chat-plan',
+      updates_chat_id: 'chat-updates',
+      counts: { total: 2, agentic: 2, complete: 1, in_flight: 1, paused: 0 },
+      tasks: [
+        {
+          task_id: 'task-1',
+          title: 'Scaffold the repository',
+          status: 'complete',
+          is_agentic: true,
+          kind: 'scaffold',
+          stage: 'merged',
+          reason: null,
+          runs: 1,
+          review_rounds: 1,
+          reviewers: 'reviewer-model',
+          pr_url: 'https://github.com/acme/app/pull/1',
+          head: 'abc',
+          checks: 'success',
+          merge_sha: 'def',
+          auto_created: false,
+        },
+        {
+          task_id: 'task-2',
+          title: 'Add continuous integration',
+          status: 'in_progress',
+          is_agentic: true,
+          kind: 'ci',
+          stage: 'running',
+          reason: null,
+          runs: 1,
+          review_rounds: 0,
+          reviewers: null,
+          pr_url: null,
+          head: null,
+          checks: null,
+          merge_sha: null,
+          auto_created: false,
+        },
+      ],
+    };
+
+    it('starts the interview from a brief and opens the planner chat', async () => {
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Auto project' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Auto project' }));
+      expect(screen.getByTestId('auto-project-modal')).toBeInTheDocument();
+
+      fireEvent.change(screen.getByTestId('auto-project-brief'), {
+        target: { value: 'A recipe app for iOS and Android' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Start the interview' }));
+
+      await waitFor(() => {
+        expect(mockStartAutoProject).toHaveBeenCalledWith('workspace-1', {
+          brief: 'A recipe app for iOS and Android',
+        });
+      });
+      await waitFor(
+        () => {
+          expect(screen.getByTestId('location')).toHaveTextContent('/chats?id=chat-9');
+        },
+        { timeout: 3000 }
+      );
+      expect(screen.queryByTestId('auto-project-modal')).not.toBeInTheDocument();
+    });
+
+    it('shows the automation error instead of leaving the modal', async () => {
+      mockStartAutoProject.mockImplementation(() =>
+        Promise.reject(new Error('Choose a model first'))
+      );
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Auto project' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Auto project' }));
+      fireEvent.change(screen.getByTestId('auto-project-brief'), {
+        target: { value: 'Something' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Start the interview' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Choose a model first')).toBeInTheDocument();
+      });
+      expect(screen.getByTestId('auto-project-modal')).toBeInTheDocument();
+      expect(screen.queryByTestId('location')).not.toBeInTheDocument();
+    });
+
+    it('toggles automation on the selected project', async () => {
+      mockUpdateProject.mockImplementation(() =>
+        Promise.resolve({ ...mockProjects[0], auto: true })
+      );
+      mockGetAutomation.mockImplementation(() => Promise.resolve(automation));
+
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Project Alpha'));
+
+      const toggle = await screen.findByTestId('auto-toggle');
+      expect(toggle).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.queryByTestId('automation-panel')).not.toBeInTheDocument();
+
+      fireEvent.click(toggle);
+
+      await waitFor(() => {
+        expect(mockUpdateProject).toHaveBeenCalledWith('proj-1', { auto: true });
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId('auto-toggle')).toHaveAttribute('aria-pressed', 'true');
+      });
+      await waitFor(() => {
+        expect(mockGetAutomation).toHaveBeenCalledWith('proj-1');
+      });
+      await waitFor(() => {
+        expect(screen.getByText('1 of 2 tasks merged, 1 in flight')).toBeInTheDocument();
+      });
+      expect(screen.getByText('Scaffold the repository')).toBeInTheDocument();
+      expect(screen.getByText('Reviewed by reviewer-model')).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'Interview' })).toHaveAttribute(
+        'href',
+        '/chats?id=chat-plan'
+      );
+    });
+
+    it('marks cards of projects that run themselves and resumes a paused one', async () => {
+      const paused = {
+        ...automation,
+        paused_reason: 'The project token cannot bypass branch protection',
+        counts: { ...automation.counts, paused: 1 },
+      };
+      mockGetProjects.mockImplementation(() =>
+        Promise.resolve([{ ...mockProjects[0], auto: true }, mockProjects[1]])
+      );
+      mockGetAutomation.mockImplementation(() => Promise.resolve(paused));
+      mockResumeAutomation.mockImplementation(() =>
+        Promise.resolve({ ...mockProjects[0], auto: true })
+      );
+
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByTestId('auto-badge')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Project Alpha'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('automation-paused')).toBeInTheDocument();
+      });
+      expect(
+        screen.getByText('The project token cannot bypass branch protection')
+      ).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+      await waitFor(() => {
+        expect(mockResumeAutomation).toHaveBeenCalledWith('proj-1');
+      });
+    });
+
+    it('selects the project named in the URL', async () => {
+      renderWithQueryClient(<ProjectsPage />, '/projects?id=proj-2');
+      await waitFor(
+        () => {
+          expect(
+            screen.getByRole('heading', { name: 'Project Beta', level: 2 })
+          ).toBeInTheDocument();
+        },
+        { timeout: 3000 }
+      );
     });
   });
 

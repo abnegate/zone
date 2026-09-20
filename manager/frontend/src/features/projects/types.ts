@@ -13,8 +13,76 @@ export interface Project {
   github_repo_url: string | null;
   /** ID of the linked source */
   source_id: string | null;
+  /** Whether the project runs itself: every agentic task run, reviewed and merged unattended. */
+  auto: boolean;
+  /** Why automation stopped and needs a person, when it did. */
+  auto_paused_reason?: string | null;
+  /** When every agentic task was merged, when it was. */
+  auto_completed_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** The brief an auto project's interview opens with. */
+export interface AutoProjectRequest {
+  brief: string;
+  model_name?: string;
+}
+
+export interface AutoProjectResponse {
+  chat_id: string;
+}
+
+export type AutomationStage =
+  | 'idle'
+  | 'running'
+  | 'no_changes'
+  | 'awaiting_checks'
+  | 'awaiting_reviews'
+  | 'fixing'
+  | 'merging'
+  | 'post_merge'
+  | 'merged'
+  | 'paused';
+
+export interface AutomationTask {
+  task_id: string;
+  title: string;
+  status: string;
+  is_agentic: boolean;
+  kind: string | null;
+  stage: AutomationStage | null;
+  reason: string | null;
+  runs: number;
+  review_rounds: number;
+  reviewers: string | null;
+  pr_url: string | null;
+  head: string | null;
+  checks: string | null;
+  merge_sha: string | null;
+  auto_created: boolean;
+}
+
+export interface AutomationCounts {
+  total: number;
+  agentic: number;
+  complete: number;
+  in_flight: number;
+  paused: number;
+}
+
+/** What automation knows about one project right now. */
+export interface ProjectAutomation {
+  project_id: string;
+  auto: boolean;
+  actor_id: string | null;
+  paused_reason: string | null;
+  completed_at: string | null;
+  parallelism: number;
+  planner_chat_id: string | null;
+  updates_chat_id: string | null;
+  counts: AutomationCounts;
+  tasks: AutomationTask[];
 }
 
 export interface CreateProjectRequest {
@@ -31,6 +99,8 @@ export interface UpdateProjectRequest {
   name?: string;
   description?: string;
   status?: ProjectStatus;
+  /** Turn automation on or off. */
+  auto?: boolean;
   /** @deprecated Use source_id instead */
   github_repo_url?: string;
   source_id?: string;

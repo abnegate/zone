@@ -127,6 +127,12 @@ pub struct ChatResponse {
     reasoning: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     needs_character: Option<bool>,
+    /// What the chat is for, when it is more than an assistant: a project
+    /// planner, or a project's updates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    purpose: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<Uuid>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -146,12 +152,24 @@ impl From<chats::ChatRow> for ChatResponse {
             tools: None,
             reasoning: None,
             needs_character: None,
+            purpose: None,
+            project_id: None,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
 }
 
 impl ChatResponse {
+    fn with_link(mut self, link: Option<chats::ChatLink>) -> Self {
+        if let Some(link) = link {
+            if link.purpose != chats::ChatPurpose::Assistant {
+                self.purpose = Some(link.purpose.as_str().to_string());
+            }
+            self.project_id = link.project_id;
+        }
+        self
+    }
+
     fn with_profile(mut self, profile: crate::services::model::ModelProfile) -> Self {
         self.tools = profile.tools;
         self.reasoning = profile.reasoning;
@@ -232,9 +250,12 @@ async fn chat_with_messages(
         }
         _ => None,
     };
+    let link = chats::link(state.db(), chat.id).await.ok().flatten();
     ChatWithMessagesResponse {
         context,
-        chat: ChatResponse::from(chat).with_profile(profile),
+        chat: ChatResponse::from(chat)
+            .with_profile(profile)
+            .with_link(link),
         messages,
     }
 }

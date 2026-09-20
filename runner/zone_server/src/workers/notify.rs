@@ -9,10 +9,11 @@
 //! Resolution is split from reading the environment so every parsing rule is
 //! testable without touching the process.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use zone_core::SecretValue;
-use zone_notify::{Discord, Email, Fanout, Slack, SmtpConfig};
+use zone_notify::{Discord, Email, Fanout, Notifier, NotifyError, Slack, SmtpConfig};
 
 const SLACK_VARIABLE: &str = "ZONE_NOTIFY_SLACK_WEBHOOK";
 const DISCORD_VARIABLE: &str = "ZONE_NOTIFY_DISCORD_WEBHOOK";
@@ -154,7 +155,7 @@ fn smtp(environment: &NotifyEnvironment) -> Option<SmtpConfig> {
     })
 }
 
-/// Build the fan-out these settings describe.
+/// The channels these settings describe, each already validated.
 ///
 /// A channel that will not construct is logged and left out rather than failing
 /// the build: one malformed webhook should cost that channel, not every other
@@ -163,20 +164,20 @@ fn smtp(environment: &NotifyEnvironment) -> Option<SmtpConfig> {
 /// Call this from inside the tokio runtime. The email backend builds a pooled
 /// SMTP transport, which needs a reactor to attach its timers to and panics
 /// without one.
-pub fn fanout(environment: &NotifyEnvironment) -> Fanout {
+pub fn channels(environment: &NotifyEnvironment) -> Vec<Arc<dyn Notifier>> {
     let settings = NotifySettings::resolve(environment);
-    let mut fanout = Fanout::new().timeout(settings.timeout);
+    let mut channels: Vec<Arc<dyn Notifier>> = Vec::new();
 
     if let Some(webhook) = &settings.slack_webhook {
         match Slack::new(webhook) {
-            Ok(slack) => fanout.register(std::sync::Arc::new(slack)),
+            Ok(slack) => channels.push(Arc::new(slack)),
             Err(error) => tracing::warn!(%error, "Slack notification channel is misconfigured"),
         }
     }
 
     if let Some(webhook) = &settings.discord_webhook {
         match Discord::new(webhook) {
-            Ok(discord) => fanout.register(std::sync::Arc::new(discord)),
+            Ok(discord) => channels.push(Arc::new(discord)),
             Err(error) => tracing::warn!(%error, "Discord notification channel is misconfigured"),
         }
     }
@@ -190,7 +191,7 @@ pub fn fanout(environment: &NotifyEnvironment) -> Fanout {
                     .map(String::as_str)
                     .collect();
                 match Email::new(config, &addresses) {
-                    Ok(email) => fanout.register(std::sync::Arc::new(email)),
+                    Ok(email) => channels.push(Arc::new(email)),
                     Err(error) => {
                         tracing::warn!(%error, "Email notification channel is misconfigured")
                     }
@@ -202,7 +203,89 @@ pub fn fanout(environment: &NotifyEnvironment) -> Fanout {
         }
     }
 
+    channels
+}
+
+/// A fan-out over `channels`, plus one more when a caller has a destination of
+/// its own -- the chat an auto project reports into, say -- that the process
+/// environment knows nothing about.
+pub fn fanout_with(
+    channels: Vec<Arc<dyn Notifier>>,
+    extra: Option<Arc<dyn Notifier>>,
+    timeout: Duration,
+) -> Fanout {
+    let mut fanout = Fanout::new().timeout(timeout);
+    for channel in channels.into_iter().chain(extra) {
+        fanout.register(channel);
+    }
     fanout
+}
+
+/// Build the fan-out these settings describe.
+pub fn fanout(environment: &NotifyEnvironment) -> Fanout {
+    let timeout = NotifySettings::resolve(environment).timeout;
+    fanout_with(channels(environment), None, timeout)
+}
+
+/// A workspace chat as a delivery destination.
+///
+/// The one channel that needs no configuration: a notice about a project lands
+/// in that project's updates chat as an assistant message, stored like any
+/// other and pushed to whoever has the chat open, so a person who set nothing
+/// up still sees what automation did. Delivery is the insert; a message that
+/// could not be stored was not delivered, and the fan-out reports it so.
+pub struct ChatNotifier {
+    pool: sqlx::PgPool,
+    chat_id: uuid::Uuid,
+    kind: &'static str,
+}
+
+impl ChatNotifier {
+    pub fn new(pool: sqlx::PgPool, chat_id: uuid::Uuid, kind: &'static str) -> Self {
+        Self {
+            pool,
+            chat_id,
+            kind,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Notifier for ChatNotifier {
+    fn channel(&self) -> zone_notify::Channel {
+        zone_notify::Channel::custom("chat")
+    }
+
+    async fn deliver(&self, notification: &zone_notify::Notification) -> Result<(), NotifyError> {
+        let failed = |error: sqlx::Error| NotifyError::Unreachable {
+            host: "database".to_string(),
+            message: error.to_string(),
+        };
+        let mut transaction = self.pool.begin().await.map_err(failed)?;
+        let stored: serde_json::Value = sqlx::query_scalar(
+            "INSERT INTO messages (chat_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3) \
+             RETURNING to_jsonb(messages.*)",
+        )
+        .bind(self.chat_id)
+        .bind(notification.to_plain_text())
+        .bind(serde_json::json!({
+            "source": "auto_project",
+            "kind": self.kind,
+            "severity": notification.kind().to_string(),
+            "link": notification.url(),
+        }))
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(failed)?;
+        sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
+            .bind(self.chat_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(failed)?;
+        transaction.commit().await.map_err(failed)?;
+        crate::db::actions::publish(self.chat_id, stored);
+        Ok(())
+    }
 }
 
 /// Build the fan-out the process environment describes.

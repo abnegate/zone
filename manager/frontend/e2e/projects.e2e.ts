@@ -7,7 +7,13 @@ const generateMockProject = (
   id: string,
   name: string,
   status: 'active' | 'on_hold' | 'cancelled' = 'active',
-  options: { description?: string; github_repo_url?: string; source_id?: string } = {}
+  options: {
+    description?: string;
+    github_repo_url?: string;
+    source_id?: string;
+    auto?: boolean;
+    auto_paused_reason?: string | null;
+  } = {}
 ) => ({
   id,
   name,
@@ -15,8 +21,62 @@ const generateMockProject = (
   status,
   github_repo_url: options.github_repo_url || null,
   source_id: options.source_id || null,
+  auto: options.auto ?? false,
+  auto_paused_reason: options.auto_paused_reason ?? null,
+  auto_completed_at: null,
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
+});
+
+const generateMockAutomation = (
+  projectId: string,
+  options: { paused_reason?: string | null } = {}
+) => ({
+  project_id: projectId,
+  auto: true,
+  actor_id: 'user-1',
+  paused_reason: options.paused_reason ?? null,
+  completed_at: null,
+  parallelism: 3,
+  planner_chat_id: 'chat-plan',
+  updates_chat_id: 'chat-updates',
+  counts: { total: 2, agentic: 2, complete: 1, in_flight: 1, paused: options.paused_reason ? 1 : 0 },
+  tasks: [
+    {
+      task_id: 'task-1',
+      title: 'Scaffold the repository',
+      status: 'complete',
+      is_agentic: true,
+      kind: 'scaffold',
+      stage: 'merged',
+      reason: null,
+      runs: 1,
+      review_rounds: 1,
+      reviewers: 'reviewer-model',
+      pr_url: 'https://github.com/acme/app/pull/1',
+      head: 'abc',
+      checks: 'success',
+      merge_sha: 'def',
+      auto_created: false,
+    },
+    {
+      task_id: 'task-2',
+      title: 'Add continuous integration',
+      status: 'in_progress',
+      is_agentic: true,
+      kind: 'ci',
+      stage: options.paused_reason ? 'paused' : 'awaiting_reviews',
+      reason: options.paused_reason ?? null,
+      runs: 1,
+      review_rounds: 1,
+      reviewers: null,
+      pr_url: 'https://github.com/acme/app/pull/2',
+      head: 'ghi',
+      checks: 'success',
+      merge_sha: null,
+      auto_created: false,
+    },
+  ],
 });
 
 const sourcesRoutePattern = /\/api\/workspaces\/[^/]+\/sources/;
@@ -26,6 +86,8 @@ const isSourcesListRequest = (requestUrl: string) =>
 const projectsListRoutePattern = /\/api\/projects(?:\?.*)?$/;
 const projectDetailRoutePattern = /\/api\/projects\/[^/]+$/;
 const projectSyncRoutePattern = /\/api\/projects\/[^/]+\/sync(?:\/[^/]+)?$/;
+const projectAutomationRoutePattern = /\/api\/projects\/[^/]+\/automation(?:\/resume)?$/;
+const autoProjectRoutePattern = /\/api\/workspaces\/[^/]+\/projects\/auto$/;
 
 test.describe('Projects Page', () => {
   test.beforeEach(async ({ context, page }) => {
@@ -699,6 +761,181 @@ test.describe('Projects Page', () => {
       await expect(
         page.locator('.projects-page .ui-card').first()
       ).toHaveAttribute('tabindex', '0');
+    });
+  });
+
+  test.describe('Auto Projects', () => {
+    test('starts the interview from a brief and opens the planner chat', async ({ page }) => {
+      let posted: unknown = null;
+      await routeApi(page, autoProjectRoutePattern, (route) => {
+        if (route.request().method() === 'POST') {
+          posted = route.request().postDataJSON();
+          route.fulfill({
+            status: 202,
+            contentType: 'application/json',
+            body: JSON.stringify({ chat_id: 'chat-plan' }),
+          });
+          return;
+        }
+        route.continue();
+      });
+      // The planner chat the page navigates to
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        const url = route.request().url();
+        if (route.request().method() !== 'GET') {
+          route.continue();
+          return;
+        }
+        if (url.includes('/chat-plan')) {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              chat: {
+                id: 'chat-plan',
+                title: 'Plan: A recipe app',
+                model_name: 'llama3.2',
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+                archived: false,
+                agent_enabled: true,
+                purpose: 'project_planner',
+                project_id: null,
+                messages: [],
+              },
+            }),
+          });
+          return;
+        }
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ chats: [] }),
+        });
+      });
+
+      await page.getByTestId('auto-project-button').click();
+      await expect(page.getByTestId('auto-project-modal')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Start the interview' })).toBeDisabled();
+
+      await page.getByTestId('auto-project-brief').fill('A recipe app for iOS and Android');
+      await page.getByRole('button', { name: 'Start the interview' }).click();
+
+      await expect(page).toHaveURL('/chats?id=chat-plan');
+      expect(posted).toEqual({ brief: 'A recipe app for iOS and Android' });
+      await expect(page.getByTestId('chat-purpose')).toContainText('Project planner');
+    });
+
+    test('toggles automation with a PATCH and shows the automation panel', async ({ page }) => {
+      const mockProject = generateMockProject('proj-1', 'Manual Project', 'active');
+      let patched: unknown = null;
+
+      await page.unroute(projectsListRoutePattern);
+      await routeApi(page, projectsListRoutePattern, (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ success: true, projects: [mockProject] }),
+          });
+          return;
+        }
+        route.continue();
+      });
+      await routeApi(page, projectDetailRoutePattern, (route) => {
+        if (route.request().method() === 'PATCH') {
+          patched = route.request().postDataJSON();
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ success: true, project: { ...mockProject, auto: true } }),
+          });
+          return;
+        }
+        route.continue();
+      });
+      await routeApi(page, projectAutomationRoutePattern, (route) => {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(generateMockAutomation('proj-1')),
+        });
+      });
+
+      await page.reload();
+      await page.click('a[href="/projects"]');
+      await page.locator('.projects-page .ui-card').first().click();
+
+      const toggle = page.getByTestId('auto-toggle');
+      await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+      await expect(page.getByTestId('automation-panel')).toHaveCount(0);
+
+      await toggle.click();
+
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+      expect(patched).toEqual({ auto: true });
+      await expect(page.getByTestId('automation-panel')).toContainText(
+        '1 of 2 tasks merged, 1 in flight'
+      );
+      await expect(page.getByTestId('automation-panel')).toContainText('Under review');
+      await expect(page.getByRole('link', { name: 'Interview' })).toHaveAttribute(
+        'href',
+        '/chats?id=chat-plan'
+      );
+    });
+
+    test('shows why a project paused and resumes it', async ({ page }) => {
+      const reason = 'The project token cannot bypass branch protection';
+      const mockProject = generateMockProject('proj-1', 'Paused Project', 'active', {
+        auto: true,
+        auto_paused_reason: reason,
+      });
+      let resumed = false;
+
+      await page.unroute(projectsListRoutePattern);
+      await routeApi(page, projectsListRoutePattern, (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ success: true, projects: [mockProject] }),
+          });
+          return;
+        }
+        route.continue();
+      });
+      await routeApi(page, projectAutomationRoutePattern, (route) => {
+        if (route.request().method() === 'POST') {
+          resumed = true;
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              success: true,
+              project: { ...mockProject, auto_paused_reason: null },
+            }),
+          });
+          return;
+        }
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(
+            generateMockAutomation('proj-1', { paused_reason: resumed ? null : reason })
+          ),
+        });
+      });
+
+      await page.reload();
+      await page.click('a[href="/projects"]');
+      await expect(page.getByTestId('auto-badge')).toBeVisible();
+      await page.locator('.projects-page .ui-card').first().click();
+
+      await expect(page.getByTestId('automation-paused')).toContainText(reason);
+      await page.getByRole('button', { name: 'Resume' }).click();
+
+      await expect.poll(() => resumed).toBe(true);
+      await expect(page.getByTestId('automation-paused')).toHaveCount(0);
     });
   });
 
