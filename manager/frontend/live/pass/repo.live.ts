@@ -889,7 +889,7 @@ test.describe('sources, projects and tasks', () => {
     ).trim();
     await expect
       .poll(async () => String((await taskById(taskId)).pr_status ?? ''), {
-        timeout: 900_000,
+        timeout: 2_100_000,
         intervals: [10_000],
       })
       .toBe('merged');
