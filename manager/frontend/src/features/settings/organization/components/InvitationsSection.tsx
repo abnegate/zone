@@ -116,8 +116,18 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
       {error && <div className="alert alert-error">{error}</div>}
       {invitations.length === 0 ? (
         <EmptyState
+          icon={
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M3 8l9 6 9-6M5 5h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" />
+            </svg>
+          }
           title="No pending invitations"
           description="Invite team members to join this organization"
+          action={
+            <Button variant="secondary" onClick={() => setShowModal(true)}>
+              Send an invitation
+            </Button>
+          }
         />
       ) : (
         <div className="table-container">

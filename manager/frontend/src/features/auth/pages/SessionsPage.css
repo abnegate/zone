@@ -20,6 +20,29 @@
   white-space: nowrap;
 }
 
+.sessions-table td {
+  height: 2.75rem;
+  padding: 0 var(--ui-space-3);
+  border-bottom: none;
+  box-shadow: inset 0 -1px var(--ui-border);
+}
+
+.sessions-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ui-space-2);
+  height: var(--ui-control-height-sm);
+  flex-shrink: 0;
+}
+
+.sessions-pager-range {
+  margin-right: auto;
+  font-size: var(--ui-text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-muted);
+}
+
 .sessions-table th:last-child,
 .sessions-table td:last-child {
   width: 1%;
@@ -27,7 +50,7 @@
 }
 
 .sessions-table tbody tr:last-child td {
-  border-bottom: none;
+  box-shadow: none;
 }
 
 .sessions-table tbody tr.current-session td {

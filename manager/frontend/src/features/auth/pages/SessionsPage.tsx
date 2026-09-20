@@ -7,7 +7,7 @@ import {
 } from '@tanstack/react-table';
 import { Button, Modal } from '@zone/ui';
 import { formatDistanceToNow } from 'date-fns';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import { useSessions } from '../hooks';
@@ -16,6 +16,14 @@ import { parseUserAgent } from '../utils';
 import './SessionsPage.css';
 
 const columnHelper = createColumnHelper<StockFeatures, Session>();
+
+const PAGE_SIZE = 50;
+
+/// The session in hand leads the list, so it is on the first page however many
+/// others there are.
+function currentFirst(sessions: Session[]): Session[] {
+  return [...sessions].sort((a, b) => Number(b.is_current) - Number(a.is_current));
+}
 
 export default function SessionsPage() {
   const {
@@ -31,6 +39,16 @@ export default function SessionsPage() {
   const [sessionToRevoke, setSessionToRevoke] = useState<string | null>(null);
   const [showRevokeModal, setShowRevokeModal] = useState(false);
   const [showRevokeAllModal, setShowRevokeAllModal] = useState(false);
+  const [pageIndex, setPageIndex] = useState(0);
+
+  const ordered = useMemo(() => currentFirst(sessions), [sessions]);
+  const pageCount = Math.max(1, Math.ceil(ordered.length / PAGE_SIZE));
+  const currentPage = Math.min(pageIndex, pageCount - 1);
+  const firstShown = currentPage * PAGE_SIZE;
+  const shown = useMemo(
+    () => ordered.slice(firstShown, firstShown + PAGE_SIZE),
+    [ordered, firstShown]
+  );
 
   const columns = columnHelper.columns([
     columnHelper.accessor((row) => row.device_info || parseUserAgent(row.user_agent), {
@@ -95,7 +113,7 @@ export default function SessionsPage() {
 
   const table = useTable({
     features: stockFeatures,
-    data: sessions,
+    data: shown,
     columns,
   });
 
@@ -188,6 +206,30 @@ export default function SessionsPage() {
               </tbody>
             </table>
           </div>
+        )}
+
+        {!isLoading && pageCount > 1 && (
+          <nav className="sessions-pager" aria-label="Sessions pages">
+            <span className="sessions-pager-range">
+              {firstShown + 1}–{firstShown + shown.length} of {ordered.length.toLocaleString()}
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={currentPage === 0}
+              onClick={() => setPageIndex(currentPage - 1)}
+            >
+              Previous
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={currentPage >= pageCount - 1}
+              onClick={() => setPageIndex(currentPage + 1)}
+            >
+              Next
+            </Button>
+          </nav>
         )}
       </div>
 

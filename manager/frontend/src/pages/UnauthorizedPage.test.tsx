@@ -32,17 +32,20 @@ describe('UnauthorizedPage', () => {
 });
 
 describe('UnauthorizedPage layout', () => {
-  it('sets the title in plain ink on one card', () => {
+  it('renders as the auth card with the logo row over an error state', () => {
     const { container } = render(
       <BrowserRouter>
         <UnauthorizedPage />
       </BrowserRouter>
     );
+    const card = container.querySelector('.auth-container');
+    expect(card).not.toBeNull();
+    expect(card?.querySelector('.auth-header .zone-logo')).not.toBeNull();
     const title = screen.getByRole('heading', { name: 'Access Denied' });
-    expect(title).toHaveClass('unauthorized-title');
-    expect(title.getAttribute('style')).toBeNull();
-    expect(container.querySelector('.unauthorized-card')).not.toBeNull();
-    expect(container.querySelector('.auth-container')).toBeNull();
+    expect(title).toHaveClass('error-title');
+    expect(title.closest('.auth-error-state')).not.toBeNull();
+    expect(screen.getByTestId('error-icon')).toBeInTheDocument();
+    expect(container.querySelector('.unauthorized-card')).toBeNull();
     expect(screen.getByRole('link', { name: 'Go to Home' })).not.toHaveClass('btn-block');
   });
 });

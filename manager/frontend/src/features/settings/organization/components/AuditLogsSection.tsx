@@ -294,6 +294,11 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
       )}
       {logs.length === 0 ? (
         <EmptyState
+          icon={
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M12 8v4l3 3M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          }
           title={`No audit logs found${hasActiveFilters ? ' matching the selected filters' : ''}.`}
           description="Member, invitation, workspace and AI settings changes are recorded here."
           action={

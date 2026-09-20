@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const settings = join(import.meta.dir);
@@ -114,11 +114,11 @@ describe('form rows', () => {
 });
 
 describe('unauthorized page', () => {
-  it('uses the plain display title on a 400 card', () => {
-    const css = read(join(pages, 'UnauthorizedPage.css'));
-    expect(css).not.toContain('gradient');
-    expect(rule(css, '.unauthorized-card')).toContain('max-width: var(--ui-modal-sm)');
-    expect(rule(css, '.unauthorized-title')).toContain('font-size: var(--ui-title-size)');
-    expect(rule(css, '.unauthorized-icon')).toContain('color: var(--ui-error)');
+  it('has no card of its own and renders through the auth card', () => {
+    expect(existsSync(join(pages, 'UnauthorizedPage.css'))).toBe(false);
+    const page = read(join(pages, 'UnauthorizedPage.tsx'));
+    expect(page).toContain('<AuthCard>');
+    expect(page).toContain('<AuthStatus');
+    expect(page).not.toContain('unauthorized-card');
   });
 });

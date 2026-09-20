@@ -145,41 +145,6 @@
   flex: 1;
 }
 
-.invitation-accept-page .error-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--ui-space-1);
-  max-width: none;
-  padding: 0;
-  text-align: center;
-}
-
-.invitation-accept-page .error-state h1 {
-  margin: 0;
-  font-family: var(--ui-font-display);
-  font-size: var(--ui-text-xl);
-  font-weight: 600;
-  line-height: var(--ui-leading-tight);
-  letter-spacing: var(--ui-tracking-tight);
-  color: var(--ui-text-primary);
-}
-
-.invitation-accept-page .error-state p {
-  margin: 0;
-  font-size: var(--ui-text-sm);
-  line-height: var(--ui-space-5);
-  color: var(--ui-text-secondary);
-}
-
-.invitation-accept-page .error-state .ui-btn {
-  margin-top: var(--ui-space-3);
-}
-
-.invitation-accept-page .loading-state {
-  padding: 0;
-}
-
 @media (max-width: 480px) {
   .invitation-details {
     grid-template-columns: 1fr;

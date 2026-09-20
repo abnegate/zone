@@ -310,6 +310,63 @@ describe('SessionsPage', () => {
     });
   });
 
+  describe('Pagination', () => {
+    const manySessions = (count: number, currentAt: number): SessionsResponse => ({
+      sessions: Array.from({ length: count }, (_, index) => ({
+        ...mockSessionsResponse.sessions[1],
+        id: `session-${index}`,
+        ip_address: `10.0.0.${index}`,
+        is_current: index === currentAt,
+      })),
+    });
+
+    it('shows fifty rows at a time and pages through the rest', async () => {
+      mockGetSessions.mockResolvedValueOnce(manySessions(120, 5));
+      renderSessionsPage();
+
+      await waitFor(() => {
+        expect(screen.getAllByRole('row')).toHaveLength(51);
+      });
+      expect(screen.getByText('1–50 of 120')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('101–120 of 120')).toBeInTheDocument();
+      });
+      expect(screen.getAllByRole('row')).toHaveLength(21);
+      expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    });
+
+    it('puts the current session on the first row with its badge and no revoke', async () => {
+      mockGetSessions.mockResolvedValueOnce(manySessions(120, 77));
+      renderSessionsPage();
+
+      const rows = await waitFor(() => {
+        const found = screen.getAllByRole('row');
+        expect(found).toHaveLength(51);
+        return found;
+      });
+      const first = rows[1];
+      expect(first).toHaveClass('current-session');
+      expect(first.querySelector('.current-badge')?.textContent).toBe('Current');
+      expect(
+        first.querySelector<HTMLButtonElement>('button[aria-label="Cannot revoke current session"]')
+          ?.disabled
+      ).toBe(true);
+    });
+
+    it('shows no pager when every session fits on one page', async () => {
+      renderSessionsPage();
+      await waitFor(() => {
+        expect(screen.getAllByRole('row')).toHaveLength(4);
+      });
+      expect(screen.queryByRole('navigation', { name: 'Sessions pages' })).toBeNull();
+    });
+  });
+
   describe('Empty State', () => {
     it('shows empty state when no sessions exist', async () => {
       mockGetSessions.mockResolvedValueOnce({ sessions: [] });
