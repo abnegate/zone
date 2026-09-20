@@ -219,6 +219,38 @@ test('sibling cards in a grid share one height', async ({ page }) => {
   }
 });
 
+test('the settings save footer stays on the pane edge at both ends of the scroll', async ({
+  page,
+}) => {
+  await signIn(page);
+
+  for (const [route, tab] of [
+    ['/org-settings', 'AI Settings'],
+    ['/settings', 'Theme'],
+  ] as const) {
+    await page.goto(route);
+    await page.getByRole('tab', { name: tab }).click();
+    const footer = page.locator('.settings-actions');
+    await expect(footer).toBeVisible();
+
+    const edges = await page.locator('.page-body').evaluate((body) => {
+      const bottom = () => body.querySelector('.settings-actions')?.getBoundingClientRect().bottom;
+      body.scrollTop = 0;
+      const atTop = bottom();
+      body.scrollTop = body.scrollHeight;
+      const atEnd = bottom();
+      return { pane: body.getBoundingClientRect().bottom, atTop, atEnd };
+    });
+    expect(Math.abs((edges.atTop ?? 0) - edges.pane), `${route} while scrolling`).toBeLessThanOrEqual(
+      1
+    );
+    expect(
+      Math.abs((edges.atEnd ?? 0) - edges.pane),
+      `${route} at the end of the scroll`
+    ).toBeLessThanOrEqual(1);
+  }
+});
+
 test('a training target title sits inside its box, not on the border', async ({ page }) => {
   await signIn(page);
   await page.goto('/models');

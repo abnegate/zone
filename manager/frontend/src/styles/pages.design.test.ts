@@ -272,6 +272,21 @@ describe('sources page layout', () => {
   });
 });
 
+describe('settings page layout', () => {
+  const css = read(join(features, 'settings', 'workspace', 'pages', 'WorkspaceSettingsPage.css'));
+
+  it('sticks the save footer to the scroller edge so it does not lift at the end of the scroll', () => {
+    const footer = rule(css, '.settings-actions');
+    expect(footer).toContain('position: sticky');
+    expect(footer).toContain('bottom: 0;');
+    expect(footer).not.toContain('--ui-panel-padding');
+    expect(footer).toContain('margin: auto calc(-1 * var(--ui-space-1)) 0');
+    const body = rule(css, '.settings-page .page-body:has(.settings-actions)');
+    expect(body).toContain('padding-bottom: 0');
+    expect(body).toContain('flex-direction: column');
+  });
+});
+
 describe('models page layout', () => {
   const css = read(join(features, 'models', 'pages', 'ModelsPage.css'));
   const page = read(join(features, 'models', 'pages', 'ModelsPage.tsx'));

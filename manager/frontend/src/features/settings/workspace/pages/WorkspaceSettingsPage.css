@@ -505,15 +505,32 @@
   text-overflow: ellipsis;
 }
 
+.settings-page .page-body:has(.settings-actions) {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 0;
+}
+
+.settings-page .page-body:has(.settings-actions) > .settings-body,
+.settings-page .ui-tabs-content:has(.settings-actions),
+.settings-form:has(.settings-actions) {
+  flex: 1;
+}
+
+.settings-page .ui-tabs-content:has(.settings-actions) {
+  display: flex;
+  flex-direction: column;
+}
+
 .settings-actions {
   position: sticky;
-  bottom: calc(-1 * var(--ui-panel-padding));
+  bottom: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--ui-space-2);
   min-height: var(--ui-toolbar-height);
-  margin: 0 calc(-1 * var(--ui-space-1));
+  margin: auto calc(-1 * var(--ui-space-1)) 0;
   padding: var(--ui-space-2) var(--ui-space-1);
   background: var(--ui-bg-base);
   border-top: 1px solid var(--ui-border);
