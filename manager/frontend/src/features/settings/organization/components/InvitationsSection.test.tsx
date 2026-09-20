@@ -192,7 +192,7 @@ describe('InvitationsSection', () => {
     fireEvent.change(screen.getByLabelText(/organization role/i), {
       target: { value: 'member' },
     });
-    fireEvent.change(screen.getByLabelText(/workspace \(optional\)/i), {
+    fireEvent.change(screen.getByLabelText(/^workspace\s+optional$/i), {
       target: { value: 'ws-1' },
     });
 

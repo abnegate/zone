@@ -1,7 +1,15 @@
 import { Button, TabsContent, TabsList, TabsTrigger } from '@zone/ui';
-import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  type CSSProperties,
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { client } from '../../../../api/client';
-import { useTheme } from '../../../../shared/context/ThemeContext';
+import { useTheme, workspaceThemeProperties } from '../../../../shared/context/ThemeContext';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
 import { useModels } from '../../../models';
@@ -93,6 +101,7 @@ export default function WorkspaceSettingsPage() {
   const { isAuthenticated } = useAuth();
   const { models: installedModels } = useModels();
   const {
+    theme,
     workspaceTheme,
     workspaceThemeLoading,
     workspaceThemeError,
@@ -237,6 +246,36 @@ export default function WorkspaceSettingsPage() {
     fontFamily,
     fontSize,
     borderRadius,
+  ]);
+
+  const previewStyle = useMemo(() => {
+    const style: Record<string, string> = {};
+    const draft: WorkspaceTheme = {
+      workspace_id: workspaceId ?? '',
+      primary_color_light: primaryColorLight,
+      secondary_color_light: secondaryColorLight,
+      primary_color_dark: primaryColorDark,
+      secondary_color_dark: secondaryColorDark,
+      font_family: fontFamily,
+      font_size_base: `${fontSize}px`,
+      border_radius: borderRadius,
+      created_at: '',
+      updated_at: '',
+    };
+    for (const [name, value] of workspaceThemeProperties(draft, theme)) {
+      style[name === 'font-size' ? 'fontSize' : name] = value;
+    }
+    return style as CSSProperties;
+  }, [
+    workspaceId,
+    primaryColorLight,
+    secondaryColorLight,
+    primaryColorDark,
+    secondaryColorDark,
+    fontFamily,
+    fontSize,
+    borderRadius,
+    theme,
   ]);
 
   useEffect(() => {
@@ -561,7 +600,7 @@ export default function WorkspaceSettingsPage() {
             </div>
           </div>
 
-          <div className="preview-box">
+          <div className="preview-box" style={previewStyle}>
             <h3 className="settings-eyebrow">Preview</h3>
             <p className="preview-text">
               This is a preview of your theme settings. Changes are applied live.

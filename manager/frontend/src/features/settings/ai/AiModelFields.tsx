@@ -99,7 +99,7 @@ export function AiModelFields({
         onChange={(value) => onChange('reasoning', value)}
         options={plain(reasoningOptions)}
         blankLabel="Automatic"
-        hint="Harder questions. Empty picks a larger installed model when the message looks like a reasoning task."
+        hint="Harder questions; empty picks a larger installed model."
       />
       {embeddingOptions.length > 0 ? (
         <ModelSelect
@@ -130,33 +130,35 @@ export function AiModelFields({
           </p>
         </div>
       )}
-      <ModelSelect
-        id="model-image"
-        label="Image Model"
-        value={models.image}
-        onChange={(value) => onChange('image', value)}
-        options={imageOptions}
-        blankLabel={inheritedLabel}
-        hint="ComfyUI checkpoint used when a message asks for an image. Attach a photo to edit it instead of generating."
-      />
-      <ModelSelect
-        id="model-video"
-        label="Video Model"
-        value={models.video}
-        onChange={(value) => onChange('video', value)}
-        options={plain(withCurrent(VIDEO_MODEL_OPTIONS, models.video))}
-        blankLabel={inheritedLabel}
-        hint="ComfyUI UNET used when a message asks for a video."
-      />
-      <ModelSelect
-        id="model-audio"
-        label="Audio Model"
-        value={models.audio}
-        onChange={(value) => onChange('audio', value)}
-        options={plain(withCurrent(AUDIO_MODEL_OPTIONS, models.audio))}
-        blankLabel={inheritedLabel}
-        hint="ComfyUI checkpoint used when a message asks for audio."
-      />
+      <div className="form-grid form-grid--3">
+        <ModelSelect
+          id="model-image"
+          label="Image Model"
+          value={models.image}
+          onChange={(value) => onChange('image', value)}
+          options={imageOptions}
+          blankLabel={inheritedLabel}
+          hint="ComfyUI checkpoint for image requests."
+        />
+        <ModelSelect
+          id="model-video"
+          label="Video Model"
+          value={models.video}
+          onChange={(value) => onChange('video', value)}
+          options={plain(withCurrent(VIDEO_MODEL_OPTIONS, models.video))}
+          blankLabel={inheritedLabel}
+          hint="ComfyUI UNET for video requests."
+        />
+        <ModelSelect
+          id="model-audio"
+          label="Audio Model"
+          value={models.audio}
+          onChange={(value) => onChange('audio', value)}
+          options={plain(withCurrent(AUDIO_MODEL_OPTIONS, models.audio))}
+          blankLabel={inheritedLabel}
+          hint="ComfyUI checkpoint for audio requests."
+        />
+      </div>
     </div>
   );
 }

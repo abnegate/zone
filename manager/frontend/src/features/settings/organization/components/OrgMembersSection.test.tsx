@@ -107,6 +107,15 @@ const removeButtonFor = (email: string): HTMLElement =>
 const roleSelectFor = (email: string): HTMLElement =>
   within(memberRow(email)).getByRole('combobox');
 
+// A row the viewer cannot re-seat shows its role as a badge and no select.
+const roleBadgeFor = (email: string): HTMLElement => {
+  const row = memberRow(email);
+  expect(within(row).queryByRole('combobox')).toBeNull();
+  const badge = row.querySelector('.role-badge');
+  if (!badge) throw new Error(`no role badge in the row for ${email}`);
+  return badge as HTMLElement;
+};
+
 const rolesOfferedForNewMember = (): string[] => {
   const field = screen.getByRole('combobox', { name: 'Role' }).closest('.ui-select-wrapper');
   if (!field) throw new Error('no role field in the add member modal');
@@ -163,15 +172,15 @@ describe('OrgMembersSection', () => {
       });
     });
 
-    it('displays role badges', async () => {
+    it('shows one role control per row: a badge where it is fixed, a select where it can change', async () => {
       render(<OrgMembersSection orgId="org-123" />);
       await waitFor(() => {
-        const badges = document.querySelectorAll('.role-badge');
-        expect(badges.length).toBeGreaterThan(0);
-        expect(document.querySelector('.role-badge-owner')).toBeInTheDocument();
-        expect(document.querySelector('.role-badge-admin')).toBeInTheDocument();
-        expect(document.querySelector('.role-badge-member')).toBeInTheDocument();
+        expect(screen.getByText('Test Owner')).toBeInTheDocument();
       });
+      expect(roleBadgeFor('owner@test.com')).toHaveClass('role-badge-owner');
+      expect(roleSelectFor('admin@test.com')).toHaveValue('admin');
+      expect(roleSelectFor('member@test.com')).toHaveValue('member');
+      expect(document.querySelectorAll('.role-badge')).toHaveLength(1);
     });
 
     it('formats joined dates using user locale', async () => {
@@ -293,11 +302,9 @@ describe('OrgMembersSection', () => {
           expect(screen.getByText('Test Admin')).toBeInTheDocument();
         });
 
-        expect(optionsFor('member@test.com')).toEqual(['member']);
-        expect(optionsFor('Test Admin')).toEqual(['admin']);
-        expect(selectFor('Test Admin')).toBeDisabled();
-        expect(optionsFor('Test Owner')).toEqual(['owner']);
-        expect(selectFor('Test Owner')).toBeDisabled();
+        expect(roleBadgeFor('member@test.com')).toHaveTextContent('Member');
+        expect(roleBadgeFor('admin@test.com')).toHaveTextContent('Admin');
+        expect(roleBadgeFor('owner@test.com')).toHaveTextContent('Owner');
       } finally {
         asOwner();
       }
@@ -654,8 +661,7 @@ describe('OrgMembersSection', () => {
 
       render(<OrgMembersSection orgId="org-123" />);
       await waitFor(() => {
-        const roleSelects = screen.getAllByRole('combobox');
-        expect(roleSelects[0]).toBeDisabled();
+        expect(roleBadgeFor('owner@test.com')).toHaveTextContent('Owner');
       });
     });
   });
@@ -681,19 +687,21 @@ describe('OrgMembersSection', () => {
 
       expect(screen.queryByRole('button', { name: /Add Member/i })).not.toBeInTheDocument();
       expect(removeButtonFor('member@test.com')).toBeDisabled();
-      expect(roleSelectFor('member@test.com')).toBeDisabled();
+      expect(roleBadgeFor('member@test.com')).toHaveTextContent('Member');
       expect(removeButtonFor('admin@test.com')).toBeDisabled();
-      expect(roleSelectFor('admin@test.com')).toBeDisabled();
+      expect(roleBadgeFor('admin@test.com')).toHaveTextContent('Admin');
       expect(removeButtonFor('other-owner@test.com')).toBeDisabled();
-      expect(roleSelectFor('other-owner@test.com')).toBeDisabled();
+      expect(roleBadgeFor('other-owner@test.com')).toHaveTextContent('Owner');
     });
 
+    // An admin may remove a member but can grant them nothing else, so the
+    // row carries a Remove button and a badge rather than a one-option select.
     it('offers an admin control over a member', async () => {
       await renderAs('admin');
 
       expect(screen.getByRole('button', { name: /Add Member/i })).toBeInTheDocument();
       expect(removeButtonFor('member@test.com')).toBeEnabled();
-      expect(roleSelectFor('member@test.com')).toBeEnabled();
+      expect(roleBadgeFor('member@test.com')).toHaveTextContent('Member');
     });
 
     it('offers an owner control over a member', async () => {
