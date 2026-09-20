@@ -8,6 +8,10 @@ on:
       - 'Makefile'
       - 'scripts/compose.sh'
       - 'scripts/test-migrations.py'
+      - 'scripts/test-dockerfile-members.sh'
+      - 'manager/Dockerfile'
+      - 'runner/Cargo.toml'
+      - '.dockerignore'
       - '.github/workflows/dev-cli.yml'
   pull_request:
     paths:
@@ -15,6 +19,10 @@ on:
       - 'Makefile'
       - 'scripts/compose.sh'
       - 'scripts/test-migrations.py'
+      - 'scripts/test-dockerfile-members.sh'
+      - 'manager/Dockerfile'
+      - 'runner/Cargo.toml'
+      - '.dockerignore'
       - '.github/workflows/dev-cli.yml'
 
 permissions:
@@ -52,3 +60,6 @@ jobs:
 
       - name: Verify migration Make commands without Docker
         run: python3 scripts/test-migrations.py
+
+      - name: Verify the manager Dockerfile copies every workspace member
+        run: sh scripts/test-dockerfile-members.sh

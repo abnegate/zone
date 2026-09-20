@@ -15,25 +15,12 @@ WORKDIR /build/runner
 ARG TARGETARCH
 ARG TARGETVARIANT
 
-# Every workspace member, because Cargo reads the whole workspace manifest
-# before it builds any one package.
-COPY runner/Cargo.toml runner/Cargo.lock ./
-COPY runner/tool_runner ./tool_runner/
-COPY runner/zone_runner ./zone_runner/
-COPY runner/zone_core ./zone_core/
-COPY runner/zone_chat ./zone_chat/
-COPY runner/zone_comfy ./zone_comfy/
-COPY runner/zone_email ./zone_email/
-COPY runner/zone_search ./zone_search/
-COPY runner/zone_vcs ./zone_vcs/
-COPY runner/zone_vision ./zone_vision/
-COPY runner/zone_context ./zone_context/
-COPY runner/zone_server ./zone_server/
-COPY runner/zone_cli ./zone_cli/
-COPY runner/zone_installer ./zone_installer/
-COPY runner/zone_desktop/Cargo.toml ./zone_desktop/
-COPY runner/zone_desktop/src ./zone_desktop/src/
-COPY runner/.sqlx ./.sqlx
+# The whole workspace, because Cargo reads every member's manifest before it
+# builds any one package. Copying members by name drifted from
+# runner/Cargo.toml once already; .dockerignore keeps the build tree and the
+# desktop bundle assets out, and scripts/test-dockerfile-members.sh checks
+# every member stays covered.
+COPY runner/ ./
 
 # Packaged recipes and workflows are compiled into zone_server via include_str!
 COPY comfyui/workflows /build/comfyui/workflows
