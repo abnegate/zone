@@ -47,7 +47,7 @@
 
 .task-card-title h3 {
   flex: 1;
-  min-width: 0;
+  min-width: 60%;
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -62,7 +62,8 @@
   display: flex;
   align-items: center;
   gap: var(--ui-space-1);
-  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .task-project {

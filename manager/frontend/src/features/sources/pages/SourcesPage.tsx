@@ -161,7 +161,7 @@ export default function SourcesPage() {
                     <SourceStatusBadge source={source} />
                   </div>
 
-                  {source.description && <p className="source-description">{source.description}</p>}
+                  <p className="source-description">{source.description}</p>
 
                   <a
                     className="source-url"

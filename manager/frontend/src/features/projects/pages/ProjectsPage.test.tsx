@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type React from 'react';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
@@ -462,6 +462,61 @@ describe('ProjectsPage', () => {
     await waitFor(() => {
       expect(mockDeleteProject).toHaveBeenCalledWith('proj-1');
     });
+  });
+
+  it('shows the kit empty state with a folder icon until a project is selected', async () => {
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+
+    const placeholder = document.querySelector('.projects-detail-placeholder') as HTMLElement;
+    expect(placeholder.querySelector('.ui-empty')).not.toBeNull();
+    expect(placeholder.querySelector('.ui-empty-icon svg')).not.toBeNull();
+    expect(placeholder.querySelector('.empty-state')).toBeNull();
+    expect(
+      within(placeholder).getByRole('heading', { name: 'Select a project' })
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(placeholder).getByRole('button', { name: 'New project' }));
+    expect(screen.getByRole('heading', { name: 'New Project' })).toBeInTheDocument();
+  });
+
+  it('opens the edit, sync and delete dialogs with a header close button', async () => {
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Project Alpha'));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Edit Project' })).toBeInTheDocument();
+    });
+
+    const openAndClose = async (trigger: HTMLElement, title: string) => {
+      fireEvent.click(trigger);
+      const dialog = await screen.findByRole('dialog', { name: title });
+      const close = within(dialog).getByRole('button', { name: 'Close' });
+      expect(close).toHaveClass('ui-dialog-close');
+      expect(document.querySelector('.modal-content')).toBeNull();
+      fireEvent.click(close);
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      });
+      return dialog;
+    };
+
+    await openAndClose(screen.getByRole('button', { name: 'Edit Project' }), 'Edit Project');
+    await openAndClose(screen.getByRole('button', { name: /Add Sync/ }), 'Add External Sync');
+
+    const remove = screen.getByRole('button', { name: 'Delete' });
+    expect(remove).toHaveClass('ui-btn-destructive-outline');
+    fireEvent.click(remove);
+    const confirm = await screen.findByRole('dialog', { name: 'Delete Project' });
+    expect(confirm).toHaveClass('ui-dialog--sm');
+    expect(within(confirm).getByRole('button', { name: 'Delete Project' })).toHaveClass(
+      'ui-btn-destructive-outline'
+    );
+    expect(within(confirm).getByRole('button', { name: 'Close' })).toBeInTheDocument();
   });
 
   it('closes project details', async () => {

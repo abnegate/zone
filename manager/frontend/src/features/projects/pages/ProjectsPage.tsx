@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Badge, Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui';
+import { Badge, Button, EmptyState, Modal, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
@@ -34,6 +34,14 @@ const statusVariants: Record<ProjectStatus, 'success' | 'warning' | 'destructive
   on_hold: 'warning',
   cancelled: 'destructive',
 };
+
+function FolderIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+      <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+    </svg>
+  );
+}
 
 export default function ProjectsPage() {
   const { isAuthenticated } = useAuth();
@@ -372,11 +380,7 @@ export default function ProjectsPage() {
         ) : projects.length === 0 ? (
           <EmptyState
             className="projects-empty"
-            icon={
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-              </svg>
-            }
+            icon={<FolderIcon />}
             title={
               statusFilter === 'all'
                 ? 'No projects yet'
@@ -659,19 +663,32 @@ export default function ProjectsPage() {
                   <Button variant="secondary" onClick={() => openEditModal(selectedProject)}>
                     Edit Project
                   </Button>
-                  <Button variant="destructive" onClick={() => openModal(setShowDeleteConfirm)}>
+                  <Button
+                    variant="destructive-outline"
+                    onClick={() => openModal(setShowDeleteConfirm)}
+                  >
                     Delete
                   </Button>
                 </div>
               </aside>
             ) : (
               <div className="projects-detail-placeholder">
-                <div className="empty-state">
-                  <h3 className="empty-state-title">Select a project</h3>
-                  <p className="empty-state-description">
-                    Choose one from the list, or create a new one.
-                  </p>
-                </div>
+                <EmptyState
+                  icon={<FolderIcon />}
+                  title="Select a project"
+                  description="Choose one from the list, or create a new one."
+                  action={
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        resetForm();
+                        setShowCreateModal(true);
+                      }}
+                    >
+                      New project
+                    </Button>
+                  }
+                />
               </div>
             )}
           </>
@@ -702,255 +719,214 @@ export default function ProjectsPage() {
         }}
       />
 
-      {/* Edit Project Modal */}
-      {showEditModal && selectedProject && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowEditModal(false)}
-            onKeyDown={(e) => e.key === 'Escape' && setShowEditModal(false)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content">
-            <h3>Edit Project</h3>
-            <form onSubmit={handleUpdateProject}>
-              <div className="form-group">
-                <label htmlFor="edit-name">Name</label>
-                <input
-                  id="edit-name"
-                  type="text"
-                  value={formName}
-                  onChange={(e) => setFormName(e.target.value)}
-                  placeholder="Project name"
-                  className={fieldErrors.name ? 'input-error' : ''}
-                />
-                {fieldErrors.name && <span className="field-error">{fieldErrors.name}</span>}
-              </div>
-              <div className="form-group">
-                <label htmlFor="edit-description">Description</label>
-                <textarea
-                  id="edit-description"
-                  value={formDescription}
-                  onChange={(e) => setFormDescription(e.target.value)}
-                  placeholder="Optional description"
-                  rows={3}
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="edit-status">Status</label>
-                <select
-                  id="edit-status"
-                  value={formStatus}
-                  onChange={(e) => setFormStatus(e.target.value as ProjectStatus)}
-                >
-                  <option value="active">Active</option>
-                  <option value="on_hold">On Hold</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-              </div>
-              {operationError && (
-                <div className="form-error" role="alert">
-                  {operationError}
-                </div>
-              )}
-              <div className="modal-actions">
-                <Button variant="secondary" type="button" onClick={() => setShowEditModal(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={submitting} loading={submitting}>
-                  {submitting ? 'Saving...' : 'Save Changes'}
-                </Button>
-              </div>
-            </form>
+      <Modal
+        isOpen={showEditModal && selectedProject !== null}
+        onClose={() => setShowEditModal(false)}
+        title="Edit Project"
+      >
+        <form onSubmit={handleUpdateProject}>
+          <div className="form-group">
+            <label htmlFor="edit-name">Name</label>
+            <input
+              id="edit-name"
+              type="text"
+              value={formName}
+              onChange={(e) => setFormName(e.target.value)}
+              placeholder="Project name"
+              className={fieldErrors.name ? 'input-error' : ''}
+            />
+            {fieldErrors.name && <span className="field-error">{fieldErrors.name}</span>}
           </div>
-        </div>
-      )}
+          <div className="form-group">
+            <label htmlFor="edit-description">Description</label>
+            <textarea
+              id="edit-description"
+              value={formDescription}
+              onChange={(e) => setFormDescription(e.target.value)}
+              placeholder="Optional description"
+              rows={3}
+            />
+          </div>
+          <div className="form-group">
+            <label htmlFor="edit-status">Status</label>
+            <select
+              id="edit-status"
+              value={formStatus}
+              onChange={(e) => setFormStatus(e.target.value as ProjectStatus)}
+            >
+              <option value="active">Active</option>
+              <option value="on_hold">On Hold</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </div>
+          {operationError && (
+            <div className="form-error" role="alert">
+              {operationError}
+            </div>
+          )}
+          <div className="modal-actions">
+            <Button variant="secondary" type="button" onClick={() => setShowEditModal(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={submitting} loading={submitting}>
+              {submitting ? 'Saving...' : 'Save Changes'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
-      {/* Delete Confirmation Modal */}
-      {showDeleteConfirm && selectedProject && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowDeleteConfirm(false)}
-            onKeyDown={(e) => e.key === 'Escape' && setShowDeleteConfirm(false)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content modal-content--sm">
-            <h3>Delete Project</h3>
-            <p>
-              Are you sure you want to delete <strong>{selectedProject.name}</strong>? This action
-              cannot be undone.
-            </p>
-            {operationError && (
-              <div className="form-error" role="alert">
-                {operationError}
-              </div>
+      <Modal
+        isOpen={showDeleteConfirm && selectedProject !== null}
+        onClose={() => setShowDeleteConfirm(false)}
+        title="Delete Project"
+        size="sm"
+      >
+        <p>
+          Are you sure you want to delete <strong>{selectedProject?.name}</strong>? This action
+          cannot be undone.
+        </p>
+        {operationError && (
+          <div className="form-error" role="alert">
+            {operationError}
+          </div>
+        )}
+        <div className="modal-actions">
+          <Button variant="secondary" type="button" onClick={() => setShowDeleteConfirm(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive-outline"
+            type="button"
+            onClick={handleDeleteProject}
+            disabled={submitting}
+            loading={submitting}
+          >
+            {submitting ? 'Deleting...' : 'Delete Project'}
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={showSourceModal && selectedProject !== null}
+        onClose={() => setShowSourceModal(false)}
+        title="Link Source"
+      >
+        <form onSubmit={handleLinkSource}>
+          <div className="form-group">
+            <label htmlFor="source-select">Source</label>
+            <select
+              id="source-select"
+              value={formSourceId}
+              onChange={(e) => setFormSourceId(e.target.value)}
+              required
+            >
+              <option value="">Select a source...</option>
+              {sources
+                .filter((s) => s.is_active)
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.source_type})
+                  </option>
+                ))}
+            </select>
+            {sources.length === 0 && (
+              <span className="form-hint">No sources configured. Add one in the Sources page.</span>
             )}
-            <div className="modal-actions">
-              <Button variant="secondary" type="button" onClick={() => setShowDeleteConfirm(false)}>
-                Cancel
-              </Button>
-              <Button
-                variant="destructive"
-                type="button"
-                onClick={handleDeleteProject}
-                disabled={submitting}
-                loading={submitting}
+          </div>
+          {operationError && (
+            <div className="form-error" role="alert">
+              {operationError}
+            </div>
+          )}
+          <div className="modal-actions">
+            <Button variant="secondary" type="button" onClick={() => setShowSourceModal(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={submitting || !formSourceId} loading={submitting}>
+              {submitting ? 'Linking...' : 'Link Source'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        isOpen={showSyncModal && selectedProject !== null}
+        onClose={() => setShowSyncModal(false)}
+        title="Add External Sync"
+      >
+        <form onSubmit={handleCreateSyncConfig}>
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="sync-provider">Provider</label>
+              <select
+                id="sync-provider"
+                value={formSyncProvider}
+                onChange={(e) => setFormSyncProvider(e.target.value as SyncProvider)}
               >
-                {submitting ? 'Deleting...' : 'Delete Project'}
-              </Button>
+                <option value="github">GitHub</option>
+                <option value="linear">Linear</option>
+              </select>
+            </div>
+            <div className="form-group">
+              <label htmlFor="sync-direction">Direction</label>
+              <select
+                id="sync-direction"
+                value={formSyncDirection}
+                onChange={(e) => setFormSyncDirection(e.target.value as SyncDirection)}
+              >
+                <option value="inbound">Inbound (External to Zone)</option>
+                <option value="outbound">Outbound (Zone to External)</option>
+                <option value="bidirectional">Bidirectional</option>
+              </select>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Link Source Modal */}
-      {showSourceModal && selectedProject && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowSourceModal(false)}
-            onKeyDown={(e) => e.key === 'Escape' && setShowSourceModal(false)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content">
-            <h3>Link Source</h3>
-            <form onSubmit={handleLinkSource}>
-              <div className="form-group">
-                <label htmlFor="source-select">Source</label>
-                <select
-                  id="source-select"
-                  value={formSourceId}
-                  onChange={(e) => setFormSourceId(e.target.value)}
-                  required
-                >
-                  <option value="">Select a source...</option>
-                  {sources
-                    .filter((s) => s.is_active)
-                    .map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} ({s.source_type})
-                      </option>
-                    ))}
-                </select>
-                {sources.length === 0 && (
-                  <span className="form-hint">
-                    No sources configured. Add one in the Sources page.
-                  </span>
-                )}
-              </div>
-              {operationError && (
-                <div className="form-error" role="alert">
-                  {operationError}
-                </div>
+          {formSyncProvider === 'github' && (
+            <div className="form-group">
+              <label htmlFor="sync-repo-url">Repository URL</label>
+              <input
+                id="sync-repo-url"
+                type="url"
+                value={formSyncRepoUrl}
+                onChange={(e) => setFormSyncRepoUrl(e.target.value)}
+                placeholder="https://github.com/owner/repo"
+                className={fieldErrors.external_repo_url ? 'input-error' : ''}
+              />
+              {fieldErrors.external_repo_url && (
+                <span className="field-error">{fieldErrors.external_repo_url}</span>
               )}
-              <div className="modal-actions">
-                <Button variant="secondary" type="button" onClick={() => setShowSourceModal(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={submitting || !formSourceId} loading={submitting}>
-                  {submitting ? 'Linking...' : 'Link Source'}
-                </Button>
-              </div>
-            </form>
+            </div>
+          )}
+          {formSyncProvider === 'linear' && (
+            <div className="form-group">
+              <label htmlFor="sync-project-id">Project ID</label>
+              <input
+                id="sync-project-id"
+                type="text"
+                value={formSyncProjectId}
+                onChange={(e) => setFormSyncProjectId(e.target.value)}
+                placeholder="LINEAR-123"
+                className={fieldErrors.external_project_id ? 'input-error' : ''}
+              />
+              {fieldErrors.external_project_id && (
+                <span className="field-error">{fieldErrors.external_project_id}</span>
+              )}
+            </div>
+          )}
+          {operationError && (
+            <div className="form-error" role="alert">
+              {operationError}
+            </div>
+          )}
+          <div className="modal-actions">
+            <Button variant="secondary" type="button" onClick={() => setShowSyncModal(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={submitting} loading={submitting}>
+              {submitting ? 'Adding...' : 'Add Sync Config'}
+            </Button>
           </div>
-        </div>
-      )}
-
-      {/* Add Sync Config Modal */}
-      {showSyncModal && selectedProject && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowSyncModal(false)}
-            onKeyDown={(e) => e.key === 'Escape' && setShowSyncModal(false)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content">
-            <h3>Add External Sync</h3>
-            <form onSubmit={handleCreateSyncConfig}>
-              <div className="form-row">
-                <div className="form-group">
-                  <label htmlFor="sync-provider">Provider</label>
-                  <select
-                    id="sync-provider"
-                    value={formSyncProvider}
-                    onChange={(e) => setFormSyncProvider(e.target.value as SyncProvider)}
-                  >
-                    <option value="github">GitHub</option>
-                    <option value="linear">Linear</option>
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label htmlFor="sync-direction">Direction</label>
-                  <select
-                    id="sync-direction"
-                    value={formSyncDirection}
-                    onChange={(e) => setFormSyncDirection(e.target.value as SyncDirection)}
-                  >
-                    <option value="inbound">Inbound (External to Zone)</option>
-                    <option value="outbound">Outbound (Zone to External)</option>
-                    <option value="bidirectional">Bidirectional</option>
-                  </select>
-                </div>
-              </div>
-              {formSyncProvider === 'github' && (
-                <div className="form-group">
-                  <label htmlFor="sync-repo-url">Repository URL</label>
-                  <input
-                    id="sync-repo-url"
-                    type="url"
-                    value={formSyncRepoUrl}
-                    onChange={(e) => setFormSyncRepoUrl(e.target.value)}
-                    placeholder="https://github.com/owner/repo"
-                    className={fieldErrors.external_repo_url ? 'input-error' : ''}
-                  />
-                  {fieldErrors.external_repo_url && (
-                    <span className="field-error">{fieldErrors.external_repo_url}</span>
-                  )}
-                </div>
-              )}
-              {formSyncProvider === 'linear' && (
-                <div className="form-group">
-                  <label htmlFor="sync-project-id">Project ID</label>
-                  <input
-                    id="sync-project-id"
-                    type="text"
-                    value={formSyncProjectId}
-                    onChange={(e) => setFormSyncProjectId(e.target.value)}
-                    placeholder="LINEAR-123"
-                    className={fieldErrors.external_project_id ? 'input-error' : ''}
-                  />
-                  {fieldErrors.external_project_id && (
-                    <span className="field-error">{fieldErrors.external_project_id}</span>
-                  )}
-                </div>
-              )}
-              {operationError && (
-                <div className="form-error" role="alert">
-                  {operationError}
-                </div>
-              )}
-              <div className="modal-actions">
-                <Button variant="secondary" type="button" onClick={() => setShowSyncModal(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={submitting} loading={submitting}>
-                  {submitting ? 'Adding...' : 'Add Sync Config'}
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+        </form>
+      </Modal>
     </div>
   );
 }
