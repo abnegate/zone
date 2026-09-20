@@ -617,6 +617,12 @@ describe('WorkspaceSettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Override organization AI settings')).toBeInTheDocument();
       });
+      const override = screen.getByRole('checkbox', { name: 'Override organization AI settings' });
+      const hint = document.getElementById(override.getAttribute('aria-describedby') ?? '');
+      expect(hint?.textContent).toBe(
+        "When disabled, this workspace uses the organization's AI provider settings."
+      );
+      expect(override.closest('.toggle-row')).not.toBeNull();
     });
 
     it('shows effective settings when not overriding', async () => {

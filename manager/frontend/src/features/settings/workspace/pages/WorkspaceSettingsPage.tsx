@@ -635,21 +635,20 @@ export default function WorkspaceSettingsPage() {
           </div>
 
           <div className="settings-card">
-            <div className="checkbox-row">
+            <div className="toggle-row">
               <input
                 type="checkbox"
                 id="override-ai-settings"
+                aria-describedby="override-ai-settings-hint"
                 checked={overrideAiSettings}
                 onChange={(e) => setOverrideAiSettings(e.target.checked)}
               />
-              <div className="checkbox-row-copy">
-                <label htmlFor="override-ai-settings" className="checkbox-row-label">
-                  Override organization AI settings
-                </label>
-                <p className="checkbox-row-description">
-                  When disabled, this workspace uses the organization's AI provider settings.
-                </p>
-              </div>
+              <label htmlFor="override-ai-settings" className="toggle-row-label">
+                Override organization AI settings
+              </label>
+              <p id="override-ai-settings-hint" className="toggle-row-description">
+                When disabled, this workspace uses the organization's AI provider settings.
+              </p>
             </div>
 
             {overrideAiSettings ? (

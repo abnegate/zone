@@ -50,6 +50,29 @@ describe('settings surfaces', () => {
     expect(shell).toContain('.form-grid > .form-group:only-child');
   });
 
+  it('starts the tab body at the gutter because the tab list lives in the page bar', () => {
+    expect(rule(shell, '.settings-page .ui-tabs-content')).toContain('margin-top: 0');
+  });
+
+  it('renders the AI override as one 32px toggle row with a 32x18 switch', () => {
+    expect(shell).not.toContain('.checkbox-row');
+    expect(rule(shell, '.toggle-row')).toContain('height: var(--ui-control-height)');
+    expect(rule(shell, '.toggle-row')).toContain('align-items: center');
+    const control = rule(shell, ".toggle-row input[type='checkbox']");
+    expect(control).toContain('width: var(--ui-space-8)');
+    expect(control).toContain('height: 1.125rem');
+    expect(control).toContain('appearance: none');
+    expect(rule(shell, '.toggle-row-label')).toContain('font-size: var(--ui-text-sm)');
+    expect(rule(shell, '.toggle-row-label')).toContain('font-weight: 500');
+    const description = rule(shell, '.toggle-row-description');
+    expect(description).toContain('font-size: var(--ui-text-xs)');
+    expect(description).toContain('white-space: nowrap');
+    expect(description).toContain('text-overflow: ellipsis');
+    expect(
+      rule(shell, '.form-grid + .form-grid,\n.toggle-row + .form-grid,\n.form-grid + .alert')
+    ).toContain('margin-top: var(--ui-field-gap)');
+  });
+
   it('keeps the save row in view as a 48px sticky footer', () => {
     const actions = rule(shell, '.settings-actions');
     expect(actions).toContain('position: sticky');
