@@ -1,15 +1,18 @@
 import { Badge, Button, EmptyState } from '@zone/ui';
 import { useState } from 'react';
+import PageBar from '../../../shared/components/PageBar/PageBar';
 import { CreateSourceWizard } from '../components/CreateSourceWizard';
-import { getSourceLabel } from '../config';
+import { getSourceById, getSourceLabel } from '../config';
 import { useSources } from '../hooks';
 import type { Source } from '../types';
 import './SourcesPage.css';
 
+const SKELETON_ROWS = [1, 2, 3];
+
 function SourceStatusBadge({ source }: { source: Source }) {
   if (!source.is_active) {
     return (
-      <Badge className="source-status" variant="secondary">
+      <Badge className="source-status" variant="neutral">
         Inactive
       </Badge>
     );
@@ -35,16 +38,37 @@ function SourceStatusBadge({ source }: { source: Source }) {
   );
 }
 
+function formatVerified(at: string): string {
+  return new Date(at).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function SourceSkeleton() {
+  return (
+    <div className="sources-list" aria-hidden="true">
+      {SKELETON_ROWS.map((row) => (
+        <div key={row} className="source-card card card--list skeleton-card">
+          <div className="source-card-title">
+            <div className="skeleton skeleton-title" />
+            <div className="skeleton skeleton-badge" />
+          </div>
+          <div className="skeleton skeleton-text" />
+          <div className="skeleton skeleton-text short" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function SourcesPage() {
   const { sources, loading, error, createSource, updateSource, deleteSource, verifySource } =
     useSources();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [verifying, setVerifying] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
-
-  const handleSourceCreated = () => {
-    // The hook automatically updates the sources list
-  };
 
   const handleVerify = async (sourceId: string) => {
     setVerifying(sourceId);
@@ -81,131 +105,114 @@ export default function SourcesPage() {
     }
   };
 
-  // Combine errors from hook and operations
   const displayError = error || operationError;
 
   return (
     <div className="page page--workspace sources-page">
-      <header className="sources-header">
-        <div className="sources-header-copy">
-          <h1>Sources</h1>
-          <p>Connect repositories, calendars, email, and other data sources</p>
-        </div>
+      <PageBar
+        title="Sources"
+        subtitle="Connect repositories, calendars, email, and other data sources"
+      >
         <Button onClick={() => setShowCreateModal(true)}>+ Add Source</Button>
-      </header>
+      </PageBar>
 
-      {displayError && (
-        <div className="sources-banner sources-banner--error" role="alert">
-          {displayError}
-        </div>
-      )}
-
-      {loading ? (
-        <div className="sources-workspace">
-          <div className="sources-list">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="source-card skeleton-card">
-                <div className="skeleton-header">
-                  <div className="skeleton skeleton-title" />
-                  <div className="skeleton skeleton-badge" />
-                </div>
-                <div className="skeleton skeleton-text" />
-                <div className="skeleton skeleton-text short" />
-                <div className="skeleton-actions">
-                  <div className="skeleton skeleton-btn" />
-                  <div className="skeleton skeleton-btn" />
-                </div>
-              </div>
-            ))}
+      <div className="page-body sources-body">
+        {displayError && (
+          <div className="sources-banner sources-banner--error" role="alert">
+            {displayError}
           </div>
-        </div>
-      ) : sources.length === 0 ? (
-        <EmptyState
-          className="sources-empty"
-          icon={
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              width="48"
-              height="48"
-            >
-              <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-              <path d="M12 11v6m-3-3h6" />
-            </svg>
-          }
-          title="No sources configured"
-          description="Add code repositories, calendars, email inboxes, web URLs, or text content"
-          action={<Button onClick={() => setShowCreateModal(true)}>Add Source</Button>}
-        />
-      ) : (
-        <div className="sources-workspace">
+        )}
+
+        {loading ? (
+          <SourceSkeleton />
+        ) : sources.length === 0 ? (
+          <EmptyState
+            className="sources-empty"
+            icon={
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                <path d="M12 11v6m-3-3h6" />
+              </svg>
+            }
+            title="No sources configured"
+            description="Add code repositories, calendars, email inboxes, web URLs, or text content"
+            action={<Button onClick={() => setShowCreateModal(true)}>Add Source</Button>}
+          />
+        ) : (
           <div className="sources-list">
-            {sources.map((source) => (
-              <div
-                key={source.id}
-                className={`source-card ${!source.is_active ? 'source-inactive' : ''}`}
-              >
-                <div className="source-card-header">
-                  <div className="source-heading">
+            {sources.map((source) => {
+              const definition = getSourceById(source.source_type);
+              return (
+                <article
+                  key={source.id}
+                  className={`source-card card card--list ${source.is_active ? '' : 'source-inactive'}`.trim()}
+                >
+                  <div className="source-card-title">
+                    {definition && (
+                      <span
+                        className={`source-provider-icon ${definition.iconWrapperClass}`}
+                        aria-hidden="true"
+                      >
+                        {definition.icon}
+                      </span>
+                    )}
+                    <h3 className="source-name">{source.name}</h3>
                     <span className="source-provider">{getSourceLabel(source.source_type)}</span>
-                    <h3>{source.name}</h3>
+                    <SourceStatusBadge source={source} />
                   </div>
-                  <SourceStatusBadge source={source} />
-                </div>
 
-                {source.description && <p className="source-description">{source.description}</p>}
+                  {source.description && <p className="source-description">{source.description}</p>}
 
-                <div className="source-url">
-                  <a href={source.url} target="_blank" rel="noopener noreferrer">
+                  <a
+                    className="source-url"
+                    href={source.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
                     {source.url}
                   </a>
-                </div>
 
-                {source.last_error && <div className="source-error">{source.last_error}</div>}
+                  {source.last_error && <p className="source-error">{source.last_error}</p>}
 
-                {source.last_verified_at && (
-                  <div className="source-meta">
-                    Verified: {new Date(source.last_verified_at).toLocaleDateString()}
+                  <div className="source-card-meta">
+                    <span className="source-meta">
+                      {source.last_verified_at
+                        ? `Verified ${formatVerified(source.last_verified_at)}`
+                        : 'Never verified'}
+                    </span>
+                    <div className="source-actions">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleVerify(source.id)}
+                        loading={verifying === source.id}
+                      >
+                        {verifying === source.id ? 'Verifying...' : 'Verify'}
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => handleToggleActive(source)}>
+                        {source.is_active ? 'Disable' : 'Enable'}
+                      </Button>
+                      <Button
+                        className="source-delete"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleDelete(source.id)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
                   </div>
-                )}
-
-                <div className="source-actions">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => handleVerify(source.id)}
-                    loading={verifying === source.id}
-                  >
-                    {verifying === source.id ? 'Verifying...' : 'Verify'}
-                  </Button>
-                  <Button
-                    variant={source.is_active ? 'secondary' : 'default'}
-                    size="sm"
-                    onClick={() => handleToggleActive(source)}
-                  >
-                    {source.is_active ? 'Disable' : 'Enable'}
-                  </Button>
-                  <Button
-                    className="source-delete"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => handleDelete(source.id)}
-                  >
-                    Delete
-                  </Button>
-                </div>
-              </div>
-            ))}
+                </article>
+              );
+            })}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       <CreateSourceWizard
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}
-        onCreated={handleSourceCreated}
+        onCreated={() => undefined}
         createSource={createSource}
       />
     </div>

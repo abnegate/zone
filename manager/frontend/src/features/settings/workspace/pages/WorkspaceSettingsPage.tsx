@@ -1,4 +1,4 @@
-import { Button, Tabs, TabsContent, TabsList, TabsTrigger } from '@zone/ui';
+import { Button, TabsContent, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useTheme } from '../../../../shared/context/ThemeContext';
@@ -6,6 +6,24 @@ import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
 import { useModels } from '../../../models';
 import { mergeStageOptions } from '../../../models/utils/stageOptions';
+import {
+  AiModelFields,
+  AiProviderFields,
+  buildAiSettingsRequest,
+  configuredFromSettings,
+  credentialsFromSettings,
+  emptyCredentials,
+  emptyModels,
+  hasOverrides,
+  type ModelSelection,
+  modelOptions,
+  modelsFromSettings,
+  nothingConfigured,
+  type ProviderConfigured,
+  type ProviderCredentials,
+  providerOptions,
+} from '../../ai';
+import { SettingsPage } from '../../components';
 import { WorkspaceMembersSection } from '../components';
 import { UpdateWorkspaceThemeRequestSchema } from '../schemas';
 import type {
@@ -13,13 +31,14 @@ import type {
   AiSettings,
   BorderRadius,
   FontFamily,
-  UpdateAiSettingsRequest,
   UpdateWorkspaceThemeRequest,
   WorkspaceTheme,
 } from '../types';
 import './WorkspaceSettingsPage.css';
 
 type Tab = 'theme' | 'ai' | 'members';
+
+const TITLE = 'Workspace Settings';
 
 const fontOptions: { value: FontFamily; label: string }[] = [
   { value: 'system', label: 'System Default' },
@@ -37,54 +56,38 @@ const radiusOptions: { value: BorderRadius; label: string }[] = [
   { value: 'large', label: 'Large' },
 ];
 
-const providerOptions: { value: AiProvider; label: string }[] = [
-  { value: 'self_hosted', label: 'Self-Hosted (Ollama via LiteLLM)' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'bedrock', label: 'AWS Bedrock' },
-];
+const DEFAULT_PRIMARY = '#3b82f6';
+const DEFAULT_SECONDARY = '#6366f1';
+const HEX_PATTERN = '^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$';
 
-const modelOptions = {
-  self_hosted: {
-    fast: ['llama3.2:3b', 'llama3.1:8b', 'qwen2.5:7b', 'mistral:7b'],
-    reasoning: ['deepseek-r1:7b', 'deepseek-r1:14b', 'deepseek-r1:32b', 'llama3.1:70b'],
-    embedding: ['nomic-embed-text', 'mxbai-embed-large'],
-  },
-  openai: {
-    fast: ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'],
-    reasoning: ['gpt-4o', 'o1', 'o1-mini'],
-    embedding: ['text-embedding-3-small', 'text-embedding-3-large', 'text-embedding-ada-002'],
-  },
-  anthropic: {
-    fast: ['claude-3-haiku-20240307', 'claude-sonnet-4-20250514'],
-    reasoning: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514'],
-    embedding: [] as string[],
-  },
-  bedrock: {
-    fast: ['anthropic.claude-3-haiku-20240307-v1:0', 'amazon.nova-lite-v1:0'],
-    reasoning: ['anthropic.claude-3-5-sonnet-20241022-v2:0', 'amazon.nova-pro-v1:0'],
-    embedding: ['amazon.titan-embed-text-v2:0', 'amazon.titan-embed-text-v1'],
-  },
-};
-
-const IMAGE_MODEL_OPTIONS = ['flux1-schnell-fp8.safetensors'];
-const VIDEO_MODEL_OPTIONS = ['wan2.2_ti2v_5B_fp16.safetensors'];
-const AUDIO_MODEL_OPTIONS = ['ace_step_v1_3.5b.safetensors'];
-
-function comfyImageOptions(
-  installed: Array<{ name: string; details?: { format?: string | null } | null }>,
-  current: string
-) {
-  const fromDisk = installed
-    .filter((model) => {
-      const format = model.details?.format;
-      return format === 'lora' || format === 'checkpoint' || format === 'diffusion_model';
-    })
-    .map((model) => model.name);
-  return Array.from(new Set([...IMAGE_MODEL_OPTIONS, ...fromDisk, current].filter(Boolean)));
+function ColorField({
+  id,
+  label,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="form-group">
+      <label htmlFor={id}>{label}</label>
+      <div className="color-input-wrapper">
+        <input type="color" id={id} value={value} onChange={(e) => onChange(e.target.value)} />
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          pattern={HEX_PATTERN}
+          className="color-text-input"
+          aria-label={`${label} hex`}
+        />
+      </div>
+    </div>
+  );
 }
-
-const awsRegions = ['us-east-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-northeast-1'];
 
 export default function WorkspaceSettingsPage() {
   const { isAuthenticated } = useAuth();
@@ -113,88 +116,34 @@ export default function WorkspaceSettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  // Form state - Theme
-  const [primaryColorLight, setPrimaryColorLight] = useState('#3b82f6');
-  const [secondaryColorLight, setSecondaryColorLight] = useState('#6366f1');
-  const [primaryColorDark, setPrimaryColorDark] = useState('#3b82f6');
-  const [secondaryColorDark, setSecondaryColorDark] = useState('#6366f1');
+  const [primaryColorLight, setPrimaryColorLight] = useState(DEFAULT_PRIMARY);
+  const [secondaryColorLight, setSecondaryColorLight] = useState(DEFAULT_SECONDARY);
+  const [primaryColorDark, setPrimaryColorDark] = useState(DEFAULT_PRIMARY);
+  const [secondaryColorDark, setSecondaryColorDark] = useState(DEFAULT_SECONDARY);
   const [fontFamily, setFontFamily] = useState<FontFamily | null>(null);
   const [fontSize, setFontSize] = useState('16');
   const [borderRadius, setBorderRadius] = useState<BorderRadius | null>(null);
 
-  // Form state - AI Settings
   const [overrideAiSettings, setOverrideAiSettings] = useState(false);
   const [aiProvider, setAiProvider] = useState<AiProvider>('self_hosted');
-  const [litellmHost, setLitellmHost] = useState('');
-  const [litellmKey, setLitellmKey] = useState('');
-  const [openaiApiKey, setOpenaiApiKey] = useState('');
-  const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
-  const [anthropicApiKey, setAnthropicApiKey] = useState('');
-  const [anthropicBaseUrl, setAnthropicBaseUrl] = useState('');
-  const [bedrockRegion, setBedrockRegion] = useState('us-east-1');
-  const [bedrockAccessKey, setBedrockAccessKey] = useState('');
-  const [bedrockSecretKey, setBedrockSecretKey] = useState('');
-  const [bedrockUseIamRole, setBedrockUseIamRole] = useState(false);
-  const [modelFast, setModelFast] = useState('');
-  const [modelReasoning, setModelReasoning] = useState('');
-  const [modelEmbedding, setModelEmbedding] = useState('');
-  const [modelImage, setModelImage] = useState('');
-  const [modelVideo, setModelVideo] = useState('');
-  const [modelAudio, setModelAudio] = useState('');
-  const [hasLitellmKey, setHasLitellmKey] = useState(false);
-  const [hasOpenaiKey, setHasOpenaiKey] = useState(false);
-  const [hasAnthropicKey, setHasAnthropicKey] = useState(false);
-  const [hasBedrockCreds, setHasBedrockCreds] = useState(false);
+  const [credentials, setCredentials] = useState<ProviderCredentials>(emptyCredentials);
+  const [configured, setConfigured] = useState<ProviderConfigured>(nothingConfigured);
+  const [models, setModels] = useState<ModelSelection>(emptyModels);
   const [effectiveSettings, setEffectiveSettings] = useState<AiSettings | null>(null);
 
   const applyAiSettingsToForm = useCallback((settings: AiSettings): void => {
-    // Check if workspace has custom settings (provider != default means override)
-    const hasCustomSettings = !!(
-      settings.has_litellm_key ||
-      settings.has_openai_api_key ||
-      settings.has_anthropic_api_key ||
-      settings.has_bedrock_credentials ||
-      settings.model_fast ||
-      settings.model_reasoning ||
-      settings.model_embedding ||
-      settings.model_image ||
-      settings.model_video ||
-      settings.model_audio ||
-      settings.litellm_host ||
-      settings.openai_base_url ||
-      settings.anthropic_base_url ||
-      settings.bedrock_region
-    );
-    setOverrideAiSettings(hasCustomSettings);
+    setOverrideAiSettings(hasOverrides(settings));
     setAiProvider(settings.provider);
-    setLitellmHost(settings.litellm_host || '');
-    setOpenaiBaseUrl(settings.openai_base_url || '');
-    setAnthropicBaseUrl(settings.anthropic_base_url || '');
-    setBedrockRegion(settings.bedrock_region || 'us-east-1');
-    setBedrockUseIamRole(settings.bedrock_use_iam_role);
-    setModelFast(settings.model_fast || '');
-    setModelReasoning(settings.model_reasoning || '');
-    setModelEmbedding(settings.model_embedding || '');
-    setModelImage(settings.model_image || '');
-    setModelVideo(settings.model_video || '');
-    setModelAudio(settings.model_audio || '');
-    setHasLitellmKey(settings.has_litellm_key);
-    setHasOpenaiKey(settings.has_openai_api_key);
-    setHasAnthropicKey(settings.has_anthropic_api_key);
-    setHasBedrockCreds(settings.has_bedrock_credentials);
-    // Clear password fields
-    setLitellmKey('');
-    setOpenaiApiKey('');
-    setAnthropicApiKey('');
-    setBedrockAccessKey('');
-    setBedrockSecretKey('');
+    setCredentials(credentialsFromSettings(settings));
+    setConfigured(configuredFromSettings(settings));
+    setModels(modelsFromSettings(settings));
   }, []);
 
   const applyThemeToForm = useCallback((theme: WorkspaceTheme | null): void => {
-    setPrimaryColorLight(theme?.primary_color_light ?? '#3b82f6');
-    setSecondaryColorLight(theme?.secondary_color_light ?? '#6366f1');
-    setPrimaryColorDark(theme?.primary_color_dark ?? '#3b82f6');
-    setSecondaryColorDark(theme?.secondary_color_dark ?? '#6366f1');
+    setPrimaryColorLight(theme?.primary_color_light ?? DEFAULT_PRIMARY);
+    setSecondaryColorLight(theme?.secondary_color_light ?? DEFAULT_SECONDARY);
+    setPrimaryColorDark(theme?.primary_color_dark ?? DEFAULT_PRIMARY);
+    setSecondaryColorDark(theme?.secondary_color_dark ?? DEFAULT_SECONDARY);
     setFontFamily(theme?.font_family ?? null);
     setFontSize((theme?.font_size_base ?? '16px').replace('px', ''));
     setBorderRadius(theme?.border_radius ?? null);
@@ -303,6 +252,13 @@ export default function WorkspaceSettingsPage() {
     });
   }, [dirty, workspaceThemeLoading, workspaceId, createThemeRequest, previewWorkspaceTheme]);
 
+  const flash = (message: string) => {
+    setSuccess(message);
+    setTimeout(() => {
+      if (currentScope.current === scope) setSuccess(null);
+    }, 3000);
+  };
+
   const handleSave = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     if (!isAuthenticated || !orgId || !workspaceId) return;
@@ -327,36 +283,12 @@ export default function WorkspaceSettingsPage() {
         previewWorkspaceTheme(null);
       }
 
-      // Save AI settings if overriding
       if (activeTab === 'ai' && overrideAiSettings) {
-        const aiRequest: UpdateAiSettingsRequest = {
-          provider: aiProvider,
-          model_fast: modelFast || undefined,
-          model_reasoning: modelReasoning || undefined,
-          model_embedding: modelEmbedding || undefined,
-          // Empty string clears the stored override so org/server inheritance resumes.
-          model_image: modelImage,
-          model_video: modelVideo,
-          model_audio: modelAudio,
-        };
-        if (aiProvider === 'self_hosted') {
-          aiRequest.litellm_host = litellmHost || undefined;
-          if (litellmKey) aiRequest.litellm_key = litellmKey;
-        } else if (aiProvider === 'openai') {
-          aiRequest.openai_base_url = openaiBaseUrl || undefined;
-          if (openaiApiKey) aiRequest.openai_api_key = openaiApiKey;
-        } else if (aiProvider === 'anthropic') {
-          aiRequest.anthropic_base_url = anthropicBaseUrl || undefined;
-          if (anthropicApiKey) aiRequest.anthropic_api_key = anthropicApiKey;
-        } else if (aiProvider === 'bedrock') {
-          aiRequest.bedrock_region = bedrockRegion || undefined;
-          aiRequest.bedrock_use_iam_role = bedrockUseIamRole;
-          if (!bedrockUseIamRole) {
-            if (bedrockAccessKey) aiRequest.bedrock_access_key = bedrockAccessKey;
-            if (bedrockSecretKey) aiRequest.bedrock_secret_key = bedrockSecretKey;
-          }
-        }
-        const aiSettings = await client.updateWorkspaceAiSettings(orgId, workspaceId, aiRequest);
+        const aiSettings = await client.updateWorkspaceAiSettings(
+          orgId,
+          workspaceId,
+          buildAiSettingsRequest(aiProvider, credentials, models)
+        );
         if (currentScope.current !== scope) return;
         applyAiSettingsToForm(aiSettings);
         const effective = await client.getEffectiveAiSettings(orgId, workspaceId);
@@ -364,10 +296,7 @@ export default function WorkspaceSettingsPage() {
         setEffectiveSettings(effective);
       }
 
-      setSuccess('Settings saved successfully');
-      setTimeout(() => {
-        if (currentScope.current === scope) setSuccess(null);
-      }, 3000);
+      flash('Settings saved successfully');
     } catch (err) {
       if (currentScope.current === scope)
         setError(err instanceof Error ? err.message : 'Failed to save settings');
@@ -402,10 +331,7 @@ export default function WorkspaceSettingsPage() {
         if (currentScope.current !== scope) return;
         setEffectiveSettings(effective);
       }
-      setSuccess('Settings reset to defaults');
-      setTimeout(() => {
-        if (currentScope.current === scope) setSuccess(null);
-      }, 3000);
+      flash('Settings reset to defaults');
     } catch (err) {
       if (currentScope.current === scope)
         setError(err instanceof Error ? err.message : 'Failed to reset settings');
@@ -414,732 +340,328 @@ export default function WorkspaceSettingsPage() {
     }
   };
 
-  const currentModels = modelOptions[aiProvider];
-  const fastOptions = mergeStageOptions(currentModels.fast, installedModels, modelFast, 'chat');
+  const stage = modelOptions[aiProvider];
+  const fastOptions = mergeStageOptions(stage.fast, installedModels, models.fast, 'chat');
   const reasoningOptions = mergeStageOptions(
-    currentModels.reasoning,
+    stage.reasoning,
     installedModels,
-    modelReasoning,
+    models.reasoning,
     'chat'
   );
   const embeddingOptions = mergeStageOptions(
-    currentModels.embedding,
+    stage.embedding,
     installedModels,
-    modelEmbedding,
+    models.embedding,
     'embedding'
   );
 
+  const colorField = (
+    field: keyof UpdateWorkspaceThemeRequest,
+    set: (value: string) => void
+  ): ((value: string) => void) => {
+    return (value) => {
+      touched.current.add(field);
+      set(value);
+    };
+  };
+
+  const tabs = (
+    <TabsList aria-label="Workspace settings">
+      <TabsTrigger value="theme">Theme</TabsTrigger>
+      <TabsTrigger value="ai">AI Settings</TabsTrigger>
+      <TabsTrigger value="members">Members</TabsTrigger>
+    </TabsList>
+  );
+  const selectTab = (value: string) => setActiveTab(value as Tab);
+
   if (loading) {
     return (
-      <div className="page page--workspace settings-page">
-        <header className="settings-page-header">
-          <h1 className="page-title">Workspace Settings</h1>
-        </header>
-        <div className="settings-page-body">
-          <div className="loading-state">Loading theme settings...</div>
+      <SettingsPage title={TITLE} tabs={tabs} value={activeTab} onValueChange={selectTab}>
+        <div className="loading-state">
+          {activeTab === 'theme' ? 'Loading theme settings...' : 'Loading AI settings...'}
         </div>
-      </div>
+      </SettingsPage>
     );
   }
 
   if (!orgId || !workspaceId) {
     return (
-      <div className="page page--workspace settings-page">
-        <header className="settings-page-header">
-          <h1 className="page-title">Workspace Settings</h1>
-        </header>
-        <div className="settings-page-body">
-          <div className="alert alert-error">
-            No workspace selected. Please select or create a workspace first.
-          </div>
+      <SettingsPage title={TITLE}>
+        <div className="alert alert-error">
+          No workspace selected. Please select or create a workspace first.
         </div>
-      </div>
+      </SettingsPage>
     );
   }
 
-  return (
-    <div className="page page--workspace settings-page">
-      <header className="settings-page-header">
-        <h1 className="page-title">Workspace Settings</h1>
-      </header>
-      <div className="settings-page-body">
-        {(error || (activeTab === 'theme' && workspaceThemeError)) && (
-          <div className="alert alert-error">{error || workspaceThemeError}</div>
-        )}
-        {success && <div className="alert alert-success">{success}</div>}
-
-        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as Tab)}>
-          <TabsList>
-            <TabsTrigger value="theme">Theme</TabsTrigger>
-            <TabsTrigger value="ai">AI Settings</TabsTrigger>
-            <TabsTrigger value="members">Members</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="members">
-            <WorkspaceMembersSection workspaceId={workspaceId} orgId={orgId} />
-          </TabsContent>
-
-          <TabsContent value="theme">
-            <form
-              onSubmit={handleSave}
-              onChange={() => {
-                edited.current = true;
-                setDirty(true);
-              }}
-              className="settings-form"
-            >
-              <section className="settings-section">
-                <h2 className="section-title">Theme Configuration</h2>
-
-                <div className="settings-grid">
-                  {/* Light Mode Colors */}
-                  <div className="settings-card">
-                    <h3 className="card-title">Light Mode Colors</h3>
-                    <div className="form-group">
-                      <label htmlFor="primary-light">Primary Color</label>
-                      <div className="color-input-wrapper">
-                        <input
-                          type="color"
-                          id="primary-light"
-                          value={primaryColorLight}
-                          onChange={(e) => {
-                            touched.current.add('primary_color_light');
-                            setPrimaryColorLight(e.target.value);
-                          }}
-                        />
-                        <input
-                          type="text"
-                          value={primaryColorLight}
-                          onChange={(e) => {
-                            touched.current.add('primary_color_light');
-                            setPrimaryColorLight(e.target.value);
-                          }}
-                          pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
-                          className="color-text-input"
-                        />
-                      </div>
-                    </div>
-                    <div className="form-group">
-                      <label htmlFor="secondary-light">Secondary Color</label>
-                      <div className="color-input-wrapper">
-                        <input
-                          type="color"
-                          id="secondary-light"
-                          value={secondaryColorLight}
-                          onChange={(e) => {
-                            touched.current.add('secondary_color_light');
-                            setSecondaryColorLight(e.target.value);
-                          }}
-                        />
-                        <input
-                          type="text"
-                          value={secondaryColorLight}
-                          onChange={(e) => {
-                            touched.current.add('secondary_color_light');
-                            setSecondaryColorLight(e.target.value);
-                          }}
-                          pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
-                          className="color-text-input"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Dark Mode Colors */}
-                  <div className="settings-card">
-                    <h3 className="card-title">Dark Mode Colors</h3>
-                    <div className="form-group">
-                      <label htmlFor="primary-dark">Primary Color</label>
-                      <div className="color-input-wrapper">
-                        <input
-                          type="color"
-                          id="primary-dark"
-                          value={primaryColorDark}
-                          onChange={(e) => {
-                            touched.current.add('primary_color_dark');
-                            setPrimaryColorDark(e.target.value);
-                          }}
-                        />
-                        <input
-                          type="text"
-                          value={primaryColorDark}
-                          onChange={(e) => {
-                            touched.current.add('primary_color_dark');
-                            setPrimaryColorDark(e.target.value);
-                          }}
-                          pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
-                          className="color-text-input"
-                        />
-                      </div>
-                    </div>
-                    <div className="form-group">
-                      <label htmlFor="secondary-dark">Secondary Color</label>
-                      <div className="color-input-wrapper">
-                        <input
-                          type="color"
-                          id="secondary-dark"
-                          value={secondaryColorDark}
-                          onChange={(e) => {
-                            touched.current.add('secondary_color_dark');
-                            setSecondaryColorDark(e.target.value);
-                          }}
-                        />
-                        <input
-                          type="text"
-                          value={secondaryColorDark}
-                          onChange={(e) => {
-                            touched.current.add('secondary_color_dark');
-                            setSecondaryColorDark(e.target.value);
-                          }}
-                          pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
-                          className="color-text-input"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Typography */}
-                <div className="settings-card">
-                  <h3 className="card-title">Typography</h3>
-                  <div className="settings-row">
-                    <div className="form-group">
-                      <label htmlFor="font-family">Font Family</label>
-                      <select
-                        id="font-family"
-                        value={fontFamily ?? ''}
-                        onChange={(e) => {
-                          touched.current.add('font_family');
-                          setFontFamily(e.target.value as FontFamily);
-                        }}
-                        className="form-select"
-                      >
-                        <option value="" disabled>
-                          App Default
-                        </option>
-                        {fontOptions.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="form-group">
-                      <label htmlFor="font-size">Base Font Size</label>
-                      <div className="slider-input-wrapper">
-                        <input
-                          type="range"
-                          id="font-size"
-                          min="12"
-                          max="20"
-                          value={fontSize}
-                          onChange={(e) => {
-                            touched.current.add('font_size_base');
-                            setFontSize(e.target.value);
-                          }}
-                          className="form-slider"
-                        />
-                        <span className="slider-value">{fontSize}px</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Appearance */}
-                <div className="settings-card">
-                  <h3 className="card-title">Appearance</h3>
-                  <div className="form-group">
-                    <span className="form-label">Corner Radius</span>
-                    <div className="radio-group">
-                      {borderRadius === null && (
-                        <label className="radio-option">
-                          <input type="radio" name="border-radius" value="" checked disabled />
-                          <span className="radio-label">App Default</span>
-                        </label>
-                      )}
-                      {radiusOptions.map((opt) => (
-                        <label key={opt.value} className="radio-option">
-                          <input
-                            type="radio"
-                            name="border-radius"
-                            value={opt.value}
-                            checked={borderRadius === opt.value}
-                            onChange={() => {
-                              touched.current.add('border_radius');
-                              setBorderRadius(opt.value);
-                            }}
-                          />
-                          <span className="radio-label">{opt.label}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Preview */}
-                <div className="settings-card">
-                  <h3 className="card-title">Preview</h3>
-                  <div className="preview-box">
-                    <p className="preview-text">
-                      This is a preview of your theme settings. Changes are applied live.
-                    </p>
-                    <div className="preview-buttons">
-                      <Button type="button" variant="primary">
-                        Primary Button
-                      </Button>
-                      <Button type="button" variant="secondary">
-                        Secondary Button
-                      </Button>
-                    </div>
-                    <div className="preview-card">
-                      <strong>Sample Card</strong>
-                      <p>This card demonstrates the corner radius and colors.</p>
-                    </div>
-                  </div>
-                </div>
-              </section>
-
-              {/* Actions */}
-              <div className="settings-actions">
-                <Button type="button" onClick={handleReset} disabled={saving} variant="secondary">
-                  Reset to Defaults
-                </Button>
-                <Button type="submit" loading={saving} variant="primary">
-                  {saving ? 'Saving...' : 'Save Changes'}
-                </Button>
-              </div>
-            </form>
-          </TabsContent>
-
-          <TabsContent value="ai">
-            <form onSubmit={handleSave} className="settings-form">
-              <section className="settings-section">
-                <h2 className="section-title">AI Provider Settings</h2>
-
-                <div className="settings-card">
-                  <div className="form-group">
-                    <label className="checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={overrideAiSettings}
-                        onChange={(e) => setOverrideAiSettings(e.target.checked)}
-                      />
-                      <span>Override organization AI settings</span>
-                    </label>
-                    <p className="form-hint">
-                      When disabled, this workspace will use the organization's AI provider
-                      settings.
-                    </p>
-                  </div>
-                </div>
-
-                {overrideAiSettings ? (
-                  <>
-                    {/* Provider Selection */}
-                    <div className="settings-card">
-                      <h3 className="card-title">Provider</h3>
-                      <div className="form-group">
-                        <label htmlFor="ai-provider">AI Provider</label>
-                        <select
-                          id="ai-provider"
-                          value={aiProvider}
-                          onChange={(e) => {
-                            setAiProvider(e.target.value as AiProvider);
-                            setModelFast('');
-                            setModelReasoning('');
-                            setModelEmbedding('');
-                          }}
-                          className="form-select"
-                        >
-                          {providerOptions.map((opt) => (
-                            <option key={opt.value} value={opt.value}>
-                              {opt.label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-
-                    {/* Provider-specific Credentials */}
-                    <div className="settings-card">
-                      <h3 className="card-title">Credentials</h3>
-
-                      {aiProvider === 'self_hosted' && (
-                        <>
-                          <div className="form-group">
-                            <label htmlFor="litellm-host">LiteLLM Host</label>
-                            <input
-                              type="text"
-                              id="litellm-host"
-                              value={litellmHost}
-                              onChange={(e) => setLitellmHost(e.target.value)}
-                              placeholder="http://localhost:4000"
-                              className="form-input"
-                            />
-                          </div>
-                          <div className="form-group">
-                            <label htmlFor="litellm-key">
-                              LiteLLM API Key
-                              {hasLitellmKey && (
-                                <span className="credential-set"> (configured)</span>
-                              )}
-                            </label>
-                            <input
-                              type="password"
-                              id="litellm-key"
-                              value={litellmKey}
-                              onChange={(e) => setLitellmKey(e.target.value)}
-                              placeholder={hasLitellmKey ? '••••••••' : 'Enter API key'}
-                              className="form-input"
-                            />
-                          </div>
-                        </>
-                      )}
-
-                      {aiProvider === 'openai' && (
-                        <>
-                          <div className="form-group">
-                            <label htmlFor="openai-key">
-                              OpenAI API Key
-                              {hasOpenaiKey && (
-                                <span className="credential-set"> (configured)</span>
-                              )}
-                            </label>
-                            <input
-                              type="password"
-                              id="openai-key"
-                              value={openaiApiKey}
-                              onChange={(e) => setOpenaiApiKey(e.target.value)}
-                              placeholder={hasOpenaiKey ? '••••••••' : 'sk-...'}
-                              className="form-input"
-                            />
-                          </div>
-                          <div className="form-group">
-                            <label htmlFor="openai-base-url">Base URL (optional)</label>
-                            <input
-                              type="text"
-                              id="openai-base-url"
-                              value={openaiBaseUrl}
-                              onChange={(e) => setOpenaiBaseUrl(e.target.value)}
-                              placeholder="https://api.openai.com/v1"
-                              className="form-input"
-                            />
-                          </div>
-                        </>
-                      )}
-
-                      {aiProvider === 'anthropic' && (
-                        <>
-                          <div className="form-group">
-                            <label htmlFor="anthropic-key">
-                              Anthropic API Key
-                              {hasAnthropicKey && (
-                                <span className="credential-set"> (configured)</span>
-                              )}
-                            </label>
-                            <input
-                              type="password"
-                              id="anthropic-key"
-                              value={anthropicApiKey}
-                              onChange={(e) => setAnthropicApiKey(e.target.value)}
-                              placeholder={hasAnthropicKey ? '••••••••' : 'sk-ant-...'}
-                              className="form-input"
-                            />
-                          </div>
-                          <div className="form-group">
-                            <label htmlFor="anthropic-base-url">Base URL (optional)</label>
-                            <input
-                              type="text"
-                              id="anthropic-base-url"
-                              value={anthropicBaseUrl}
-                              onChange={(e) => setAnthropicBaseUrl(e.target.value)}
-                              placeholder="https://api.anthropic.com"
-                              className="form-input"
-                            />
-                          </div>
-                        </>
-                      )}
-
-                      {aiProvider === 'bedrock' && (
-                        <>
-                          <div className="form-group">
-                            <label htmlFor="bedrock-region">AWS Region</label>
-                            <select
-                              id="bedrock-region"
-                              value={bedrockRegion}
-                              onChange={(e) => setBedrockRegion(e.target.value)}
-                              className="form-select"
-                            >
-                              {awsRegions.map((region) => (
-                                <option key={region} value={region}>
-                                  {region}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="form-group">
-                            <label className="checkbox-label">
-                              <input
-                                type="checkbox"
-                                checked={bedrockUseIamRole}
-                                onChange={(e) => setBedrockUseIamRole(e.target.checked)}
-                              />
-                              <span>Use IAM Role (EC2 instance profile / ECS task role)</span>
-                            </label>
-                          </div>
-                          {!bedrockUseIamRole && (
-                            <>
-                              <div className="form-group">
-                                <label htmlFor="bedrock-access-key">
-                                  Access Key ID
-                                  {hasBedrockCreds && (
-                                    <span className="credential-set"> (configured)</span>
-                                  )}
-                                </label>
-                                <input
-                                  type="password"
-                                  id="bedrock-access-key"
-                                  value={bedrockAccessKey}
-                                  onChange={(e) => setBedrockAccessKey(e.target.value)}
-                                  placeholder={hasBedrockCreds ? '••••••••' : 'AKIA...'}
-                                  className="form-input"
-                                />
-                              </div>
-                              <div className="form-group">
-                                <label htmlFor="bedrock-secret-key">Secret Access Key</label>
-                                <input
-                                  type="password"
-                                  id="bedrock-secret-key"
-                                  value={bedrockSecretKey}
-                                  onChange={(e) => setBedrockSecretKey(e.target.value)}
-                                  placeholder={hasBedrockCreds ? '••••••••' : 'Secret key'}
-                                  className="form-input"
-                                />
-                              </div>
-                            </>
-                          )}
-                        </>
-                      )}
-                    </div>
-
-                    {/* Model Selection */}
-                    <div className="settings-card">
-                      <h3 className="card-title">Default Models</h3>
-                      <div className="settings-row">
-                        <div className="form-group">
-                          <label htmlFor="model-fast">Fast Model</label>
-                          <select
-                            id="model-fast"
-                            value={modelFast}
-                            onChange={(e) => setModelFast(e.target.value)}
-                            className="form-select"
-                          >
-                            <option value="">Automatic</option>
-                            {fastOptions.map((model) => (
-                              <option key={model} value={model}>
-                                {model}
-                              </option>
-                            ))}
-                          </select>
-                          <p className="form-hint">
-                            Short replies, titles, and image-intent classification. Empty uses the
-                            chat message and installed models.
-                          </p>
-                        </div>
-                        <div className="form-group">
-                          <label htmlFor="model-reasoning">Reasoning Model</label>
-                          <select
-                            id="model-reasoning"
-                            value={modelReasoning}
-                            onChange={(e) => setModelReasoning(e.target.value)}
-                            className="form-select"
-                          >
-                            <option value="">Automatic</option>
-                            {reasoningOptions.map((model) => (
-                              <option key={model} value={model}>
-                                {model}
-                              </option>
-                            ))}
-                          </select>
-                          <p className="form-hint">
-                            Harder questions. Empty picks a larger installed model when the message
-                            looks like a reasoning task.
-                          </p>
-                        </div>
-                      </div>
-                      <div className="form-group">
-                        <label htmlFor="model-embedding">Embedding Model</label>
-                        {embeddingOptions.length > 0 ? (
-                          <select
-                            id="model-embedding"
-                            value={modelEmbedding}
-                            onChange={(e) => setModelEmbedding(e.target.value)}
-                            className="form-select"
-                          >
-                            <option value="">Automatic</option>
-                            {embeddingOptions.map((model) => (
-                              <option key={model} value={model}>
-                                {model}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <>
-                            <input
-                              type="text"
-                              id="model-embedding"
-                              value={modelEmbedding}
-                              onChange={(e) => setModelEmbedding(e.target.value)}
-                              placeholder="Enter embedding model name"
-                              className="form-input"
-                            />
-                            <p className="form-hint">
-                              {aiProvider === 'anthropic'
-                                ? 'Anthropic does not provide embedding models. Use a model from another provider (e.g., OpenAI text-embedding-3-small).'
-                                : 'Enter a custom embedding model name.'}
-                            </p>
-                          </>
-                        )}
-                      </div>
-                      <div className="form-group">
-                        <label htmlFor="model-image">Image Model</label>
-                        <select
-                          id="model-image"
-                          value={modelImage}
-                          onChange={(e) => setModelImage(e.target.value)}
-                          className="form-select"
-                        >
-                          <option value="">Use organization / server default</option>
-                          {comfyImageOptions(installedModels, modelImage).map((model) => {
-                            const row = installedModels.find((item) => item.name === model);
-                            return (
-                              <option key={model} value={model} disabled={row?.ready === false}>
-                                {row?.ready === false
-                                  ? `${model} (requires ${row.required_files?.[0] || 'base'})`
-                                  : model}
-                              </option>
-                            );
-                          })}
-                        </select>
-                        <p className="form-hint">
-                          ComfyUI checkpoint used when a message asks for an image. Attach a photo
-                          to edit it instead of generating. The matching recipe is selected
-                          automatically.
-                        </p>
-                      </div>
-                      <div className="form-group">
-                        <label htmlFor="model-video">Video Model</label>
-                        <select
-                          id="model-video"
-                          value={modelVideo}
-                          onChange={(e) => setModelVideo(e.target.value)}
-                          className="form-select"
-                        >
-                          <option value="">Use organization / server default</option>
-                          {Array.from(
-                            new Set([...VIDEO_MODEL_OPTIONS, modelVideo].filter(Boolean))
-                          ).map((model) => (
-                            <option key={model} value={model}>
-                              {model}
-                            </option>
-                          ))}
-                        </select>
-                        <p className="form-hint">
-                          ComfyUI UNET used when a message asks for a video.
-                        </p>
-                      </div>
-                      <div className="form-group">
-                        <label htmlFor="model-audio">Audio Model</label>
-                        <select
-                          id="model-audio"
-                          value={modelAudio}
-                          onChange={(e) => setModelAudio(e.target.value)}
-                          className="form-select"
-                        >
-                          <option value="">Use organization / server default</option>
-                          {Array.from(
-                            new Set([...AUDIO_MODEL_OPTIONS, modelAudio].filter(Boolean))
-                          ).map((model) => (
-                            <option key={model} value={model}>
-                              {model}
-                            </option>
-                          ))}
-                        </select>
-                        <p className="form-hint">
-                          ComfyUI checkpoint used when a message asks for audio.
-                        </p>
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <div className="settings-card">
-                    <h3 className="card-title">Effective Settings (from Organization)</h3>
-                    {effectiveSettings ? (
-                      <div className="effective-settings">
-                        <div className="effective-row">
-                          <span className="effective-label">Provider:</span>
-                          <span className="effective-value">
-                            {providerOptions.find((p) => p.value === effectiveSettings.provider)
-                              ?.label || effectiveSettings.provider}
-                          </span>
-                        </div>
-                        <div className="effective-row">
-                          <span className="effective-label">Fast Model:</span>
-                          <span className="effective-value">
-                            {effectiveSettings.model_fast || 'Not configured'}
-                          </span>
-                        </div>
-                        <div className="effective-row">
-                          <span className="effective-label">Reasoning Model:</span>
-                          <span className="effective-value">
-                            {effectiveSettings.model_reasoning || 'Not configured'}
-                          </span>
-                        </div>
-                        <div className="effective-row">
-                          <span className="effective-label">Embedding Model:</span>
-                          <span className="effective-value">
-                            {effectiveSettings.model_embedding || 'Not configured'}
-                          </span>
-                        </div>
-                        <div className="effective-row">
-                          <span className="effective-label">Image Model:</span>
-                          <span className="effective-value">
-                            {effectiveSettings.model_image || 'Server default'}
-                          </span>
-                        </div>
-                        <div className="effective-row">
-                          <span className="effective-label">Video Model:</span>
-                          <span className="effective-value">
-                            {effectiveSettings.model_video || 'Server default'}
-                          </span>
-                        </div>
-                        <div className="effective-row">
-                          <span className="effective-label">Audio Model:</span>
-                          <span className="effective-value">
-                            {effectiveSettings.model_audio || 'Server default'}
-                          </span>
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="form-hint">No organization settings configured.</p>
-                    )}
-                  </div>
-                )}
-              </section>
-
-              {/* Actions */}
-              <div className="settings-actions">
-                <Button type="button" onClick={handleReset} disabled={saving} variant="secondary">
-                  Reset to Defaults
-                </Button>
-                <Button type="submit" loading={saving} variant="primary">
-                  {saving ? 'Saving...' : 'Save Changes'}
-                </Button>
-              </div>
-            </form>
-          </TabsContent>
-        </Tabs>
-      </div>
+  const actions = (
+    <div className="settings-actions">
+      <Button type="button" variant="ghost" size="sm" onClick={handleReset} disabled={saving}>
+        Reset to Defaults
+      </Button>
+      <Button type="submit" loading={saving}>
+        {saving ? 'Saving...' : 'Save Changes'}
+      </Button>
     </div>
+  );
+
+  const effectiveRows: [string, string][] = effectiveSettings
+    ? [
+        [
+          'Provider',
+          providerOptions.find((option) => option.value === effectiveSettings.provider)?.label ||
+            effectiveSettings.provider,
+        ],
+        ['Fast Model', effectiveSettings.model_fast || 'Not configured'],
+        ['Reasoning Model', effectiveSettings.model_reasoning || 'Not configured'],
+        ['Embedding Model', effectiveSettings.model_embedding || 'Not configured'],
+        ['Image Model', effectiveSettings.model_image || 'Server default'],
+        ['Video Model', effectiveSettings.model_video || 'Server default'],
+        ['Audio Model', effectiveSettings.model_audio || 'Server default'],
+      ]
+    : [];
+
+  return (
+    <SettingsPage title={TITLE} tabs={tabs} value={activeTab} onValueChange={selectTab}>
+      {(error || (activeTab === 'theme' && workspaceThemeError)) && (
+        <div className="alert alert-error">{error || workspaceThemeError}</div>
+      )}
+      {success && <div className="alert alert-success">{success}</div>}
+
+      <TabsContent value="members">
+        <WorkspaceMembersSection workspaceId={workspaceId} orgId={orgId} />
+      </TabsContent>
+
+      <TabsContent value="theme">
+        <form
+          onSubmit={handleSave}
+          onChange={() => {
+            edited.current = true;
+            setDirty(true);
+          }}
+          className="settings-form"
+        >
+          <div className="section-row">
+            <div className="section-row-copy">
+              <h2 className="section-title">Theme Configuration</h2>
+              <p className="section-description">
+                Changes preview live and apply to everyone in this workspace once saved.
+              </p>
+            </div>
+          </div>
+
+          <div className="settings-card">
+            <h3 className="card-title">Colors</h3>
+            <div className="theme-groups">
+              <div className="theme-group">
+                <h4 className="settings-eyebrow">Light Mode Colors</h4>
+                <div className="form-grid">
+                  <ColorField
+                    id="primary-light"
+                    label="Primary Color"
+                    value={primaryColorLight}
+                    onChange={colorField('primary_color_light', setPrimaryColorLight)}
+                  />
+                  <ColorField
+                    id="secondary-light"
+                    label="Secondary Color"
+                    value={secondaryColorLight}
+                    onChange={colorField('secondary_color_light', setSecondaryColorLight)}
+                  />
+                </div>
+              </div>
+              <div className="theme-group">
+                <h4 className="settings-eyebrow">Dark Mode Colors</h4>
+                <div className="form-grid">
+                  <ColorField
+                    id="primary-dark"
+                    label="Primary Color"
+                    value={primaryColorDark}
+                    onChange={colorField('primary_color_dark', setPrimaryColorDark)}
+                  />
+                  <ColorField
+                    id="secondary-dark"
+                    label="Secondary Color"
+                    value={secondaryColorDark}
+                    onChange={colorField('secondary_color_dark', setSecondaryColorDark)}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="settings-card">
+            <h3 className="card-title">Typography &amp; shape</h3>
+            <div className="form-grid">
+              <div className="form-group">
+                <label htmlFor="font-family">Font Family</label>
+                <select
+                  id="font-family"
+                  value={fontFamily ?? ''}
+                  onChange={(e) => {
+                    touched.current.add('font_family');
+                    setFontFamily(e.target.value as FontFamily);
+                  }}
+                  className="form-select"
+                >
+                  <option value="" disabled>
+                    App Default
+                  </option>
+                  {fontOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-group">
+                <label htmlFor="font-size">Base Font Size</label>
+                <div className="slider-input-wrapper">
+                  <input
+                    type="range"
+                    id="font-size"
+                    min="12"
+                    max="20"
+                    value={fontSize}
+                    onChange={(e) => {
+                      touched.current.add('font_size_base');
+                      setFontSize(e.target.value);
+                    }}
+                    className="form-slider"
+                  />
+                  <span className="slider-value">{fontSize}px</span>
+                </div>
+              </div>
+              <div className="form-group form-group--full">
+                <span className="form-label">Corner Radius</span>
+                <div className="radio-group">
+                  {borderRadius === null && (
+                    <label className="radio-option">
+                      <input type="radio" name="border-radius" value="" checked disabled />
+                      <span className="radio-label">App Default</span>
+                    </label>
+                  )}
+                  {radiusOptions.map((opt) => (
+                    <label key={opt.value} className="radio-option">
+                      <input
+                        type="radio"
+                        name="border-radius"
+                        value={opt.value}
+                        checked={borderRadius === opt.value}
+                        onChange={() => {
+                          touched.current.add('border_radius');
+                          setBorderRadius(opt.value);
+                        }}
+                      />
+                      <span className="radio-label">{opt.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="preview-box">
+            <h3 className="settings-eyebrow">Preview</h3>
+            <p className="preview-text">
+              This is a preview of your theme settings. Changes are applied live.
+            </p>
+            <div className="preview-buttons">
+              <Button type="button" variant="primary">
+                Primary Button
+              </Button>
+              <Button type="button" variant="secondary">
+                Secondary Button
+              </Button>
+            </div>
+            <div className="preview-card">
+              <strong>Sample Card</strong>
+              <p>This card demonstrates the corner radius and colors.</p>
+            </div>
+          </div>
+
+          {actions}
+        </form>
+      </TabsContent>
+
+      <TabsContent value="ai">
+        <form onSubmit={handleSave} className="settings-form">
+          <div className="section-row">
+            <div className="section-row-copy">
+              <h2 className="section-title">AI Provider Settings</h2>
+              <p className="section-description">
+                Inherits the organization's provider and models unless overridden here.
+              </p>
+            </div>
+          </div>
+
+          <div className="settings-card">
+            <div className="checkbox-row">
+              <input
+                type="checkbox"
+                id="override-ai-settings"
+                checked={overrideAiSettings}
+                onChange={(e) => setOverrideAiSettings(e.target.checked)}
+              />
+              <div className="checkbox-row-copy">
+                <label htmlFor="override-ai-settings" className="checkbox-row-label">
+                  Override organization AI settings
+                </label>
+                <p className="checkbox-row-description">
+                  When disabled, this workspace uses the organization's AI provider settings.
+                </p>
+              </div>
+            </div>
+
+            {overrideAiSettings ? (
+              <AiProviderFields
+                provider={aiProvider}
+                onProviderChange={(provider) => {
+                  setAiProvider(provider);
+                  setModels((prev) => ({ ...prev, fast: '', reasoning: '', embedding: '' }));
+                }}
+                credentials={credentials}
+                configured={configured}
+                onChange={(key, value) => setCredentials((prev) => ({ ...prev, [key]: value }))}
+              />
+            ) : (
+              <div className="effective-block">
+                <h3 className="settings-eyebrow">Effective Settings (from Organization)</h3>
+                {effectiveSettings ? (
+                  <div className="effective-settings">
+                    {effectiveRows.map(([label, value]) => (
+                      <div key={label} className="effective-row">
+                        <span className="effective-label">{label}</span>
+                        <span className="effective-value">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="form-hint">No organization settings configured.</p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {overrideAiSettings && (
+            <div className="settings-card">
+              <h3 className="card-title">Default Models</h3>
+              <AiModelFields
+                provider={aiProvider}
+                models={models}
+                onChange={(key, value) => setModels((prev) => ({ ...prev, [key]: value }))}
+                fastOptions={fastOptions}
+                reasoningOptions={reasoningOptions}
+                embeddingOptions={embeddingOptions}
+                installedModels={installedModels}
+                inheritedLabel="Use organization / server default"
+              />
+            </div>
+          )}
+
+          {actions}
+        </form>
+      </TabsContent>
+    </SettingsPage>
   );
 }

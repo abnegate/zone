@@ -222,6 +222,18 @@
     margin-bottom: 0;
   }
 
+  .form-row:not(:last-child) {
+    margin-bottom: var(--ui-field-gap);
+  }
+
+  .form-row > .form-group {
+    margin-bottom: 0;
+  }
+
+  .form-row > .form-group:only-child {
+    grid-column: 1 / -1;
+  }
+
   .form-hint,
   .field-error {
     margin: var(--ui-hint-gap) 0 0;

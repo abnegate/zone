@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const mockGetSourceTypes = mock();
 
@@ -66,5 +66,34 @@ describe('CreateSourceWizard kinds', () => {
     expect(kinds).not.toContain('Email');
     expect(kinds).not.toContain('Calendar');
     expect(screen.queryByText('Notion')).toBeNull();
+  });
+});
+
+describe('CreateSourceWizard configuration step', () => {
+  beforeEach(() => {
+    mockGetSourceTypes.mockReset();
+    mockGetSourceTypes.mockResolvedValue([kind('github')]);
+  });
+
+  it('seats the access token beside the branch and states its hint once', async () => {
+    renderWizard();
+    await waitFor(() => {
+      expect(offeredKinds()).toEqual(['GitHub']);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    const branch = await screen.findByLabelText(/Branch/);
+    const token = screen.getByLabelText(/Access Token/);
+    const row = branch.closest('.form-row');
+    expect(row).not.toBeNull();
+    expect(token.closest('.form-row')).toBe(row);
+    expect(row?.querySelectorAll('.form-group')).toHaveLength(2);
+    expect(screen.getAllByText('Token required for private repos and write access')).toHaveLength(
+      1
+    );
+
+    fireEvent.change(token, { target: { value: 'ghp_secret' } });
+    expect(token).toHaveValue('ghp_secret');
+    expect(branch).toHaveValue('main');
   });
 });

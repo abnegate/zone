@@ -1,201 +1,77 @@
 .invitations-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
   width: 100%;
 }
 
-.invitations-section .section-header h2 {
-  margin: 0;
-  font-size: var(--ui-text-lg);
-  font-weight: 600;
-}
-
-.invitations-section .empty-state .text-muted {
-  color: var(--text-muted);
-  font-size: var(--ui-text-sm);
-}
-
-.table-container {
+.invitations-section .table-container {
   overflow-x: auto;
-  border-radius: 8px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-bg-elevated);
 }
 
 .invitations-table {
   width: 100%;
   border-collapse: collapse;
-  background: var(--bg-primary);
-}
-
-.invitations-table thead {
-  background: var(--bg-secondary);
 }
 
 .invitations-table th {
-  padding: var(--ui-space-3) var(--ui-space-4);
-  text-align: left;
-  font-weight: 600;
-  font-size: var(--ui-text-sm);
-  color: var(--text-secondary);
-  border-bottom: 2px solid var(--border-color);
+  white-space: nowrap;
 }
 
-.invitations-table td {
-  padding: var(--ui-space-3) var(--ui-space-4);
-  border-bottom: 1px solid var(--border-color);
+.invitations-table th:first-child,
+.invitations-table td:first-child {
+  padding-left: var(--ui-space-4);
 }
 
-.invitations-table tbody tr:hover {
-  background: var(--bg-hover);
+.invitations-table tbody tr:last-child td {
+  border-bottom: none;
 }
 
-.invitations-table tbody tr.expired {
-  opacity: 0.6;
+.invitations-table tbody tr.expired td {
+  color: var(--ui-text-muted);
 }
 
-.invitations-section .role-badge {
-  display: inline-block;
-  padding: var(--ui-space-1) var(--ui-space-2);
-  border-radius: 4px;
-  font-size: var(--ui-text-xs);
-  font-weight: 600;
-  text-transform: capitalize;
+.invitation-actions {
+  text-align: right;
 }
 
-.invitations-section .role-badge.role-owner {
-  background: var(--color-purple-100);
-  color: var(--color-purple-800);
-}
-
-.invitations-section .role-badge.role-admin {
-  background: var(--color-blue-100);
-  color: var(--color-blue-800);
-}
-
-.invitations-section .role-badge.role-member {
-  background: var(--color-gray-100);
-  color: var(--color-gray-800);
-}
-
-.invitations-section .role-badge.role-viewer {
-  background: var(--color-green-100);
-  color: var(--color-green-800);
+.invitation-revoke {
+  color: var(--ui-error);
 }
 
 .invitations-section .text-danger {
-  color: var(--color-error);
+  color: var(--ui-error);
 }
 
 .invitation-dialog {
-  padding: var(--ui-gutter);
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  inset: 0;
+  z-index: var(--ui-layer-modal);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: var(--ui-layer-modal);
-}
-
-.invitation-dialog .modal-content {
-  padding: 0;
-  background: var(--bg-primary);
-  border-radius: 8px;
-  width: 100%;
-  max-width: 28rem;
-  max-height: calc(100dvh - 2 * var(--ui-gutter));
-  overflow-y: auto;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  padding: var(--ui-gutter);
+  background: var(--ui-overlay-heavy);
+  backdrop-filter: blur(8px);
+  animation: ui-fade-in var(--ui-duration-fast) var(--ui-ease-out) both;
 }
 
 .invitation-dialog .modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: var(--ui-panel-padding);
-  border-bottom: 1px solid var(--border-color);
+  margin-bottom: var(--ui-space-4);
 }
 
 .invitation-dialog .modal-header h3 {
   margin: 0;
-  font-size: var(--ui-text-xl);
-  font-weight: 600;
 }
 
 .invitation-dialog .modal-close {
-  background: none;
-  border: none;
-  font-size: var(--ui-text-2xl);
-  cursor: pointer;
-  color: var(--text-secondary);
-  padding: 0;
-  width: 2rem;
-  height: 2rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
+  font-size: var(--ui-text-xl);
+  line-height: 1;
 }
 
-.invitation-dialog .modal-close:hover {
-  background: var(--bg-hover);
-}
-
-.invitation-form {
-  padding: var(--ui-panel-padding);
-}
-
-.invitation-form .form-group {
-  margin-bottom: var(--ui-space-4);
-}
-
-.invitation-form .form-group label {
-  display: block;
-  margin-bottom: var(--ui-space-2);
-  font-weight: 500;
-  color: var(--text-primary);
-}
-
-.invitation-form .form-input,
-.invitation-form .form-select {
-  width: 100%;
-  height: var(--ui-control-height);
-  padding: 0 var(--ui-space-3);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-size: var(--ui-text-sm);
-  background: var(--bg-primary);
-  color: var(--text-primary);
-}
-
-.invitation-form .form-input:focus,
-.invitation-form .form-select:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.1);
-}
-
-@media (max-width: 768px) {
-  .invitations-table {
-    font-size: var(--ui-text-sm);
-  }
-
-  .invitations-table th,
-  .invitations-table td {
-    padding: var(--ui-space-2);
-  }
-
-  .invitation-dialog .modal-content {
-    padding: 0;
-    width: 100%;
-  }
-
-  .invitation-dialog .modal-actions {
-    flex-direction: column;
-  }
-
-  .invitation-dialog .modal-actions button {
-    width: 100%;
-  }
+.invitation-form .form-group:last-of-type {
+  margin-bottom: 0;
 }

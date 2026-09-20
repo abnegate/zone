@@ -734,3 +734,27 @@ describe('OrgMembersSection', () => {
     });
   });
 });
+
+describe('OrgMembersSection table anatomy', () => {
+  beforeEach(() => {
+    mock.clearAllMocks();
+    mockClient.getOrgMembers.mockResolvedValue({
+      members: [mockOwner, mockAdmin, mockMember],
+    });
+  });
+
+  it('shows the email under the name in one cell instead of its own column', async () => {
+    render(<OrgMembersSection orgId="org-123" />);
+    await waitFor(() => {
+      expect(screen.getByText('Test Owner')).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('columnheader', { name: 'Email' })).toBeNull();
+    const identity = screen.getByText('Test Owner').closest('.member-identity');
+    expect(identity).not.toBeNull();
+    expect(within(identity as HTMLElement).getByText('owner@test.com')).toHaveClass('member-email');
+    const memberRow = screen.getByText('member@test.com').closest('tr') as HTMLElement;
+    expect(within(memberRow).queryAllByText('member@test.com')).toHaveLength(1);
+    expect(memberRow.querySelector('.member-remove')).not.toBeNull();
+    expect(memberRow.querySelector('.role-select')).not.toBeNull();
+  });
+});

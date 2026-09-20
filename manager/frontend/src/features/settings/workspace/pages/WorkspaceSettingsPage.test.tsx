@@ -192,7 +192,7 @@ describe('WorkspaceSettingsPage', () => {
   it('renders typography settings', async () => {
     render(<WorkspaceSettingsPage />);
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Typography' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Typography & shape' })).toBeInTheDocument();
     });
     expect(screen.getByLabelText('Font Family')).toBeInTheDocument();
     expect(screen.getByLabelText('Base Font Size')).toBeInTheDocument();
@@ -200,9 +200,7 @@ describe('WorkspaceSettingsPage', () => {
 
   it('renders appearance settings', async () => {
     render(<WorkspaceSettingsPage />);
-    await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Appearance' })).toBeInTheDocument();
-    });
+    await waitFor(() => {});
     expect(screen.getByText('Corner Radius')).toBeInTheDocument();
   });
 
@@ -733,7 +731,6 @@ describe('WorkspaceSettingsPage', () => {
       await enableOverride(user);
 
       await waitFor(() => {
-        expect(screen.getByText('Credentials')).toBeInTheDocument();
         expect(screen.getByLabelText(/LiteLLM Host/i)).toBeInTheDocument();
       });
     });

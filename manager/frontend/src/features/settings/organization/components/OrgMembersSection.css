@@ -1,211 +1,188 @@
 .org-members-section {
-  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
 }
 
-/* Members Table */
 .members-table-container {
   overflow-x: auto;
-  border-radius: 8px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-bg-elevated);
 }
 
 .members-table {
   width: 100%;
   border-collapse: collapse;
-  background: var(--color-background-secondary);
-}
-
-.members-table thead {
-  background: var(--color-background-tertiary);
-  border-bottom: 1px solid var(--color-border);
 }
 
 .members-table th {
-  padding: var(--ui-space-3) var(--ui-space-4);
-  text-align: left;
-  font-weight: 600;
-  font-size: var(--ui-text-sm);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--color-text-secondary);
+  white-space: nowrap;
 }
 
-.members-table tbody tr {
-  border-bottom: 1px solid var(--color-border);
-  transition: background-color 0.2s;
+.members-table th:first-child,
+.members-table td:first-child {
+  padding-left: var(--ui-space-4);
 }
 
-.members-table tbody tr:last-child {
-  border-bottom: none;
-}
-
-.members-table tbody tr:hover {
-  background: var(--color-background-hover);
+.members-table th:last-child,
+.members-table td:last-child {
+  padding-right: var(--ui-space-3);
 }
 
 .members-table td {
-  padding: var(--ui-space-4);
-  vertical-align: middle;
+  height: var(--ui-space-12);
 }
 
-/* Member Info */
+.members-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.members-actions-head {
+  text-align: right;
+}
+
 .member-info {
   display: flex;
   align-items: center;
-  gap: var(--ui-space-3);
+  gap: var(--ui-space-2-5);
+  min-width: 0;
 }
 
 .member-avatar {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background: var(--color-primary);
-  color: var(--color-text-on-primary, white);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 600;
-  font-size: var(--ui-text-base);
   flex-shrink: 0;
+  width: var(--ui-space-6);
+  height: var(--ui-space-6);
+  border-radius: 50%;
+  background: var(--ui-accent);
+  color: var(--ui-text-inverse);
+  font-size: var(--ui-text-2xs);
+  font-weight: 600;
+}
+
+.member-identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .member-name {
-  font-weight: 500;
-  color: var(--color-text-primary);
-}
-
-/* Role Badge */
-.role-badge {
-  display: inline-block;
-  padding: var(--ui-space-1) var(--ui-space-3);
-  border-radius: 12px;
-  font-size: var(--ui-text-xs);
+  font-size: var(--ui-text-sm);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.role-badge-owner {
-  background: var(--color-role-owner-bg, #f3e8ff);
-  color: var(--color-role-owner-text, #7c3aed);
+.member-email {
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-space-4);
+  color: var(--ui-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.role-badge-admin {
-  background: var(--color-role-admin-bg, #dbeafe);
-  color: var(--color-role-admin-text, #2563eb);
+.member-joined {
+  white-space: nowrap;
+  color: var(--ui-text-secondary);
 }
 
-.role-badge-member {
-  background: var(--color-role-member-bg, #f3f4f6);
-  color: var(--color-role-member-text, #6b7280);
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  height: var(--ui-badge-height);
+  padding: 0 var(--ui-space-1-5);
+  border-radius: var(--ui-radius-md);
+  font-size: var(--ui-text-2xs);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  text-transform: capitalize;
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-secondary);
 }
 
-/* Member Actions */
+.role-badge-owner,
+.role-badge.role-owner {
+  background: var(--ui-accent-muted);
+  color: var(--ui-accent);
+}
+
+.role-badge-admin,
+.role-badge.role-admin {
+  background: color-mix(in srgb, var(--ui-success) 14%, transparent);
+  color: var(--ui-success-600);
+}
+
+.role-badge-viewer,
+.role-badge.role-viewer {
+  background: color-mix(in srgb, var(--ui-info) 14%, transparent);
+  color: var(--ui-info-600);
+}
+
+:root[data-theme='dark'] .role-badge-admin,
+:root[data-theme='dark'] .role-badge.role-admin {
+  color: var(--ui-success-400);
+}
+
+:root[data-theme='dark'] .role-badge-viewer,
+:root[data-theme='dark'] .role-badge.role-viewer {
+  color: var(--ui-info-400);
+}
+
 .member-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--ui-space-2);
 }
 
 .role-select {
-  min-width: 120px;
-
-  padding: 0 var(--ui-space-8) 0 var(--ui-space-3);
-  border: 1px solid var(--color-border);
-
-  border-radius: var(--ui-radius-md);
-  background: var(--color-background-secondary);
-  color: var(--color-text-primary);
-  font-size: var(--ui-text-sm);
-  cursor: pointer;
-  transition: border-color 0.2s;
-  height: var(--ui-control-height);
-}
-
-.role-select:hover:not(:disabled) {
-  border-color: var(--color-primary);
-}
-
-.role-select:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.loading-spinner {
+  width: auto;
+  min-width: 7rem;
+  height: var(--ui-control-height-sm);
+  padding-right: var(--ui-space-6);
   font-size: var(--ui-text-xs);
-  color: var(--color-text-secondary);
-  font-style: italic;
 }
 
-/* Forms */
+.member-updating {
+  font-size: var(--ui-text-2xs);
+  color: var(--ui-text-muted);
+}
+
+.member-remove {
+  color: var(--ui-error);
+}
+
 .add-member-form {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-4);
+  gap: var(--ui-field-gap);
 }
 
-.remove-member-modal {
-  padding: var(--ui-space-4) 0;
+.confirm-modal p {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
 }
 
-.remove-member-modal p {
-  margin: 0 0 var(--ui-space-6) 0;
-  color: var(--color-text-primary);
+.confirm-modal .alert {
+  margin-top: var(--ui-space-3);
 }
 
-.role-confirm-modal {
-  padding: var(--ui-space-4) 0;
+.confirm-modal .modal-actions {
+  margin-top: var(--ui-space-4);
 }
 
-.role-confirm-modal p {
-  margin: 0 0 var(--ui-space-4) 0;
-  color: var(--color-text-primary);
-}
-
-/* Dark mode adjustments */
-@media (prefers-color-scheme: dark) {
-  .role-badge-owner {
-    background: var(--color-role-owner-bg, rgba(124, 58, 237, 0.2));
-    color: var(--color-role-owner-text, #c4b5fd);
-  }
-
-  .role-badge-admin {
-    background: var(--color-role-admin-bg, rgba(37, 99, 235, 0.2));
-    color: var(--color-role-admin-text, #93c5fd);
-  }
-
-  .role-badge-member {
-    background: var(--color-role-member-bg, rgba(107, 114, 128, 0.2));
-    color: var(--color-role-member-text, #d1d5db);
-  }
-
-  .alert-warning {
-    background: var(--color-warning-bg, rgba(245, 158, 11, 0.1));
-    color: var(--color-warning-text, #fbbf24);
-    border-color: var(--color-warning-border, rgba(245, 158, 11, 0.3));
-  }
-}
-
-/* Responsive */
 @media (max-width: 768px) {
-  .section-header {
-    flex-direction: column;
-    gap: var(--ui-space-4);
-  }
-
-  .members-table-container {
-    overflow-x: scroll;
-  }
-
   .members-table {
-    min-width: 800px;
-  }
-
-  .modal-actions {
-    flex-direction: column-reverse;
-  }
-
-  .modal-actions button {
-    width: 100%;
+    min-width: 40rem;
   }
 }
