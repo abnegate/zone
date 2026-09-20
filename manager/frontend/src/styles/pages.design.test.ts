@@ -40,12 +40,7 @@ describe('chats layout', () => {
       '--chat-item-bg: var(--ui-bg-hover)'
     );
     expect(rule(chats, '.chat-item.active')).toContain('--chat-item-bg: var(--ui-accent-muted)');
-    expect(
-      rule(
-        chats,
-        '.chat-item:hover .chat-item-content,\n.chat-item:focus-within .chat-item-content'
-      )
-    ).toContain('padding-right: calc(var(--chat-item-actions) + var(--ui-space-2))');
+    expect(chats).not.toMatch(/\.chat-item:(hover|focus-within) \.chat-item-content/);
     expect(rule(chats, '.chat-title')).toContain('text-overflow: ellipsis');
     expect(chats).not.toContain('text-overflow: clip');
   });

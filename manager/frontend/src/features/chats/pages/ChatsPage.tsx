@@ -53,6 +53,7 @@ import {
   parseCharacterText,
   readAttachment,
   sourceAttachment,
+  toPlainText,
   videoAttachments,
 } from '../utils';
 import './ChatsPage.css';
@@ -660,7 +661,7 @@ export default function ChatsPage() {
                     <span className="search-result-chat">{searchResultTitle(result)}</span>
                     <span className="search-result-date">{formatDate(result.created_at)}</span>
                   </div>
-                  <div className="search-result-snippet">{result.snippet}</div>
+                  <div className="search-result-snippet">{toPlainText(result.snippet)}</div>
                 </div>
               ))}
             </div>

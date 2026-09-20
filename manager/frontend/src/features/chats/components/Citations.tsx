@@ -8,12 +8,16 @@ import {
   citationProvenanceLabel,
   formatObservedAt,
   formatRevision,
+  isRevisionTimestamp,
 } from '../utils/citations';
 
 function CitationItem({ citation }: { citation: Citation }) {
   const href = citationHref(citation);
   const evidence = citationEvidence(citation);
-  const revision = formatRevision(citation.revision);
+  const revision = formatRevision(citation.revision, citation.observed_at);
+  const revisionClass = isRevisionTimestamp(citation.revision)
+    ? 'citation-revision citation-revision--time'
+    : 'citation-revision';
   const claim = citationProvenanceLabel(citation.provenance);
   const external = Boolean(href && /^https?:\/\//i.test(href));
   const title = (
@@ -41,7 +45,7 @@ function CitationItem({ citation }: { citation: Citation }) {
         <span className="citation-link citation-link--static">{title}</span>
       )}
       <span className="citation-meta">
-        {revision ? <span className="citation-revision">{revision}</span> : null}
+        {revision ? <span className={revisionClass}>{revision}</span> : null}
         <time className="citation-observed" dateTime={citation.observed_at}>
           {formatObservedAt(citation.observed_at)}
         </time>

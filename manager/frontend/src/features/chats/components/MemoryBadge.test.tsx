@@ -25,4 +25,12 @@ describe('MemoryBadge', () => {
       'The assistant read your stored memory while writing this reply.'
     );
   });
+
+  it('is the shared neutral badge, so it sits at the same height as every other chip', () => {
+    render(<MemoryBadge used />);
+
+    const badge = screen.getByTestId('memory-badge');
+    expect(badge).toHaveClass('ui-badge');
+    expect(badge).toHaveClass('ui-badge-neutral');
+  });
 });
