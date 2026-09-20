@@ -119,6 +119,6 @@ export interface InvitationDetails {
   org_role: OrgRole;
   workspace_name: string | null;
   workspace_role: WorkspaceRole | null;
-  invited_by_email: string;
+  invited_by_email: string | null;
   expires_at: string;
 }

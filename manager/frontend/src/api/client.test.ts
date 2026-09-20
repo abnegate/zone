@@ -1497,18 +1497,36 @@ describe('Client', () => {
         );
       });
 
-      it('resetOrgAiSettings resets org AI settings', async () => {
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ ...mockAiSettings, provider: 'self_hosted' }),
-        });
+      it('resetOrgAiSettings resets org AI settings and reads the defaults back', async () => {
+        const defaults = { ...mockAiSettings, provider: 'self_hosted' };
+        mockFetch
+          .mockResolvedValueOnce({ ok: true, status: 204 })
+          .mockResolvedValueOnce({ ok: true, json: async () => defaults });
 
-        await client.resetOrgAiSettings('org-1');
+        const result = await client.resetOrgAiSettings('org-1');
 
-        expect(mockFetch).toHaveBeenCalledWith(
+        expect(result.provider).toBe('self_hosted');
+        expect(mockFetch).toHaveBeenNthCalledWith(
+          1,
           '/api/organizations/org-1/settings/ai',
           expect.objectContaining({ method: 'DELETE' })
         );
+        expect(mockFetch).toHaveBeenNthCalledWith(
+          2,
+          '/api/organizations/org-1/settings/ai',
+          expect.not.objectContaining({ method: 'DELETE' })
+        );
+      });
+
+      it('resetOrgAiSettings treats settings that were never saved as already reset', async () => {
+        const defaults = { ...mockAiSettings, provider: 'self_hosted' };
+        mockFetch
+          .mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({}) })
+          .mockResolvedValueOnce({ ok: true, json: async () => defaults });
+
+        const result = await client.resetOrgAiSettings('org-1');
+
+        expect(result.provider).toBe('self_hosted');
       });
     });
 
@@ -1545,17 +1563,23 @@ describe('Client', () => {
         );
       });
 
-      it('resetWorkspaceAiSettings resets workspace AI settings', async () => {
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          json: async () => mockAiSettings,
-        });
+      it('resetWorkspaceAiSettings resets workspace AI settings and reads the defaults back', async () => {
+        mockFetch
+          .mockResolvedValueOnce({ ok: true, status: 204 })
+          .mockResolvedValueOnce({ ok: true, json: async () => mockAiSettings });
 
-        await client.resetWorkspaceAiSettings('org-1', 'ws-1');
+        const result = await client.resetWorkspaceAiSettings('org-1', 'ws-1');
 
-        expect(mockFetch).toHaveBeenCalledWith(
+        expect(result.provider).toBe(mockAiSettings.provider);
+        expect(mockFetch).toHaveBeenNthCalledWith(
+          1,
           '/api/organizations/org-1/workspaces/ws-1/settings/ai',
           expect.objectContaining({ method: 'DELETE' })
+        );
+        expect(mockFetch).toHaveBeenNthCalledWith(
+          2,
+          '/api/organizations/org-1/workspaces/ws-1/settings/ai',
+          expect.not.objectContaining({ method: 'DELETE' })
         );
       });
 
@@ -3451,18 +3475,20 @@ describe('Client', () => {
     describe('getUsage', () => {
       it('fetches current period usage', async () => {
         const mockUsage: Usage = {
-          users: 15,
+          members: 15,
           workspaces: 3,
-          projects: 42,
-          storage_gb: 5.7,
-          api_calls: 12543,
+          chat_messages: 12543,
           period_start: '2024-01-01T00:00:00Z',
           period_end: '2024-02-01T00:00:00Z',
         };
 
         mockFetch.mockResolvedValueOnce({
           ok: true,
-          json: async () => mockUsage,
+          json: async () => ({
+            current_period_start: '2024-01-01T00:00:00Z',
+            current_period_end: '2024-02-01T00:00:00Z',
+            usage: { chat_messages: 12543, members: 15, workspaces: 3 },
+          }),
         });
 
         const result = await client.getUsage(orgId);
@@ -3476,41 +3502,41 @@ describe('Client', () => {
 
       it('handles zero usage', async () => {
         const mockUsage: Usage = {
-          users: 0,
+          members: 0,
           workspaces: 0,
-          projects: 0,
-          storage_gb: 0,
-          api_calls: 0,
+          chat_messages: 0,
           period_start: '2024-01-01T00:00:00Z',
           period_end: '2024-02-01T00:00:00Z',
         };
 
         mockFetch.mockResolvedValueOnce({
           ok: true,
-          json: async () => mockUsage,
+          json: async () => ({
+            current_period_start: '2024-01-01T00:00:00Z',
+            current_period_end: '2024-02-01T00:00:00Z',
+            usage: { chat_messages: 0, members: 0, workspaces: 0 },
+          }),
         });
 
         const result = await client.getUsage(orgId);
 
         expect(result).toEqual(mockUsage);
-        expect(result.users).toBe(0);
-        expect(result.api_calls).toBe(0);
+        expect(result.members).toBe(0);
+        expect(result.chat_messages).toBe(0);
       });
     });
 
     describe('getLimits', () => {
       it('fetches organization limits', async () => {
         const mockLimits: Limits = {
-          max_users: 50,
+          max_members: 50,
           max_workspaces: 10,
-          max_projects: 100,
-          max_storage_gb: 50,
-          max_api_calls_monthly: 50000,
+          max_chats_per_month: 50000,
         };
 
         mockFetch.mockResolvedValueOnce({
           ok: true,
-          json: async () => mockLimits,
+          json: async () => ({ max_workspaces: 10, max_members: 50, max_chats_per_month: 50000 }),
         });
 
         const result = await client.getLimits(orgId);
@@ -3522,24 +3548,22 @@ describe('Client', () => {
         );
       });
 
-      it('handles unlimited limits (null values)', async () => {
+      it('reads a negative plan limit as unlimited', async () => {
         const mockLimits: Limits = {
-          max_users: null,
+          max_members: null,
           max_workspaces: null,
-          max_projects: null,
-          max_storage_gb: 100,
-          max_api_calls_monthly: 100000,
+          max_chats_per_month: 100000,
         };
 
         mockFetch.mockResolvedValueOnce({
           ok: true,
-          json: async () => mockLimits,
+          json: async () => ({ max_workspaces: -1, max_members: -1, max_chats_per_month: 100000 }),
         });
 
         const result = await client.getLimits(orgId);
 
         expect(result).toEqual(mockLimits);
-        expect(result.max_users).toBeNull();
+        expect(result.max_members).toBeNull();
         expect(result.max_workspaces).toBeNull();
       });
     });
@@ -3579,12 +3603,14 @@ describe('Client', () => {
             {
               id: 'log-1',
               organization_id: orgId,
+              workspace_id: null,
               actor_id: 'user-1',
               actor_email: 'user@example.com',
-              action: 'create',
-              resource_type: 'project',
-              resource_id: 'proj-1',
-              metadata: { name: 'New Project' },
+              action: 'member.role_changed',
+              resource_type: 'member',
+              resource_id: 'user-2',
+              old_values: null,
+              new_values: { role: 'admin' },
               created_at: '2024-01-01T00:00:00Z',
             },
           ],
@@ -3666,12 +3692,14 @@ describe('Client', () => {
         const mockLog = {
           id: logId,
           organization_id: orgId,
+          workspace_id: null,
           actor_id: 'user-1',
           actor_email: 'user@example.com',
-          action: 'delete',
-          resource_type: 'source',
-          resource_id: 'src-1',
-          metadata: { reason: 'Cleanup' },
+          action: 'member.removed',
+          resource_type: 'member',
+          resource_id: 'user-2',
+          old_values: null,
+          new_values: null,
           created_at: '2024-01-01T00:00:00Z',
         };
 

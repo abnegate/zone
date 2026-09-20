@@ -16,7 +16,7 @@ pub use jwt::{
     AccessClaims, create_access_token, create_refresh_token, create_session_access_token,
     validate_access_token,
 };
-pub use middleware::{AuthUser, require_auth};
+pub use middleware::{AuthSession, AuthUser, require_auth};
 pub use organization_guard::{OrgAdmin, OrgMember, OrgOwner};
 pub use password::{hash_password, verify_password};
 pub use workspace_guard::{WorkspaceAdmin, WorkspaceMember, WorkspaceOwner, WorkspaceWriter};

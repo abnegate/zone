@@ -335,6 +335,156 @@ pub async fn list_members(
         .collect())
 }
 
+/// An active member together with the account they sign in with.
+#[derive(Debug, Clone)]
+pub struct MemberWithUser {
+    pub member: OrganizationMemberRow,
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct MemberWithUserRow {
+    id: Uuid,
+    organization_id: Uuid,
+    user_id: Uuid,
+    role: String,
+    is_active: bool,
+    invited_by: Option<Uuid>,
+    invited_at: Option<NaiveDateTime>,
+    accepted_at: Option<NaiveDateTime>,
+    created_at: Option<NaiveDateTime>,
+    updated_at: Option<NaiveDateTime>,
+    email: String,
+    display_name: Option<String>,
+}
+
+impl From<MemberWithUserRow> for MemberWithUser {
+    fn from(row: MemberWithUserRow) -> Self {
+        let now = chrono::Utc::now().naive_utc();
+        Self {
+            member: OrganizationMemberRow {
+                id: row.id,
+                organization_id: row.organization_id,
+                user_id: row.user_id,
+                role: row.role.parse().unwrap_or(OrgRole::Member),
+                is_active: row.is_active,
+                invited_by: row.invited_by,
+                invited_at: row.invited_at,
+                accepted_at: row.accepted_at,
+                created_at: row.created_at.unwrap_or(now),
+                updated_at: row.updated_at.unwrap_or(now),
+            },
+            email: row.email,
+            display_name: row.display_name,
+        }
+    }
+}
+
+const MEMBER_WITH_USER_COLUMNS: &str = r#"
+    om.id, om.organization_id, om.user_id, om.role, om.is_active,
+    om.invited_by, om.invited_at, om.accepted_at, om.created_at, om.updated_at,
+    u.email, u.display_name
+"#;
+
+/// List the active members of an organization with their emails and names.
+pub async fn list_members_with_users(
+    pool: &PgPool,
+    organization_id: Uuid,
+) -> DbResult<Vec<MemberWithUser>> {
+    let rows: Vec<MemberWithUserRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        r#"
+        SELECT {MEMBER_WITH_USER_COLUMNS}
+        FROM organization_members om
+        INNER JOIN users u ON u.id = om.user_id
+        WHERE om.organization_id = $1 AND om.is_active = TRUE
+        ORDER BY om.created_at ASC
+        "#
+    )))
+    .bind(organization_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(MemberWithUser::from).collect())
+}
+
+/// One member of an organization with their email and name.
+pub async fn get_member_with_user(
+    pool: &PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<MemberWithUser>> {
+    let row: Option<MemberWithUserRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        r#"
+        SELECT {MEMBER_WITH_USER_COLUMNS}
+        FROM organization_members om
+        INNER JOIN users u ON u.id = om.user_id
+        WHERE om.organization_id = $1 AND om.user_id = $2
+        "#
+    )))
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(MemberWithUser::from))
+}
+
+/// An organization a user belongs to, with the role they hold in it.
+#[derive(Debug, Clone)]
+pub struct UserOrganization {
+    pub organization: super::organizations::OrganizationRow,
+    pub role: OrgRole,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct UserOrganizationRow {
+    id: Uuid,
+    name: String,
+    slug: String,
+    description: Option<String>,
+    is_active: Option<bool>,
+    created_at: Option<NaiveDateTime>,
+    updated_at: Option<NaiveDateTime>,
+    role: String,
+}
+
+/// List the organizations a user is an active member of, with their role.
+pub async fn list_user_organizations_with_role(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> DbResult<Vec<UserOrganization>> {
+    let rows: Vec<UserOrganizationRow> = sqlx::query_as(
+        r#"
+        SELECT o.id, o.name, o.slug, o.description, o.is_active, o.created_at, o.updated_at,
+               om.role
+        FROM organizations o
+        INNER JOIN organization_members om ON o.id = om.organization_id
+        WHERE om.user_id = $1 AND om.is_active = TRUE
+        ORDER BY o.created_at DESC
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| UserOrganization {
+            organization: super::organizations::OrganizationRow {
+                id: row.id,
+                name: row.name,
+                slug: row.slug,
+                description: row.description,
+                is_active: row.is_active,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            },
+            role: row.role.parse().unwrap_or(OrgRole::Member),
+        })
+        .collect())
+}
+
 /// List all organizations a user is a member of
 pub async fn list_user_organizations(
     pool: &PgPool,
@@ -568,6 +718,18 @@ pub async fn is_owner(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> Db
 }
 
 /// Count active owners in an organization
+/// How many active seats an organization holds.
+pub async fn count_active_members(pool: &PgPool, organization_id: Uuid) -> DbResult<i64> {
+    let count: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM organization_members WHERE organization_id = $1 AND is_active = TRUE",
+    )
+    .bind(organization_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.unwrap_or(0))
+}
+
 pub async fn count_owners(pool: &PgPool, organization_id: Uuid) -> DbResult<i64> {
     let count = sqlx::query_scalar!(
         r#"

@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{AuthUser, OrgAdmin, OrgMember, OrgOwner, WorkspaceAdmin, WorkspaceMember};
+use crate::db::audit::{actions, resources};
 use crate::db::{organization_members, organizations, workspaces};
 use crate::state::AppState;
 
-use super::common::{ErrorResponse, Timestamps};
+use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
 
 /// Organization response
 #[derive(Debug, Serialize)]
@@ -23,6 +24,8 @@ pub struct OrganizationResponse {
     slug: String,
     description: Option<String>,
     is_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -35,8 +38,16 @@ impl From<organizations::OrganizationRow> for OrganizationResponse {
             slug: row.slug,
             description: row.description,
             is_active: row.is_active.unwrap_or(true),
+            role: None,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
+    }
+}
+
+impl OrganizationResponse {
+    fn with_role(mut self, role: organization_members::OrgRole) -> Self {
+        self.role = Some(role.as_str().to_string());
+        self
     }
 }
 
@@ -123,9 +134,14 @@ pub async fn list(State(state): State<AppState>, auth: AuthUser) -> impl IntoRes
         }
     };
 
-    match organization_members::list_user_organizations(state.db(), user_id).await {
+    match organization_members::list_user_organizations_with_role(state.db(), user_id).await {
         Ok(orgs) => Json(OrganizationsListResponse {
-            organizations: orgs.into_iter().map(OrganizationResponse::from).collect(),
+            organizations: orgs
+                .into_iter()
+                .map(|membership| {
+                    OrganizationResponse::from(membership.organization).with_role(membership.role)
+                })
+                .collect(),
         })
         .into_response(),
         Err(e) => {
@@ -234,7 +250,7 @@ pub async fn create(
 pub async fn get(State(state): State<AppState>, member: OrgMember) -> impl IntoResponse {
     match organizations::get_organization(state.db(), member.org_id).await {
         Ok(Some(org)) => Json(SingleOrganizationResponse {
-            organization: OrganizationResponse::from(org),
+            organization: OrganizationResponse::from(org).with_role(member.role),
         })
         .into_response(),
         Ok(None) => (
@@ -268,10 +284,29 @@ pub async fn update(
     )
     .await
     {
-        Ok(Some(org)) => Json(SingleOrganizationResponse {
-            organization: OrganizationResponse::from(org),
-        })
-        .into_response(),
+        Ok(Some(org)) => {
+            let organization = OrganizationResponse::from(org).with_role(admin.role);
+            audit(
+                state.db(),
+                AuditEvent {
+                    organization_id: Some(admin.org_id),
+                    workspace_id: None,
+                    actor_id: admin.user_id,
+                    actor_email: &admin.email,
+                    action: actions::ORGANIZATION_UPDATED,
+                    resource_type: resources::ORGANIZATION,
+                    resource_id: Some(admin.org_id),
+                    old_values: None,
+                    new_values: Some(serde_json::json!({
+                        "name": organization.name,
+                        "description": organization.description,
+                        "is_active": organization.is_active,
+                    })),
+                },
+            )
+            .await;
+            Json(SingleOrganizationResponse { organization }).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Organization not found")),
@@ -291,7 +326,24 @@ pub async fn update(
 /// DELETE /api/organizations/:org_id - Delete org (requires owner)
 pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl IntoResponse {
     match organizations::delete_organization(state.db(), owner.org_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            audit(
+                state.db(),
+                AuditEvent {
+                    organization_id: Some(owner.org_id),
+                    workspace_id: None,
+                    actor_id: owner.user_id,
+                    actor_email: &owner.email,
+                    action: actions::ORGANIZATION_DELETED,
+                    resource_type: resources::ORGANIZATION,
+                    resource_id: Some(owner.org_id),
+                    old_values: None,
+                    new_values: None,
+                },
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Organization not found")),
@@ -367,11 +419,26 @@ pub async fn create_workspace(
         }
     };
 
+    let workspace = WorkspaceResponse::from(ws);
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(admin.org_id),
+            workspace_id: Some(workspace.id),
+            actor_id: admin.user_id,
+            actor_email: &admin.email,
+            action: actions::WORKSPACE_CREATED,
+            resource_type: resources::WORKSPACE,
+            resource_id: Some(workspace.id),
+            old_values: None,
+            new_values: serde_json::to_value(&workspace).ok(),
+        },
+    )
+    .await;
+
     (
         StatusCode::CREATED,
-        Json(SingleWorkspaceResponse {
-            workspace: WorkspaceResponse::from(ws),
-        }),
+        Json(SingleWorkspaceResponse { workspace }),
     )
         .into_response()
 }
@@ -417,10 +484,25 @@ pub async fn update_workspace(
     )
     .await
     {
-        Ok(Some(ws)) => Json(SingleWorkspaceResponse {
-            workspace: WorkspaceResponse::from(ws),
-        })
-        .into_response(),
+        Ok(Some(ws)) => {
+            let workspace = WorkspaceResponse::from(ws);
+            audit(
+                state.db(),
+                AuditEvent {
+                    organization_id: Some(workspace.organization_id),
+                    workspace_id: Some(admin.workspace_id),
+                    actor_id: admin.user_id,
+                    actor_email: &admin.email,
+                    action: actions::WORKSPACE_UPDATED,
+                    resource_type: resources::WORKSPACE,
+                    resource_id: Some(admin.workspace_id),
+                    old_values: None,
+                    new_values: serde_json::to_value(&workspace).ok(),
+                },
+            )
+            .await;
+            Json(SingleWorkspaceResponse { workspace }).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Workspace not found")),
@@ -442,8 +524,37 @@ pub async fn delete_workspace(
     State(state): State<AppState>,
     admin: WorkspaceAdmin,
 ) -> impl IntoResponse {
+    let organization_id = match workspaces::get_workspace(state.db(), admin.workspace_id).await {
+        Ok(workspace) => workspace.map(|workspace| workspace.organization_id),
+        Err(e) => {
+            tracing::error!("Database error: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+
     match workspaces::delete_workspace(state.db(), admin.workspace_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            audit(
+                state.db(),
+                AuditEvent {
+                    organization_id,
+                    workspace_id: Some(admin.workspace_id),
+                    actor_id: admin.user_id,
+                    actor_email: &admin.email,
+                    action: actions::WORKSPACE_DELETED,
+                    resource_type: resources::WORKSPACE,
+                    resource_id: Some(admin.workspace_id),
+                    old_values: None,
+                    new_values: None,
+                },
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Workspace not found")),
@@ -473,6 +584,8 @@ pub struct OrganizationMemberResponse {
     role: String,
     is_active: bool,
     invited_by: Option<Uuid>,
+    email: Option<String>,
+    display_name: Option<String>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -486,9 +599,63 @@ impl From<organization_members::OrganizationMemberRow> for OrganizationMemberRes
             role: row.role.as_str().to_string(),
             is_active: row.is_active,
             invited_by: row.invited_by,
+            email: None,
+            display_name: None,
             timestamps: Timestamps::from_naive(Some(row.created_at), Some(row.updated_at)),
         }
     }
+}
+
+impl From<organization_members::MemberWithUser> for OrganizationMemberResponse {
+    fn from(member: organization_members::MemberWithUser) -> Self {
+        Self {
+            email: Some(member.email),
+            display_name: member.display_name,
+            ..Self::from(member.member)
+        }
+    }
+}
+
+/// The member as the console lists them: with the account's email and name
+/// when the account can be read, the bare seat otherwise.
+async fn describe_member(
+    state: &AppState,
+    row: organization_members::OrganizationMemberRow,
+) -> OrganizationMemberResponse {
+    match organization_members::get_member_with_user(state.db(), row.organization_id, row.user_id)
+        .await
+    {
+        Ok(Some(member)) => OrganizationMemberResponse::from(member),
+        Ok(None) => OrganizationMemberResponse::from(row),
+        Err(error) => {
+            tracing::warn!(%error, user_id = %row.user_id, "Failed to read the member's account");
+            OrganizationMemberResponse::from(row)
+        }
+    }
+}
+
+async fn audit_member(
+    state: &AppState,
+    admin: &OrgAdmin,
+    action: &str,
+    user_id: Uuid,
+    role: Option<&str>,
+) {
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(admin.org_id),
+            workspace_id: None,
+            actor_id: admin.user_id,
+            actor_email: &admin.email,
+            action,
+            resource_type: resources::MEMBER,
+            resource_id: Some(user_id),
+            old_values: None,
+            new_values: role.map(|role| serde_json::json!({ "user_id": user_id, "role": role })),
+        },
+    )
+    .await;
 }
 
 /// Add member request. The console's organization form names the invitee by
@@ -514,7 +681,7 @@ struct OrganizationMembersListResponse {
 
 /// GET /api/organizations/:org_id/members - List members (requires member)
 pub async fn list_members(State(state): State<AppState>, member: OrgMember) -> impl IntoResponse {
-    match organization_members::list_members(state.db(), member.org_id).await {
+    match organization_members::list_members_with_users(state.db(), member.org_id).await {
         Ok(members) => Json(OrganizationMembersListResponse {
             members: members
                 .into_iter()
@@ -620,11 +787,16 @@ pub async fn add_member(
                 .await
                 {
                     Ok(member) => {
-                        return (
-                            StatusCode::OK,
-                            Json(OrganizationMemberResponse::from(member)),
+                        audit_member(
+                            &state,
+                            &admin,
+                            actions::MEMBER_ADDED,
+                            member.user_id,
+                            Some(member.role.as_str()),
                         )
-                            .into_response();
+                        .await;
+                        let response = describe_member(&state, member).await;
+                        return (StatusCode::OK, Json(response)).into_response();
                     }
                     Err(e) => {
                         tracing::error!("Database error reactivating member: {}", e);
@@ -659,11 +831,18 @@ pub async fn add_member(
     )
     .await
     {
-        Ok(member) => (
-            StatusCode::CREATED,
-            Json(OrganizationMemberResponse::from(member)),
-        )
-            .into_response(),
+        Ok(member) => {
+            audit_member(
+                &state,
+                &admin,
+                actions::MEMBER_ADDED,
+                member.user_id,
+                Some(member.role.as_str()),
+            )
+            .await;
+            let response = describe_member(&state, member).await;
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -722,7 +901,16 @@ pub async fn update_member_role(
     .await
     {
         Ok(organization_members::RoleChange::Applied(member)) => {
-            Json(OrganizationMemberResponse::from(*member)).into_response()
+            audit_member(
+                &state,
+                &admin,
+                actions::MEMBER_ROLE_CHANGED,
+                member.user_id,
+                Some(member.role.as_str()),
+            )
+            .await;
+            let response = describe_member(&state, *member).await;
+            Json(response).into_response()
         }
         Ok(organization_members::RoleChange::Forbidden) => (
             StatusCode::FORBIDDEN,
@@ -763,7 +951,10 @@ pub async fn remove_member(
     match organization_members::remove_guarded(state.db(), admin.org_id, path.user_id, admin.role)
         .await
     {
-        Ok(organization_members::Removal::Removed) => StatusCode::NO_CONTENT.into_response(),
+        Ok(organization_members::Removal::Removed) => {
+            audit_member(&state, &admin, actions::MEMBER_REMOVED, path.user_id, None).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(organization_members::Removal::Forbidden) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(

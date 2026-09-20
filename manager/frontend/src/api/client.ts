@@ -538,15 +538,17 @@ class Client {
     return parse(AiSettingsResponseSchema, await response.json());
   }
 
+  // The delete answers 204 with no body (404 when nothing was ever saved), so
+  // the defaults are read back rather than parsed out of the reply.
   async resetOrgAiSettings(orgId: string): Promise<AiSettings> {
     const response = await fetch(`${API_BASE}/api/organizations/${orgId}/settings/ai`, {
       method: 'DELETE',
       headers: this.getHeaders(),
     });
-    if (!response.ok) {
+    if (!response.ok && response.status !== 404) {
       throw new Error(`Failed to reset org AI settings: ${response.status}`);
     }
-    return parse(AiSettingsResponseSchema, await response.json());
+    return this.getOrgAiSettings(orgId);
   }
 
   // Workspace AI Settings API
@@ -589,10 +591,10 @@ class Client {
         headers: this.getHeaders(),
       }
     );
-    if (!response.ok) {
+    if (!response.ok && response.status !== 404) {
       throw new Error(`Failed to reset workspace AI settings: ${response.status}`);
     }
-    return parse(AiSettingsResponseSchema, await response.json());
+    return this.getWorkspaceAiSettings(orgId, wsId);
   }
 
   async getEffectiveAiSettings(orgId: string, wsId: string): Promise<AiSettings> {

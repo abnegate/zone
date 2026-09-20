@@ -42,10 +42,12 @@ describe('AuditLogsSection', () => {
       organization_id: orgId,
       actor_id: 'user-1',
       actor_email: 'alice@example.com',
-      action: 'create',
-      resource_type: 'project',
+      action: 'member.added',
+      resource_type: 'member',
       resource_id: 'proj-1',
-      metadata: { name: 'New Project' },
+      workspace_id: null,
+      old_values: null,
+      new_values: { name: 'New Project' },
       created_at: '2024-01-15T10:30:00Z',
     },
     {
@@ -53,10 +55,12 @@ describe('AuditLogsSection', () => {
       organization_id: orgId,
       actor_id: 'user-2',
       actor_email: 'bob@example.com',
-      action: 'update',
-      resource_type: 'task',
+      action: 'member.role_changed',
+      resource_type: 'ai_settings',
       resource_id: 'task-1',
-      metadata: { status: 'completed' },
+      workspace_id: null,
+      old_values: null,
+      new_values: { status: 'completed' },
       created_at: '2024-01-15T11:00:00Z',
     },
     {
@@ -64,10 +68,12 @@ describe('AuditLogsSection', () => {
       organization_id: orgId,
       actor_id: 'user-1',
       actor_email: 'alice@example.com',
-      action: 'delete',
-      resource_type: 'source',
+      action: 'member.removed',
+      resource_type: 'invitation',
       resource_id: 'src-1',
-      metadata: { reason: 'No longer needed' },
+      workspace_id: null,
+      old_values: null,
+      new_values: { reason: 'No longer needed' },
       created_at: '2024-01-15T12:00:00Z',
     },
   ];
@@ -200,12 +206,12 @@ describe('AuditLogsSection', () => {
       render(<AuditLogsSection orgId={orgId} />);
 
       await waitFor(() => {
-        expect(screen.getByText('create')).toBeInTheDocument();
+        expect(screen.getByText('member.added')).toBeInTheDocument();
       });
 
-      const createBadge = screen.getByText('create');
-      const updateBadge = screen.getByText('update');
-      const deleteBadge = screen.getByText('delete');
+      const createBadge = screen.getByText('member.added');
+      const updateBadge = screen.getByText('member.role_changed');
+      const deleteBadge = screen.getByText('member.removed');
 
       expect(createBadge).toHaveClass('action-badge', 'action-create');
       expect(updateBadge).toHaveClass('action-badge', 'action-update');
@@ -253,11 +259,11 @@ describe('AuditLogsSection', () => {
       render(<AuditLogsSection orgId={orgId} />);
 
       await waitFor(() => {
-        expect(screen.getByText('project')).toBeInTheDocument();
+        expect(screen.getByText('member')).toBeInTheDocument();
       });
 
-      expect(screen.getByText('task')).toBeInTheDocument();
-      expect(screen.getByText('source')).toBeInTheDocument();
+      expect(screen.getByText('ai_settings')).toBeInTheDocument();
+      expect(screen.getByText('invitation')).toBeInTheDocument();
       expect(screen.getByText('proj-1')).toBeInTheDocument();
       expect(screen.getByText('task-1')).toBeInTheDocument();
       expect(screen.getByText('src-1')).toBeInTheDocument();
@@ -283,7 +289,7 @@ describe('AuditLogsSection', () => {
       fireEvent.click(expandButtons[0]);
 
       await waitFor(() => {
-        expect(screen.getByText('Metadata')).toBeInTheDocument();
+        expect(screen.getByText('Recorded values')).toBeInTheDocument();
       });
 
       expect(screen.getByText(/"name": "New Project"/)).toBeInTheDocument();
@@ -306,7 +312,7 @@ describe('AuditLogsSection', () => {
       fireEvent.click(screen.getByText('Hide'));
 
       await waitFor(() => {
-        expect(screen.queryByText('Metadata')).not.toBeInTheDocument();
+        expect(screen.queryByText('Recorded values')).not.toBeInTheDocument();
       });
     });
 
@@ -396,10 +402,10 @@ describe('AuditLogsSection', () => {
       });
 
       // Test with single filter to avoid component limitations with multiple simultaneous filter changes
-      fireEvent.change(actionSelect, { target: { value: 'create' } });
+      fireEvent.change(actionSelect, { target: { value: 'member.added' } });
 
       // Wait for React to process this state update and useEffect to trigger
-      await waitFor(() => expect(actionSelect.value).toBe('create'));
+      await waitFor(() => expect(actionSelect.value).toBe('member.added'));
 
       // Wait for automatic reload to complete
       await waitFor(
@@ -431,7 +437,7 @@ describe('AuditLogsSection', () => {
       expect(mockGetAuditLogs).toHaveBeenCalledWith(
         orgId,
         expect.objectContaining({
-          action: 'create',
+          action: 'member.added',
         })
       );
     });
@@ -473,10 +479,10 @@ describe('AuditLogsSection', () => {
         total: 3,
       });
 
-      fireEvent.change(actionSelect, { target: { value: 'create' } });
+      fireEvent.change(actionSelect, { target: { value: 'member.added' } });
 
       await waitFor(() => {
-        expect(actionSelect.value).toBe('create');
+        expect(actionSelect.value).toBe('member.added');
       });
 
       // Wait for automatic reload to complete
@@ -714,7 +720,7 @@ describe('AuditLogsSection', () => {
       });
 
       const actionSelect = screen.getByLabelText('Action') as HTMLSelectElement;
-      fireEvent.change(actionSelect, { target: { value: 'create' } });
+      fireEvent.change(actionSelect, { target: { value: 'member.added' } });
 
       await waitFor(() => {
         expect(screen.getByText('Export CSV')).toBeInTheDocument();
@@ -727,7 +733,7 @@ describe('AuditLogsSection', () => {
         expect(mockExportAuditLogs).toHaveBeenCalledWith(
           orgId,
           expect.objectContaining({
-            action: 'create',
+            action: 'member.added',
           })
         );
       });
@@ -850,7 +856,7 @@ describe('AuditLogsSection', () => {
       });
 
       const actionSelect = screen.getByLabelText('Action') as HTMLSelectElement;
-      fireEvent.change(actionSelect, { target: { value: 'create' } });
+      fireEvent.change(actionSelect, { target: { value: 'member.added' } });
 
       mockGetAuditLogs.mockClear();
       mockGetAuditLogs.mockResolvedValue({

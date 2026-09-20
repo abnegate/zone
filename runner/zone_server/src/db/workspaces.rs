@@ -49,6 +49,18 @@ pub async fn list_workspaces(pool: &PgPool, organization_id: Uuid) -> DbResult<V
 }
 
 /// Get workspace by ID
+/// How many active workspaces an organization holds.
+pub async fn count_active_workspaces(pool: &PgPool, organization_id: Uuid) -> DbResult<i64> {
+    let count: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workspaces WHERE organization_id = $1 AND is_active = TRUE",
+    )
+    .bind(organization_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.unwrap_or(0))
+}
+
 pub async fn get_workspace(pool: &PgPool, id: Uuid) -> DbResult<Option<WorkspaceRow>> {
     let row = sqlx::query!(
         r#"

@@ -5,6 +5,18 @@ import ZoneLogo from '../../../shared/components/ZoneLogo';
 import { isValidTokenFormat } from '../utils';
 import './AuthPage.css';
 
+// One request per token while it is in flight: StrictMode mounts the page
+// twice, and a second call would find the single-use token consumed.
+const inFlight = new Map<string, Promise<{ message: string }>>();
+
+function verifyOnce(token: string): Promise<{ message: string }> {
+  const pending = inFlight.get(token);
+  if (pending) return pending;
+  const request = client.verifyEmail(token).finally(() => inFlight.delete(token));
+  inFlight.set(token, request);
+  return request;
+}
+
 export default function EmailVerificationPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -30,7 +42,7 @@ export default function EmailVerificationPage() {
 
     const verify = async () => {
       try {
-        const result = await client.verifyEmail(token);
+        const result = await verifyOnce(token);
         if (abortController.signal.aborted) return;
 
         setStatus('success');
