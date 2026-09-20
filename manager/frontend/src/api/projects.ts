@@ -186,8 +186,9 @@ class ProjectsApi {
 
   private async parseErrorResponse(response: Response): Promise<{ message?: string }> {
     try {
-      const data = await response.json();
-      return data;
+      const data = (await response.json()) as { error?: unknown; message?: unknown };
+      const message = [data.error, data.message].find((value) => typeof value === 'string');
+      return typeof message === 'string' ? { message } : {};
     } catch {
       return {};
     }
