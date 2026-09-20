@@ -99,6 +99,50 @@ test('the models tabs stay scrollable and the page bar stays one row', async ({ 
   expect(overflowing, 'the bar wrapped').toBe(0);
 });
 
+test('chat titles keep the row width and the conversation header stays one row', async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.goto('/chats');
+  const item = page.locator('.chat-item').first();
+  await expect(item).toBeVisible();
+
+  const widths = await item.evaluate((element) => {
+    const title = element.querySelector('.chat-title');
+    return {
+      item: element.getBoundingClientRect().width,
+      title: title?.getBoundingClientRect().width ?? 0,
+      height: element.getBoundingClientRect().height,
+    };
+  });
+  expect(widths.title).toBeGreaterThanOrEqual(widths.item * 0.6);
+  expect(widths.height).toBeLessThanOrEqual(56);
+
+  await item.click();
+  const header = page.locator('.chat-header');
+  await expect(header).toBeVisible();
+  const box = await header.boundingBox();
+  expect(box?.height).toBeLessThanOrEqual(BAR_HEIGHT);
+  const wrapped = await header.evaluate((element) => {
+    const own = element.getBoundingClientRect();
+    return [...element.querySelectorAll('*')]
+      .map((child) => child.getBoundingClientRect())
+      .filter((rect) => rect.height > 0 && (rect.top < own.top - 1 || rect.bottom > own.bottom + 1))
+      .length;
+  });
+  expect(wrapped, 'the chat header wrapped').toBe(0);
+
+  const bubble = page.locator('.message-user .message-content').first();
+  if (await bubble.count()) {
+    const column = await page.locator('.messages-container').evaluate((element) => {
+      const style = getComputedStyle(element);
+      return element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    });
+    const width = (await bubble.boundingBox())?.width ?? 0;
+    expect(width).toBeLessThanOrEqual(column * 0.72 + 1);
+  }
+});
+
 test('sibling cards in a grid share one height', async ({ page }) => {
   await signIn(page);
 
