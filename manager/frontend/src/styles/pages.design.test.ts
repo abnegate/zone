@@ -57,15 +57,18 @@ describe('chats layout', () => {
     expect(rule(chats, '.chat-meta')).toContain('line-height: var(--ui-space-4)');
   });
 
-  it('gives a search result a title row and a two-line snippet with no score badge', () => {
-    expect(rule(chats, '.search-result-item')).not.toContain('height:');
+  it('sets a search result to the 56px two-line row: 4 + 16 title + 32 snippet + 4', () => {
+    expect(rule(chats, '.search-result-item')).toContain('height: var(--ui-list-row-2)');
     expect(rule(chats, '.search-result-item')).toContain(
-      'padding: var(--ui-space-2) var(--ui-space-3)'
+      'padding: var(--ui-space-1) var(--ui-space-3)'
     );
-    expect(rule(chats, '.search-result-header')).toContain('height: var(--ui-space-5)');
+    expect(rule(chats, '.search-result-header')).toContain('height: var(--ui-space-4)');
     expect(rule(chats, '.search-result-chat')).toContain('flex: 1');
+    expect(rule(chats, '.search-result-chat')).toContain('line-height: var(--ui-space-4)');
+    expect(rule(chats, '.search-result-date')).toContain('line-height: var(--ui-space-4)');
     expect(rule(chats, '.search-result-snippet')).toContain('-webkit-line-clamp: 2');
     expect(rule(chats, '.search-result-snippet')).toContain('height: var(--ui-space-8)');
+    expect(rule(chats, '.search-result-snippet')).toContain('line-height: var(--ui-space-4)');
     expect(chats).not.toContain('.search-result-score');
   });
 
