@@ -39,6 +39,13 @@ pub struct Config {
     /// Editor command for editing files
     #[serde(default = "default_editor")]
     pub editor: String,
+
+    /// OpenAI-compatible base URL `zone run` sends completions to, such as
+    /// LiteLLM at http://localhost:4000 or Ollama at http://127.0.0.1:11434/v1
+    pub llm_base_url: Option<String>,
+
+    /// Bearer token for `llm_base_url`; omitted for a server that needs none
+    pub llm_api_key: Option<String>,
 }
 
 fn default_model() -> String {
@@ -60,6 +67,8 @@ impl Default for Config {
             host: None,
             max_iterations: default_max_iterations(),
             editor: default_editor(),
+            llm_base_url: None,
+            llm_api_key: None,
         }
     }
 }
@@ -154,6 +163,8 @@ mod tests {
             host: Some("https://zone.example.com".to_string()),
             max_iterations: 100,
             editor: "nano".to_string(),
+            llm_base_url: None,
+            llm_api_key: None,
         };
 
         let toml_str = toml::to_string(&config).unwrap();
@@ -213,6 +224,8 @@ mod tests {
             host: Some("https://zone.example.com".to_string()),
             max_iterations: 100,
             editor: "nano".to_string(),
+            llm_base_url: None,
+            llm_api_key: None,
         };
 
         let cloned = config.clone();
@@ -292,6 +305,8 @@ mod tests {
             host: Some("https://zone.test.com".to_string()),
             max_iterations: 75,
             editor: "nvim".to_string(),
+            llm_base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+            llm_api_key: Some("ollama".to_string()),
         };
 
         let toml_str = toml::to_string_pretty(&original).unwrap();
@@ -301,6 +316,8 @@ mod tests {
         assert_eq!(original.host, deserialized.host);
         assert_eq!(original.max_iterations, deserialized.max_iterations);
         assert_eq!(original.editor, deserialized.editor);
+        assert_eq!(original.llm_base_url, deserialized.llm_base_url);
+        assert_eq!(original.llm_api_key, deserialized.llm_api_key);
     }
 
     #[test]
@@ -310,6 +327,8 @@ mod tests {
             host: None,
             max_iterations: 50,
             editor: "vim".to_string(),
+            llm_base_url: None,
+            llm_api_key: None,
         };
 
         let toml_str = toml::to_string(&config).unwrap();
@@ -327,6 +346,8 @@ mod tests {
                 host: None,
                 max_iterations: iterations,
                 editor: "vim".to_string(),
+                llm_base_url: None,
+                llm_api_key: None,
             };
 
             let toml_str = toml::to_string(&config).unwrap();

@@ -28,7 +28,7 @@ impl Frontend {
 
     fn build_dir(&self) -> &'static str {
         match self {
-            Frontend::Manager => "dist",
+            Frontend::Manager => "build",
         }
     }
 }
@@ -169,4 +169,29 @@ pub fn run_all(project_root: &Path, verbose: bool) -> Result<()> {
         style("✓").green().bold()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lighthouse CI serves `staticDistDir` from `lighthouserc.json`, so the
+    /// directory this waits for after `bun run build` has to be that one.
+    #[test]
+    fn the_manager_build_dir_is_the_one_lighthouserc_serves() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let rc = std::fs::read_to_string(
+            root.join(Frontend::Manager.path())
+                .join("lighthouserc.json"),
+        )
+        .expect("manager/frontend/lighthouserc.json exists");
+        let rc: serde_json::Value = serde_json::from_str(&rc).unwrap();
+        let declared = rc["ci"]["collect"]["staticDistDir"]
+            .as_str()
+            .expect("lighthouserc.json declares staticDistDir");
+        assert_eq!(
+            declared.trim_start_matches("./"),
+            Frontend::Manager.build_dir()
+        );
+    }
 }
