@@ -55,15 +55,12 @@
 
 .details-stat-label,
 .details-label {
+  display: block;
+  margin-bottom: var(--ui-space-1);
   font-size: var(--ui-text-2xs);
   color: var(--ui-text-muted);
   text-transform: uppercase;
   letter-spacing: var(--ui-tracking-wider);
-}
-
-.details-label {
-  display: block;
-  margin-bottom: var(--ui-space-1);
 }
 
 .details-author {
@@ -84,6 +81,12 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
   gap: var(--ui-space-3) var(--ui-space-4);
+}
+
+.details-meta--row {
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-template-columns: none;
 }
 
 .details-meta-item {
