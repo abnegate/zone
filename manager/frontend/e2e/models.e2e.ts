@@ -381,7 +381,7 @@ test.describe('Models Page', () => {
     await expect(
       page.getByText('subject.mp4: 24 frames read at 8.0/s, 2 kept')
     ).toBeVisible();
-    await expect(page.getByText('Caption for subject.mp4 frame-0000.png')).toBeVisible();
+    await expect(page.getByLabel('Caption for subject.mp4 frame-0000.png')).toBeVisible();
     await expect(
       page.getByText('subject.mp4 frame-0001.png (mirrored)', { exact: true })
     ).toBeVisible();

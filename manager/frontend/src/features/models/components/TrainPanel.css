@@ -144,6 +144,37 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+.train-clips {
+  display: flex;
+  flex-direction: column;
+  margin: var(--ui-hint-gap) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.train-clip {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-height: var(--ui-control-height-sm);
+  font-size: var(--ui-text-2xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-muted);
+}
+
+.train-clip-receipt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.train-clip-name {
+  font-family: var(--ui-font-mono);
+  color: var(--ui-text-primary);
+}
+
 .train-caption {
   display: flex;
   align-items: center;

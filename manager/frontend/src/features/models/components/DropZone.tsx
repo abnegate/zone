@@ -1,5 +1,5 @@
 import { Label } from '@zone/ui';
-import { type DragEvent, type ReactElement, useState } from 'react';
+import { type DragEvent, type ReactElement, type ReactNode, useState } from 'react';
 import './DropZone.css';
 
 type DropZoneProps = {
@@ -10,6 +10,7 @@ type DropZoneProps = {
   accept: string;
   disabled?: boolean;
   onFiles: (files: File[]) => void;
+  children?: ReactNode;
 };
 
 function accepts(accept: string, file: File): boolean {
@@ -27,6 +28,7 @@ export default function DropZone({
   accept,
   disabled = false,
   onFiles,
+  children,
 }: DropZoneProps): ReactElement {
   const [over, setOver] = useState(false);
   const labelId = `${id}-label`;
@@ -87,6 +89,7 @@ export default function DropZone({
         </svg>
         <span className="drop-zone-prompt">{prompt}</span>
       </label>
+      {children}
       <p id={hintId} className="drop-zone-hint">
         {hint}
       </p>
