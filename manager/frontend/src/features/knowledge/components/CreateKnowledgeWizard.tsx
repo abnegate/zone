@@ -315,7 +315,7 @@ export function CreateKnowledgeWizard({
                   value={tagInput}
                   onChange={(e) => setTagInput(e.target.value)}
                   onKeyDown={handleAddTag}
-                  placeholder={tags.length === 0 ? 'Press Enter to add tags...' : 'Add more...'}
+                  placeholder={tags.length === 0 ? 'e.g. release, history' : 'Add more...'}
                 />
               </div>
               <span className="form-hint">Press Enter to add each tag</span>

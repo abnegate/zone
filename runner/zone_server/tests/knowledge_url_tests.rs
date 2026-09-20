@@ -346,6 +346,7 @@ fn test_knowledge_row_has_url_fields() {
         id: Uuid::new_v4(),
         workspace_id: Uuid::new_v4(),
         title: "Test".to_string(),
+        excerpt: "Content".to_string(),
         category: None,
         tags: vec![],
         token_count: 0,
@@ -354,6 +355,8 @@ fn test_knowledge_row_has_url_fields() {
         last_fetched_at: None,
         refresh_interval_minutes: Some(60),
         last_fetch_error: None,
+        created_at: None,
+        updated_at: None,
         indexed: true,
     };
 }

@@ -9,6 +9,14 @@ import './WikiPage.css';
 
 type FilterType = 'all' | 'text' | 'url';
 
+const NO_EXCERPT = 'No excerpt';
+
+/// What a card says about itself when the list carries no date: the size of
+/// the entry, or failing that its type, so the meta row is never blank.
+function cardSize(entry: KnowledgeEntry): string {
+  return entry.token_count === null ? entry.type : `${entry.token_count.toLocaleString()} tokens`;
+}
+
 export default function WikiPage() {
   const { entries, loading, error, refreshing, createEntry, deleteEntry, refreshEntry, readEntry } =
     useKnowledge();
@@ -202,10 +210,7 @@ export default function WikiPage() {
         ) : (
           <div className="knowledge-grid">
             {filteredEntries.map((entry) => {
-              const excerpt =
-                entry.type === 'url' && entry.fetched_content
-                  ? entry.fetched_content
-                  : entry.content;
+              const excerpt = entry.excerpt;
               const updated = entry.updated_at || entry.created_at;
               return (
                 <div
@@ -233,7 +238,7 @@ export default function WikiPage() {
 
                   {excerpt ? (
                     <div className="knowledge-card-content">{excerpt}</div>
-                  ) : (
+                  ) : entry.tags.length > 0 ? (
                     <div className="knowledge-card-tags">
                       {entry.tags.map((tag) => (
                         <span key={tag} className="knowledge-tag">
@@ -241,11 +246,15 @@ export default function WikiPage() {
                         </span>
                       ))}
                     </div>
+                  ) : (
+                    <div className="knowledge-card-content knowledge-card-content--empty">
+                      {entry.category ?? NO_EXCERPT}
+                    </div>
                   )}
 
                   <div className="knowledge-card-footer">
                     <span className="knowledge-card-date">
-                      {updated ? `Updated ${formatDate(updated)}` : ''}
+                      {updated ? `Updated ${formatDate(updated)}` : cardSize(entry)}
                       {entry.type === 'url' && entry.last_refreshed_at
                         ? ` · Refreshed ${formatDate(entry.last_refreshed_at)}`
                         : ''}

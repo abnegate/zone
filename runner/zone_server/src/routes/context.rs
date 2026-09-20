@@ -174,6 +174,9 @@ pub struct KnowledgeListItem {
     id: Uuid,
     workspace_id: Uuid,
     title: String,
+    /// The opening of the content, so a card can show a passage without the
+    /// list carrying every entry in full.
+    excerpt: String,
     category: Option<String>,
     tags: Vec<String>,
     token_count: usize,
@@ -190,6 +193,10 @@ pub struct KnowledgeListItem {
     /// Last fetch error if any
     #[serde(skip_serializing_if = "Option::is_none")]
     last_fetch_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Whether semantic search can see this entry yet. The wiki reads this
     /// list, so it is where an unindexed entry has to become visible.
     indexed: bool,
@@ -849,6 +856,7 @@ pub async fn list_knowledge(
             id: entry.id,
             workspace_id: entry.workspace_id,
             title: entry.title,
+            excerpt: entry.excerpt,
             category: entry.category,
             tags: entry.tags,
             token_count: entry.token_count as usize,
@@ -859,6 +867,12 @@ pub async fn list_knowledge(
                 .map(|dt| chrono::DateTime::from_naive_utc_and_offset(dt, chrono::Utc)),
             refresh_interval_minutes: entry.refresh_interval_minutes,
             last_fetch_error: entry.last_fetch_error,
+            created_at: entry
+                .created_at
+                .map(|dt| chrono::DateTime::from_naive_utc_and_offset(dt, chrono::Utc)),
+            updated_at: entry
+                .updated_at
+                .map(|dt| chrono::DateTime::from_naive_utc_and_offset(dt, chrono::Utc)),
             indexed: entry.indexed,
         })
         .collect();

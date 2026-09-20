@@ -109,7 +109,10 @@ describe('WikiPage', () => {
       type: 'text',
       content: 'This is text content',
       fetched_content: null,
+      excerpt: 'This is text content',
+      category: null,
       tags: ['tag1', 'tag2'],
+      token_count: 12,
       last_refreshed_at: null,
       indexed: true,
       created_at: '2024-01-01T00:00:00Z',
@@ -122,7 +125,10 @@ describe('WikiPage', () => {
       type: 'url',
       content: 'https://example.com',
       fetched_content: 'Fetched content from URL',
+      excerpt: 'Fetched content from URL',
+      category: null,
       tags: ['documentation'],
+      token_count: 40,
       last_refreshed_at: '2024-01-02T00:00:00Z',
       indexed: true,
       created_at: '2024-01-01T00:00:00Z',
@@ -319,6 +325,61 @@ describe('WikiPage', () => {
       const refreshButtons = screen.getAllByLabelText('Refresh URL content');
       expect(refreshButtons.length).toBe(1);
     });
+
+    it('never leaves the excerpt or meta slot blank on a bare list entry', () => {
+      const bare: KnowledgeEntry = {
+        ...defaultEntries[0],
+        id: 'kb-bare',
+        title: 'Runbook',
+        content: '',
+        excerpt: '',
+        tags: [],
+        token_count: 25,
+        created_at: '',
+        updated_at: '',
+      };
+      getMockState = () => ({ entries: [bare], loading: false, error: null });
+      renderWikiPage();
+
+      const card = screen.getByText('Runbook').closest('.knowledge-card') as HTMLElement;
+      expect(within(card).getByText('No excerpt')).toHaveClass('knowledge-card-content--empty');
+      expect(within(card).getByText('25 tokens')).toHaveClass('knowledge-card-date');
+    });
+
+    it('names the category in the excerpt slot and the type when nothing else is known', () => {
+      const bare: KnowledgeEntry = {
+        ...defaultEntries[0],
+        id: 'kb-bare',
+        title: 'Live run',
+        excerpt: '',
+        category: 'operations',
+        tags: [],
+        token_count: null,
+        created_at: '',
+        updated_at: '',
+      };
+      getMockState = () => ({ entries: [bare], loading: false, error: null });
+      renderWikiPage();
+
+      const card = screen.getByText('Live run').closest('.knowledge-card') as HTMLElement;
+      expect(within(card).getByText('operations')).toBeInTheDocument();
+      expect(within(card).getByText('text', { selector: '.knowledge-card-date' })).toBeTruthy();
+    });
+
+    it('prefers the tags row to a placeholder when an entry has tags but no excerpt', () => {
+      const tagged: KnowledgeEntry = {
+        ...defaultEntries[0],
+        id: 'kb-tagged',
+        title: 'Release checklist',
+        excerpt: '',
+        tags: ['release'],
+      };
+      getMockState = () => ({ entries: [tagged], loading: false, error: null });
+      renderWikiPage();
+
+      expect(screen.getByText('release')).toHaveClass('knowledge-tag');
+      expect(screen.queryByText('No excerpt')).not.toBeInTheDocument();
+    });
   });
 
   describe('Create Knowledge Wizard', () => {
@@ -385,6 +446,22 @@ describe('WikiPage', () => {
         expect(screen.getByLabelText('URL')).toBeInTheDocument();
       });
       expect((screen.getByLabelText('URL') as HTMLInputElement).type).toBe('url');
+    });
+
+    it('says how to add a tag once, in the hint rather than the placeholder', async () => {
+      renderWikiPage();
+      fireEvent.click(getAddKnowledgeButton());
+      fireEvent.click(screen.getByText('Text Content'));
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+      fireEvent.change(await screen.findByLabelText('Content'), {
+        target: { value: 'Enough content to move on' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      const tags = (await screen.findByLabelText(/^Tags/)) as HTMLInputElement;
+      expect(tags.placeholder).toBe('e.g. release, history');
+      expect(screen.getAllByText(/press enter/i)).toHaveLength(1);
+      expect(screen.getByText('Press Enter to add each tag')).toHaveClass('form-hint');
     });
   });
 
@@ -836,7 +913,10 @@ describe('WikiPage card anatomy', () => {
     type: 'text',
     content: '',
     fetched_content: null,
+    excerpt: '',
+    category: null,
     tags: ['history', 'pass'],
+    token_count: null,
     last_refreshed_at: null,
     indexed: true,
     created_at: '2024-03-04T00:00:00Z',
@@ -859,7 +939,7 @@ describe('WikiPage card anatomy', () => {
 
   it('puts the excerpt in the body and the tags in the meta row when content exists', () => {
     getMockState = () => ({
-      entries: [{ ...bare, content: 'The bridge opened in 1959.' }],
+      entries: [{ ...bare, excerpt: 'The bridge opened in 1959.' }],
       loading: false,
       error: null,
     });

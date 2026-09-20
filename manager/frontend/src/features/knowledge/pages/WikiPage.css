@@ -127,6 +127,10 @@
   overflow-wrap: anywhere;
 }
 
+.knowledge-card-content--empty {
+  color: var(--ui-text-muted);
+}
+
 .knowledge-card-tags {
   display: flex;
   align-items: center;

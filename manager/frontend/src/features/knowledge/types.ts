@@ -8,7 +8,11 @@ export interface KnowledgeEntry {
   type: KnowledgeType;
   content: string;
   fetched_content: string | null;
+  /** The opening of the content, which is all the list carries. */
+  excerpt: string;
+  category: string | null;
   tags: string[];
+  token_count: number | null;
   last_refreshed_at: string | null;
   /** Whether semantic search can see this entry; null if the server did not say. */
   indexed: boolean | null;
