@@ -214,6 +214,48 @@ describe('ProjectsPage', () => {
     });
   });
 
+  it('names the filter when a status has no projects', async () => {
+    mockGetProjects.mockImplementation((_workspace: string, status?: string) =>
+      Promise.resolve(status === 'cancelled' ? [] : mockProjects)
+    );
+    const user = userEvent.setup();
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('tab', { name: 'Cancelled' }));
+    await waitFor(() => {
+      expect(screen.getByText('No cancelled projects')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('No projects yet')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Show all projects' }));
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+  });
+
+  it('lays the selected project out as a facts grid with its source inline', async () => {
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Project Alpha'));
+    await waitFor(() => {
+      expect(document.querySelector('dl.detail-facts')).toBeInTheDocument();
+    });
+    const labels = [...document.querySelectorAll('dl.detail-facts > dt')].map(
+      (node) => node.textContent
+    );
+    expect(labels).toEqual(['Status', 'Created', 'Updated', 'Automation', 'Description', 'Source']);
+    const source = document.querySelector('.detail-facts .source-detail');
+    expect(source?.querySelector('.source-name')?.textContent).toBe('GitHub Repo');
+    expect(source?.querySelector('button')?.textContent).toBe('Unlink');
+    expect(document.querySelector('.details-actions .flex-1')).toBeNull();
+  });
+
   it('shows empty state', async () => {
     mockGetProjects.mockImplementation(() => Promise.resolve([]));
     renderWithQueryClient(<ProjectsPage />);
