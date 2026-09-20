@@ -6,7 +6,7 @@ export const textSource: SourceDefinition = {
   id: 'text',
   name: 'Text',
   category: 'text',
-  description: 'Add raw text content',
+  description: 'Raw text',
   icon: DocumentIcon,
   badgeColor: 'badge-gray',
   iconWrapperClass: 'text',

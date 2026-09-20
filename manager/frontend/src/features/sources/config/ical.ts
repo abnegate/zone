@@ -6,7 +6,7 @@ export const icalSource: SourceDefinition = {
   id: 'ical',
   name: 'Calendar',
   category: 'calendar',
-  description: 'Subscribe to a calendar feed',
+  description: 'Calendar feed',
   icon: CalendarIcon,
   badgeColor: 'badge-green',
   iconWrapperClass: 'ical',

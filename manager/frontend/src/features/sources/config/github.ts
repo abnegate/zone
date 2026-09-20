@@ -6,7 +6,7 @@ export const githubSource: SourceDefinition = {
   id: 'github',
   name: 'GitHub',
   category: 'file',
-  description: 'Connect to a GitHub repository',
+  description: 'GitHub repository',
   icon: GitHubIcon,
   badgeColor: 'badge-purple',
   iconWrapperClass: 'github',

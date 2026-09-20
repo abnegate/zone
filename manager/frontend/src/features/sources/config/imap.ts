@@ -6,7 +6,7 @@ export const imapSource: SourceDefinition = {
   id: 'imap',
   name: 'Email',
   category: 'mail',
-  description: 'Connect to an email inbox',
+  description: 'Email inbox',
   icon: MailIcon,
   badgeColor: 'badge-yellow',
   iconWrapperClass: 'imap',
