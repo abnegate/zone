@@ -198,6 +198,7 @@ mod tests {
         "generate_audio",
         "generate_image",
         "get_build_status",
+        "get_issue",
         "get_task_run",
         "list_chats",
         "list_deployments",
