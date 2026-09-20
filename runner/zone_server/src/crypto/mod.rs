@@ -97,6 +97,16 @@ pub fn decrypt(key: &[u8], ciphertext: &str) -> CryptoResult<String> {
     String::from_utf8(plaintext).map_err(|_| CryptoError::DecryptionFailed)
 }
 
+/// Read a stored secret that is either ciphertext from [`encrypt`] or a value
+/// written before it was encrypted at rest.
+///
+/// AES-GCM authenticates what it decrypts, so a plaintext that happens to be
+/// well-formed base64 cannot decrypt to garbage: anything that does not open
+/// under the key is handed back as it was stored.
+pub fn open(key: &[u8], stored: &str) -> String {
+    decrypt(key, stored).unwrap_or_else(|_| stored.to_string())
+}
+
 /// Derive a 32-byte encryption key using Argon2id
 /// This is slow by design to resist brute-force attacks
 ///
@@ -152,6 +162,22 @@ pub fn derive_key(config_key: &str) -> CryptoResult<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_reads_ciphertext_and_hands_back_what_it_cannot_open() {
+        let key = random_key();
+        let sealed = encrypt(&key, "ghp_secret").unwrap();
+        assert_eq!(open(&key, &sealed), "ghp_secret");
+        // A value stored before encryption at rest comes back as it was, even
+        // when it happens to be well-formed base64 of twelve bytes or more.
+        assert_eq!(open(&key, "ghp_plaintext_token"), "ghp_plaintext_token");
+        assert_eq!(
+            open(&key, "AAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        );
+        // The wrong key cannot open it and must not pretend to.
+        assert_eq!(open(&random_key(), &sealed), sealed);
+    }
 
     fn random_key() -> [u8; 32] {
         let mut key = [0u8; 32];

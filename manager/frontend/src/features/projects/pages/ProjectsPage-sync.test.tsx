@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import type { Project, SyncConfig } from '../types';
 
 const mockGetProjects = mock();
@@ -24,6 +25,9 @@ mock.module('../../../api/projects', () => ({
     createProject: mockCreateProject,
     updateProject: mockUpdateProject,
     deleteProject: mockDeleteProject,
+    startAutoProject: mock(),
+    getAutomation: mock(),
+    resumeAutomation: mock(),
   },
 }));
 
@@ -86,7 +90,9 @@ const createWrapper = () => {
     },
   });
   return ({ children }: { children: React.ReactNode }) => (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    <MemoryRouter initialEntries={['/projects']}>
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    </MemoryRouter>
   );
 };
 
@@ -102,6 +108,7 @@ const mockProject: Project = {
   status: 'active',
   github_repo_url: null,
   source_id: null,
+  auto: false,
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
 };

@@ -44,6 +44,7 @@ const ORDER: &[Section] = &[
     ("web", section::web::render),
     ("citation", section::citation::render),
     ("task", section::task::render),
+    ("planner", section::planner::render),
     ("mcp", section::mcp::render),
     ("toolbox", section::toolbox::render),
     ("session", section::session::render),
@@ -67,6 +68,9 @@ const PLAIN: &[Section] = &[
 /// without automations, automations 21,162 without memory — which is what the
 /// rule is for.
 pub const CHAT_MAX_CHARS: usize = 22_700;
+/// A planner chat adds the interview section to the chat prompt; measured
+/// the same way and rounded up the same way.
+pub const PLANNER_MAX_CHARS: usize = 26_000;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 14_000;
 
@@ -393,6 +397,7 @@ mod tests {
                 "web",
                 "citation",
                 "task",
+                "planner",
                 "mcp",
                 "toolbox",
                 "session",
@@ -848,6 +853,28 @@ mod tests {
         let task_prompt = task(&task_tools, &environment);
 
         assert!(task_prompt.contains(&for_task), "{task_prompt}");
+    }
+
+    #[test]
+    fn a_planner_chat_prompt_stays_inside_its_own_budget() {
+        // The planner tools are workspace tools the host registry does not
+        // know, so their production tiers are stated outright: the outward
+        // tier adds its own paragraph, and the budget has to hold with it.
+        let mut tiers = tiered(ToolProfile::Chat, CHAT_CATALOG);
+        tiers.push((crate::agent::planner::FINALIZE_PROJECT, Tier::Write));
+        tiers.push((crate::agent::planner::CREATE_REPOSITORY, Tier::Outward));
+        let tools = ChatTools::with_tiers(
+            ToolProfile::Chat,
+            &tiers,
+            zone_core::mcp::guidance_for_tools(&[MCP_TOOL]),
+        );
+        let prompt = chat(&tools, false, &environment());
+        assert!(prompt.contains("Planning a project:"), "{prompt}");
+        assert!(
+            prompt.len() <= PLANNER_MAX_CHARS,
+            "planner prompt is {} chars",
+            prompt.len()
+        );
     }
 
     #[test]

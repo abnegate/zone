@@ -1,12 +1,17 @@
 import type {
+  AutoProjectRequest,
+  AutoProjectResponse,
   CreateProjectRequest,
   CreateSyncConfigRequest,
   Project,
+  ProjectAutomation,
   SyncConfig,
   UpdateProjectRequest,
 } from '../features/projects/types';
 import { parse } from '../validation';
 import {
+  AutoProjectResponseSchema,
+  ProjectAutomationSchema,
   ProjectResponseSchema,
   ProjectsResponseSchema,
   SyncConfigResponseSchema,
@@ -91,6 +96,61 @@ class ProjectsApi {
     if (!response.ok) {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to update project: ${response.status}`);
+    }
+    const data = parse(ProjectResponseSchema, await response.json());
+    return data.project;
+  }
+
+  /**
+   * Open the interview an auto project comes out of. The server answers with
+   * the planner chat, where the model asks its first questions.
+   */
+  async startAutoProject(
+    workspaceId: string,
+    request: AutoProjectRequest
+  ): Promise<AutoProjectResponse> {
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/projects/auto`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to start the project: ${response.status}`);
+    }
+    return parse(AutoProjectResponseSchema, await response.json());
+  }
+
+  /** What automation knows about a project: its tasks, their stage, its pauses. */
+  async getAutomation(projectId: string): Promise<ProjectAutomation> {
+    const response = await fetch(
+      `${API_BASE}/api/projects/${encodeURIComponent(projectId)}/automation`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to read automation: ${response.status}`);
+    }
+    return parse(ProjectAutomationSchema, await response.json());
+  }
+
+  /** Clear a pause -- the project's and every task's -- and wake the driver. */
+  async resumeAutomation(projectId: string): Promise<Project> {
+    const response = await fetch(
+      `${API_BASE}/api/projects/${encodeURIComponent(projectId)}/automation/resume`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to resume automation: ${response.status}`);
     }
     const data = parse(ProjectResponseSchema, await response.json());
     return data.project;

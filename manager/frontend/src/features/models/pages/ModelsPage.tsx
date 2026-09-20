@@ -28,6 +28,7 @@ import {
   modelDownload,
   modelDownloadSizes,
   modelSourceUrl,
+  sourceLabel,
 } from '../utils';
 import './ModelsPage.css';
 
@@ -227,7 +228,7 @@ export default function ModelsPage() {
       <div className="page-body models-body">
         {pull.jobs.length > 0 && (
           <section className="card pull-jobs-panel">
-            <div className="pull-jobs-panel-header">
+            <div className="card-header">
               <h2>Downloads</h2>
               <span className="help-text">
                 {pull.activeCount} of {MAX_PARALLEL_PULLS} slots in use
@@ -237,45 +238,42 @@ export default function ModelsPage() {
           </section>
         )}
 
-        {/* Installed Tab Content */}
         {activeTab === 'installed' && (
           <>
-            {/* Add Model Section */}
-            <section className="card models-install-panel">
-              <h2>Add Model</h2>
+            <section className="models-install-panel">
+              <div className="models-section-head">
+                <h2>Add Model</h2>
+              </div>
+              <form className="models-install-form" onSubmit={handlePull}>
+                <input
+                  type="text"
+                  placeholder="Model name..."
+                  aria-label="Model name"
+                  value={modelInput}
+                  onChange={(e) => setModelInput(e.target.value)}
+                  disabled={pull.activeCount >= MAX_PARALLEL_PULLS}
+                />
+                <Button
+                  type="submit"
+                  loading={Boolean(currentJob)}
+                  disabled={!currentName || !pull.canStart(currentName)}
+                >
+                  {currentJob
+                    ? 'Installing...'
+                    : pull.activeCount >= MAX_PARALLEL_PULLS
+                      ? 'Slots full'
+                      : 'Install'}
+                </Button>
+              </form>
               <p className="help-text">
-                Enter an Ollama model:tag (e.g., llama3.2:3b) or a HuggingFace GGUF reference
+                An Ollama model:tag (llama3.2:3b) or a HuggingFace GGUF reference
                 (hf.co/owner/Model-GGUF). Downloads continue in the background if you leave this
                 page.
               </p>
-
-              <form className="model-form" onSubmit={handlePull}>
-                <div className="input-group">
-                  <input
-                    type="text"
-                    placeholder="Model name..."
-                    value={modelInput}
-                    onChange={(e) => setModelInput(e.target.value)}
-                    disabled={pull.activeCount >= MAX_PARALLEL_PULLS}
-                  />
-                  <Button
-                    type="submit"
-                    loading={Boolean(currentJob)}
-                    disabled={!currentName || !pull.canStart(currentName)}
-                  >
-                    {currentJob
-                      ? 'Installing...'
-                      : pull.activeCount >= MAX_PARALLEL_PULLS
-                        ? 'Slots full'
-                        : 'Install'}
-                  </Button>
-                </div>
-              </form>
             </section>
 
-            {/* Installed Models Section */}
-            <section className="card models-list-panel">
-              <div className="card-header">
+            <section className="models-list-panel">
+              <div className="models-section-head">
                 <h2>Installed Models</h2>
                 <Button variant="ghost" size="icon" onClick={refresh} title="Refresh">
                   <svg
@@ -298,16 +296,9 @@ export default function ModelsPage() {
                 </div>
               ) : ollamaError && models.length === 0 ? (
                 <EmptyState
+                  className="models-outage"
                   icon={
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      width="48"
-                      height="48"
-                      className="text-destructive"
-                    >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                       <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                     </svg>
                   }
@@ -330,14 +321,7 @@ export default function ModelsPage() {
               ) : models.length === 0 ? (
                 <EmptyState
                   icon={
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      width="48"
-                      height="48"
-                    >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                       <path d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
                     </svg>
                   }
@@ -384,23 +368,27 @@ export default function ModelsPage() {
                       >
                         <div className="model-info">
                           <span className="model-name">{model.name}</span>
-                          {model.details?.format === 'lora' && <span className="tag">adapter</span>}
-                          {model.ready === false && (
-                            <span className="tag">
-                              Requires {model.required_files?.[0] || 'base model'}
+                          <div className="model-meta-row">
+                            <span className="model-meta">
+                              {[
+                                formatBytes(model.size),
+                                model.details?.parameter_size,
+                                model.details?.quantization_level,
+                                formatDate(model.modified_at),
+                              ]
+                                .filter(Boolean)
+                                .join(' · ')}
                             </span>
-                          )}
-                          <span className="model-meta">
-                            {[
-                              formatBytes(model.size),
-                              model.details?.parameter_size,
-                              model.details?.quantization_level,
-                              formatDate(model.modified_at),
-                            ]
-                              .filter(Boolean)
-                              .join(' · ')}
-                          </span>
-                          <Capabilities capabilities={model.capabilities} />
+                            {model.details?.format === 'lora' && (
+                              <span className="tag">adapter</span>
+                            )}
+                            {model.ready === false && (
+                              <span className="tag">
+                                Requires {model.required_files?.[0] || 'base model'}
+                              </span>
+                            )}
+                            <Capabilities capabilities={model.capabilities} />
+                          </div>
                         </div>
                         <div className="model-actions">
                           <button
@@ -434,34 +422,33 @@ export default function ModelsPage() {
           </>
         )}
 
-        {/* Browse Tab Content */}
         {activeTab === 'browse' && (
-          <section className="card models-browse-panel">
-            <Tabs
-              value={browse.source}
-              onValueChange={(v) => browse.changeSource(v as typeof browse.source)}
-              className="mb-4"
-            >
-              <TabsList>
-                <TabsTrigger value="all">All</TabsTrigger>
-                <TabsTrigger value="ollama">Ollama</TabsTrigger>
-                <TabsTrigger value="huggingface">HuggingFace</TabsTrigger>
-              </TabsList>
-            </Tabs>
+          <section className="models-browse-panel">
+            <div className="browse-toolbar">
+              <Tabs
+                value={browse.source}
+                onValueChange={(v) => browse.changeSource(v as typeof browse.source)}
+              >
+                <TabsList>
+                  <TabsTrigger value="all">All</TabsTrigger>
+                  <TabsTrigger value="ollama">Ollama</TabsTrigger>
+                  <TabsTrigger value="huggingface">HuggingFace</TabsTrigger>
+                </TabsList>
+              </Tabs>
 
-            <form className="search-container" onSubmit={handleSearch}>
-              <input
-                type="text"
-                placeholder="Search models..."
-                value={browse.query}
-                onChange={(e) => browse.setQuery(e.target.value)}
-              />
-              <Button type="submit" variant="secondary">
-                Search
-              </Button>
-            </form>
+              <form className="browse-search" onSubmit={handleSearch}>
+                <input
+                  type="search"
+                  placeholder="Search models..."
+                  aria-label="Search models"
+                  value={browse.query}
+                  onChange={(e) => browse.setQuery(e.target.value)}
+                />
+                <Button type="submit" variant="secondary">
+                  Search
+                </Button>
+              </form>
 
-            <div className="browse-controls">
               <label className="browse-sort">
                 <span>Sort</span>
                 <select
@@ -476,7 +463,9 @@ export default function ModelsPage() {
                   ))}
                 </select>
               </label>
+            </div>
 
+            <div className="browse-filters">
               <div className="browse-filter-groups">
                 <div className="filter-pills" role="group" aria-label="Filter by medium">
                   {MODEL_MEDIUM_FILTERS.map((option) => (
@@ -522,13 +511,9 @@ export default function ModelsPage() {
               </div>
 
               {browse.hasActiveFilters && (
-                <button
-                  type="button"
-                  className="browse-clear-filters"
-                  onClick={browse.clearFilters}
-                >
+                <Button variant="ghost" size="sm" onClick={browse.clearFilters}>
                   Clear filters
-                </button>
+                </Button>
               )}
             </div>
 
@@ -554,11 +539,11 @@ export default function ModelsPage() {
         {activeTab === 'train' && <TrainPanel onTrained={refresh} />}
       </div>
 
-      {/* Delete Confirmation Modal */}
       <Modal
         isOpen={deleteConfirm !== null}
         onClose={() => setDeleteConfirm(null)}
         title="Delete Model"
+        size="sm"
       >
         <p>
           Are you sure you want to delete <strong>{deleteConfirm}</strong>?
@@ -601,8 +586,8 @@ export default function ModelsPage() {
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2"
-                width="20"
-                height="20"
+                width="16"
+                height="16"
                 aria-hidden="true"
               >
                 <path d="M6 18L18 6M6 6l12 12" />
@@ -618,7 +603,7 @@ export default function ModelsPage() {
               <span className="details-source">
                 {isInstalledModel(detailsModel)
                   ? 'Installed'
-                  : detailsModel.source || browse.source}
+                  : sourceLabel(detailsModel.source || browse.source)}
               </span>
             </div>
 
@@ -664,6 +649,9 @@ export default function ModelsPage() {
                   </div>
                 </div>
                 <div className="modal-actions">
+                  <Button variant="ghost" onClick={() => setDetailsModel(null)}>
+                    Close
+                  </Button>
                   <Button
                     variant="destructive"
                     onClick={() => {
@@ -859,6 +847,9 @@ export default function ModelsPage() {
 
                 {modelDownloadSizes(detailsModel).length < 2 && (
                   <div className="modal-actions">
+                    <Button variant="ghost" onClick={() => setDetailsModel(null)}>
+                      Close
+                    </Button>
                     <Button
                       disabled={!download?.name || !pull.canStart(download.name)}
                       onClick={() =>

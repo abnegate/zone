@@ -1,48 +1,104 @@
 .pull-jobs {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-4);
 }
 
-.pull-job-title {
+.pull-job {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: var(--ui-space-1);
+  min-height: var(--ui-list-row);
+  padding: var(--ui-space-2) 0;
+}
+
+.pull-job + .pull-job {
+  border-top: 1px solid var(--ui-border);
+}
+
+.pull-job-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  height: var(--ui-space-5);
   min-width: 0;
 }
 
+.pull-job-title {
+  flex-shrink: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+  color: var(--ui-text-primary);
+}
+
 .pull-job-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--ui-font-mono);
   font-size: var(--ui-text-xs);
   color: var(--ui-text-secondary);
-  word-break: break-all;
 }
 
-.pull-job .progress-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--ui-space-3);
+.pull-job-percent {
+  margin-left: auto;
+  font-size: var(--ui-text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-primary);
 }
 
 .pull-job-action {
   flex-shrink: 0;
-  padding: 0;
+  margin-left: auto;
+  height: var(--ui-control-height-sm);
+  padding: 0 var(--ui-space-2);
   border: none;
+  border-radius: var(--ui-radius-md);
   background: none;
-  color: var(--ui-accent-500);
-  font-size: var(--ui-text-sm);
+  color: var(--ui-accent);
+  font-family: var(--ui-font-body);
+  font-size: var(--ui-text-xs);
   font-weight: 500;
   cursor: pointer;
 }
 
+.pull-job-percent + .pull-job-action {
+  margin-left: 0;
+}
+
 .pull-job-action:hover {
-  text-decoration: underline;
+  background: var(--ui-accent-muted);
 }
 
 .pull-job .progress-chunk {
-  margin: 0 0 var(--ui-space-3);
-  color: var(--ui-text-secondary);
-  font-size: var(--ui-text-xs);
+  margin: 0;
+  font-size: var(--ui-text-2xs);
+  line-height: var(--ui-space-4);
   font-variant-numeric: tabular-nums;
+  color: var(--ui-text-muted);
+}
+
+.pull-job .steps-list {
+  max-height: 8rem;
+  overflow-y: auto;
+}
+
+.pull-job .step-item {
+  min-height: var(--ui-space-6);
+  padding: 0 var(--ui-space-2);
+  font-size: var(--ui-text-xs);
+  border: none;
+  background: transparent;
+  animation: none;
+}
+
+.pull-job .step-icon {
+  margin-top: 0;
+}
+
+.pull-job .result-message {
+  margin-top: var(--ui-space-1);
+  padding: var(--ui-space-1) var(--ui-space-2);
+  font-size: var(--ui-text-xs);
 }

@@ -22,6 +22,11 @@ const NARROWED: &str =
 
 const COUNT: &str = "- One question is the shape to aim for, three the ceiling.";
 
+/// A planner chat is an interview: cards carry a topic's related questions
+/// together, and the ceiling is the card's.
+const PLANNER_COUNT: &str =
+    "- Group the related questions of one topic on a card, two to four at a time.";
+
 const LAST: &str =
     "- Your turn ends on the call: finish everything the answer does not block first.";
 
@@ -37,6 +42,12 @@ const TASK_WAIT: &str = "- The run parks here: an optional question goes ahead o
 
 const CHAT_WAIT: &str = "- The answer comes back as the user's next message.";
 
+/// An unattended run has nobody to answer it: the wait is the same thirty
+/// seconds for every card, required or not, and then the first option stands.
+const UNATTENDED_WAIT: &str = "- Nobody reads this run while it runs: any card you ask goes ahead on its first option \
+     after about thirty seconds, required or not, so decide for yourself, put the decision and \
+     the assumption behind it in your report, and ask only when no reading could settle it.";
+
 /// Pairs with `TASK_WAIT`: the default is the one option nobody chose, and a
 /// report that hands it to the user as their decision is what this prevents.
 const ELAPSED: &str =
@@ -47,6 +58,15 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
         return None;
     }
     let rules = match context.surface {
+        Surface::Chat if context.tools.has(crate::agent::planner::FINALIZE_PROJECT) => vec![
+            RESERVE,
+            CONVERSATION,
+            NARROWED,
+            PLANNER_COUNT,
+            LAST,
+            CARD,
+            CHAT_WAIT,
+        ],
         Surface::Chat => vec![
             RESERVE,
             CONVERSATION,
@@ -55,6 +75,16 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
             LAST,
             CARD,
             CHAT_WAIT,
+        ],
+        Surface::Task if context.tools.is_unattended() => vec![
+            RESERVE,
+            CONVERSATION,
+            NARROWED,
+            COUNT,
+            LAST,
+            CARD,
+            UNATTENDED_WAIT,
+            ELAPSED,
         ],
         Surface::Task => vec![
             RESERVE,
@@ -198,6 +228,35 @@ mod tests {
             "{task}"
         );
         assert!(!chat.contains("The wait running out"), "{chat}");
+    }
+
+    #[test]
+    fn a_planner_chat_groups_its_questions_instead_of_asking_one() {
+        let tools = ChatTools::with_names(
+            ToolProfile::Chat,
+            &[
+                "read_file",
+                ASK_USER,
+                crate::agent::planner::FINALIZE_PROJECT,
+            ],
+            None,
+        );
+        let environment = environment();
+        let rendered = render(&chat_context(&tools, false, &environment)).unwrap();
+        assert!(rendered.contains(PLANNER_COUNT), "{rendered}");
+        assert!(!rendered.contains(COUNT), "{rendered}");
+    }
+
+    #[test]
+    fn an_unattended_run_is_told_nobody_answers_and_loses_the_required_rule() {
+        let tools =
+            ChatTools::with_names(ToolProfile::Task, &["read_file", ASK_USER], None).unattended();
+        let environment = environment();
+        let rendered = render(&task_context(&tools, &environment)).unwrap();
+        assert!(rendered.contains(UNATTENDED_WAIT), "{rendered}");
+        assert!(!rendered.contains(REQUIRED), "{rendered}");
+        assert!(!rendered.contains(TASK_WAIT), "{rendered}");
+        assert!(rendered.contains(ELAPSED), "{rendered}");
     }
 
     /// `boundary` owns what an elapsed wait means for consent and `tiers` owns

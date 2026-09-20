@@ -3,12 +3,31 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type React from 'react';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import type { Source } from '../../../types';
-import type { Project } from '../types';
+import type { Project, ProjectAutomation } from '../types';
 
 let ProjectsPage: typeof import('./ProjectsPage').default;
 
-const createWrapper = () => {
+/** Where the page navigated to, and a way to follow a project link again. */
+const LocationProbe = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <div>
+      <div data-testid="location">{`${location.pathname}${location.search}`}</div>
+      <button
+        type="button"
+        data-testid="follow-proj-2"
+        onClick={() => navigate('/projects?id=proj-2')}
+      >
+        follow
+      </button>
+    </div>
+  );
+};
+
+const createWrapper = (initialPath: string) => {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: 0 },
@@ -16,12 +35,27 @@ const createWrapper = () => {
     },
   });
   return ({ children }: { children: React.ReactNode }) => (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    <MemoryRouter initialEntries={[initialPath]}>
+      <QueryClientProvider client={queryClient}>
+        <Routes>
+          <Route
+            path="/projects"
+            element={
+              <>
+                <LocationProbe />
+                {children}
+              </>
+            }
+          />
+          <Route path="*" element={<LocationProbe />} />
+        </Routes>
+      </QueryClientProvider>
+    </MemoryRouter>
   );
 };
 
-const renderWithQueryClient = (ui: React.ReactElement) => {
-  const Wrapper = createWrapper();
+const renderWithQueryClient = (ui: React.ReactElement, initialPath = '/projects') => {
+  const Wrapper = createWrapper(initialPath);
   return render(<Wrapper>{ui}</Wrapper>);
 };
 
@@ -33,6 +67,9 @@ const mockDeleteProject = mock(() => Promise.resolve());
 const mockGetSyncConfigs = mock(() => Promise.resolve([]));
 const mockCreateSyncConfig = mock(() => Promise.resolve({}));
 const mockDeleteSyncConfig = mock(() => Promise.resolve());
+const mockStartAutoProject = mock(() => Promise.resolve({ chat_id: 'chat-9' }));
+const mockGetAutomation = mock(() => Promise.resolve({} as ProjectAutomation));
+const mockResumeAutomation = mock(() => Promise.resolve({} as Project));
 
 // Create mock functions for the client
 const mockGetSources = mock(() => Promise.resolve([] as Source[]));
@@ -49,6 +86,9 @@ mock.module('../../../api/projects', () => ({
     getSyncConfigs: mockGetSyncConfigs,
     createSyncConfig: mockCreateSyncConfig,
     deleteSyncConfig: mockDeleteSyncConfig,
+    startAutoProject: mockStartAutoProject,
+    getAutomation: mockGetAutomation,
+    resumeAutomation: mockResumeAutomation,
   },
 }));
 
@@ -107,6 +147,7 @@ const mockProjects: Project[] = [
     status: 'active',
     github_repo_url: null,
     source_id: 'src-1',
+    auto: false,
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-15T00:00:00Z',
   },
@@ -117,6 +158,7 @@ const mockProjects: Project[] = [
     status: 'on_hold',
     github_repo_url: null,
     source_id: null,
+    auto: false,
     created_at: '2024-01-02T00:00:00Z',
     updated_at: '2024-01-16T00:00:00Z',
   },
@@ -149,6 +191,10 @@ describe('ProjectsPage', () => {
     mockGetSources.mockReset();
     mockLinkSource.mockReset();
     mockUnlinkSource.mockReset();
+    mockStartAutoProject.mockReset();
+    mockGetAutomation.mockReset();
+    mockResumeAutomation.mockReset();
+    mockStartAutoProject.mockImplementation(() => Promise.resolve({ chat_id: 'chat-9' }));
     mockGetProjects.mockImplementation(() => Promise.resolve(mockProjects));
     mockGetSyncConfigs.mockImplementation(() => Promise.resolve([]));
     mockGetSources.mockImplementation(() => Promise.resolve(mockSources));
@@ -166,6 +212,48 @@ describe('ProjectsPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Failed to load')).toBeInTheDocument();
     });
+  });
+
+  it('names the filter when a status has no projects', async () => {
+    mockGetProjects.mockImplementation((_workspace: string, status?: string) =>
+      Promise.resolve(status === 'cancelled' ? [] : mockProjects)
+    );
+    const user = userEvent.setup();
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('tab', { name: 'Cancelled' }));
+    await waitFor(() => {
+      expect(screen.getByText('No cancelled projects')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('No projects yet')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Show all projects' }));
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+  });
+
+  it('lays the selected project out as a facts grid with its source inline', async () => {
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Project Alpha'));
+    await waitFor(() => {
+      expect(document.querySelector('dl.detail-facts')).toBeInTheDocument();
+    });
+    const labels = [...document.querySelectorAll('dl.detail-facts > dt')].map(
+      (node) => node.textContent
+    );
+    expect(labels).toEqual(['Status', 'Created', 'Updated', 'Automation', 'Description', 'Source']);
+    const source = document.querySelector('.detail-facts .source-detail');
+    expect(source?.querySelector('.source-name')?.textContent).toBe('GitHub Repo');
+    expect(source?.querySelector('button')?.textContent).toBe('Unlink');
+    expect(document.querySelector('.details-actions .flex-1')).toBeNull();
   });
 
   it('shows empty state', async () => {
@@ -236,6 +324,7 @@ describe('ProjectsPage', () => {
       status: 'active',
       github_repo_url: null,
       source_id: null,
+      auto: false,
       created_at: '2024-01-17T00:00:00Z',
       updated_at: '2024-01-17T00:00:00Z',
     };
@@ -654,6 +743,7 @@ describe('ProjectsPage', () => {
         status: 'on_hold',
         github_repo_url: null,
         source_id: null,
+        auto: false,
         created_at: '2024-01-03T00:00:00Z',
         updated_at: '2024-01-03T00:00:00Z',
       },
@@ -683,6 +773,7 @@ describe('ProjectsPage', () => {
         status: 'cancelled',
         github_repo_url: null,
         source_id: null,
+        auto: false,
         created_at: '2024-01-04T00:00:00Z',
         updated_at: '2024-01-04T00:00:00Z',
       },
@@ -702,6 +793,246 @@ describe('ProjectsPage', () => {
 
     await waitFor(() => {
       expect(mockGetProjects).toHaveBeenCalledWith('workspace-1', 'cancelled');
+    });
+  });
+
+  describe('auto projects', () => {
+    const automation: ProjectAutomation = {
+      project_id: 'proj-1',
+      auto: true,
+      actor_id: 'user-1',
+      paused_reason: null,
+      completed_at: null,
+      parallelism: 3,
+      planner_chat_id: 'chat-plan',
+      updates_chat_id: 'chat-updates',
+      counts: { total: 2, agentic: 2, complete: 1, in_flight: 1, paused: 0 },
+      tasks: [
+        {
+          task_id: 'task-1',
+          title: 'Scaffold the repository',
+          status: 'complete',
+          is_agentic: true,
+          kind: 'scaffold',
+          stage: 'merged',
+          reason: null,
+          runs: 1,
+          review_rounds: 1,
+          reviewers: 'reviewer-model',
+          pr_url: 'https://github.com/acme/app/pull/1',
+          head: 'abc',
+          checks: 'success',
+          merge_sha: 'def',
+          auto_created: false,
+        },
+        {
+          task_id: 'task-2',
+          title: 'Add continuous integration',
+          status: 'in_progress',
+          is_agentic: true,
+          kind: 'ci',
+          stage: 'running',
+          reason: null,
+          runs: 1,
+          review_rounds: 0,
+          reviewers: null,
+          pr_url: null,
+          head: null,
+          checks: null,
+          merge_sha: null,
+          auto_created: false,
+        },
+      ],
+    };
+
+    it('starts the interview from a brief and opens the planner chat', async () => {
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Auto project' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Auto project' }));
+      expect(screen.getByTestId('auto-project-modal')).toBeInTheDocument();
+
+      fireEvent.change(screen.getByTestId('auto-project-brief'), {
+        target: { value: 'A recipe app for iOS and Android' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Start the interview' }));
+
+      await waitFor(() => {
+        expect(mockStartAutoProject).toHaveBeenCalledWith('workspace-1', {
+          brief: 'A recipe app for iOS and Android',
+        });
+      });
+      await waitFor(
+        () => {
+          expect(screen.getByTestId('location')).toHaveTextContent('/chats?id=chat-9');
+        },
+        { timeout: 3000 }
+      );
+      expect(screen.queryByTestId('auto-project-modal')).not.toBeInTheDocument();
+    });
+
+    it('shows the automation error instead of leaving the modal', async () => {
+      mockStartAutoProject.mockImplementation(() =>
+        Promise.reject(new Error('Choose a model first'))
+      );
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Auto project' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Auto project' }));
+      fireEvent.change(screen.getByTestId('auto-project-brief'), {
+        target: { value: 'Something' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Start the interview' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Choose a model first')).toBeInTheDocument();
+      });
+      expect(screen.getByTestId('auto-project-modal')).toBeInTheDocument();
+      expect(screen.getByTestId('location')).toHaveTextContent('/projects');
+    });
+
+    it('toggles automation on the selected project', async () => {
+      mockUpdateProject.mockImplementation(() =>
+        Promise.resolve({ ...mockProjects[0], auto: true })
+      );
+      mockGetAutomation.mockImplementation(() => Promise.resolve(automation));
+
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Project Alpha'));
+
+      const toggle = await screen.findByTestId('auto-toggle');
+      expect(toggle).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.queryByTestId('automation-panel')).not.toBeInTheDocument();
+
+      fireEvent.click(toggle);
+
+      await waitFor(() => {
+        expect(mockUpdateProject).toHaveBeenCalledWith('proj-1', { auto: true });
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId('auto-toggle')).toHaveAttribute('aria-pressed', 'true');
+      });
+      await waitFor(() => {
+        expect(mockGetAutomation).toHaveBeenCalledWith('proj-1');
+      });
+      await waitFor(() => {
+        expect(screen.getByText('1 of 2 tasks merged, 1 in flight')).toBeInTheDocument();
+      });
+      expect(screen.getByText('Scaffold the repository')).toBeInTheDocument();
+      expect(screen.getByText('Reviewed by reviewer-model')).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'Interview' })).toHaveAttribute(
+        'href',
+        '/chats?id=chat-plan'
+      );
+    });
+
+    it('marks cards of projects that run themselves and resumes a paused one', async () => {
+      const paused = {
+        ...automation,
+        paused_reason: 'The project token cannot bypass branch protection',
+        counts: { ...automation.counts, paused: 1 },
+      };
+      mockGetProjects.mockImplementation(() =>
+        Promise.resolve([{ ...mockProjects[0], auto: true }, mockProjects[1]])
+      );
+      mockGetAutomation.mockImplementation(() => Promise.resolve(paused));
+      mockResumeAutomation.mockImplementation(() =>
+        Promise.resolve({ ...mockProjects[0], auto: true })
+      );
+
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByTestId('auto-badge')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Project Alpha'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('automation-paused')).toBeInTheDocument();
+      });
+      expect(
+        screen.getByText('The project token cannot bypass branch protection')
+      ).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+      await waitFor(() => {
+        expect(mockResumeAutomation).toHaveBeenCalledWith('proj-1');
+      });
+    });
+
+    it('selects the project named in the URL', async () => {
+      renderWithQueryClient(<ProjectsPage />, '/projects?id=proj-2');
+      await waitFor(
+        () => {
+          expect(
+            screen.getByRole('heading', { name: 'Project Beta', level: 2 })
+          ).toBeInTheDocument();
+        },
+        { timeout: 3000 }
+      );
+    });
+
+    it('closing the panel consumes the deep link instead of reopening it', async () => {
+      renderWithQueryClient(<ProjectsPage />, '/projects?id=proj-2');
+      await waitFor(
+        () => {
+          expect(
+            screen.getByRole('heading', { name: 'Project Beta', level: 2 })
+          ).toBeInTheDocument();
+        },
+        { timeout: 3000 }
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => {
+        expect(document.querySelector('.project-details')).not.toBeInTheDocument();
+      });
+      expect(screen.getByTestId('location')).toHaveTextContent('/projects');
+      expect(screen.getByTestId('location')).not.toHaveTextContent('id=');
+      // The effect that honours the link must not bring the panel back
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(document.querySelector('.project-details')).not.toBeInTheDocument();
+
+      // Following the same link again, later in the same mount, is honoured
+      fireEvent.click(screen.getByTestId('follow-proj-2'));
+      await waitFor(
+        () => {
+          expect(
+            screen.getByRole('heading', { name: 'Project Beta', level: 2 })
+          ).toBeInTheDocument();
+        },
+        { timeout: 3000 }
+      );
+    });
+
+    it('shows why a toggle failed next to the control', async () => {
+      mockUpdateProject.mockImplementation(() =>
+        Promise.reject(new Error('Automation is disabled on this server'))
+      );
+
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Project Alpha'));
+      fireEvent.click(await screen.findByTestId('auto-toggle'));
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent('Automation is disabled on this server');
+      expect(screen.getByTestId('auto-toggle')).toHaveAttribute('aria-pressed', 'false');
+
+      // Choosing another project clears a message that was about this one
+      fireEvent.click(screen.getByText('Project Beta'));
+      await waitFor(() => {
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      });
     });
   });
 

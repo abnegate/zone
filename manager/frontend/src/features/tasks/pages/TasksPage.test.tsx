@@ -810,19 +810,38 @@ describe('TasksPage', () => {
   it('displays PR link when pr_url exists', async () => {
     renderTasksPage();
     await waitFor(() => {
-      const prLink = screen.getByText('View Pull Request');
-      expect(prLink).toBeInTheDocument();
-      expect(prLink.closest('a')).toHaveAttribute('href', 'https://github.com/test/repo/pull/123');
-      expect(prLink.closest('a')).toHaveAttribute('target', '_blank');
-      expect(prLink.closest('a')).toHaveAttribute('rel', 'noopener noreferrer');
+      const prLink = screen.getByRole('link', { name: 'View PR' });
+      expect(prLink).toHaveAttribute('href', 'https://github.com/test/repo/pull/123');
+      expect(prLink).toHaveAttribute('target', '_blank');
+      expect(prLink).toHaveAttribute('rel', 'noopener noreferrer');
+      expect(prLink.closest('.task-meta')).not.toBeNull();
     });
   });
 
   it('displays branch name when branch_name exists', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByText('Branch: feature/fix-button-styling')).toBeInTheDocument();
+      const branch = screen.getByText('feature/fix-button-styling');
+      expect(branch).toHaveClass('task-branch');
+      expect(branch).toHaveAttribute('title', 'feature/fix-button-styling');
     });
+  });
+
+  it('reserves every slot of a card so siblings share one height', async () => {
+    renderTasksPage();
+    await waitFor(() => {
+      expect(screen.getByText('Implement login')).toBeInTheDocument();
+    });
+    const cards = document.querySelectorAll('.task-card');
+    expect(cards.length).toBeGreaterThan(1);
+    for (const card of cards) {
+      expect(card.querySelector('.task-card-title')).not.toBeNull();
+      expect(card.querySelector('.task-project')).not.toBeNull();
+      expect(card.querySelector('.task-description')).not.toBeNull();
+      expect(card.querySelector('.task-meta')).not.toBeNull();
+      expect(card.querySelector('.task-actions')).not.toBeNull();
+    }
+    expect(document.querySelector('.task-pr-info')).toBeNull();
   });
 
   it('does not display PR info when pr_url is null', async () => {

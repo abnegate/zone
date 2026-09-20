@@ -194,6 +194,7 @@ pub struct ReviewSummary {
 /// on, and how to read a score and a reviewed commit out of a comment body.
 /// Nothing above this trait knows any of that.
 pub trait ReviewSignal: Send + Sync {
+    /// The account the bot reviews as, without the `[bot]` suffix.
     fn reviewer(&self) -> &str;
 
     fn required(&self) -> Confidence;
@@ -250,6 +251,28 @@ impl SignalKind {
             Self::CodeRabbit => "coderabbit",
             Self::Greptile => "greptile",
         }
+    }
+
+    /// The account the bot comments as, without the `[bot]` suffix REST adds.
+    pub fn reviewer(self) -> &'static str {
+        match self {
+            Self::CodeRabbit => CODERABBIT_REVIEWER,
+            Self::Greptile => GREPTILE_REVIEWER,
+        }
+    }
+
+    /// The comment that asks the bot to review, or review again, when it has
+    /// not done so on its own.
+    pub fn trigger_command(self) -> &'static str {
+        match self {
+            Self::CodeRabbit => "@coderabbitai review",
+            Self::Greptile => "@greptileai review",
+        }
+    }
+
+    /// The one signal, for a caller that reads bots one at a time.
+    pub fn as_signal(self) -> Box<dyn ReviewSignal> {
+        self.signal()
     }
 
     fn signal(self) -> Box<dyn ReviewSignal> {
@@ -395,6 +418,7 @@ static REVIEWED_RANGE_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
 pub struct Greptile;
 
 impl ReviewSignal for Greptile {
+    /// The account this bot reviews as.
     fn reviewer(&self) -> &str {
         GREPTILE_REVIEWER
     }
@@ -436,6 +460,7 @@ impl ReviewSignal for Greptile {
 pub struct CodeRabbit;
 
 impl ReviewSignal for CodeRabbit {
+    /// The account this bot reviews as.
     fn reviewer(&self) -> &str {
         CODERABBIT_REVIEWER
     }

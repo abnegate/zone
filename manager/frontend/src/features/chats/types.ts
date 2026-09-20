@@ -205,7 +205,14 @@ export const REASONED_TOOLS: ReadonlySet<string> = new Set([
 /// Every kind of workspace item a write can target, as the server names it.
 /// A list rather than only a union, so the schema enum is built from it and a
 /// test can compare it with the server's enum.
-export const ACTION_TARGETS = ['task', 'document', 'message', 'reminder', 'memory'] as const;
+export const ACTION_TARGETS = [
+  'task',
+  'document',
+  'message',
+  'reminder',
+  'memory',
+  'project',
+] as const;
 
 export type ActionTarget = (typeof ACTION_TARGETS)[number];
 
@@ -295,6 +302,14 @@ export interface Chat {
    * request. Older servers omit this; treat those chats as Auto.
    */
   reasoning_effort?: ReasoningEffort;
+  /**
+   * What the chat is for: `assistant` (the default), `project_planner` (the
+   * interview an auto project starts from) or `project_updates` (where a
+   * project that runs itself reports). Older servers omit this.
+   */
+  purpose?: string | null;
+  /** The project a planner or updates chat belongs to, once it exists. */
+  project_id?: string | null;
 }
 
 export type ReasoningEffort = 'auto' | 'off' | 'low' | 'medium' | 'high';

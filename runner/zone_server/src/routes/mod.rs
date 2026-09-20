@@ -177,6 +177,10 @@ pub fn create_router(state: AppState) -> Router {
             patch(workspaces::update_member_role).delete(workspaces::remove_member),
         )
         // Projects
+        .route(
+            "/api/workspaces/{workspace_id}/projects/auto",
+            post(projects::start_auto),
+        )
         .route("/api/projects", get(projects::list).post(projects::create))
         .route(
             "/api/projects/{id}",
@@ -184,6 +188,11 @@ pub fn create_router(state: AppState) -> Router {
                 .put(projects::update)
                 .patch(projects::update)
                 .delete(projects::delete),
+        )
+        .route("/api/projects/{id}/automation", get(projects::automation))
+        .route(
+            "/api/projects/{id}/automation/resume",
+            post(projects::resume_automation),
         )
         .route(
             "/api/projects/{id}/source",

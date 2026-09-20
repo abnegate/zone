@@ -1100,6 +1100,8 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
             "038_reminder_condition_watch.sql",
             "039_reminder_condition_watch_validation.sql",
             "040_task_plan_approval.sql",
+            "042_auto_projects.sql",
+            "043_auto_projects_validation.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );

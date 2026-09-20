@@ -19,6 +19,7 @@ use uuid::Uuid;
 use zone_core::tools::ToolResult;
 
 use super::memory::{MEMORY_APPEND, MEMORY_DELETE, MEMORY_WRITE};
+use super::planner::FINALIZE_PROJECT;
 use crate::db::memory::MemoryCategory;
 
 /// Longest target label we keep on a receipt.
@@ -38,6 +39,8 @@ pub enum ActionTarget {
     /// One person's remembered entry. Private to them, so it has no page to
     /// link to and the receipt is the only record the console gets.
     Memory,
+    /// A project an interview created, with its tasks.
+    Project,
 }
 
 /// A completed workspace write, as streamed to the client and stored on the
@@ -76,6 +79,7 @@ pub fn is_write_tool(name: &str) -> bool {
             | MEMORY_WRITE
             | MEMORY_APPEND
             | MEMORY_DELETE
+            | FINALIZE_PROJECT
     )
 }
 
@@ -130,6 +134,7 @@ fn target_type(name: &str) -> Option<ActionTarget> {
         "send_message" => ActionTarget::Message,
         "create_reminder" | "cancel_reminder" => ActionTarget::Reminder,
         MEMORY_WRITE | MEMORY_APPEND | MEMORY_DELETE => ActionTarget::Memory,
+        FINALIZE_PROJECT => ActionTarget::Project,
         _ => return None,
     })
 }
@@ -189,6 +194,9 @@ fn target_label(name: &str, args: &Value, output: Option<&Value>) -> String {
         "create_task" | "update_task" | "create_document" | "update_document" => title
             .or(content)
             .unwrap_or_else(|| fallback_label(name).to_string()),
+        FINALIZE_PROJECT => title
+            .or_else(|| text_field(args, "name"))
+            .unwrap_or_else(|| fallback_label(name).to_string()),
         "send_message" | "create_reminder" | "cancel_reminder" => content
             .or(title)
             .unwrap_or_else(|| fallback_label(name).to_string()),
@@ -203,6 +211,7 @@ fn fallback_label(name: &str) -> &'static str {
         "send_message" => "Message",
         "create_reminder" | "cancel_reminder" => "Reminder",
         MEMORY_WRITE | MEMORY_APPEND | MEMORY_DELETE => "Memory",
+        FINALIZE_PROJECT => "Project",
         _ => "Workspace item",
     }
 }
@@ -242,6 +251,7 @@ fn outcome(name: &str, result: &ToolResult) -> String {
         MEMORY_WRITE => "Memory written".to_string(),
         MEMORY_APPEND => "Memory appended".to_string(),
         MEMORY_DELETE => "Memory forgotten".to_string(),
+        FINALIZE_PROJECT => "Project created and started".to_string(),
         _ => "Write completed".to_string(),
     }
 }
@@ -273,6 +283,7 @@ fn href(target_type: ActionTarget, target_id: &str, chat_id: &Option<String>) ->
         // A remembered entry is one person's and has no page, and the console
         // renders a link only where there is an href.
         ActionTarget::Memory => String::new(),
+        ActionTarget::Project if !target_id.is_empty() => format!("/projects?id={target_id}"),
         _ => String::new(),
     }
 }

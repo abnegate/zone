@@ -10,7 +10,7 @@ import {
   TabsTrigger,
 } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
@@ -812,6 +812,28 @@ export default function ChatsPage() {
                 <Badge variant="neutral" className="chat-model">
                   {modelLabel(displayedChat.model_name)}
                 </Badge>
+                {displayedChat.purpose === 'project_planner' && (
+                  <span className="chat-purpose" data-testid="chat-purpose">
+                    Project planner
+                    {displayedChat.project_id && (
+                      <>
+                        {' · '}
+                        <Link to={`/projects?id=${displayedChat.project_id}`}>Open project</Link>
+                      </>
+                    )}
+                  </span>
+                )}
+                {displayedChat.purpose === 'project_updates' && (
+                  <span className="chat-purpose" data-testid="chat-purpose">
+                    Project updates
+                    {displayedChat.project_id && (
+                      <>
+                        {' · '}
+                        <Link to={`/projects?id=${displayedChat.project_id}`}>Open project</Link>
+                      </>
+                    )}
+                  </span>
+                )}
               </div>
               <div className="chat-header-actions">
                 {showReasoning && (

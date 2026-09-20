@@ -3,6 +3,7 @@ import { Badge, Button, EmptyState } from '@zone/ui';
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
+import PageBar from '../../../shared/components/PageBar/PageBar';
 import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard } from '../components';
 import { useTasks } from '../hooks';
@@ -11,29 +12,32 @@ import { TaskExecutionView } from './TaskExecutionView';
 import './TasksPage.css';
 import { useWorkspace } from '../../../shared/context';
 
+type Tint = 'neutral' | 'info' | 'warning' | 'destructive' | 'accent' | 'success';
+
+const STATUS_TINTS: Record<string, Tint> = {
+  created: 'neutral',
+  queued: 'info',
+  in_progress: 'info',
+  blocked: 'destructive',
+  review: 'warning',
+  complete: 'success',
+};
+
+const PR_TINTS: Record<string, Tint> = {
+  pending: 'neutral',
+  open: 'success',
+  merged: 'accent',
+  closed: 'destructive',
+};
+
+const SKELETON_CARDS = [1, 2, 3, 4];
+
 function TaskStatusBadge({ status }: { status: string }) {
-  const variants: Record<
-    string,
-    'secondary' | 'info' | 'warning' | 'destructive' | 'default' | 'success'
-  > = {
-    created: 'secondary',
-    queued: 'info',
-    in_progress: 'warning',
-    blocked: 'destructive',
-    review: 'default',
-    complete: 'success',
-  };
-  return <Badge variant={variants[status] || 'secondary'}>{status.replace('_', ' ')}</Badge>;
+  return <Badge variant={STATUS_TINTS[status] ?? 'neutral'}>{status.replace('_', ' ')}</Badge>;
 }
 
 function PrStatusBadge({ status }: { status: 'pending' | 'open' | 'merged' | 'closed' }) {
-  const variants: Record<string, 'secondary' | 'success' | 'default' | 'destructive'> = {
-    pending: 'secondary',
-    open: 'success',
-    merged: 'default',
-    closed: 'destructive',
-  };
-  return <Badge variant={variants[status] || 'secondary'}>PR: {status}</Badge>;
+  return <Badge variant={PR_TINTS[status] ?? 'neutral'}>PR: {status}</Badge>;
 }
 
 export default function TasksPage() {
@@ -104,27 +108,8 @@ export default function TasksPage() {
 
   return (
     <div className="page page--workspace tasks-page">
-      <header className="tasks-header">
-        <div>
-          <h1 className="tasks-title">Tasks</h1>
-          <p className="tasks-subtitle">Autonomous agent workflows</p>
-        </div>
-        <Button
-          onClick={() => setShowCreateModal(true)}
-          disabled={loading || projects.length === 0}
-        >
-          + New Task
-        </Button>
-      </header>
-
-      <div className="tasks-workspace">
-        {displayError && (
-          <div className="rounded-md bg-destructive/10 border border-destructive/30 p-3 text-sm text-destructive mb-4">
-            {displayError}
-          </div>
-        )}
-
-        <div className="filters">
+      <PageBar title="Tasks" subtitle="Autonomous agent workflows">
+        <div className="tasks-filters">
           <select
             value={filterProject}
             onChange={(e) => setFilterProject(e.target.value)}
@@ -153,23 +138,39 @@ export default function TasksPage() {
             <option value="complete">Complete</option>
           </select>
         </div>
+        <Button
+          onClick={() => setShowCreateModal(true)}
+          disabled={loading || projects.length === 0}
+        >
+          + New Task
+        </Button>
+      </PageBar>
+
+      <div className="page-body tasks-body">
+        {displayError && (
+          <div className="error-banner" role="alert">
+            {displayError}
+          </div>
+        )}
 
         {loading ? (
           <div className="tasks-list">
-            {[1, 2, 3, 4].map((i) => (
+            {SKELETON_CARDS.map((i) => (
               <div key={i} className="task-card skeleton-card">
-                <div className="skeleton-header">
+                <div className="task-card-title">
                   <div className="skeleton skeleton-title" />
                   <div className="skeleton skeleton-badge" />
                 </div>
                 <div className="skeleton skeleton-text short" />
-                <div className="skeleton skeleton-text" />
-                <div className="skeleton skeleton-text" style={{ width: '80%' }} />
-                <div className="skeleton-meta">
+                <div className="task-description">
+                  <div className="skeleton skeleton-text" />
+                  <div className="skeleton skeleton-text" style={{ width: '80%' }} />
+                </div>
+                <div className="task-meta">
                   <div className="skeleton skeleton-tag" />
                   <div className="skeleton skeleton-tag" />
                 </div>
-                <div className="skeleton-actions">
+                <div className="task-actions">
                   <div className="skeleton skeleton-btn" />
                   <div className="skeleton skeleton-btn" />
                 </div>
@@ -179,14 +180,7 @@ export default function TasksPage() {
         ) : tasks.length === 0 ? (
           <EmptyState
             icon={
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                width="40"
-                height="40"
-              >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
                 <path d="M9 12l2 2 4-4" />
               </svg>
@@ -198,35 +192,20 @@ export default function TasksPage() {
         ) : (
           <div className="tasks-list">
             {tasks.map((task) => (
-              <div
+              <article
                 key={task.id}
                 className={`task-card ${task.is_agentic ? 'task-card-agentic' : ''}`}
               >
-                <div className="task-card-header">
-                  <h3>{task.title}</h3>
+                <div className="task-card-title">
+                  <h3 title={task.title}>{task.title}</h3>
                   <div className="task-badges">
-                    {task.is_agentic && <span className="task-agentic-badge">Agentic</span>}
+                    {task.is_agentic && <Badge variant="accent">Agentic</Badge>}
                     <TaskStatusBadge status={task.status} />
                     {task.pr_status && <PrStatusBadge status={task.pr_status} />}
                   </div>
                 </div>
                 <p className="task-project">{getProjectNames(task.project_ids)}</p>
                 <p className="task-description">{task.description}</p>
-                {task.pr_url && (
-                  <div className="task-pr-info">
-                    <a
-                      href={task.pr_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="task-pr-link"
-                    >
-                      View Pull Request
-                    </a>
-                    {task.branch_name && (
-                      <span className="task-branch">Branch: {task.branch_name}</span>
-                    )}
-                  </div>
-                )}
                 <div className="task-meta">
                   <span className="task-priority">Priority: {task.priority ?? 'N/A'}</span>
                   {task.model_name && <span className="task-model">Model: {task.model_name}</span>}
@@ -235,16 +214,38 @@ export default function TasksPage() {
                       {sources.find((s) => s.id === task.source_id)?.name || 'Source'}
                     </span>
                   )}
+                  {task.pr_url && (
+                    <span className="task-pr">
+                      <a
+                        href={task.pr_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="task-pr-link"
+                      >
+                        View PR
+                      </a>
+                      {task.branch_name && (
+                        <code className="task-branch" title={task.branch_name}>
+                          {task.branch_name}
+                        </code>
+                      )}
+                    </span>
+                  )}
                 </div>
                 <div className="task-actions">
-                  <Button size="sm" onClick={() => setSelectedTask(task)}>
+                  <Button size="sm" variant="secondary" onClick={() => setSelectedTask(task)}>
                     Execute
                   </Button>
-                  <Button variant="destructive" size="sm" onClick={() => handleDeleteTask(task.id)}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="task-delete"
+                    onClick={() => handleDeleteTask(task.id)}
+                  >
                     Delete
                   </Button>
                 </div>
-              </div>
+              </article>
             ))}
           </div>
         )}

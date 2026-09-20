@@ -14,18 +14,23 @@ export default function PullJobs({ jobs, onCancel, onDismiss }: PullJobsProps) {
   return (
     <div className="pull-jobs" aria-live="polite">
       {jobs.map((job) => (
-        <article key={job.id} className="progress-section pull-job">
-          <div className="progress-header">
-            <div className="pull-job-title">
-              <span>
-                {job.pulling
-                  ? 'Installing model...'
-                  : job.result?.success
-                    ? 'Installation complete'
-                    : 'Installation failed'}
+        <article key={job.id} className="pull-job">
+          <div className="pull-job-row">
+            <span className="pull-job-title">
+              {job.pulling
+                ? 'Installing model...'
+                : job.result?.success
+                  ? 'Installation complete'
+                  : 'Installation failed'}
+            </span>
+            {job.modelName && (
+              <span className="pull-job-name" title={job.modelName}>
+                {job.modelName}
               </span>
-              {job.modelName && <span className="pull-job-name">{job.modelName}</span>}
-            </div>
+            )}
+            {job.progress !== null && (
+              <span className="pull-job-percent">{Math.round(job.progress)}%</span>
+            )}
             {job.pulling ? (
               <button type="button" className="pull-job-action" onClick={() => onCancel(job.id)}>
                 Cancel
@@ -38,9 +43,15 @@ export default function PullJobs({ jobs, onCancel, onDismiss }: PullJobsProps) {
           </div>
 
           {job.progress !== null && (
-            <div className="progress-bar-container">
-              <div className="progress-bar" style={{ width: `${job.progress}%` }} />
-              <span className="progress-text">{Math.round(job.progress)}%</span>
+            <div
+              className="progress-bar"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(job.progress)}
+              aria-label={`${job.modelName ?? 'Model'} download`}
+            >
+              <div className="progress-bar-fill" style={{ width: `${job.progress}%` }} />
             </div>
           )}
 

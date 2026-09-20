@@ -215,6 +215,11 @@
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--ui-field-gap) var(--ui-group-gap);
+    margin-bottom: var(--ui-field-gap);
+  }
+
+  .form-row > .form-group {
+    margin-bottom: 0;
   }
 
   .form-hint,

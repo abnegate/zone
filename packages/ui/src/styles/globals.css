@@ -859,6 +859,9 @@
 
   .ui-dialog-close:focus {
     outline: none;
+  }
+
+  .ui-dialog-close:focus-visible {
     box-shadow: 0 0 0 2px var(--ui-border-focus);
   }
 

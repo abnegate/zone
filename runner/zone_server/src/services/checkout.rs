@@ -44,7 +44,13 @@ pub struct Repository {
 }
 
 impl Repository {
-    pub async fn resolve(pool: &PgPool, task: &TaskRow) -> Result<Option<Self>, String> {
+    /// The repository a task works in, its token opened from how the project
+    /// stores it (encrypted at rest, or plain from before it was).
+    pub async fn resolve(
+        pool: &PgPool,
+        encryption_key: &[u8],
+        task: &TaskRow,
+    ) -> Result<Option<Self>, String> {
         let requested = task
             .github_repo_url
             .as_deref()
@@ -64,7 +70,9 @@ impl Repository {
                 let url = GitService::repository_url(&url).map_err(|error| error.to_string())?;
                 repositories.push(Self {
                     url,
-                    token: project.github_access_token,
+                    token: project
+                        .github_access_token
+                        .map(|stored| crate::crypto::open(encryption_key, &stored)),
                 });
             }
         }
@@ -163,11 +171,12 @@ pub struct Checkout {
 impl Checkout {
     pub async fn prepare(
         pool: &PgPool,
+        encryption_key: &[u8],
         task: &TaskRow,
         execution: tasks::Execution,
     ) -> Result<Self, String> {
         let tasks::Execution { run, owner, .. } = execution;
-        let repository = Repository::resolve(pool, task).await?;
+        let repository = Repository::resolve(pool, encryption_key, task).await?;
         if !execution
             .authorized(pool, false)
             .await
@@ -1042,8 +1051,10 @@ mod tests {
         let run = tasks::create_task_run(&pool, task.id).await.unwrap();
         let owner = Uuid::new_v4();
         assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
+        let key: [u8; 32] = rand::random();
         let checkout = Checkout::prepare(
             &pool,
+            &key,
             &task,
             tasks::Execution {
                 task: task.id,

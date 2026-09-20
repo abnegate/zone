@@ -155,7 +155,7 @@ impl Publication<'_> {
             .await
             .map_err(|_| "Cannot verify publication identity")?
             .ok_or("Task not found")?;
-        let repository = Repository::resolve(self.state.db(), &task)
+        let repository = Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
             .await?
             .ok_or("Task repository changed during execution")?;
         if repository.url != baseline.repository
@@ -214,7 +214,11 @@ impl Publication<'_> {
         if task.created_by.is_none() {
             return Ok(PrCreationResult::Sandbox);
         }
-        if self.baseline.is_none() && Repository::resolve(self.state.db(), &task).await?.is_none() {
+        if self.baseline.is_none()
+            && Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
+                .await?
+                .is_none()
+        {
             self.authorized().await?;
             return Ok(PrCreationResult::NoRepository);
         }
@@ -245,7 +249,7 @@ impl Publication<'_> {
             self.identity(baseline).await?;
             return Ok(PrCreationResult::NoChanges);
         }
-        let repository = Repository::resolve(self.state.db(), &task)
+        let repository = Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
             .await?
             .ok_or("Task repository changed during execution")?;
         let token = repository
@@ -531,11 +535,12 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         Err(error) => return RepairOutcome::Failed(format!("Failed to get project: {}", error)),
     };
 
-    let (Some(repo_url), Some(access_token)) =
+    let (Some(repo_url), Some(stored_token)) =
         (&project.github_repo_url, &project.github_access_token)
     else {
         return RepairOutcome::Failed("No GitHub repository configured".to_string());
     };
+    let access_token = &crate::crypto::open(state.encryption_key(), stored_token);
 
     let pr_service = PrService::configured(state.config().github_api_url.clone());
     let (owner, repo) = match pr_service.parse_github_url(repo_url) {
@@ -727,12 +732,13 @@ async fn repair_model(state: &AppState, task: &tasks::TaskRow) -> String {
     )
 }
 
-async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Option<String> {
+/// The first linked project's repository token, opened from how it is stored.
+pub(crate) async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Option<String> {
     for project_id in &task.project_ids {
         if let Ok(Some(project)) = projects::get_project(state.db(), *project_id).await
             && let Some(token) = project.github_access_token
         {
-            return Some(token);
+            return Some(crate::crypto::open(state.encryption_key(), &token));
         }
     }
     None
@@ -869,9 +875,11 @@ mod tests {
             };
             let mut sandbox = task.clone();
             sandbox.project_ids.clear();
-            let checkout = crate::services::checkout::Checkout::prepare(&pool, &sandbox, execution)
-                .await
-                .unwrap();
+            let key: [u8; 32] = rand::random();
+            let checkout =
+                crate::services::checkout::Checkout::prepare(&pool, &key, &sandbox, execution)
+                    .await
+                    .unwrap();
             let path = checkout.path().to_path_buf();
             for arguments in [
                 vec!["init", "--quiet", "--initial-branch=main"],
@@ -1810,6 +1818,7 @@ mod publication_tests {
             std::fs::remove_dir_all(&fixture.path).unwrap();
             let checkout = crate::services::checkout::Checkout::prepare(
                 fixture.state.db(),
+                fixture.state.encryption_key(),
                 &task,
                 fixture.execution,
             )

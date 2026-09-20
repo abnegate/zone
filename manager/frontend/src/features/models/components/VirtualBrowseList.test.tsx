@@ -184,6 +184,36 @@ describe('VirtualBrowseList', () => {
     expect(onItemClick).not.toHaveBeenCalled();
   });
 
+  it('labels the source in sentence case and keeps each row to two lines', () => {
+    const model: BrowseModel = {
+      name: 'unsloth/Qwen3-Coder-GGUF',
+      source: 'huggingface',
+      description: 'Text Generation GGUF model by unsloth.',
+      details: { parameter_size: '30B', family: 'qwen3moe' },
+    };
+    render(
+      <VirtualBrowseList
+        models={[model]}
+        onItemClick={onItemClick}
+        onInstall={onInstall}
+        hasMore={false}
+        loadingMore={false}
+        onLoadMore={onLoadMore}
+      />
+    );
+
+    const badge = screen.getByText('Hugging Face');
+    expect(badge).toHaveClass('browse-source-huggingface');
+    const header = badge.closest('.browse-header');
+    expect(header?.querySelector('.browse-specs')?.textContent).toBe('30Bqwen3moe');
+    const line = header?.parentElement?.querySelector('.browse-line');
+    expect(line?.querySelector('.browse-description')).toHaveAttribute(
+      'title',
+      'Text Generation GGUF model by unsloth.'
+    );
+    expect(document.querySelector('.virtual-browse-item-wrapper')).toHaveStyle({ height: '72px' });
+  });
+
   it('explains why remote API models cannot be installed through Ollama', () => {
     const model: BrowseModel = {
       name: 'qwen/qwen3.8-27b',

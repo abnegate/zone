@@ -138,6 +138,7 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
   const [error, setError] = useState<string | null>(null);
   const [monitoring, setMonitoring] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const controller = useRef<AbortController | null>(null);
   const busy = useRef(false);
   const submitted = useRef<TaskRun | null>(null);
@@ -236,6 +237,13 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
     }
   };
 
+  const toggleExpanded = (id: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+
   const running = !!run && active(run);
   const waiting = run ? wait(run) : undefined;
   const phase = run ? activity(run) : null;
@@ -251,6 +259,7 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
       isOpen
       onClose={onClose}
       title={task.title}
+      size="lg"
       className="task-execution-modal"
       aria-describedby="execution-description"
     >
@@ -323,16 +332,27 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
                 // so showing the line alone throws the record away.
                 const receipt = log.metadata?.action_receipt;
                 return (
-                  <div key={log.id} className="log-entry">
+                  <div
+                    key={log.id}
+                    className={receipt ? 'log-entry log-entry--receipt' : 'log-entry'}
+                  >
                     <span className="log-phase">{ACTIVITIES[log.phase] ?? log.phase}</span>
-                    <span className="log-details">
-                      {log.agent_type} · {log.level}
-                    </span>
                     {receipt ? (
                       <ActionReceipts receipts={[receipt]} />
                     ) : (
-                      <span className="log-message">{log.message}</span>
+                      <button
+                        type="button"
+                        className="log-message"
+                        aria-expanded={expanded.has(log.id)}
+                        title={expanded.has(log.id) ? 'Collapse' : 'Expand'}
+                        onClick={() => toggleExpanded(log.id)}
+                      >
+                        {log.message}
+                      </button>
                     )}
+                    <span className="log-details">
+                      {log.agent_type} · {log.level}
+                    </span>
                   </div>
                 );
               })}

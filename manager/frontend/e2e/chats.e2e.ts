@@ -9,7 +9,7 @@ const generateMockChat = (
   title: string,
   modelName: string,
   archived = false,
-  options: { agent_enabled?: boolean } = {}
+  options: { agent_enabled?: boolean; purpose?: string; project_id?: string | null } = {}
 ) => ({
   id,
   title,
@@ -18,6 +18,7 @@ const generateMockChat = (
   updated_at: new Date().toISOString(),
   archived,
   agent_enabled: options.agent_enabled ?? false,
+  ...(options.purpose ? { purpose: options.purpose, project_id: options.project_id ?? null } : {}),
 });
 
 const generateMockMessage = (id: string, chatId: string, role: string, content: string) => ({
@@ -408,6 +409,41 @@ test.describe('Chats Page', () => {
 
       await expect(page.locator('.chat-header h3')).toContainText('Test Chat');
       await expect(page.locator('.chat-model')).toContainText('llama3.2');
+      await expect(page.getByTestId('chat-purpose')).toHaveCount(0);
+    });
+
+    test('labels a planner chat and links its project once it exists', async ({ page }) => {
+      const planner = generateMockChat('chat-1', 'Plan: Recipe app', 'llama3.2', false, {
+        agent_enabled: true,
+        purpose: 'project_planner',
+        project_id: 'proj-9',
+      });
+      await page.unroute(/\/api\/chats/);
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        const url = route.request().url();
+        if (url.includes('/chat-1') && route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ chat: { ...planner, messages: mockMessages } }),
+          });
+        } else if (route.request().method() === 'GET' && !url.includes('/chat-')) {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ chats: [planner] }),
+          });
+        }
+      });
+
+      await page.click('.chat-item');
+
+      const badge = page.getByTestId('chat-purpose');
+      await expect(badge).toContainText('Project planner');
+      await expect(badge.getByRole('link', { name: 'Open project' })).toHaveAttribute(
+        'href',
+        '/projects?id=proj-9'
+      );
     });
 
     test('displays messages with correct roles', async ({ page }) => {

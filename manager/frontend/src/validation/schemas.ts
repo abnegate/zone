@@ -152,8 +152,13 @@ export {
 // Project Schemas
 
 export {
+  AutomationStageSchema,
+  AutomationTaskSchema,
+  AutoProjectRequestSchema,
+  AutoProjectResponseSchema,
   CreateProjectRequestSchema,
   CreateSyncConfigRequestSchema,
+  ProjectAutomationSchema,
   ProjectResponseSchema,
   ProjectSchema,
   ProjectStatusSchema,

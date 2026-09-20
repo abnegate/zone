@@ -88,6 +88,17 @@ export function CreateProjectWizard({
     return true;
   }, [currentStep, name]);
 
+  const handleClose = useCallback(() => {
+    setCurrentStep(0);
+    setName('');
+    setDescription('');
+    setStatus('active');
+    setSourceId('');
+    setError(null);
+    setFieldErrors({});
+    onClose();
+  }, [onClose]);
+
   const handleComplete = useCallback(async () => {
     if (!currentWorkspace) {
       setError('No workspace selected');
@@ -121,18 +132,16 @@ export function CreateProjectWizard({
     } finally {
       setLoading(false);
     }
-  }, [currentWorkspace, name, description, status, sourceId, createProject, onCreated]);
-
-  const handleClose = useCallback(() => {
-    setCurrentStep(0);
-    setName('');
-    setDescription('');
-    setStatus('active');
-    setSourceId('');
-    setError(null);
-    setFieldErrors({});
-    onClose();
-  }, [onClose]);
+  }, [
+    currentWorkspace,
+    name,
+    description,
+    status,
+    sourceId,
+    createProject,
+    onCreated,
+    handleClose,
+  ]);
 
   const activeSources = useMemo(() => sources.filter((s) => s.is_active), [sources]);
 
@@ -209,8 +218,7 @@ export function CreateProjectWizard({
                       fill="none"
                       stroke="currentColor"
                       strokeWidth="2"
-                      width="20"
-                      height="20"
+                      aria-hidden="true"
                     >
                       <circle cx="12" cy="12" r="10" />
                       <path d="M8 12h8" />
@@ -282,6 +290,7 @@ export function CreateProjectWizard({
       onClose={handleClose}
       title="New Project"
       subtitle="Create a new project to organize your work"
+      className="project-wizard"
       steps={WIZARD_STEPS}
       currentStep={currentStep}
       onStepChange={handleStepChange}

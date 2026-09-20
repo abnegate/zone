@@ -1449,3 +1449,159 @@ pub async fn update_task_branch(
     Ok(sqlx::query("UPDATE tasks t SET branch_name=$5, updated_at=NOW() FROM task_runs r, workspace_members m WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner')")
         .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(branch).execute(pool).await?.rows_affected() == 1)
 }
+
+// ---------------------------------------------------------------------------
+// Auto projects: tasks created several at a time, runs nobody is watching, and
+// the merge that finishes a task without a person moving it.
+// ---------------------------------------------------------------------------
+
+/// Insert a task inside a caller's transaction, for a write that makes several
+/// at once and wants all or none of them. Project membership is locked the way
+/// a single create locks it; authorization belongs to the caller.
+pub(crate) async fn create_task_in(
+    connection: &mut PgConnection,
+    input: &Create<'_>,
+) -> Result<TaskRow, MutationError> {
+    lock_projects(connection, input.workspace_id, input.project_ids).await?;
+    insert_task(connection, input)
+        .await
+        .map_err(MutationError::Database)
+}
+
+/// Record which tasks a task waits on. The column is JSON so it can be read
+/// back by the console as it is; each entry is a task id as text.
+pub(crate) async fn set_dependencies_in(
+    connection: &mut PgConnection,
+    task_id: Uuid,
+    dependencies: &[Uuid],
+) -> DbResult<()> {
+    let ids: Vec<String> = dependencies.iter().map(Uuid::to_string).collect();
+    sqlx::query("UPDATE tasks SET dependencies = $2, updated_at = NOW() WHERE id = $1")
+        .bind(task_id)
+        .bind(serde_json::json!(ids))
+        .execute(connection)
+        .await?;
+    Ok(())
+}
+
+/// Replace a task's dependencies in a transaction of its own.
+pub async fn set_dependencies(pool: &PgPool, task_id: Uuid, dependencies: &[Uuid]) -> DbResult<()> {
+    let mut transaction = pool.begin().await?;
+    set_dependencies_in(&mut transaction, task_id, dependencies).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Admit a run nobody will be watching, as the person automation runs as.
+///
+/// The actor is authorized the way a run started from the console is, so a
+/// run the driver starts carries exactly the authority a run that person
+/// started would. A task that already has a run is reported rather than
+/// admitted twice.
+pub async fn create_unattended_task_run(
+    pool: &PgPool,
+    task_id: Uuid,
+    actor: Uuid,
+) -> DbResult<RunMutation> {
+    let mut transaction = pool.begin().await?;
+    // Membership before the task lock, as every user-triggered admission
+    // orders them; then the row is held so two drivers cannot both find no
+    // active run and each insert one.
+    authorize_task_in(&mut transaction, task_id, actor, true).await?;
+    sqlx::query("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
+        .bind(task_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    let active = sqlx::query_as::<_, TaskRunRow>(sqlx::AssertSqlSafe(format!(
+        "SELECT id, task_id, triggered_by, status, current_phase, progress_percent, started_at, \
+                completed_at, error_message, artifacts, pending_question, pending_wait, plan \
+         FROM task_runs WHERE task_id = $1 AND status IN {ACTIVE_RUN_STATUSES} \
+         ORDER BY started_at DESC, id LIMIT 1"
+    )))
+    .bind(task_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if let Some(run) = active {
+        return Ok(RunMutation::Active(run));
+    }
+    let run = insert_task_run(&mut transaction, task_id, Some(actor)).await?;
+    sqlx::query("UPDATE task_runs SET unattended = TRUE WHERE id = $1")
+        .bind(run.id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(RunMutation::Created(run))
+}
+
+/// How a run is being run: whether anyone is there to answer it, and the
+/// model it resolved to once it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunMode {
+    pub unattended: bool,
+    pub model: Option<String>,
+}
+
+/// Whether a run is unattended, and the model it resolved to.
+pub async fn run_mode(pool: &PgPool, run_id: Uuid) -> DbResult<Option<RunMode>> {
+    let row: Option<(bool, Option<String>)> =
+        sqlx::query_as("SELECT unattended, model FROM task_runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(unattended, model)| RunMode { unattended, model }))
+}
+
+/// Keep the model a run resolved to on the run, fenced on the lease like
+/// every write a run makes about itself. A reviewer is chosen against it.
+pub async fn record_run_model(
+    pool: &PgPool,
+    run: Uuid,
+    owner: Uuid,
+    model: &str,
+) -> DbResult<bool> {
+    Ok(sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE task_runs SET model = $3 WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 \
+         AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds'"
+    )))
+    .bind(run)
+    .bind(owner)
+    .bind(model)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Finish a task whose pull request merged: the transition no run and no
+/// person makes. Fenced on the URL the merge was made for, so a task that
+/// opened a different pull request in the meantime is not finished on the
+/// strength of the old one, and on the task having no run, so a run someone
+/// started meanwhile is not cut off. Which column a person dragged the task
+/// to does not matter: the merge is a fact.
+pub async fn complete_merged_task(pool: &PgPool, task_id: Uuid, pr_url: &str) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE tasks SET status = 'complete', pr_status = 'merged', completed_at = NOW(), \
+           updated_at = NOW() \
+         WHERE id = $1 AND active_run_id IS NULL AND status <> 'complete' AND pr_url = $2",
+    )
+    .bind(task_id)
+    .bind(pr_url)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Record what became of a task's pull request when something other than a
+/// merge closed it.
+pub async fn mark_pr_status(pool: &PgPool, task_id: Uuid, status: &str) -> DbResult<bool> {
+    Ok(
+        sqlx::query("UPDATE tasks SET pr_status = $2, updated_at = NOW() WHERE id = $1")
+            .bind(task_id)
+            .bind(status)
+            .execute(pool)
+            .await?
+            .rows_affected()
+            == 1,
+    )
+}

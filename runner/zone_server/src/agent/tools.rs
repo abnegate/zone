@@ -280,6 +280,10 @@ pub struct ChatTools {
     /// reading — and `submit_plan` — runs. The worker clears it by rebuilding
     /// the catalog without it once the approval is answered.
     plan_hold: bool,
+    /// Nobody reads this run while it runs: a card it asks goes ahead on its
+    /// first option after the window whether or not a question was required,
+    /// and the prompt says so.
+    unattended: bool,
     /// A display name for receipts, not an authorization decision, so it is
     /// the one thing here worth caching: a stale name costs nothing, a stale
     /// grant would. Membership is re-read per call in `authorize_workspace`.
@@ -322,6 +326,7 @@ impl ChatTools {
             mcp_guidance: None,
             lease: None,
             plan_hold: false,
+            unattended: false,
             actor_name: OnceCell::new(),
         }
     }
@@ -461,6 +466,28 @@ impl ChatTools {
         self
     }
 
+    /// The two calls a planner chat ends its interview with, registered only
+    /// for such a chat: the paragraph that teaches them renders off the
+    /// catalog, so an ordinary chat is never told to plan a project.
+    pub fn with_planner(mut self) -> Self {
+        let Some(scope) = self.scope.clone() else {
+            return self;
+        };
+        super::planner::register(&mut self.registry, &scope);
+        for name in [
+            super::planner::CREATE_REPOSITORY,
+            super::planner::FINALIZE_PROJECT,
+        ] {
+            self.core.insert(name.to_string());
+            if !self.workspace.iter().any(|known| known == name) {
+                self.workspace.push(name.to_string());
+            }
+        }
+        self.cache_catalog();
+        self.publish_catalog();
+        self
+    }
+
     /// Hold every mutating call until the plan is approved. The paragraph
     /// that tells a run to plan first is an instruction; this is what makes
     /// it so: `apply_patch`, `run_command` and their kind are refused with the
@@ -473,6 +500,18 @@ impl ChatTools {
     /// Whether mutating calls are currently held for a plan's approval.
     pub fn holds_for_plan(&self) -> bool {
         self.plan_hold
+    }
+
+    /// A run nobody is watching. The worker proceeds on a card's first option
+    /// after the window whether or not the question was required, and the
+    /// sections that describe the wait say so.
+    pub fn unattended(mut self) -> Self {
+        self.unattended = true;
+        self
+    }
+
+    pub fn is_unattended(&self) -> bool {
+        self.unattended
     }
 
     /// The run id reaches the tool context nowhere else, so the session a job
@@ -656,6 +695,7 @@ impl ChatTools {
             remote,
             mcp_guidance,
             plan_hold: false,
+            unattended: false,
             lease: None,
             actor_name: OnceCell::new(),
         };
