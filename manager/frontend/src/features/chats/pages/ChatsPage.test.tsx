@@ -23,6 +23,8 @@ const mockUnarchiveChat = mock();
 const mockDeleteChat = mock();
 const mockSearchChatMessages = mock();
 const mockUpdateChat = mock();
+const mockGetChatSources = mock();
+const mockSetChatSources = mock();
 const mockWsSend = mock();
 const mockWsClose = mock();
 
@@ -56,6 +58,8 @@ mock.module('../../../api/chats', () => ({
     unarchiveChat: mockUnarchiveChat,
     deleteChat: mockDeleteChat,
     searchChatMessages: mockSearchChatMessages,
+    getChatSources: mockGetChatSources,
+    setChatSources: mockSetChatSources,
     setGetAccessToken: mock(),
     getMessages: mock(),
     updateChat: mockUpdateChat,
@@ -66,6 +70,50 @@ mock.module('../../../api/chats', () => ({
       return socket;
     },
   },
+}));
+
+const workspaceSources = [
+  {
+    id: 'source-repo',
+    name: 'abnegate/zone-tests',
+    source_type: 'github',
+    category: 'file',
+    config: {},
+    description: null,
+    url: 'https://github.com/abnegate/zone-tests',
+    is_active: true,
+    last_verified_at: null,
+    last_error: null,
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+  },
+  {
+    id: 'source-notes',
+    name: 'Team notes',
+    source_type: 'text',
+    category: 'text',
+    config: {},
+    description: null,
+    url: '',
+    is_active: true,
+    last_verified_at: null,
+    last_error: null,
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+  },
+];
+
+mock.module('../../sources/hooks/useSources', () => ({
+  useSources: () => ({
+    sources: workspaceSources,
+    loading: false,
+    error: null,
+    createSource: mock(),
+    updateSource: mock(),
+    deleteSource: mock(),
+    verifySource: mock(),
+    refresh: mock(),
+  }),
 }));
 
 // Mock useModels - include all exports from models module for proper mocking
@@ -279,6 +327,9 @@ afterAll(() => {
 
 describe('ChatsPage', () => {
   beforeEach(() => {
+    mockGetChatSources.mockReset();
+    mockSetChatSources.mockReset();
+    mockGetChatSources.mockResolvedValue([]);
     window.history.pushState({}, '', '/');
     mockGetChats.mockReset();
     mockGetChat.mockReset();
@@ -2077,6 +2128,60 @@ describe('ChatsPage', () => {
     fireEvent.click(screen.getByText('Chat 1'));
     await waitFor(() => expect(screen.getByTestId('agent-toggle')).toBeInTheDocument());
     expect(screen.getByTestId('character-toggle')).toHaveTextContent('Ada');
+  });
+
+  describe('attached sources', () => {
+    const openChat = async () => {
+      mockGetChats.mockResolvedValue(mockChats);
+      mockGetChat.mockResolvedValue(mockChatWithMessages);
+      window.history.pushState({}, '', '/?id=chat-1');
+      renderChatsPage();
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-sources')).toBeInTheDocument();
+      });
+    };
+
+    it('offers a Sources chip in the composer that reads whole-workspace when nothing is attached', async () => {
+      await openChat();
+      expect(mockGetChatSources).toHaveBeenCalledWith('chat-1');
+      const toggle = screen.getByRole('button', { name: 'Sources: whole workspace' });
+      expect(toggle).toBeInTheDocument();
+      expect(screen.queryAllByTestId('chat-source-chip')).toHaveLength(0);
+    });
+
+    it('attaches a workspace source for this chat and shows it as a chip', async () => {
+      mockSetChatSources.mockResolvedValue([
+        { id: 'source-repo', name: 'abnegate/zone-tests', source_type: 'github' },
+      ]);
+      await openChat();
+      fireEvent.click(screen.getByRole('button', { name: 'Sources: whole workspace' }));
+      fireEvent.click(screen.getByLabelText(/abnegate\/zone-tests/));
+      await waitFor(() => {
+        expect(mockSetChatSources).toHaveBeenCalledWith('chat-1', ['source-repo']);
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-source-chip')).toHaveTextContent('abnegate/zone-tests');
+      });
+      expect(screen.getByRole('button', { name: 'Sources: 1 attached' })).toBeInTheDocument();
+    });
+
+    it('shows the attachment the server already holds and detaches from the chip', async () => {
+      mockGetChatSources.mockResolvedValue([
+        { id: 'source-notes', name: 'Team notes', source_type: 'text' },
+      ]);
+      mockSetChatSources.mockResolvedValue([]);
+      await openChat();
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-source-chip')).toHaveTextContent('Team notes');
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Detach Team notes' }));
+      await waitFor(() => {
+        expect(mockSetChatSources).toHaveBeenCalledWith('chat-1', []);
+      });
+      await waitFor(() => {
+        expect(screen.queryAllByTestId('chat-source-chip')).toHaveLength(0);
+      });
+    });
   });
 
   describe('chat search', () => {

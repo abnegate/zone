@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::{chats, message_embeddings};
+use crate::db::{chat_attached_sources, chats, message_embeddings};
 use crate::error::ServerError;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
@@ -1043,6 +1043,90 @@ pub async fn search_messages(
         total,
     })
     .into_response()
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChatSourcesResponse {
+    sources: Vec<chat_attached_sources::Attached>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetChatSourcesRequest {
+    source_ids: Vec<Uuid>,
+}
+
+/// GET /api/chats/{id}/sources
+///
+/// The sources this chat's retrieval is confined to. Empty means the whole
+/// workspace.
+pub async fn list_sources(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    if let Err(e) = get_chat_with_access(&state, &auth, id).await {
+        return e.into_response();
+    }
+    match chat_attached_sources::list(state.db(), id).await {
+        Ok(sources) => Json(ChatSourcesResponse { sources }).into_response(),
+        Err(e) => {
+            tracing::error!("Database error listing attached sources: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// PUT /api/chats/{id}/sources
+///
+/// Replace the chat's attachment with `source_ids`, every one of which has to
+/// be an active source of the chat's workspace.
+pub async fn set_sources(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(request): Json<SetChatSourcesRequest>,
+) -> impl IntoResponse {
+    let chat = match get_chat_with_access(&state, &auth, id).await {
+        Ok(chat) => chat,
+        Err(e) => return e.into_response(),
+    };
+    let Some(workspace_id) = chat.workspace_id else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new("Chat has no workspace association")),
+        )
+            .into_response();
+    };
+    if let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await {
+        return e.into_response();
+    }
+    match chat_attached_sources::replace(state.db(), id, workspace_id, &request.source_ids).await {
+        Ok(sources) => Json(ChatSourcesResponse { sources }).into_response(),
+        Err(chat_attached_sources::ReplaceError::Foreign(foreign)) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(format!(
+                "Not sources of this chat's workspace: {}",
+                foreign
+                    .iter()
+                    .map(Uuid::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        )
+            .into_response(),
+        Err(chat_attached_sources::ReplaceError::Database(e)) => {
+            tracing::error!("Database error attaching sources: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Read-only draft estimation. Shares preparation with send; never saves or summarizes.

@@ -348,6 +348,15 @@ export interface ChatSearchResult {
   created_at: string;
 }
 
+/// A workspace source this chat's retrieval is confined to. Attached by the
+/// person before a turn, so it is chosen rather than observed.
+export interface ChatSource {
+  id: string;
+  name: string;
+  source_type: string;
+  attached_at?: string;
+}
+
 export interface ChatSearchOptions {
   query: string;
   workspace_id: string;

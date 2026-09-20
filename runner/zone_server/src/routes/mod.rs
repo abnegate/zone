@@ -219,6 +219,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/chats/{id}/archive", post(chats::archive))
         .route("/api/chats/{id}/unarchive", post(chats::unarchive))
         .route(
+            "/api/chats/{id}/sources",
+            get(chats::list_sources).put(chats::set_sources),
+        )
+        .route(
             "/api/chats/{id}/messages",
             get(chats::list_messages).post(chats::create_message),
         )

@@ -1,6 +1,7 @@
 import {
   ChatResponseSchema,
   ChatSearchResponseSchema,
+  ChatSourcesResponseSchema,
   ChatsResponseSchema,
   ContextResponseSchema,
   MessageResponseSchema,
@@ -10,6 +11,7 @@ import type {
   Chat,
   ChatSearchOptions,
   ChatSearchResponse,
+  ChatSource,
   ChatWithMessages,
   ContextUsage,
   CreateChatRequest,
@@ -188,6 +190,28 @@ class ChatsApi {
     if (!response.ok) {
       throw new Error(`Failed to delete message: ${response.status}`);
     }
+  }
+
+  async getChatSources(chatId: string): Promise<ChatSource[]> {
+    const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/sources`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(await this.failure(response, 'Failed to load attached sources'));
+    }
+    return parse(ChatSourcesResponseSchema, await response.json()).sources;
+  }
+
+  async setChatSources(chatId: string, sourceIds: string[]): Promise<ChatSource[]> {
+    const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/sources`, {
+      method: 'PUT',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ source_ids: sourceIds }),
+    });
+    if (!response.ok) {
+      throw new Error(await this.failure(response, 'Failed to attach sources'));
+    }
+    return parse(ChatSourcesResponseSchema, await response.json()).sources;
   }
 
   async searchChatMessages(options: ChatSearchOptions): Promise<ChatSearchResponse> {

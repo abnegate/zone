@@ -41,7 +41,8 @@ use crate::agent::{
 };
 use crate::auth::validate_access_token;
 use crate::db::{
-    self, ai_settings, chat_sources, chats, knowledge, sessions, workspace_members, workspaces,
+    self, ai_settings, chat_attached_sources, chat_sources, chats, knowledge, sessions,
+    workspace_members, workspaces,
 };
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
@@ -2746,8 +2747,9 @@ async fn prepare_chat(
             None => None,
         };
 
+        let attached = chat_attached_sources::scope(state.db(), Some(chat_id)).await;
         let mut knowledge_hits = Vec::new();
-        if let Some(embedding) = query_embedding.as_deref() {
+        if let (Some(embedding), None) = (query_embedding.as_deref(), attached.as_ref()) {
             match knowledge::search_knowledge_entries(
                 state.db(),
                 embedding,
@@ -2761,30 +2763,32 @@ async fn prepare_chat(
                 Err(error) => tracing::warn!(%error, "Knowledge semantic search failed"),
             }
         }
-        match knowledge::search_knowledge_keyword(
-            state.db(),
-            content,
-            workspace_id,
-            MAX_CONTEXT_IN_PROMPT as i64,
-        )
-        .await
-        {
-            Ok(hits) => {
-                knowledge_hits = knowledge::fuse_knowledge_hits(
-                    knowledge_hits,
-                    hits,
-                    content,
-                    MAX_CONTEXT_IN_PROMPT,
-                );
+        if attached.is_none() {
+            match knowledge::search_knowledge_keyword(
+                state.db(),
+                content,
+                workspace_id,
+                MAX_CONTEXT_IN_PROMPT as i64,
+            )
+            .await
+            {
+                Ok(hits) => {
+                    knowledge_hits = knowledge::fuse_knowledge_hits(
+                        knowledge_hits,
+                        hits,
+                        content,
+                        MAX_CONTEXT_IN_PROMPT,
+                    );
+                }
+                Err(error) => tracing::warn!(%error, "Knowledge keyword search failed"),
             }
-            Err(error) => tracing::warn!(%error, "Knowledge keyword search failed"),
         }
 
         let mut source_lines = Vec::new();
         if let Some(context_service) = state.context_service() {
             let filters = zone_context::embeddings::SearchFilters {
                 workspace_id: Some(workspace_id),
-                source_ids: None,
+                source_ids: attached.clone(),
                 categories: None,
                 min_quality: None,
                 since: None,

@@ -322,6 +322,17 @@ export const MessageResponseSchema = z.object({
   message: MessageSchema,
 });
 
+export const ChatSourceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  source_type: z.string(),
+  attached_at: z.string().optional(),
+});
+
+export const ChatSourcesResponseSchema = z.object({
+  sources: z.array(ChatSourceSchema).default([]),
+});
+
 export const ChatSearchResultSchema = z
   .object({
     message_id: z.string(),
