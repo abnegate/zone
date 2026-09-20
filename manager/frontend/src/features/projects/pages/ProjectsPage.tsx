@@ -92,6 +92,10 @@ export default function ProjectsPage() {
   // panel would otherwise be re-selected by this effect before the parameter is gone
   const honouredLink = useRef<string | null>(null);
   useEffect(() => {
+    // Once the URL has really moved on, the same link may be followed again
+    if (honouredLink.current && honouredLink.current !== requestedProjectId) {
+      honouredLink.current = null;
+    }
     if (!requestedProjectId || selectedProject) return;
     if (honouredLink.current === requestedProjectId) return;
     const match = projects.find((project) => project.id === requestedProjectId);

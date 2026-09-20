@@ -3,16 +3,28 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type React from 'react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import type { Source } from '../../../types';
 import type { Project, ProjectAutomation } from '../types';
 
 let ProjectsPage: typeof import('./ProjectsPage').default;
 
-/** Where the page navigated to, for routes the test does not render. */
+/** Where the page navigated to, and a way to follow a project link again. */
 const LocationProbe = () => {
   const location = useLocation();
-  return <div data-testid="location">{`${location.pathname}${location.search}`}</div>;
+  const navigate = useNavigate();
+  return (
+    <div>
+      <div data-testid="location">{`${location.pathname}${location.search}`}</div>
+      <button
+        type="button"
+        data-testid="follow-proj-2"
+        onClick={() => navigate('/projects?id=proj-2')}
+      >
+        follow
+      </button>
+    </div>
+  );
 };
 
 const createWrapper = (initialPath: string) => {
@@ -927,6 +939,17 @@ describe('ProjectsPage', () => {
       // The effect that honours the link must not bring the panel back
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(document.querySelector('.project-details')).not.toBeInTheDocument();
+
+      // Following the same link again, later in the same mount, is honoured
+      fireEvent.click(screen.getByTestId('follow-proj-2'));
+      await waitFor(
+        () => {
+          expect(
+            screen.getByRole('heading', { name: 'Project Beta', level: 2 })
+          ).toBeInTheDocument();
+        },
+        { timeout: 3000 }
+      );
     });
 
     it('shows why a toggle failed next to the control', async () => {
