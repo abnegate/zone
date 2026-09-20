@@ -181,15 +181,22 @@ pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u6
     .rows_affected();
     // Admission only reads tasks in `created`; a task that exhausted its runs
     // sits in `blocked` (or `review` without a pull request), so it is put
-    // back to `created` with its counter, or resume would change nothing.
+    // back to `created` with its counter, or resume would change nothing. A
+    // task someone started a run on meanwhile is left alone, and the
+    // candidates are locked before either table changes so an admission
+    // cannot slip in between the check and the reset.
     let restarted = sqlx::query(
-        "WITH restarted AS ( \
+        "WITH candidates AS ( \
+           SELECT t.id FROM tasks t JOIN task_automation a ON a.task_id = t.id \
+           WHERE a.project_id = $1 AND a.stage = 'paused' AND t.pr_url IS NULL \
+             AND t.status <> 'complete' AND t.active_run_id IS NULL \
+           FOR UPDATE OF t), \
+         restarted AS ( \
            UPDATE task_automation a SET stage = 'idle', reason = NULL, runs = 0, updated_at = NOW() \
-           FROM tasks t WHERE t.id = a.task_id AND a.project_id = $1 AND a.stage = 'paused' \
-             AND t.pr_url IS NULL AND t.status <> 'complete' \
+           FROM candidates c WHERE a.task_id = c.id \
            RETURNING a.task_id) \
          UPDATE tasks SET status = 'created', updated_at = NOW() \
-         WHERE id IN (SELECT task_id FROM restarted) AND active_run_id IS NULL",
+         WHERE id IN (SELECT task_id FROM restarted)",
     )
     .bind(project_id)
     .execute(pool)

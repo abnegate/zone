@@ -315,6 +315,12 @@ impl Mergeability {
     pub fn conflicted(self) -> bool {
         self == Mergeability::Conflicted
     }
+
+    /// GitHub computes mergeability in the background after a push; until it
+    /// has, a merge is refused with the same 405 a protection rule gives.
+    pub fn unknown(self) -> bool {
+        self == Mergeability::Unknown
+    }
 }
 
 /// PR service for creating pull requests

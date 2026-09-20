@@ -369,13 +369,27 @@ async fn absent_checks(step: &Step<'_>, pull: &PullRequestDetail) -> Result<(), 
                     )
                     .await;
             }
-            refresh_from_base(step, pull).await
+            refresh_from_base(step, pull, Refresh::Workflows).await
         }
     }
 }
 
-/// Merge the base into the branch so the workflows it now carries run.
-async fn refresh_from_base(step: &Step<'_>, pull: &PullRequestDetail) -> Result<(), String> {
+/// Why a branch is brought up to date with its base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refresh {
+    /// The base gained workflows the branch has to carry before checks run.
+    Workflows,
+    /// GitHub reports the branch behind a base that has to be caught up before a merge.
+    Behind,
+}
+
+/// Merge the base into the branch, for the workflows it now carries or
+/// because the repository refuses to merge a branch behind its base.
+async fn refresh_from_base(
+    step: &Step<'_>,
+    pull: &PullRequestDetail,
+    purpose: Refresh,
+) -> Result<(), String> {
     let pool = step.drive.state.db();
     let Some(remote) = step.drive.project.repository_url.clone() else {
         return step
@@ -392,10 +406,16 @@ async fn refresh_from_base(step: &Step<'_>, pull: &PullRequestDetail) -> Result<
         expected_head: None,
         expected_base: None,
     };
-    let message = format!(
-        "Merge {} into {} to pick up its workflows",
-        pull.base_ref, pull.head_ref
-    );
+    let message = match purpose {
+        Refresh::Workflows => format!(
+            "Merge {} into {} to pick up its workflows",
+            pull.base_ref, pull.head_ref
+        ),
+        Refresh::Behind => format!(
+            "Merge {} into {} to bring it up to date before merging",
+            pull.base_ref, pull.head_ref
+        ),
+    };
     match step
         .drive
         .services
@@ -413,25 +433,40 @@ async fn refresh_from_base(step: &Step<'_>, pull: &PullRequestDetail) -> Result<
             )
             .await
             .map_err(|error| error.to_string())?;
+            let why = match purpose {
+                Refresh::Workflows => "to pick up its workflows",
+                Refresh::Behind => "to bring the branch up to date",
+            };
             step.set(
                 Stage::AwaitingChecks,
                 Some(&format!(
-                    "{REFRESHED_PREFIX} as {} to pick up its workflows",
+                    "{REFRESHED_PREFIX} as {} {why}",
                     short(refreshed.commit.as_str())
                 )),
             )
             .await
         }
-        Ok(_) => {
-            step.set(
-                Stage::Fixing,
-                Some(
-                    "no check ran on this head although the base's workflows are already in the \
-                     branch: find out why the workflow does not start for this branch and fix it.",
-                ),
-            )
-            .await
-        }
+        Ok(_) => match purpose {
+            Refresh::Workflows => {
+                step.set(
+                    Stage::Fixing,
+                    Some(
+                        "no check ran on this head although the base's workflows are already in \
+                         the branch: find out why the workflow does not start for this branch and \
+                         fix it.",
+                    ),
+                )
+                .await
+            }
+            // GitHub said behind, git found nothing to merge: read it again.
+            Refresh::Behind => {
+                step.set(
+                    Stage::AwaitingChecks,
+                    Some("the branch was reported behind its base but had nothing to merge"),
+                )
+                .await
+            }
+        },
         Err(ConflictError::Conflicted) => {
             match repair_conflicts_for_task(step.drive.state, step.task.task_id).await {
                 RepairOutcome::Repaired { .. } | RepairOutcome::NotConflicted => {
@@ -987,6 +1022,16 @@ async fn merging(step: &Step<'_>) -> Result<(), String> {
             )
             .await;
     }
+    if pull.mergeable.unknown() {
+        // Asking before GitHub has computed mergeability gets the 405 a rule
+        // gives; wait a tick and read it again.
+        return step
+            .set(
+                Stage::Merging,
+                Some("waiting for GitHub to compute mergeability"),
+            )
+            .await;
+    }
     if pull.mergeable.conflicted() {
         // A conflict is repaired, never merged past as an administrator.
         return step
@@ -995,6 +1040,12 @@ async fn merging(step: &Step<'_>) -> Result<(), String> {
                 Some("the branch conflicts; repairing"),
             )
             .await;
+    }
+    if pull.mergeable_state.as_deref() == Some("behind") {
+        // A repository that requires branches to be up to date refuses a
+        // merge behind the base; refreshing gives a new head, which is
+        // checked and reviewed again before it is merged.
+        return refresh_from_base(step, &pull, Refresh::Behind).await;
     }
     let rows = auto_projects::reviews(step.drive.state.db(), step.task.task_id)
         .await
