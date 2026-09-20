@@ -27,8 +27,8 @@ use super::citations::{self, Citation};
 use super::identifier::{self, Kind};
 use super::receipts::{self, ActionReceipt};
 use crate::db::{
-    DbResult, chat_sources, knowledge, message_embeddings, projects, sources, users,
-    workspace_members,
+    DbResult, chat_attached_sources, chat_sources, knowledge, message_embeddings, projects,
+    sources, users, workspace_members,
 };
 use crate::state::AppState;
 
@@ -1150,7 +1150,8 @@ impl Tool for SearchKnowledgeTool {
     fn description(&self) -> &str {
         "Search the workspace knowledge base (indexed documents, repositories and other connected \
          sources) for passages relevant to a query. Use this whenever the answer may depend on \
-         the user's own content rather than general knowledge."
+         the user's own content rather than general knowledge. When the person has attached \
+         sources to this chat, only those sources are searched."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1181,6 +1182,21 @@ impl Tool for SearchKnowledgeTool {
     }
 }
 
+/// The filter a source search runs under: the workspace always, and the
+/// attached sources when the chat has any.
+fn source_filters(
+    workspace_id: Uuid,
+    attached: Option<Vec<Uuid>>,
+) -> zone_context::embeddings::SearchFilters {
+    zone_context::embeddings::SearchFilters {
+        workspace_id: Some(workspace_id),
+        source_ids: attached,
+        categories: None,
+        min_quality: None,
+        since: None,
+    }
+}
+
 impl SearchKnowledgeTool {
     /// The body is written to return a `ToolResult` rather than an error,
     /// because a tool that fails is an observation the model can act on.
@@ -1192,6 +1208,7 @@ impl SearchKnowledgeTool {
         };
         let limit = limit_arg(&params);
         let observed_at = chrono::Utc::now().to_rfc3339();
+        let attached = chat_attached_sources::scope(ctx.state.db(), ctx.chat_id).await;
 
         let embed_fut = async {
             match ctx.state.embedding_service() {
@@ -1214,6 +1231,9 @@ impl SearchKnowledgeTool {
             }
         };
         let keyword_fut = async {
+            if attached.is_some() {
+                return Vec::new();
+            }
             match knowledge::search_knowledge_keyword(
                 ctx.state.db(),
                 query,
@@ -1236,7 +1256,7 @@ impl SearchKnowledgeTool {
         let ((query_embedding, mut degraded), keyword_hits) = tokio::join!(embed_fut, keyword_fut);
 
         let semantic_fut = async {
-            if let Some(embedding) = query_embedding.as_deref() {
+            if let (Some(embedding), None) = (query_embedding.as_deref(), attached.as_ref()) {
                 match knowledge::search_knowledge_entries(
                     ctx.state.db(),
                     embedding,
@@ -1262,13 +1282,7 @@ impl SearchKnowledgeTool {
         };
         let source_fut = async {
             if let Some(context_service) = ctx.state.context_service() {
-                let filters = zone_context::embeddings::SearchFilters {
-                    workspace_id: Some(ctx.workspace_id),
-                    source_ids: None,
-                    categories: None,
-                    min_quality: None,
-                    since: None,
-                };
+                let filters = source_filters(ctx.workspace_id, attached.clone());
                 match context_service
                     .search_hybrid_with_embedding(
                         query,
@@ -1333,9 +1347,16 @@ impl SearchKnowledgeTool {
 
         let mut passages = interleave_passages(knowledge_passages, source_passages, limit);
         if passages.is_empty() {
-            return ToolResult::success(
-                "No passages in this workspace's knowledge base matched that query.".to_string(),
-            );
+            return ToolResult::success(match attached {
+                Some(sources) => format!(
+                    "No passages in the {} source(s) attached to this chat matched that query. \
+                     Detach them to search the whole workspace.",
+                    sources.len()
+                ),
+                None => {
+                    "No passages in this workspace's knowledge base matched that query.".to_string()
+                }
+            });
         }
         self.identify(&mut passages).await;
 
@@ -2096,6 +2117,22 @@ mod tests {
 
     /// How long a connection the registry already holds may take to surface.
     const ACCEPT_TIMEOUT: Duration = Duration::from_millis(250);
+
+    #[test]
+    fn an_attachment_confines_the_source_search_and_none_leaves_the_workspace_open() {
+        let workspace = Uuid::new_v4();
+        let open = source_filters(workspace, None);
+        assert_eq!(open.workspace_id, Some(workspace));
+        assert!(
+            open.source_ids.is_none(),
+            "no attachment searches every source"
+        );
+
+        let attached = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let confined = source_filters(workspace, Some(attached.clone()));
+        assert_eq!(confined.workspace_id, Some(workspace));
+        assert_eq!(confined.source_ids, Some(attached));
+    }
 
     fn knowledge_tool(chat: Option<Uuid>, registry: u16) -> SearchKnowledgeTool {
         let database = PgPoolOptions::new()

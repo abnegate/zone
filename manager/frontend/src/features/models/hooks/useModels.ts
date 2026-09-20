@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
 import { useAuth } from '../../../features/auth';
-import type { DiskUsage, InstalledModel } from '../types';
+import type { DiskUsage, InstalledModel, ProviderErrors } from '../types';
 
 export function useModels() {
   const { isAuthenticated, isLoading: authLoading, logout } = useAuth();
@@ -9,6 +9,7 @@ export function useModels() {
   const [disk, setDisk] = useState<DiskUsage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [providerErrors, setProviderErrors] = useState<ProviderErrors>({});
 
   const fetchModels = useCallback(async () => {
     // Wait for auth to finish loading before fetching
@@ -20,6 +21,7 @@ export function useModels() {
     try {
       const response = await modelsApi.getModels();
       setModels(response.models || []);
+      setProviderErrors(response.errors ?? {});
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch models';
       if (message.includes('401')) {
@@ -53,5 +55,5 @@ export function useModels() {
     }
   }, []);
 
-  return { models, disk, loading, error, refresh: fetchModels, deleteModel };
+  return { models, disk, loading, error, providerErrors, refresh: fetchModels, deleteModel };
 }

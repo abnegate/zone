@@ -179,7 +179,7 @@ async fn refresh_due(state: &AppState, permits: &Arc<Semaphore>) -> DbResult<()>
                 return;
             };
 
-            refresh_entry(&state, entry).await;
+            let _ = refresh_entry(&state, entry).await;
         });
     }
 
@@ -317,8 +317,17 @@ pub async fn recover_unindexed(
     Ok(())
 }
 
-/// Refresh a single knowledge entry
-async fn refresh_entry(state: &AppState, entry: knowledge::KnowledgeRefreshDue) {
+/// Re-fetch one URL-backed entry, storing the new text and vector when the
+/// page changed and only the fetch time when it did not.
+///
+/// Shared by the scheduled pass and the console's Refresh button, so both
+/// record a failed fetch on the row the same way. The `Err` carries the fetch
+/// failure in the words already stored as `last_fetch_error`, for a caller
+/// that has somebody waiting on the answer.
+pub async fn refresh_entry(
+    state: &AppState,
+    entry: knowledge::KnowledgeRefreshDue,
+) -> Result<(), String> {
     tracing::info!(
         "Refreshing knowledge entry: id={}, title='{}', url='{}'",
         entry.id,
@@ -326,12 +335,10 @@ async fn refresh_entry(state: &AppState, entry: knowledge::KnowledgeRefreshDue) 
         entry.source_url
     );
 
-    // Fetch content from URL
     let (content, new_hash) = match fetch_web_content(&entry.source_url).await {
         Ok((content, hash)) => (content, hash),
         Err(e) => {
             tracing::warn!("Failed to fetch URL for entry {}: {}", entry.id, e);
-            // Record the error
             if let Err(db_err) = knowledge::record_fetch_error(state.db(), entry.id, &e).await {
                 tracing::error!(
                     "Failed to record fetch error for entry {}: {}",
@@ -339,7 +346,7 @@ async fn refresh_entry(state: &AppState, entry: knowledge::KnowledgeRefreshDue) 
                     db_err
                 );
             }
-            return;
+            return Err(e);
         }
     };
 
@@ -365,7 +372,7 @@ async fn refresh_entry(state: &AppState, entry: knowledge::KnowledgeRefreshDue) 
         {
             tracing::error!("Failed to update timestamp for entry {}: {}", entry.id, e);
         }
-        return;
+        return Ok(());
     }
 
     tracing::info!(
@@ -384,7 +391,7 @@ async fn refresh_entry(state: &AppState, entry: knowledge::KnowledgeRefreshDue) 
             .await
     {
         tracing::error!("Failed to update content for entry {}: {}", entry.id, e);
-        return;
+        return Err(format!("Failed to store the fetched content: {e}"));
     }
 
     // New content wants a new vector. A failure here leaves the entry indexed
@@ -404,6 +411,7 @@ async fn refresh_entry(state: &AppState, entry: knowledge::KnowledgeRefreshDue) 
         entry.id,
         token_count
     );
+    Ok(())
 }
 
 /// Fetch content from a web URL and extract text

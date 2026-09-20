@@ -1,8 +1,13 @@
 import { useState } from 'react';
 import { chatsApi } from '../../../api/chats';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { ChatSearchResult } from '../types';
 
+export const NO_WORKSPACE_TO_SEARCH = 'Select a workspace to search its messages.';
+
 export function useChatSearch() {
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
   const [results, setResults] = useState<ChatSearchResult[]>([]);
   const [total, setTotal] = useState(0);
   const [searching, setSearching] = useState(false);
@@ -12,12 +17,19 @@ export function useChatSearch() {
     if (!query.trim()) {
       return;
     }
+    if (!workspaceId) {
+      setError(NO_WORKSPACE_TO_SEARCH);
+      setResults([]);
+      setTotal(0);
+      return;
+    }
 
     setSearching(true);
     setError(null);
     try {
       const response = await chatsApi.searchChatMessages({
         query: query.trim(),
+        workspace_id: workspaceId,
         ...options,
       });
       setResults(response.results);

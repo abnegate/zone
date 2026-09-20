@@ -322,15 +322,37 @@ export const MessageResponseSchema = z.object({
   message: MessageSchema,
 });
 
-export const ChatSearchResultSchema = z.object({
-  message_id: z.string(),
-  chat_id: z.string(),
-  chat_title: z.string(),
-  content: z.string(),
-  snippet: z.string(),
-  relevance_score: z.number(),
-  created_at: z.string(),
+export const ChatSourceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  source_type: z.string(),
+  attached_at: z.string().optional(),
 });
+
+export const ChatSourcesResponseSchema = z.object({
+  sources: z.array(ChatSourceSchema).default([]),
+});
+
+export const ChatSearchResultSchema = z
+  .object({
+    message_id: z.string(),
+    chat_id: z.string(),
+    chat_title: z.string().optional(),
+    content: z.string(),
+    snippet: z.string().optional(),
+    relevance_score: z.number().optional(),
+    similarity: z.number().optional(),
+    created_at: z.string(),
+  })
+  .transform((result) => ({
+    message_id: result.message_id,
+    chat_id: result.chat_id,
+    chat_title: result.chat_title ?? '',
+    content: result.content,
+    snippet: result.snippet ?? result.content,
+    relevance_score: Math.min(1, Math.max(0, result.relevance_score ?? result.similarity ?? 0)),
+    created_at: result.created_at,
+  }));
 
 export const ChatSearchResponseSchema = z.object({
   results: z.array(ChatSearchResultSchema),

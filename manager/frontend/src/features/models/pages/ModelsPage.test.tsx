@@ -114,6 +114,7 @@ const defaultModelsHook = {
   disk: null,
   loading: false,
   error: null,
+  providerErrors: {},
   refresh: mock(),
   deleteModel: mock(),
 };
@@ -255,6 +256,40 @@ describe('ModelsPage', () => {
       mockUseModels.mockReturnValue({ ...defaultModelsHook, error: 'Failed to load' });
       renderModelsPage();
       expect(screen.getByText('Cannot connect to Ollama')).toBeInTheDocument();
+    });
+
+    it('says Ollama is down beside the ComfyUI rows it could still list', () => {
+      const refresh = mock();
+      mockUseModels.mockReturnValue({
+        ...defaultModelsHook,
+        refresh,
+        models: [
+          {
+            name: 'flux1-dev.safetensors',
+            size: 1,
+            modified_at: '2024-01-01T00:00:00Z',
+            capabilities: ['image_generation'],
+          },
+        ],
+        providerErrors: { ollama: 'Failed to connect to Ollama: connection refused' },
+      });
+      renderModelsPage();
+      const banner = screen.getByRole('alert');
+      expect(within(banner).getByText('Cannot connect to Ollama')).toBeInTheDocument();
+      expect(screen.getByText('flux1-dev.safetensors')).toBeInTheDocument();
+      fireEvent.click(within(banner).getByRole('button', { name: 'Retry' }));
+      expect(refresh).toHaveBeenCalled();
+    });
+
+    it('shows the Ollama empty state when nothing else could be listed', () => {
+      mockUseModels.mockReturnValue({
+        ...defaultModelsHook,
+        providerErrors: { ollama: 'Failed to connect to Ollama: connection refused' },
+      });
+      renderModelsPage();
+      expect(screen.getByText('Cannot connect to Ollama')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+      expect(screen.queryByText('No models installed')).not.toBeInTheDocument();
     });
 
     it('shows empty state', () => {

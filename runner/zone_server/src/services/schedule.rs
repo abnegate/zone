@@ -105,13 +105,14 @@ impl Recurrence {
             let value = value.trim();
             match name.trim().to_ascii_uppercase().as_str() {
                 "FREQ" => {
-                    frequency = Some(
-                        Frequency::parse(&value.to_ascii_uppercase()).ok_or_else(|| {
+                    frequency = Some(Frequency::parse(&value.to_ascii_uppercase()).ok_or_else(
+                        || {
                             format!(
-                                "FREQ={value} is not supported. Use HOURLY, DAILY, WEEKLY or MONTHLY."
+                                "FREQ={value} is not supported. Use HOURLY, DAILY, WEEKLY or \
+                                 MONTHLY; HOURLY is the finest cadence a schedule can have."
                             )
-                        })?,
-                    );
+                        },
+                    )?);
                 }
                 "INTERVAL" => {
                     interval = value

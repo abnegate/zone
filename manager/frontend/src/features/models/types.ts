@@ -194,8 +194,12 @@ export interface DiskUsage {
   percent: number;
 }
 
+/** Providers whose inventory could not be read, by name, with the reason. */
+export type ProviderErrors = Record<string, string>;
+
 export interface ModelsResponse {
   models: InstalledModel[];
+  errors?: ProviderErrors;
 }
 
 export interface BrowseResponse {

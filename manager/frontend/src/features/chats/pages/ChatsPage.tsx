@@ -4,12 +4,14 @@ import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
+import { useSources } from '../../sources/hooks/useSources';
 import { isProtectedArtifactUrl } from '../api/protectedImages';
 import {
   ActionReceipts,
   AuthenticatedAudio,
   AuthenticatedImage,
   AuthenticatedVideo,
+  ChatSources,
   Citations,
   Generation,
   MemoryBadge,
@@ -18,7 +20,7 @@ import {
   ToolTrace,
 } from '../components';
 import { ContextUsage } from '../components/ContextUsage';
-import { useChat, useChatSearch, useChats } from '../hooks';
+import { useChat, useChatSearch, useChatSources, useChats } from '../hooks';
 import { type ChatSearchResult, REASONING_EFFORT_OPTIONS, type ReasoningEffort } from '../types';
 import {
   type Attachment,
@@ -131,6 +133,14 @@ export default function ChatsPage() {
     clear: clearSearch,
   } = useChatSearch();
 
+  const { sources: workspaceSources } = useSources({ activeOnly: true });
+  const {
+    sources: attachedSources,
+    loading: attachedLoading,
+    error: attachedError,
+    setAttached: setAttachedSources,
+  } = useChatSources(selectedChatId);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -182,6 +192,7 @@ export default function ChatsPage() {
     stickToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 80;
   };
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a newly selected chat starts stuck to its bottom
   useEffect(() => {
     stickToBottom.current = true;
   }, [selectedChatId]);
@@ -451,6 +462,9 @@ export default function ChatsPage() {
     setOperationError(null);
     try {
       await unarchiveChatFn(chatId);
+      if (selectedChatId === chatId) {
+        clearSelectedChat();
+      }
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to unarchive chat');
     }
@@ -1081,6 +1095,13 @@ export default function ChatsPage() {
                 </p>
               ) : null}
 
+              <ChatSources
+                attached={attachedSources}
+                available={workspaceSources}
+                loading={attachedLoading}
+                error={attachedError}
+                onChange={setAttachedSources}
+              />
               <ContextUsage usage={context ?? null} error={contextError} previewing={previewing} />
               <div className="message-form-row">
                 <input

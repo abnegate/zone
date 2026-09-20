@@ -78,14 +78,20 @@ export function useChats(options: UseChatsOptions = {}) {
     setChats((prev) => prev.filter((c) => c.id !== id));
   };
 
+  const place = (updated: Chat): void => {
+    setChats((prev) =>
+      updated.archived === archived
+        ? prev.map((c) => (c.id === updated.id ? updated : c))
+        : prev.filter((c) => c.id !== updated.id)
+    );
+  };
+
   const archiveChat = async (id: string): Promise<void> => {
-    const archivedChat = await chatsApi.archiveChat(id);
-    setChats((prev) => prev.map((c) => (c.id === id ? archivedChat : c)));
+    place(await chatsApi.archiveChat(id));
   };
 
   const unarchiveChat = async (id: string): Promise<void> => {
-    const unarchivedChat = await chatsApi.unarchiveChat(id);
-    setChats((prev) => prev.map((c) => (c.id === id ? unarchivedChat : c)));
+    place(await chatsApi.unarchiveChat(id));
   };
 
   const refresh = async (): Promise<void> => {

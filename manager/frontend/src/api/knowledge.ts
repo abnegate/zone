@@ -73,10 +73,11 @@ class KnowledgeApi {
   }
 
   async createKnowledge(request: CreateKnowledgeRequest): Promise<KnowledgeEntry> {
+    const { type: _type, ...body } = request;
     const response = await fetch(`${API_BASE}/api/knowledge`, {
       method: 'POST',
       headers: this.getHeaders(),
-      body: JSON.stringify(request),
+      body: JSON.stringify(body),
     });
     if (!response.ok) {
       const errorData = await this.parseErrorResponse(response);

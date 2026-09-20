@@ -458,9 +458,10 @@ describe('WikiPage', () => {
           workspace_id: 'test-ws',
           title: 'New URL',
           type: 'url',
-          content: 'https://newurl.com',
+          source_url: 'https://newurl.com',
           tags: undefined,
         });
+        expect(mockCreateEntry.mock.calls[0][0]).not.toHaveProperty('content');
       });
     });
 
