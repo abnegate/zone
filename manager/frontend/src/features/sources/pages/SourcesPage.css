@@ -215,7 +215,7 @@
   display: flex;
   align-items: center;
   gap: var(--ui-space-2-5);
-  min-height: var(--ui-list-row-2);
+  height: var(--ui-list-row-2);
   padding: var(--ui-space-2) var(--ui-space-3);
   background: var(--ui-bg-surface);
   border: 1px solid var(--ui-border);
@@ -342,6 +342,13 @@
   min-width: 0;
 }
 
+.source-type-name,
+.source-type-desc {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .source-type-name {
   font-size: var(--ui-text-sm);
   font-weight: 600;
@@ -350,10 +357,6 @@
 }
 
 .source-type-desc {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
   font-size: var(--ui-text-xs);
   line-height: var(--ui-space-4);
   color: var(--ui-text-muted);

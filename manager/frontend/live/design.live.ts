@@ -177,6 +177,31 @@ test('chat titles keep the row width and the conversation header stays one row',
   }
 });
 
+test('the add source tiles are one 56px row each', async ({ page }) => {
+  await signIn(page);
+  await page.goto('/sources');
+  await page.getByRole('button', { name: /Add Source/ }).first().click();
+
+  const tiles = page.locator('.source-type-option');
+  await expect(tiles.first()).toBeVisible();
+  await page.waitForFunction(() =>
+    document.getAnimations().every((animation) => animation.playState !== 'running')
+  );
+  const heights = await tiles.evaluateAll((elements) =>
+    elements.map((element) => Math.round(element.getBoundingClientRect().height))
+  );
+  expect(heights.every((height) => height === 56), heights.join(',')).toBe(true);
+
+  const wrapped = await tiles.evaluateAll((elements) =>
+    elements.filter((element) =>
+      [...element.querySelectorAll('.source-type-name, .source-type-desc')].some(
+        (line) => line.getBoundingClientRect().height > 24
+      )
+    ).length
+  );
+  expect(wrapped, 'a tile line wrapped').toBe(0);
+});
+
 test('sibling cards in a grid share one height', async ({ page }) => {
   await signIn(page);
 

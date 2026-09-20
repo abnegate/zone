@@ -26,6 +26,11 @@ const offeredKinds = () =>
     (node) => node.textContent
   );
 
+const offeredDescriptions = () =>
+  Array.from(document.querySelectorAll('.source-type-option .source-type-desc')).map(
+    (node) => node.textContent
+  );
+
 function renderWizard() {
   return render(
     <CreateSourceWizard
@@ -51,6 +56,24 @@ describe('CreateSourceWizard kinds', () => {
       expect(offeredKinds()).toEqual(['GitHub', 'Text']);
     });
     expect(mockGetSourceTypes).toHaveBeenCalledTimes(1);
+  });
+
+  it('describes each kind in a phrase short enough for one line of a tile', async () => {
+    mockGetSourceTypes.mockResolvedValue(
+      ['github', 'gitlab', 'filesystem', 'web', 'text'].map(kind)
+    );
+
+    renderWizard();
+
+    await waitFor(() => {
+      expect(offeredDescriptions()).toEqual([
+        'GitHub repository',
+        'GitLab project',
+        'Local directory',
+        'Web page',
+        'Raw text',
+      ]);
+    });
   });
 
   it('never offers a kind without an adapter, even when the server cannot be asked', async () => {

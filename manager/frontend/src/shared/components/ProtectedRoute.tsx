@@ -9,10 +9,10 @@ export type OrganizationRoleRequirement = Exclude<OrgRole, 'member'>;
 const ORGANIZATION_RANK: Record<OrgRole, number> = { member: 0, admin: 1, owner: 2 };
 
 export function meetsOrganizationRole(
-  role: OrgRole | undefined,
+  role: OrgRole,
   required: OrganizationRoleRequirement
 ): boolean {
-  return role !== undefined && ORGANIZATION_RANK[role] >= ORGANIZATION_RANK[required];
+  return ORGANIZATION_RANK[role] >= ORGANIZATION_RANK[required];
 }
 
 function Loading() {
@@ -31,15 +31,17 @@ interface OrganizationRoleGateProps {
 }
 
 // Permissions are global to the account; the role is held per organization,
-// so a member of one tenant does not reach another tenant's settings.
+// so a member of one tenant does not reach another tenant's settings. Only an
+// explicit insufficient role denies: the server enforces the rest.
 function OrganizationRoleGate({ children, required, useWorkspaceHook }: OrganizationRoleGateProps) {
-  const { loading, currentOrganization } = (useWorkspaceHook ?? useWorkspace)();
+  const { loading, resolvingRole, currentOrganization } = (useWorkspaceHook ?? useWorkspace)();
 
-  if (loading) {
+  if (loading || resolvingRole) {
     return <Loading />;
   }
 
-  if (currentOrganization && !meetsOrganizationRole(currentOrganization.role, required)) {
+  const role = currentOrganization?.role;
+  if (role !== undefined && !meetsOrganizationRole(role, required)) {
     return <Navigate to="/unauthorized" replace />;
   }
 

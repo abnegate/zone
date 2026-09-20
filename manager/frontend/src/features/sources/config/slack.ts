@@ -6,7 +6,7 @@ export const slackSource: SourceDefinition = {
   id: 'slack',
   name: 'Slack',
   category: 'chat',
-  description: 'Connect to a Slack workspace',
+  description: 'Slack workspace',
   icon: SlackIcon,
   badgeColor: 'badge-pink',
   iconWrapperClass: 'slack',

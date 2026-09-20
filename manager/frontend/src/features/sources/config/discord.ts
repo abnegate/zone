@@ -6,7 +6,7 @@ export const discordSource: SourceDefinition = {
   id: 'discord',
   name: 'Discord',
   category: 'chat',
-  description: 'Connect to a Discord server',
+  description: 'Discord server',
   icon: DiscordIcon,
   badgeColor: 'badge-indigo',
   iconWrapperClass: 'discord',

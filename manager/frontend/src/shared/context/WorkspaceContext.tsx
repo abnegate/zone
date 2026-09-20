@@ -1,7 +1,7 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from 'react';
 import { client } from '../../api/client';
 import { useAuth } from '../../features/auth';
-import type { Organization, Workspace } from '../../types';
+import type { Organization, OrgRole, Workspace } from '../../types';
 
 interface WorkspaceContextType {
   organizations: Organization[];
@@ -9,6 +9,7 @@ interface WorkspaceContextType {
   currentWorkspace: Workspace | null;
   workspaces: Workspace[];
   loading: boolean;
+  resolvingRole: boolean;
   error: string | null;
   setCurrentOrganization: (org: Organization) => void;
   setCurrentWorkspace: (ws: Workspace) => void;
@@ -28,13 +29,29 @@ export function WorkspaceProvider({
   children: ReactNode;
   useAuthHook?: typeof useAuth;
 }) {
-  const { isAuthenticated, isLoading: authLoading } = (useAuthHook ?? useAuth)();
+  const { isAuthenticated, isLoading: authLoading, user } = (useAuthHook ?? useAuth)();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [currentOrganization, setCurrentOrgState] = useState<Organization | null>(null);
   const [currentWorkspace, setCurrentWsState] = useState<Workspace | null>(null);
   const [loading, setLoading] = useState(true);
+  const [unresolvedRoleOrganizationId, setUnresolvedRoleOrganizationId] = useState<string | null>(
+    null
+  );
   const [error, setError] = useState<string | null>(null);
+  const organizationId = currentOrganization?.id;
+  const userId = user?.id;
+  const resolvingRole =
+    currentOrganization !== null &&
+    currentOrganization.role === undefined &&
+    userId !== undefined &&
+    unresolvedRoleOrganizationId !== currentOrganization.id;
+
+  const applyRole = useCallback((id: string, role: OrgRole) => {
+    const withRole = (org: Organization) => (org.id === id ? { ...org, role } : org);
+    setOrganizations((orgs) => orgs.map(withRole));
+    setCurrentOrgState((org) => (org ? withRole(org) : org));
+  }, []);
 
   const refreshOrganizations = useCallback(async () => {
     try {
@@ -55,7 +72,7 @@ export function WorkspaceProvider({
   }, []);
 
   const refreshWorkspaces = useCallback(async () => {
-    if (!currentOrganization) {
+    if (!organizationId) {
       setWorkspaces([]);
       setCurrentWsState(null);
       return;
@@ -63,7 +80,7 @@ export function WorkspaceProvider({
 
     try {
       setError(null);
-      const wsList = await client.getWorkspaces(currentOrganization.id, true);
+      const wsList = await client.getWorkspaces(organizationId, true);
       setWorkspaces(wsList);
 
       // Restore from localStorage or pick first
@@ -79,7 +96,7 @@ export function WorkspaceProvider({
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load workspaces');
     }
-  }, [currentOrganization]);
+  }, [organizationId]);
 
   const setCurrentOrganization = useCallback((org: Organization) => {
     setCurrentOrgState(org);
@@ -115,10 +132,36 @@ export function WorkspaceProvider({
 
   // Load workspaces when organization changes
   useEffect(() => {
-    if (currentOrganization) {
+    if (organizationId) {
       refreshWorkspaces();
     }
-  }, [currentOrganization, refreshWorkspaces]);
+  }, [organizationId, refreshWorkspaces]);
+
+  // A server that lists organizations without the caller's role still
+  // answers it from the membership list, so the role gate need not deny.
+  useEffect(() => {
+    if (!resolvingRole || !organizationId || !userId) {
+      return;
+    }
+    let cancelled = false;
+    client
+      .getOrgMembers(organizationId)
+      .then(({ members }) => members.find((member) => member.user_id === userId)?.role)
+      .catch(() => undefined)
+      .then((role) => {
+        if (cancelled) {
+          return;
+        }
+        if (role) {
+          applyRole(organizationId, role);
+        } else {
+          setUnresolvedRoleOrganizationId(organizationId);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvingRole, organizationId, userId, applyRole]);
 
   return (
     <WorkspaceContext.Provider
@@ -128,6 +171,7 @@ export function WorkspaceProvider({
         currentWorkspace,
         workspaces,
         loading,
+        resolvingRole,
         error,
         setCurrentOrganization,
         setCurrentWorkspace,

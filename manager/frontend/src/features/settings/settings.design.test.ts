@@ -101,10 +101,18 @@ describe('sources surfaces', () => {
     expect(rule(css, '.source-url')).toContain('font-family: var(--ui-font-mono)');
   });
 
-  it('lays wizard type tiles out three across at the two-line row height', () => {
+  it('lays wizard type tiles out three across at exactly the two-line row height', () => {
     expect(rule(css, '.source-type-grid')).toContain('repeat(3, minmax(0, 1fr))');
     expect(rule(css, '.source-type-grid')).toContain('gap: var(--ui-space-2)');
-    expect(rule(css, '.source-type-option')).toContain('min-height: var(--ui-list-row-2)');
+    expect(rule(css, '.source-type-option')).toContain('height: var(--ui-list-row-2)');
+    expect(rule(css, '.source-type-option')).not.toContain('min-height');
+  });
+
+  it('keeps a tile name and description each to one line', () => {
+    const lines = rule(css, '.source-type-name,\n.source-type-desc');
+    expect(lines).toContain('white-space: nowrap');
+    expect(lines).toContain('text-overflow: ellipsis');
+    expect(css).not.toContain('line-clamp');
   });
 });
 
