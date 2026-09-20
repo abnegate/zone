@@ -69,7 +69,7 @@ test.describe('wiki and search', () => {
     await shot(page, '54-text-entry-card');
 
     const urlTitle = `Example page ${s}`;
-    await open(/URL \/ Web Page/, 'https://example.com/', urlTitle, ['web']);
+    await open(/URL \/ Web Page/, `https://example.com/?pass=${s}`, urlTitle, ['web']);
     const urlCard = page.locator('.knowledge-card', { hasText: urlTitle });
     await expect(urlCard).toBeVisible({ timeout: 30_000 });
     const urlRow = () =>
