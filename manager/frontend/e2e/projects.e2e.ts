@@ -229,7 +229,7 @@ test.describe('Projects Page', () => {
     });
 
     test('shows new project button', async ({ page }) => {
-      await expect(page.getByRole('button', { name: '+ New Project' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'New project' })).toBeVisible();
     });
   });
 
@@ -403,7 +403,7 @@ test.describe('Projects Page', () => {
 
   test.describe('Create Project', () => {
     test('opens create modal from header button', async ({ page }) => {
-      await page.getByRole('button', { name: '+ New Project' }).click();
+      await page.getByRole('button', { name: 'New project' }).click();
       await expect(page.getByRole('dialog', { name: 'New Project' })).toBeVisible();
     });
 
@@ -413,7 +413,7 @@ test.describe('Projects Page', () => {
     });
 
     test('shows all form fields', async ({ page }) => {
-      await page.getByRole('button', { name: '+ New Project' }).click();
+      await page.getByRole('button', { name: 'New project' }).click();
 
       const dialog = page.getByRole('dialog', { name: 'New Project' });
       await expect(dialog.locator('#project-name')).toBeVisible();
@@ -450,7 +450,7 @@ test.describe('Projects Page', () => {
         route.continue();
       });
 
-      await page.getByRole('button', { name: '+ New Project' }).click();
+      await page.getByRole('button', { name: 'New project' }).click();
       const dialog = page.getByRole('dialog', { name: 'New Project' });
       await dialog.locator('#project-name').fill('My New Project');
       await dialog.getByRole('button', { name: 'Next' }).click();
@@ -490,7 +490,7 @@ test.describe('Projects Page', () => {
         route.continue();
       });
 
-      await page.getByRole('button', { name: '+ New Project' }).click();
+      await page.getByRole('button', { name: 'New project' }).click();
       const dialog = page.getByRole('dialog', { name: 'New Project' });
       await dialog.locator('#project-name').fill('Full Project');
       await dialog.locator('#project-description').fill('Full description');
@@ -505,7 +505,7 @@ test.describe('Projects Page', () => {
     });
 
     test('disables create button when name is empty', async ({ page }) => {
-      await page.getByRole('button', { name: '+ New Project' }).click();
+      await page.getByRole('button', { name: 'New project' }).click();
       await expect(
         page.getByRole('dialog', { name: 'New Project' }).getByRole('button', {
           name: 'Next',
@@ -514,14 +514,14 @@ test.describe('Projects Page', () => {
     });
 
     test('enables create button when name is entered', async ({ page }) => {
-      await page.getByRole('button', { name: '+ New Project' }).click();
+      await page.getByRole('button', { name: 'New project' }).click();
       const dialog = page.getByRole('dialog', { name: 'New Project' });
       await dialog.locator('#project-name').fill( 'Test');
       await expect(dialog.getByRole('button', { name: 'Next' })).not.toBeDisabled();
     });
 
     test('closes modal on cancel', async ({ page }) => {
-      await page.getByRole('button', { name: '+ New Project' }).click();
+      await page.getByRole('button', { name: 'New project' }).click();
       await page
         .getByRole('dialog', { name: 'New Project' })
         .getByRole('button', { name: 'Cancel' })
@@ -814,6 +814,7 @@ test.describe('Projects Page', () => {
         });
       });
 
+      await page.getByRole('button', { name: 'New project' }).click();
       await page.getByTestId('auto-project-button').click();
       await expect(page.getByTestId('auto-project-modal')).toBeVisible();
       await expect(page.getByRole('button', { name: 'Start the interview' })).toBeDisabled();

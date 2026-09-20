@@ -10,6 +10,7 @@ import {
   type TrainResult,
   type TrainScreening,
 } from '../../../api/models';
+import DropZone from './DropZone';
 import './TrainPanel.css';
 
 type TrainBase = { id: string; label: string; edit: boolean };
@@ -482,12 +483,12 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     if (!edit) setFocusRequested(true);
   };
 
-  const handleVideos = async (files: FileList | null) => {
-    if (busy || !files?.length) return;
+  const handleVideos = async (files: File[]) => {
+    if (busy || files.length === 0) return;
     setError(null);
     setSampled(null);
     try {
-      for (const file of Array.from(files)) {
+      for (const file of files) {
         setSampling(file.name);
         const clip = await modelsApi.frames({
           filename: file.name,
@@ -636,16 +637,28 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           <Advice findings={result.dataset ?? []} />
         </div>
       )}
-      <form className="ui-form" aria-busy={busy} onSubmit={handleSubmit}>
-        <Input
-          label="Name"
-          value={name}
-          disabled={busy}
-          onChange={(event) => {
-            if (!busy) setName(event.target.value);
-          }}
-          required
-        />
+      <form className="ui-form train-form" aria-busy={busy} onSubmit={handleSubmit}>
+        <div className="train-identity">
+          <Input
+            label="Name"
+            value={name}
+            disabled={busy}
+            onChange={(event) => {
+              if (!busy) setName(event.target.value);
+            }}
+            required
+          />
+          <Input
+            label="Trigger word"
+            value={trigger}
+            disabled={busy}
+            onChange={(event) => {
+              if (!busy) setTrigger(event.target.value);
+            }}
+            placeholder={edit ? 'optional subject name' : 'required for a unique identity'}
+            required={!edit}
+          />
+        </div>
         <Select
           label="Base"
           value={base}
@@ -654,49 +667,34 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           placeholder="No trainable base installed"
           disabled={busy || bases.length === 0}
         />
-        <Input
-          label="Trigger word"
-          value={trigger}
-          disabled={busy}
-          onChange={(event) => {
-            if (!busy) setTrigger(event.target.value);
-          }}
-          placeholder={edit ? 'optional subject name' : 'required for a unique identity'}
-          required={!edit}
-        />
-        <Input
-          id="train-targets"
-          label="Target images"
-          helpText={
-            edit
-              ? 'Choose the finished images. You will add one reference and instruction for each target.'
-              : 'Choose the images this LoRA should learn from.'
-          }
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          disabled={busy}
-          multiple
-          onChange={(event) => {
-            const files = Array.from(event.target.files ?? []);
-            event.target.value = '';
-            void handleTargets(files);
-          }}
-        />
+        <div className={`train-drops${edit ? ' train-drops--single' : ''}`}>
+          <DropZone
+            id="train-targets"
+            label="Target images"
+            prompt="Drop images here, or browse"
+            hint={
+              edit
+                ? 'Choose the finished images. You will add one reference and instruction for each target.'
+                : 'Choose the images this LoRA should learn from.'
+            }
+            accept="image/png,image/jpeg,image/webp"
+            disabled={busy}
+            onFiles={(files) => void handleTargets(files)}
+          />
+          {!edit && (
+            <DropZone
+              id="train-clips"
+              label="Video"
+              prompt="Drop a clip here, or browse"
+              hint="A clip is sampled above the rate it keeps, so the sharpest frame of each moment wins its slot, repeats of a shot already taken are dropped, and every frame is cropped around whatever moved."
+              accept="video/*"
+              disabled={busy || Boolean(sampling)}
+              onFiles={(files) => void handleVideos(files)}
+            />
+          )}
+        </div>
         {!edit && (
           <>
-            <Input
-              label="Video"
-              type="file"
-              accept="video/*"
-              multiple
-              disabled={busy || Boolean(sampling)}
-              onChange={(event) => void handleVideos(event.target.files)}
-            />
-            <p className="help-text">
-              A clip is sampled above the rate it keeps, so the sharpest frame of each moment wins
-              its slot, repeats of a shot already taken are dropped, and every frame is cropped
-              around whatever moved.
-            </p>
             <Checkbox
               label="Mirror half the frames of each second"
               helpText="More variety from one angle, applied as each clip is read. Turn it off for a subject carrying text, or one a mirror would get wrong."
@@ -709,7 +707,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           </>
         )}
         {images.length > 0 && !edit && (
-          <div>
+          <div className="train-caption">
             <Button
               type="button"
               variant="secondary"
@@ -719,7 +717,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             >
               Auto-caption images
             </Button>
-            <p className="help-text">
+            <p className="train-caption-hint">
               Describes pose, setting, and lighting only, so the trigger word carries the identity.
               Captions you have written are kept, and frames of one shot are described once.
             </p>
@@ -853,14 +851,16 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             })}
           </div>
         )}
-        <Button
-          type="submit"
-          loading={busy}
-          disabled={busy || !ready || Boolean(sampling)}
-          aria-describedby={edit ? 'train-pairs-status' : undefined}
-        >
-          Train
-        </Button>
+        <div className="train-footer">
+          <Button
+            type="submit"
+            loading={busy}
+            disabled={busy || !ready || Boolean(sampling)}
+            aria-describedby={edit ? 'train-pairs-status' : undefined}
+          >
+            Train
+          </Button>
+        </div>
       </form>
     </section>
   );

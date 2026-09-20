@@ -7,7 +7,7 @@
 .context-switcher-empty {
   display: flex;
   align-items: center;
-  height: var(--ui-list-row);
+  height: var(--ui-control-height);
   padding: 0 var(--ui-space-2);
   color: var(--ui-text-muted);
   font-size: var(--ui-text-xs);
@@ -19,7 +19,7 @@
   justify-content: space-between;
   width: 100%;
   gap: var(--ui-space-2);
-  height: var(--ui-list-row);
+  height: var(--ui-control-height);
   padding: 0 var(--ui-space-2);
   background: var(--ui-bg-surface);
   border: 1px solid var(--ui-border);
@@ -46,14 +46,13 @@
 .context-label {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-0-5);
   min-width: 0;
 }
 
 .org-name {
   font-size: var(--ui-text-2xs);
   font-weight: 600;
-  line-height: 1;
+  line-height: 0.75rem;
   letter-spacing: var(--ui-tracking-wider);
   text-transform: uppercase;
   color: var(--ui-text-muted);
@@ -65,7 +64,7 @@
 .ws-name {
   font-size: var(--ui-text-sm);
   font-weight: 600;
-  line-height: var(--ui-leading-normal);
+  line-height: 1rem;
   color: var(--ui-text-primary);
   white-space: nowrap;
   overflow: hidden;

@@ -228,7 +228,7 @@ test.describe('Tasks Page', () => {
     await projectsLoaded;
     await expect(page).toHaveURL('/tasks');
     await expect(page.locator('.tasks-page')).toBeVisible({ timeout: 10000 });
-    await expect(page.getByRole('button', { name: /New Task/ })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /New task/ })).toBeEnabled();
   });
 
   test.describe('Page Header', () => {
@@ -238,9 +238,9 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows new task button', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeVisible({ timeout: 10000 });
-      await expect(newTaskButton).toContainText('New Task');
+      await expect(newTaskButton).toContainText('New task');
     });
   });
 
@@ -386,14 +386,14 @@ test.describe('Tasks Page', () => {
 
   test.describe('Create Task Modal', () => {
     test('opens create modal from header button', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
       await expect(page.getByRole('dialog', { name: 'New Task' })).toBeVisible();
     });
 
     test('shows project selection options', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
 
@@ -402,7 +402,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows all form fields', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
 
@@ -419,7 +419,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows source dropdown when agentic mode enabled', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
 
@@ -459,7 +459,7 @@ test.describe('Tasks Page', () => {
         }
       });
 
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
       await page.locator('.project-selection-option').first().click();
@@ -495,7 +495,7 @@ test.describe('Tasks Page', () => {
       });
 
       // Wait for button to be enabled (projects loaded)
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
       await page.locator('.project-selection-option').first().click();
@@ -525,7 +525,7 @@ test.describe('Tasks Page', () => {
       });
 
       // Wait for button to be enabled (projects loaded)
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
       await page.locator('.project-selection-option').first().click();
@@ -540,7 +540,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('closes modal on cancel', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
       await page.getByRole('button', { name: 'Cancel' }).click();
@@ -808,7 +808,7 @@ test.describe('Tasks Page', () => {
       await page.goto('/tasks');
       await expect(page).toHaveURL('/tasks');
 
-      await expect(page.getByRole('button', { name: /New Task/ })).toBeDisabled();
+      await expect(page.getByRole('button', { name: /New task/ })).toBeDisabled();
     });
   });
 });

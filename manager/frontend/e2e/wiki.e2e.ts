@@ -149,7 +149,7 @@ test.describe('Wiki Page', () => {
     });
 
     test('shows add knowledge button', async ({ page }) => {
-      await expect(page.getByRole('button', { name: /Add Knowledge/ })).toBeVisible();
+      await expect(page.getByRole('button', { name: /Add knowledge/ })).toBeVisible();
     });
   });
 

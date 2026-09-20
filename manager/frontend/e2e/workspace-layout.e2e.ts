@@ -148,12 +148,12 @@ for (const viewport of [
       // and its own retries, and a failure names the wizard. Four of them in
       // one test ran out of the 60-second budget on a slow WebKit runner.
       for (const wizard of [
-        { path: 'projects', button: '+ New Project', title: 'New Project' },
-        { path: 'tasks', button: '+ New Task', title: 'New Task' },
-        { path: 'sources', button: '+ Add Source', title: 'Add Source' },
+        { path: 'projects', button: 'New project', title: 'New Project' },
+        { path: 'tasks', button: 'New task', title: 'New Task' },
+        { path: 'sources', button: 'Add source', title: 'Add Source' },
         {
           path: 'wiki',
-          button: '+ Add Knowledge',
+          button: 'Add knowledge',
           title: 'Add Knowledge Entry',
         },
       ]) {

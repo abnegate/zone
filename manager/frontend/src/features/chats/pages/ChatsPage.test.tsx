@@ -500,6 +500,14 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('keeps the new chat control an icon-only button drawn with the shared plus icon', async () => {
+      renderChatsPage();
+      await waitFor(() => {
+        expect(newChatButtons()[0]).toHaveClass('btn-icon');
+      });
+      expect(newChatButtons()[0].querySelector('svg.plus-icon')).not.toBeNull();
+    });
+
     it('renders filter buttons', async () => {
       renderChatsPage();
       await waitFor(() => {

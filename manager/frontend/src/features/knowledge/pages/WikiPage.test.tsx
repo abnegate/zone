@@ -383,6 +383,12 @@ describe('WikiPage', () => {
   });
 
   describe('Create Knowledge Wizard', () => {
+    it('labels the primary Add knowledge in sentence case with the plus icon', () => {
+      renderWikiPage();
+      const button = screen.getByRole('button', { name: 'Add knowledge' });
+      expect(button.querySelector('svg.plus-icon')).not.toBeNull();
+    });
+
     it('opens create wizard when Add Knowledge button is clicked', () => {
       renderWikiPage();
       const addButton = getAddKnowledgeButton();

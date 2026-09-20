@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
 import PageBar from '../../../shared/components/PageBar/PageBar';
+import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard } from '../components';
 import { useTasks } from '../hooks';
@@ -142,7 +143,8 @@ export default function TasksPage() {
           onClick={() => setShowCreateModal(true)}
           disabled={loading || projects.length === 0}
         >
-          + New Task
+          <PlusIcon />
+          New task
         </Button>
       </PageBar>
 

@@ -1,6 +1,7 @@
 import { Badge, Button, EmptyState } from '@zone/ui';
 import { useState } from 'react';
 import PageBar from '../../../shared/components/PageBar/PageBar';
+import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { CreateSourceWizard } from '../components/CreateSourceWizard';
 import { getSourceById, getSourceLabel } from '../config';
 import { useSources } from '../hooks';
@@ -113,7 +114,10 @@ export default function SourcesPage() {
         title="Sources"
         subtitle="Connect repositories, calendars, email, and other data sources"
       >
-        <Button onClick={() => setShowCreateModal(true)}>+ Add Source</Button>
+        <Button onClick={() => setShowCreateModal(true)}>
+          <PlusIcon />
+          Add source
+        </Button>
       </PageBar>
 
       <div className="page-body sources-body">
@@ -136,7 +140,7 @@ export default function SourcesPage() {
             }
             title="No sources configured"
             description="Add code repositories, calendars, email inboxes, web URLs, or text content"
-            action={<Button onClick={() => setShowCreateModal(true)}>Add Source</Button>}
+            action={<Button onClick={() => setShowCreateModal(true)}>Add source</Button>}
           />
         ) : (
           <div className="sources-list">
