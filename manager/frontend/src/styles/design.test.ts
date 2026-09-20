@@ -82,6 +82,23 @@ describe('shared surfaces', () => {
     expect(rule(layout, '.page-bar')).toContain('height: var(--ui-header-height)');
   });
 
+  it('never lets the document itself scroll behind a workspace page', () => {
+    const layout = read(join(styles, '..', 'shared', 'components', 'Layout', 'Layout.css'));
+    expect(rule(layout, 'html:has(.page--workspace),\nbody:has(.page--workspace)')).toContain(
+      'overflow: hidden'
+    );
+  });
+
+  it('hides screen-reader text without laying it out against the page', () => {
+    const utilities = read(join(styles, 'utilities.css'));
+    const hidden = rule(utilities, '.sr-only');
+    expect(hidden).toContain('position: absolute');
+    expect(hidden).toContain('clip-path: inset(50%)');
+    expect(hidden).toContain('width: 1px');
+    expect(hidden).toContain('height: 1px');
+    expect(hidden).toContain('overflow: hidden');
+  });
+
   it('tints badges instead of filling them', () => {
     const globals = read(join(kit, 'globals.css'));
     expect(rule(globals, '  .ui-badge')).toContain('height: var(--ui-badge-height)');

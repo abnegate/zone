@@ -1,4 +1,4 @@
-import { expect, signIn, test } from './harness';
+import { api, expect, signIn, state, test, tokenFor } from './harness';
 
 /**
  * The layout contract every page is held to, measured live at the smallest
@@ -58,22 +58,56 @@ async function clippedWithoutScroll(page: import('@playwright/test').Page): Prom
 
 test.use({ viewport: VIEWPORT });
 
+/** The frame never scrolls: the document is exactly the viewport on every route. */
+async function documentOverflow(page: import('@playwright/test').Page): Promise<number> {
+  return page.evaluate(() => {
+    const root = document.scrollingElement ?? document.documentElement;
+    return root.scrollHeight - root.clientHeight;
+  });
+}
+
 test('nothing is clipped without a scrollbar on any workspace page', async ({
   page,
   consoleErrors,
 }) => {
   await signIn(page);
   const clipped: Record<string, Clipped[]> = {};
+  const overflowing: Record<string, number> = {};
 
   for (const route of ROUTES) {
     await page.goto(route);
     await page.waitForLoadState('networkidle').catch(() => undefined);
     const offenders = await clippedWithoutScroll(page);
     if (offenders.length > 0) clipped[route] = offenders;
+    const overflow = await documentOverflow(page);
+    if (overflow !== 0) overflowing[route] = overflow;
   }
 
   expect(clipped).toEqual({});
+  expect(overflowing).toEqual({});
   expect(consoleErrors.filter((error) => !/\b400\b.*search/.test(error))).toEqual([]);
+});
+
+test('no conversation stretches the document past the viewport', async ({ page }) => {
+  await signIn(page);
+  const token = await tokenFor(state.owner);
+  const listed = await api('GET', `/api/chats?workspace_id=${state.owner.workspace.id}`, {
+    token,
+  });
+  const body = listed.body as { chats?: { id: string }[] } | { id: string }[];
+  const chats = Array.isArray(body) ? body : (body.chats ?? []);
+  expect(chats.length).toBeGreaterThan(0);
+
+  const overflowing: Record<string, number> = {};
+  for (const chat of chats) {
+    await page.goto(`/chats?id=${chat.id}`);
+    await page.locator('.messages-container').waitFor({ timeout: 15_000 }).catch(() => undefined);
+    await page.waitForLoadState('networkidle').catch(() => undefined);
+    const overflow = await documentOverflow(page);
+    if (overflow !== 0) overflowing[chat.id] = overflow;
+  }
+
+  expect(overflowing).toEqual({});
 });
 
 test('the models tabs stay scrollable and the page bar stays one row', async ({ page }) => {
@@ -116,7 +150,7 @@ test('chat titles keep the row width and the conversation header stays one row',
     };
   });
   expect(widths.title).toBeGreaterThanOrEqual(widths.item * 0.6);
-  expect(widths.height).toBeLessThanOrEqual(56);
+  expect(widths.height).toBe(52);
 
   await item.click();
   const header = page.locator('.chat-header');
