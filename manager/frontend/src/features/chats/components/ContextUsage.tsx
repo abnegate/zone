@@ -80,9 +80,19 @@ export function ContextUsage({ usage, error, previewing = false }: Props) {
           {percentage === null ? brief : `${usage?.estimated ? '≈ ' : ''}${percentage}%`}
         </span>
         {status && <span className="context-usage-state">{status}</span>}
-        <span className="context-usage-caret" aria-hidden="true">
-          {expanded ? '−' : '+'}
-        </span>
+        <svg
+          className="context-usage-caret"
+          data-expanded={expanded}
+          viewBox="0 0 12 12"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M3 4.5 6 7.5l3-3" />
+        </svg>
       </button>
       {expanded && (
         <section

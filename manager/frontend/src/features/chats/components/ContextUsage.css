@@ -60,8 +60,14 @@
 }
 
 .context-usage-caret {
+  flex-shrink: 0;
   width: var(--ui-space-3);
-  text-align: center;
+  height: var(--ui-space-3);
+  transition: transform var(--ui-transition-fast);
+}
+
+.context-usage-caret[data-expanded='true'] {
+  transform: rotate(180deg);
 }
 
 .context-usage-details {

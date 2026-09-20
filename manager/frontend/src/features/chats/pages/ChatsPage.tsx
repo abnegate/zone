@@ -57,6 +57,8 @@ import {
 } from '../utils';
 import './ChatsPage.css';
 
+const UNTITLED_CHAT_TITLE = 'Untitled chat';
+
 export default function ChatsPage() {
   const { isAuthenticated } = useAuth();
   const { currentWorkspace } = useWorkspace();
@@ -503,6 +505,11 @@ export default function ChatsPage() {
     await search(searchQuery, { limit: 20 });
   };
 
+  const searchResultTitle = (result: ChatSearchResult): string =>
+    result.chat_title ||
+    chats.find((chat) => chat.id === result.chat_id)?.title ||
+    UNTITLED_CHAT_TITLE;
+
   const handleSearchResultClick = async (result: ChatSearchResult) => {
     selectChat(result.chat_id, result.message_id);
     setShowSearchResults(false);
@@ -628,13 +635,13 @@ export default function ChatsPage() {
                   data-testid="search-result-item"
                 >
                   <div className="search-result-header">
-                    <span className="search-result-chat">{result.chat_title || 'Chat'}</span>
+                    <span className="search-result-chat">{searchResultTitle(result)}</span>
+                    <span className="search-result-date">{formatDate(result.created_at)}</span>
                     <span className="search-result-score">
                       {Math.round(result.relevance_score * 100)}%
                     </span>
                   </div>
                   <div className="search-result-snippet">{result.snippet}</div>
-                  <span className="search-result-date">{formatDate(result.created_at)}</span>
                 </div>
               ))}
             </div>
@@ -1274,7 +1281,7 @@ export default function ChatsPage() {
                 setNewChatReasoning('auto');
               }
             }}
-            helpText="Automatic picks chat, image, video, or audio from the message when those modules are installed. You can still pin a model."
+            helpText="Automatic picks a chat, image, video or audio model from the message."
             options={[
               { value: AUTO_MODEL, label: 'Automatic' },
               ...models
@@ -1285,7 +1292,7 @@ export default function ChatsPage() {
           {showNewChatAgent && (
             <Checkbox
               label="Agent mode"
-              helpText="Let replies search workspace content, check connected GitHub data and manage workspace work, run shell commands and read and write server files when requested. Requires a model that supports tool calling."
+              helpText="Search workspace content, use connected GitHub data and run tools when asked. Needs a tool-calling model."
               checked={newChatAgent}
               onCheckedChange={(checked) => {
                 setNewChatAgent(checked);

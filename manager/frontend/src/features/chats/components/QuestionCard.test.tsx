@@ -127,6 +127,22 @@ describe('QuestionCard', () => {
     expect(screen.getByTestId('question-free-text')).toBeEnabled();
   });
 
+  it('gives every choice the same row and puts the free-text box on a row of its own', () => {
+    render(<QuestionCard questions={[question()]} answered={false} onSubmit={() => {}} />);
+
+    const rows = document.querySelectorAll('.question-card-choice');
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      const line = row.querySelector('.question-card-choice-row');
+      expect(line).not.toBeNull();
+      expect(line?.querySelector('.question-card-control')).not.toBeNull();
+      expect(line?.querySelector('.question-card-choice-description')).not.toBeNull();
+    }
+    const text = screen.getByTestId('question-free-text');
+    expect(text.closest('.question-card-choice-row')).toBeNull();
+    expect(text.parentElement).toHaveClass('question-card-choice');
+  });
+
   it('will not send while a required question is unanswered', () => {
     render(<QuestionCard questions={[question()]} answered={false} onSubmit={() => {}} />);
 

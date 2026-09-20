@@ -2305,6 +2305,33 @@ describe('ChatsPage', () => {
       expect(screen.getByText('95%')).toBeInTheDocument();
     });
 
+    it('names a result after the loaded chat when the server sent no title', async () => {
+      mockClient.searchChatMessages.mockResolvedValueOnce({
+        results: [
+          { ...mockSearchResults[0], chat_title: '', chat_id: 'chat-2' },
+          { ...mockSearchResults[1], chat_title: '', chat_id: 'chat-gone' },
+        ],
+        total: 2,
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-search-input')).toBeInTheDocument();
+      });
+
+      const searchInput = screen.getByTestId('chat-search-input');
+      fireEvent.change(searchInput, { target: { value: 'TypeScript' } });
+      fireEvent.submit(searchInput.closest('form')!);
+
+      const titles = await waitFor(() => {
+        const list = screen.getByTestId('search-results-list');
+        return [...list.querySelectorAll('.search-result-chat')].map((node) => node.textContent);
+      });
+      expect(titles).toEqual(['Chat 2', 'Untitled chat']);
+      expect(screen.queryByText('Chat', { selector: '.search-result-chat' })).toBeNull();
+    });
+
     it('shows no results message when search returns empty', async () => {
       mockClient.searchChatMessages.mockResolvedValueOnce({
         results: [],

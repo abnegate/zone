@@ -42,6 +42,19 @@ describe('ContextUsage', () => {
     expect(button.getAttribute('aria-expanded')).toBe('false');
     expect(document.activeElement).toBe(button);
   });
+  it('discloses with a chevron that turns, not a stray plus sign', () => {
+    render(<ContextUsage usage={usage} />);
+    const button = screen.getByRole('button', { name: /Context/ });
+    expect(button.textContent).not.toMatch(/[+−]/);
+    const caret = button.querySelector('svg.context-usage-caret');
+    expect(caret?.getAttribute('data-expanded')).toBe('false');
+    expect(caret?.getAttribute('aria-hidden')).toBe('true');
+    fireEvent.click(button);
+    expect(button.querySelector('svg.context-usage-caret')?.getAttribute('data-expanded')).toBe(
+      'true'
+    );
+  });
+
   it('keeps the percentage visible while a draft preview is in flight', () => {
     render(<ContextUsage usage={usage} previewing />);
     expect(screen.getByRole('button').textContent).toContain('24%');

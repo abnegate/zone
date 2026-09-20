@@ -30,6 +30,37 @@ describe('chats layout', () => {
     ).toContain('display: flex');
   });
 
+  it('fades the title under the hover actions instead of cutting it', () => {
+    const fade = rule(chats, '.chat-item-actions::before');
+    expect(fade).toContain('right: 100%');
+    expect(fade).toContain('width: var(--ui-space-2)');
+    expect(fade).toContain('linear-gradient(to right, transparent, var(--chat-item-bg))');
+    expect(rule(chats, '.chat-item-actions')).toContain('background: var(--chat-item-bg)');
+    expect(
+      rule(chats, '.chat-item:hover .chat-title,\n.chat-item:focus-within .chat-title')
+    ).toContain('text-overflow: clip');
+  });
+
+  it('sets a chat item to 52px: 8 + 18 + 2 + 16 + 8', () => {
+    expect(rule(chats, '.chat-item')).toContain('padding: var(--ui-space-2) var(--ui-space-3)');
+    expect(rule(chats, '.chat-title')).toContain('line-height: 1.125rem');
+    expect(rule(chats, '.chat-meta')).toContain('margin-top: var(--ui-space-0-5)');
+    expect(rule(chats, '.chat-meta')).toContain('line-height: var(--ui-space-4)');
+  });
+
+  it('gives a search result a title row, a two-line snippet and a score badge', () => {
+    expect(rule(chats, '.search-result-item')).toContain('height: 4.25rem');
+    expect(rule(chats, '.search-result-header')).toContain('height: var(--ui-space-5)');
+    expect(rule(chats, '.search-result-snippet')).toContain('-webkit-line-clamp: 2');
+    expect(rule(chats, '.search-result-snippet')).toContain('height: var(--ui-space-8)');
+    expect(rule(chats, '.search-result-score')).toContain('height: var(--ui-badge-height)');
+  });
+
+  it('positions the message column so hidden text cannot stretch the document', () => {
+    expect(rule(chats, '.messages-container')).toContain('position: relative');
+    expect(rule(chats, '.message-markdown')).toContain('position: relative');
+  });
+
   it('holds the conversation header to one 48px row', () => {
     const header = rule(chats, '.chat-header');
     expect(header).toContain('flex-wrap: nowrap');
@@ -63,14 +94,24 @@ describe('context meter', () => {
     expect(rule(meter, '.context-usage-details')).toContain('position: absolute');
     expect(meter).not.toContain('--text-secondary');
   });
+
+  it('discloses with a 12px chevron that turns when open', () => {
+    expect(rule(meter, '.context-usage-caret')).toContain('width: var(--ui-space-3)');
+    expect(rule(meter, '.context-usage-caret')).toContain('height: var(--ui-space-3)');
+    expect(rule(meter, ".context-usage-caret[data-expanded='true']")).toContain('rotate(180deg)');
+  });
 });
 
 describe('question card and receipts', () => {
-  it('lays each choice on one 32px row', () => {
+  it('lays each choice on one 32px row with the free-text box on its own row below', () => {
     const question = read(join(features, 'chats', 'components', 'QuestionCard.css'));
-    expect(rule(question, '.question-card-choice')).toContain(
-      'min-height: var(--ui-control-height)'
+    expect(rule(question, '.question-card-choice-row')).toContain(
+      'height: var(--ui-control-height)'
     );
+    expect(rule(question, '.question-card-choice')).toContain('gap: var(--ui-space-2)');
+    expect(rule(question, '.question-card-choices')).toContain('gap: var(--ui-space-1)');
+    expect(rule(question, '.question-card-text')).toContain('height: var(--ui-control-height)');
+    expect(rule(question, '.question-card-text')).not.toContain('flex-basis');
     expect(rule(question, '.question-card-choice-description::before')).toContain("content: '— '");
   });
 
@@ -103,6 +144,15 @@ describe('knowledge layout', () => {
     expect(rule(search, '.search-toolbar')).toContain('display: flex');
     expect(rule(search, '.source-pill')).toContain('height: var(--ui-control-height-sm)');
   });
+
+  it('centres the search empty state in the body like the other list pages', () => {
+    expect(rule(search, '.context-search-body')).toContain('flex-direction: column');
+    expect(rule(search, '.context-search-body > .ui-empty')).toContain('margin: auto');
+  });
+
+  it('mutes the wiki card excerpt slot when an entry has nothing to show there', () => {
+    expect(rule(wiki, '.knowledge-card-content--empty')).toContain('color: var(--ui-text-muted)');
+  });
 });
 
 describe('auth layout', () => {
@@ -120,9 +170,23 @@ describe('auth layout', () => {
     expect(rule(auth, '.auth-success .success-icon,\n.auth-error-state .error-icon')).toContain(
       'width: var(--ui-empty-icon-size)'
     );
-    expect(rule(auth, '.auth-error-state .error-title,\n.auth-success .success-message')).toContain(
-      'font-size: var(--ui-text-md)'
-    );
+    const title = rule(auth, '.auth-error-state .error-title,\n.auth-success .success-message');
+    expect(title).toContain('font-size: var(--ui-text-md)');
+    expect(title).toContain('font-family: var(--ui-font-body)');
+  });
+
+  it('leaves the invitation page no error card of its own', () => {
+    expect(invitation).not.toContain('.error-state');
+    expect(invitation).not.toContain('.loading-state');
+  });
+
+  it('sizes session rows at 44 with a 28px pager', () => {
+    const sessions = read(join(features, 'auth', 'pages', 'SessionsPage.css'));
+    expect(rule(sessions, '.sessions-table td')).toContain('height: 2.75rem');
+    expect(rule(sessions, '.sessions-table td')).toContain('padding: 0 var(--ui-space-3)');
+    expect(rule(sessions, '.sessions-table td')).toContain('box-shadow: inset 0 -1px');
+    expect(rule(sessions, '.sessions-pager')).toContain('height: var(--ui-control-height-sm)');
+    expect(rule(sessions, '.current-badge')).toContain('height: var(--ui-badge-height)');
   });
 });
 
