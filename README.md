@@ -556,6 +556,21 @@ make backup
 make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz
 ```
 
+The postgres cluster lives in the `zone_postgres_data` volume, mounted at
+`/var/lib/postgresql/data`. An install created while the compose file mounted
+that volume at `/var/lib/postgresql` kept its cluster in an anonymous volume
+that `make backup` never saw; move it once before the next `make up`:
+
+```bash
+make stop
+make migrate-pgdata
+make up
+```
+
+`make backup` refuses to archive an empty cluster until that is done, and
+archives taken before the move hold no database. See
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 ## License
 
 MIT License - See [LICENSE](LICENSE) file for details.

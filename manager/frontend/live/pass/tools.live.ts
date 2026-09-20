@@ -734,7 +734,10 @@ test.describe('agent tools from chat', () => {
 
     const chatId = await agentChat(page);
     const replies: Record<string, string> = {};
-    const steps: [string, string][] = [
+    // Each step is a label, the prompt, and the tools that can answer it;
+    // a step passes when the model called any of them. The labels
+    // github_issue, review_current and review_missing are not tool names.
+    const steps: [string, string, string[]?][] = [
       ['list_sources', 'List the data sources connected to this workspace.'],
       [
         'read_repository_file',
@@ -744,6 +747,7 @@ test.describe('agent tools from chat', () => {
       [
         'github_issue',
         'Show me the full details of issue number 5 in the scratch repository.',
+        ['get_issue'],
       ],
       [
         'get_build_status',
@@ -764,10 +768,12 @@ test.describe('agent tools from chat', () => {
       [
         'review_current',
         `Review the pull request you just opened from ${branch} and tell me whether anything in it needs changing.`,
+        ['assess_pull_requests', 'read_repository_file'],
       ],
       [
         'review_missing',
         'Which open pull requests in the scratch repository are still missing a review?',
+        ['assess_pull_requests'],
       ],
       [
         'assess_release_pipelines',
@@ -809,8 +815,11 @@ test.describe('agent tools from chat', () => {
       }[]
     ).find((p) => p.headRefName === branch);
     const missing = steps
-      .map(([tool]) => tool)
-      .filter((tool) => !tools.includes(tool));
+      .filter(
+        ([label, , accepts]) =>
+          !(accepts ?? [label]).some((tool) => tools.includes(tool)),
+      )
+      .map(([label]) => label);
     record(50, {
       result: missing.length === 0 && Boolean(chatPr) ? 'WORKS' : 'FAILS',
       cause:

@@ -301,7 +301,14 @@ impl AppState {
 
     /// Install an empty hub so tests never spawn MCP children.
     pub fn disable_mcp(&self) {
-        let _ = self.inner.mcp.set(McpHub::new());
+        self.install_mcp(McpHub::new());
+    }
+
+    /// Install an already connected hub, for a test that attaches its own
+    /// server instead of whatever the process environment names. A hub that
+    /// is already installed stays.
+    pub fn install_mcp(&self, hub: McpHub) {
+        let _ = self.inner.mcp.set(hub);
     }
 }
 

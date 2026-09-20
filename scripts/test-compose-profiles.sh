@@ -110,7 +110,8 @@ assert_not_contains "$monitoring_services" 'gluetun' 'monitoring does not start 
 direct=$(mktemp)
 devcfg=$(mktemp)
 combo=$(mktemp)
-trap 'rm -rf "$directory" "$direct" "$devcfg" "$combo"' EXIT HUP INT TERM
+bundled=$(mktemp)
+trap 'rm -rf "$directory" "$direct" "$devcfg" "$combo" "$bundled"' EXIT HUP INT TERM
 
 # shellcheck disable=SC2046
 compose $("$script" flags '') config --format json > "$direct"
@@ -118,14 +119,17 @@ compose $("$script" flags '') config --format json > "$direct"
 compose $("$script" flags dev) config --format json > "$devcfg"
 # shellcheck disable=SC2046
 compose $("$script" flags 'dev,vpn,monitoring') config --format json > "$combo"
+# shellcheck disable=SC2046
+compose $("$script" flags bundled-ollama) config --format json > "$bundled"
 
-python3 - "$direct" "$devcfg" "$combo" <<'PY'
+python3 - "$direct" "$devcfg" "$combo" "$bundled" <<'PY'
 import json
 import sys
 
 direct = json.load(open(sys.argv[1], encoding="utf-8"))
 dev = json.load(open(sys.argv[2], encoding="utf-8"))
 combo = json.load(open(sys.argv[3], encoding="utf-8"))
+bundled = json.load(open(sys.argv[4], encoding="utf-8"))
 
 
 def dockerfile(service):
@@ -172,6 +176,39 @@ if "5432:5432" not in published_ports(combo["services"]["postgres"]):
 prometheus_profiles = combo["services"]["prometheus"].get("profiles") or []
 if prometheus_profiles != ["monitoring"]:
     raise SystemExit(f"prometheus must use the monitoring profile, got {prometheus_profiles!r}")
+
+
+def volume_targets(service):
+    targets = {}
+    for item in service.get("volumes") or []:
+        if isinstance(item, dict):
+            targets[item.get("target")] = item.get("source")
+        else:
+            parts = str(item).split(":")
+            if len(parts) >= 2:
+                targets[parts[1]] = parts[0]
+    return targets
+
+
+# The pgvector image declares /var/lib/postgresql/data a VOLUME and keeps
+# PGDATA there; a named volume mounted anywhere else leaves the cluster in an
+# anonymous volume that make backup never sees.
+for name, config in (("core", direct), ("dev", dev), ("dev+vpn+monitoring", combo)):
+    targets = volume_targets(config["services"]["postgres"])
+    source = targets.get("/var/lib/postgresql/data")
+    if source is None:
+        raise SystemExit(
+            f"{name} postgres must mount its named volume at /var/lib/postgresql/data, "
+            f"got {sorted(targets)!r}"
+        )
+    if "/var/lib/postgresql" in targets:
+        raise SystemExit(f"{name} postgres must not also mount /var/lib/postgresql")
+
+# host.docker.internal is unroutable from the internal-only network, so an
+# ollama-init pointed at a host Ollama needs the edge network too.
+init_networks = set(bundled["services"]["ollama-init"].get("networks") or {})
+if not {"internal", "edge"} <= init_networks:
+    raise SystemExit(f"ollama-init must join internal and edge, got {sorted(init_networks)!r}")
 
 print("Compose profile combination checks passed")
 PY
