@@ -183,6 +183,26 @@
     background-color: var(--ui-error-600);
   }
 
+  .ui-btn-destructive-outline {
+    border-color: color-mix(in srgb, var(--ui-error-500) 45%, transparent);
+    background-color: transparent;
+    color: var(--ui-error-600);
+  }
+
+  .ui-btn-destructive-outline:hover {
+    border-color: var(--ui-error-600);
+    background-color: var(--ui-error-600);
+    color: var(--ui-text-inverse);
+  }
+
+  :root[data-theme='dark'] .ui-btn-destructive-outline {
+    color: var(--ui-error-400);
+  }
+
+  :root[data-theme='dark'] .ui-btn-destructive-outline:hover {
+    color: var(--ui-text-inverse);
+  }
+
   .ui-btn-outline {
     border-color: var(--ui-border);
     background-color: transparent;
@@ -899,7 +919,7 @@
     font-family: var(--ui-font-display);
     font-size: var(--ui-title-size);
     font-weight: 600;
-    line-height: var(--ui-leading-tight);
+    line-height: var(--ui-space-6);
     letter-spacing: -0.025em;
   }
 
