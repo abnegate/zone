@@ -877,13 +877,17 @@ test.describe('agent tools from chat', () => {
       `Update the task "Chat-made task ${s}": set its priority to 5 and add "Created from chat" to its description.`,
       { replies: 4, timeout: 600_000 },
     );
-    await ask(page, `Start the task "Chat-made task ${s}" now.`, {
-      replies: 5,
-      timeout: 600_000,
-    });
+    const started = await ask(
+      page,
+      `Now start a background coding task in the project "Real pass scratch" titled "Chat-run ${s}" whose job is to list the files in its working directory and report how many there are, and tell me the task id and run id it gave you.`,
+      { replies: 5, timeout: 900_000 },
+    );
     await shot(page, '51-task-created-and-started');
-    const taskRow = sql(
+    const manualRow = sql(
       `select id || ' | ' || status || ' | ' || priority || ' | ' || is_agentic from tasks where title = 'Chat-made task ${s}'`,
+    );
+    const taskRow = sql(
+      `select id || ' | ' || status || ' | ' || priority || ' | ' || is_agentic from tasks where title = 'Chat-run ${s}' order by created_at desc limit 1`,
     );
     const taskId = taskRow[0]?.split(' | ')[0] ?? '';
     await expect
@@ -897,13 +901,13 @@ test.describe('agent tools from chat', () => {
       .toMatch(/completed|failed/);
     const status = await ask(
       page,
-      `What is the status of the latest run of the task "Chat-made task ${s}"?`,
+      `Use get_task_run to read the latest run of the task "Chat-run ${s}" and tell me its status in one sentence.`,
       { replies: 6, timeout: 600_000 },
     );
     await shot(page, '51-get-task-run');
     const tools = toolNames(chatId);
     await page.goto('/tasks');
-    const card = page.locator('.task-card', { hasText: `Chat-made task ${s}` });
+    const card = page.locator('.task-card', { hasText: `Chat-run ${s}` });
     await expect(card).toBeVisible({ timeout: 30_000 });
     const cardText = (await card.innerText()).replace(/\s+/g, ' ');
     await shot(page, '51-task-on-tasks-page');
@@ -929,8 +933,10 @@ test.describe('agent tools from chat', () => {
           ? undefined
           : `model: never called ${missing.join(', ')} (used ${[...new Set(tools)].join(', ')})`,
       chat_id: chatId,
+      manual_task_row: manualRow,
       task_row: taskRow,
       run,
+      started_reply: started.slice(0, 200),
       status_reply: status.slice(0, 200),
       task_card: cardText.slice(0, 200),
       tools,
