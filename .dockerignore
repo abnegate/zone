@@ -52,9 +52,6 @@ biome.json
 runner/target
 runner/**/target
 
-# Stale offline query cache; the live one is runner/zone_server/.sqlx
-runner/.sqlx
-
 # Desktop bundle assets and generated platform projects; the manager image
 # only needs zone_desktop's manifest and sources for the workspace to resolve
 runner/zone_desktop/dist

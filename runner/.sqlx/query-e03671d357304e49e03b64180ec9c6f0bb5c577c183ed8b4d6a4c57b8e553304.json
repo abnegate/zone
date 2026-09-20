@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE organization_members\n        SET is_active = FALSE, updated_at = NOW()\n        WHERE organization_id = $1 AND user_id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e03671d357304e49e03b64180ec9c6f0bb5c577c183ed8b4d6a4c57b8e553304"
+}

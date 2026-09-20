@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE subscriptions\n            SET status = $1, cancel_at_period_end = FALSE, canceled_at = NOW(), updated_at = NOW()\n            WHERE id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "79b16032325c203d67ae0ebeba5d65054025f63bde53e6113f7ce05364286146"
+}
