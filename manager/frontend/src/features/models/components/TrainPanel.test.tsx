@@ -122,6 +122,29 @@ function deferFileReads(): {
 }
 
 describe('TrainPanel', () => {
+  it('titles each target inside its own row instead of on the fieldset border', async () => {
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit');
+    });
+    await selectBase('FLUX.1 Schnell');
+    await addTargets(file('frame-0000.png', 'a'), file('frame-0001.png', 'b'));
+
+    expect(document.querySelector('legend')).toBeNull();
+    const [first] = screen.getAllByRole('group', { name: 'Target pair 1: frame-0000.png' });
+    const head = first.querySelector('.train-pair-head');
+    expect(head).toHaveTextContent('Target 1');
+    expect(head).toHaveTextContent('frame-0000.png');
+    expect(first.querySelector('.train-pair-thumb img')?.getAttribute('src')).toMatch(
+      /^data:image\/png;base64,/
+    );
+    expect(screen.getByLabelText('Caption for frame-0000.png')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Move target 1: frame-0000.png up' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Move target 2: frame-0001.png down' })
+    ).toBeDisabled();
+  });
+
   it('gives every field its own labelled control', async () => {
     render(<TrainPanel onTrained={mock()} />);
 
