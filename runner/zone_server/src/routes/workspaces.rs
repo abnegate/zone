@@ -243,6 +243,8 @@ pub struct WorkspaceMemberResponse {
     role: String,
     is_active: bool,
     invited_by: Option<Uuid>,
+    email: Option<String>,
+    display_name: Option<String>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -256,7 +258,19 @@ impl From<workspace_members::WorkspaceMemberRow> for WorkspaceMemberResponse {
             role: row.role.as_str().to_string(),
             is_active: row.is_active,
             invited_by: row.invited_by,
+            email: None,
+            display_name: None,
             timestamps: Timestamps::from_naive(Some(row.created_at), Some(row.updated_at)),
+        }
+    }
+}
+
+impl From<workspace_members::MemberWithUser> for WorkspaceMemberResponse {
+    fn from(member: workspace_members::MemberWithUser) -> Self {
+        Self {
+            email: Some(member.email),
+            display_name: member.display_name,
+            ..Self::from(member.member)
         }
     }
 }
@@ -284,7 +298,7 @@ pub async fn list_members(
     State(state): State<AppState>,
     member: WorkspaceMember,
 ) -> impl IntoResponse {
-    match workspace_members::list_members(state.db(), member.workspace_id).await {
+    match workspace_members::list_members_with_users(state.db(), member.workspace_id).await {
         Ok(members) => Json(WorkspaceMembersListResponse {
             members: members
                 .into_iter()
