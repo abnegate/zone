@@ -104,6 +104,11 @@ const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[
 const ZONED = /(?:Z|[+-]\d{2}:?\d{2})$/;
 const REVISED_LABEL = 'Revised';
 
+export interface CitationTimes {
+  revision: string | null;
+  observed: string;
+}
+
 export function isRevisionTimestamp(revision?: string | null): boolean {
   return Boolean(revision && ISO_TIMESTAMP.test(revision));
 }
@@ -113,29 +118,70 @@ function parseTimestamp(value: string): Date {
   return new Date(ZONED.test(value) ? value : `${value}Z`);
 }
 
-function formatDate(date: Date): string {
-  return date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+function validDate(date: Date): Date | null {
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function sameDay(left: Date, right: Date): boolean {
+  return (
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate()
+  );
+}
+
+function formatTime(date: Date): string {
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+/// The year is noise while it is the current one, which is nearly always.
+function formatStamp(date: Date, now: Date): string {
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    ...(date.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
+    hour: 'numeric',
+    minute: '2-digit',
+  });
 }
 
 /// A git source is named by its commit, shortened the way git shows it. A
 /// document's revision is the time it was last edited, which reads as a date
 /// beside the observation time — or not at all when the two would print the
 /// same minute, since a reader gains nothing from seeing it twice.
-export function formatRevision(revision?: string | null, observedAt?: string): string | null {
+function formatRevision(
+  revision: string | null | undefined,
+  revised: Date | null,
+  observed: Date | null,
+  now: Date
+): string | null {
   if (!revision) return null;
   if (COMMIT_SHA.test(revision)) return revision.slice(0, 7);
-  if (!ISO_TIMESTAMP.test(revision)) return revision;
-  const revised = parseTimestamp(revision);
-  if (Number.isNaN(revised.getTime())) return revision;
-  const label = formatDate(revised);
-  if (observedAt && label === formatObservedAt(observedAt)) return null;
+  if (!revised) return revision;
+  const label = formatStamp(revised, now);
+  if (observed && label === formatStamp(observed, now)) return null;
   return `${REVISED_LABEL} ${label}`;
 }
 
-export function formatObservedAt(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return formatDate(date);
+/// The two stamps on a citation are read together, so the observation drops the
+/// date it shares with the revision printed just before it.
+export function formatCitationTimes(
+  citation: Pick<Citation, 'revision' | 'observed_at'>,
+  now: Date = new Date()
+): CitationTimes {
+  const observed = validDate(new Date(citation.observed_at));
+  const revised = isRevisionTimestamp(citation.revision)
+    ? validDate(parseTimestamp(citation.revision ?? ''))
+    : null;
+  const revision = formatRevision(citation.revision, revised, observed, now);
+  if (!observed) return { revision, observed: citation.observed_at };
+  const dated = !(revision && revised && sameDay(revised, observed));
+  return { revision, observed: dated ? formatStamp(observed, now) : formatTime(observed) };
+}
+
+export function formatObservedAt(value: string, now: Date = new Date()): string {
+  const date = validDate(new Date(value));
+  return date ? formatStamp(date, now) : value;
 }
 
 /// An identifier names a source; an address only says where to read one. One

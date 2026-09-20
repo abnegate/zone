@@ -56,6 +56,33 @@ describe('Citations', () => {
     expect(screen.queryByText('2026-09-20T20:22:20.046608')).not.toBeInTheDocument();
   });
 
+  it('labels the observation with its evidence word and drops the date it shares with the revision', () => {
+    render(
+      <Citations
+        citations={[
+          citation({
+            kind: 'workspace_document',
+            title: 'Runbook',
+            url: 'knowledge://11111111-1111-1111-1111-111111111111',
+            revision: '2026-09-20T20:22:20Z',
+            observed_at: '2026-09-20T20:24:11Z',
+            outcome: 'observed',
+          }),
+        ]}
+      />
+    );
+
+    const time = new Date('2026-09-20T20:24:11Z').toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    expect(document.querySelector('.citation-observation')).toHaveTextContent(`Observed ${time}`);
+    expect(document.querySelector('.citation-meta')?.textContent).toBe(
+      `Revised ${formatObservedAt('2026-09-20T20:22:20Z')}Observed ${time}`
+    );
+    expect(document.querySelector('time')).toHaveTextContent(time);
+  });
+
   it('leaves the revision out when it would repeat the observation minute', () => {
     render(
       <Citations

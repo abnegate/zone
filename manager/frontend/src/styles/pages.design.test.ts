@@ -39,10 +39,39 @@ describe('chats layout', () => {
     expect(rule(chats, '.chat-item:hover,\n.chat-item:focus-within')).toContain(
       '--chat-item-bg: var(--ui-bg-hover)'
     );
-    expect(rule(chats, '.chat-item.active')).toContain('--chat-item-bg: var(--ui-accent-muted)');
+    expect(rule(chats, '.chat-item.active')).toContain('--chat-item-bg: var(--ui-bg-selected)');
     expect(chats).not.toMatch(/\.chat-item:(hover|focus-within) \.chat-item-content/);
     expect(rule(chats, '.chat-title')).toContain('text-overflow: ellipsis');
     expect(chats).not.toContain('text-overflow: clip');
+  });
+
+  it('covers the whole row with the hover actions, on a background nothing shows through', () => {
+    const actions = rule(chats, '.chat-item-actions');
+    expect(actions).toContain('top: 0');
+    expect(actions).toContain('bottom: 0');
+    expect(actions).toContain('align-items: center');
+    expect(actions).not.toContain('translateY');
+    const fade = rule(chats, '.chat-item-actions::before');
+    expect(fade).toContain('top: 0');
+    expect(fade).toContain('bottom: 0');
+
+    const variables = read(
+      join(
+        import.meta.dir,
+        '..',
+        '..',
+        '..',
+        '..',
+        'packages',
+        'ui',
+        'src',
+        'styles',
+        'variables.css'
+      )
+    );
+    const selected = variables.match(/--ui-bg-selected:[^;]*;/g) ?? [];
+    expect(selected.length).toBe((variables.match(/--ui-accent-muted:/g) ?? []).length);
+    for (const value of selected) expect(value).not.toContain('transparent');
   });
 
   it('sets a chat item to 52px: 8 + 18 + 2 + 16 + 8', () => {

@@ -148,6 +148,181 @@ describe('ToolTrace', () => {
     expect(screen.getByText('Loaded nothing.')).toBeInTheDocument();
   });
 
+  it('says what each GitHub call was about from its arguments, not the record it returned', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            id: 'a',
+            name: 'read_repository_file',
+            arguments: '{"source_id":"s","path":"src/widget.py","ref":"main"}',
+            detail: '{"blob_sha":"cd1676fd","bytes":68,"complete":true}',
+          }),
+          call({
+            id: 'b',
+            name: 'get_build_status',
+            arguments: '{"source_id":"s","ref":"release/1.2"}',
+            detail: '{"state":"success","complete":true}',
+          }),
+          call({
+            id: 'c',
+            name: 'list_issues',
+            arguments: '{"source_id":"s","state":"closed"}',
+            detail: '{"repository":"https://github.com/o/r","issues":[]}',
+          }),
+          call({
+            id: 'd',
+            name: 'get_issue',
+            arguments: '{"source_id":"s","number":42}',
+            detail: '{"number":42,"title":"Widget breaks"}',
+          }),
+          call({
+            id: 'e',
+            name: 'assess_pull_requests',
+            arguments: '{"source_id":"s","number":7}',
+            detail: '{"assessed":1,"assessment":"Observed checks…"}',
+          }),
+          call({
+            id: 'f',
+            name: 'assess_release_pipelines',
+            arguments: '{"source_id":"s","tag":"v1.2.0"}',
+            detail: '{"assessed":1,"assessment":"Observed release-triggered…"}',
+          }),
+          call({
+            id: 'g',
+            name: 'create_pull_request',
+            arguments: '{"source_id":"s","title":"Chat PR","head":"chat/pr","base":"main"}',
+            detail: '{"observed_at":"2026-09-20T21:01:39Z","pull_request":{"number":10}}',
+          }),
+          call({
+            id: 'h',
+            name: 'read_check_logs',
+            arguments: '{"source_id":"s","job_id":9912,"number":7}',
+            detail: '{"excerpt":"…"}',
+          }),
+          call({
+            id: 'i',
+            name: 'read_repository_file',
+            arguments:
+              '{"source_id":"s","path":"README.md","ref":"41488920b7166b951c1588b560bac62a7b4fb18b"}',
+            detail: '{"blob_sha":"41488920","bytes":12,"complete":true}',
+          }),
+        ]}
+      />
+    );
+
+    expect(screen.getByText('src/widget.py @ main')).toBeInTheDocument();
+    expect(screen.getByText('README.md @ 4148892')).toBeInTheDocument();
+    expect(screen.getByText('release/1.2')).toBeInTheDocument();
+    expect(screen.getByText('closed')).toBeInTheDocument();
+    expect(screen.getByText('#42')).toBeInTheDocument();
+    expect(screen.getByText('#7')).toBeInTheDocument();
+    expect(screen.getByText('v1.2.0')).toBeInTheDocument();
+    expect(screen.getByText('Chat PR · chat/pr → main')).toBeInTheDocument();
+    expect(screen.getByText('job 9912 · #7')).toBeInTheDocument();
+    expect(screen.queryByText(/\{"/)).not.toBeInTheDocument();
+  });
+
+  it('names a document, a listing and a reminder by what the model asked for', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            id: 'a',
+            name: 'read_document',
+            arguments: '{"id":"931a61f8-f8a9-4883-9afe-ba8b0aa9c4f0"}',
+            detail: '{"complete":true,"content_state":"stored_text"}',
+          }),
+          call({
+            id: 'b',
+            name: 'create_document',
+            arguments: '{"title":"Runbook","content":"Step one."}',
+            detail: '{"created":true,"id":"6894f43a"}',
+          }),
+          call({
+            id: 'c',
+            name: 'update_document',
+            arguments: '{"id":"6894f43a","content":"Step two."}',
+            detail: '{"id":"6894f43a","updated":true}',
+          }),
+          call({
+            id: 'd',
+            name: 'list_documents',
+            arguments: '{"query":"deployment"}',
+            detail: '{"documents":[{"content":null}]}',
+          }),
+          call({
+            id: 'e',
+            name: 'create_reminder',
+            arguments:
+              '{"content":"stretch","due_at":"2026-09-20T19:45:30+00:00","reason":"asked"}',
+            detail: '{"anchor_at":null,"chat_id":"f0b66701"}',
+          }),
+        ]}
+      />
+    );
+
+    const due = new Date('2026-09-20T19:45:30+00:00').toLocaleString([], {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+    expect(screen.getByText('931a61f8-f8a9-4883-9afe-ba8b0aa9c4f0')).toBeInTheDocument();
+    expect(screen.getByText('Runbook')).toBeInTheDocument();
+    expect(screen.getByText('6894f43a')).toBeInTheDocument();
+    expect(screen.getByText('“deployment”')).toBeInTheDocument();
+    expect(screen.getByText(`stretch · ${due}`)).toBeInTheDocument();
+    expect(screen.queryByText(/\{"/)).not.toBeInTheDocument();
+  });
+
+  it('drops the source handle from a listing of connected sources', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'list_sources',
+            arguments: '{}',
+            detail:
+              'Scratch repo [github, active] [source_id: f29acba3-c463-4986-a158-41206d9dfecd] https://github.com/o/r — The scratch repository',
+          }),
+        ]}
+      />
+    );
+
+    expect(
+      screen.getByText(
+        'Scratch repo [github, active] https://github.com/o/r — The scratch repository'
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/source_id/)).not.toBeInTheDocument();
+  });
+
+  it('shows nothing rather than a JSON record for a call it cannot summarise', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            id: 'a',
+            name: 'list_reminders',
+            arguments: '{}',
+            detail: '[{"anchor_at":null,"chat_id":"f0b66701"}]',
+          }),
+          call({
+            id: 'b',
+            name: 'cancel_reminder',
+            arguments: '{"reminder_id":"r1","reason":"done"}',
+            detail: '{"anchor_at":"2026-09-20T19:45:30+00:00","completed_at":null}',
+          }),
+          call({ id: 'c', name: 'tail_job', detail: '[job running; next=512]' }),
+        ]}
+      />
+    );
+
+    const details = [...document.querySelectorAll('.tool-call-detail')].map(
+      (detail) => detail.textContent
+    );
+    expect(details).toEqual(['', '', '[job running; next=512]']);
+  });
+
   it('marks failed and running calls distinctly', () => {
     render(
       <ToolTrace
