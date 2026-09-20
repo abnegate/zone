@@ -10,7 +10,7 @@ export const icalSource: SourceDefinition = {
   icon: CalendarIcon,
   badgeColor: 'badge-green',
   iconWrapperClass: 'ical',
-  enabled: true,
+  enabled: false,
 
   formFields: [
     {

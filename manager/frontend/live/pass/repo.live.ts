@@ -423,16 +423,34 @@ test.describe('sources, projects and tasks', () => {
       },
       'Text notes',
     );
-    outcomes.notion = kinds.includes('Notion')
-      ? 'offered'
-      : 'not offered by the wizard (server allows source_type notion)';
-    outcomes.slack = kinds.includes('Slack')
-      ? 'offered'
-      : 'not offered by the wizard (config/slack.ts enabled: false)';
+    for (const kind of ['Notion', 'Slack', 'Email', 'Calendar']) {
+      outcomes[kind.toLowerCase()] = kinds.includes(kind)
+        ? 'offered although the server has no adapter for it'
+        : 'not offered (no adapter on the server)';
+    }
+    const reachedVerify = (outcome: string) =>
+      outcome.startsWith('added; verify ->');
+    const unoffered = ['Notion', 'Slack', 'Email', 'Calendar'].filter(
+      (kind) => !kinds.includes(kind),
+    );
+    const works =
+      reachedVerify(outcomes.gitlab) &&
+      reachedVerify(outcomes.web_url) &&
+      reachedVerify(outcomes.text) &&
+      unoffered.length === 4;
+    const refused = Object.entries(outcomes)
+      .filter(([, outcome]) => outcome.startsWith('wizard refused'))
+      .map(([kind, outcome]) => `${kind}: ${outcome}`);
     record(21, {
-      result: 'FAILS',
-      cause:
-        'environment: no GitLab, Notion or Slack token on this machine; the GitLab wizard refuses a bad token on Verify as recorded, Notion and Slack have no wizard entry, and the Web URL kind is refused by the server',
+      result: works ? 'WORKS' : 'FAILS',
+      cause: works
+        ? undefined
+        : refused.length > 0
+          ? `product: the wizard offers a kind the server refuses (${refused.join('; ')})`
+          : unoffered.length < 4
+            ? `product: the wizard offers a kind without an adapter (${['Notion', 'Slack', 'Email', 'Calendar'].filter((kind) => kinds.includes(kind)).join(', ')})`
+            : `product: a kind did not reach Verify (${JSON.stringify(outcomes)})`,
+      note: 'GitLab is verified with a deliberately bad token, so its verdict is the adapter refusing the credential, which is the point: the adapter answered',
       wizard_kinds: kinds,
       outcomes,
       screenshots: [

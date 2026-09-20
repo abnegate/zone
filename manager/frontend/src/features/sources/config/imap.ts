@@ -10,7 +10,7 @@ export const imapSource: SourceDefinition = {
   icon: MailIcon,
   badgeColor: 'badge-yellow',
   iconWrapperClass: 'imap',
-  enabled: true,
+  enabled: false,
 
   formFields: [
     {

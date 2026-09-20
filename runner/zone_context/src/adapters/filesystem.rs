@@ -39,7 +39,8 @@ const BINARY_CHECK_BYTES: usize = 8192;
 /// Configuration for filesystem sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemConfig {
-    /// Directory path
+    /// Directory path (the console's wizard stores it as `base_path`)
+    #[serde(alias = "base_path")]
     pub path: String,
     /// Whether to recurse into subdirectories
     #[serde(default = "default_recursive")]
@@ -1327,5 +1328,17 @@ mod tests {
         // Verify order: data.json should be first, README.md should be last
         assert!(fetch_result.items[0].title.contains("data.json"));
         assert!(fetch_result.items[3].title.contains("README.md"));
+    }
+
+    #[tokio::test]
+    async fn the_consoles_base_path_key_names_the_directory() {
+        let dir = TempDir::new().unwrap();
+        let adapter = FilesystemAdapter::new();
+        let source = create_test_source(json!({ "base_path": dir.path(), "allow_writes": true }));
+
+        adapter
+            .verify(&source)
+            .await
+            .expect("a source the wizard wrote verifies against its directory");
     }
 }

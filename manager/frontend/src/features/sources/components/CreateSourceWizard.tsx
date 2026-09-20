@@ -9,6 +9,7 @@ import {
   initializeFormState,
   sourceRegistry,
 } from '../config';
+import { useSourceKinds } from '../hooks/useSourceKinds';
 import { CreateSourceRequestSchema } from '../schemas';
 import type { CreateSourceRequest, Source, SourceType } from '../types';
 
@@ -175,7 +176,14 @@ export function CreateSourceWizard({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const currentSource = getSourceById(sourceType);
-  const enabledSources = useMemo(() => sourceRegistry.filter((s) => s.enabled), []);
+  const serverKinds = useSourceKinds(isOpen);
+  const enabledSources = useMemo(
+    () =>
+      sourceRegistry.filter(
+        (source) => source.enabled && (serverKinds === null || serverKinds.has(source.id))
+      ),
+    [serverKinds]
+  );
 
   const handleSourceTypeChange = useCallback((newType: SourceType) => {
     setSourceType(newType);

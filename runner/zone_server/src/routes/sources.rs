@@ -16,14 +16,29 @@ use crate::db::sources;
 use crate::error::ServerError;
 use crate::state::AppState;
 
-/// Allowed source types
-const ALLOWED_SOURCE_TYPES: &[&str] = &["github", "gitlab", "filesystem", "notion", "text"];
-
 /// Maximum name length
 const MAX_NAME_LENGTH: usize = 256;
 
 /// Maximum config size in bytes
 const MAX_CONFIG_SIZE: usize = 65536;
+
+/// The kinds this server can verify and fetch, sorted, straight from the
+/// adapter registry so nothing offers a kind that would never verify.
+fn source_kinds(state: &AppState) -> Option<Vec<String>> {
+    state.adapter_registry().map(|registry| {
+        let mut kinds = registry.registered_types();
+        kinds.sort();
+        kinds
+    })
+}
+
+fn unknown_kind_message(kind: &str, kinds: &[String]) -> String {
+    format!(
+        "Invalid source_type \"{}\". Must be one of: {}",
+        kind,
+        kinds.join(", ")
+    )
+}
 
 /// Sanitize verification errors before returning to clients
 fn sanitize_verification_error(e: &zone_context::error::ContextError) -> String {
@@ -378,13 +393,19 @@ pub async fn create(
             .into_response();
     }
 
-    // Validate source_type
-    if !ALLOWED_SOURCE_TYPES.contains(&req.source_type.as_str()) {
+    let Some(kinds) = source_kinds(&state) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse::new("Source kinds unavailable")),
+        )
+            .into_response();
+    };
+    if !kinds.contains(&req.source_type) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!(
-                "Invalid source_type. Must be one of: {}",
-                ALLOWED_SOURCE_TYPES.join(", ")
+            Json(ErrorResponse::new(unknown_kind_message(
+                &req.source_type,
+                &kinds,
             ))),
         )
             .into_response();
@@ -687,7 +708,9 @@ pub async fn verify(
     let adapter = match adapter_registry.get(&source_row.source_type) {
         Some(adapter) => adapter,
         None => {
-            let error_msg = format!("No adapter for source type: {}", source_row.source_type);
+            let mut kinds = adapter_registry.registered_types();
+            kinds.sort();
+            let error_msg = unknown_kind_message(&source_row.source_type, &kinds);
             // Update error in database
             if let Err(db_err) =
                 sources::update_verification(state.db(), id, workspace_id, Some(&error_msg)).await
@@ -710,6 +733,7 @@ pub async fn verify(
         "filesystem" => zone_core::SourceType::Filesystem,
         "notion" => zone_core::SourceType::Notion,
         "text" => zone_core::SourceType::Text,
+        "web" => zone_core::SourceType::Web,
         _ => {
             let error_msg = format!("Unknown source type: {}", source_row.source_type);
             if let Err(db_err) =
@@ -825,12 +849,14 @@ pub async fn verify(
     }
 }
 
-/// Source type info
+/// One kind the console may offer: `id` is the adapter's kind, `name` the
+/// label, `category` one of the console's source categories.
 #[derive(Debug, Serialize)]
 pub struct SourceTypeInfo {
+    id: String,
     name: String,
-    display_name: String,
     category: String,
+    enabled: bool,
     description: String,
     config_schema: serde_json::Value,
 }
@@ -899,15 +925,14 @@ pub async fn reindex(
         .into_response()
 }
 
-/// GET /api/sources/types
-pub async fn list_types(_auth: AuthUser) -> impl IntoResponse {
-    let types = vec![
-        SourceTypeInfo {
-            name: "github".to_string(),
-            display_name: "GitHub".to_string(),
-            category: "code".to_string(),
-            description: "GitHub repository integration".to_string(),
-            config_schema: serde_json::json!({
+/// Everything known about a kind besides whether an adapter for it is registered.
+fn describe_kind(kind: &str) -> SourceTypeInfo {
+    let (name, category, description, config_schema) = match kind {
+        "github" => (
+            "GitHub",
+            "file",
+            "GitHub repository integration",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "owner": {"type": "string", "description": "Repository owner"},
@@ -916,27 +941,26 @@ pub async fn list_types(_auth: AuthUser) -> impl IntoResponse {
                 },
                 "required": ["owner", "repo"]
             }),
-        },
-        SourceTypeInfo {
-            name: "gitlab".to_string(),
-            display_name: "GitLab".to_string(),
-            category: "code".to_string(),
-            description: "GitLab repository integration".to_string(),
-            config_schema: serde_json::json!({
+        ),
+        "gitlab" => (
+            "GitLab",
+            "file",
+            "GitLab project integration",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "project_id": {"type": "string", "description": "Project ID or path"},
+                    "project_id": {"type": "string", "description": "Project path or numeric id"},
+                    "host": {"type": "string", "description": "GitLab host for self-hosted instances"},
                     "branch": {"type": "string", "description": "Default branch"}
                 },
                 "required": ["project_id"]
             }),
-        },
-        SourceTypeInfo {
-            name: "filesystem".to_string(),
-            display_name: "Local Directory".to_string(),
-            category: "filesystem".to_string(),
-            description: "Local filesystem (self-hosted only)".to_string(),
-            config_schema: serde_json::json!({
+        ),
+        "filesystem" => (
+            "Local Directory",
+            "file",
+            "Local filesystem (self-hosted only)",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "base_path": {"type": "string", "description": "Absolute path to project root"},
@@ -944,35 +968,58 @@ pub async fn list_types(_auth: AuthUser) -> impl IntoResponse {
                 },
                 "required": ["base_path"]
             }),
-        },
-        SourceTypeInfo {
-            name: "confluence".to_string(),
-            display_name: "Confluence".to_string(),
-            category: "documentation".to_string(),
-            description: "Atlassian Confluence integration".to_string(),
-            config_schema: serde_json::json!({
+        ),
+        "web" => (
+            "Web URL",
+            "web",
+            "Fetch content from a URL",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "base_url": {"type": "string", "description": "Confluence base URL"},
-                    "space_key": {"type": "string", "description": "Space key"}
+                    "url": {"type": "string", "description": "URL to fetch"}
                 },
-                "required": ["base_url"]
+                "required": ["url"]
             }),
-        },
-        SourceTypeInfo {
-            name: "notion".to_string(),
-            display_name: "Notion".to_string(),
-            category: "documentation".to_string(),
-            description: "Notion workspace integration".to_string(),
-            config_schema: serde_json::json!({
+        ),
+        "text" => (
+            "Text",
+            "text",
+            "Inline text content",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "workspace_id": {"type": "string", "description": "Workspace ID"}
+                    "content": {"type": "string", "description": "The text"},
+                    "label": {"type": "string", "description": "A label for the text"}
                 },
-                "required": ["workspace_id"]
+                "required": ["content"]
             }),
-        },
-    ];
+        ),
+        other => (
+            other,
+            "file",
+            "",
+            serde_json::json!({"type": "object", "properties": {}}),
+        ),
+    };
+    SourceTypeInfo {
+        id: kind.to_string(),
+        name: name.to_string(),
+        category: category.to_string(),
+        enabled: true,
+        description: description.to_string(),
+        config_schema,
+    }
+}
 
+/// GET /api/sources/types
+///
+/// Exactly the kinds a registered adapter can verify, so the console cannot
+/// offer one the server would refuse.
+pub async fn list_types(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
+    let types = source_kinds(&state)
+        .unwrap_or_default()
+        .iter()
+        .map(|kind| describe_kind(kind))
+        .collect();
     Json(SourceTypesListResponse { types })
 }
