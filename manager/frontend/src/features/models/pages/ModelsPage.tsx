@@ -590,7 +590,7 @@ export default function ModelsPage() {
               {detailsModel.details?.description && (
                 <p className="details-description">{detailsModel.details.description}</p>
               )}
-              <div className="details-meta">
+              <div className="details-meta details-meta--row">
                 <div className="details-meta-item">
                   <span className="details-label">Size</span>
                   <span>{formatBytes(detailsModel.size)}</span>

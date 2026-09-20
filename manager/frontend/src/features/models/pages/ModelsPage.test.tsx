@@ -774,6 +774,7 @@ describe('ModelsPage', () => {
         expect(screen.getByText('Size')).toBeInTheDocument();
       });
       expect(screen.getByText('Modified')).toBeInTheDocument();
+      expect(document.querySelector('.details-meta')).toHaveClass('details-meta--row');
       const source = screen.getByRole('link', { name: 'View source' });
       expect(source).toHaveAttribute('href', 'https://ollama.com/library/llama2');
     });

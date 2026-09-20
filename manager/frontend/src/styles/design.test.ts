@@ -190,4 +190,20 @@ describe('page chrome', () => {
     expect(rule(train, '.train-footer')).toContain('justify-content: flex-end');
     expect(rule(train, '.train-caption')).toContain('display: flex');
   });
+
+  it('keeps an installed model row at 56 with its divider drawn inside', () => {
+    const models = read(join(styles, 'models.css'));
+    expect(rule(models, '.model-item')).toContain('min-height: var(--ui-list-row-2)');
+    expect(rule(models, '.model-item')).toContain('box-shadow: inset 0 -1px 0 var(--ui-border)');
+    expect(rule(models, '.model-item')).not.toContain('border:');
+    expect(rule(models, '.model-item')).not.toContain('border-bottom');
+    const page = read(join(app, 'features', 'models', 'pages', 'ModelsPage.css'));
+    expect(page).not.toContain('.models-page .model-item');
+  });
+
+  it('lays the installed model facts out on one row', () => {
+    const modals = read(join(styles, 'modals.css'));
+    expect(rule(modals, '.details-meta--row')).toContain('grid-auto-flow: column');
+    expect(rule(modals, '.details-meta--row')).toContain('grid-auto-columns: minmax(0, 1fr)');
+  });
 });

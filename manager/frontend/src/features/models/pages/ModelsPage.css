@@ -111,19 +111,6 @@
   border-top: 1px solid var(--ui-border);
 }
 
-.models-page .model-item {
-  min-height: var(--ui-list-row-2);
-  padding: var(--ui-space-2) var(--ui-space-3);
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--ui-border);
-  border-radius: 0;
-}
-
-.models-page .model-item:hover {
-  background: var(--ui-bg-hover);
-}
-
 .models-page .model-info {
   gap: 0;
 }
