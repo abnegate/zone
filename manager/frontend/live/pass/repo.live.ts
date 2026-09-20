@@ -867,7 +867,7 @@ test.describe('sources, projects and tasks', () => {
     const card = page.locator('.task-card', { hasText: title });
     await expect(card).toContainText(/PR: open/, { timeout: 60_000 });
     const link = card.locator('a.task-pr-link');
-    await expect(link).toHaveText('View Pull Request');
+    await expect(link).toHaveText('View PR');
     const prUrl = String(task.pr_url);
     await shot(page, '30-task-pr-open');
     const number = prUrl.match(/pull\/(\d+)/)?.[1] ?? '';

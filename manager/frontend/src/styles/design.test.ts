@@ -89,6 +89,19 @@ describe('shared surfaces', () => {
     );
   });
 
+  it('stacks a toggle description under its title in a 44px row: 1 + 4 + 18 + 16 + 4 + 1', () => {
+    const forms = read(join(styles, 'forms.css'));
+    const label = rule(forms, '  .toggle-label');
+    expect(label).toContain('padding: var(--ui-space-1) var(--ui-space-3)');
+    expect(label).toContain('margin: 0');
+    expect(rule(forms, '  .toggle-wrapper')).not.toContain('margin-top');
+    expect(rule(forms, '  .toggle-text')).toContain('flex-direction: column');
+    expect(rule(forms, '  .toggle-text')).not.toContain('gap');
+    expect(rule(forms, '  .toggle-title')).toContain('line-height: 1.125rem');
+    expect(rule(forms, '  .toggle-desc')).toContain('line-height: var(--ui-space-4)');
+    expect(rule(forms, '  .toggle-desc')).not.toContain('white-space');
+  });
+
   it('hides screen-reader text without laying it out against the page', () => {
     const utilities = read(join(styles, 'utilities.css'));
     const hidden = rule(utilities, '.sr-only');

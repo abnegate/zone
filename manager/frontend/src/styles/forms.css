@@ -269,7 +269,8 @@
     display: flex;
     align-items: flex-start;
     gap: var(--ui-space-2-5);
-    padding: var(--ui-space-2) var(--ui-space-3);
+    margin: 0;
+    padding: var(--ui-space-1) var(--ui-space-3);
     background: var(--ui-bg-surface);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-lg);
@@ -289,7 +290,6 @@
     width: 2rem;
     height: 1.125rem;
     flex-shrink: 0;
-    margin-top: var(--ui-space-px);
   }
 
   .toggle-wrapper input {
@@ -337,20 +337,19 @@
   .toggle-text {
     display: flex;
     flex-direction: column;
-    gap: var(--ui-space-0-5);
     min-width: 0;
   }
 
   .toggle-title {
     font-weight: 500;
     font-size: var(--ui-text-sm);
-    line-height: var(--ui-leading-normal);
+    line-height: 1.125rem;
     color: var(--ui-text-primary);
   }
 
   .toggle-desc {
     font-size: var(--ui-text-xs);
     color: var(--ui-text-muted);
-    line-height: var(--ui-leading-normal);
+    line-height: var(--ui-space-4);
   }
 }
