@@ -18,6 +18,8 @@ const labels: Record<keyof Usage['breakdown'], string> = {
 };
 const count = (value: number | null): string =>
   value === null ? 'Unknown' : value.toLocaleString();
+const compact = (value: number): string =>
+  value >= 1000 ? `${(value / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(value);
 
 export function ContextUsage({ usage, error, previewing = false }: Props) {
   const [expanded, setExpanded] = useState(false);
@@ -42,6 +44,9 @@ export function ContextUsage({ usage, error, previewing = false }: Props) {
   const summary = usage
     ? `${usage.estimated || usage.incomplete ? '≈ ' : ''}${count(usage.used)} tokens`
     : 'Usage unavailable';
+  const brief = usage
+    ? `${usage.estimated || usage.incomplete ? '≈ ' : ''}${compact(usage.used)}`
+    : 'Unavailable';
   return (
     <div
       role="group"
@@ -71,11 +76,13 @@ export function ContextUsage({ usage, error, previewing = false }: Props) {
             }}
           />
         </span>
-        <span>
-          {percentage === null ? summary : `${usage?.estimated ? '≈ ' : ''}${percentage}%`}
+        <span className="context-usage-value">
+          {percentage === null ? brief : `${usage?.estimated ? '≈ ' : ''}${percentage}%`}
         </span>
         {status && <span className="context-usage-state">{status}</span>}
-        <span aria-hidden="true">{expanded ? '−' : '+'}</span>
+        <span className="context-usage-caret" aria-hidden="true">
+          {expanded ? '−' : '+'}
+        </span>
       </button>
       {expanded && (
         <section

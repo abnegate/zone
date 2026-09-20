@@ -1,7 +1,3 @@
-/* Workspace write receipts.
-   First-class record of a change, shown above the reply in a thread and beside
-   the log line that recorded it in a run. Stronger than the tool trace: this is
-   what the agent did, not how it thought. */
 .action-receipts {
   display: flex;
   flex-direction: column;
@@ -11,91 +7,107 @@
 
 .action-receipt {
   display: grid;
-  gap: var(--ui-space-2);
+  gap: var(--ui-space-1);
   padding: var(--ui-space-3);
   border: 1px solid var(--ui-border);
-  border-left-width: 3px;
-  border-left-color: var(--ui-text-tertiary, var(--ui-text-secondary));
+  border-left: 2px solid var(--ui-text-muted);
+  border-radius: 0 var(--ui-radius-lg) var(--ui-radius-lg) 0;
   background: var(--ui-bg-surface);
 }
 
 .action-receipt--ok {
-  border-left-color: var(--ui-success, #16a34a);
+  border-left-color: var(--ui-success);
 }
 
 .action-receipt--failed {
-  border-left-color: var(--ui-danger, #dc2626);
+  border-left-color: var(--ui-error);
 }
 
 .action-receipt-header {
   display: flex;
   align-items: center;
   gap: var(--ui-space-2);
+  line-height: var(--ui-space-5);
 }
 
 .action-receipt-status {
   flex: none;
-  width: 7px;
-  height: 7px;
+  width: var(--ui-space-2);
+  height: var(--ui-space-2);
   border-radius: 50%;
-  background: var(--ui-text-tertiary, var(--ui-text-secondary));
+  background: var(--ui-text-muted);
 }
 
 .action-receipt--ok .action-receipt-status {
-  background: var(--ui-success, #16a34a);
+  background: var(--ui-success);
 }
 
 .action-receipt--failed .action-receipt-status {
-  background: var(--ui-danger, #dc2626);
+  background: var(--ui-error);
 }
 
 .action-receipt-action {
+  flex: 1;
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--ui-font-body);
   font-size: var(--ui-text-sm);
   font-weight: 600;
   color: var(--ui-text-primary);
 }
 
+.action-receipt-time {
+  flex: none;
+  font-size: var(--ui-text-2xs);
+  color: var(--ui-text-muted);
+}
+
 .action-receipt-target {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   margin: 0;
-  color: var(--ui-text-primary);
+  color: var(--ui-text-secondary);
   font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
 }
 
-.action-receipt-meta {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
-  gap: var(--ui-space-2) var(--ui-space-3);
+.action-receipt-reason {
   margin: 0;
-}
-
-.action-receipt-meta dt {
-  margin: 0 0 2px;
   color: var(--ui-text-secondary);
   font-size: var(--ui-text-xs);
-}
-
-.action-receipt-meta dd {
-  margin: 0;
-  color: var(--ui-text-primary);
-  font-size: var(--ui-text-sm);
-}
-
-/* The model's own account of why, spanning the row so a full sentence reads as
-   prose. Every other field on this card is server-observed; the label is what
-   keeps the difference visible. */
-.action-receipt-reason {
-  grid-column: 1 / -1;
-}
-
-.action-receipt-reason dd {
+  line-height: var(--ui-space-4);
   overflow-wrap: anywhere;
 }
 
+.action-receipt-reason-label {
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-2xs);
+}
+
+.action-receipt-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-1);
+  margin: 0;
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-2xs);
+  line-height: var(--ui-space-4);
+}
+
+.action-receipt-meta > * + *::before {
+  content: '·';
+  margin-right: var(--ui-space-1);
+}
+
 .action-receipt-link {
-  justify-self: start;
-  color: var(--ui-accent, var(--ui-text-primary));
-  font-size: var(--ui-text-sm);
+  color: var(--ui-accent);
   text-decoration: underline;
   text-underline-offset: 2px;
 }

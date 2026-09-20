@@ -102,3 +102,12 @@ it('explains paused compaction without claiming a fitting context is full', () =
   fireEvent.click(screen.getByRole('button'));
   expect(screen.getByText('The summary could not be prepared. History is unchanged.')).toBeTruthy();
 });
+
+it('abbreviates the token count on the meter row when there is no limit to measure against', () => {
+  render(<ContextUsage usage={{ ...usage, limit: null, used: 23409 }} />);
+  const button = screen.getByRole('button', { name: /Context/ });
+  expect(button.textContent).toContain('≈ 23.4k');
+  expect(button.textContent).not.toContain('tokens');
+  fireEvent.click(button);
+  expect(screen.getByText('≈ 23,409 tokens')).toBeTruthy();
+});

@@ -309,6 +309,8 @@ const mockChatWithSystemMessage: ChatWithMessages = {
   ],
 };
 
+const newChatButtons = () => screen.getAllByRole('button', { name: 'New chat' });
+
 const renderChatsPage = () => {
   return render(
     <BrowserRouter>
@@ -494,7 +496,7 @@ describe('ChatsPage', () => {
     it('renders new chat button', async () => {
       renderChatsPage();
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
     });
 
@@ -609,6 +611,45 @@ describe('ChatsPage', () => {
         expect(screen.getByText('The capital is Paris.')).toBeInTheDocument();
         expect(screen.getByText('Hi there!')).toBeInTheDocument();
       });
+    });
+
+    it('hides the waiting placeholder body of a turn that asked a question', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          {
+            ...mockChatWithMessages.messages[1],
+            content: '[Waiting for your answer]',
+            metadata: {
+              tool_calls: [
+                {
+                  id: 'call_q',
+                  name: 'ask_user',
+                  arguments: '{}',
+                  success: true,
+                  detail: 'Waiting for your answer…',
+                  duration_ms: 0,
+                  questions: [
+                    {
+                      header: 'Which city?',
+                      question: 'Which city do you mean?',
+                      required: false,
+                      multi_select: false,
+                      choices: [{ label: 'Auckland', description: 'North Island' }],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      await screen.findByTestId('question-card');
+      expect(screen.queryByText('[Waiting for your answer]')).not.toBeInTheDocument();
     });
 
     it('shows thinking interleaved with the tool trace', async () => {
@@ -766,7 +807,7 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'Start New Chat' })).toBeInTheDocument();
+        expect(newChatButtons()[1]).toBeInTheDocument();
       });
     });
 
@@ -774,10 +815,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'Start New Chat' })).toBeInTheDocument();
+        expect(newChatButtons()[1]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'Start New Chat' }));
+      fireEvent.click(newChatButtons()[1]);
 
       expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
     });
@@ -788,10 +829,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
 
       expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
       expect(screen.getByLabelText('Select Model')).toBeInTheDocument();
@@ -805,10 +846,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
       expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
 
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -822,10 +863,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
@@ -848,10 +889,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
 
       // Press Escape to close
       fireEvent.keyDown(document, { key: 'Escape' });
@@ -877,10 +918,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
@@ -931,10 +972,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
       fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
 
       await waitFor(() => {
@@ -950,7 +991,7 @@ describe('ChatsPage', () => {
 
     it('shows Agent mode only for a model that can call tools', async () => {
       renderChatsPage();
-      fireEvent.click(await screen.findByRole('button', { name: 'New chat' }));
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
       });
@@ -984,10 +1025,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
