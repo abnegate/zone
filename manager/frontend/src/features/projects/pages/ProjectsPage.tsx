@@ -680,7 +680,7 @@ export default function ProjectsPage() {
                         setShowCreateModal(true);
                       }}
                     >
-                      New project
+                      Create a project
                     </Button>
                   }
                 />

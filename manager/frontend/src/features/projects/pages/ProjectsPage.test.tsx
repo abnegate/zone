@@ -487,7 +487,7 @@ describe('ProjectsPage', () => {
       within(placeholder).getByRole('heading', { name: 'Select a project' })
     ).toBeInTheDocument();
 
-    fireEvent.click(within(placeholder).getByRole('button', { name: 'New project' }));
+    fireEvent.click(within(placeholder).getByRole('button', { name: 'Create a project' }));
     expect(screen.getByRole('heading', { name: 'New Project' })).toBeInTheDocument();
   });
 
