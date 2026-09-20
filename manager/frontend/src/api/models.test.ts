@@ -17,6 +17,18 @@ describe('Namespaced model requests', () => {
     expect(await modelsApi.getModels()).toEqual({ models: [model] });
   });
 
+  it('keeps the provider errors a partial inventory carries', async () => {
+    const model = { name: 'flux1-dev.safetensors', size: 1, modified_at: '2024-01-01T00:00:00Z' };
+    global.fetch = mock(async () =>
+      Response.json({ models: [model], errors: { ollama: 'Failed to connect to Ollama' } })
+    ) as typeof fetch;
+
+    expect(await modelsApi.getModels()).toEqual({
+      models: [model],
+      errors: { ollama: 'Failed to connect to Ollama' },
+    });
+  });
+
   afterEach(() => {
     global.fetch = original;
   });

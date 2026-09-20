@@ -58,6 +58,7 @@ export const ModelSourceSchema = z.enum(['ollama', 'huggingface']);
 
 export const ModelsResponseSchema = z.object({
   models: z.array(InstalledModelSchema),
+  errors: z.record(z.string(), z.string()).optional(),
 });
 
 export const DiskUsageSchema = z.object({
