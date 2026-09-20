@@ -1,19 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  EmptyState,
-  Tabs,
-  TabsList,
-  TabsTrigger,
-} from '@zone/ui';
+import { Badge, Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
 import { projectsApi } from '../../../api/projects';
 import { useAuth } from '../../../features/auth';
+import PageBar from '../../../shared/components/PageBar/PageBar';
 import { getErrors } from '../../../validation';
 import { AutomationPanel, AutoProjectModal, CreateProjectWizard } from '../components';
 import { useAutomation, useProjects, useSyncConfigs } from '../hooks';
@@ -339,11 +331,7 @@ export default function ProjectsPage() {
 
   return (
     <div className="page page--workspace projects-page">
-      <header className="projects-header">
-        <div className="projects-header-copy">
-          <h1>Projects</h1>
-          <p>Organize work with GitHub integration</p>
-        </div>
+      <PageBar title="Projects" subtitle="Organize work with GitHub integration">
         <Tabs
           value={statusFilter}
           onValueChange={(v) => setStatusFilter(v as ProjectStatus | 'all')}
@@ -356,24 +344,22 @@ export default function ProjectsPage() {
             <TabsTrigger value="cancelled">Cancelled</TabsTrigger>
           </TabsList>
         </Tabs>
-        <div className="projects-header-actions">
-          <Button
-            variant="secondary"
-            onClick={() => setShowAutoModal(true)}
-            data-testid="auto-project-button"
-          >
-            Auto project
-          </Button>
-          <Button
-            onClick={() => {
-              resetForm();
-              setShowCreateModal(true);
-            }}
-          >
-            + New Project
-          </Button>
-        </div>
-      </header>
+        <Button
+          variant="secondary"
+          onClick={() => setShowAutoModal(true)}
+          data-testid="auto-project-button"
+        >
+          Auto project
+        </Button>
+        <Button
+          onClick={() => {
+            resetForm();
+            setShowCreateModal(true);
+          }}
+        >
+          + New Project
+        </Button>
+      </PageBar>
 
       <div className="projects-workspace">
         {loading ? (
@@ -387,28 +373,35 @@ export default function ProjectsPage() {
           <EmptyState
             className="projects-empty"
             icon={
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                width="48"
-                height="48"
-              >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
               </svg>
             }
-            title="No projects yet"
-            description="Create your first project to get started"
+            title={
+              statusFilter === 'all'
+                ? 'No projects yet'
+                : `No ${statusLabels[statusFilter].toLowerCase()} projects`
+            }
+            description={
+              statusFilter === 'all'
+                ? 'Create your first project to get started'
+                : 'Nothing in this workspace has that status'
+            }
             action={
-              <Button
-                onClick={() => {
-                  resetForm();
-                  setShowCreateModal(true);
-                }}
-              >
-                Create Project
-              </Button>
+              statusFilter === 'all' ? (
+                <Button
+                  onClick={() => {
+                    resetForm();
+                    setShowCreateModal(true);
+                  }}
+                >
+                  Create Project
+                </Button>
+              ) : (
+                <Button variant="secondary" onClick={() => setStatusFilter('all')}>
+                  Show all projects
+                </Button>
+              )
             }
           />
         ) : (
@@ -416,53 +409,49 @@ export default function ProjectsPage() {
             <div className="projects-list-pane">
               <div className="projects-list">
                 {projects.map((project) => (
-                  <Card
+                  <div
                     key={project.id}
-                    className={`project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
+                    className={`card--list project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
                     onClick={() => selectProject(project)}
                     onKeyDown={(e) => e.key === 'Enter' && selectProject(project)}
                     role="button"
                     tabIndex={0}
                   >
-                    <CardContent className="project-card-body">
-                      <div className="project-card-header">
-                        <h3 className="project-name">{project.name}</h3>
-                        <span className="project-card-badges">
-                          {project.auto && (
-                            <Badge variant="default" data-testid="auto-badge">
-                              Auto
-                            </Badge>
-                          )}
-                          <Badge variant={statusVariants[project.status]}>
-                            {statusLabels[project.status]}
+                    <div className="project-card-header">
+                      <h3 className="project-name">{project.name}</h3>
+                      <span className="project-card-badges">
+                        {project.auto && (
+                          <Badge variant="accent" data-testid="auto-badge">
+                            Auto
                           </Badge>
-                        </span>
-                      </div>
-                      {project.description && (
-                        <p className="project-description">{project.description}</p>
-                      )}
-                      <div className="project-card-footer">
-                        {(() => {
-                          const source = getProjectSource(project);
-                          return source ? (
-                            <a
-                              href={source.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="source-link"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <span className={`source-type-icon ${source.source_type}`} />
-                              {source.name}
-                            </a>
-                          ) : (
-                            <span className="no-source">No source</span>
-                          );
-                        })()}
-                        <span>{formatDate(project.updated_at)}</span>
-                      </div>
-                    </CardContent>
-                  </Card>
+                        )}
+                        <Badge variant={statusVariants[project.status]}>
+                          {statusLabels[project.status]}
+                        </Badge>
+                      </span>
+                    </div>
+                    <p className="project-description">{project.description}</p>
+                    <div className="project-card-footer">
+                      {(() => {
+                        const source = getProjectSource(project);
+                        return source ? (
+                          <a
+                            href={source.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="source-link"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <span className={`source-type-icon ${source.source_type}`} />
+                            {source.name}
+                          </a>
+                        ) : (
+                          <span className="no-source">No source</span>
+                        );
+                      })()}
+                      <span>{formatDate(project.updated_at)}</span>
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
@@ -476,8 +465,9 @@ export default function ProjectsPage() {
                       fill="none"
                       stroke="currentColor"
                       strokeWidth="2"
-                      width="20"
-                      height="20"
+                      width="16"
+                      height="16"
+                      aria-hidden="true"
                     >
                       <path d="M6 18L18 6M6 6l12 12" />
                     </svg>
@@ -490,44 +480,84 @@ export default function ProjectsPage() {
                       {operationError}
                     </div>
                   )}
-                  <div className="detail-meta">
-                    <div className="detail-row">
-                      <span className="detail-label">Status</span>
+                  <dl className="detail-facts">
+                    <dt className="detail-label">Status</dt>
+                    <dd className="detail-value">
                       <Badge variant={statusVariants[selectedProject.status]}>
                         {statusLabels[selectedProject.status]}
                       </Badge>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-label">Created</span>
-                      <span className="detail-value">{formatDate(selectedProject.created_at)}</span>
-                    </div>
-                    <div className="detail-row">
-                      <span className="detail-label">Updated</span>
-                      <span className="detail-value">{formatDate(selectedProject.updated_at)}</span>
-                    </div>
-                  </div>
-
-                  <div className="detail-row">
-                    <span className="detail-label">Automation</span>
-                    <button
-                      type="button"
-                      className="auto-toggle"
-                      aria-pressed={!!selectedProject.auto}
-                      data-testid="auto-toggle"
-                      disabled={togglingAuto}
-                      onClick={handleToggleAuto}
-                      title={
-                        selectedProject.auto
-                          ? 'Stop running the tasks of this project on their own'
-                          : 'Run, review and merge every task of this project on its own'
-                      }
-                    >
-                      <span className="auto-toggle-track" aria-hidden="true">
-                        <span className="auto-toggle-thumb" />
-                      </span>
-                      Auto
-                    </button>
-                  </div>
+                    </dd>
+                    <dt className="detail-label">Created</dt>
+                    <dd className="detail-value">{formatDate(selectedProject.created_at)}</dd>
+                    <dt className="detail-label">Updated</dt>
+                    <dd className="detail-value">{formatDate(selectedProject.updated_at)}</dd>
+                    <dt className="detail-label">Automation</dt>
+                    <dd className="detail-value">
+                      <button
+                        type="button"
+                        className="auto-toggle"
+                        aria-pressed={!!selectedProject.auto}
+                        data-testid="auto-toggle"
+                        disabled={togglingAuto}
+                        onClick={handleToggleAuto}
+                        title={
+                          selectedProject.auto
+                            ? 'Stop running the tasks of this project on their own'
+                            : 'Run, review and merge every task of this project on its own'
+                        }
+                      >
+                        <span className="auto-toggle-track" aria-hidden="true">
+                          <span className="auto-toggle-thumb" />
+                        </span>
+                        Auto
+                      </button>
+                    </dd>
+                    {selectedProject.description && (
+                      <>
+                        <dt className="detail-label">Description</dt>
+                        <dd className="detail-value">{selectedProject.description}</dd>
+                      </>
+                    )}
+                    <dt className="detail-label">Source</dt>
+                    <dd className="detail-value">
+                      {(() => {
+                        const source = getProjectSource(selectedProject);
+                        return source ? (
+                          <div className="source-detail">
+                            <span className={`source-type-badge ${source.source_type}`}>
+                              {source.source_type}
+                            </span>
+                            <span className="source-name">{source.name}</span>
+                            <a
+                              href={source.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="source-url"
+                            >
+                              {source.url}
+                            </a>
+                            <Button variant="secondary" size="sm" onClick={handleUnlinkSource}>
+                              Unlink
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="source-detail">
+                            <span className="no-source">No source</span>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => {
+                                setFormSourceId('');
+                                openModal(setShowSourceModal);
+                              }}
+                            >
+                              Link Source
+                            </Button>
+                          </div>
+                        );
+                      })()}
+                    </dd>
+                  </dl>
 
                   {automationActionError && (
                     <p className="field-error" role="alert" data-testid="automation-action-error">
@@ -544,52 +574,6 @@ export default function ProjectsPage() {
                       onResume={handleResumeAutomation}
                     />
                   )}
-
-                  {selectedProject.description && (
-                    <div className="detail-row">
-                      <span className="detail-label">Description</span>
-                      <p className="detail-value">{selectedProject.description}</p>
-                    </div>
-                  )}
-
-                  <div className="detail-row">
-                    <span className="detail-label">Source</span>
-                    {(() => {
-                      const source = getProjectSource(selectedProject);
-                      return source ? (
-                        <div className="source-detail">
-                          <div className="source-info">
-                            <span className={`source-type-badge ${source.source_type}`}>
-                              {source.source_type}
-                            </span>
-                            <span className="source-name">{source.name}</span>
-                          </div>
-                          <a
-                            href={source.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="source-url"
-                          >
-                            {source.url}
-                          </a>
-                          <Button variant="secondary" size="sm" onClick={handleUnlinkSource}>
-                            Unlink
-                          </Button>
-                        </div>
-                      ) : (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => {
-                            setFormSourceId('');
-                            openModal(setShowSourceModal);
-                          }}
-                        >
-                          Link Source
-                        </Button>
-                      );
-                    })()}
-                  </div>
 
                   <div className="sync-config-section">
                     <div className="sync-config-header">
@@ -608,7 +592,7 @@ export default function ProjectsPage() {
 
                     {syncLoading ? (
                       <div className="sync-config-empty">
-                        <span className="spinner" /> Loading...
+                        <span className="spinner" /> Loading sync configurations…
                       </div>
                     ) : syncConfigs.length === 0 ? (
                       <div className="sync-config-empty">
@@ -672,26 +656,22 @@ export default function ProjectsPage() {
                 </div>
 
                 <div className="details-actions">
-                  <Button
-                    variant="secondary"
-                    className="flex-1"
-                    onClick={() => openEditModal(selectedProject)}
-                  >
+                  <Button variant="secondary" onClick={() => openEditModal(selectedProject)}>
                     Edit Project
                   </Button>
-                  <Button
-                    variant="destructive"
-                    className="flex-1"
-                    onClick={() => openModal(setShowDeleteConfirm)}
-                  >
+                  <Button variant="destructive" onClick={() => openModal(setShowDeleteConfirm)}>
                     Delete
                   </Button>
                 </div>
               </aside>
             ) : (
               <div className="projects-detail-placeholder">
-                <h3>Select a project</h3>
-                <p>Choose one from the list, or create a new one.</p>
+                <div className="empty-state">
+                  <h3 className="empty-state-title">Select a project</h3>
+                  <p className="empty-state-description">
+                    Choose one from the list, or create a new one.
+                  </p>
+                </div>
               </div>
             )}
           </>
@@ -799,7 +779,7 @@ export default function ProjectsPage() {
             tabIndex={0}
             aria-label="Close modal"
           />
-          <div className="modal-content">
+          <div className="modal-content modal-content--sm">
             <h3>Delete Project</h3>
             <p>
               Are you sure you want to delete <strong>{selectedProject.name}</strong>? This action
@@ -897,28 +877,30 @@ export default function ProjectsPage() {
           <div className="modal-content">
             <h3>Add External Sync</h3>
             <form onSubmit={handleCreateSyncConfig}>
-              <div className="form-group">
-                <label htmlFor="sync-provider">Provider</label>
-                <select
-                  id="sync-provider"
-                  value={formSyncProvider}
-                  onChange={(e) => setFormSyncProvider(e.target.value as SyncProvider)}
-                >
-                  <option value="github">GitHub</option>
-                  <option value="linear">Linear</option>
-                </select>
-              </div>
-              <div className="form-group">
-                <label htmlFor="sync-direction">Direction</label>
-                <select
-                  id="sync-direction"
-                  value={formSyncDirection}
-                  onChange={(e) => setFormSyncDirection(e.target.value as SyncDirection)}
-                >
-                  <option value="inbound">Inbound (External to Zone)</option>
-                  <option value="outbound">Outbound (Zone to External)</option>
-                  <option value="bidirectional">Bidirectional</option>
-                </select>
+              <div className="form-row">
+                <div className="form-group">
+                  <label htmlFor="sync-provider">Provider</label>
+                  <select
+                    id="sync-provider"
+                    value={formSyncProvider}
+                    onChange={(e) => setFormSyncProvider(e.target.value as SyncProvider)}
+                  >
+                    <option value="github">GitHub</option>
+                    <option value="linear">Linear</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label htmlFor="sync-direction">Direction</label>
+                  <select
+                    id="sync-direction"
+                    value={formSyncDirection}
+                    onChange={(e) => setFormSyncDirection(e.target.value as SyncDirection)}
+                  >
+                    <option value="inbound">Inbound (External to Zone)</option>
+                    <option value="outbound">Outbound (Zone to External)</option>
+                    <option value="bidirectional">Bidirectional</option>
+                  </select>
+                </div>
               </div>
               {formSyncProvider === 'github' && (
                 <div className="form-group">

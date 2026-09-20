@@ -80,6 +80,21 @@ export function CreateTaskWizard({
     return true;
   }, [currentStep, projectId, title, description]);
 
+  const handleClose = useCallback(() => {
+    setCurrentStep(0);
+    setProjectId(projects[0]?.id || '');
+    setTitle('');
+    setDescription('');
+    setCriteria('');
+    setPriority(3);
+    setIsAgentic(false);
+    setRequirePlanApproval(false);
+    setSourceId('');
+    setError(null);
+    setFieldErrors({});
+    onClose();
+  }, [onClose, projects]);
+
   const handleComplete = useCallback(async () => {
     const request: CreateTaskRequest = {
       project_ids: projectId ? [projectId] : [],
@@ -126,22 +141,8 @@ export function CreateTaskWizard({
     sourceId,
     createTask,
     onCreated,
+    handleClose,
   ]);
-
-  const handleClose = useCallback(() => {
-    setCurrentStep(0);
-    setProjectId(projects[0]?.id || '');
-    setTitle('');
-    setDescription('');
-    setCriteria('');
-    setPriority(3);
-    setIsAgentic(false);
-    setRequirePlanApproval(false);
-    setSourceId('');
-    setError(null);
-    setFieldErrors({});
-    onClose();
-  }, [onClose, projects]);
 
   const activeSources = useMemo(() => sources.filter((s) => s.is_active), [sources]);
 
@@ -222,7 +223,7 @@ export function CreateTaskWizard({
                   }
                 }}
                 placeholder="Detailed description of the task..."
-                rows={4}
+                rows={3}
                 className={fieldErrors.description ? 'input-error' : ''}
               />
               {fieldErrors.description && (
@@ -239,7 +240,7 @@ export function CreateTaskWizard({
                 value={criteria}
                 onChange={(e) => setCriteria(e.target.value)}
                 placeholder="How will we know when this task is complete?"
-                rows={3}
+                rows={2}
               />
             </div>
           </div>
@@ -292,7 +293,10 @@ export function CreateTaskWizard({
                 </span>
                 <span className="toggle-text">
                   <span className="toggle-title">Enable Agentic Mode</span>
-                  <span className="toggle-desc">
+                  <span
+                    className="toggle-desc"
+                    title="Allow this task to autonomously read/write code and query the knowledge base"
+                  >
                     Allow this task to autonomously read/write code and query the knowledge base
                   </span>
                 </span>
@@ -312,7 +316,10 @@ export function CreateTaskWizard({
                   </span>
                   <span className="toggle-text">
                     <span className="toggle-title">Require plan approval</span>
-                    <span className="toggle-desc">
+                    <span
+                      className="toggle-desc"
+                      title="A run writes its plan and waits for you to approve it before changing anything"
+                    >
                       A run writes its plan and waits for you to approve it before changing anything
                     </span>
                   </span>
@@ -366,6 +373,7 @@ export function CreateTaskWizard({
       onClose={handleClose}
       title="New Task"
       subtitle="Create a new task for autonomous execution"
+      className="task-wizard"
       steps={WIZARD_STEPS}
       currentStep={currentStep}
       onStepChange={handleStepChange}

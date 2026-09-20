@@ -1,7 +1,13 @@
 import React, { useCallback, useEffect, useRef } from 'react';
-import { List, type RowComponentProps, useDynamicRowHeight } from 'react-window';
+import { List, type RowComponentProps } from 'react-window';
 import type { BrowseModel } from '../types';
-import { formatBytes, formatContextLength, formatNumber, modelDownload } from '../utils';
+import {
+  formatBytes,
+  formatContextLength,
+  formatNumber,
+  modelDownload,
+  sourceLabel,
+} from '../utils';
 import Capabilities from './Capabilities';
 import './VirtualBrowseList.css';
 
@@ -13,6 +19,8 @@ interface VirtualBrowseListProps {
   loadingMore: boolean;
   onLoadMore: () => void;
 }
+
+const ROW_HEIGHT = 72;
 
 type BrowseRowProps = {
   models: BrowseModel[];
@@ -51,6 +59,7 @@ function BrowseRow({
   const specs = specParts(model);
   const title = model.display_name || model.name;
   const download = modelDownload(model);
+  const line = download.reason ?? model.description ?? null;
 
   return (
     <div style={style} className="virtual-browse-item-wrapper">
@@ -63,32 +72,41 @@ function BrowseRow({
       >
         <div className="browse-info">
           <div className="browse-header">
-            <span className="browse-name">{title}</span>
+            <span className="browse-name" title={title}>
+              {title}
+            </span>
             {model.source && (
-              <span className={`browse-source browse-source-${model.source}`}>{model.source}</span>
+              <span className={`browse-source browse-source-${model.source}`}>
+                {sourceLabel(model.source)}
+              </span>
+            )}
+            {specs.length > 0 && (
+              <span className="browse-specs">
+                {specs.map((part) => (
+                  <span key={part} className="browse-spec">
+                    {part}
+                  </span>
+                ))}
+              </span>
             )}
           </div>
-          {specs.length > 0 && (
-            <div className="browse-specs">
-              {specs.map((part) => (
-                <span key={part} className="browse-spec">
-                  {part}
-                </span>
-              ))}
-            </div>
-          )}
-          {model.description && <p className="browse-description">{model.description}</p>}
-          {download.reason && <p className="browse-description">{download.reason}</p>}
-          <Capabilities capabilities={model.capabilities} />
-          {model.downloads != null ? (
-            <span className="browse-downloads">
-              {formatNumber(model.downloads)}
-              {model.source === 'ollama' ? ' pulls' : ' downloads'}
-            </span>
-          ) : null}
+          <div className="browse-line">
+            {line && (
+              <p className="browse-description" title={line}>
+                {line}
+              </p>
+            )}
+            <Capabilities capabilities={model.capabilities} />
+            {model.downloads != null ? (
+              <span className="browse-downloads">
+                {formatNumber(model.downloads)}
+                {model.source === 'ollama' ? ' pulls' : ' downloads'}
+              </span>
+            ) : null}
+          </div>
         </div>
         <button
-          className="btn btn-primary btn-small"
+          className="btn btn-secondary btn-small"
           disabled={download.name === null}
           onClick={(e) => {
             e.stopPropagation();
@@ -123,8 +141,6 @@ export default function VirtualBrowseList({
   );
 
   const itemCount = models.length + (hasMore ? 1 : 0);
-
-  const rowHeight = useDynamicRowHeight({ defaultRowHeight: 160 });
 
   const rowProps = React.useMemo<BrowseRowProps>(
     () => ({
@@ -161,7 +177,7 @@ export default function VirtualBrowseList({
     <div ref={containerRef} className="virtual-browse-container">
       <List
         rowCount={itemCount}
-        rowHeight={rowHeight}
+        rowHeight={ROW_HEIGHT}
         rowComponent={BrowseRow}
         rowProps={rowProps}
         overscanCount={8}
