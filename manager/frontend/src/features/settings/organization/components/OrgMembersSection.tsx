@@ -2,6 +2,7 @@ import { Button, EmptyState, Input, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
+import { memberLabel } from '../../memberLabel';
 import type { AddOrgMemberRequest, OrganizationMember, OrgRole } from '../types';
 import './OrgMembersSection.css';
 
@@ -20,9 +21,6 @@ const isValidEmail = (email: string): boolean => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
 };
-
-const memberLabel = (member: { display_name: string | null; email: string }) =>
-  member.display_name || member.email || 'Member';
 
 const toUserMessage = (err: unknown, fallback: string) => {
   const message = err instanceof Error ? err.message : fallback;

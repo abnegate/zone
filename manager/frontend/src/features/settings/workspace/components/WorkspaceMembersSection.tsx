@@ -2,13 +2,14 @@ import { Button, EmptyState, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
+import { memberLabel } from '../../memberLabel';
 import type {
   AddWorkspaceMemberRequest,
   OrganizationMember,
   WorkspaceMember,
   WorkspaceRole,
 } from '../types';
-import '../../organization/components/OrgMembersSection.css'; // Reuse the same CSS
+import '../../organization/components/OrgMembersSection.css';
 
 interface WorkspaceMembersSectionProps {
   workspaceId: string;
@@ -21,9 +22,6 @@ const roleOptions: Array<{ value: WorkspaceRole; label: string }> = [
   { value: 'admin', label: 'Admin' },
   { value: 'owner', label: 'Owner' },
 ];
-
-const memberLabel = (member: { display_name: string | null; email: string }) =>
-  member.display_name || member.email || 'Member';
 
 const toUserMessage = (err: unknown, fallback: string) => {
   const message = err instanceof Error ? err.message : fallback;
