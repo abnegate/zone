@@ -169,7 +169,7 @@ async fn a_watch_hands_its_next_firing_the_reading_the_last_one_took() {
         harness.chat,
         zone_server::db::reminders::Reminder {
             content: "Release branch".into(),
-            due_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            due_at: (chrono::Utc::now() + chrono::Duration::hours(1)).fixed_offset(),
             rrule: Some("FREQ=DAILY".into()),
             prompt: Some("Check whether the release branch is green.".into()),
             timing_mode: Some("condition_watch".into()),
@@ -271,7 +271,7 @@ async fn a_due_prompt_is_answered_in_its_chat_by_the_worker_that_claimed_it() {
         harness.chat,
         zone_server::db::reminders::Reminder {
             content: "Dependency check".into(),
-            due_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            due_at: (chrono::Utc::now() + chrono::Duration::hours(1)).fixed_offset(),
             rrule: None,
             prompt: Some("Report any dependency PR that has been red for a week.".into()),
             timing_mode: None,

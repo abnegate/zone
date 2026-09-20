@@ -27,11 +27,12 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
      do not claim this will run a task. \
      Add rrule to repeat it, as an RFC 5545 rule in this subset: FREQ (HOURLY, DAILY, WEEKLY, \
      MONTHLY), INTERVAL, BYDAY, BYHOUR, BYMINUTE, BYMONTHDAY, UNTIL, COUNT. A clause outside that \
-     list is refused rather than dropped. Once an hour is the ceiling, measured at the shortest \
-     gap the rule produces rather than its average — BYHOUR=0,1 with BYMINUTE=0,30 fires four \
-     times a day and three of those gaps are half an hour. A condition that changes faster than \
-     the ceiling wants wait_for on the event itself, not a schedule. A repeating reminder stops \
-     after seven days unless it is asked for again. \
+     list is refused rather than dropped. FREQ=HOURLY is the finest cadence there is; MINUTELY \
+     and SECONDLY are refused, not rounded up. Once an hour is the ceiling, measured at the \
+     shortest gap the rule produces rather than its average — BYHOUR=0,1 with BYMINUTE=0,30 \
+     fires four times a day and three of those gaps are half an hour. A condition that changes \
+     faster than the ceiling wants wait_for on the event itself, not a schedule. A repeating \
+     reminder stops after seven days unless it is asked for again. \
      Without a prompt, each firing delivers content as it is written. With one, each firing runs \
      the prompt as a turn of your own in this chat and what you say is the delivery, and content \
      is not sent at all — it stays as the schedule's name, which is what list_reminders shows and \
@@ -249,7 +250,7 @@ impl Tool for WorkspaceAction {
                 json!(["title"]),
             ),
             Action::UpdateTask => (
-                json!({"task_id":identifier,"title":{"type":"string","minLength":1},"description":{"type":"string"},"status":{"type":"string","enum":["created","in_progress","review","complete","blocked"]},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
+                json!({"task_id":identifier,"title":{"type":"string","minLength":1},"description":{"type":"string"},"status":{"type":"string","enum":["created","in_progress","review","complete","blocked"]},"priority":{"type":"integer","minimum":1,"maximum":5,"description":"1 is the most urgent, 5 the least."},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
                 json!(["task_id"]),
             ),
             Action::SendMessage => (
@@ -259,8 +260,8 @@ impl Tool for WorkspaceAction {
             Action::CreateReminder => (
                 json!({
                     "content":{"type":"string","minLength":1,"description":"The words each firing delivers. With a prompt they are not delivered at all and this is the schedule's name instead, so keep it short enough to recognise in a list."},
-                    "due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset. The first firing, and the exact time the person named."},
-                    "rrule":{"type":"string","description":"RFC 5545 rule to repeat it, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9. Omit for a single reminder."},
+                    "due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset, e.g. 2026-09-20T19:30:00+12:00. The first firing, and the exact time the person named. It must still be in the future when the call is made: a turn can take minutes, so leave room rather than naming the next minute."},
+                    "rrule":{"type":"string","description":"RFC 5545 rule to repeat it, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9. FREQ may be HOURLY, DAILY, WEEKLY or MONTHLY; FREQ=HOURLY is the finest cadence and MINUTELY or SECONDLY is refused. Omit for a single reminder."},
                     "prompt":{"type":"string","description":"An instruction to your future self, run as a turn at each firing instead of delivering content. End it with the rule that if nothing changed, say nothing — except under condition_watch, which supplies its own rule and answers an unchanged firing in one short line."},
                     "timing_mode":{"type":"string","enum":["exact_schedule","condition_watch"],"description":"exact_schedule, the default, fires at the time named. condition_watch fires on the rrule and reports what differs from the last firing, and requires both rrule and prompt. It cannot see a change that appears and disappears between two firings."}
                 }),
@@ -452,6 +453,40 @@ mod tests {
         }))
         .expect("deny_unknown_fields must accept every property the schema advertises");
         assert_eq!(message.reason.as_deref(), Some(WHY));
+    }
+
+    #[tokio::test]
+    async fn update_task_offers_the_priority_a_task_has() {
+        let schema = tool(Action::UpdateTask).parameters_schema();
+        let priority = &schema["properties"]["priority"];
+        assert_eq!(priority["type"], "integer");
+        assert_eq!(priority["minimum"], 1);
+        assert_eq!(priority["maximum"], 5);
+        let update: actions::Update =
+            serde_json::from_value(json!({"task_id": Uuid::new_v4(), "priority": 2}))
+                .expect("deny_unknown_fields must accept every property the schema advertises");
+        assert_eq!(update.priority, Some(2));
+    }
+
+    #[tokio::test]
+    async fn create_reminder_states_the_hourly_floor_where_the_rule_is_asked_for() {
+        let schema = tool(Action::CreateReminder).parameters_schema();
+        let rrule = schema["properties"]["rrule"]["description"]
+            .as_str()
+            .expect("rrule is described");
+        assert!(rrule.contains("HOURLY"), "{rrule}");
+        assert!(rrule.contains("MINUTELY"), "{rrule}");
+        assert!(
+            CREATE_REMINDER_DESCRIPTION.contains("MINUTELY"),
+            "the tool description names what is refused"
+        );
+        let due_at = schema["properties"]["due_at"]["description"]
+            .as_str()
+            .expect("due_at is described");
+        assert!(
+            due_at.contains("+12:00"),
+            "an example offset is shown: {due_at}"
+        );
     }
 
     #[test]
