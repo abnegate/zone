@@ -194,6 +194,7 @@ export default function ChatsPage() {
     scrollToBottom();
   }, [activeChat?.messages, chatError, chatStatus, streaming, linkedMessageId, scrollToBottom]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a newly selected chat starts stuck to its bottom
   useEffect(() => {
     if (!linkedMessageId || !displayedChat) return;
     const node = document.getElementById(`chat-message-${linkedMessageId}`);
@@ -451,6 +452,9 @@ export default function ChatsPage() {
     setOperationError(null);
     try {
       await unarchiveChatFn(chatId);
+      if (selectedChatId === chatId) {
+        clearSelectedChat();
+      }
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to unarchive chat');
     }
