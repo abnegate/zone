@@ -20,7 +20,10 @@ export interface CreateKnowledgeRequest {
   workspace_id: string;
   title: string;
   type: KnowledgeType;
-  content: string;
+  /** The text of a `text` entry. */
+  content?: string;
+  /** The page a `url` entry is fetched from; the server fetches and indexes it. */
+  source_url?: string;
   tags?: string[];
 }
 

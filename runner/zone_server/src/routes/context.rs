@@ -950,6 +950,132 @@ pub async fn get_knowledge_entry(
     .into_response()
 }
 
+/// POST /api/knowledge/{id}/refresh
+///
+/// Re-fetch a URL-backed entry now rather than at its next interval. Answers
+/// the entry as it stands afterwards, or names the fetch failure, which is
+/// also recorded on the row as `last_fetch_error`.
+pub async fn refresh_knowledge(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let user_id = match auth.0.user_id() {
+        Ok(id) => id,
+        Err(_) => {
+            tracing::error!("Failed to parse user ID from auth claims");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Authentication error")),
+            )
+                .into_response();
+        }
+    };
+
+    let db = state.db();
+    use crate::db::knowledge;
+    let entry = match knowledge::get_knowledge(db, id).await {
+        Ok(Some(entry)) if entry.is_active && !private(entry.category.as_deref()) => entry,
+        Ok(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("Database error fetching knowledge: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+
+    // A stranger learns nothing from the refusal; a reader learns it is a write.
+    match workspace_members::can_read(db, entry.workspace_id, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("Database error checking workspace read access: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    }
+    match workspace_members::can_write(db, entry.workspace_id, user_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse::new("Access denied")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Database error checking workspace write access: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    }
+
+    let Some(source_url) = entry.source_url.clone() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "This entry has no source URL to fetch; only URL / Web Page entries can be refreshed",
+            )),
+        )
+            .into_response();
+    };
+
+    let due = knowledge::KnowledgeRefreshDue {
+        id: entry.id,
+        workspace_id: entry.workspace_id,
+        title: entry.title.clone(),
+        source_url,
+        content_hash: entry.content_hash.clone(),
+        refresh_interval_minutes: entry.refresh_interval_minutes,
+    };
+    if let Err(error) = crate::workers::knowledge_refresh::refresh_entry(&state, due).await {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse::new(format!("Failed to fetch URL: {error}"))),
+        )
+            .into_response();
+    }
+
+    match knowledge::get_knowledge(db, id).await {
+        Ok(Some(entry)) => Json(KnowledgeResponse {
+            id: entry.id,
+            workspace_id: entry.workspace_id,
+            title: entry.title,
+            content: entry.content,
+            category: entry.category,
+            tags: entry.tags,
+            token_count: entry.token_count as usize,
+            is_active: entry.is_active,
+            source_url: entry.source_url,
+            last_fetched_at: entry.last_fetched_at.map(utc),
+            refresh_interval_minutes: entry.refresh_interval_minutes,
+            last_fetch_error: entry.last_fetch_error,
+            created_at: entry.created_at.map(utc),
+            updated_at: entry.updated_at.map(utc),
+            indexed: entry.indexed,
+        })
+        .into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("Database error fetching knowledge: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response()
+        }
+    }
+}
+
 fn utc(stamp: chrono::NaiveDateTime) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_naive_utc_and_offset(stamp, chrono::Utc)
 }

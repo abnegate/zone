@@ -507,3 +507,122 @@ fn test_clean_text_in_worker() {
     assert_eq!(clean_text("  hello   world  "), "hello world");
     assert_eq!(clean_text("\n\n\ntest\n\n\n"), "test");
 }
+
+// =============================================================================
+// Refreshing one entry
+// =============================================================================
+
+/// A text entry has nothing to fetch, and the refusal says which kind does.
+#[tokio::test]
+async fn refreshing_a_text_entry_is_refused_by_name() {
+    let client = TestClient::with_db().await;
+    let (token, workspace_id) = setup_user_and_workspace(&client).await;
+
+    let created = client
+        .post_json_auth(
+            "/api/knowledge",
+            &json!({
+                "workspace_id": workspace_id,
+                "title": "Plain text",
+                "content": "Nothing to fetch here."
+            }),
+            &token,
+        )
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let id = created.json_value()["id"].as_str().unwrap().to_string();
+
+    let response = client
+        .post_json_auth(&format!("/api/knowledge/{id}/refresh"), &json!({}), &token)
+        .await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+    let error = response.json_value()["error"].as_str().unwrap().to_string();
+    assert!(error.contains("no source URL"), "{error}");
+    assert!(error.contains("URL / Web Page"), "{error}");
+}
+
+/// A URL entry whose page cannot be fetched answers the failure and records
+/// it on the row, where the card's error state reads it.
+#[tokio::test]
+async fn refreshing_a_url_entry_refetches_and_records_the_outcome() {
+    let client = TestClient::with_db().await;
+    let (token, workspace_id) = setup_user_and_workspace(&client).await;
+    let pool = client.state().db().clone();
+    let user_id: Uuid =
+        sqlx::query_scalar("SELECT user_id FROM workspace_members WHERE workspace_id = $1 LIMIT 1")
+            .bind(workspace_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    use zone_server::db::knowledge;
+    let id = knowledge::create_knowledge_with_url(
+        &pool,
+        workspace_id,
+        "Unreachable page",
+        "stale text",
+        "https://unreachable.invalid/page",
+        None,
+        &[],
+        2,
+        "stale-hash",
+        None,
+        user_id,
+    )
+    .await
+    .unwrap();
+
+    let response = client
+        .post_json_auth(&format!("/api/knowledge/{id}/refresh"), &json!({}), &token)
+        .await;
+    response.assert_status(StatusCode::BAD_GATEWAY);
+    let error = response.json_value()["error"].as_str().unwrap().to_string();
+    assert!(error.starts_with("Failed to fetch URL:"), "{error}");
+
+    let entry = client
+        .get_auth(&format!("/api/knowledge/{id}"), &token)
+        .await;
+    entry.assert_status(StatusCode::OK);
+    let body = entry.json_value();
+    assert_eq!(body["source_url"], "https://unreachable.invalid/page");
+    assert!(
+        body["last_fetch_error"]
+            .as_str()
+            .is_some_and(|e| !e.is_empty()),
+        "the failure is recorded on the row: {body}"
+    );
+    assert_eq!(
+        body["content"], "stale text",
+        "a failed fetch keeps the last good text"
+    );
+}
+
+/// A member of another workspace cannot even learn the entry exists.
+#[tokio::test]
+async fn refreshing_another_workspaces_entry_is_not_found() {
+    let client = TestClient::with_db().await;
+    let (token, workspace_id) = setup_user_and_workspace(&client).await;
+    let (stranger, _) = setup_user_and_workspace(&client).await;
+
+    let created = client
+        .post_json_auth(
+            "/api/knowledge",
+            &json!({
+                "workspace_id": workspace_id,
+                "title": "Ours",
+                "content": "Kept to ourselves."
+            }),
+            &token,
+        )
+        .await;
+    let id = created.json_value()["id"].as_str().unwrap().to_string();
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/knowledge/{id}/refresh"),
+            &json!({}),
+            &stranger,
+        )
+        .await;
+    response.assert_status(StatusCode::NOT_FOUND);
+}
