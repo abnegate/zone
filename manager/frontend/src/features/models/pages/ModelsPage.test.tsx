@@ -792,7 +792,11 @@ describe('ModelsPage', () => {
         expect(screen.getByText('Size')).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByLabelText('Close'));
+      expect(screen.getByRole('dialog', { name: 'llama2' })).toHaveClass('ui-dialog--lg');
+      expect(document.querySelector('.modal-content')).toBeNull();
+      const close = document.querySelector('.ui-dialog-close') as HTMLElement;
+      expect(close.querySelector('svg')).not.toBeNull();
+      fireEvent.click(close);
 
       await waitFor(() => {
         expect(screen.queryByText('Modified')).not.toBeInTheDocument();
@@ -1477,9 +1481,7 @@ describe('ModelsPage', () => {
         expect(screen.getByText('Size')).toBeInTheDocument();
       });
 
-      // Press Escape on the backdrop to close the details modal
-      const backdrop = screen.getByLabelText('Close modal');
-      fireEvent.keyDown(backdrop, { key: 'Escape' });
+      fireEvent.keyDown(document, { key: 'Escape' });
 
       await waitFor(() => {
         expect(screen.queryByText('Modified')).not.toBeInTheDocument();

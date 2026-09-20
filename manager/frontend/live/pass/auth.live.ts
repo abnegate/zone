@@ -506,7 +506,7 @@ test.describe('auth and account', () => {
       ' ',
     );
     await page.getByRole('button', { name: 'Invite Member' }).click();
-    const modal = page.locator('.modal-content[role="dialog"]');
+    const modal = page.getByRole('dialog', { name: 'Invite Member' });
     await expect(modal).toBeVisible();
     await modal.locator('#email').fill(state.intruder.email);
     await modal.locator('#org-role').selectOption('member');

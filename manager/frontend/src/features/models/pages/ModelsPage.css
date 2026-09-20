@@ -196,30 +196,6 @@
   overflow-wrap: anywhere;
 }
 
-.models-page .details-link {
-  margin: 0 0 var(--ui-space-3);
-}
-
-.models-page .details-link a {
-  font-size: var(--ui-text-sm);
-}
-
-.models-page .details-meta {
-  border-bottom: none;
-  padding-bottom: 0;
-}
-
-.models-page .details-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--ui-space-3) var(--ui-space-5);
-  margin-bottom: var(--ui-space-3);
-}
-
-.models-page .details-size-picker {
-  margin-bottom: var(--ui-space-3);
-}
-
 .ui-select-content {
   z-index: 1200;
 }

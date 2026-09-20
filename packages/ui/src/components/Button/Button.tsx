@@ -10,7 +10,6 @@ const buttonVariants = cva(
       variant: {
         default: 'ui-btn-primary',
         destructive: 'ui-btn-destructive',
-        'destructive-outline': 'ui-btn-destructive-outline',
         outline: 'ui-btn-outline',
         secondary: 'ui-btn-secondary',
         ghost: 'ui-btn-ghost',

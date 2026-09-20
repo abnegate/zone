@@ -1591,6 +1591,8 @@ describe('ChatsPage', () => {
       expect(
         screen.getByText('Are you sure you want to delete this chat? This action cannot be undone.')
       ).toBeInTheDocument();
+      const confirm = screen.getByRole('dialog', { name: 'Delete Chat' });
+      expect(confirm.querySelector('.ui-btn-destructive')).toHaveTextContent('Delete');
     });
 
     it('cancels delete on cancel button', async () => {

@@ -518,12 +518,12 @@ describe('ProjectsPage', () => {
     await openAndClose(screen.getByRole('button', { name: /Add Sync/ }), 'Add External Sync');
 
     const remove = screen.getByRole('button', { name: 'Delete' });
-    expect(remove).toHaveClass('ui-btn-destructive-outline');
+    expect(remove).toHaveClass('ui-btn-destructive');
     fireEvent.click(remove);
     const confirm = await screen.findByRole('dialog', { name: 'Delete Project' });
     expect(confirm).toHaveClass('ui-dialog--sm');
     expect(within(confirm).getByRole('button', { name: 'Delete Project' })).toHaveClass(
-      'ui-btn-destructive-outline'
+      'ui-btn-destructive'
     );
     expect(within(confirm).getByRole('button', { name: 'Close' })).toBeInTheDocument();
   });
