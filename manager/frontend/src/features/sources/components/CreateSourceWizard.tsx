@@ -242,6 +242,18 @@ export function CreateSourceWizard({
     return true;
   }, [currentStep, sourceType, currentSource, formState]);
 
+  const handleClose = useCallback(() => {
+    setCurrentStep(0);
+    setSourceType('github');
+    setFormState(initializeFormState('github'));
+    setName('');
+    setDescription('');
+    setCredentials('');
+    setError(null);
+    setFieldErrors({});
+    onClose();
+  }, [onClose]);
+
   const handleComplete = useCallback(async () => {
     if (!currentSource) return;
 
@@ -285,19 +297,8 @@ export function CreateSourceWizard({
     sourceType,
     createSource,
     onCreated,
+    handleClose,
   ]);
-
-  const handleClose = useCallback(() => {
-    setCurrentStep(0);
-    setSourceType('github');
-    setFormState(initializeFormState('github'));
-    setName('');
-    setDescription('');
-    setCredentials('');
-    setError(null);
-    setFieldErrors({});
-    onClose();
-  }, [onClose]);
 
   const renderStepContent = () => {
     switch (currentStep) {

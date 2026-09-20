@@ -120,12 +120,6 @@
   text-decoration: underline;
 }
 
-.auth-footer--plain {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: 0;
-}
-
 .auth-info {
   margin-top: var(--ui-space-3);
   text-align: center;
