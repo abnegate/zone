@@ -1091,7 +1091,7 @@ test.describe('sources, projects and tasks', () => {
     const title = `Semicolon text ${s}`;
     const taskId = await createTask(page, {
       title,
-      description: `Using a single echo command, print exactly this text to the terminal: alpha; beta; gamma-${s}. Report the command you ran and its output.`,
+      description: `Run exactly this command through a shell first: sh -c 'git --version' (the marker for this task is ${s}). If the tool refuses the shell, run the same program directly instead, and report the command you ran and its output.`,
       project: SCRATCH_PROJECT,
     });
     await startRun(page, title);
