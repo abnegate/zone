@@ -229,6 +229,21 @@ describe('WikiPage', () => {
       expect(screen.getByText('No knowledge entries found')).toBeInTheDocument();
       expect(screen.getByText('Try adjusting your filters or search query')).toBeInTheDocument();
     });
+
+    it('offers to show all entries when the filter or search hides everything', () => {
+      renderWikiPage();
+      fireEvent.click(screen.getByRole('tab', { name: 'URL' }));
+      const searchInput = screen.getByPlaceholderText('Search knowledge...');
+      fireEvent.change(searchInput, { target: { value: 'nonexistent' } });
+      expect(screen.queryByRole('button', { name: 'Add Entry' })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Show all entries' }));
+
+      expect(screen.getByText('Text Entry')).toBeInTheDocument();
+      expect(screen.getByText('URL Entry')).toBeInTheDocument();
+      expect(searchInput).toHaveValue('');
+      expect(screen.getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'true');
+    });
   });
 
   describe('Filter Functionality', () => {
@@ -326,7 +341,7 @@ describe('WikiPage', () => {
       expect(refreshButtons.length).toBe(1);
     });
 
-    it('never leaves the excerpt or meta slot blank on a bare list entry', () => {
+    it('leaves the excerpt slot empty rather than printing a placeholder on a bare list entry', () => {
       const bare: KnowledgeEntry = {
         ...defaultEntries[0],
         id: 'kb-bare',
@@ -342,7 +357,9 @@ describe('WikiPage', () => {
       renderWikiPage();
 
       const card = screen.getByText('Runbook').closest('.knowledge-card') as HTMLElement;
-      expect(within(card).getByText('No excerpt')).toHaveClass('knowledge-card-content--empty');
+      expect(card.querySelector('.knowledge-card-content')).toBeNull();
+      expect(card.querySelector('.knowledge-card-tags')).toBeNull();
+      expect(screen.queryByText('No excerpt')).not.toBeInTheDocument();
       expect(within(card).getByText('25 tokens')).toHaveClass('knowledge-card-date');
     });
 

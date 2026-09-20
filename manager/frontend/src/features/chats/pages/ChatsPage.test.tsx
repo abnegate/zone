@@ -2332,7 +2332,7 @@ describe('ChatsPage', () => {
 
       expect(screen.getByText('Chat 1')).toBeInTheDocument();
       expect(screen.getByText('...test message about TypeScript...')).toBeInTheDocument();
-      expect(screen.getByText('95%')).toBeInTheDocument();
+      expect(screen.queryByText('95%')).not.toBeInTheDocument();
     });
 
     it('names a result after the loaded chat when the server sent no title', async () => {
@@ -2473,7 +2473,7 @@ describe('ChatsPage', () => {
       expect(screen.getByTestId('clear-search-btn')).toBeInTheDocument();
     });
 
-    it('hides filter buttons when showing search results', async () => {
+    it('keeps the filter tabs mounted but disabled while showing search results', async () => {
       mockClient.searchChatMessages.mockResolvedValueOnce({
         results: mockSearchResults,
         total: 2,
@@ -2482,8 +2482,8 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('tab', { name: 'Active' })).toBeInTheDocument();
-        expect(screen.getByRole('tab', { name: 'Archived' })).toBeInTheDocument();
+        expect(screen.getByRole('tab', { name: 'Active' })).toBeEnabled();
+        expect(screen.getByRole('tab', { name: 'Archived' })).toBeEnabled();
       });
 
       const searchInput = screen.getByTestId('chat-search-input');
@@ -2494,8 +2494,14 @@ describe('ChatsPage', () => {
         expect(screen.getByTestId('search-results-list')).toBeInTheDocument();
       });
 
-      expect(screen.queryByRole('tab', { name: 'Active' })).not.toBeInTheDocument();
-      expect(screen.queryByRole('tab', { name: 'Archived' })).not.toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'Active' })).toBeDisabled();
+      expect(screen.getByRole('tab', { name: 'Archived' })).toBeDisabled();
+
+      fireEvent.click(screen.getByTestId('clear-search-btn'));
+
+      await waitFor(() => {
+        expect(screen.getByRole('tab', { name: 'Active' })).toBeEnabled();
+      });
     });
 
     it('does not search with empty query', async () => {

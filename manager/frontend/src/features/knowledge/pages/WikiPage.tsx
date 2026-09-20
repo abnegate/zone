@@ -10,8 +10,6 @@ import './WikiPage.css';
 
 type FilterType = 'all' | 'text' | 'url';
 
-const NO_EXCERPT = 'No excerpt';
-
 /// What a card says about itself when the list carries no date: the size of
 /// the entry, or failing that its type, so the meta row is never blank.
 function cardSize(entry: KnowledgeEntry): string {
@@ -208,7 +206,17 @@ export default function WikiPage() {
             action={
               !searchQuery && filterType === 'all' ? (
                 <Button onClick={() => setShowCreateWizard(true)}>Add Entry</Button>
-              ) : undefined
+              ) : (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setFilterType('all');
+                    setSearchQuery('');
+                  }}
+                >
+                  Show all entries
+                </Button>
+              )
             }
           />
         ) : (
@@ -250,11 +258,11 @@ export default function WikiPage() {
                         </span>
                       ))}
                     </div>
-                  ) : (
+                  ) : entry.category ? (
                     <div className="knowledge-card-content knowledge-card-content--empty">
-                      {entry.category ?? NO_EXCERPT}
+                      {entry.category}
                     </div>
-                  )}
+                  ) : null}
 
                   <div className="knowledge-card-footer">
                     <span className="knowledge-card-date">
