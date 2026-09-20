@@ -12,7 +12,7 @@ use crate::db::chats::{self, ChatPurpose};
 use crate::db::tasks::{self, RunMutation};
 use crate::db::workspace_members;
 use crate::state::AppState;
-use crate::workers::notify::{self, ChatNotifier, NotifyEnvironment, NotifySettings};
+use crate::workers::notify::{self, ChatNotifier};
 
 use super::{Services, notification, pipeline};
 
@@ -24,7 +24,6 @@ pub struct Drive<'a> {
     pub project: &'a ProjectAutomation,
     pub workspace_id: Uuid,
     pub actor: Uuid,
-    channels: Vec<Arc<dyn Notifier>>,
 }
 
 impl Drive<'_> {
@@ -49,8 +48,11 @@ impl Drive<'_> {
                 None
             }
         };
-        let timeout = NotifySettings::resolve(&NotifyEnvironment::from_process()).timeout;
-        let fanout: Fanout = notify::fanout_with(self.channels.clone(), chat, timeout);
+        let fanout: Fanout = notify::fanout_with(
+            self.services.channels.clone(),
+            chat,
+            self.services.notify_timeout,
+        );
         let report = fanout.deliver(&notification).await;
         for failure in report.failures() {
             tracing::warn!(
@@ -172,7 +174,6 @@ pub async fn drive_project(
         project: &project,
         workspace_id,
         actor: project.actor_id.unwrap_or(Uuid::nil()),
-        channels: notify::channels(&NotifyEnvironment::from_process()),
     };
     let Some(actor) = project.actor_id else {
         drive
@@ -274,13 +275,40 @@ pub async fn drive_project(
         let runnable = auto_projects::next_runnable(pool, project_id)
             .await
             .map_err(|error| error.to_string())?;
-        if runnable.is_none() && !paused.is_empty() {
-            drive
-                .pause_project(&format!(
-                    "nothing can start until a person looks at: {}",
-                    paused.join("; ")
-                ))
-                .await;
+        if runnable.is_none() {
+            if !paused.is_empty() {
+                drive
+                    .pause_project(&format!(
+                        "nothing can start until a person looks at: {}",
+                        paused.join("; ")
+                    ))
+                    .await;
+            } else {
+                // Nothing paused, nothing running, nothing admissible, work
+                // left: the remaining tasks wait on something automation
+                // cannot supply -- a task nobody made agentic, a dependency
+                // that never finished. Spinning here would look like progress.
+                let waiting: Vec<String> = stuck
+                    .iter()
+                    .filter(|task| task.status != "complete")
+                    .map(|task| {
+                        format!(
+                            "{} ({}{})",
+                            task.title,
+                            task.status,
+                            if task.is_agentic { "" } else { ", not agentic" }
+                        )
+                    })
+                    .collect();
+                drive
+                    .pause_project(&format!(
+                        "nothing can start: {} task(s) remain but none is runnable; they wait on \
+                         tasks that are not agentic or did not finish: {}",
+                        remaining,
+                        waiting.join("; ")
+                    ))
+                    .await;
+            }
         }
     }
     Ok(())

@@ -1563,15 +1563,17 @@ pub async fn record_run_model(
         == 1)
 }
 
-/// Finish a task whose pull request merged: the one transition out of
-/// `review` that no run and no person makes. Fenced on the URL the merge was
-/// made for, so a task that opened a different pull request in the meantime
-/// is not finished on the strength of the old one.
+/// Finish a task whose pull request merged: the transition no run and no
+/// person makes. Fenced on the URL the merge was made for, so a task that
+/// opened a different pull request in the meantime is not finished on the
+/// strength of the old one, and on the task having no run, so a run someone
+/// started meanwhile is not cut off. Which column a person dragged the task
+/// to does not matter: the merge is a fact.
 pub async fn complete_merged_task(pool: &PgPool, task_id: Uuid, pr_url: &str) -> DbResult<bool> {
     Ok(sqlx::query(
         "UPDATE tasks SET status = 'complete', pr_status = 'merged', completed_at = NOW(), \
            updated_at = NOW() \
-         WHERE id = $1 AND active_run_id IS NULL AND status = 'review' AND pr_url = $2",
+         WHERE id = $1 AND active_run_id IS NULL AND status <> 'complete' AND pr_url = $2",
     )
     .bind(task_id)
     .bind(pr_url)

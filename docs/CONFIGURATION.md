@@ -413,7 +413,7 @@ An auto project runs itself: every agentic task in it is executed unattended, it
 
 ### `ZONE_AUTO_BOT_REVIEW_GRACE_SECS`
 - **Default**: `600` (60–3600)
-- **Description**: How long to wait for an expected bot to review a new head before asking it with its trigger comment, and again before going on without it.
+- **Description**: How long to wait for an expected bot to review a head, measured from when the head's checks passed, before asking it with its trigger comment; then the same again from the moment it was asked, before going on without it.
 
 ### `ZONE_AUTO_CHECKS_GRACE_SECS`
 - **Default**: `120` (30–1800)

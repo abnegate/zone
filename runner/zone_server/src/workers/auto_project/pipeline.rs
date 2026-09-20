@@ -26,6 +26,11 @@ use super::notification::{self, MergeReport};
 use super::review::{self, Outcome, ReviewError, ReviewRequest, bots, model, verdict};
 use super::summary;
 
+/// Rounds in a row a reviewer may end without a readable verdict before the
+/// task is handed to a person: a model that cannot follow the contract is
+/// not reviewing anything.
+const MAX_UNPARSEABLE_ROUNDS: usize = 2;
+
 /// Bytes of diff a reviewer is shown.
 const DIFF_BYTES: usize = 60_000;
 /// Paths the merge notice names.
@@ -252,7 +257,14 @@ async fn awaiting_checks(step: &Step<'_>) -> Result<(), String> {
         step.seconds_since_checks()
     };
     match checks {
-        ChecksOutcome::Success => step.set(Stage::AwaitingReviews, None).await,
+        ChecksOutcome::Success => {
+            // The wait for reviews is measured from here, not from when the
+            // checks started: slow checks must not eat a bot's grace.
+            auto_projects::restart_clock(pool, step.task.task_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            step.set(Stage::AwaitingReviews, None).await
+        }
         ChecksOutcome::Pending => {
             if elapsed >= i64::try_from(config.checks_timeout_secs).unwrap_or(i64::MAX) {
                 step.pause(&format!(
@@ -482,41 +494,60 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let mut waiting: Vec<_> = Vec::new();
     for kind in bots::expected(config, &rows, &comments, &threads) {
-        if rows
+        // A bot's verdict on a head moves as its threads get resolved, so it
+        // is read again every tick and recorded again only when it changed;
+        // a thread that is gone from the new reading counts as addressed.
+        let previous = rows
             .iter()
-            .any(|row| row.is_bot() && row.reviewer == kind.reviewer() && row.head == head)
+            .filter(|row| row.is_bot() && row.reviewer == kind.reviewer() && row.head == head)
+            .max_by_key(|row| (row.round, row.created_at));
+        let Some(round) = bots::round(kind, &comments, &threads, &head) else {
+            if previous.is_none() {
+                waiting.push(kind);
+            }
+            continue;
+        };
+        let fresh: Vec<String> = round.findings.iter().map(finding_key).collect();
+        let addressed: Vec<String> = previous
+            .map(|row| {
+                row.findings()
+                    .iter()
+                    .map(finding_key)
+                    .filter(|key| !fresh.contains(key))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(row) = previous
+            && row.verdict() == round.verdict
+            && addressed.is_empty()
+            && row.findings().len() == fresh.len()
         {
             continue;
         }
-        match bots::round(kind, &comments, &threads, &head) {
-            Some(round) => {
-                let next = auto_projects::latest_round(pool, step.task.task_id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    + 1;
-                auto_projects::record_review(
-                    pool,
-                    ReviewInsert {
-                        task_id: step.task.task_id,
-                        run_id: step.task.last_run_id,
-                        round: next,
-                        head: &head,
-                        reviewer_kind: ReviewerKind::Bot,
-                        reviewer: round.reviewer,
-                        author_model: None,
-                        same_model: false,
-                        verdict: round.verdict,
-                        summary: &round.summary,
-                        findings: &round.findings,
-                        addressed: &[],
-                        external_id: round.external_id.as_deref(),
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            }
-            None => waiting.push(kind),
-        }
+        let next = auto_projects::latest_round(pool, step.task.task_id)
+            .await
+            .map_err(|error| error.to_string())?
+            + 1;
+        auto_projects::record_review(
+            pool,
+            ReviewInsert {
+                task_id: step.task.task_id,
+                run_id: step.task.last_run_id,
+                round: next,
+                head: &head,
+                reviewer_kind: ReviewerKind::Bot,
+                reviewer: round.reviewer,
+                author_model: None,
+                same_model: false,
+                verdict: round.verdict,
+                summary: &round.summary,
+                findings: &round.findings,
+                addressed: &addressed,
+                external_id: round.external_id.as_deref(),
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
     }
     let mut absent: Vec<String> = Vec::new();
     if !waiting.is_empty() {
@@ -526,19 +557,20 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .iter()
             .map(|kind| bots::display_name(kind.reviewer()))
             .collect();
+        let asked = step.task.bot_trigger_head.as_deref() == Some(head.as_str());
         if elapsed < grace {
-            return step
-                .set(
-                    Stage::AwaitingReviews,
-                    Some(&format!(
-                        "waiting for {} to review {}",
-                        names.join(", "),
-                        short(&head)
-                    )),
+            let reason = if asked {
+                format!("still waiting for {} after asking", names.join(", "))
+            } else {
+                format!(
+                    "waiting for {} to review {}",
+                    names.join(", "),
+                    short(&head)
                 )
-                .await;
+            };
+            return step.set(Stage::AwaitingReviews, Some(&reason)).await;
         }
-        if step.task.bot_trigger_head.as_deref() != Some(head.as_str()) {
+        if !asked {
             for kind in &waiting {
                 if let Err(error) = pr
                     .post_issue_comment(&step.reference, kind.trigger_command(), &step.token)
@@ -548,6 +580,10 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 }
             }
             auto_projects::set_bot_trigger_head(pool, step.task.task_id, &head)
+                .await
+                .map_err(|error| error.to_string())?;
+            // The bot gets the whole grace again, from the moment it was asked.
+            auto_projects::restart_clock(pool, step.task.task_id)
                 .await
                 .map_err(|error| error.to_string())?;
             return step
@@ -561,17 +597,6 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 )
                 .await;
         }
-        if elapsed < grace.saturating_mul(2) {
-            return step
-                .set(
-                    Stage::AwaitingReviews,
-                    Some(&format!(
-                        "still waiting for {} after asking",
-                        names.join(", ")
-                    )),
-                )
-                .await;
-        }
         absent = names;
     }
 
@@ -580,7 +605,23 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
         .await
         .map_err(|error| error.to_string())?;
     let bot_on_head = rows.iter().any(|row| row.is_bot() && row.head == head);
-    if !rows.iter().any(|row| !row.is_bot() && row.head == head) {
+    let model_rows: Vec<&ReviewRow> = rows
+        .iter()
+        .filter(|row| !row.is_bot() && row.head == head)
+        .collect();
+    let unreadable = model_rows
+        .iter()
+        .filter(|row| row.verdict() == Recorded::Unparseable)
+        .count();
+    if model_rows.len() == unreadable {
+        if unreadable >= MAX_UNPARSEABLE_ROUNDS {
+            return step
+                .pause(
+                    "the reviewer model gave no readable verdict twice; check the model, or name \
+                     another in ZONE_AUTO_REVIEW_MODELS",
+                )
+                .await;
+        }
         let author = match step.task.last_run_id {
             Some(run) => tasks::run_mode(pool, run)
                 .await
@@ -606,13 +647,23 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 .pause("no completion model is installed to review with")
                 .await;
         }
-        if reviewer.same_model && config.require_distinct_reviewer && !bot_on_head {
-            return step
-                .pause(
-                    "no model other than the one that wrote the change is available to review it, \
-                     and no review bot answered",
-                )
-                .await;
+        if config.require_distinct_reviewer && !bot_on_head {
+            if author.is_none() {
+                return step
+                    .pause(
+                        "the model that wrote the change was not recorded, so no review can be \
+                         shown to be independent, and no review bot answered",
+                    )
+                    .await;
+            }
+            if reviewer.same_model {
+                return step
+                    .pause(
+                        "no model other than the one that wrote the change is available to review \
+                         it, and no review bot answered",
+                    )
+                    .await;
+            }
         }
         let diff = pr
             .fetch_diff(&step.reference, &step.token, DIFF_BYTES)
@@ -708,6 +759,14 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
+                // Nothing was reviewed: ask again next tick rather than
+                // treating silence as a request for changes.
+                return step
+                    .set(
+                        Stage::AwaitingReviews,
+                        Some("the reviewer gave no readable verdict; asking again"),
+                    )
+                    .await;
             }
             Err(error) => return Err(error.to_string()),
         }
@@ -804,7 +863,7 @@ pub enum Decision {
 pub fn decide(rows: &[ReviewRow], open: &[Finding], head: &str, distinct: bool) -> Decision {
     let latest = rows
         .iter()
-        .filter(|row| !row.is_bot() && row.head == head)
+        .filter(|row| !row.is_bot() && row.head == head && row.verdict() != Recorded::Unparseable)
         .max_by_key(|row| (row.round, row.created_at));
     let Some(latest) = latest else {
         return Decision::Fix("no review of this head has been recorded".to_string());
@@ -816,9 +875,27 @@ pub fn decide(rows: &[ReviewRow], open: &[Finding], head: &str, distinct: bool) 
             describe(open)
         ));
     }
-    let bots_short: Vec<&ReviewRow> = rows
-        .iter()
-        .filter(|row| row.is_bot() && row.head == head && row.verdict() != Recorded::Approve)
+    // A bot's latest word on this head is what counts: it re-reads the head
+    // as its threads get resolved, and each re-read is its own row.
+    let mut latest_bots: Vec<&ReviewRow> = Vec::new();
+    for row in rows.iter().filter(|row| row.is_bot() && row.head == head) {
+        match latest_bots
+            .iter()
+            .position(|known| known.reviewer == row.reviewer)
+        {
+            Some(index)
+                if (latest_bots[index].round, latest_bots[index].created_at)
+                    < (row.round, row.created_at) =>
+            {
+                latest_bots[index] = row;
+            }
+            Some(_) => {}
+            None => latest_bots.push(row),
+        }
+    }
+    let bots_short: Vec<&ReviewRow> = latest_bots
+        .into_iter()
+        .filter(|row| row.verdict() != Recorded::Approve)
         .collect();
     if !bots_short.is_empty() {
         return Decision::Fix(format!(
@@ -843,6 +920,15 @@ pub fn decide(rows: &[ReviewRow], open: &[Finding], head: &str, distinct: bool) 
         );
     }
     Decision::Merge
+}
+
+/// What identifies a finding across rounds: its thread when a bot raised it,
+/// its id otherwise.
+fn finding_key(finding: &Finding) -> String {
+    finding
+        .thread_id
+        .clone()
+        .unwrap_or_else(|| finding.id.clone())
 }
 
 /// The open findings as one line, for a reason.
@@ -898,6 +984,15 @@ async fn merging(step: &Step<'_>) -> Result<(), String> {
             .set(
                 Stage::AwaitingChecks,
                 Some("the head moved before the merge"),
+            )
+            .await;
+    }
+    if pull.mergeable.conflicted() {
+        // A conflict is repaired, never merged past as an administrator.
+        return step
+            .set(
+                Stage::AwaitingChecks,
+                Some("the branch conflicts; repairing"),
             )
             .await;
     }
@@ -1001,9 +1096,12 @@ async fn finish_merged(
     {
         tracing::warn!(task_id = %step.task.task_id, %error, "Could not delete the merged branch");
     }
-    tasks::complete_merged_task(pool, step.task.task_id, &step.pr_url)
+    let completed = tasks::complete_merged_task(pool, step.task.task_id, &step.pr_url)
         .await
         .map_err(|error| error.to_string())?;
+    if !completed {
+        tracing::warn!(task_id = %step.task.task_id, "The pull request merged but the task could not be marked complete: a run is active or its pull request changed");
+    }
     auto_projects::set_merge_sha(pool, step.task.task_id, &merged.sha)
         .await
         .map_err(|error| error.to_string())?;
@@ -1072,7 +1170,11 @@ async fn finish_merged(
     auto_projects::set_head(pool, step.task.task_id, &merged.sha, Some("pending"), true)
         .await
         .map_err(|error| error.to_string())?;
-    step.set(Stage::PostMerge, None).await
+    let note = (!completed).then_some(
+        "merged, but the task could not be marked complete: a run is active or its pull request \
+         changed; mark it complete by hand",
+    );
+    step.set(Stage::PostMerge, note).await
 }
 
 /// Watch the jobs the merge triggered and file a fix task when one fails.
@@ -1274,5 +1376,21 @@ mod tests {
             Decision::Fix(_)
         ));
         assert_eq!(decide(&same_only, &[], head, true), Decision::Merge);
+    }
+
+    #[test]
+    fn a_bot_s_latest_word_supersedes_its_earlier_one_and_an_unreadable_verdict_is_no_review() {
+        let head = "h1";
+        let resolved = [
+            row(1, true, "coderabbitai", "request_changes", false, head),
+            row(2, false, "big", "approve", false, head),
+            row(3, true, "coderabbitai", "approve", false, head),
+        ];
+        assert_eq!(decide(&resolved, &[], head, true), Decision::Merge);
+        let unreadable = [row(1, false, "big", "unparseable", false, head)];
+        assert!(matches!(
+            decide(&unreadable, &[], head, true),
+            Decision::Fix(reason) if reason.contains("no review")
+        ));
     }
 }

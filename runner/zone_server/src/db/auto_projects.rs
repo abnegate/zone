@@ -179,10 +179,17 @@ pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u6
     .execute(pool)
     .await?
     .rows_affected();
+    // Admission only reads tasks in `created`; a task that exhausted its runs
+    // sits in `blocked` (or `review` without a pull request), so it is put
+    // back to `created` with its counter, or resume would change nothing.
     let restarted = sqlx::query(
-        "UPDATE task_automation a SET stage = 'idle', reason = NULL, runs = 0, updated_at = NOW() \
-         FROM tasks t WHERE t.id = a.task_id AND a.project_id = $1 AND a.stage = 'paused' \
-           AND t.pr_url IS NULL AND t.status <> 'complete'",
+        "WITH restarted AS ( \
+           UPDATE task_automation a SET stage = 'idle', reason = NULL, runs = 0, updated_at = NOW() \
+           FROM tasks t WHERE t.id = a.task_id AND a.project_id = $1 AND a.stage = 'paused' \
+             AND t.pr_url IS NULL AND t.status <> 'complete' \
+           RETURNING a.task_id) \
+         UPDATE tasks SET status = 'created', updated_at = NOW() \
+         WHERE id IN (SELECT task_id FROM restarted) AND active_run_id IS NULL",
     )
     .bind(project_id)
     .execute(pool)
@@ -415,6 +422,18 @@ pub async fn set_head(
     .bind(head)
     .bind(checks)
     .bind(fresh)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Start the wait for reviews over: the grace a bot gets is measured from
+/// when the change became reviewable, and again from when the bot was asked.
+pub async fn restart_clock(pool: &PgPool, task_id: Uuid) -> DbResult<()> {
+    sqlx::query(
+        "UPDATE task_automation SET checks_since = NOW(), updated_at = NOW() WHERE task_id = $1",
+    )
+    .bind(task_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -869,7 +888,8 @@ pub async fn open_findings(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<Finding
 pub async fn distinct_review_on_head(pool: &PgPool, task_id: Uuid, head: &str) -> DbResult<bool> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM task_reviews WHERE task_id = $1 AND head = $2 \
-           AND (reviewer_kind = 'bot' OR NOT same_model) AND verdict <> 'unparseable')",
+           AND (reviewer_kind = 'bot' OR (NOT same_model AND author_model IS NOT NULL)) \
+           AND verdict <> 'unparseable')",
     )
     .bind(task_id)
     .bind(head)

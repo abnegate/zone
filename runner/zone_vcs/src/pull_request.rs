@@ -2143,6 +2143,12 @@ nodes{databaseId body url createdAt author{login}}}}}}}}";
         if status != reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Err(PrError::NotMergeable(format!("{status}: {reason}")));
         }
+        // GitHub answers 405 both for a rule the token cannot bypass and for a
+        // branch that no longer merges cleanly; only the former has an
+        // administrator path, the latter needs the conflict repaired.
+        if reason.to_ascii_lowercase().contains("not mergeable") {
+            return Err(PrError::NotMergeable(format!("{status}: {reason}")));
+        }
         let Some(node_id) = node_id.filter(|_| admin) else {
             return Err(PrError::Protected(reason));
         };
@@ -2314,6 +2320,44 @@ mod automation_tests {
                 .unwrap(),
             ChecksOutcome::Failure(vec!["deploy".to_string()]),
             "the failure on the second page decides the outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conflicted_pull_request_is_not_merged_as_an_administrator() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+        Mock::given(method("PUT"))
+            .and(path("/repos/acme/project/pulls/7/merge"))
+            .respond_with(
+                ResponseTemplate::new(405)
+                    .set_body_json(json!({"message": "Pull Request is not mergeable"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let error = service
+            .merge(
+                &reference(),
+                "token",
+                Some("PR_node"),
+                "0123456789abcdef0123456789abcdef01234567",
+                "Title",
+                "Body",
+                MergeMethod::Squash,
+                true,
+            )
+            .await
+            .expect_err("a conflict is not merged");
+        assert!(
+            matches!(error, PrError::NotMergeable(ref reason) if reason.contains("not mergeable")),
+            "{error:?}"
         );
     }
 

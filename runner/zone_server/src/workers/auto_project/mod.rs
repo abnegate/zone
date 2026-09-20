@@ -20,12 +20,14 @@ use std::time::Duration;
 use dashmap::DashMap;
 use tokio::sync::Notify;
 use uuid::Uuid;
+use zone_notify::Notifier;
 use zone_vcs::conflict::ConflictService;
 use zone_vcs::pull_request::PrService;
 
 use crate::config::{AutoProjectConfig, Config};
 use crate::db::auto_projects;
 use crate::state::AppState;
+use crate::workers::notify::{self, NotifyEnvironment, NotifySettings};
 
 static WAKE: Notify = Notify::const_new();
 
@@ -64,22 +66,34 @@ pub fn poke_task(state: &AppState, task_id: Uuid) {
 pub struct Services {
     pub pr: PrService,
     pub conflicts: ConflictService,
+    /// The operator's notification channels, built once from the environment
+    /// rather than once per project per tick.
+    pub channels: Vec<Arc<dyn Notifier>>,
+    /// How long a delivery may take before it is given up on.
+    pub notify_timeout: std::time::Duration,
 }
 
 impl Services {
-    /// The pull request and conflict services the driver talks to GitHub through.
+    /// The pull request and conflict services the driver talks to GitHub
+    /// through, and the channels its notices go out on.
     pub fn from_config(config: &Config) -> Self {
+        let environment = NotifyEnvironment::from_process();
         Self {
             pr: PrService::configured(config.github_api_url.clone()),
             conflicts: ConflictService::new(),
+            channels: notify::channels(&environment),
+            notify_timeout: NotifySettings::resolve(&environment).timeout,
         }
     }
 
-    /// Services addressing a stand-in for GitHub, for tests.
+    /// Services addressing a stand-in for GitHub, for tests: notices reach the
+    /// updates chat only.
     pub fn standing_in_for(pr: PrService) -> Self {
         Self {
             pr,
             conflicts: ConflictService::new(),
+            channels: Vec::new(),
+            notify_timeout: std::time::Duration::from_secs(5),
         }
     }
 }

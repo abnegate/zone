@@ -124,9 +124,13 @@ impl Blueprint {
                 "`description` is over {MAX_TEXT_CHARS} characters."
             ));
         }
+        // A source alone means the source's own repository; a URL alone means
+        // a repository the runs reach without a credential; both together is
+        // what create_repository hands back: the new repository's URL and the
+        // source whose token pushes to it.
         if let Some(repository) = &self.repository {
-            if repository.source_id.is_some() && repository.url.is_some() {
-                return Err("`repository` names both a source and a URL; give one.".to_string());
+            if repository.source_id.is_none() && repository.url.is_none() {
+                return Err("`repository` names neither a source nor a URL.".to_string());
             }
             if let Some(url) = &repository.url {
                 GitService::repository_url(url)
@@ -755,11 +759,20 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_names_a_source_or_a_url_and_a_bad_url_is_refused() {
+    fn a_repository_names_a_source_a_url_or_both_and_a_bad_url_is_refused() {
+        // A created repository is named by its URL and the source whose token
+        // pushes to it: exactly what create_repository tells the model to pass.
         let mut both = sound();
         both["repository"] =
             json!({"source_id": Uuid::new_v4(), "url": "https://github.com/acme/shop"});
-        assert!(Blueprint::parse(&both).unwrap_err().contains("give one"));
+        assert!(Blueprint::parse(&both).is_ok());
+        let mut neither = sound();
+        neither["repository"] = json!({});
+        assert!(
+            Blueprint::parse(&neither)
+                .unwrap_err()
+                .contains("neither a source nor a URL")
+        );
         let mut bad = sound();
         bad["repository"] = json!({"url": "ftp://nowhere"});
         assert!(
