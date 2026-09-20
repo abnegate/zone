@@ -86,7 +86,7 @@ fi
 : "${JWT_SECRET:?set JWT_SECRET}"
 : "${ENCRYPTION_KEY:?set ENCRYPTION_KEY}"
 
-mkdir -p "$work"
+mkdir -p "$work" "$work/chat-cwd"
 pids=""
 
 stop() {
@@ -168,6 +168,7 @@ PORT="$api_port" \
 CORS_ORIGINS="http://localhost:$port,http://127.0.0.1:$port" \
 APP_BASE_URL="http://localhost:$port" \
 ARTIFACT_ROOT="$work/artifacts" \
+ZONE_CHAT_AGENT_CWD="$work/chat-cwd" \
 LITELLM_HOST="${LITELLM_HOST:-http://127.0.0.1:11434/v1}" \
 LITELLM_KEY="${LITELLM_KEY:-live-verify}" \
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}" \
