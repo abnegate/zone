@@ -139,7 +139,7 @@ test.describe('wiki and search', () => {
       page.locator('.knowledge-card', { hasText: urlTitle }),
     ).toHaveCount(0, { timeout: 30_000 });
     const deleted = sql(
-      `select count(*) from knowledge_entries where title = '${urlTitle}'`,
+      `select count(*) from knowledge_entries where title = '${urlTitle}' and is_active`,
     ).join(',');
     await shot(page, '54-url-entry-deleted');
 
