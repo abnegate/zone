@@ -82,6 +82,15 @@ describe('shared surfaces', () => {
     expect(invitations).not.toContain('.modal-close');
   });
 
+  it('keeps a gap-managed form the same distance from its footer rule as a plain one', () => {
+    const modals = read(join(styles, 'modals.css'));
+    expect(rule(modals, '.modal-actions')).toContain('margin-top: var(--ui-space-5)');
+    expect(rule(modals, '.ui-form > .modal-actions')).toContain(
+      'margin-top: calc(var(--ui-space-5) - var(--ui-field-gap))'
+    );
+    expect(read(join(kit, 'globals.css'))).not.toContain('.modal-actions');
+  });
+
   it('gives a primary link button the same ink as a primary button', () => {
     const buttons = read(join(styles, 'buttons.css'));
     expect(buttons).toMatch(/a\.btn\.btn-primary[^{]*\{[^}]*color: var\(--ui-text-inverse\)/);

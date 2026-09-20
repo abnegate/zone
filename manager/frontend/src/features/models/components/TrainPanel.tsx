@@ -33,8 +33,11 @@ type Draft = {
   reference?: Reference;
   group?: number;
   source?: string;
+  clip?: string;
   mirrored?: boolean;
 };
+
+type Clip = { key: string; name: string; summary: string };
 
 type Band = 'none' | 'weak' | 'healthy' | 'strong';
 
@@ -94,9 +97,9 @@ const REMEDIATION_OUTCOMES: Record<TrainRemediation['outcome'], string> = {
 
 let sequence = 0;
 
-function nextKey(): string {
+function nextKey(prefix = 'training-image'): string {
   sequence += 1;
-  return `training-image-${sequence}`;
+  return `${prefix}-${sequence}`;
 }
 
 function band(improvement: number): Band {
@@ -377,7 +380,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [captioning, setCaptioning] = useState(false);
   const [focusRequested, setFocusRequested] = useState(false);
   const [sampling, setSampling] = useState<string | null>(null);
-  const [sampled, setSampled] = useState<string | null>(null);
+  const [clips, setClips] = useState<Clip[]>([]);
 
   useEffect(() => {
     modelsApi
@@ -486,10 +489,10 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const handleVideos = async (files: File[]) => {
     if (busy || files.length === 0) return;
     setError(null);
-    setSampled(null);
     try {
       for (const file of files) {
         setSampling(file.name);
+        const key = nextKey('training-clip');
         const clip = await modelsApi.frames({
           filename: file.name,
           bytes_base64: await fileToBase64(file),
@@ -513,19 +516,31 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
               reading: false,
               group: offset + frame.group,
               source: file.name,
+              clip: key,
               mirrored: frame.mirrored,
             })),
           ];
         });
-        setSampled(
-          `${file.name}: ${clip.sampled} frames read at ${clip.sampled_fps.toFixed(1)}/s, ${clip.frames.length} kept`
-        );
+        setClips((current) => [
+          ...current,
+          {
+            key,
+            name: file.name,
+            summary: `${clip.sampled} frames read at ${clip.sampled_fps.toFixed(1)}/s, ${clip.frames.length} kept`,
+          },
+        ]);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not read the video');
     } finally {
       setSampling(null);
     }
+  };
+
+  const removeClip = (key: string) => {
+    if (busy) return;
+    setClips((current) => current.filter((clip) => clip.key !== key));
+    setImages((current) => current.filter((image) => image.clip !== key));
   };
 
   const handleCaption = async () => {
@@ -596,8 +611,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       });
       setResult(trained);
       setImages([]);
+      setClips([]);
       setName('');
-      setSampled(null);
       onTrained();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Training failed');
@@ -690,21 +705,40 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
               accept="video/*"
               disabled={busy || Boolean(sampling)}
               onFiles={(files) => void handleVideos(files)}
-            />
+            >
+              {(clips.length > 0 || sampling) && (
+                <ul className="train-clips" aria-label="Accepted clips">
+                  {clips.map((clip) => (
+                    <li key={clip.key} className="train-clip">
+                      <span className="train-clip-receipt">
+                        <span className="train-clip-name">{clip.name}</span>: {clip.summary}
+                      </span>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        disabled={busy}
+                        aria-label={`Remove clip ${clip.name}`}
+                        onClick={() => removeClip(clip.key)}
+                      >
+                        <CloseIcon />
+                      </Button>
+                    </li>
+                  ))}
+                  {sampling && <li className="train-clip">Reading {sampling}…</li>}
+                </ul>
+              )}
+            </DropZone>
           )}
         </div>
         {!edit && (
-          <>
-            <Checkbox
-              label="Mirror half the frames of each second"
-              helpText="More variety from one angle, applied as each clip is read. Turn it off for a subject carrying text, or one a mirror would get wrong."
-              checked={mirror}
-              disabled={busy}
-              onCheckedChange={setMirror}
-            />
-            {sampling && <p className="help-text">Reading {sampling}…</p>}
-            {sampled && <p className="help-text">{sampled}</p>}
-          </>
+          <Checkbox
+            label="Mirror half the frames of each second"
+            helpText="More variety from one angle, applied as each clip is read. Turn it off for a subject carrying text, or one a mirror would get wrong."
+            checked={mirror}
+            disabled={busy}
+            onCheckedChange={setMirror}
+          />
         )}
         {images.length > 0 && !edit && (
           <div className="train-caption">

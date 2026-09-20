@@ -8,6 +8,28 @@ const mockTrainBases = mock(() =>
   ])
 );
 const mockCaptions = mock(() => Promise.resolve({ captions: ['generated caption'] }));
+const mockFrames = mock(() =>
+  Promise.resolve({
+    sampled: 32,
+    sampled_fps: 8,
+    frames: [
+      {
+        filename: 'frame-0000.png',
+        bytes_base64: 'aaa',
+        timestamp_ms: 0,
+        mirrored: false,
+        group: 0,
+      },
+      {
+        filename: 'frame-0001.png',
+        bytes_base64: 'bbb',
+        timestamp_ms: 250,
+        mirrored: true,
+        group: 0,
+      },
+    ],
+  })
+);
 const mockTrain = mock(() =>
   Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
 );
@@ -16,6 +38,7 @@ mock.module('../../../api/models', () => ({
   modelsApi: {
     trainBases: mockTrainBases,
     captions: mockCaptions,
+    frames: mockFrames,
     train: mockTrain,
   },
 }));
@@ -28,6 +51,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   mockCaptions.mockClear();
+  mockFrames.mockClear();
   mockTrain.mockClear();
   mockTrain.mockImplementation(() =>
     Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
@@ -122,6 +146,62 @@ function deferFileReads(): {
 }
 
 describe('TrainPanel', () => {
+  it('receipts an accepted clip under the Video zone and clears its frames from there', async () => {
+    const pending = deferred<Awaited<ReturnType<typeof mockFrames>>>();
+    mockFrames.mockImplementationOnce(() => pending.promise);
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit');
+    });
+    await selectBase('FLUX.1 Schnell');
+    const field = screen.getByLabelText('Video').closest('.drop-zone-field') as HTMLElement;
+
+    fireEvent.change(screen.getByLabelText('Video'), {
+      target: { files: [new File(['clip'], 'subject.mp4', { type: 'video/mp4' })] },
+    });
+    expect(field.contains(await screen.findByText('Reading subject.mp4…'))).toBe(true);
+    expect(screen.getByLabelText('Video')).toBeDisabled();
+
+    pending.resolve({
+      sampled: 32,
+      sampled_fps: 8,
+      frames: [
+        {
+          filename: 'frame-0000.png',
+          bytes_base64: 'aaa',
+          timestamp_ms: 0,
+          mirrored: false,
+          group: 0,
+        },
+        {
+          filename: 'frame-0001.png',
+          bytes_base64: 'bbb',
+          timestamp_ms: 250,
+          mirrored: true,
+          group: 0,
+        },
+      ],
+    });
+    const receipt = await screen.findByText(/32 frames read at 8\.0\/s, 2 kept/);
+    expect(receipt).toHaveTextContent('subject.mp4: 32 frames read at 8.0/s, 2 kept');
+    expect(field.contains(receipt)).toBe(true);
+    expect(screen.queryByText('Reading subject.mp4…')).toBeNull();
+    expect(screen.getAllByRole('group', { name: /target pair/i })).toHaveLength(2);
+    const mirror = screen.getByLabelText('Mirror half the frames of each second');
+    expect(mirror.compareDocumentPosition(receipt) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+
+    const remove = screen.getByRole('button', { name: 'Remove clip subject.mp4' });
+    expect(field.contains(remove)).toBe(true);
+    fireEvent.click(remove);
+    await waitFor(() => {
+      expect(screen.queryAllByRole('group', { name: /target pair/i })).toHaveLength(0);
+    });
+    expect(screen.queryByText(/frames read at/)).toBeNull();
+    expect(screen.getByLabelText('Video').closest('.drop-zone')).toHaveTextContent(
+      'Drop a clip here, or browse'
+    );
+  });
+
   it('titles each target inside its own row instead of on the fieldset border', async () => {
     render(<TrainPanel onTrained={() => {}} />);
     await waitFor(() => {

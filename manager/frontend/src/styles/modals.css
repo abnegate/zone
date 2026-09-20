@@ -27,6 +27,10 @@
   border-top: 1px solid var(--ui-border);
 }
 
+.ui-form > .modal-actions {
+  margin-top: calc(var(--ui-space-5) - var(--ui-field-gap));
+}
+
 .details-description {
   font-size: var(--ui-text-sm);
   color: var(--ui-text-secondary);
