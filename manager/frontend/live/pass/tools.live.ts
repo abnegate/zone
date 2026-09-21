@@ -884,10 +884,10 @@ test.describe('agent tools from chat', () => {
     );
     await shot(page, '51-task-created-and-started');
     const manualRow = sql(
-      `select id || ' | ' || status || ' | ' || priority || ' | ' || is_agentic from tasks where title = 'Chat-made task ${s}'`,
+      `select id || ' | ' || status || ' | ' || coalesce(priority::text, '-') || ' | ' || is_agentic from tasks where title = 'Chat-made task ${s}'`,
     );
     const taskRow = sql(
-      `select id || ' | ' || status || ' | ' || priority || ' | ' || is_agentic from tasks where title = 'Chat-run ${s}' order by created_at desc limit 1`,
+      `select id || ' | ' || status || ' | ' || coalesce(priority::text, '-') || ' | ' || is_agentic from tasks where title = 'Chat-run ${s}' order by created_at desc limit 1`,
     );
     const taskId = taskRow[0]?.split(' | ')[0] ?? '';
     await expect
