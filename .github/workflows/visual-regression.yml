@@ -64,6 +64,8 @@ jobs:
           mkdir -p screenshots-pr
           PLAYWRIGHT_REUSE_SERVER=true PLAYWRIGHT_PORT=4173 bunx playwright test e2e/screenshots.e2e.ts --project=chromium
           cp screenshots/*.png screenshots-pr/
+        env:
+          RUN_SCREENSHOTS: 'true'
 
       - name: Download baseline screenshots
         uses: dawidd6/action-download-artifact@d63b86af1b34672e53c440b1b83979861906bad7 # v24
@@ -259,6 +261,8 @@ jobs:
 
       - name: Take baseline screenshots
         run: PLAYWRIGHT_REUSE_SERVER=true PLAYWRIGHT_PORT=4173 bunx playwright test e2e/screenshots.e2e.ts --project=chromium
+        env:
+          RUN_SCREENSHOTS: 'true'
 
       - name: Upload baseline screenshots
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
