@@ -8,7 +8,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -256,10 +256,15 @@ async fn a_role_change_is_written_to_the_audit_log() {
         .await
         .assert_status(StatusCode::OK);
 
-    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let from = (Utc::now() - Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let to = (Utc::now() + Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
     let response = client
         .get_auth(
-            &format!("/api/organizations/{org}/audit-logs?start_date={today}&end_date={today}"),
+            &format!("/api/organizations/{org}/audit-logs?start_date={from}&end_date={to}"),
             &owner.token,
         )
         .await;

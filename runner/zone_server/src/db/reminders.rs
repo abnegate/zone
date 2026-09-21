@@ -629,7 +629,7 @@ pub async fn record_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, Timelike};
     use sqlx::postgres::PgPoolOptions;
 
     /// Validation answers before the pool is touched, so a pool nothing listens
@@ -657,9 +657,32 @@ mod tests {
         }
     }
 
+    /// An offset that puts the present at midday, so a due_at a few minutes
+    /// back shares its date and the refusal names a bare time whatever hour
+    /// the suite runs at.
+    fn midday_offset() -> FixedOffset {
+        FixedOffset::east_opt((12 - Utc::now().hour() as i32) * 3600)
+            .expect("twelve hours either side of UTC is an offset")
+    }
+
+    #[test]
+    fn the_refusal_drops_the_date_only_when_both_instants_share_one() {
+        let due = DateTime::parse_from_rfc3339("2026-09-21T23:57:32+12:00").unwrap();
+        let same_day = "2026-09-21T11:59:32Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            past_due(due, same_day),
+            "due_at 23:57:32+12:00 is in the past; now is 23:59:32+12:00"
+        );
+        let next_day = "2026-09-21T12:03:32Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            past_due(due, next_day),
+            "due_at 2026-09-21T23:57:32+12:00 is in the past; now is 2026-09-22T00:03:32+12:00"
+        );
+    }
+
     #[tokio::test]
     async fn a_past_due_at_is_named_against_now_in_its_own_offset() {
-        let offset = FixedOffset::east_opt(12 * 3600).unwrap();
+        let offset = midday_offset();
         let due = (Utc::now() - Duration::minutes(6)).with_timezone(&offset);
         let error = create(
             &unreachable_pool(),
@@ -680,7 +703,7 @@ mod tests {
             "the refusal names the time that was asked for: {message}"
         );
         assert!(
-            message.ends_with("+12:00"),
+            message.ends_with(&offset.to_string()),
             "now is given in the caller's offset: {message}"
         );
         assert!(
