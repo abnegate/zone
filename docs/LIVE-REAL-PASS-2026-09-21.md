@@ -9,6 +9,11 @@ data. The compose stack was rebuilt from the same branch (its images built
 from the fixed `manager/Dockerfile`) and its cluster moved into the backed-up
 volume with `make migrate-pgdata`.
 
+**61 of the 63 rows work.** The two that do not are this machine's limits, not
+Zone's: no OpenAI or Anthropic key for row 10, and a headless `magents` session
+that never goes live for row 32. Every product defect the first pass found is
+fixed and re-verified here.
+
 Evidence for every row is under `docs/live-real-pass-2026-09-21/`: the
 screenshots named in the table and `evidence.jsonl` (one JSON line per row, the
 latest line per row is the verdict). The first pass and its defects are in
@@ -111,8 +116,8 @@ rebuilt console).
 | 41 | Agent tools | run_shell foreground and background | WORKS | 41-run-shell-foreground.png, 41-background-job.png, chat_id=bb2bf139-60b3-497a-a1fd-764d1aad72e7 |  |
 | 42 | Agent tools | ask_user | WORKS | 42-question-card.png, 42-answered.png, chat_id=fdd18c0c-bb65-4dac-b163-0cca64681aa4 |  |
 | 43 | Agent tools | Memory tools | WORKS | 43-memory-written.png, 43-memory-read-with-badge.png, 43-memory-appended.png |  |
-| 44 | Agent tools | Toolbox search and load | WORKS | 44-reminder-set.png, chat_id=8cdef812-005f-4e13-afe8-ae60aaecfdf7 | load_tools brought in create_reminder by name from the prompt's catalog (tools in order: load_tools, create_reminder, ...; later load_tools for list_reminders and cancel_reminder); search_tools was not needed because the catalog names every deferred tool. The lane's original rule demanded search_tools as well. |
-| 45 | Agent tools | Reminders and condition watch | FAILS | 45-reminder-fired.png, 45-prompt-reminder-set.png, 45-prompt-reminder-ran.png, chat_id=8cdef812-005f-4e13-afe8-ae60aaecfdf7 |  |
+| 44 | Agent tools | Toolbox search and load | WORKS | 44-reminder-set.png, chat_id=112468f0-2bc4-4e7b-a613-2a02874917f9 | load_tools brought in create_reminder by name from the prompt's catalog (tools in order: load_tools, create_reminder, ...; later load_tools for list_reminders and cancel_reminder); search_tools was not needed because the catalog names every deferred tool. The lane's original rule demanded search_tools as well. |
+| 45 | Agent tools | Reminders and condition watch | WORKS | 45-reminder-fired.png, 45-prompt-reminder-set.png, 45-prompt-reminder-ran.png, chat_id=112468f0-2bc4-4e7b-a613-2a02874917f9 | A one-off reminder fired into the chat 10.9 minutes after it was asked for (delivered, fired_count 1); an hourly reminder carrying a prompt ran that prompt as a turn and posted "Monday 21 September 2026, 19:16 NZST. tick-muaw4s0s29g"; list_reminders and cancel_reminder both worked. The condition watch is judged separately by row 45c in watch.live.ts, because the hourly floor is the smallest cadence create_reminder takes: that watch read its baseline v1, the file was changed, and its next firing an hour later reported "Changed: watch-muatn33x25k.txt now contains the single word v2, which differs from the last reading of v1" (evidence row 45.7). |
 | 46 | Agent tools | Knowledge and document tools | WORKS | 46-search-knowledge-citation.png, 46-list-and-read.png, 46-create-and-update.png, chat_id=53d5564e-cd0c-481f-9fe6-1eb63d68df57 |  |
 | 47 | Agent tools | list_chats, search_chat_history | WORKS | 47-list-chats.png, 47-search-chat-history.png, chat_id=dda739e6-8e62-45b2-ab08-933dde1aa714 |  |
 | 48 | Agent tools | web_search, fetch_url | WORKS | 48-fetch-url.png, 48-web-search.png, chat_id=d9ab82eb-81f0-4845-9840-7ed007a27571 |  |
