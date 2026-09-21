@@ -255,17 +255,24 @@ async fn sample(config: &Config, clip: &Path, stills: &Path, fps: f64) -> Result
     Ok(())
 }
 
+/// A setting read as the name of something to run: trimmed, present, and free
+/// of the control characters no program name carries.
+fn program_name(configured: &str) -> Option<String> {
+    let name = configured.trim();
+    let named = !name.is_empty() && !name.chars().any(char::is_control);
+    named.then(|| name.to_string())
+}
+
 /// The decoder the operator configured, as something this process may execute:
 /// a bare name for `PATH` to resolve, or a path to a file that is there. A
 /// setting shaped like neither is a misconfiguration, not a command.
 fn program(configured: &str) -> Option<String> {
-    let name = configured.trim();
-    if name.is_empty() {
+    let name = program_name(configured)?;
+    let spelled_as_path = name.contains('/') || name.contains('\\');
+    if spelled_as_path && !Path::new(&name).is_file() {
         return None;
     }
-    let spelled_as_path = name.contains('/') || name.contains('\\');
-    let usable = !spelled_as_path || Path::new(name).is_file();
-    usable.then(|| name.to_string())
+    Some(name)
 }
 
 fn measure(stills: &Path, fps: f64) -> Result<Vec<Measured>, TrainError> {
@@ -715,6 +722,7 @@ mod tests {
         for refused in [
             "",
             "   ",
+            "ffmpeg\nrm -rf /",
             "bin/ffmpeg",
             "../../usr/bin/ffmpeg",
             "..\\ffmpeg.exe",

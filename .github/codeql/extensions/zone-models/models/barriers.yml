@@ -26,6 +26,7 @@ extensions:
       - ["zone_comfy::inventory::path_component", "ReturnValue", "path-injection", "manual"]
       - ["zone_comfy::inventory::required_path", "ReturnValue", "path-injection", "manual"]
       - ["zone_comfy::video::program", "ReturnValue", "command-injection", "manual"]
+      - ["zone_comfy::video::program_name", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::artifacts::safe_filename", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::artifacts::confine_beneath", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::artifacts::chat_directory", "ReturnValue", "path-injection", "manual"]
