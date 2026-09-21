@@ -376,7 +376,10 @@ test.describe('agent tools from chat', () => {
     const setAt = Date.now();
     const setReply = await ask(
       page,
-      `Set a reminder for me two minutes from now that says: stretch ${s}`,
+      // Ten minutes, not two: a turn on a 12 tokens/s model can take longer
+      // than two minutes to reach the tool call, and the server rightly
+      // refuses a due time that has already passed by then.
+      `Set a reminder for me ten minutes from now that says: stretch ${s}`,
       { replies: 1, timeout: 600_000 },
     );
     let tools = toolNames(chatId);
@@ -388,7 +391,7 @@ test.describe('agent tools from chat', () => {
           sql(
             `select count(*) from reminders where content like '%stretch ${s}%' and status = 'delivered'`,
           ).join(','),
-        { timeout: 420_000, intervals: [5_000] },
+        { timeout: 1_500_000, intervals: [5_000] },
       )
       .toBe('1')
       .then(() => Date.now() - setAt)
@@ -399,7 +402,7 @@ test.describe('agent tools from chat', () => {
 
     await ask(
       page,
-      `Every hour, starting two minutes from now, run this instruction for me: report the current date and time and the word tick-${s}.`,
+      `Every hour, starting ten minutes from now, run this instruction for me (put the instruction in the reminder's prompt so each firing carries it out): report the current date and time and the word tick-${s}.`,
       { replies: 2, timeout: 600_000 },
     );
     await shot(page, '45-prompt-reminder-set');
