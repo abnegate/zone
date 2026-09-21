@@ -47,6 +47,9 @@ pub struct InventoryItem {
 }
 
 pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
+    let Some(models_dir) = models_root(models_dir) else {
+        return Vec::new();
+    };
     let mut items = Vec::new();
     for (directory, kind) in SCAN_DIRECTORIES {
         let folder = models_dir.join(directory);
@@ -67,7 +70,7 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
             if sanitize_weight_filename(filename).is_err() {
                 continue;
             }
-            if *kind == "lora" && publication_pending(models_dir, filename) {
+            if *kind == "lora" && publication_pending(&models_dir, filename) {
                 continue;
             }
             let metadata = fs::metadata(&path).ok();
@@ -80,10 +83,10 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
             let Some(recipe) = recipe else {
                 continue;
             };
-            if *kind == "lora" && publication_pending(models_dir, filename) {
+            if *kind == "lora" && publication_pending(&models_dir, filename) {
                 continue;
             }
-            let missing = missing_required(models_dir, &recipe.required_files);
+            let missing = missing_required(&models_dir, &recipe.required_files);
             let mut required: Vec<String> = recipe
                 .required_files
                 .iter()
@@ -192,14 +195,33 @@ fn publication_pending(models_dir: &Path, filename: &str) -> bool {
 fn missing_required(models_dir: &Path, required: &[RequiredFile]) -> Vec<String> {
     required
         .iter()
-        .filter(|file| {
-            !models_dir
-                .join(&file.directory)
-                .join(&file.filename)
-                .is_file()
-        })
+        .filter(|file| !required_path(models_dir, file).is_some_and(|path| path.is_file()))
         .map(|file| file.filename.clone())
         .collect()
+}
+
+/// The models root the operator configured, resolved to the real directory it
+/// names. A setting that points at anything else has nothing to scan.
+fn models_root(models_dir: &Path) -> Option<PathBuf> {
+    let root = fs::canonicalize(models_dir).ok()?;
+    root.is_dir().then_some(root)
+}
+
+/// One segment of a catalog-supplied path. A segment that could steer the join
+/// out of the models root is not a segment.
+fn path_component(value: &str) -> Option<String> {
+    let usable = !value.is_empty()
+        && value.len() <= 256
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains("..");
+    usable.then(|| value.to_string())
+}
+
+fn required_path(models_dir: &Path, file: &RequiredFile) -> Option<PathBuf> {
+    let directory = path_component(&file.directory)?;
+    let filename = path_component(&file.filename)?;
+    Some(models_dir.join(directory).join(filename))
 }
 
 fn inventory_label(recipe: &Recipe, filename: &str) -> String {
@@ -383,6 +405,51 @@ mod tests {
         .unwrap();
 
         assert!(scan(&root, &RecipeCatalog::packaged().unwrap()).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_required_file_reached_through_a_traversal_is_reported_missing() {
+        let root = temp_models();
+        fs::write(root.join("vae/base.safetensors"), b"vae").unwrap();
+
+        let named = RequiredFile {
+            filename: "base.safetensors".into(),
+            directory: "vae".into(),
+        };
+        assert!(
+            missing_required(&root, std::slice::from_ref(&named)).is_empty(),
+            "the file sits exactly where the catalog names it"
+        );
+
+        let traversed = RequiredFile {
+            filename: "base.safetensors".into(),
+            directory: "loras/../vae".into(),
+        };
+        assert_eq!(
+            missing_required(&root, std::slice::from_ref(&traversed)),
+            vec!["base.safetensors".to_string()],
+            "a required file may only be named as a segment of the models root"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_models_root_that_is_not_a_directory_has_nothing_to_scan() {
+        let root = temp_models();
+        let file = root.join("loras/not-a-root");
+        fs::write(&file, b"weight").unwrap();
+
+        assert_eq!(models_root(&root), Some(fs::canonicalize(&root).unwrap()));
+        assert_eq!(models_root(&file), None, "a file is not a models root");
+        assert_eq!(
+            models_root(&root.join("absent")),
+            None,
+            "a root that is not there is not a models root"
+        );
+        assert!(scan(&file, &RecipeCatalog::packaged().unwrap()).is_empty());
+
         let _ = fs::remove_dir_all(root);
     }
 

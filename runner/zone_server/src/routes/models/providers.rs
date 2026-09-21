@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use reqwest::Client;
+use reqwest::{Client, Url};
 use scraper::{Html, Selector};
 use std::time::Duration;
 
@@ -1160,13 +1160,48 @@ impl HuggingFaceProvider {
     }
 }
 
-async fn fetch_huggingface_adapter_page(
+/// Check a catalog request built from `catalog_url` and hand back the URL to
+/// request, so only a URL still on the configured catalog's own origin and
+/// path is sent.
+///
+/// `catalog_url` is operator configuration (`HUGGINGFACE_MODELS_URL`), which a
+/// self-hosted Zone points at a mirror on its own network, so there is no
+/// public-host rule here. What is checked is that the query appended to it did
+/// not carry the request somewhere else.
+fn catalog_request_url(catalog_url: &str, request_url: &str) -> Result<Url, ProviderError> {
+    let invalid = || {
+        ProviderError::Unavailable(format!(
+            "Model catalog URL is not a usable HTTP endpoint: {catalog_url}"
+        ))
+    };
+    let catalog = Url::parse(catalog_url).map_err(|_| invalid())?;
+    let request = Url::parse(request_url).map_err(|_| invalid())?;
+
+    if !matches!(request.scheme(), "http" | "https") {
+        return Err(invalid());
+    }
+    if !request.username().is_empty() || request.password().is_some() {
+        return Err(invalid());
+    }
+    if request.scheme() != catalog.scheme()
+        || request.host_str() != catalog.host_str()
+        || request.port_or_known_default() != catalog.port_or_known_default()
+        || request.path() != catalog.path()
+    {
+        return Err(ProviderError::Unavailable(format!(
+            "Model catalog request left the configured catalog: {catalog_url}"
+        )));
+    }
+
+    Ok(request)
+}
+
+fn huggingface_adapter_page_url(
     catalog_url: &str,
-    client: &Client,
     query: Option<&str>,
     base: &str,
     limit: usize,
-) -> Result<Vec<ModelResponse>, ProviderError> {
+) -> String {
     let mut url = format!(
         "{catalog_url}?filter={}&sort=downloads&direction=-1&limit={limit}",
         urlencoding::encode(&format!("base_model:adapter:{base}"))
@@ -1185,10 +1220,24 @@ async fn fetch_huggingface_adapter_page(
         url.push_str("&expand%5B%5D=");
         url.push_str(field);
     }
-    if let Some(q) = query.map(str::trim).filter(|value| !value.is_empty()) {
-        url.push_str(&format!("&search={}", urlencoding::encode(q)));
+    if let Some(search) = query.map(str::trim).filter(|value| !value.is_empty()) {
+        url.push_str(&format!("&search={}", urlencoding::encode(search)));
     }
-    let response = client.get(&url).send().await?;
+    url
+}
+
+async fn fetch_huggingface_adapter_page(
+    catalog_url: &str,
+    client: &Client,
+    query: Option<&str>,
+    base: &str,
+    limit: usize,
+) -> Result<Vec<ModelResponse>, ProviderError> {
+    let url = huggingface_adapter_page_url(catalog_url, query, base, limit);
+    let response = client
+        .get(catalog_request_url(catalog_url, &url)?)
+        .send()
+        .await?;
     if !response.status().is_success() {
         return Err(ProviderError::Unavailable(format!(
             "HuggingFace API returned status: {}",
@@ -3926,5 +3975,68 @@ mod tests {
         assert_eq!(format_context_tokens(262144), "256K");
         assert_eq!(format_context_tokens(1048576), "1M");
         assert_eq!(format_context_tokens(128000), "128K");
+    }
+
+    #[test]
+    fn the_configured_catalog_is_reachable_wherever_the_operator_put_it() {
+        for catalog_url in [
+            DEFAULT_HUGGINGFACE_MODELS_URL,
+            "http://127.0.0.1:8080/api/models",
+            "http://catalog.test/huggingface",
+            "http://mirror.internal:9000/api/models",
+        ] {
+            let url = huggingface_adapter_page_url(catalog_url, Some("qwen"), "meta/llama-3", 20);
+            let checked = catalog_request_url(catalog_url, &url)
+                .unwrap_or_else(|error| panic!("{catalog_url} must stay reachable: {error}"));
+            assert_eq!(checked.as_str(), url);
+        }
+    }
+
+    #[test]
+    fn a_base_model_cannot_carry_the_request_to_another_host() {
+        let catalog_url = DEFAULT_HUGGINGFACE_MODELS_URL;
+        for base in [
+            "meta/llama-3",
+            "../../../etc/passwd",
+            "x@evil.example/models",
+            "x#@evil.example/models",
+            "x?filter=y",
+        ] {
+            let url = huggingface_adapter_page_url(catalog_url, None, base, 20);
+            let checked = catalog_request_url(catalog_url, &url)
+                .unwrap_or_else(|error| panic!("{base} must not break the request: {error}"));
+            assert_eq!(checked.host_str(), Some("huggingface.co"));
+            assert_eq!(checked.path(), "/api/models");
+        }
+    }
+
+    #[test]
+    fn a_request_that_leaves_the_catalog_is_refused() {
+        let catalog_url = DEFAULT_HUGGINGFACE_MODELS_URL;
+        for request_url in [
+            "https://evil.example/api/models?filter=gguf",
+            "https://huggingface.co.evil.example/api/models",
+            "https://huggingface.co/api/other?filter=gguf",
+            "http://huggingface.co/api/models",
+            "https://user:pass@huggingface.co/api/models",
+            "file:///etc/passwd",
+            "/api/models?filter=gguf",
+        ] {
+            assert!(
+                catalog_request_url(catalog_url, request_url).is_err(),
+                "{request_url} is not a request to the configured catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn a_catalog_url_that_is_not_an_http_endpoint_is_refused() {
+        for catalog_url in ["/api/models", "file:///etc/passwd", "not a url"] {
+            let url = huggingface_adapter_page_url(catalog_url, None, "meta/llama-3", 20);
+            assert!(
+                catalog_request_url(catalog_url, &url).is_err(),
+                "{catalog_url} is not a catalog endpoint"
+            );
+        }
     }
 }

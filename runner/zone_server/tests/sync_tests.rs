@@ -357,11 +357,11 @@ async fn test_github_webhook_signature_verification() {
         "token": "ghp_test123"
     });
 
-    let webhook_secret = "test-webhook-secret";
+    let webhook_secret = Uuid::new_v4().to_string();
     let encryption_key =
         crypto::derive_key(state.config().encryption_key()).expect("Failed to derive key");
     let encrypted_secret =
-        crypto::encrypt(&encryption_key, webhook_secret).expect("Failed to encrypt");
+        crypto::encrypt(&encryption_key, &webhook_secret).expect("Failed to encrypt");
 
     let sync_config_row = sync_config::create_sync_config(
         state.db(),
@@ -451,11 +451,11 @@ async fn test_linear_webhook_signature_verification() {
         "team_id": "TEAM-123"
     });
 
-    let webhook_secret = "test-webhook-secret";
+    let webhook_secret = Uuid::new_v4().to_string();
     let encryption_key =
         crypto::derive_key(state.config().encryption_key()).expect("Failed to derive key");
     let encrypted_secret =
-        crypto::encrypt(&encryption_key, webhook_secret).expect("Failed to encrypt");
+        crypto::encrypt(&encryption_key, &webhook_secret).expect("Failed to encrypt");
 
     let sync_config_row = sync_config::create_sync_config(
         state.db(),

@@ -34,11 +34,7 @@ impl ArtifactStore {
         let extension = safe_extension(extension)?;
         let artifact_id = Uuid::new_v4();
         let filename = format!("{artifact_id}.{extension}");
-        let directory = self
-            .root
-            .join(uuid_component(workspace_id)?)
-            .join(uuid_component(chat_id)?)
-            .join(uuid_component(owner_id)?);
+        let directory = owner_directory(&self.root, workspace_id, chat_id, owner_id)?;
         fs::create_dir_all(&directory).await?;
         fs::write(directory.join(&filename), bytes).await?;
         Ok(format!(
@@ -65,28 +61,20 @@ impl ArtifactStore {
         owner_id: Uuid,
         filename: &str,
     ) -> Result<Artifact, ArtifactError> {
-        if !safe_filename(filename) {
-            return Err(ArtifactError::InvalidPath);
-        }
-        let candidate = self
-            .root
-            .join(uuid_component(workspace_id)?)
-            .join(uuid_component(chat_id)?)
-            .join(uuid_component(owner_id)?)
-            .join(filename);
-        ensure_lexically_beneath(&self.root, &candidate)?;
+        let filename = safe_filename(filename)?;
+        let candidate = confine_beneath(
+            &self.root,
+            owner_directory(&self.root, workspace_id, chat_id, owner_id)?.join(filename),
+        )?;
         let root = fs::canonicalize(&self.root).await?;
-        let canonical = fs::canonicalize(candidate).await?;
-        if !canonical.starts_with(root) {
-            return Err(ArtifactError::InvalidPath);
-        }
+        let canonical = confine_beneath(&root, fs::canonicalize(candidate).await?)?;
         let file = fs::File::open(canonical).await?;
         let length = file.metadata().await?.len();
         Ok(Artifact { file, length })
     }
 
     pub async fn cleanup_chat(&self, workspace_id: Uuid, chat_id: Uuid) {
-        let Some(path) = self.safe_chat_dir(workspace_id, chat_id) else {
+        let Ok(path) = chat_directory(&self.root, workspace_id, chat_id) else {
             return;
         };
         if let Err(error) = fs::remove_dir_all(path).await
@@ -101,7 +89,7 @@ impl ArtifactStore {
     }
 
     pub async fn cleanup_owner(&self, workspace_id: Uuid, chat_id: Uuid, owner_id: Uuid) {
-        let Some(path) = self.safe_owner_dir(workspace_id, chat_id, owner_id) else {
+        let Ok(path) = owner_directory(&self.root, workspace_id, chat_id, owner_id) else {
             return;
         };
         if let Err(error) = fs::remove_dir_all(path).await
@@ -113,23 +101,6 @@ impl ArtifactStore {
                 error
             );
         }
-    }
-
-    fn safe_chat_dir(&self, workspace_id: Uuid, chat_id: Uuid) -> Option<PathBuf> {
-        let path = self
-            .root
-            .join(uuid_component(workspace_id).ok()?)
-            .join(uuid_component(chat_id).ok()?);
-        ensure_lexically_beneath(&self.root, &path).ok()?;
-        Some(path)
-    }
-
-    fn safe_owner_dir(&self, workspace_id: Uuid, chat_id: Uuid, owner_id: Uuid) -> Option<PathBuf> {
-        let path = self
-            .safe_chat_dir(workspace_id, chat_id)?
-            .join(uuid_component(owner_id).ok()?);
-        ensure_lexically_beneath(&self.root, &path).ok()?;
-        Some(path)
     }
 }
 
@@ -180,29 +151,56 @@ fn safe_extension(extension: &str) -> Result<&str, ArtifactError> {
     }
 }
 
-fn safe_filename(filename: &str) -> bool {
-    !filename.is_empty()
+fn safe_filename(filename: &str) -> Result<&str, ArtifactError> {
+    let accepted = !filename.is_empty()
         && filename.len() <= 128
         && Path::new(filename)
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
         && filename
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
-}
-
-fn ensure_lexically_beneath(root: &Path, candidate: &Path) -> Result<(), ArtifactError> {
-    if candidate.starts_with(root)
-        && candidate.strip_prefix(root).is_ok_and(|relative| {
-            relative
-                .components()
-                .all(|c| matches!(c, Component::Normal(_)))
-        })
-    {
-        Ok(())
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'));
+    if accepted {
+        Ok(filename)
     } else {
         Err(ArtifactError::InvalidPath)
     }
+}
+
+fn confine_beneath(root: &Path, candidate: PathBuf) -> Result<PathBuf, ArtifactError> {
+    let relative = candidate
+        .strip_prefix(root)
+        .map_err(|_| ArtifactError::InvalidPath)?;
+    if relative
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
+        Ok(candidate)
+    } else {
+        Err(ArtifactError::InvalidPath)
+    }
+}
+
+fn chat_directory(
+    root: &Path,
+    workspace_id: Uuid,
+    chat_id: Uuid,
+) -> Result<PathBuf, ArtifactError> {
+    confine_beneath(
+        root,
+        root.join(uuid_component(workspace_id)?)
+            .join(uuid_component(chat_id)?),
+    )
+}
+
+fn owner_directory(
+    root: &Path,
+    workspace_id: Uuid,
+    chat_id: Uuid,
+    owner_id: Uuid,
+) -> Result<PathBuf, ArtifactError> {
+    let chat = chat_directory(root, workspace_id, chat_id)?;
+    confine_beneath(root, chat.join(uuid_component(owner_id)?))
 }
 
 #[cfg(test)]
@@ -211,10 +209,13 @@ mod tests {
 
     #[test]
     fn traversal_and_unsafe_extensions_are_rejected() {
-        assert!(!safe_filename("../secret.png"));
-        assert!(!safe_filename("nested/file.png"));
-        assert!(!safe_filename("%2e%2e.png"));
-        assert!(safe_filename("4f20_image-1.png"));
+        assert!(safe_filename("../secret.png").is_err());
+        assert!(safe_filename("nested/file.png").is_err());
+        assert!(safe_filename("%2e%2e.png").is_err());
+        assert_eq!(
+            safe_filename("4f20_image-1.png").unwrap(),
+            "4f20_image-1.png"
+        );
         assert!(safe_extension("../png").is_err());
         assert!(safe_extension("svg").is_err());
         assert_eq!(safe_extension("webm").unwrap(), "webm");
@@ -248,9 +249,33 @@ mod tests {
     }
 
     #[test]
-    fn candidate_must_remain_beneath_root() {
-        assert!(ensure_lexically_beneath(Path::new("/tmp/a"), Path::new("/tmp/a/x/y")).is_ok());
-        assert!(ensure_lexically_beneath(Path::new("/tmp/a"), Path::new("/tmp/b/y")).is_err());
+    fn confinement_returns_the_checked_path() {
+        let root = Path::new("/tmp/a");
+        assert_eq!(
+            confine_beneath(root, PathBuf::from("/tmp/a/x/y")).unwrap(),
+            PathBuf::from("/tmp/a/x/y")
+        );
+        assert!(confine_beneath(root, PathBuf::from("/tmp/b/y")).is_err());
+        assert!(confine_beneath(root, PathBuf::from("/tmp/a/../b")).is_err());
+        assert!(confine_beneath(root, PathBuf::from("/tmp")).is_err());
+    }
+
+    #[test]
+    fn directories_are_confined_to_the_artifact_root() {
+        let root = Path::new("/tmp/artifacts");
+        let workspace = Uuid::new_v4();
+        let chat = Uuid::new_v4();
+        let owner = Uuid::new_v4();
+        assert_eq!(
+            chat_directory(root, workspace, chat).unwrap(),
+            root.join(workspace.to_string()).join(chat.to_string())
+        );
+        assert_eq!(
+            owner_directory(root, workspace, chat, owner).unwrap(),
+            root.join(workspace.to_string())
+                .join(chat.to_string())
+                .join(owner.to_string())
+        );
     }
 
     #[tokio::test]

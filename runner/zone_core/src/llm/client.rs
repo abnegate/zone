@@ -135,6 +135,42 @@ pub struct LlmClient {
     reasoning: Option<(String, crate::llm::Effort)>,
 }
 
+/// Check an outbound request URL and hand back the URL to request, so the
+/// caller can only send the value that was checked.
+///
+/// No private-network rule here on purpose. Every caller passes an
+/// operator-configured host, and a self-hosted Zone points at loopback,
+/// a LAN address or a compose service name. The check belongs where a
+/// tenant-supplied host is first accepted, against that value.
+fn validate_outbound_url(url: &str) -> Result<Url, LlmError> {
+    let parsed = Url::parse(url).map_err(|_| {
+        LlmError::InvalidConfig("LLM base_url must be a valid absolute URL".to_string())
+    })?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(LlmError::InvalidConfig(
+                "LLM base_url must use http or https".to_string(),
+            ));
+        }
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(LlmError::InvalidConfig(
+            "LLM base_url must not include userinfo".to_string(),
+        ));
+    }
+
+    if parsed.host_str().is_none() {
+        return Err(LlmError::InvalidConfig(
+            "LLM base_url must include a host".to_string(),
+        ));
+    }
+
+    Ok(parsed)
+}
+
 impl LlmClient {
     /// Create a new LLM client
     pub fn new(config: LlmConfig) -> Self {
@@ -199,45 +235,12 @@ impl LlmClient {
         Ok(body)
     }
 
-    fn validate_outbound_url(&self, url: &str) -> Result<(), LlmError> {
-        let parsed = Url::parse(url).map_err(|_| {
-            LlmError::InvalidConfig("LLM base_url must be a valid absolute URL".to_string())
-        })?;
-
-        match parsed.scheme() {
-            "http" | "https" => {}
-            _ => {
-                return Err(LlmError::InvalidConfig(
-                    "LLM base_url must use http or https".to_string(),
-                ));
-            }
-        }
-
-        if !parsed.username().is_empty() || parsed.password().is_some() {
-            return Err(LlmError::InvalidConfig(
-                "LLM base_url must not include userinfo".to_string(),
-            ));
-        }
-
-        if parsed.host_str().is_none() {
-            return Err(LlmError::InvalidConfig(
-                "LLM base_url must include a host".to_string(),
-            ));
-        }
-
-        // No private-network rule here on purpose. Every caller passes an
-        // operator-configured host, and a self-hosted Zone points at loopback,
-        // a LAN address or a compose service name. The check belongs where a
-        // tenant-supplied host is first accepted, against that value.
-        Ok(())
-    }
-
     async fn send(
         &self,
         url: &str,
         body: &serde_json::Value,
     ) -> Result<reqwest::Response, LlmError> {
-        self.validate_outbound_url(url)?;
+        let url = validate_outbound_url(url)?;
         Ok(self
             .client
             .post(url)
@@ -744,27 +747,14 @@ mod tests {
         assert!(compact.get("reasoning_effort").is_none());
     }
 
-    fn client_for(base_url: &str) -> LlmClient {
-        LlmClient::new(LlmConfig {
-            base_url: base_url.to_string(),
-            ..LlmConfig::default()
-        })
-    }
-
     #[test]
     fn a_public_https_host_is_accepted() {
-        assert!(
-            client_for("https://api.openai.com/v1")
-                .validate_outbound_url("https://api.openai.com/v1/chat/completions")
-                .is_ok()
-        );
+        assert!(validate_outbound_url("https://api.openai.com/v1/chat/completions").is_ok());
     }
 
     #[test]
     fn a_non_http_scheme_is_refused() {
-        let error = client_for("file:///etc/passwd")
-            .validate_outbound_url("file:///etc/passwd")
-            .unwrap_err();
+        let error = validate_outbound_url("file:///etc/passwd").unwrap_err();
         assert!(
             matches!(&error, LlmError::InvalidConfig(message) if message.contains("http or https")),
             "the refusal has to name the scheme rule: {error}"
@@ -773,9 +763,7 @@ mod tests {
 
     #[test]
     fn credentials_in_the_url_are_refused() {
-        let error = client_for("https://user:pass@api.openai.com/v1")
-            .validate_outbound_url("https://user:pass@api.openai.com/v1")
-            .unwrap_err();
+        let error = validate_outbound_url("https://user:pass@api.openai.com/v1").unwrap_err();
         assert!(
             matches!(&error, LlmError::InvalidConfig(message) if message.contains("userinfo")),
             "the refusal has to name the userinfo rule: {error}"
@@ -793,7 +781,7 @@ mod tests {
             "http://[::1]:4000",
         ] {
             assert!(
-                client_for(base_url).validate_outbound_url(base_url).is_ok(),
+                validate_outbound_url(base_url).is_ok(),
                 "{base_url} is a supported way to reach a self-hosted model server"
             );
         }
@@ -801,12 +789,20 @@ mod tests {
 
     #[test]
     fn a_relative_url_is_refused() {
-        let error = client_for("/v1/chat/completions")
-            .validate_outbound_url("/v1/chat/completions")
-            .unwrap_err();
+        let error = validate_outbound_url("/v1/chat/completions").unwrap_err();
         assert!(
             matches!(&error, LlmError::InvalidConfig(message) if message.contains("absolute URL")),
             "the refusal has to name the absolute-URL rule: {error}"
         );
+    }
+
+    /// The request has to be made against the URL the guard returned, not the
+    /// string it was handed, or the check and the send can disagree.
+    #[test]
+    fn the_checked_url_is_the_one_handed_back() {
+        let checked = validate_outbound_url("http://litellm:4000/v1/chat/completions")
+            .expect("a compose service host is reachable");
+        assert_eq!(checked.as_str(), "http://litellm:4000/v1/chat/completions");
+        assert_eq!(checked.host_str(), Some("litellm"));
     }
 }

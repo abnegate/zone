@@ -22,6 +22,7 @@ use axum::{
 };
 use once_cell::sync::Lazy;
 use serde::Serialize;
+use std::path::{Component, PathBuf};
 use std::time::Duration;
 
 use crate::auth::AuthUser;
@@ -699,16 +700,45 @@ fn delete_comfy_weight(state: &AppState, name: &str) -> bool {
     let Some(item) = zone_comfy::inventory::find(&items, &filename) else {
         return false;
     };
-    let path = state
-        .config()
-        .comfyui
-        .models_dir
-        .join(&item.directory)
-        .join(&item.filename);
-    let sidecar = path.with_file_name(format!("{}.zone.json", item.filename));
+    let Some(path) = confined_weight_path(
+        &state.config().comfyui.models_dir,
+        &item.directory,
+        &item.filename,
+    ) else {
+        return false;
+    };
+    let Some(sidecar) = confined_sidecar_path(&path, &item.filename) else {
+        return false;
+    };
     let removed = std::fs::remove_file(&path).is_ok();
     let _ = std::fs::remove_file(sidecar);
     removed
+}
+
+fn single_component(value: &str) -> Option<&str> {
+    let mut components = std::path::Path::new(value).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Some(value),
+        _ => None,
+    }
+}
+
+/// The models directory is operator configuration and the two names come from a directory
+/// scan, so each must resolve to exactly one path component beneath it.
+fn confined_weight_path(
+    models_dir: &std::path::Path,
+    directory: &str,
+    filename: &str,
+) -> Option<PathBuf> {
+    Some(
+        models_dir
+            .join(single_component(directory)?)
+            .join(single_component(filename)?),
+    )
+}
+
+fn confined_sidecar_path(weight: &std::path::Path, filename: &str) -> Option<PathBuf> {
+    Some(weight.with_file_name(format!("{}.zone.json", single_component(filename)?)))
 }
 
 pub(crate) fn filesystem_usage(path: &str) -> Option<DiskUsage> {
@@ -743,5 +773,49 @@ mod disk_tests {
     #[test]
     fn missing_path_returns_none() {
         assert!(filesystem_usage("/this/path/does/not/exist").is_none());
+    }
+}
+
+#[cfg(test)]
+mod weight_path_tests {
+    use super::{confined_sidecar_path, confined_weight_path, single_component};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_component_may_not_escape_its_parent() {
+        assert_eq!(single_component("loras"), Some("loras"));
+        assert!(single_component("..").is_none());
+        assert!(single_component(".").is_none());
+        assert!(single_component("").is_none());
+        assert!(single_component("loras/nested").is_none());
+        assert!(single_component("/etc").is_none());
+    }
+
+    #[test]
+    fn scanned_weights_resolve_beneath_the_models_directory() {
+        assert_eq!(
+            confined_weight_path(Path::new("/models"), "loras", "style.safetensors"),
+            Some(PathBuf::from("/models/loras/style.safetensors"))
+        );
+    }
+
+    #[test]
+    fn traversal_in_a_scanned_name_is_refused() {
+        let models_dir = Path::new("/models");
+        assert!(confined_weight_path(models_dir, "..", "style.safetensors").is_none());
+        assert!(confined_weight_path(models_dir, "loras", "../../etc/passwd").is_none());
+        assert!(confined_weight_path(models_dir, "loras/nested", "style.safetensors").is_none());
+        assert!(confined_weight_path(models_dir, "loras", "/etc/passwd").is_none());
+    }
+
+    #[test]
+    fn a_sidecar_sits_beside_its_weight() {
+        let weight =
+            confined_weight_path(Path::new("/models"), "loras", "style.safetensors").unwrap();
+        assert_eq!(
+            confined_sidecar_path(&weight, "style.safetensors"),
+            Some(PathBuf::from("/models/loras/style.safetensors.zone.json"))
+        );
+        assert!(confined_sidecar_path(&weight, "../style").is_none());
     }
 }
