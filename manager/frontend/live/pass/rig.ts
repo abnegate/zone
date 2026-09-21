@@ -118,9 +118,10 @@ export async function ask(
   message: string,
   options: { replies: number; approve?: boolean; timeout?: number } = { replies: 1 },
 ): Promise<string> {
+  const assistant = page.locator('.message-assistant');
+  const usersBefore = await page.locator('.message-user').count();
   await send(page, message);
   const deadline = Date.now() + (options.timeout ?? 900_000);
-  const assistant = page.locator('.message-assistant');
   let quiet = 0;
   for (;;) {
     if (options.approve !== false) {
@@ -131,16 +132,22 @@ export async function ask(
     }
     const status = await page.locator('.message-status').count();
     const alert = await page.getByRole('alert').count();
-    const answered = await page.evaluate((text) => {
-      const users = Array.from(document.querySelectorAll('.message-user'));
-      const last = users[users.length - 1];
-      if (!last || !(last.textContent ?? '').includes(text)) return false;
-      return Array.from(document.querySelectorAll('.message-assistant')).some(
-        (reply) =>
-          Boolean(last.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING) &&
-          (reply.textContent ?? '').trim().length > 0,
-      );
-    }, message.slice(0, 60));
+    const answered = await page.evaluate(
+      ({ text, before }) => {
+        const users = Array.from(document.querySelectorAll('.message-user'));
+        const last = users[users.length - 1];
+        if (!last) return false;
+        const mine =
+          (last.textContent ?? '').replace(/\s+/g, ' ').includes(text) || users.length > before;
+        if (!mine) return false;
+        return Array.from(document.querySelectorAll('.message-assistant')).some(
+          (reply) =>
+            Boolean(last.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+            (reply.textContent ?? '').trim().length > 0,
+        );
+      },
+      { text: message.slice(0, 30).replace(/\s+/g, ' '), before: usersBefore },
+    );
     quiet = answered && status === 0 ? quiet + 1 : 0;
     if (quiet >= 3) break;
     if (alert > 0 && !answered && status === 0) break;
