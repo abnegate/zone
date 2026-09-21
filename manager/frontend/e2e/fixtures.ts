@@ -70,6 +70,56 @@ export const test = base.extend({
       });
     });
 
+    // Endpoints the shell asks for on every page, so no test has to mock them
+    // to reach the page it is about. A workspace with no theme override has no
+    // stored row, which is the 404 the console is written against.
+    await context.route(/\/api\/models\/disk$/, (route) => {
+      const type = route.request().resourceType();
+      if (type !== 'xhr' && type !== 'fetch') {
+        return route.continue();
+      }
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          used_bytes: 120_000_000_000,
+          total_bytes: 500_000_000_000,
+          available_bytes: 380_000_000_000,
+          percent: 24,
+        }),
+      });
+    });
+
+    await context.route(/\/api\/workspaces\/[^/]+\/theme$/, (route) => {
+      const type = route.request().resourceType();
+      if (type !== 'xhr' && type !== 'fetch') {
+        return route.continue();
+      }
+      if (route.request().method() !== 'GET') {
+        return route.continue();
+      }
+      route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'No theme override' }),
+      });
+    });
+
+    await context.route(/\/api\/workspaces\/[^/]+\/sources(\?|$)/, (route) => {
+      const type = route.request().resourceType();
+      if (type !== 'xhr' && type !== 'fetch') {
+        return route.continue();
+      }
+      if (route.request().method() !== 'GET') {
+        return route.continue();
+      }
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ sources: [] }),
+      });
+    });
+
     // Handle all organization-related endpoints with a single regex
     await context.route(/\/api\/organizations/, (route) => {
       const type = route.request().resourceType();

@@ -1021,7 +1021,7 @@ test.describe('Models Page', () => {
     await page.reload();
     await expect(model.getByTitle('Delete model')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Installed Models' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Add Model' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Add model' })).toBeVisible();
     await expect(page.getByRole('progressbar', { name: 'Disk space used' })).toBeVisible();
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
@@ -1043,7 +1043,7 @@ test.describe('Models Page', () => {
   test('displays model source badge', async ({ page }) => {
     await switchToBrowseTab(page);
     // Models show their source badge
-    await expect(page.locator('.browse-source').first()).toContainText('ollama');
+    await expect(page.locator('.browse-source').first()).toHaveText('Ollama');
   });
 
   test('displays model tags', async ({ page }) => {
@@ -1162,8 +1162,8 @@ test.describe('Models Page', () => {
       }
     });
 
-    await page.fill('.search-container input', 'code');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', 'code');
+    await page.click('.browse-search button');
 
     await expect(page.locator('.browse-item')).toHaveCount(1);
     await expect(page.locator('.browse-name')).toHaveText('codellama');
@@ -1226,10 +1226,11 @@ test.describe('Models Page', () => {
   test('opens model details modal on click', async ({ page }) => {
     await page.locator('.model-item').first().click();
 
-    await expect(page.locator('.modal-details')).toBeVisible();
-    await expect(page.locator('.modal-details-header h3')).toHaveText('llama3.2:latest');
-    await expect(page.locator('.details-source')).toHaveText('Installed');
-    await expect(page.getByRole('link', { name: 'View source' })).toHaveAttribute(
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('heading')).toHaveText('llama3.2:latest');
+    await expect(dialog.locator('.ui-badge')).toHaveText('Installed');
+    await expect(dialog.getByRole('link', { name: 'View source' })).toHaveAttribute(
       'href',
       'https://ollama.com/library/llama3.2'
     );
@@ -1242,18 +1243,20 @@ test.describe('Models Page', () => {
 
   test('closes modal on backdrop click', async ({ page }) => {
     await page.locator('.model-item').first().click();
-    await expect(page.locator('.modal-details')).toBeVisible();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
 
-    await page.locator('.modal-backdrop').click({ position: { x: 10, y: 10 } });
-    await expect(page.locator('.modal-details')).not.toBeVisible();
+    await page.locator('.ui-dialog-overlay').click({ position: { x: 10, y: 10 } });
+    await expect(dialog).toBeHidden();
   });
 
   test('closes modal on close button click', async ({ page }) => {
     await page.locator('.model-item').first().click();
-    await expect(page.locator('.modal-details')).toBeVisible();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
 
-    await page.locator('.modal-close').click();
-    await expect(page.locator('.modal-details')).not.toBeVisible();
+    await dialog.locator('.ui-dialog-close').click();
+    await expect(dialog).toBeHidden();
   });
 
   test('shows delete confirmation modal', async ({ page }) => {
@@ -1279,22 +1282,22 @@ test.describe('Models Page', () => {
     await page.click('button:has-text("Delete")');
 
     // Modal should close
-    await expect(page.locator('.modal-content h3')).not.toBeVisible();
+    await expect(page.getByRole('dialog')).toBeHidden();
   });
 
   test('add model input accepts text', async ({ page }) => {
-    const input = page.locator('.model-form input');
+    const input = page.locator('.models-install-form input');
     await input.fill('phi3:mini');
     await expect(input).toHaveValue('phi3:mini');
   });
 
   test('install button disabled when input empty', async ({ page }) => {
-    await expect(page.locator('.model-form button[type="submit"]')).toBeDisabled();
+    await expect(page.locator('.models-install-form button[type="submit"]')).toBeDisabled();
   });
 
   test('install button enabled when input has value', async ({ page }) => {
-    await page.fill('.model-form input', 'phi3:mini');
-    await expect(page.locator('.model-form button[type="submit"]')).not.toBeDisabled();
+    await page.fill('.models-install-form input', 'phi3:mini');
+    await expect(page.locator('.models-install-form button[type="submit"]')).not.toBeDisabled();
   });
 
   test('refresh button reloads models list', async ({ page }) => {
@@ -1314,7 +1317,7 @@ test.describe('Models Page', () => {
       }
     });
 
-    await page.locator('.card-header button[title="Refresh"]').click();
+    await page.locator('.models-section-head button[title="Refresh"]').click();
     await expect.poll(() => requestCount).toBeGreaterThan(0);
   });
 
@@ -1361,9 +1364,13 @@ test.describe('Models Page', () => {
     });
 
     // Click refresh to trigger error
-    await page.locator('.card-header button[title="Refresh"]').click();
+    await page.locator('.models-section-head button[title="Refresh"]').click();
 
-    await expect(page.getByRole('heading', { name: 'Cannot connect to Ollama' })).toBeVisible();
+    const outage = page.getByRole('alert');
+    await expect(outage).toBeVisible();
+    await expect(outage).toContainText('Cannot connect to Ollama');
+    await expect(outage).toContainText('Failed to fetch models: 500');
+    await expect(outage.getByRole('button', { name: 'Retry' })).toBeVisible();
   });
 
   test('shows empty state when no models installed', async ({ page }) => {
@@ -1415,8 +1422,8 @@ test.describe('Models Page', () => {
     });
 
     // Trigger a search to reload browse data
-    await page.fill('.search-container input', 'test');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', 'test');
+    await page.click('.browse-search button');
 
     // Should show error in the browse section
     await expect(page.locator('.error-placeholder')).toBeVisible();
@@ -1533,7 +1540,7 @@ test.describe('Models Page', () => {
     await page.click('button:has-text("Delete")');
 
     // Wait for modal to close (delete completes but fails)
-    await expect(page.locator('.modal-content h3')).not.toBeVisible({ timeout: 3000 });
+    await expect(page.getByRole('dialog')).toBeHidden({ timeout: 3000 });
     // Even on failure, the UI may have optimistically removed the model
     // This test verifies the app doesn't crash on delete failure
   });
@@ -1561,8 +1568,8 @@ test.describe('Models Page', () => {
       }
     });
 
-    await page.fill('.search-container input', 'nonexistent-model-xyz');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', 'nonexistent-model-xyz');
+    await page.click('.browse-search button');
 
     // Should show "No models found" message
     await expect(page.locator('.empty-placeholder')).toContainText('No models found');
@@ -1611,27 +1618,29 @@ test.describe('Models Page', () => {
     await switchToBrowseTab(page);
     await page.locator('.browse-item').first().click();
 
-    await expect(page.locator('.modal-details')).toBeVisible();
-    await expect(page.locator('.modal-details-header h3')).toHaveText('llama3.2');
-    await expect(page.locator('.details-source')).toHaveText('ollama');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('heading')).toHaveText('llama3.2');
+    await expect(dialog.locator('.ui-badge')).toHaveText('Ollama');
   });
 
   test('install button in details modal works', async ({ page }) => {
     await switchToBrowseTab(page);
     await page.locator('.browse-item').first().click();
-    await expect(page.locator('.modal-details')).toBeVisible();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
 
     // The modal should have an install button
-    await expect(page.getByRole('button', { name: 'Install Model' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Install Model' })).toBeVisible();
   });
 
   test('keyboard escape closes details modal', async ({ page }) => {
     await page.locator('.model-item').first().click();
-    await expect(page.locator('.modal-details')).toBeVisible();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
 
     await page.keyboard.press('Escape');
-    // Modal may or may not close with Escape - depends on implementation
-    // Just verify the test doesn't crash
+    await expect(dialog).toBeHidden();
   });
 
   test('model meta shows correct format for different sizes', async ({ page }) => {
@@ -1700,8 +1709,8 @@ test.describe('Models Page', () => {
     });
 
     // Trigger a search to reload browse data
-    await page.fill('.search-container input', 'test');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', 'test');
+    await page.click('.browse-search button');
 
     await expect(page.locator('.browse-item').nth(0).locator('.browse-spec')).toContainText('500 B');
     await expect(page.locator('.browse-item').nth(1).locator('.browse-spec')).toContainText('500 KB');

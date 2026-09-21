@@ -2,6 +2,8 @@ import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
 
+const SUBPIXEL = 0.05;
+
 test.describe('Wiki Page', () => {
   test.beforeEach(async ({ context, page }) => {
     // Block service worker first
@@ -107,25 +109,27 @@ test.describe('Wiki Page', () => {
       await page.goto('/search');
       const input = page.getByPlaceholder('Search your knowledge base...');
       await input.fill('Search spacing');
-      const geometry = await input.evaluate((element) => {
+      const geometry = await input.evaluate((element, tolerance) => {
         const field = element.getBoundingClientRect();
-        const wrapper = element.parentElement!;
-        const bounds = wrapper.getBoundingClientRect();
-        const icon = wrapper.querySelector('.search-icon-wrapper')!.getBoundingClientRect();
-        const button = wrapper.querySelector('button')!.getBoundingClientRect();
+        const form = element.closest('form')!;
+        const bounds = form.getBoundingClientRect();
+        const icon = form.querySelector('.search-icon-wrapper')!.getBoundingClientRect();
+        const button = form.querySelector('button')!.getBoundingClientRect();
         return {
-          icon: icon.width === 0 || icon.right < field.left,
+          icon: field.left + Number.parseFloat(getComputedStyle(element).paddingLeft) - icon.right,
           input: field.right,
           button: button.right,
           bounds: bounds.right,
-          separated: field.right <= button.left || field.bottom <= button.top,
+          separated:
+            field.right <= button.left + tolerance ||
+            field.bottom <= button.top + tolerance,
         };
-      });
-      expect(geometry.bounds).toBeLessThanOrEqual(width);
-      expect(geometry.input).toBeLessThanOrEqual(geometry.bounds);
-      expect(geometry.button).toBeLessThanOrEqual(geometry.bounds);
+      }, SUBPIXEL);
+      expect(geometry.bounds).toBeLessThanOrEqual(width + SUBPIXEL);
+      expect(geometry.input).toBeLessThanOrEqual(geometry.bounds + SUBPIXEL);
+      expect(geometry.button).toBeLessThanOrEqual(geometry.bounds + SUBPIXEL);
       expect(geometry.separated).toBe(true);
-      expect(geometry.icon).toBe(true);
+      expect(geometry.icon).toBeGreaterThan(0);
     });
   }
 

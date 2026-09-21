@@ -112,18 +112,21 @@ async function verifyTheme(page: Page, mode: 'light' | 'dark'): Promise<void> {
     'background-color',
     mode === 'light' ? 'rgb(48, 96, 144)' : 'rgb(112, 176, 144)',
   );
-  for (const name of ['Primary Button', 'Secondary Button']) {
-    await expect(page.getByRole('button', { name, exact: true })).toHaveCSS(
-      'color',
-      mode === 'light' ? 'rgb(255, 255, 255)' : 'rgb(0, 0, 0)',
-    );
-  }
+  await expect(
+    page.getByRole('button', { name: 'Primary Button', exact: true }),
+  ).toHaveCSS(
+    'color',
+    mode === 'light' ? 'rgb(250, 247, 241)' : 'rgb(26, 22, 18)',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Secondary Button', exact: true }),
+  ).toHaveCSS('color', mode === 'light' ? 'rgb(255, 255, 255)' : 'rgb(0, 0, 0)');
   for (const name of ['Theme', 'AI Settings', 'Members']) {
     await expect(page.getByRole('tab', { name, exact: true })).toBeVisible();
   }
   await expect(page.locator('html')).toHaveCSS('font-size', '18px');
   await expect(page.locator('body')).toHaveCSS('font-family', /Roboto/i);
-  await expect(page.locator('.page-title')).toHaveCSS('font-family', /Roboto/i);
+  await expect(page.locator('.page-bar-title')).toHaveCSS('font-family', /Roboto/i);
   expect(
     await page.evaluate(
       async () => (await document.fonts.load('18px Roboto')).length,
@@ -147,7 +150,7 @@ test('saved API theme controls actual light and dark component styles', async ({
   await page
     .locator('.preview-box')
     .screenshot({ path: testInfo.outputPath('theme-light-preview.png') });
-  await page.locator('.page-title').scrollIntoViewIfNeeded();
+  await page.locator('.page-bar-title').scrollIntoViewIfNeeded();
   await page.getByRole('button', { name: 'Switch to dark mode' }).click();
   await verifyTheme(page, 'dark');
   await page.screenshot({

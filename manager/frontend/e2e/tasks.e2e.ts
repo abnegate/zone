@@ -302,7 +302,9 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows agentic badge for agentic tasks', async ({ page }) => {
-      await expect(page.locator('.task-agentic-badge')).toHaveCount(2);
+      await expect(
+        page.locator('.task-badges').getByText('Agentic', { exact: true })
+      ).toHaveCount(2);
     });
 
     test('displays priority in task meta', async ({ page }) => {
@@ -312,7 +314,7 @@ test.describe('Tasks Page', () => {
 
   test.describe('Filters', () => {
     test('displays project and status filter dropdowns', async ({ page }) => {
-      await expect(page.locator('.filters select')).toHaveCount(2);
+      await expect(page.locator('.tasks-filters select')).toHaveCount(2);
     });
 
     test('filters by project', async ({ context, page }) => {
@@ -345,7 +347,7 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
       await expect(page.locator('.task-card')).toHaveCount(3);
 
-      await page.selectOption('.filters select:first-of-type', 'proj-1');
+      await page.getByLabel('Filter by project').selectOption('proj-1');
 
       await expect(page.locator('.task-card')).toHaveCount(2);
     });
@@ -378,7 +380,7 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
       await expect(page.locator('.task-card')).toHaveCount(3);
 
-      await page.selectOption('.filters select:last-of-type', 'complete');
+      await page.getByLabel('Filter by status').selectOption('complete');
 
       await expect(page.locator('.task-card')).toHaveCount(1);
     });

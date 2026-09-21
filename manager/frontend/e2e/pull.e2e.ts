@@ -32,8 +32,8 @@ test('authenticates model pulls and displays provider errors before allowing a s
   });
 
   await page.goto('/models');
-  const input = page.locator('.model-form input');
-  const install = page.locator('.model-form button[type="submit"]');
+  const input = page.locator('.models-install-form input');
+  const install = page.locator('.models-install-form button[type="submit"]');
   const form = page.locator('.models-install-panel');
   // Downloads only appears once a pull starts, so it is a separate card from
   // the Add Model form that starts one, and it lists every job rather than
@@ -76,9 +76,9 @@ test('authenticates model pulls and displays provider errors before allowing a s
 
   await input.fill(succeeding);
   await install.click();
-  await expect(job(succeeding).locator('.step-item, .result-message, .progress-text')).toHaveCount(
-    0
-  );
+  await expect(
+    job(succeeding).locator('.step-item, .result-message, .pull-job-percent')
+  ).toHaveCount(0);
   await expect(job(failing)).toContainText('Installation failed');
   await expect.poll(() => messages.length).toBe(3);
   expect(messages[2]).toEqual({ type: 'auth', token });
@@ -87,7 +87,7 @@ test('authenticates model pulls and displays provider errors before allowing a s
   expect(messages[3]).toEqual({ model: 'qwen3.8:27b' });
   socket?.send(JSON.stringify({ type: 'step', status: 'downloading' }));
   socket?.send(JSON.stringify({ type: 'progress', percent: 50 }));
-  await expect(job(succeeding).locator('.progress-text')).toHaveText('50%');
+  await expect(job(succeeding).locator('.pull-job-percent')).toHaveText('50%');
   const refresh = page.waitForRequest(
     (request) => new URL(request.url()).pathname === '/api/models'
   );
@@ -157,7 +157,7 @@ test.describe('catalog download references', () => {
         const row = page.locator('.browse-item').filter({ hasText: name });
         if (entry === 'details') {
           await row.locator('.browse-name').click();
-          const details = page.locator('.modal-details');
+          const details = page.getByRole('dialog');
           await expect(details.locator('.details-install code')).toHaveText(reference);
           await expect(details.getByRole('button', { name: 'Delete Model' })).toHaveCount(0);
           if (source === 'HuggingFace') {
@@ -215,9 +215,9 @@ test('keeps a chunked download running after leaving Models', async ({ context, 
   });
 
   await page.goto('/models');
-  await page.locator('.model-form input').fill('qwen3.8:27b');
-  await page.locator('.model-form button[type="submit"]').click();
-  await expect(page.locator('.progress-text')).toHaveText('42%');
+  await page.locator('.models-install-form input').fill('qwen3.8:27b');
+  await page.locator('.models-install-form button[type="submit"]').click();
+  await expect(page.locator('.pull-job-percent')).toHaveText('42%');
   await expect(page.locator('.progress-chunk')).toContainText('42 B / 100 B');
 
   await page.getByRole('link', { name: 'Chats', exact: true }).click();

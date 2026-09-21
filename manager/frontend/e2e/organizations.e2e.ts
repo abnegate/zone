@@ -436,7 +436,11 @@ test.describe('Organizations & Context Switcher', () => {
       await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
-      await expect(page.locator('.context-switcher-empty')).toBeVisible();
+      await expect(page.locator('.context-prompt')).toContainText('Select organization');
+
+      await page.click('.context-switcher-button');
+
+      await expect(page.locator('.dropdown-empty')).toContainText('No organizations yet');
     });
 
     test('shows message when org has no workspaces', async ({ page }) => {
@@ -518,12 +522,11 @@ test.describe('Organizations & Context Switcher', () => {
       await page.reload();
       await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
-      // Should show loading state
-      await expect(page.locator('.context-switcher-loading')).toBeVisible();
+      const placeholder = page.getByRole('status', { name: 'Loading organizations' });
+      await expect(placeholder).toBeVisible();
 
-      // Wait for load to complete
-      await page.waitForTimeout(1500);
-      await expect(page.locator('.context-switcher-loading')).not.toBeVisible();
+      await expect(page.locator('.org-name')).toContainText('Acme Corp', { timeout: 10000 });
+      await expect(placeholder).toHaveCount(0);
     });
   });
 });

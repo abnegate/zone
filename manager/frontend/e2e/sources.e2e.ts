@@ -1,3 +1,4 @@
+import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
@@ -52,6 +53,9 @@ const sourceVerifyPattern = /\/api\/workspaces\/[^/]+\/sources\/src-1\/verify$/;
 
 const isSourcesListRequest = (requestUrl: string) =>
   sourcesListPattern.test(new URL(requestUrl).pathname);
+
+const addSourceButton = (page: Page) =>
+  page.locator('.page-bar').getByRole('button', { name: 'Add source' });
 
 test.describe('Sources Page', () => {
   test.beforeEach(async ({ context, page }) => {
@@ -145,7 +149,7 @@ test.describe('Sources Page', () => {
     });
 
     test('shows add source button', async ({ page }) => {
-      await expect(page.getByRole('button', { name: 'Add source' })).toBeVisible();
+      await expect(addSourceButton(page)).toBeVisible();
     });
   });
 
@@ -160,7 +164,7 @@ test.describe('Sources Page', () => {
         )
       ).toBeVisible();
       await expect(
-        page.getByRole('button', { name: 'Add Source', exact: true })
+        page.locator('.sources-empty').getByRole('button', { name: 'Add source' })
       ).toBeVisible();
     });
   });
@@ -310,7 +314,7 @@ test.describe('Sources Page', () => {
       await page.reload();
       await page.click('a[href="/sources"]');
 
-      const sourceUrl = page.locator('.source-url a').first();
+      const sourceUrl = page.locator('a.source-url').first();
       await expect(sourceUrl).toHaveAttribute('href', 'https://github.com/acme/frontend');
       await expect(sourceUrl).toHaveAttribute('target', '_blank');
     });
@@ -318,21 +322,24 @@ test.describe('Sources Page', () => {
 
   test.describe('Create Source Modal', () => {
     test('opens create modal from header button', async ({ page }) => {
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
       await expect(page.getByRole('dialog', { name: 'Add Source' })).toBeVisible();
     });
 
     test('shows all source type options', async ({ page }) => {
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
 
-      await expect(page.locator('.source-type-option')).toHaveCount(7);
-      await expect(page.locator('.source-type-name').filter({ hasText: 'GitHub' })).toBeVisible();
-      await expect(page.locator('.source-type-name').filter({ hasText: 'GitLab' })).toBeVisible();
-      await expect(page.locator('.source-type-name').filter({ hasText: 'Filesystem' })).toBeVisible();
+      await expect(page.locator('.source-type-name')).toHaveText([
+        'GitHub',
+        'GitLab',
+        'Filesystem',
+        'Web URL',
+        'Text',
+      ]);
     });
 
     test('shows GitHub form fields by default', async ({ page }) => {
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
       await page.getByRole('button', { name: 'Next' }).click();
 
       await expect(page.locator('#ghOwner')).toBeVisible();
@@ -341,7 +348,7 @@ test.describe('Sources Page', () => {
     });
 
     test('switches to GitLab form when selected', async ({ page }) => {
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
 
       await page.getByRole('button', { name: /GitLab/i }).click();
       await page.getByRole('button', { name: 'Next' }).click();
@@ -352,7 +359,7 @@ test.describe('Sources Page', () => {
     });
 
     test('switches to Filesystem form when selected', async ({ page }) => {
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
 
       await page.getByRole('button', { name: /Filesystem/i }).click();
       await page.getByRole('button', { name: 'Next' }).click();
@@ -362,7 +369,7 @@ test.describe('Sources Page', () => {
     });
 
     test('switches to Web URL form when selected', async ({ page }) => {
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
 
       await page.getByRole('button', { name: /Web URL/i }).click();
       await page.getByRole('button', { name: 'Next' }).click();
@@ -371,7 +378,7 @@ test.describe('Sources Page', () => {
     });
 
     test('switches to Text form when selected', async ({ page }) => {
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
 
       await page.getByRole('button', { name: /Text/i }).click();
       await page.getByRole('button', { name: 'Next' }).click();
@@ -400,7 +407,7 @@ test.describe('Sources Page', () => {
         }
       });
 
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
       await page.getByRole('button', { name: 'Next' }).click();
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
@@ -433,7 +440,7 @@ test.describe('Sources Page', () => {
         }
       });
 
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
       await page.getByRole('button', { name: 'Next' }).click();
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
@@ -463,7 +470,7 @@ test.describe('Sources Page', () => {
         }
       });
 
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
       await page.getByRole('button', { name: 'Next' }).click();
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
@@ -478,7 +485,7 @@ test.describe('Sources Page', () => {
     });
 
     test('closes modal on cancel', async ({ page }) => {
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
       await page
         .getByRole('dialog', { name: 'Add Source' })
         .getByRole('button', { name: 'Cancel' })
@@ -488,7 +495,7 @@ test.describe('Sources Page', () => {
     });
 
     test('closes modal on backdrop click', async ({ page }) => {
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
       await expect(page.getByRole('dialog', { name: 'Add Source' })).toBeVisible();
       // The dismiss control fills the overlay; click a corner so the centered
       // dialog does not intercept the pointer.
@@ -498,7 +505,7 @@ test.describe('Sources Page', () => {
     });
 
     test('shows details fields on final step', async ({ page }) => {
-      await page.getByRole('button', { name: 'Add source' }).click();
+      await addSourceButton(page).click();
       await page.getByRole('button', { name: 'Next' }).click();
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');

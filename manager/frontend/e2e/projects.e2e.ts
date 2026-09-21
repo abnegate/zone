@@ -270,7 +270,7 @@ test.describe('Projects Page', () => {
       await page.reload();
       await page.click('a[href="/projects"]');
 
-      await expect(page.locator('.projects-page .ui-card')).toHaveCount(3);
+      await expect(page.locator('.projects-page .project-card')).toHaveCount(3);
     });
 
     test('displays project name and description', async ({ page }) => {
@@ -292,7 +292,7 @@ test.describe('Projects Page', () => {
       await page.reload();
       await page.click('a[href="/projects"]');
 
-      const firstCard = page.locator('.projects-page .ui-card').first();
+      const firstCard = page.locator('.projects-page .project-card').first();
       await expect(firstCard.locator('h3')).toContainText('My Project');
       await expect(firstCard.getByText('Project description here')).toBeVisible();
     });
@@ -318,7 +318,7 @@ test.describe('Projects Page', () => {
       await page.reload();
       await page.click('a[href="/projects"]');
 
-      const cards = page.locator('.projects-page .ui-card');
+      const cards = page.locator('.projects-page .project-card');
       await expect(cards.nth(0)).toContainText('Active');
       await expect(cards.nth(1)).toContainText('On Hold');
       await expect(cards.nth(2)).toContainText('Cancelled');
@@ -341,7 +341,7 @@ test.describe('Projects Page', () => {
       await page.reload();
       await page.click('a[href="/projects"]');
 
-      await expect(page.locator('.projects-page .ui-card').first()).toContainText('No source');
+      await expect(page.locator('.projects-page .project-card').first()).toContainText('No source');
     });
   });
 
@@ -552,12 +552,12 @@ test.describe('Projects Page', () => {
     });
 
     test('opens details sidebar on card click', async ({ page }) => {
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
       await expect(page.locator('.project-details')).toBeVisible();
     });
 
     test('displays project details', async ({ page }) => {
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
 
       await expect(page.locator('.project-details h2')).toContainText('Test Project');
       await expect(page.locator('.project-details')).toContainText('Test description');
@@ -565,7 +565,7 @@ test.describe('Projects Page', () => {
     });
 
     test('shows edit and delete buttons', async ({ page }) => {
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
 
       await expect(
         page.locator('.details-actions').getByRole('button', { name: 'Edit Project' })
@@ -576,13 +576,13 @@ test.describe('Projects Page', () => {
     });
 
     test('closes sidebar with close button', async ({ page }) => {
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
       await page.locator('.project-details').getByRole('button', { name: 'Close' }).click();
       await expect(page.locator('.project-details')).not.toBeVisible();
     });
 
     test('shows link source button when no source', async ({ page }) => {
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
       await expect(
         page.locator('.project-details').getByRole('button', { name: 'Link Source' })
       ).toBeVisible();
@@ -627,26 +627,26 @@ test.describe('Projects Page', () => {
     });
 
     test('opens edit modal with pre-filled values', async ({ page }) => {
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
       await page
         .locator('.details-actions')
         .getByRole('button', { name: 'Edit Project' })
         .click();
 
-      await expect(page.locator('.modal-content h3')).toContainText('Edit Project');
+      await expect(page.getByRole('dialog', { name: 'Edit Project' })).toBeVisible();
       await expect(page.locator('#edit-name')).toHaveValue('Original Name');
       await expect(page.locator('#edit-description')).toHaveValue('Original description');
     });
 
     test('closes edit modal on cancel', async ({ page }) => {
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
       await page
         .locator('.details-actions')
         .getByRole('button', { name: 'Edit Project' })
         .click();
       await page.locator('.modal-actions').getByRole('button', { name: 'Cancel' }).click();
 
-      await expect(page.locator('.modal-content')).not.toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Edit Project' })).toHaveCount(0);
     });
   });
 
@@ -679,20 +679,21 @@ test.describe('Projects Page', () => {
     });
 
     test('shows delete confirmation modal', async ({ page }) => {
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
       await page.locator('.details-actions').getByRole('button', { name: 'Delete' }).click();
 
-      await expect(page.locator('.modal-content h3')).toContainText('Delete Project');
-      await expect(page.locator('.modal-content')).toContainText('cannot be undone');
-      await expect(page.locator('.modal-content strong')).toContainText('Test Project');
+      const dialog = page.getByRole('dialog', { name: 'Delete Project' });
+      await expect(dialog).toBeVisible();
+      await expect(dialog).toContainText('cannot be undone');
+      await expect(dialog.locator('strong')).toContainText('Test Project');
     });
 
     test('cancels delete', async ({ page }) => {
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
       await page.locator('.details-actions').getByRole('button', { name: 'Delete' }).click();
       await page.locator('.modal-actions').getByRole('button', { name: 'Cancel' }).click();
 
-      await expect(page.locator('.modal-content')).not.toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Delete Project' })).toHaveCount(0);
       await expect(page.locator('.project-details')).toBeVisible();
     });
   });
@@ -715,10 +716,10 @@ test.describe('Projects Page', () => {
       await page.reload();
       await page.click('a[href="/projects"]');
 
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
       await page.locator('.project-details').getByRole('button', { name: 'Link Source' }).click();
 
-      await expect(page.locator('.modal-content h3')).toContainText('Link Source');
+      await expect(page.getByRole('dialog', { name: 'Link Source' })).toBeVisible();
     });
   });
 
@@ -759,7 +760,7 @@ test.describe('Projects Page', () => {
       await page.click('a[href="/projects"]');
 
       await expect(
-        page.locator('.projects-page .ui-card').first()
+        page.locator('.projects-page .project-card').first()
       ).toHaveAttribute('tabindex', '0');
     });
   });
@@ -865,7 +866,7 @@ test.describe('Projects Page', () => {
 
       await page.reload();
       await page.click('a[href="/projects"]');
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
 
       const toggle = page.getByTestId('auto-toggle');
       await expect(toggle).toHaveAttribute('aria-pressed', 'false');
@@ -930,7 +931,7 @@ test.describe('Projects Page', () => {
       await page.reload();
       await page.click('a[href="/projects"]');
       await expect(page.getByTestId('auto-badge')).toBeVisible();
-      await page.locator('.projects-page .ui-card').first().click();
+      await page.locator('.projects-page .project-card').first().click();
 
       await expect(page.getByTestId('automation-paused')).toContainText(reason);
       await page.getByRole('button', { name: 'Resume' }).click();
@@ -961,7 +962,7 @@ test.describe('Projects Page', () => {
       await page.reload();
       await page.click('a[href="/projects"]');
 
-      const firstCard = page.locator('.projects-page .ui-card').first();
+      const firstCard = page.locator('.projects-page .project-card').first();
       await firstCard.click();
       await expect(firstCard).toHaveClass(/selected/);
     });

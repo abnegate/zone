@@ -63,6 +63,7 @@ for (const width of [390, 1280]) {
       fullPage: true,
     });
     if (width < 768) await page.getByRole('button', { name: 'Back to chats' }).click();
+    await row.hover();
     await row.getByRole('button', { name: `Rename ${chat.title}` }).click();
     const name = page.getByLabel('Chat name');
     await expect(name).toHaveValue(chat.title);

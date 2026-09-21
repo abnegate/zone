@@ -460,7 +460,7 @@ test.describe('Unauthorized Access', () => {
 
     // Should redirect to unauthorized
     await expect(page).toHaveURL('/unauthorized');
-    await expect(page.locator('h1')).toContainText('Access Denied');
+    await expect(page.getByRole('heading', { name: 'Access Denied' })).toBeVisible();
   });
 
   test('unauthorized page has link back to home', async ({ page }) => {

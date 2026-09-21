@@ -33,7 +33,7 @@ for (const width of [1280, 390]) {
     await expect(row.getByRole('button', { name: 'Install', exact: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`capabilities-${width}.png`), fullPage: true, animations: 'disabled' });
     await row.click();
-    const dialog = page.locator('.modal-details');
+    const dialog = page.getByRole('dialog');
     await expect(dialog.getByText('Capabilities', { exact: true })).toBeVisible();
     await expect(dialog.getByText('Image generation', { exact: true })).toBeVisible();
     await expect(dialog.getByText('Tools', { exact: true })).toBeVisible();

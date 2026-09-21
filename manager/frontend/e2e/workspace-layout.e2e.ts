@@ -13,42 +13,49 @@ const screens = [
     heading: 'Chats',
     content: '.chat-item',
     title: '.chat-title',
+    titleLeading: '18px',
   },
   {
     path: 'projects',
     heading: 'Projects',
     content: '.project-card',
     title: '.project-name',
+    titleLeading: '20px',
   },
   {
     path: 'tasks',
     heading: 'Tasks',
     content: '.task-card:not(.skeleton-card)',
-    title: '.task-card-header h3',
+    title: '.task-card-title h3',
+    titleLeading: '20px',
   },
   {
     path: 'sources',
     heading: 'Sources',
     content: '.source-card',
-    title: '.source-card-header h3',
+    title: '.source-name',
+    titleLeading: '20px',
   },
   {
     path: 'wiki',
     heading: 'Knowledge Base',
     content: '.knowledge-card',
     title: '.knowledge-card-title',
+    titleLeading: '20px',
   },
   {
     path: 'models',
     heading: 'Models',
     content: '.model-item',
     title: '.model-name',
+    titleLeading: '20px',
   },
   {
     path: 'search',
     heading: 'Context Search',
-    content: '.search-section',
+    content: '.search-toolbar',
     title: null,
+    titleLeading: null,
   },
 ];
 
@@ -118,25 +125,18 @@ for (const viewport of [
           await expect(heading).toBeVisible();
           await expect(page.locator(screen.content).first()).toBeVisible();
           await expect(page.locator('.skeleton-card')).toHaveCount(0);
-          await expect(heading).toHaveCSS('font-size', '20px');
-          await expect(heading).toHaveCSS('line-height', '25px');
-          if (viewport.width > 768) {
-            const header =
-              screen.path === 'chats'
-                ? '.chats-sidebar-header'
-                : screen.path === 'search'
-                  ? '.context-search-header'
-                  : `.${screen.path}-header`;
-            await expect(page.locator(header)).toHaveCSS('height', '56px');
-          }
+          await expect(heading).toHaveCSS('font-size', '18px');
+          await expect(heading).toHaveCSS('line-height', '22.5px');
+          if (viewport.width > 768)
+            await expect(page.locator('.page-bar')).toHaveCSS('height', '48px');
           if (screen.title) {
             await expect(page.locator(screen.title).first()).toHaveCSS(
               'font-size',
-              '14px'
+              '13px'
             );
             await expect(page.locator(screen.title).first()).toHaveCSS(
               'line-height',
-              '21px'
+              screen.titleLeading!
             );
           }
           await fitsViewport(page);
@@ -171,7 +171,7 @@ for (const viewport of [
           await expect(dialog).toBeVisible();
           await expect(
             dialog.getByRole('heading', { name: wizard.title, exact: true })
-          ).toHaveCSS('font-size', '20px');
+          ).toHaveCSS('font-size', '18px');
           await expect(
             dialog.getByRole('navigation', { name: 'Wizard steps' })
           ).toBeVisible();
@@ -195,7 +195,7 @@ for (const viewport of [
           } else if (wizard.path === 'sources') {
             await dialog
               .locator('.source-type-option')
-              .filter({ hasText: 'Add raw text content' })
+              .filter({ hasText: 'Raw text' })
               .click();
           }
           await dialog
@@ -254,8 +254,8 @@ for (const viewport of [
               .first()
               .boundingBox();
             expect(toggle).not.toBeNull();
-            expect.soft(toggle!.width).toBeCloseTo(44, 3);
-            expect.soft(toggle!.height).toBeCloseTo(24, 3);
+            expect.soft(toggle!.width).toBeCloseTo(32, 3);
+            expect.soft(toggle!.height).toBeCloseTo(18, 3);
             // Named, because enabling agentic mode reveals a second toggle
             // (plan approval) inside the same dialog.
             const agentic = dialog.getByRole('checkbox', {
@@ -340,11 +340,11 @@ for (const viewport of [
         await expect(page.locator('.message')).toHaveCount(2);
         await expect(page.locator('.message-assistant')).toHaveCSS(
           'font-size',
-          '16px'
+          '14px'
         );
         await expect(page.locator('.message-assistant')).toHaveCSS(
           'line-height',
-          '24px'
+          '22px'
         );
         await expect(page.locator('.message-form textarea')).toBeVisible();
         await expect(page.locator('.tool-call-summary')).toBeVisible();
@@ -387,7 +387,7 @@ for (const viewport of [
         await expect(page.locator('.project-details')).toBeVisible();
         await expect(page.locator('.details-content')).toHaveCSS(
           'padding-left',
-          viewport.width > 768 ? '24px' : '16px'
+          viewport.width > 768 ? '20px' : '16px'
         );
         await expect(page.locator('.sync-config-section')).toBeVisible();
         await capture(page, `${profile}-project-details`, theme);
@@ -399,7 +399,7 @@ for (const viewport of [
         ).toBeVisible();
         await expect(page.locator('.wiki-dialog-content')).toHaveCSS(
           'font-size',
-          '16px'
+          '14px'
         );
         await capture(page, `${profile}-wiki-details`, theme);
         await fitsViewport(page);
@@ -413,7 +413,7 @@ for (const viewport of [
         ).toBeVisible();
         await expect(page.getByRole('dialog').getByRole('heading')).toHaveCSS(
           'font-size',
-          '20px'
+          '18px'
         );
         await capture(page, `${profile}-execution`, theme);
         await fitsViewport(page);
@@ -482,7 +482,7 @@ for (const viewport of [
               .first()
               .getByRole('button', { name: 'Install', exact: true })
           )
-          .toHaveCSS('font-size', '14px');
+          .toHaveCSS('font-size', '12px');
         const rows = await page
           .locator('.virtual-browse-item-wrapper')
           .evaluateAll((elements) =>
@@ -506,7 +506,7 @@ for (const viewport of [
         await fitsViewport(page);
         await capture(page, `${profile}-browse`, theme);
         await page.locator('.browse-item').first().click();
-        const details = page.locator('.modal-content.modal-details');
+        const details = page.getByRole('dialog');
         await expect(details).toBeVisible();
         await capture(page, `${profile}-model-details`, theme);
         if (viewport.width === 390) {

@@ -106,7 +106,7 @@ test.describe('Workspace Settings Page', () => {
 
   test.describe('Page Header', () => {
     test('displays page title', async ({ page }) => {
-      await expect(page.locator('.page-title')).toContainText('Workspace Settings');
+      await expect(page.locator('.page-bar-title')).toContainText('Workspace Settings');
     });
   });
 
@@ -116,13 +116,13 @@ test.describe('Workspace Settings Page', () => {
     });
 
     test('displays light mode color inputs', async ({ page }) => {
-      await expect(page.locator('.card-title').filter({ hasText: 'Light Mode Colors' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Light Mode Colors' })).toBeVisible();
       await expect(page.locator('#primary-light')).toBeVisible();
       await expect(page.locator('#secondary-light')).toBeVisible();
     });
 
     test('displays dark mode color inputs', async ({ page }) => {
-      await expect(page.locator('.card-title').filter({ hasText: 'Dark Mode Colors' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Dark Mode Colors' })).toBeVisible();
       await expect(page.locator('#primary-dark')).toBeVisible();
       await expect(page.locator('#secondary-dark')).toBeVisible();
     });
@@ -170,7 +170,7 @@ test.describe('Workspace Settings Page', () => {
 
   test.describe('Appearance Section', () => {
     test('displays corner radius options', async ({ page }) => {
-      await expect(page.locator('.card-title').filter({ hasText: 'Appearance' })).toBeVisible();
+      await expect(page.getByText('Corner Radius', { exact: true })).toBeVisible();
       await expect(page.locator('.radio-option')).toHaveCount(4);
     });
 
@@ -185,7 +185,9 @@ test.describe('Workspace Settings Page', () => {
 
   test.describe('Preview Section', () => {
     test('displays preview section', async ({ page }) => {
-      await expect(page.locator('.card-title').filter({ hasText: 'Preview' })).toBeVisible();
+      await expect(
+        page.locator('.preview-box').getByRole('heading', { name: 'Preview' })
+      ).toBeVisible();
     });
 
     test('shows preview text', async ({ page }) => {
@@ -408,9 +410,7 @@ test.describe('Workspace Settings Page', () => {
       await page.getByRole('tab', { name: 'AI Settings' }).click();
 
       await expect(page.locator('#model-image')).toHaveValue('flux1-schnell-fp8.safetensors');
-      await expect(
-        page.getByText('ComfyUI checkpoint used when a message asks for an image.')
-      ).toBeVisible();
+      await expect(page.getByText('ComfyUI checkpoint for image requests.')).toBeVisible();
     });
 
     test('saves the selected image model with the other AI settings', async ({ page }) => {
@@ -463,7 +463,9 @@ test.describe('Workspace Settings Page', () => {
       await page.getByRole('tab', { name: 'AI Settings' }).click();
       await page.getByLabel('Override organization AI settings').uncheck();
 
-      await expect(page.getByText('Image Model:')).toBeVisible();
+      await expect(
+        page.locator('.effective-label').filter({ hasText: 'Image Model' })
+      ).toBeVisible();
       await expect(page.locator('.effective-value').filter({ hasText: 'flux1-schnell-fp8.safetensors' })).toBeVisible();
     });
   });
@@ -473,9 +475,7 @@ test.describe('Workspace Settings Page', () => {
       await page.getByRole('tab', { name: 'AI Settings' }).click();
 
       await expect(page.locator('#model-video')).toHaveValue('wan2.2_ti2v_5B_fp16.safetensors');
-      await expect(
-        page.getByText('ComfyUI UNET used when a message asks for a video.')
-      ).toBeVisible();
+      await expect(page.getByText('ComfyUI UNET for video requests.')).toBeVisible();
     });
 
     test('shows the effective video model when the workspace is not overriding', async ({
@@ -484,7 +484,9 @@ test.describe('Workspace Settings Page', () => {
       await page.getByRole('tab', { name: 'AI Settings' }).click();
       await page.getByLabel('Override organization AI settings').uncheck();
 
-      await expect(page.getByText('Video Model:')).toBeVisible();
+      await expect(
+        page.locator('.effective-label').filter({ hasText: 'Video Model' })
+      ).toBeVisible();
       await expect(
         page.locator('.effective-value').filter({ hasText: 'wan2.2_ti2v_5B_fp16.safetensors' })
       ).toBeVisible();
@@ -496,9 +498,7 @@ test.describe('Workspace Settings Page', () => {
       await page.getByRole('tab', { name: 'AI Settings' }).click();
 
       await expect(page.locator('#model-audio')).toHaveValue('ace_step_v1_3.5b.safetensors');
-      await expect(
-        page.getByText('ComfyUI checkpoint used when a message asks for audio.')
-      ).toBeVisible();
+      await expect(page.getByText('ComfyUI checkpoint for audio requests.')).toBeVisible();
     });
 
     test('shows the effective audio model when the workspace is not overriding', async ({
@@ -507,7 +507,9 @@ test.describe('Workspace Settings Page', () => {
       await page.getByRole('tab', { name: 'AI Settings' }).click();
       await page.getByLabel('Override organization AI settings').uncheck();
 
-      await expect(page.getByText('Audio Model:')).toBeVisible();
+      await expect(
+        page.locator('.effective-label').filter({ hasText: 'Audio Model' })
+      ).toBeVisible();
       await expect(
         page.locator('.effective-value').filter({ hasText: 'ace_step_v1_3.5b.safetensors' })
       ).toBeVisible();

@@ -129,7 +129,7 @@ test.describe('Mobile Responsiveness', () => {
 
     test('model form is visible on mobile', async ({ page }) => {
       await page.goto('/models');
-      await expect(page.locator('.model-form')).toBeVisible();
+      await expect(page.locator('.models-install-form')).toBeVisible();
     });
   });
 

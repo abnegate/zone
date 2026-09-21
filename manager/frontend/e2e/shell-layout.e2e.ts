@@ -87,21 +87,15 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
           }
         : path.endsWith('/usage')
           ? {
-              users: 3,
-              workspaces: 1,
-              projects: 4,
-              storage_gb: 2.4,
-              api_calls: 1200,
-              period_start: timestamp,
-              period_end: '2026-10-05T00:00:00Z',
+              current_period_start: timestamp,
+              current_period_end: '2026-10-05T00:00:00Z',
+              usage: { members: 3, workspaces: 1, chat_messages: 1200 },
             }
           : path.endsWith('/limits')
             ? {
-                max_users: 10,
+                max_members: 10,
                 max_workspaces: 5,
-                max_projects: 20,
-                max_storage_gb: 50,
-                max_api_calls_monthly: 10000,
+                max_chats_per_month: 10000,
               }
             : path.endsWith('/audit-logs')
               ? {
@@ -127,7 +121,7 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
 }
 
 async function tabs(page: Page): Promise<{ height: number; gap: number }> {
-  return page.locator('.settings-page-body').evaluate((element) => {
+  return page.locator('.settings-page').evaluate((element) => {
     const list = element
       .querySelector('[role="tablist"]')
       ?.getBoundingClientRect();
@@ -137,7 +131,7 @@ async function tabs(page: Page): Promise<{ height: number; gap: number }> {
     if (!list || !panel) throw new Error('Settings tabs must be visible');
     return {
       height: Math.round(list.height),
-      gap: Math.round(panel.y - list.y - list.height),
+      gap: Math.round((panel.y - list.y - list.height) * 2) / 2,
     };
   });
 }
@@ -148,7 +142,7 @@ async function capture(
   name: string,
 ): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
-  await page.locator('.settings-page-body').evaluateAll((elements) => {
+  await page.locator('.settings-page .page-body').evaluateAll((elements) => {
     for (const element of elements) element.scrollTop = 0;
   });
   await expect
@@ -204,7 +198,7 @@ for (const scenario of scenarios) {
     const button = page.getByRole('button', { name: 'Sign In', exact: true });
     await expect(input).toHaveCSS('height', '36px');
     await expect(button).toHaveCSS('height', '36px');
-    await expect(input).toHaveCSS('font-size', '14px');
+    await expect(input).toHaveCSS('font-size', '13px');
     await expect(button).toHaveCSS('font-size', '14px');
   });
 
@@ -221,16 +215,14 @@ for (const scenario of scenarios) {
     await page.goto('/settings', { waitUntil: 'domcontentloaded' });
     await expect(page.locator('#font-family')).toBeVisible();
     const workspaceTabs = await tabs(page);
-    expect(workspaceTabs).toEqual({ height: 36, gap: 24 });
-    const workspaceTitle = page.locator('.settings-page-header h1');
+    expect(workspaceTabs).toEqual({ height: 32, gap: 24.5 });
+    const workspaceTitle = page.locator('.settings-page .page-bar-title');
     const rhythm = await page
       .locator('.settings-form')
       .first()
       .evaluate((form) => {
-        const sections = Array.from(
-          form.querySelectorAll(
-            ':scope > .settings-section > .settings-grid, :scope > .settings-section > .settings-card',
-          ),
+        const sections = Array.from(form.children).filter(
+          (child) => !child.classList.contains('settings-actions'),
         );
         return sections
           .slice(1)
@@ -241,9 +233,9 @@ for (const scenario of scenarios) {
           );
       });
     expect(rhythm.length).toBeGreaterThan(1);
-    expect(rhythm.every((gap) => Math.abs(gap - 24) < 1)).toBe(true);
+    expect(rhythm.every((gap) => Math.abs(gap - 16) < 1)).toBe(true);
 
-    await expect(workspaceTitle).toHaveCSS('font-size', '20px');
+    await expect(workspaceTitle).toHaveCSS('font-size', '18px');
     for (const tab of ['Theme', 'AI Settings', 'Members']) {
       await page.getByRole('tab', { name: tab, exact: true }).click();
       await expect(page.getByRole('tabpanel')).toBeVisible();
@@ -303,12 +295,10 @@ for (const scenario of scenarios) {
         await expect(page.getByRole('dialog')).toBeVisible();
         await expect(
           page.getByLabel('Email Address', { exact: true }),
-        ).toHaveCSS('height', '36px');
+        ).toHaveCSS('height', '32px');
         await capture(page, information, 'invitation-dialog');
         if (scenario.width === 390) {
-          const bounds = await page
-            .locator('.invitation-dialog .modal-content')
-            .boundingBox();
+          const bounds = await page.getByRole('dialog').boundingBox();
           expect.soft(bounds ? Math.round(bounds.x) : null).toBe(16);
           expect
             .soft(
@@ -324,7 +314,7 @@ for (const scenario of scenarios) {
     await page.goto('/sessions', { waitUntil: 'domcontentloaded' });
     await expect(
       page.getByRole('heading', { name: 'Active Sessions' }),
-    ).toHaveCSS('font-size', '20px');
+    ).toHaveCSS('font-size', '18px');
     await expect(
       page.getByRole('table', { name: 'Active sessions' }),
     ).toBeVisible();
@@ -403,14 +393,14 @@ test('workspace custom typography preserves shared proportions', async ({
   await setupAdminAuth(page);
   await page.goto('/settings', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('#font-family')).toHaveValue('roboto');
-  await expect(page.locator('.settings-page-header h1')).toHaveCSS(
+  await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS(
     'font-size',
-    '22.5px',
+    '20.25px',
   );
-  await expect(page.locator('.settings-page-header h1')).toHaveCSS(
+  await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS(
     'font-family',
     /Roboto/,
   );
-  await expect(page.locator('#font-family')).toHaveCSS('height', '40.5px');
+  await expect(page.locator('#font-family')).toHaveCSS('height', '36px');
   await capture(page, information, 'workspace-custom-font');
 });

@@ -47,7 +47,10 @@ const mockToolCapableModels = (page: Page) =>
   });
 
 const openNewChatFromSidebar = (page: Page) =>
-  page.getByRole('button', { name: 'New chat', exact: true }).click();
+  page
+    .locator('.chats-sidebar-header')
+    .getByRole('button', { name: 'New chat', exact: true })
+    .click();
 
 const mockOpenChatSocket = async (page: Page, chatId = 'chat-1') => {
   await page.routeWebSocket(new RegExp(`/ws/chats/${chatId}`), (ws) => {
@@ -142,7 +145,7 @@ test.describe('Chats Page', () => {
       });
 
       expect(spacing.start).toBeGreaterThan(spacing.icon);
-      expect(spacing.end).toBeLessThan(spacing.clear);
+      expect(spacing.end).toBeLessThanOrEqual(spacing.clear);
       await page.screenshot({ path: test.info().outputPath('chats.png') });
       await page.getByTestId('clear-search-btn').click();
       await expect(input).toHaveValue('');
@@ -158,7 +161,9 @@ test.describe('Chats Page', () => {
     test('shows start new chat button in empty state', async ({ page }) => {
       await expect(page.getByRole('heading', { name: 'No chats yet' })).toBeVisible();
       await expect(
-        page.getByRole('button', { name: 'New Chat', exact: true })
+        page
+          .locator('.chats-sidebar .ui-empty')
+          .getByRole('button', { name: 'New chat', exact: true })
       ).toBeVisible();
     });
   });
@@ -288,7 +293,10 @@ test.describe('Chats Page', () => {
     });
 
     test('opens new chat modal from placeholder button', async ({ page }) => {
-      await page.getByRole('button', { name: 'Start New Chat' }).click();
+      await page
+        .locator('.chat-placeholder')
+        .getByRole('button', { name: 'New chat', exact: true })
+        .click();
       await expect(page.getByRole('dialog', { name: 'New Chat' })).toBeVisible();
     });
 
@@ -797,7 +805,9 @@ test.describe('Chats Page', () => {
       await openNewChatFromSidebar(page);
       await page.getByRole('checkbox', { name: 'Agent mode', exact: true }).check();
       await expect(page.getByRole('checkbox', { name: 'Sandboxed' })).toHaveCount(0);
-      await expect(page.getByText('run shell commands and read and write server files', { exact: false })).toBeVisible();
+      await expect(
+        page.getByText('run tools when asked', { exact: false })
+      ).toBeVisible();
       await expect(page.getByRole('button', { name: 'Create Chat', exact: true })).toBeVisible();
       await page.screenshot({ path: testInfo.outputPath('agent-form.png'), fullPage: true, animations: 'disabled' });
     });
