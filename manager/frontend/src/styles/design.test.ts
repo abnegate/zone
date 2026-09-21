@@ -148,6 +148,16 @@ describe('shared surfaces', () => {
     expect(read(join(styles, 'buttons.css'))).not.toContain('.btn-danger {');
   });
 
+  it('paints the secondary button from the theme the workspace saved', () => {
+    const globals = read(join(kit, 'globals.css'));
+    const secondary = rule(globals, '  .ui-btn-secondary');
+    expect(secondary).toContain('background-color: var(--ui-secondary, var(--ui-bg-surface))');
+    expect(secondary).toContain('color: var(--ui-secondary-foreground, var(--ui-text-primary))');
+    expect(rule(globals, '  .ui-btn-secondary:hover')).toContain(
+      'background-color: var(--ui-secondary-hover, var(--ui-bg-hover))'
+    );
+  });
+
   it('gives a dialog title a 24px line so the panel lands on the grid', () => {
     const globals = read(join(kit, 'globals.css'));
     expect(rule(globals, '  .ui-dialog-title')).toContain('line-height: var(--ui-space-6)');

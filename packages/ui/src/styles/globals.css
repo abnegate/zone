@@ -200,12 +200,12 @@
   }
 
   .ui-btn-secondary {
-    background-color: var(--ui-bg-surface);
-    color: var(--ui-text-primary);
+    background-color: var(--ui-secondary, var(--ui-bg-surface));
+    color: var(--ui-secondary-foreground, var(--ui-text-primary));
   }
 
   .ui-btn-secondary:hover {
-    background-color: var(--ui-bg-hover);
+    background-color: var(--ui-secondary-hover, var(--ui-bg-hover));
   }
 
   .ui-btn-ghost {
