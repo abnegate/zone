@@ -68,3 +68,6 @@ runner/zone_vision/models/
 
 # Python bytecode, from running the comfyui and live-verify scripts
 __pycache__/
+
+# Archives written by `make backup`
+backups/
