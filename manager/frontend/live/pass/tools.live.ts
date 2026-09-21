@@ -403,17 +403,23 @@ test.describe('agent tools from chat', () => {
       { replies: 2, timeout: 600_000 },
     );
     await shot(page, '45-prompt-reminder-set');
+    // reminder_turns is the worker's queue and is emptied once a firing has
+    // been written down, so a finished turn leaves no row there. What lasts is
+    // the firing count on the reminder and what it put in the chat.
     const promptFired = await expect
       .poll(
         () =>
           sql(
-            `select count(*) from reminder_turns t join reminders r on r.id = t.reminder_id where r.content like '%tick-${s}%'`,
+            `select coalesce(max(fired_count), 0) from reminders where content like '%tick-${s}%'`,
           ).join(','),
         { timeout: 480_000, intervals: [5_000] },
       )
       .not.toBe('0')
       .then(() => true)
       .catch(() => false);
+    const recurringShape = sql(
+      `select case when prompt is null then 'delivers its content' else 'runs its prompt as a turn' end from reminders where content like '%tick-${s}%'`,
+    ).join(',');
     await page.reload();
     await page.waitForTimeout(2_000);
     await shot(page, '45-prompt-reminder-ran');
@@ -499,7 +505,8 @@ test.describe('agent tools from chat', () => {
       watch: 'the condition watch is judged by row 45c (watch.live.ts), whose hourly cadence is the smallest the tool accepts',
       chat_id: chatId,
       exact_reminder_fired_after_ms: fired,
-      prompt_reminder_ran_a_turn: promptFired,
+      recurring_reminder_fired: promptFired,
+      recurring_reminder_shape: recurringShape,
       list_reply: listed.slice(0, 200),
       reminder_rows: status,
       watch_row: watchRow,
