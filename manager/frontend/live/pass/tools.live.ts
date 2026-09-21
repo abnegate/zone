@@ -869,7 +869,7 @@ test.describe('agent tools from chat', () => {
     });
     await ask(
       page,
-      `Create a task in the project "Real pass scratch" titled "Chat-made task ${s}" with the description: list the files in the working directory and report how many there are. Make it agentic.`,
+      `Create a task in the project "Real pass scratch" titled "Chat-made task ${s}" with the description: list the files in the working directory and report how many there are. (a manual task is fine).`,
       { replies: 3, timeout: 600_000 },
     );
     await ask(
