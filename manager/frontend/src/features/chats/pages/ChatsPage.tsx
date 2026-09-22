@@ -130,6 +130,7 @@ export default function ChatsPage() {
     approveTool,
     setAgentEnabled: setAgentEnabledFn,
     setAutoApprove: setAutoApproveFn,
+    setAgentSandboxed: setAgentSandboxedFn,
     setReasoningEffort: setReasoningEffortFn,
     setCharacter: setCharacterFn,
     clearCharacter: clearCharacterFn,
@@ -312,6 +313,17 @@ export default function ChatsPage() {
       await setAutoApproveFn(!displayedChat.auto_approve);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to change auto-approve');
+    }
+  };
+
+  const handleToggleAgentSandboxed = async () => {
+    if (!isAuthenticated || !displayedChat) return;
+    setOperationError(null);
+    try {
+      const sandboxed = displayedChat.agent_sandboxed !== false;
+      await setAgentSandboxedFn(!sandboxed);
+    } catch (err) {
+      setOperationError(err instanceof Error ? err.message : 'Failed to change tool access');
     }
   };
 
@@ -902,6 +914,22 @@ export default function ChatsPage() {
                     data-testid="auto-approve-toggle"
                   >
                     Auto-approve
+                  </button>
+                )}
+                {displayedChat.agent_enabled && (
+                  <button
+                    type="button"
+                    className="agent-toggle"
+                    onClick={handleToggleAgentSandboxed}
+                    aria-pressed={displayedChat.agent_sandboxed !== false}
+                    title={
+                      displayedChat.agent_sandboxed !== false
+                        ? 'Zone tools only on: the agent can call nothing but the tools Zone gives it, so Zone sees and gates every call'
+                        : 'Zone tools only off: the agent can also read, write and run commands on this host with its own tools, which Zone never sees and cannot gate'
+                    }
+                    data-testid="agent-sandbox-toggle"
+                  >
+                    Zone tools only
                   </button>
                 )}
                 {showCharacter && (

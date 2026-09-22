@@ -1222,6 +1222,9 @@ export function useChat(
   const setAutoApprove = (enabled: boolean): Promise<void> =>
     updateAgentSettings({ auto_approve: enabled });
 
+  const setAgentSandboxed = (sandboxed: boolean): Promise<void> =>
+    updateAgentSettings({ agent_sandboxed: sandboxed });
+
   const setReasoningEffort = (effort: ReasoningEffort): Promise<void> =>
     updateAgentSettings({ reasoning_effort: effort });
 
@@ -1258,6 +1261,7 @@ export function useChat(
     approveTool,
     setAgentEnabled,
     setAutoApprove,
+    setAgentSandboxed,
     setReasoningEffort,
     setCharacter,
     clearCharacter,
