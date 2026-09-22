@@ -39,7 +39,7 @@ mod transcript;
 mod testing;
 
 pub use agent::{AgentKind, Delivery};
-pub use cli::CliProvider;
+pub use cli::{AgentStream, CliProvider};
 pub use completion::{Completion, CompletionProvider, CompletionRequest, ProviderKind};
 pub use credential::Credential;
 pub use error::{ExitStatus, ProviderError};
@@ -48,5 +48,7 @@ pub use http::HttpProvider;
 pub use lines::{Lines, Overlong};
 pub use router::Router;
 pub use selection::{SelectionStrategy, Weighted, choose, sample};
-pub use settings::{CliSettings, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, DEFAULT_TIMEOUT};
+pub use settings::{
+    BuiltinTools, CliSettings, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, DEFAULT_TIMEOUT, Toolset,
+};
 pub use transcript::render;

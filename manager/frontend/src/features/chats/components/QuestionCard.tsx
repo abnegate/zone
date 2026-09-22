@@ -91,13 +91,17 @@ export function QuestionCard({
         const group = `${cardId}-${questionIndex}`;
         const chosen = selections[question.header] ?? [];
         return (
-          <fieldset className="question-card-question" key={question.header}>
-            <legend className="question-card-header">
+          <fieldset
+            className="question-card-question"
+            key={question.header}
+            aria-labelledby={`${group}-header`}
+          >
+            <div className="question-card-header" id={`${group}-header`}>
               <span className="question-card-header-text">{question.header}</span>
               <span className="question-card-marker" data-testid="question-marker">
                 {question.required ? REQUIRED_LABEL : OPTIONAL_LABEL}
               </span>
-            </legend>
+            </div>
             <p className="question-card-prompt">{question.question}</p>
             {question.preview?.trim() ? (
               <p className="tool-call-preview" data-testid="question-preview">
@@ -113,35 +117,37 @@ export function QuestionCard({
                 const selected = chosen.includes(choice.label);
                 return (
                   <li className="question-card-choice" key={choice.label}>
-                    <input
-                      type={question.multi_select ? 'checkbox' : 'radio'}
-                      id={inputId}
-                      name={group}
-                      className="question-card-control"
-                      checked={selected}
-                      disabled={answered}
-                      aria-describedby={
-                        choice.recommended ? `${recommendedId} ${descriptionId}` : descriptionId
-                      }
-                      onChange={(event) => choose(question, choice.label, event.target.checked)}
-                    />
-                    <span className="question-card-choice-heading">
-                      <label className="question-card-choice-label" htmlFor={inputId}>
-                        {choice.label}
-                      </label>
-                      {choice.recommended && (
-                        <span
-                          className="question-card-recommended"
-                          id={recommendedId}
-                          data-testid="question-recommended"
-                        >
-                          {RECOMMENDED_LABEL}
-                        </span>
-                      )}
-                    </span>
-                    <p className="question-card-choice-description" id={descriptionId}>
-                      {choice.description}
-                    </p>
+                    <div className="question-card-choice-row">
+                      <input
+                        type={question.multi_select ? 'checkbox' : 'radio'}
+                        id={inputId}
+                        name={group}
+                        className="question-card-control"
+                        checked={selected}
+                        disabled={answered}
+                        aria-describedby={
+                          choice.recommended ? `${recommendedId} ${descriptionId}` : descriptionId
+                        }
+                        onChange={(event) => choose(question, choice.label, event.target.checked)}
+                      />
+                      <span className="question-card-choice-heading">
+                        <label className="question-card-choice-label" htmlFor={inputId}>
+                          {choice.label}
+                        </label>
+                        {choice.recommended && (
+                          <span
+                            className="question-card-recommended"
+                            id={recommendedId}
+                            data-testid="question-recommended"
+                          >
+                            {RECOMMENDED_LABEL}
+                          </span>
+                        )}
+                      </span>
+                      <p className="question-card-choice-description" id={descriptionId}>
+                        {choice.description}
+                      </p>
+                    </div>
                     {choice.free_text && (
                       <input
                         type="text"

@@ -29,7 +29,10 @@ describe('KnowledgeApi', () => {
             type: 'text',
             content: 'Test content',
             fetched_content: null,
+            excerpt: 'Test content',
+            category: null,
             tags: ['tag1'],
+            token_count: 2,
             last_refreshed_at: null,
             indexed: true,
             created_at: '2024-01-01T00:00:00Z',
@@ -125,7 +128,10 @@ describe('KnowledgeApi', () => {
         type: 'text',
         content: 'Test content',
         fetched_content: null,
+        excerpt: 'Test content',
+        category: null,
         tags: ['tag1'],
+        token_count: 2,
         last_refreshed_at: null,
         indexed: true,
         created_at: '2024-01-01T00:00:00Z',
@@ -139,6 +145,41 @@ describe('KnowledgeApi', () => {
 
       const result = await knowledgeApi.createKnowledge(request);
       expect(result).toEqual(mockResponse);
+    });
+
+    it('posts a url entry as source_url so the server fetches the page', async () => {
+      const request: CreateKnowledgeRequest = {
+        workspace_id: 'w1',
+        title: 'Example page',
+        type: 'url',
+        source_url: 'https://example.com/',
+      };
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          id: 'k2',
+          workspace_id: 'w1',
+          title: 'Example page',
+          content: 'Example Domain',
+          source_url: 'https://example.com/',
+          last_fetched_at: '2026-09-20T07:00:00Z',
+          tags: [],
+          indexed: true,
+          created_at: '2026-09-20T07:00:00Z',
+          updated_at: '2026-09-20T07:00:00Z',
+        }),
+      });
+
+      const entry = await knowledgeApi.createKnowledge(request);
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body).toEqual({
+        workspace_id: 'w1',
+        title: 'Example page',
+        source_url: 'https://example.com/',
+      });
+      expect(entry.type).toBe('url');
+      expect(entry.last_refreshed_at).toBe('2026-09-20T07:00:00Z');
     });
   });
 
@@ -266,7 +307,10 @@ describe('KnowledgeApi', () => {
         type: 'url',
         content: 'https://example.com',
         fetched_content: 'Updated content',
+        excerpt: 'Updated content',
+        category: null,
         tags: [],
+        token_count: 2,
         last_refreshed_at: '2024-01-02T00:00:00Z',
         indexed: true,
         created_at: '2024-01-01T00:00:00Z',

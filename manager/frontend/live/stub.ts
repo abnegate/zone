@@ -132,14 +132,22 @@ export function stamp(): string {
   return `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
 }
 
-/** Type a message and send it, without waiting for the turn to finish. */
+/**
+ * Type a message and send it, without waiting for the turn to finish.
+ *
+ * A composer that is still carrying the previous turn swallows the keystroke,
+ * so the send waits for the turn to end first and counts the rendered messages
+ * rather than matching the text: a long message is wrapped and re-spaced by the
+ * renderer, which a whole-string match reads as a message that never arrived.
+ */
 export async function send(page: Page, message: string): Promise<void> {
+  const users = page.locator('.message-user');
+  await expect(page.locator('.message-status')).toHaveCount(0, { timeout: 600_000 });
+  const before = await users.count();
   const box = page.getByPlaceholder(/type a message/i).first();
   await box.fill(message);
   await box.press('Enter');
-  await expect(page.locator('.message-user').filter({ hasText: message })).toBeVisible({
-    timeout: 30_000,
-  });
+  await expect(users).toHaveCount(before + 1, { timeout: 30_000 });
 }
 
 /** Wait for the open turn to finish: a reply present and no status indicator left. */

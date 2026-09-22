@@ -3,20 +3,20 @@ import { render, screen } from '@testing-library/react';
 import { Reasoning } from './Reasoning';
 
 describe('Reasoning', () => {
-  it('hides empty thinking and shows a disclosure for model reasoning', () => {
+  it('hides empty thinking and folds stored reasoning until the turn opens it', () => {
     const { container } = render(<Reasoning content="  " />);
     expect(container.firstChild).toBeNull();
 
     render(<Reasoning content="The capital is Paris." />);
-    expect(screen.getByText('Reasoning')).toBeInTheDocument();
     expect(screen.getByText('The capital is Paris.')).toBeInTheDocument();
-    expect(screen.getByTestId('reasoning')).not.toHaveAttribute('open');
+    expect(screen.getByTestId('reasoning')).toHaveAttribute('hidden');
+    expect(screen.queryByText('Reasoning')).not.toBeInTheDocument();
   });
 
   it('can start expanded so live thinking is visible', () => {
     render(<Reasoning content="Inspect the file first." open />);
     expect(screen.getByText('Inspect the file first.')).toBeInTheDocument();
-    expect(screen.getByTestId('reasoning')).toHaveAttribute('open');
+    expect(screen.getByTestId('reasoning')).not.toHaveAttribute('hidden');
   });
 
   it('does not nest a markdown quote inside the thinking disclosure', () => {

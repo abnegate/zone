@@ -32,31 +32,78 @@
 }
 
 .virtual-browse-item-wrapper .browse-item {
-  min-height: var(--ui-control-height);
   box-sizing: border-box;
+  height: 100%;
   align-items: center;
-  padding: var(--ui-row-padding);
-  gap: var(--ui-space-4);
+  gap: var(--ui-space-3);
+  padding: var(--ui-space-3);
+  border: none;
+  border-bottom: 1px solid var(--ui-border);
+  border-radius: 0;
+}
+
+.browse-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+}
+
+.browse-header,
+.browse-line {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  height: var(--ui-space-5);
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+.browse-header .browse-name {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+  line-height: var(--ui-space-5);
 }
 
 .browse-specs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--ui-space-1) var(--ui-space-2);
-  margin-bottom: var(--ui-space-1);
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: var(--ui-space-2);
   font-size: var(--ui-text-xs);
   font-variant-numeric: tabular-nums;
-  color: var(--ui-text-secondary);
+  color: var(--ui-text-muted);
+  white-space: nowrap;
 }
 
 .browse-spec:not(:last-child)::after {
   content: '·';
   margin-left: var(--ui-space-2);
-  color: var(--ui-text-muted);
 }
 
-.browse-item .browse-description {
-  margin: 0 0 var(--ui-space-1);
+.browse-line .browse-description {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+  line-height: var(--ui-space-5);
+}
+
+.browse-line .model-capabilities {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+}
+
+.browse-line .browse-downloads {
+  flex-shrink: 0;
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .virtual-browse-loading {
@@ -69,10 +116,7 @@
 }
 
 @media (max-width: 768px) {
-  .virtual-browse-item-wrapper .browse-item {
-    align-items: flex-start;
-  }
-  .browse-item .btn {
-    flex-shrink: 0;
+  .browse-header .browse-specs {
+    display: none;
   }
 }

@@ -203,7 +203,6 @@ describe('OrgSettingsPage', () => {
     it('shows LiteLLM configuration for self_hosted provider', async () => {
       render(<OrgSettingsPage />);
       await waitFor(() => {
-        expect(screen.getByText('LiteLLM Configuration')).toBeInTheDocument();
         expect(screen.getByLabelText(/LiteLLM Host/i)).toBeInTheDocument();
       });
     });
@@ -226,7 +225,7 @@ describe('OrgSettingsPage', () => {
 
       render(<OrgSettingsPage />);
       await waitFor(() => {
-        expect(screen.getByText('OpenAI Configuration')).toBeInTheDocument();
+        expect(screen.getByLabelText(/OpenAI API Key/i)).toBeInTheDocument();
       });
     });
 
@@ -239,7 +238,7 @@ describe('OrgSettingsPage', () => {
 
       render(<OrgSettingsPage />);
       await waitFor(() => {
-        expect(screen.getByText(/\(set\)/i)).toBeInTheDocument();
+        expect(screen.getByText(/\(configured\)/i)).toBeInTheDocument();
       });
     });
   });
@@ -253,7 +252,7 @@ describe('OrgSettingsPage', () => {
 
       render(<OrgSettingsPage />);
       await waitFor(() => {
-        expect(screen.getByText('Anthropic Configuration')).toBeInTheDocument();
+        expect(screen.getByLabelText(/Anthropic API Key/i)).toBeInTheDocument();
       });
     });
   });
@@ -283,8 +282,8 @@ describe('OrgSettingsPage', () => {
 
       render(<OrgSettingsPage />);
       await waitFor(() => {
-        expect(screen.getByLabelText(/Access Key/i)).toBeInTheDocument();
-        expect(screen.getByLabelText(/Secret Key/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/Access Key ID/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/Secret Access Key/i)).toBeInTheDocument();
       });
     });
 
@@ -298,8 +297,8 @@ describe('OrgSettingsPage', () => {
 
       render(<OrgSettingsPage />);
       await waitFor(() => {
-        expect(screen.queryByLabelText(/Access Key/i)).not.toBeInTheDocument();
-        expect(screen.queryByLabelText(/Secret Key/i)).not.toBeInTheDocument();
+        expect(screen.queryByLabelText(/Access Key ID/i)).not.toBeInTheDocument();
+        expect(screen.queryByLabelText(/Secret Access Key/i)).not.toBeInTheDocument();
       });
     });
   });

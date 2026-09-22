@@ -5,31 +5,47 @@
     'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     monospace;
 
-  --ui-title-size: 1.25rem;
-  --ui-heading-size: 1.25rem;
+  --ui-title-size: 1.125rem;
+  --ui-heading-size: 1rem;
   --ui-auth-title-size: 1.875rem;
-  --ui-control-height: 2.25rem;
-  --ui-control-height-sm: 2rem;
-  --ui-control-height-lg: 2.5rem;
-  --ui-header-height: 3.5rem;
-  --ui-gutter: 1.5rem;
-  --ui-panel-padding: 1.5rem;
-  --ui-field-gap: 1rem;
-  --ui-label-gap: 0.5rem;
-  --ui-section-gap: 1.5rem;
-  --ui-content-width: 56rem;
-  --ui-icon-size: 1.25rem;
-  --ui-icon-size-sm: 1rem;
-  --ui-empty-icon-size: 2.5rem;
-  --ui-row-padding: 0.75rem 1rem;
+  --ui-control-height: 2rem;
+  --ui-control-height-sm: 1.75rem;
+  --ui-control-height-lg: 2.25rem;
+  --ui-header-height: 3rem;
+  --ui-toolbar-height: 3rem;
+  --ui-gutter: 1.25rem;
+  --ui-panel-padding: 1rem;
+  --ui-card-padding: 1rem;
+  --ui-card-padding-list: 0.75rem;
+  --ui-field-gap: 0.75rem;
+  --ui-group-gap: 1rem;
+  --ui-label-gap: 0.375rem;
+  --ui-hint-gap: 0.25rem;
+  --ui-section-gap: 1rem;
+  --ui-content-width: 60rem;
+  --ui-chat-column: 47.5rem;
+  --ui-sidebar-width: 14rem;
+  --ui-sidebar-collapsed: 3.5rem;
+  --ui-icon-size: 1rem;
+  --ui-icon-size-sm: 0.875rem;
+  --ui-empty-icon-size: 2rem;
+  --ui-badge-height: 1.25rem;
+  --ui-list-row: 2.5rem;
+  --ui-list-row-2: 3.5rem;
+  --ui-row-padding: 0.5rem 0.75rem;
+  --ui-modal-sm: 25rem;
+  --ui-modal-md: 30rem;
+  --ui-modal-lg: 40rem;
+  --ui-modal-xl: 50rem;
   --ui-layer-modal: 1100;
   --ui-layer-popover: 1200;
 
   /* Type Scale */
+  --ui-text-2xs: 0.6875rem; /* 11px */
   --ui-text-xs: 0.75rem; /* 12px */
-  --ui-text-sm: 0.875rem; /* 14px */
+  --ui-text-sm: 0.8125rem; /* 13px */
+  --ui-text-md: 0.875rem; /* 14px */
   --ui-text-base: 1rem; /* 16px */
-  --ui-text-md: 1rem; /* 16px */
   --ui-text-lg: 1.125rem; /* 18px */
   --ui-text-xl: 1.25rem; /* 20px */
   --ui-text-2xl: 1.5rem; /* 24px */
@@ -84,6 +100,7 @@
   --ui-radius-sm: 0.25rem; /* 4px */
   --ui-radius-md: 0.375rem; /* 6px */
   --ui-radius-lg: 0.5rem; /* 8px */
+  --ui-radius-card: 0.625rem; /* 10px */
   --ui-radius-xl: 0.75rem; /* 12px */
   --ui-radius-2xl: 1rem; /* 16px */
   --ui-radius-3xl: 1.5rem; /* 24px */
@@ -241,6 +258,7 @@
 
   --ui-accent: var(--ui-accent-600);
   --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 14%, transparent);
+  --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 14%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-700);
   --ui-accent-glow: rgb(164 72 29 / 0.22);
 
@@ -264,6 +282,7 @@
 
   --ui-accent: var(--ui-accent-600);
   --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 18%, transparent);
+  --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 18%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-500);
   --ui-accent-glow: rgb(212 125 63 / 0.24);
 
@@ -287,6 +306,7 @@
 
   --ui-accent: var(--ui-accent-600);
   --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 14%, transparent);
+  --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 14%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-700);
   --ui-accent-glow: hsl(221.2 83.2% 53.3% / 0.2);
 
@@ -309,6 +329,7 @@
 
   --ui-accent: var(--ui-accent-400);
   --ui-accent-muted: color-mix(in srgb, var(--ui-accent-400) 16%, transparent);
+  --ui-bg-selected: color-mix(in srgb, var(--ui-accent-400) 16%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-300);
   --ui-accent-glow: hsl(217.2 91.2% 59.8% / 0.2);
 
@@ -333,6 +354,7 @@
 
   --ui-accent: var(--ui-accent-500);
   --ui-accent-muted: hsl(210 40% 96.1%);
+  --ui-bg-selected: var(--ui-accent-muted);
   --ui-accent-hover: hsl(222.2 47.4% 15%);
   --ui-accent-glow: hsl(222.2 47.4% 11.2% / 0.2);
 
@@ -357,6 +379,7 @@
 
   --ui-accent: var(--ui-accent-500);
   --ui-accent-muted: hsl(217.2 32.6% 17.5%);
+  --ui-bg-selected: var(--ui-accent-muted);
   --ui-accent-hover: hsl(210 40% 90%);
   --ui-accent-glow: hsl(210 40% 98% / 0.2);
 
@@ -468,6 +491,5 @@
 @media (max-width: 768px) {
   :root {
     --ui-gutter: 1rem;
-    --ui-panel-padding: 1rem;
   }
 }

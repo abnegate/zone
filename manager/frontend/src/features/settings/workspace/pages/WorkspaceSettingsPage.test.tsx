@@ -44,6 +44,11 @@ mock.module('../../../../shared/context/ThemeContext', () => ({
     previewWorkspaceTheme: mockPreviewWorkspaceTheme,
     setWorkspaceTheme: mockSetWorkspaceTheme,
   }),
+  workspaceThemeProperties: (value: WorkspaceTheme | null, mode: 'light' | 'dark') =>
+    new Map([
+      ['--ui-accent', mode === 'dark' ? value?.primary_color_dark : value?.primary_color_light],
+      ['font-size', value?.font_size_base],
+    ]),
 }));
 
 mock.module('../../../models', () => ({
@@ -192,7 +197,7 @@ describe('WorkspaceSettingsPage', () => {
   it('renders typography settings', async () => {
     render(<WorkspaceSettingsPage />);
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Typography' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Typography & shape' })).toBeInTheDocument();
     });
     expect(screen.getByLabelText('Font Family')).toBeInTheDocument();
     expect(screen.getByLabelText('Base Font Size')).toBeInTheDocument();
@@ -200,9 +205,7 @@ describe('WorkspaceSettingsPage', () => {
 
   it('renders appearance settings', async () => {
     render(<WorkspaceSettingsPage />);
-    await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Appearance' })).toBeInTheDocument();
-    });
+    await waitFor(() => {});
     expect(screen.getByText('Corner Radius')).toBeInTheDocument();
   });
 
@@ -212,6 +215,25 @@ describe('WorkspaceSettingsPage', () => {
       expect(screen.getByRole('heading', { name: 'Preview' })).toBeInTheDocument();
     });
     expect(screen.getByText(/This is a preview of your theme settings/)).toBeInTheDocument();
+  });
+
+  it('paints the preview with the draft colours, not the app accent', async () => {
+    render(<WorkspaceSettingsPage />);
+    const preview = await waitFor(() => {
+      const box = document.querySelector<HTMLElement>('.preview-box');
+      if (!box) throw new Error('no preview box');
+      return box;
+    });
+    expect(preview.style.getPropertyValue('--ui-accent')).toBe('#3b82f6');
+    expect(preview.style.fontSize).toBe('16px');
+
+    fireEvent.change(screen.getAllByLabelText('Primary Color hex')[0], {
+      target: { value: '#112233' },
+    });
+    fireEvent.change(screen.getByLabelText('Base Font Size'), { target: { value: '18' } });
+
+    expect(preview.style.getPropertyValue('--ui-accent')).toBe('#112233');
+    expect(preview.style.fontSize).toBe('18px');
   });
 
   it('renders save and reset buttons', async () => {
@@ -595,6 +617,12 @@ describe('WorkspaceSettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Override organization AI settings')).toBeInTheDocument();
       });
+      const override = screen.getByRole('checkbox', { name: 'Override organization AI settings' });
+      const hint = document.getElementById(override.getAttribute('aria-describedby') ?? '');
+      expect(hint?.textContent).toBe(
+        "When disabled, this workspace uses the organization's AI provider settings."
+      );
+      expect(override.closest('.toggle-row')).not.toBeNull();
     });
 
     it('shows effective settings when not overriding', async () => {
@@ -733,7 +761,6 @@ describe('WorkspaceSettingsPage', () => {
       await enableOverride(user);
 
       await waitFor(() => {
-        expect(screen.getByText('Credentials')).toBeInTheDocument();
         expect(screen.getByLabelText(/LiteLLM Host/i)).toBeInTheDocument();
       });
     });

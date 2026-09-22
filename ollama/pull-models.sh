@@ -59,8 +59,22 @@ validate_env() {
     fi
 }
 
+readonly BUNDLED_OLLAMA_HOST='http://ollama:11434'
+
+# Whether OLLAMA_HOST names the Ollama this compose stack runs itself. Pulls
+# into anything else happen on that host's own store, so an unreachable
+# external Ollama is not this container's failure.
+targets_bundled_ollama() {
+    [ "${OLLAMA_HOST%/}" = "${BUNDLED_OLLAMA_HOST}" ]
+}
+
 # Wait for Ollama API to be ready
 wait_for_ollama() {
+    if targets_bundled_ollama; then
+        log_info "Pulling into the bundled Ollama at ${OLLAMA_HOST}"
+    else
+        log_info "OLLAMA_BASE_URL points outside the stack: pulling into ${OLLAMA_HOST}"
+    fi
     log_info "Waiting for Ollama API at ${OLLAMA_HOST}..."
 
     local retries=0
@@ -75,8 +89,14 @@ wait_for_ollama() {
         sleep "${RETRY_INTERVAL}"
     done
 
-    log_error "Ollama API failed to become ready after $MAX_RETRIES attempts"
-    exit 1
+    if targets_bundled_ollama; then
+        log_error "Ollama API failed to become ready after $MAX_RETRIES attempts"
+        exit 1
+    fi
+
+    log_warn "OLLAMA_HOST ${OLLAMA_HOST} is not reachable from this container after $MAX_RETRIES attempts; nothing pulled."
+    log_warn "Set OLLAMA_BASE_URL=${BUNDLED_OLLAMA_HOST} to pull into the bundled Ollama, or run 'ollama pull' on the host that serves ${OLLAMA_HOST}."
+    exit 0
 }
 
 # Check if a model is already pulled

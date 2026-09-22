@@ -9,6 +9,7 @@ import {
   initializeFormState,
   sourceRegistry,
 } from '../config';
+import { useSourceKinds } from '../hooks/useSourceKinds';
 import { CreateSourceRequestSchema } from '../schemas';
 import type { CreateSourceRequest, Source, SourceType } from '../types';
 
@@ -138,6 +139,18 @@ function FormFieldsRenderer({
   );
 }
 
+function withCredentialField(
+  fields: (FormField | FormRow)[],
+  credentialField: FormField | undefined
+): (FormField | FormRow)[] {
+  if (!credentialField) return fields;
+  const last = fields[fields.length - 1];
+  if (last && 'fields' in last && last.fields.length === 1) {
+    return [...fields.slice(0, -1), { fields: [...last.fields, credentialField] }];
+  }
+  return [...fields, credentialField];
+}
+
 const WIZARD_STEPS: WizardStep[] = [
   {
     id: 'type',
@@ -175,7 +188,14 @@ export function CreateSourceWizard({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const currentSource = getSourceById(sourceType);
-  const enabledSources = useMemo(() => sourceRegistry.filter((s) => s.enabled), []);
+  const serverKinds = useSourceKinds(isOpen);
+  const enabledSources = useMemo(
+    () =>
+      sourceRegistry.filter(
+        (source) => source.enabled && (serverKinds === null || serverKinds.has(source.id))
+      ),
+    [serverKinds]
+  );
 
   const handleSourceTypeChange = useCallback((newType: SourceType) => {
     setSourceType(newType);
@@ -222,6 +242,18 @@ export function CreateSourceWizard({
     return true;
   }, [currentStep, sourceType, currentSource, formState]);
 
+  const handleClose = useCallback(() => {
+    setCurrentStep(0);
+    setSourceType('github');
+    setFormState(initializeFormState('github'));
+    setName('');
+    setDescription('');
+    setCredentials('');
+    setError(null);
+    setFieldErrors({});
+    onClose();
+  }, [onClose]);
+
   const handleComplete = useCallback(async () => {
     if (!currentSource) return;
 
@@ -265,19 +297,8 @@ export function CreateSourceWizard({
     sourceType,
     createSource,
     onCreated,
+    handleClose,
   ]);
-
-  const handleClose = useCallback(() => {
-    setCurrentStep(0);
-    setSourceType('github');
-    setFormState(initializeFormState('github'));
-    setName('');
-    setDescription('');
-    setCredentials('');
-    setError(null);
-    setFieldErrors({});
-    onClose();
-  }, [onClose]);
 
   const renderStepContent = () => {
     switch (currentStep) {
@@ -318,20 +339,22 @@ export function CreateSourceWizard({
                   Configure the connection settings for your {currentSource.name} source.
                 </p>
                 <FormFieldsRenderer
-                  fields={currentSource.formFields}
-                  state={formState}
-                  onChange={handleFieldChange}
+                  fields={withCredentialField(
+                    currentSource.formFields,
+                    currentSource.credentialField
+                  )}
+                  state={
+                    currentSource.credentialField
+                      ? { ...formState, [currentSource.credentialField.id]: credentials }
+                      : formState
+                  }
+                  onChange={(id, value) =>
+                    id === currentSource.credentialField?.id
+                      ? setCredentials(value as string)
+                      : handleFieldChange(id, value)
+                  }
                 />
-                {currentSource.credentialField && (
-                  <FormFieldRenderer
-                    field={currentSource.credentialField}
-                    value={credentials}
-                    onChange={(_, value) => setCredentials(value as string)}
-                  />
-                )}
-                {currentSource.formHint && (
-                  <p className="form-section-hint">{currentSource.formHint}</p>
-                )}
+                {currentSource.formHint && <p className="form-hint">{currentSource.formHint}</p>}
               </>
             ) : (
               <p className="wizard-step-intro">{currentSource?.name} integration is coming soon.</p>

@@ -11,6 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::json;
+use uuid::Uuid;
 
 use super::jwt::{AccessClaims, Claims, extract_bearer_token, validate_access_token};
 use crate::db::sessions;
@@ -69,6 +70,39 @@ async fn require_active_session(state: &AppState, access: &AccessClaims) -> Resu
     }
 }
 
+/// Extractor for the authenticated user together with the session their
+/// access token is bound to, for handlers that act on the caller's own session.
+#[derive(Debug, Clone)]
+pub struct AuthSession {
+    pub claims: Claims,
+    pub session_id: Uuid,
+}
+
+async fn authenticate(parts: &Parts, app_state: &AppState) -> Result<AccessClaims, AuthError> {
+    let auth_header = parts
+        .headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Missing authorization header".to_string(),
+        })?;
+
+    let token = extract_bearer_token(auth_header).ok_or(AuthError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "Invalid authorization header format".to_string(),
+    })?;
+
+    let access =
+        validate_access_token(token, app_state.config().jwt_secret()).map_err(|e| AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            message: format!("Invalid token: {}", e),
+        })?;
+    require_active_session(app_state, &access).await?;
+
+    Ok(access)
+}
+
 impl<S> FromRequestParts<S> for AuthUser
 where
     S: Send + Sync,
@@ -77,36 +111,32 @@ where
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // Get the app state
         let app_state = AppState::from_ref(state);
-
-        // Get the Authorization header
-        let auth_header = parts
-            .headers
-            .get("Authorization")
-            .and_then(|v| v.to_str().ok())
-            .ok_or(AuthError {
-                status: StatusCode::UNAUTHORIZED,
-                message: "Missing authorization header".to_string(),
-            })?;
-
-        // Extract the bearer token
-        let token = extract_bearer_token(auth_header).ok_or(AuthError {
-            status: StatusCode::UNAUTHORIZED,
-            message: "Invalid authorization header format".to_string(),
-        })?;
-
-        // Validate the token
-        let access =
-            validate_access_token(token, app_state.config().jwt_secret()).map_err(|e| {
-                AuthError {
-                    status: StatusCode::UNAUTHORIZED,
-                    message: format!("Invalid token: {}", e),
-                }
-            })?;
-        require_active_session(&app_state, &access).await?;
+        let access = authenticate(parts, &app_state).await?;
 
         Ok(AuthUser(access.claims))
+    }
+}
+
+impl<S> FromRequestParts<S> for AuthSession
+where
+    S: Send + Sync,
+    AppState: FromRef<S>,
+{
+    type Rejection = AuthError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let app_state = AppState::from_ref(state);
+        let access = authenticate(parts, &app_state).await?;
+        let session_id = access.session_id.ok_or_else(|| AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Session expired or revoked".to_string(),
+        })?;
+
+        Ok(AuthSession {
+            claims: access.claims,
+            session_id,
+        })
     }
 }
 

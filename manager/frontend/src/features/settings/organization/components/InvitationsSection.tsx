@@ -1,4 +1,4 @@
-import { Button } from '@zone/ui';
+import { Button, EmptyState, Modal } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import type { Workspace, WorkspaceRole } from '../../workspace/types';
@@ -102,20 +102,33 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
 
   return (
     <div className="invitations-section">
-      <div className="section-header">
-        <h2>Pending Invitations</h2>
-        <Button onClick={() => setShowModal(true)} variant="primary">
-          Invite Member
-        </Button>
-      </div>
-
-      {error && <div className="alert alert-error">{error}</div>}
-
-      {invitations.length === 0 ? (
-        <div className="empty-state">
-          <p>No pending invitations</p>
-          <p className="text-muted">Invite team members to join this organization</p>
+      <div className="section-row">
+        <div className="section-row-copy">
+          <h2 className="section-title">Pending Invitations</h2>
+          <p className="section-description">Invitations expire seven days after they are sent.</p>
         </div>
+        <div className="section-row-actions">
+          <Button size="sm" onClick={() => setShowModal(true)}>
+            Invite Member
+          </Button>
+        </div>
+      </div>
+      {error && <div className="alert alert-error">{error}</div>}
+      {invitations.length === 0 ? (
+        <EmptyState
+          icon={
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M3 8l9 6 9-6M5 5h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" />
+            </svg>
+          }
+          title="No pending invitations"
+          description="Invite team members to join this organization"
+          action={
+            <Button variant="secondary" onClick={() => setShowModal(true)}>
+              Send an invitation
+            </Button>
+          }
+        />
       ) : (
         <div className="table-container">
           <table className="invitations-table">
@@ -162,8 +175,13 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
                     {formatDate(invitation.expires_at)}
                     {isExpired(invitation.expires_at) && ' (Expired)'}
                   </td>
-                  <td>
-                    <Button onClick={() => handleRevoke(invitation.id)} variant="danger" size="sm">
+                  <td className="invitation-actions">
+                    <Button
+                      className="invitation-revoke"
+                      onClick={() => handleRevoke(invitation.id)}
+                      variant="ghost"
+                      size="sm"
+                    >
                       Revoke
                     </Button>
                   </td>
@@ -174,116 +192,86 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
         </div>
       )}
 
-      {showModal && (
-        <div
-          className="modal-overlay invitation-dialog"
-          onClick={() => setShowModal(false)}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              setShowModal(false);
-            }
-          }}
-          role="button"
-          tabIndex={0}
-          aria-label="Close modal"
-        >
-          <div
-            className="modal-content"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => e.stopPropagation()}
-            role="dialog"
-          >
-            <div className="modal-header">
-              <h3>Invite Member</h3>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={() => setShowModal(false)}
-                aria-label="Close"
-              >
-                ×
-              </button>
-            </div>
-
-            <form onSubmit={handleSubmit} className="invitation-form">
-              <div className="form-group">
-                <label htmlFor="email">Email Address</label>
-                <input
-                  type="email"
-                  id="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  placeholder="member@example.com"
-                  className="form-input"
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="org-role">Organization Role</label>
-                <select
-                  id="org-role"
-                  value={orgRole}
-                  onChange={(e) => setOrgRole(e.target.value as OrgRole)}
-                  className="form-select"
-                >
-                  <option value="member">Member</option>
-                  <option value="admin">Admin</option>
-                  <option value="owner">Owner</option>
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="workspace">Workspace (Optional)</label>
-                <select
-                  id="workspace"
-                  value={workspaceId}
-                  onChange={(e) => setWorkspaceId(e.target.value)}
-                  className="form-select"
-                >
-                  <option value="">None - Org only</option>
-                  {workspaces.map((ws) => (
-                    <option key={ws.id} value={ws.id}>
-                      {ws.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {workspaceId && (
-                <div className="form-group">
-                  <label htmlFor="workspace-role">Workspace Role</label>
-                  <select
-                    id="workspace-role"
-                    value={workspaceRole}
-                    onChange={(e) => setWorkspaceRole(e.target.value as WorkspaceRole)}
-                    className="form-select"
-                  >
-                    <option value="viewer">Viewer</option>
-                    <option value="member">Member</option>
-                    <option value="admin">Admin</option>
-                    <option value="owner">Owner</option>
-                  </select>
-                </div>
-              )}
-
-              <div className="modal-actions">
-                <Button
-                  type="button"
-                  onClick={() => setShowModal(false)}
-                  variant="secondary"
-                  disabled={submitting}
-                >
-                  Cancel
-                </Button>
-                <Button type="submit" variant="primary" loading={submitting}>
-                  Send Invitation
-                </Button>
-              </div>
-            </form>
+      <Modal isOpen={showModal} onClose={() => setShowModal(false)} title="Invite Member">
+        <form onSubmit={handleSubmit} className="invitation-form">
+          <div className="form-group">
+            <label htmlFor="email">Email Address</label>
+            <input
+              type="email"
+              id="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              placeholder="member@example.com"
+              className="form-input"
+            />
           </div>
-        </div>
-      )}
+
+          <div className="form-group">
+            <label htmlFor="org-role">Organization Role</label>
+            <select
+              id="org-role"
+              value={orgRole}
+              onChange={(e) => setOrgRole(e.target.value as OrgRole)}
+              className="form-select"
+            >
+              <option value="member">Member</option>
+              <option value="admin">Admin</option>
+              <option value="owner">Owner</option>
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="workspace">
+              Workspace <span className="label-optional">optional</span>
+            </label>
+            <select
+              id="workspace"
+              value={workspaceId}
+              onChange={(e) => setWorkspaceId(e.target.value)}
+              className="form-select"
+            >
+              <option value="">None - Org only</option>
+              {workspaces.map((ws) => (
+                <option key={ws.id} value={ws.id}>
+                  {ws.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {workspaceId && (
+            <div className="form-group">
+              <label htmlFor="workspace-role">Workspace Role</label>
+              <select
+                id="workspace-role"
+                value={workspaceRole}
+                onChange={(e) => setWorkspaceRole(e.target.value as WorkspaceRole)}
+                className="form-select"
+              >
+                <option value="viewer">Viewer</option>
+                <option value="member">Member</option>
+                <option value="admin">Admin</option>
+                <option value="owner">Owner</option>
+              </select>
+            </div>
+          )}
+
+          <div className="modal-actions">
+            <Button
+              type="button"
+              onClick={() => setShowModal(false)}
+              variant="secondary"
+              disabled={submitting}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" loading={submitting}>
+              Send Invitation
+            </Button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

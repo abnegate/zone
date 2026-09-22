@@ -23,6 +23,12 @@ pub enum RunError {
     NotLoggedIn,
     #[error("Configuration error: {0}")]
     Config(String),
+    #[error(
+        "No LLM endpoint is configured. Set llm_base_url in {path} to an OpenAI-compatible base \
+         URL (LiteLLM: http://localhost:4000, Ollama: http://127.0.0.1:11434/v1) and llm_api_key \
+         if it needs one."
+    )]
+    LlmNotConfigured { path: String },
     #[error("Agent error: {0}")]
     Agent(#[from] AgentError),
     #[error("Session error: {0}")]
@@ -134,31 +140,50 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+/// The completions endpoint a local run talks to. The Zone server has no
+/// completions route of its own, so this comes from the CLI's config rather
+/// than from the host the CLI is logged in to.
+fn llm_config(config: &Config) -> Result<LlmConfig, RunError> {
+    let base_url = config
+        .llm_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| RunError::LlmNotConfigured {
+            path: Config::config_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "~/.zone/config.toml".to_string()),
+        })?;
+    Ok(LlmConfig {
+        base_url: base_url.trim_end_matches('/').to_string(),
+        api_key: config.llm_api_key.clone().unwrap_or_default(),
+        default_model: config.model.clone(),
+        temperature: 0.7,
+        max_tokens: 4096,
+        ..LlmConfig::default()
+    })
+}
+
 /// Run the agent with a prompt
 pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result<(), RunError> {
-    // Load config
     let config = Config::load().map_err(|e| RunError::Config(e.to_string()))?;
 
-    // Check authentication
     let auth = AuthManager::new();
     if !auth.is_logged_in() {
         return Err(RunError::NotLoggedIn);
     }
 
+    let llm_config = llm_config(&config)?;
     let metadata = auth.get_metadata().map_err(|_| RunError::NotLoggedIn)?;
-
-    // Get LLM API key from server config (or use local LiteLLM)
-    // For now, we'll assume a local setup
-    let llm_config = LlmConfig {
-        base_url: format!("{}/api/llm", metadata.host),
-        api_key: auth
-            .get_access_token()
-            .await
-            .map_err(|_| RunError::NotLoggedIn)?,
-        default_model: config.model.clone(),
-        temperature: 0.7,
-        max_tokens: 4096,
-    };
+    auth.get_access_token()
+        .await
+        .map_err(|_| RunError::NotLoggedIn)?;
+    println!(
+        "{} {} {}",
+        style("Signed in as").dim(),
+        style(&metadata.email).cyan(),
+        style(format!("({})", metadata.host)).dim()
+    );
 
     // Set up working directory
     let cwd = if let Some(ws) = workspace {
@@ -278,24 +303,22 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
     );
     println!();
 
-    // Set up agent (similar to run)
     let auth = AuthManager::new();
     if !auth.is_logged_in() {
         return Err(RunError::NotLoggedIn);
     }
 
+    let llm_config = llm_config(&config)?;
     let metadata = auth.get_metadata().map_err(|_| RunError::NotLoggedIn)?;
-
-    let llm_config = LlmConfig {
-        base_url: format!("{}/api/llm", metadata.host),
-        api_key: auth
-            .get_access_token()
-            .await
-            .map_err(|_| RunError::NotLoggedIn)?,
-        default_model: config.model.clone(),
-        temperature: 0.7,
-        max_tokens: 4096,
-    };
+    auth.get_access_token()
+        .await
+        .map_err(|_| RunError::NotLoggedIn)?;
+    println!(
+        "{} {} {}",
+        style("Signed in as").dim(),
+        style(&metadata.email).cyan(),
+        style(format!("({})", metadata.host)).dim()
+    );
 
     let cwd = session
         .project_dir
@@ -508,5 +531,44 @@ mod tests {
         let config_err = ConfigError::NoHomeDir;
         let run_err: RunError = config_err.into();
         assert!(matches!(run_err, RunError::Config(_)));
+    }
+
+    /// A run without an endpoint says which key to set and where, rather than
+    /// pointing at a route the server does not have or blaming the login.
+    #[test]
+    fn a_run_names_the_missing_llm_endpoint() {
+        let config = Config {
+            llm_base_url: None,
+            ..Config::default()
+        };
+        let error = llm_config(&config).unwrap_err();
+        assert!(matches!(error, RunError::LlmNotConfigured { .. }));
+        let message = error.to_string();
+        assert!(message.contains("llm_base_url"), "{message}");
+        assert!(message.contains("config.toml"), "{message}");
+        assert!(!message.contains("Not logged in"), "{message}");
+
+        let blank = Config {
+            llm_base_url: Some("   ".to_string()),
+            ..Config::default()
+        };
+        assert!(matches!(
+            llm_config(&blank),
+            Err(RunError::LlmNotConfigured { .. })
+        ));
+    }
+
+    #[test]
+    fn a_configured_endpoint_is_used_as_given() {
+        let config = Config {
+            llm_base_url: Some("http://127.0.0.1:11434/v1/".to_string()),
+            llm_api_key: Some("ollama".to_string()),
+            model: "qwen3:8b".to_string(),
+            ..Config::default()
+        };
+        let llm = llm_config(&config).unwrap();
+        assert_eq!(llm.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(llm.api_key, "ollama");
+        assert_eq!(llm.default_model, "qwen3:8b");
     }
 }

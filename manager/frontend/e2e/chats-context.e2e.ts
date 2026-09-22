@@ -195,7 +195,10 @@ test('empty chat previews and context updates survive adversarial frame ordering
   await page.keyboard.press('Escape');
   await expect(meter).toBeFocused();
   const forwardTab = browserName === 'webkit' ? 'Alt+Tab' : 'Tab';
-  await page.keyboard.press(forwardTab);
+  const backTab = browserName === 'webkit' ? 'Alt+Shift+Tab' : 'Shift+Tab';
+  await page.keyboard.press(backTab);
+  await expect(input).toBeFocused();
+  await page.keyboard.press(backTab);
   await expect(page.getByRole('button', { name: 'Attach files' })).toBeFocused();
   await page.keyboard.press(forwardTab);
   await expect(input).toBeFocused();

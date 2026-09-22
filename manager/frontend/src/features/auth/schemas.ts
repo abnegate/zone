@@ -66,25 +66,20 @@ export const ResendVerificationRequestSchema = z.object({
   email: z.string().email('Invalid email address'),
 });
 
-export const VerifyEmailResponseSchema = z.object({
-  success: z.boolean(),
+// A 2xx from an auth endpoint is the outcome; `success` is a courtesy flag the
+// server adds, so a message-only body still reads as success.
+export const AuthOutcomeSchema = z.object({
+  success: z.boolean().optional().default(true),
   message: z.string(),
 });
 
-export const ResendVerificationResponseSchema = z.object({
-  success: z.boolean(),
-  message: z.string(),
-});
+export const VerifyEmailResponseSchema = AuthOutcomeSchema;
 
-export const ForgotPasswordResponseSchema = z.object({
-  success: z.boolean(),
-  message: z.string(),
-});
+export const ResendVerificationResponseSchema = AuthOutcomeSchema;
 
-export const ResetPasswordResponseSchema = z.object({
-  success: z.boolean(),
-  message: z.string(),
-});
+export const ForgotPasswordResponseSchema = AuthOutcomeSchema;
+
+export const ResetPasswordResponseSchema = AuthOutcomeSchema;
 
 export const JwtPayloadSchema = z.object({
   sub: z.string(),
@@ -102,14 +97,14 @@ export const JwtPayloadSchema = z.object({
 
 export const SessionSchema = z.object({
   id: z.string().min(1),
-  user_id: z.string().min(1),
+  user_id: z.string().min(1).optional(),
   ip_address: z.string().nullable(),
   user_agent: z.string().nullable(),
   device_info: z.string().nullable(),
-  location: z.string().nullable(),
-  created_at: z.string().datetime(),
-  last_active_at: z.string().datetime(),
-  expires_at: z.string().datetime(),
+  location: z.string().nullable().optional().default(null),
+  created_at: z.string().datetime({ offset: true }),
+  last_active_at: z.string().datetime({ offset: true }),
+  expires_at: z.string().datetime({ offset: true }),
   is_current: z.boolean(),
 });
 
@@ -141,10 +136,10 @@ export const InvitationSchema = z.object({
 export const InvitationDetailsSchema = z.object({
   organization_name: z.string(),
   org_role: OrgRoleSchema,
-  workspace_name: z.string().nullable(),
+  workspace_name: z.string().nullable().optional().default(null),
   workspace_role: WorkspaceRoleSchema.nullable(),
-  invited_by_email: z.string().email(),
-  expires_at: z.string().datetime(),
+  invited_by_email: z.string().email().nullable().optional().default(null),
+  expires_at: z.string().datetime({ offset: true }),
 });
 
 // =============================================================================

@@ -194,6 +194,32 @@ describe('useModels', () => {
     });
   });
 
+  it('exposes the provider errors a partial inventory carries', async () => {
+    const comfy = [{ name: 'flux1-dev.safetensors', size: 1, modified_at: '2024-01-01' }];
+    mockGetModels.mockResolvedValueOnce({
+      models: comfy,
+      errors: { ollama: 'Failed to connect to Ollama: connection refused' },
+    });
+
+    const { result } = renderHook(() => useModels());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.models).toEqual(comfy);
+    expect(result.current.error).toBeNull();
+    expect(result.current.providerErrors).toEqual({
+      ollama: 'Failed to connect to Ollama: connection refused',
+    });
+
+    mockGetModels.mockResolvedValueOnce({ models: comfy });
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.providerErrors).toEqual({});
+  });
+
   it('handles non-Error object in fetch error', async () => {
     mockGetModels.mockRejectedValueOnce('String error');
 

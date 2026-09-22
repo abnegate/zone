@@ -2,9 +2,12 @@ import { Button } from '@zone/ui';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
+import { AuthCard, AuthStatus } from '../components';
 import { useAuth } from '../hooks';
 import type { InvitationDetails } from '../types';
 import './InvitationAcceptPage.css';
+
+const INVITATION_SUBTITLE = 'Organization invitation';
 
 export default function InvitationAcceptPage() {
   const [searchParams] = useSearchParams();
@@ -82,45 +85,37 @@ export default function InvitationAcceptPage() {
     });
   };
 
+  const goHome = (
+    <Button onClick={() => navigate('/')} variant="primary">
+      Go to Home
+    </Button>
+  );
+
   if (loading) {
     return (
-      <div className="invitation-accept-page">
-        <div className="invitation-card">
-          <div className="loading-state">Loading invitation...</div>
-        </div>
-      </div>
+      <AuthCard subtitle={INVITATION_SUBTITLE}>
+        <div className="auth-loading">Loading invitation...</div>
+      </AuthCard>
     );
   }
 
   if (error && !details) {
     return (
-      <div className="invitation-accept-page">
-        <div className="invitation-card">
-          <div className="error-state">
-            <h1>Invalid Invitation</h1>
-            <p>{error}</p>
-            <Button onClick={() => navigate('/')} variant="primary">
-              Go to Home
-            </Button>
-          </div>
-        </div>
-      </div>
+      <AuthCard subtitle={INVITATION_SUBTITLE}>
+        <AuthStatus title="Invalid Invitation" description={error} action={goHome} />
+      </AuthCard>
     );
   }
 
   if (!details) {
     return (
-      <div className="invitation-accept-page">
-        <div className="invitation-card">
-          <div className="error-state">
-            <h1>Invitation Not Found</h1>
-            <p>This invitation link is invalid or has been revoked.</p>
-            <Button onClick={() => navigate('/')} variant="primary">
-              Go to Home
-            </Button>
-          </div>
-        </div>
-      </div>
+      <AuthCard subtitle={INVITATION_SUBTITLE}>
+        <AuthStatus
+          title="Invitation Not Found"
+          description="This invitation link is invalid or has been revoked."
+          action={goHome}
+        />
+      </AuthCard>
     );
   }
 
@@ -132,7 +127,7 @@ export default function InvitationAcceptPage() {
         <div className="invitation-header">
           <h1>You've Been Invited!</h1>
           <p className="subtitle">
-            {details.invited_by_email} has invited you to join{' '}
+            {details.invited_by_email ?? 'A member'} has invited you to join{' '}
             <strong>{details.organization_name}</strong>
           </p>
         </div>
@@ -168,7 +163,7 @@ export default function InvitationAcceptPage() {
 
           <div className="detail-row">
             <span className="label">Invited By:</span>
-            <span className="value">{details.invited_by_email}</span>
+            <span className="value">{details.invited_by_email ?? '—'}</span>
           </div>
 
           <div className="detail-row">

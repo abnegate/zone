@@ -325,11 +325,11 @@ pub async fn register(
     };
 
     // Generate tokens
-    let (access_token, refresh_token) = match generate_tokens(&state, &user_perms, None, None).await
-    {
-        Ok(tokens) => tokens,
-        Err(response) => return response.into_response(),
-    };
+    let (access_token, refresh_token) =
+        match generate_tokens(&state, &user_perms, None, None, None).await {
+            Ok(tokens) => tokens,
+            Err(response) => return response.into_response(),
+        };
 
     (
         StatusCode::CREATED,
@@ -431,14 +431,14 @@ pub async fn login(
     };
 
     // Generate tokens
-    let (access_token, refresh_token) = match generate_tokens(&state, &user_perms, None, None).await
-    {
-        Ok(tokens) => tokens,
-        Err(response) => {
-            crate::metrics::record_login("error");
-            return response.into_response();
-        }
-    };
+    let (access_token, refresh_token) =
+        match generate_tokens(&state, &user_perms, None, None, None).await {
+            Ok(tokens) => tokens,
+            Err(response) => {
+                crate::metrics::record_login("error");
+                return response.into_response();
+            }
+        };
 
     crate::metrics::record_login("ok");
     Json(AuthResponse {
@@ -481,6 +481,25 @@ pub async fn refresh(
         }
     };
 
+    let session = match sessions::get_session_by_token(state.db(), &token_hash).await {
+        Ok(Some(session)) if session.user_id == user_id => session,
+        Ok(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::new("Session expired or revoked")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Database error: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+
     // Revoke the old refresh token
     if let Err(e) = refresh_tokens::revoke_refresh_token(state.db(), &token_hash).await {
         tracing::warn!("Failed to revoke old refresh token: {}", e);
@@ -507,11 +526,11 @@ pub async fn refresh(
     };
 
     // Generate new tokens
-    let (access_token, refresh_token) = match generate_tokens(&state, &user_perms, None, None).await
-    {
-        Ok(tokens) => tokens,
-        Err(response) => return response.into_response(),
-    };
+    let (access_token, refresh_token) =
+        match generate_tokens(&state, &user_perms, None, None, Some(session.id)).await {
+            Ok(tokens) => tokens,
+            Err(response) => return response.into_response(),
+        };
 
     Json(AuthResponse {
         access_token,
@@ -551,11 +570,14 @@ pub async fn logout(State(state): State<AppState>, auth: AuthUser) -> impl IntoR
 }
 
 /// Generate access and refresh tokens
+/// Issue a fresh refresh token and an access token bound to a session: a new
+/// session for a login, or the caller's existing one when `session` names it.
 async fn generate_tokens(
     state: &AppState,
     user: &users::UserWithPermissions,
     ip_address: Option<&str>,
     user_agent: Option<&str>,
+    session: Option<Uuid>,
 ) -> Result<(String, String), (StatusCode, Json<ErrorResponse>)> {
     let config = state.config();
 
@@ -593,20 +615,29 @@ async fn generate_tokens(
         ));
     }
 
-    let session = match sessions::create_session(
-        state.db(),
-        user.user.id,
-        &token_hash,
-        ip_address,
-        user_agent,
-        None,
-        expires_at.naive_utc(),
-    )
-    .await
-    {
+    let session = match session {
+        Some(session_id) => {
+            sessions::rotate_session(state.db(), session_id, &token_hash, expires_at.naive_utc())
+                .await
+                .and_then(|rotated| rotated.ok_or(sqlx::Error::RowNotFound))
+        }
+        None => {
+            sessions::create_session(
+                state.db(),
+                user.user.id,
+                &token_hash,
+                ip_address,
+                user_agent,
+                None,
+                expires_at.naive_utc(),
+            )
+            .await
+        }
+    };
+    let session = match session {
         Ok(session) => session,
         Err(error) => {
-            tracing::error!("Failed to create session: {}", error);
+            tracing::error!("Failed to bind session: {}", error);
             let _ = refresh_tokens::revoke_refresh_token(state.db(), &token_hash).await;
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -657,19 +688,33 @@ pub async fn verify_email(
 ) -> impl IntoResponse {
     use crate::db::email_verification;
 
-    // Verify the token and get user_id
+    let verified = serde_json::json!({
+        "success": true,
+        "message": "Email verified successfully"
+    });
+
     let user_id = match email_verification::verify_token(state.db(), &req.token).await {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new("Invalid or expired verification token")),
-            )
-                .into_response();
+            return match email_verification::recently_verified_user(state.db(), &req.token).await {
+                Ok(Some(_)) => (StatusCode::OK, Json(verified)).into_response(),
+                Ok(None) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::new("Invalid or expired verification token")),
+                )
+                    .into_response(),
+                Err(e) => {
+                    tracing::error!("Failed to look up verification token: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::new("Internal server error")),
+                    )
+                        .into_response()
+                }
+            };
         }
     };
 
-    // Mark email as verified
     if let Err(e) = email_verification::mark_email_verified(state.db(), user_id).await {
         tracing::error!("Failed to mark email as verified: {}", e);
         return (
@@ -679,13 +724,12 @@ pub async fn verify_email(
             .into_response();
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "message": "Email verified successfully"
-        })),
-    )
-        .into_response()
+    (StatusCode::OK, Json(verified)).into_response()
+}
+
+/// The link a verification mail carries: the console's `/verify-email` page.
+fn verification_url(base_url: &str, token: &str) -> String {
+    format!("{}/verify-email?token={}", base_url, token)
 }
 
 /// POST /api/auth/resend-verification
@@ -703,6 +747,7 @@ pub async fn resend_verification(
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({
+                    "success": true,
                     "message": "If the email exists, a verification email has been sent"
                 })),
             )
@@ -724,7 +769,8 @@ pub async fn resend_verification(
         return (
             StatusCode::OK,
             Json(serde_json::json!({
-                "message": "If the email exists, a verification email has been sent"
+                "success": true,
+                    "message": "If the email exists, a verification email has been sent"
             })),
         )
             .into_response();
@@ -746,8 +792,7 @@ pub async fn resend_verification(
 
     // Send verification email if email service is configured
     if let Some(email_service) = state.email_service() {
-        // Build verification URL using configured base URL
-        let verification_url = format!("{}/verify?token={}", state.config().app_base_url, token);
+        let verification_url = verification_url(&state.config().app_base_url, &token);
         let display_name = user.display_name.as_deref().unwrap_or(&user.email);
 
         if let Err(e) = email_service
@@ -769,7 +814,8 @@ pub async fn resend_verification(
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "message": "If the email exists, a verification email has been sent"
+            "success": true,
+                    "message": "If the email exists, a verification email has been sent"
         })),
     )
         .into_response()
@@ -805,6 +851,7 @@ pub async fn forgot_password(
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({
+                    "success": true,
                     "message": "If the email exists, a password reset email has been sent"
                 })),
             )
@@ -862,7 +909,8 @@ pub async fn forgot_password(
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "message": "If the email exists, a password reset email has been sent"
+            "success": true,
+                    "message": "If the email exists, a password reset email has been sent"
         })),
     )
         .into_response()
@@ -942,8 +990,24 @@ pub async fn reset_password(
     (
         StatusCode::OK,
         Json(serde_json::json!({
+            "success": true,
             "message": "Password reset successfully"
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verification_url;
+
+    /// The console routes the verification page at /verify-email, so the mail
+    /// must point there.
+    #[test]
+    fn the_verification_mail_links_to_the_console_verify_email_page() {
+        assert_eq!(
+            verification_url("http://localhost:4199", "abc123"),
+            "http://localhost:4199/verify-email?token=abc123"
+        );
+    }
 }

@@ -71,13 +71,25 @@ pub mod actions {
     pub const PROJECT_UPDATED: &str = "project.updated";
     pub const PROJECT_DELETED: &str = "project.deleted";
 
+    pub const ORGANIZATION_UPDATED: &str = "organization.updated";
+    pub const ORGANIZATION_DELETED: &str = "organization.deleted";
+
     pub const SETTINGS_UPDATED: &str = "settings.updated";
+    pub const SETTINGS_RESET: &str = "settings.reset";
 
     pub const INVITATION_SENT: &str = "invitation.sent";
     pub const INVITATION_ACCEPTED: &str = "invitation.accepted";
     pub const INVITATION_REVOKED: &str = "invitation.revoked";
 
     pub const SUBSCRIPTION_CHANGED: &str = "subscription.changed";
+}
+
+pub mod resources {
+    pub const ORGANIZATION: &str = "organization";
+    pub const WORKSPACE: &str = "workspace";
+    pub const MEMBER: &str = "member";
+    pub const INVITATION: &str = "invitation";
+    pub const AI_SETTINGS: &str = "ai_settings";
 }
 
 /// Log an action to the audit trail

@@ -33,6 +33,12 @@ pub const LOAD_TOOLS: &str = "load_tools";
 ///
 /// A search that answers with the whole catalog has spent the context the
 /// catalog was deferred to save.
+/// Words a natural query carries that no tool's name or purpose should be
+/// found by: "start a task" must not surface every purpose containing "a".
+const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "for", "in", "it", "me", "my", "of", "on", "or", "the", "to", "with",
+];
+
 const MAX_MATCHES: usize = 10;
 
 /// One deferred tool, as the catalog lists it.
@@ -103,6 +109,11 @@ fn ends_a_sentence(before: &str) -> bool {
 #[derive(Debug, Default)]
 pub struct Toolbox {
     catalog: OnceLock<Vec<Listed>>,
+    /// The tools whose schemas are always in front of the model, so the two
+    /// fetching tools can answer for a core name instead of denying it exists.
+    /// A `Mutex` rather than a `OnceLock` because the core set grows once more
+    /// when a run is handed `submit_plan`.
+    core: Mutex<Vec<Listed>>,
     loaded: Mutex<HashSet<String>>,
 }
 
@@ -112,9 +123,32 @@ impl Toolbox {
         let _ = self.catalog.set(listed);
     }
 
+    /// Record what is always loaded, replacing the previous list.
+    pub fn publish_core(&self, listed: Vec<Listed>) {
+        if let Ok(mut core) = self.core.lock() {
+            *core = listed;
+        }
+    }
+
     /// Every deferred tool, whether or not it has since been loaded.
     pub fn catalog(&self) -> &[Listed] {
         self.catalog.get().map_or(&[], Vec::as_slice)
+    }
+
+    /// The tools that need no loading, cloned for the same reason as
+    /// [`Self::loaded`].
+    pub fn core(&self) -> Vec<Listed> {
+        self.core
+            .lock()
+            .map(|core| core.clone())
+            .unwrap_or_default()
+    }
+
+    fn is_core(&self, name: &str) -> bool {
+        self.core
+            .lock()
+            .map(|core| core.iter().any(|listed| listed.name == name))
+            .unwrap_or(false)
     }
 
     /// The deferred tools still waiting to be asked for.
@@ -167,7 +201,9 @@ impl Toolbox {
             ));
         };
         for name in names {
-            if !known.contains(name.as_str()) {
+            if self.is_core(name) {
+                taken.already.push(name.clone());
+            } else if !known.contains(name.as_str()) {
                 taken.unknown.push(name.clone());
             } else if !loaded.insert(name.clone()) {
                 taken.already.push(name.clone());
@@ -245,39 +281,51 @@ impl Tool for SearchToolsTool {
         if needle.is_empty() {
             return Err(ToolError::InvalidParams("Provide a nonblank query".into()));
         }
-        let terms: Vec<&str> = needle.split_whitespace().collect();
-        let mut matches: Vec<&Listed> = self
-            .0
-            .catalog()
+        let terms: Vec<&str> = needle
+            .split_whitespace()
+            .filter(|term| !STOPWORDS.contains(term))
+            .collect();
+        if terms.is_empty() {
+            return Err(ToolError::InvalidParams(
+                "Name what the tool should do, not only articles and prepositions".into(),
+            ));
+        }
+        let hits = |listed: &Listed| {
+            let haystack = format!("{} {}", listed.name, listed.purpose).to_lowercase();
+            terms.iter().filter(|term| haystack.contains(*term)).count()
+        };
+        // Core tools are searched too: a model that cannot find the tool it
+        // wants asks here, and "nothing matches" for a schema it already has
+        // reads as "no such tool".
+        let core = self.0.core();
+        let mut matches: Vec<(&Listed, bool)> = core
             .iter()
-            .filter(|listed| {
-                let haystack = format!("{} {}", listed.name, listed.purpose).to_lowercase();
-                terms.iter().any(|term| haystack.contains(term))
-            })
+            .map(|listed| (listed, true))
+            .chain(self.0.catalog().iter().map(|listed| (listed, false)))
+            .filter(|(listed, _)| hits(listed) > 0)
             .collect();
         // Most terms matched first, so a two-word query puts the tool that
         // answers both above the one that happens to share a common word.
-        matches.sort_by_key(|listed| {
-            let haystack = format!("{} {}", listed.name, listed.purpose).to_lowercase();
-            std::cmp::Reverse(terms.iter().filter(|term| haystack.contains(*term)).count())
-        });
+        matches.sort_by_key(|(listed, _)| std::cmp::Reverse(hits(listed)));
         if matches.is_empty() {
             return Ok(ToolResult::success(format!(
-                "No deferred tool matches \"{query}\". Every tool whose schema you can already \
-                 see is loaded; the rest are listed by name in your instructions."
+                "No tool matches \"{query}\". Every tool whose schema you can already see is \
+                 loaded; the rest are listed by name in your instructions."
             )));
         }
         let hidden = matches.len().saturating_sub(MAX_MATCHES);
-        let mut lines: Vec<String> = matches
+        let shown = &matches[..matches.len().min(MAX_MATCHES)];
+        let mut lines: Vec<String> = shown
             .iter()
-            .take(MAX_MATCHES)
-            .map(|listed| {
-                let loaded = if self.0.is_loaded(&listed.name) {
+            .map(|(listed, core)| {
+                let state = if *core {
+                    " (loaded — call it directly)"
+                } else if self.0.is_loaded(&listed.name) {
                     " (already loaded)"
                 } else {
                     ""
                 };
-                format!("{}{loaded}: {}", listed.name, listed.purpose)
+                format!("{}{state}: {}", listed.name, listed.purpose)
             })
             .collect();
         if hidden > 0 {
@@ -286,8 +334,16 @@ impl Tool for SearchToolsTool {
                 if hidden == 1 { "" } else { "es" }
             ));
         }
+        let closing = if shown
+            .iter()
+            .any(|(listed, core)| !core && !self.0.is_loaded(&listed.name))
+        {
+            "Call load_tools with the names you want; the ones marked loaded need no loading."
+        } else {
+            "Every match is already loaded: call it directly, in your next message."
+        };
         Ok(ToolResult::success(format!(
-            "{}\n\nCall load_tools with the names you want.",
+            "{}\n\n{closing}",
             lines.join("\n")
         )))
     }
@@ -438,5 +494,79 @@ mod tests {
             .map(|listed| listed.name.as_str())
             .collect();
         assert_eq!(waiting, vec!["list_chats"]);
+    }
+
+    fn listed(name: &str, purpose: &str) -> Listed {
+        Listed {
+            name: name.into(),
+            purpose: purpose.into(),
+            remote: false,
+        }
+    }
+
+    /// Twice in the live pass the model had `start_task`'s schema in front of
+    /// it, asked to load it, was told no deferred tool had that name, and
+    /// concluded the tool did not exist. A core name is answered as already
+    /// loaded, by both fetching tools.
+    #[tokio::test]
+    async fn a_core_tool_is_answered_as_already_loaded_rather_than_unknown() {
+        let toolbox = Arc::new(Toolbox::default());
+        toolbox.publish(vec![listed("cancel_reminder", "Stop a schedule.")]);
+        toolbox.publish_core(vec![listed(
+            "start_task",
+            "Create a task and start an agentic run on it in the background.",
+        )]);
+
+        let taken = toolbox
+            .take(&["start_task".into(), "nonesuch".into()])
+            .expect("an unpoisoned toolbox loads");
+        assert_eq!(taken.already, vec!["start_task".to_string()]);
+        assert_eq!(taken.unknown, vec!["nonesuch".to_string()]);
+        assert!(taken.accepted.is_empty());
+        assert!(
+            !toolbox.is_loaded("start_task"),
+            "a core tool is not recorded as a load: it costs no schema"
+        );
+
+        let context = ToolContext::default();
+        let said = |result: ToolResult| result.output.unwrap_or_default();
+        let loaded = said(
+            LoadToolsTool(toolbox.clone())
+                .execute(json!({"names": ["start_task"]}), &context)
+                .await
+                .unwrap(),
+        );
+        assert!(loaded.contains("Already loaded: start_task"), "{loaded}");
+        assert!(!loaded.contains("No deferred tool"), "{loaded}");
+
+        let found = said(
+            SearchToolsTool(toolbox.clone())
+                .execute(json!({"query": "start a background task"}), &context)
+                .await
+                .unwrap(),
+        );
+        assert!(
+            found.contains("start_task (loaded — call it directly)"),
+            "{found}"
+        );
+        assert!(found.contains("Every match is already loaded"), "{found}");
+
+        // A search that finds both kinds still points at load_tools for the
+        // deferred one, and marks the core one so the model does not load it.
+        let mixed = said(
+            SearchToolsTool(toolbox)
+                .execute(
+                    json!({"query": "stop a schedule or start a task"}),
+                    &context,
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(
+            mixed.contains("cancel_reminder: Stop a schedule."),
+            "{mixed}"
+        );
+        assert!(mixed.contains("start_task (loaded"), "{mixed}");
+        assert!(mixed.contains("Call load_tools"), "{mixed}");
     }
 }

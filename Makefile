@@ -1,6 +1,6 @@
 .PHONY: help setup up down restart logs logs-follow ps health check vision-model test-vision \
 	test-lora-live \
-	pull-models clean clean-volumes backup restore \
+	pull-models clean clean-volumes backup restore migrate-pgdata stop \
 	setup-auth add-user setup-comfyui-macos setup-comfyui-model \
 	setup-comfyui-video-model setup-comfyui-audio-model setup-vision-model \
 	setup-comfyui-upscale-model verify-comfyui-model verify-comfyui-video-model \
@@ -154,6 +154,7 @@ validate: ## Validate configuration
 		sh scripts/test-model-proxy.sh; \
 		sh scripts/test-vpn-compose.sh; \
 		sh scripts/test-compose-profiles.sh; \
+		sh scripts/test-dockerfile-members.sh; \
 	else \
 		echo "$(RED)✗ Missing .env or auth/users.htpasswd. Run 'make setup' first.$(NC)"; \
 		exit 1; \
@@ -199,6 +200,10 @@ up-all: ## Start with VPN and monitoring
 down: ## Stop all services
 	@echo "$(YELLOW)Stopping services...$(NC)"
 	$(COMPOSE) --all-overlays down
+
+stop: ## Stop all services but keep their containers (and anonymous volumes)
+	@echo "$(YELLOW)Stopping services...$(NC)"
+	$(COMPOSE) --all-overlays stop
 
 restart: ## Restart all services
 	@echo "$(YELLOW)Restarting services...$(NC)"
@@ -345,8 +350,14 @@ prune: ## Remove unused Docker resources
 
 ##@ Backup & Restore
 
-backup: ## Backup volumes to ./backups directory
+backup: ## Backup volumes to ./backups directory (the postgres cluster lives in zone_postgres_data; see migrate-pgdata for installs from before it did)
 	@echo "$(BLUE)Creating backup...$(NC)"
+	@if ! docker run --rm -v zone_postgres_data:/postgres:ro alpine test -f /postgres/PG_VERSION; then \
+		echo "$(RED)zone_postgres_data holds no database cluster, so this archive would carry no data.$(NC)"; \
+		echo "An install from before the PGDATA mount keeps its cluster in an anonymous volume: run 'make stop && make migrate-pgdata && make up' first."; \
+		echo "Set ALLOW_EMPTY_POSTGRES=1 to archive the other volumes anyway."; \
+		[ -n "$(ALLOW_EMPTY_POSTGRES)" ] || exit 1; \
+	fi
 	@mkdir -p backups
 	@DATE=$$(date +%Y%m%d_%H%M%S); \
 	docker run --rm \
@@ -380,7 +391,13 @@ restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_
 		-v zone_traefik_letsencrypt:/data/traefik \
 		-v $$(pwd)/backups:/backup \
 		alpine tar xzf /backup/$$(basename $(BACKUP)) -C /data
+	@if ! docker run --rm -v zone_postgres_data:/postgres:ro alpine test -f /postgres/PG_VERSION; then \
+		echo "$(YELLOW)The archive carried no postgres cluster: backups taken before the PGDATA mount moved into zone_postgres_data hold an empty postgres/ directory.$(NC)"; \
+	fi
 	@echo "$(GREEN)Restore complete!$(NC)"
+
+migrate-pgdata: ## Move an existing install's postgres cluster out of the anonymous PGDATA volume into zone_postgres_data (run after 'make stop', before 'make up')
+	@sh scripts/migrate-pgdata.sh
 
 ##@ Development
 

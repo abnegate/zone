@@ -6,7 +6,7 @@ export const filesystemSource: SourceDefinition = {
   id: 'filesystem',
   name: 'Filesystem',
   category: 'file',
-  description: 'Use a local directory',
+  description: 'Local directory',
   icon: FolderIcon,
   badgeColor: 'badge-blue',
   iconWrapperClass: 'filesystem',

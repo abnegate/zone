@@ -30,3 +30,22 @@ describe('UnauthorizedPage', () => {
     expect(screen.getByRole('link', { name: 'Go to Home' })).toHaveAttribute('href', '/');
   });
 });
+
+describe('UnauthorizedPage layout', () => {
+  it('renders as the auth card with the logo row over an error state', () => {
+    const { container } = render(
+      <BrowserRouter>
+        <UnauthorizedPage />
+      </BrowserRouter>
+    );
+    const card = container.querySelector('.auth-container');
+    expect(card).not.toBeNull();
+    expect(card?.querySelector('.auth-header .zone-logo')).not.toBeNull();
+    const title = screen.getByRole('heading', { name: 'Access Denied' });
+    expect(title).toHaveClass('error-title');
+    expect(title.closest('.auth-error-state')).not.toBeNull();
+    expect(screen.getByTestId('error-icon')).toBeInTheDocument();
+    expect(container.querySelector('.unauthorized-card')).toBeNull();
+    expect(screen.getByRole('link', { name: 'Go to Home' })).not.toHaveClass('btn-block');
+  });
+});

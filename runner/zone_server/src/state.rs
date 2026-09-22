@@ -3,13 +3,16 @@
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::{OnceCell, Semaphore};
-use zone_context::adapters::AdapterRegistry;
+use zone_context::adapters::{
+    AdapterRegistry, FilesystemAdapter, GitHubAdapter, GitLabAdapter, TextAdapter, WebAdapter,
+};
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
+use zone_core::llm::{CliSettings, LlmBackend};
 use zone_core::mcp::McpHub;
 
 use crate::cache::Cache;
-use crate::config::Config;
+use crate::config::{Config, ModelBackend};
 use crate::pull::PullRegistry;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
@@ -21,6 +24,39 @@ const MAX_CONCURRENT_INDEX: usize = 3;
 /// One, because a training upload holds its whole body in memory and a second
 /// run would be waiting on the same ComfyUI and the same GPU regardless.
 const MAX_CONCURRENT_TRAIN: usize = 1;
+
+/// The adapters a source can be verified and fetched with.
+///
+/// Every kind offered anywhere (the console's wizard, `GET /api/sources/types`,
+/// the create route's validation) is read from this registry, so a kind without
+/// a working adapter cannot be offered. Notion stays out until its adapter does
+/// more than refuse.
+pub fn default_adapter_registry() -> AdapterRegistry {
+    let mut registry = AdapterRegistry::new();
+    registry.register(FilesystemAdapter::new());
+    registry.register(GitHubAdapter::new());
+    registry.register(GitLabAdapter::new());
+    registry.register(TextAdapter::new());
+    registry.register(WebAdapter::new());
+    registry
+}
+
+/// The backend every model client in this process is built on.
+///
+/// A CLI-only self-host leaves `litellm_host` empty, so a client left on HTTP
+/// has nowhere to send its turn rather than somewhere slower to send it.
+pub fn llm_backend(config: &Config) -> LlmBackend {
+    match config.model_backend() {
+        ModelBackend::LiteLlm => LlmBackend::Http,
+        ModelBackend::Cli { agent, executable } => LlmBackend::cli(
+            *agent,
+            match executable {
+                Some(executable) => CliSettings::default().with_executable(executable),
+                None => CliSettings::default(),
+            },
+        ),
+    }
+}
 
 /// Shared application state
 ///
@@ -60,7 +96,7 @@ struct AppStateInner {
 }
 
 impl AppState {
-    /// Create a new application state without zone_context services
+    /// Create a new application state without embedding or context services
     pub fn new(config: Config, db: PgPool, cache: Option<Cache>) -> Self {
         // Derive encryption key from config
         let encryption_key = crate::crypto::derive_key(config.encryption_key())
@@ -86,7 +122,7 @@ impl AppState {
                 config,
                 db,
                 cache,
-                adapter_registry: None,
+                adapter_registry: Some(Arc::new(default_adapter_registry())),
                 embedding_service: None,
                 context_service: None,
                 email_service: None,
@@ -283,7 +319,14 @@ impl AppState {
 
     /// Install an empty hub so tests never spawn MCP children.
     pub fn disable_mcp(&self) {
-        let _ = self.inner.mcp.set(McpHub::new());
+        self.install_mcp(McpHub::new());
+    }
+
+    /// Install an already connected hub, for a test that attaches its own
+    /// server instead of whatever the process environment names. A hub that
+    /// is already installed stays.
+    pub fn install_mcp(&self, hub: McpHub) {
+        let _ = self.inner.mcp.set(hub);
     }
 }
 
@@ -311,6 +354,7 @@ pub(crate) fn test_config() -> Config {
         jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
+        model_backend: Default::default(),
         litellm_host: "http://localhost:4000".to_string(),
         litellm_key: "test-key".to_string(),
         ollama_host: "http://localhost:11434".to_string(),
@@ -335,8 +379,9 @@ pub(crate) fn test_config() -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zone_context::adapters::{FilesystemAdapter, GitHubAdapter, TextAdapter};
+    use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
+    use zone_core::llm::AgentKind;
     use zone_email::EmailConfig;
 
     fn create_test_config() -> Config {
@@ -348,6 +393,7 @@ mod tests {
             jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
             jwt_access_lifetime: 900,
             jwt_refresh_lifetime: 604800,
+            model_backend: Default::default(),
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),
@@ -369,26 +415,72 @@ mod tests {
         }
     }
 
+    fn backed_by(backend: ModelBackend) -> Config {
+        Config {
+            model_backend: backend,
+            ..create_test_config()
+        }
+    }
+
     #[test]
-    fn test_adapter_registry_initialization() {
-        // Given: Empty adapter registry
-        let mut registry = AdapterRegistry::new();
+    fn an_unconfigured_host_keeps_sending_completions_to_the_endpoint() {
+        assert!(matches!(
+            llm_backend(&create_test_config()),
+            LlmBackend::Http
+        ));
+    }
 
-        // When: Registering text, filesystem, and github adapters
-        registry.register(TextAdapter::new());
-        registry.register(FilesystemAdapter::new());
-        registry.register(GitHubAdapter::new());
+    #[test]
+    fn every_configured_agent_reaches_the_client_as_its_own_backend() {
+        for agent in AgentKind::ALL {
+            let config = backed_by(ModelBackend::Cli {
+                agent,
+                executable: None,
+            });
 
-        // Then: Should have all three adapters registered
-        assert_eq!(registry.len(), 3);
-        assert!(registry.has_adapter("text"));
-        assert!(registry.has_adapter("filesystem"));
-        assert!(registry.has_adapter("github"));
+            let LlmBackend::Cli {
+                agent: chosen,
+                settings,
+            } = llm_backend(&config)
+            else {
+                panic!("{agent} was configured and the client was still built on HTTP");
+            };
+            assert_eq!(chosen, agent);
+            assert!(
+                settings.executable.is_none(),
+                "an unnamed binary has to stay a PATH lookup, not become a literal path"
+            );
+        }
+    }
 
-        let types = registry.registered_types();
-        assert!(types.contains(&"text".to_string()));
-        assert!(types.contains(&"filesystem".to_string()));
-        assert!(types.contains(&"github".to_string()));
+    #[test]
+    fn a_configured_binary_is_the_one_the_agent_is_run_from() {
+        let executable = PathBuf::from("/opt/homebrew/bin/claude");
+        let config = backed_by(ModelBackend::Cli {
+            agent: AgentKind::Claude,
+            executable: Some(executable.clone()),
+        });
+
+        let LlmBackend::Cli { settings, .. } = llm_backend(&config) else {
+            panic!("a configured agent has to reach the client as a CLI backend");
+        };
+        assert_eq!(
+            settings.executable,
+            Some(executable),
+            "the operator named a binary off PATH and it was dropped, so the agent would not be found"
+        );
+    }
+
+    #[test]
+    fn the_default_registry_holds_exactly_the_kinds_that_can_verify() {
+        let registry = default_adapter_registry();
+        let mut kinds = registry.registered_types();
+        kinds.sort();
+        assert_eq!(kinds, ["filesystem", "github", "gitlab", "text", "web"]);
+        assert!(
+            !registry.has_adapter("notion"),
+            "the Notion adapter is a stub that refuses every verify; offering it would strand the source"
+        );
     }
 
     // Note: AppState with services requires a real database connection and embedding service.
@@ -405,8 +497,7 @@ mod tests {
             // When: Creating AppState without services
             let state = AppState::new(config, pool, None);
 
-            // Then: Service accessors should return None
-            assert!(state.adapter_registry().is_none());
+            assert!(state.adapter_registry().is_some());
             assert!(state.embedding_service().is_none());
             assert!(state.context_service().is_none());
         }

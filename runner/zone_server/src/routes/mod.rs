@@ -18,6 +18,7 @@ pub mod organizations;
 pub mod projects;
 pub mod sessions;
 pub mod sources;
+pub mod sync;
 pub mod tasks;
 pub mod webhooks;
 pub mod workspace_themes;
@@ -28,7 +29,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     middleware,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -102,6 +103,12 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/webhooks/sync/{sync_config_id}/linear",
             post(webhooks::linear_webhook),
+        )
+        // Zone's tools, served to a spawned coding agent (auth: the turn's
+        // own bearer token, which no other route accepts)
+        .route(
+            crate::mcp::PATH,
+            post(crate::mcp::serve).layer(DefaultBodyLimit::max(crate::mcp::BODY_LIMIT)),
         )
         // WebSocket routes (auth via first message)
         .route("/ws/pull", get(ws::handle_pull_ws))
@@ -194,9 +201,18 @@ pub fn create_router(state: AppState) -> Router {
             post(projects::resume_automation),
         )
         .route(
+            "/api/projects/{id}/source",
+            put(projects::link_source).delete(projects::unlink_source),
+        )
+        .route(
             "/api/projects/{id}/github",
             post(projects::link_github).delete(projects::unlink_github),
         )
+        .route(
+            "/api/projects/{id}/sync",
+            get(sync::list).post(sync::create),
+        )
+        .route("/api/projects/{id}/sync/{config_id}", delete(sync::delete))
         // Tasks (workspace-scoped)
         .route(
             "/api/workspaces/{workspace_id}/tasks",
@@ -228,6 +244,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/chats/{id}/context", post(chats::context))
         .route("/api/chats/{id}/archive", post(chats::archive))
         .route("/api/chats/{id}/unarchive", post(chats::unarchive))
+        .route(
+            "/api/chats/{id}/sources",
+            get(chats::list_sources).put(chats::set_sources),
+        )
         .route(
             "/api/chats/{id}/messages",
             get(chats::list_messages).post(chats::create_message),
@@ -266,6 +286,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/knowledge/{id}",
             get(context::get_knowledge_entry).delete(context::delete_knowledge),
+        )
+        .route(
+            "/api/knowledge/{id}/refresh",
+            post(context::refresh_knowledge),
         )
         // Models
         .route("/api/models", get(models::list))

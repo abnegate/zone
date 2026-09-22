@@ -1,7 +1,8 @@
-import { Button, Input, Modal, Select } from '@zone/ui';
+import { Button, EmptyState, Input, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
+import { memberLabel } from '../../memberLabel';
 import type { AddOrgMemberRequest, OrganizationMember, OrgRole } from '../types';
 import './OrgMembersSection.css';
 
@@ -20,9 +21,6 @@ const isValidEmail = (email: string): boolean => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
 };
-
-const memberLabel = (member: { display_name: string | null; email: string }) =>
-  member.display_name || member.email || 'Member';
 
 const toUserMessage = (err: unknown, fallback: string) => {
   const message = err instanceof Error ? err.message : fallback;
@@ -253,20 +251,21 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
 
   return (
     <div className="org-members-section">
-      <div className="section-header">
-        <div>
+      <div className="section-row">
+        <div className="section-row-copy">
           <h2 className="section-title">Organization Members</h2>
           <p className="section-description">
             Manage members and their roles in this organization.
           </p>
         </div>
         {canManageMembers && (
-          <Button onClick={() => setShowAddModal(true)} variant="primary">
-            Add Member
-          </Button>
+          <div className="section-row-actions">
+            <Button size="sm" onClick={() => setShowAddModal(true)}>
+              Add Member
+            </Button>
+          </div>
         )}
       </div>
-
       {error && (
         <div className="alert alert-error" role="alert">
           {error}
@@ -277,21 +276,17 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
           {success}
         </div>
       )}
-
       {members.length === 0 ? (
-        <div className="empty-state">
-          <p>No members found</p>
-        </div>
+        <EmptyState title="No members found" />
       ) : (
         <div className="members-table-container">
           <table className="members-table">
             <thead>
               <tr>
                 <th>Member</th>
-                <th>Email</th>
                 <th>Role</th>
                 <th>Joined</th>
-                <th>Actions</th>
+                <th className="members-actions-head">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -299,30 +294,30 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                 const isUpdating = updatingMemberId === member.id;
                 const canModify = canModifyMember(member);
                 const availableRoles = getAvailableRoles(member);
-
+                const editable = canModify && availableRoles.length > 1;
                 return (
                   <tr key={member.id}>
                     <td>
                       <div className="member-info">
-                        <div className="member-avatar">{memberLabel(member)[0].toUpperCase()}</div>
-                        <div className="member-name">{memberLabel(member)}</div>
+                        <div className="member-avatar" aria-hidden="true">
+                          {memberLabel(member)[0].toUpperCase()}
+                        </div>
+                        <div className="member-identity">
+                          <div className="member-name">{memberLabel(member)}</div>
+                          {member.display_name && member.email && (
+                            <div className="member-email">{member.email}</div>
+                          )}
+                        </div>
                       </div>
                     </td>
-                    <td>{member.email || '—'}</td>
                     <td>
-                      <span className={getRoleBadgeClass(member.role)}>
-                        {member.role.charAt(0).toUpperCase() + member.role.slice(1)}
-                      </span>
-                    </td>
-                    <td>{formatDate(member.joined_at)}</td>
-                    <td>
-                      <div className="member-actions">
+                      {editable ? (
                         <select
                           value={member.role}
                           onChange={(e) =>
                             handleRoleChangeRequest(member, e.target.value as OrgRole)
                           }
-                          disabled={!canModify || isUpdating}
+                          disabled={isUpdating}
                           className="role-select"
                           aria-label={`Change role for ${memberLabel(member)}`}
                         >
@@ -332,18 +327,28 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                             </option>
                           ))}
                         </select>
+                      ) : (
+                        <span className={getRoleBadgeClass(member.role)}>
+                          {member.role.charAt(0).toUpperCase() + member.role.slice(1)}
+                        </span>
+                      )}
+                    </td>
+                    <td className="member-joined">{formatDate(member.joined_at)}</td>
+                    <td>
+                      <div className="member-actions">
                         {isUpdating && (
-                          <span className="loading-spinner" aria-live="polite">
+                          <span className="member-updating" aria-live="polite">
                             Updating...
                           </span>
                         )}
                         <Button
+                          className="member-remove"
                           onClick={() => {
                             setMemberToRemove(member);
                             setShowRemoveModal(true);
                           }}
                           disabled={!canModify || isUpdating}
-                          variant="secondary"
+                          variant="ghost"
                           size="sm"
                         >
                           Remove
@@ -357,8 +362,6 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
           </table>
         </div>
       )}
-
-      {/* Add Member Modal */}
       <Modal
         isOpen={showAddModal}
         onClose={() => {
@@ -403,14 +406,13 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
           </div>
         </form>
       </Modal>
-
-      {/* Remove Member Confirmation Modal */}
       <Modal
         isOpen={showRemoveModal}
         onClose={() => setShowRemoveModal(false)}
         title="Remove Member"
+        size="sm"
       >
-        <div className="remove-member-modal">
+        <div className="confirm-modal">
           <p>
             Are you sure you want to remove{' '}
             <strong>{memberToRemove ? memberLabel(memberToRemove) : ''}</strong> from this
@@ -426,8 +428,6 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
           </div>
         </div>
       </Modal>
-
-      {/* Role Elevation Confirmation Modal */}
       <Modal
         isOpen={showRoleConfirmModal}
         onClose={() => {
@@ -435,8 +435,9 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
           setPendingRoleChange(null);
         }}
         title="Confirm Role Change"
+        size="sm"
       >
-        <div className="role-confirm-modal">
+        <div className="confirm-modal">
           <p>
             Are you sure you want to promote{' '}
             <strong>{pendingRoleChange ? memberLabel(pendingRoleChange.member) : ''}</strong> to{' '}

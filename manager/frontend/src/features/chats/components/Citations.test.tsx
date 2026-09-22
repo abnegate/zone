@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen } from '@testing-library/react';
 import type { Citation } from '../types';
-import { citationAnchorId } from '../utils/citations';
+import { citationAnchorId, formatObservedAt } from '../utils/citations';
 import { Citations } from './Citations';
 
 const citation = (overrides: Partial<Citation> = {}): Citation => ({
@@ -30,6 +30,77 @@ describe('Citations', () => {
     const [identified, plain] = screen.getAllByTestId('citation');
     expect(identified).toHaveAttribute('id', citationAnchorId('web:a3f21c'));
     expect(plain).not.toHaveAttribute('id');
+  });
+
+  it('prints a document revision as a date beside the observation, not as a raw stamp', () => {
+    render(
+      <Citations
+        citations={[
+          citation({
+            kind: 'workspace_document',
+            title: 'Deployment checklist',
+            url: 'knowledge://11111111-1111-1111-1111-111111111111',
+            revision: '2026-09-20T20:22:20.046608',
+            observed_at: '2026-09-20T20:24:11Z',
+            outcome: 'observed',
+          }),
+        ]}
+      />
+    );
+
+    const revision = document.querySelector('.citation-revision');
+    expect(revision).toHaveClass('citation-revision--time');
+    expect(revision).toHaveTextContent(
+      `Revised ${formatObservedAt('2026-09-20T20:22:20.046608Z')}`
+    );
+    expect(screen.queryByText('2026-09-20T20:22:20.046608')).not.toBeInTheDocument();
+  });
+
+  it('labels the observation with its evidence word and drops the date it shares with the revision', () => {
+    render(
+      <Citations
+        citations={[
+          citation({
+            kind: 'workspace_document',
+            title: 'Runbook',
+            url: 'knowledge://11111111-1111-1111-1111-111111111111',
+            revision: '2026-09-20T20:22:20Z',
+            observed_at: '2026-09-20T20:24:11Z',
+            outcome: 'observed',
+          }),
+        ]}
+      />
+    );
+
+    const time = new Date('2026-09-20T20:24:11Z').toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    expect(document.querySelector('.citation-observation')).toHaveTextContent(`Observed ${time}`);
+    expect(document.querySelector('.citation-meta')?.textContent).toBe(
+      `Revised ${formatObservedAt('2026-09-20T20:22:20Z')}Observed ${time}`
+    );
+    expect(document.querySelector('time')).toHaveTextContent(time);
+  });
+
+  it('leaves the revision out when it would repeat the observation minute', () => {
+    render(
+      <Citations
+        citations={[
+          citation({
+            kind: 'workspace_document',
+            title: 'Deployment checklist',
+            url: 'knowledge://11111111-1111-1111-1111-111111111111',
+            revision: '2026-09-20T20:24:02',
+            observed_at: '2026-09-20T20:24:11Z',
+            outcome: 'observed',
+          }),
+        ]}
+      />
+    );
+
+    expect(document.querySelector('.citation-revision')).toBeNull();
+    expect(document.querySelector('time')).toHaveAttribute('dateTime', '2026-09-20T20:24:11Z');
   });
 
   it('renders nothing without sources', () => {

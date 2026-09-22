@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_comfy::MediaType;
-use zone_core::llm::{Message as LlmMessage, Role as LlmRole};
+use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Message as LlmMessage, Role as LlmRole};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -41,7 +41,8 @@ use crate::agent::{
 };
 use crate::auth::validate_access_token;
 use crate::db::{
-    self, ai_settings, chat_sources, chats, knowledge, sessions, workspace_members, workspaces,
+    self, ai_settings, chat_attached_sources, chat_sources, chats, knowledge, sessions,
+    workspace_members, workspaces,
 };
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
@@ -1744,6 +1745,7 @@ async fn handle_image_generation(
             image_config.clone(),
             state.config().litellm_host.clone(),
             state.config().litellm_key.clone(),
+            crate::state::llm_backend(state.config()),
         )
         .edit_prompt(prompt)
         .await
@@ -2574,6 +2576,7 @@ async fn prepare_message(
         image_config.clone(),
         state.config().litellm_host.clone(),
         state.config().litellm_key.clone(),
+        crate::state::llm_backend(state.config()),
     );
     let intent = classifier
         .classify(content, metadata)
@@ -2746,8 +2749,9 @@ async fn prepare_chat(
             None => None,
         };
 
+        let attached = chat_attached_sources::scope(state.db(), Some(chat_id)).await;
         let mut knowledge_hits = Vec::new();
-        if let Some(embedding) = query_embedding.as_deref() {
+        if let (Some(embedding), None) = (query_embedding.as_deref(), attached.as_ref()) {
             match knowledge::search_knowledge_entries(
                 state.db(),
                 embedding,
@@ -2761,30 +2765,32 @@ async fn prepare_chat(
                 Err(error) => tracing::warn!(%error, "Knowledge semantic search failed"),
             }
         }
-        match knowledge::search_knowledge_keyword(
-            state.db(),
-            content,
-            workspace_id,
-            MAX_CONTEXT_IN_PROMPT as i64,
-        )
-        .await
-        {
-            Ok(hits) => {
-                knowledge_hits = knowledge::fuse_knowledge_hits(
-                    knowledge_hits,
-                    hits,
-                    content,
-                    MAX_CONTEXT_IN_PROMPT,
-                );
+        if attached.is_none() {
+            match knowledge::search_knowledge_keyword(
+                state.db(),
+                content,
+                workspace_id,
+                MAX_CONTEXT_IN_PROMPT as i64,
+            )
+            .await
+            {
+                Ok(hits) => {
+                    knowledge_hits = knowledge::fuse_knowledge_hits(
+                        knowledge_hits,
+                        hits,
+                        content,
+                        MAX_CONTEXT_IN_PROMPT,
+                    );
+                }
+                Err(error) => tracing::warn!(%error, "Knowledge keyword search failed"),
             }
-            Err(error) => tracing::warn!(%error, "Knowledge keyword search failed"),
         }
 
         let mut source_lines = Vec::new();
         if let Some(context_service) = state.context_service() {
             let filters = zone_context::embeddings::SearchFilters {
                 workspace_id: Some(workspace_id),
-                source_ids: None,
+                source_ids: attached.clone(),
                 categories: None,
                 min_quality: None,
                 since: None,
@@ -2840,6 +2846,121 @@ async fn prepare_chat(
     Ok(preparation)
 }
 
+/// What a CLI-backed turn needs to reach zone's tools, for exactly as long as
+/// it is held: the lease keeping this turn's token minted, and the calls the
+/// agent makes arriving as the events the console already renders.
+struct AgentTools {
+    lease: crate::mcp::Lease,
+    calls: mpsc::UnboundedReceiver<AgentEvent>,
+}
+
+/// The one turn zone's MCP endpoint decides a call by.
+struct TurnScope {
+    workspace: Uuid,
+    chat: Uuid,
+    user: Uuid,
+    /// `chats.agent_sandboxed`.
+    sandboxed: bool,
+    approval: crate::agent::ApprovalPolicy,
+    endpoint: String,
+}
+
+impl TurnScope {
+    /// A sandboxed chat gives the agent zone's tools and nothing else. An
+    /// unsandboxed one leaves it the file and shell tools it ships with, which
+    /// run outside zone, which zone never sees, and which no approval card can
+    /// reach.
+    fn builtin_tools(&self) -> BuiltinTools {
+        match self.sandboxed {
+            true => BuiltinTools::Withheld,
+            false => BuiltinTools::Granted,
+        }
+    }
+}
+
+/// Serve this turn's tools to a spawned coding agent over MCP.
+///
+/// Only ever for an agentic turn: a chat whose agent the reader turned off
+/// gets no tools at all, and serving the registry to the child anyway would
+/// hand it exactly what that switch is there to withhold.
+///
+/// The agent runs its own tool loop and cannot be handed zone's schemas over
+/// the completions API, so the registry moves out of zone's loop and into the
+/// turn the endpoint answers for. What zone's loop keeps can call nothing,
+/// which is what it could have done with this backend either way.
+///
+/// `None` for a backend whose tools zone cannot decide -- an HTTP endpoint,
+/// which carries its tools in the request itself, or an agent that would end
+/// up holding the operator's own servers and an ungated shell beside zone's --
+/// and then the turn's tools stay exactly where they were.
+fn serve_tools(turn: &TurnScope, llm: &LlmClient, tools: &mut ChatTools) -> Option<AgentTools> {
+    let LlmBackend::Cli { agent, .. } = &llm.config().backend else {
+        return None;
+    };
+    if !agent.accepts_toolset() {
+        return None;
+    }
+
+    let registry = Arc::new(std::mem::replace(tools, ChatTools::empty()));
+    let (events, calls) = mpsc::unbounded_channel();
+    let lease = crate::mcp::Turn::new(
+        turn.workspace,
+        turn.chat,
+        turn.user,
+        registry,
+        turn.approval.clone(),
+        events,
+    )
+    .open(turn.endpoint.as_str());
+    Some(AgentTools { lease, calls })
+}
+
+/// Where a child process of this one reaches this server.
+///
+/// `Config::host` is a bind address: a server bound to every interface is
+/// reached at loopback, and one bound to a single address at that address. The
+/// agent runs on this host, so nothing here has to be routable from anywhere
+/// else -- and the turn's token, which travels this way, had better not be.
+fn own_address(config: &crate::config::Config) -> String {
+    let host = match config.host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        host => host,
+    };
+    match host.contains(':') && !host.starts_with('[') {
+        true => format!("http://[{host}]:{}", config.port),
+        false => format!("http://{host}:{}", config.port),
+    }
+}
+
+/// Everything the reader has to see this round, in one stream: zone's own
+/// loop, and the calls a spawned agent made over MCP while that loop was
+/// waiting on its answer.
+///
+/// Ends with the loop rather than with the channel. The lease holding the
+/// channel open outlives the round on purpose, so a merge that waited for it
+/// to close would never end the turn.
+fn merged<'a>(
+    events: impl Stream<Item = AgentEvent> + Send + 'a,
+    calls: &'a mut mpsc::UnboundedReceiver<AgentEvent>,
+) -> impl Stream<Item = AgentEvent> + Send + 'a {
+    async_stream::stream! {
+        futures::pin_mut!(events);
+        loop {
+            tokio::select! {
+                biased;
+                Some(call) = calls.recv() => yield call,
+                event = events.next() => match event {
+                    Some(event) => yield event,
+                    None => break,
+                },
+            }
+        }
+        while let Ok(call) = calls.try_recv() {
+            yield call;
+        }
+    }
+}
+
 /// `jobs` collects the background jobs this turn started and has not yet
 /// reported as exited, so the teardown that kills them can say each one is gone.
 async fn handle_chat_generation(
@@ -2857,6 +2978,7 @@ async fn handle_chat_generation(
         model,
         agentic,
         auto_approve,
+        sandboxed,
         mut tools,
         mut context,
         llm: llm_client,
@@ -2870,6 +2992,24 @@ async fn handle_chat_generation(
     let model_name = model.as_str();
     let mut replay = context.clone();
     let definitions = agentic.then(|| tools.definitions().to_vec());
+    let turn = TurnScope {
+        workspace: workspace_id,
+        chat: chat_id,
+        user: user_id,
+        sandboxed,
+        approval: generation.approvals.clone(),
+        endpoint: crate::mcp::endpoint(&own_address(state.config())),
+    };
+    // Bound for the whole turn on purpose. The token is revoked when the lease
+    // drops, and the agent is still calling with it until its last round has
+    // returned.
+    let mut agent_tools = agentic
+        .then(|| serve_tools(&turn, &llm_client, &mut tools))
+        .flatten();
+    let llm_client = match &agent_tools {
+        Some(served) => llm_client.with_toolset(served.lease.toolset(), turn.builtin_tools()),
+        None => llm_client,
+    };
     let mut token_filter = TokenFilter::new(stop);
     let assistant_message_id = generation.message_id;
     let stream_deadline = generation_deadline(timeout)?;
@@ -2910,22 +3050,26 @@ async fn handle_chat_generation(
 
     loop {
         wait::set_ceiling(ToolSession::Chat(chat_id), stream_deadline);
-        let mut events: Pin<Box<dyn Stream<Item = AgentEvent> + Send>> =
-            Box::pin(agent::run_with_context(
-                AgentRun {
-                    llm: llm_client.clone(),
-                    model: model_name.to_string(),
-                    tools,
-                    messages: Vec::new(),
-                    budget,
-                    approval: {
-                        generation.approvals.set_auto(auto_approve);
-                        generation.approvals.clone()
-                    },
+        let round = agent::run_with_context(
+            AgentRun {
+                llm: llm_client.clone(),
+                model: model_name.to_string(),
+                tools,
+                messages: Vec::new(),
+                budget,
+                approval: {
+                    generation.approvals.set_auto(auto_approve);
+                    generation.approvals.clone()
                 },
-                context,
-                agentic,
-            ));
+            },
+            context,
+            agentic,
+        );
+        let mut events: Pin<Box<dyn Stream<Item = AgentEvent> + Send + '_>> =
+            match agent_tools.as_mut() {
+                Some(served) => Box::pin(merged(round, &mut served.calls)),
+                None => Box::pin(round),
+            };
         let mut pending_wait: Option<(Waited, Spend)> = None;
 
         loop {
@@ -6115,5 +6259,170 @@ mod tests {
             "a document or passage the registry resolved produced no citation, so the console \
              renders the reply's own marker as a fabrication"
         );
+    }
+
+    /// Zone's tools reach a spawned coding agent over MCP or not at all, and
+    /// which of the agent's own tools survive beside them is `agent_sandboxed`
+    /// alone. Both are decided here, once the turn's registry and approval
+    /// policy exist, and both last exactly as long as the lease.
+    mod served_tools {
+        use super::*;
+        use zone_core::llm::{AgentKind, CliSettings, LlmConfig};
+
+        fn scope(sandboxed: bool) -> TurnScope {
+            TurnScope {
+                workspace: Uuid::new_v4(),
+                chat: Uuid::new_v4(),
+                user: Uuid::new_v4(),
+                sandboxed,
+                approval: crate::agent::ApprovalPolicy::auto(),
+                endpoint: crate::mcp::endpoint("http://127.0.0.1:8421"),
+            }
+        }
+
+        fn cli(agent: AgentKind) -> LlmClient {
+            LlmClient::new(
+                LlmConfig::default().with_backend(LlmBackend::cli(agent, CliSettings::default())),
+            )
+        }
+
+        fn tools() -> ChatTools {
+            let tools = ChatTools::empty().with_plan_approval();
+            assert!(!tools.is_empty(), "the turn has tools worth serving");
+            tools
+        }
+
+        /// What the child process is actually configured with: where zone
+        /// serves its tools, which tools those are, and whether the agent
+        /// keeps its own.
+        fn attached(llm: &LlmClient) -> Option<(String, Vec<String>, BuiltinTools)> {
+            match &llm.config().backend {
+                LlmBackend::Cli { settings, .. } => settings.toolset.as_ref().map(|toolset| {
+                    (
+                        toolset.endpoint.clone(),
+                        toolset.tools.clone(),
+                        settings.builtin_tools,
+                    )
+                }),
+                LlmBackend::Http => None,
+            }
+        }
+
+        fn served(sandboxed: bool) -> (LlmClient, ChatTools, AgentTools) {
+            let turn = scope(sandboxed);
+            let mut tools = tools();
+            let llm = cli(AgentKind::Claude);
+            let agent_tools =
+                serve_tools(&turn, &llm, &mut tools).expect("claude lets zone decide its tools");
+            let llm = llm.with_toolset(agent_tools.lease.toolset(), turn.builtin_tools());
+            (llm, tools, agent_tools)
+        }
+
+        #[test]
+        fn a_sandboxed_turn_serves_zone_tools_and_withholds_the_agents_own() {
+            let (llm, left_behind, served) = served(true);
+
+            let (endpoint, served_tools, builtin_tools) =
+                attached(&llm).expect("the agent is told where zone serves its tools");
+            assert_eq!(endpoint, crate::mcp::endpoint("http://127.0.0.1:8421"));
+            assert_eq!(served_tools, [crate::agent::plan::SUBMIT_PLAN]);
+            assert_eq!(
+                builtin_tools,
+                BuiltinTools::Withheld,
+                "a sandboxed chat must not leave the agent tools zone cannot gate"
+            );
+            assert!(
+                left_behind.is_empty(),
+                "the registry the endpoint answers from must not also sit in zone's own loop"
+            );
+            drop(served);
+        }
+
+        #[test]
+        fn an_unsandboxed_turn_grants_the_agent_its_own_tools_beside_zones() {
+            let (llm, _, served) = served(false);
+
+            let (_, served_tools, builtin_tools) =
+                attached(&llm).expect("the agent is told where zone serves its tools");
+            assert_eq!(served_tools, [crate::agent::plan::SUBMIT_PLAN]);
+            assert_eq!(
+                builtin_tools,
+                BuiltinTools::Granted,
+                "an unsandboxed chat keeps the agent's own file and shell tools"
+            );
+            drop(served);
+        }
+
+        #[test]
+        fn an_http_turn_serves_nothing_and_keeps_every_tool_it_had() {
+            let turn = scope(true);
+            let mut tools = tools();
+            let llm = LlmClient::new(LlmConfig::default());
+
+            let served = serve_tools(&turn, &llm, &mut tools);
+
+            assert!(served.is_none(), "an HTTP backend spawns nothing to serve");
+            assert!(
+                !tools.is_empty(),
+                "an HTTP turn offers its tools over the completions API and must keep them"
+            );
+            assert!(matches!(llm.config().backend, LlmBackend::Http));
+        }
+
+        /// Codex would carry the operator's own MCP servers and an ungated
+        /// shell beside zone's tools, so zone serves it none and the turn is
+        /// the prose-only one it was before any of this.
+        #[test]
+        fn a_codex_turn_is_served_no_toolset() {
+            let turn = scope(true);
+            let mut tools = tools();
+            let llm = cli(AgentKind::Codex);
+
+            let served = serve_tools(&turn, &llm, &mut tools);
+
+            assert!(served.is_none());
+            assert!(!tools.is_empty());
+            assert!(attached(&llm).is_none());
+        }
+
+        #[test]
+        fn the_turns_token_stops_working_once_the_lease_is_dropped() {
+            let (_, _, served) = served(true);
+            let token = served.lease.toolset().token.expose().to_string();
+
+            assert!(
+                crate::mcp::Turn::find(&token).is_some(),
+                "the agent cannot reach zone's tools while its turn is running"
+            );
+            drop(served);
+
+            assert!(
+                crate::mcp::Turn::find(&token).is_none(),
+                "a token that outlives its turn is a standing grant on this workspace"
+            );
+        }
+
+        /// A child of this process reaches the server over loopback whatever
+        /// interfaces it was bound to, and the token never leaves the host.
+        #[test]
+        fn the_agent_is_pointed_at_this_server_and_no_further() {
+            let mut config = crate::state::test_config();
+            config.port = 8421;
+
+            for (bound, expected) in [
+                ("0.0.0.0", "http://127.0.0.1:8421"),
+                ("::", "http://127.0.0.1:8421"),
+                ("", "http://127.0.0.1:8421"),
+                ("127.0.0.1", "http://127.0.0.1:8421"),
+                ("192.168.1.9", "http://192.168.1.9:8421"),
+                ("::1", "http://[::1]:8421"),
+            ] {
+                config.host = bound.to_string();
+                assert_eq!(own_address(&config), expected, "bound to {bound}");
+            }
+
+            config.host = "0.0.0.0".to_string();
+            assert!(crate::mcp::endpoint(&own_address(&config)).ends_with(crate::mcp::PATH));
+        }
     }
 }

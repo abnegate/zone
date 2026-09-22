@@ -5,6 +5,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
 import { getErrors } from '../../../validation';
+import { AuthCard, AuthStatus } from '../components';
 import { ResetPasswordSchema } from '../schemas';
 import { isValidTokenFormat } from '../utils';
 import './AuthPage.css';
@@ -65,37 +66,17 @@ export default function ResetPasswordPage() {
 
   if (!token || !isValidTokenFormat(token)) {
     return (
-      <div className="auth-page">
-        <div className="auth-container">
-          <div className="auth-header">
-            <ZoneLogo size="xl" />
-            <p>Invalid reset link</p>
-          </div>
-
-          <div className="auth-error-state">
-            <div className="error-icon">
-              <svg
-                width="64"
-                height="64"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="12" cy="12" r="10" />
-                <line x1="15" y1="9" x2="9" y2="15" />
-                <line x1="9" y1="9" x2="15" y2="15" />
-              </svg>
-            </div>
-            <p className="error-message">{!token ? 'No token provided' : 'Invalid token format'}</p>
+      <AuthCard subtitle="Reset your password">
+        <AuthStatus
+          title="Invalid reset link"
+          description={!token ? 'No token provided' : 'Invalid token format'}
+          action={
             <Link to="/forgot-password" className="btn btn-primary">
               Request New Reset Link
             </Link>
-          </div>
-        </div>
-      </div>
+          }
+        />
+      </AuthCard>
     );
   }
 
@@ -104,7 +85,7 @@ export default function ResetPasswordPage() {
       <div className="auth-page">
         <div className="auth-container">
           <div className="auth-header">
-            <ZoneLogo size="xl" />
+            <ZoneLogo size="md" />
             <p>Password Reset Successful</p>
           </div>
 
@@ -136,7 +117,7 @@ export default function ResetPasswordPage() {
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <ZoneLogo size="xl" />
+          <ZoneLogo size="md" />
           <p>Set new password</p>
         </div>
 

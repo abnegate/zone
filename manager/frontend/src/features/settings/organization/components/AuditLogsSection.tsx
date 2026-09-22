@@ -1,6 +1,7 @@
-import { Button } from '@zone/ui';
+import { Button, EmptyState } from '@zone/ui';
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
+import { AUDIT_ACTIONS, AUDIT_RESOURCE_TYPES } from '../schemas';
 import type { AuditAction, AuditLog, AuditLogFilters, AuditResourceType } from '../types';
 import './AuditLogsSection.css';
 
@@ -8,27 +9,8 @@ interface AuditLogsSectionProps {
   orgId: string;
 }
 
-const ACTIONS: AuditAction[] = [
-  'create',
-  'update',
-  'delete',
-  'login',
-  'logout',
-  'invite',
-  'accept',
-  'revoke',
-];
-const RESOURCE_TYPES: AuditResourceType[] = [
-  'user',
-  'organization',
-  'workspace',
-  'project',
-  'task',
-  'source',
-  'chat',
-  'invitation',
-  'member',
-];
+const ACTIONS: readonly AuditAction[] = AUDIT_ACTIONS;
+const RESOURCE_TYPES: readonly AuditResourceType[] = AUDIT_RESOURCE_TYPES;
 
 export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
   const [loading, setLoading] = useState(true);
@@ -133,7 +115,7 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
     setExpandedLog(expandedLog === logId ? null : logId);
   };
 
-  const formatTimestamp = (timestamp: string): string => {
+  const formatTimestamp = (timestamp: string): { relative: string; absolute: string } => {
     const date = new Date(timestamp);
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
@@ -162,23 +144,26 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
       minute: '2-digit',
       second: '2-digit',
     });
-
-    return `${absolute} (${relative})`;
+    return { relative, absolute };
   };
 
   const getActionBadgeClass = (action: AuditAction): string => {
-    switch (action) {
-      case 'create':
+    const outcome = action.split('.').pop() ?? '';
+    switch (outcome) {
+      case 'created':
+      case 'added':
+      case 'sent':
         return 'action-create';
-      case 'update':
+      case 'updated':
+      case 'role_changed':
         return 'action-update';
-      case 'delete':
+      case 'deleted':
+      case 'removed':
         return 'action-delete';
-      case 'login':
-      case 'accept':
+      case 'accepted':
         return 'action-success';
-      case 'logout':
-      case 'revoke':
+      case 'revoked':
+      case 'reset':
         return 'action-warning';
       default:
         return 'action-default';
@@ -186,14 +171,13 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
   };
 
   if (loading && offset === 0) {
-    return <div className="audit-logs-loading">Loading audit logs...</div>;
+    return <div className="loading-state">Loading audit logs...</div>;
   }
-
   if (error && offset === 0) {
     return (
-      <div className="audit-logs-error">
-        <p>{error}</p>
-        <Button onClick={loadLogs} variant="secondary">
+      <div className="alert alert-error alert-inline" role="alert">
+        <span>{error}</span>
+        <Button onClick={loadLogs} variant="ghost" size="sm">
           Retry
         </Button>
       </div>
@@ -205,19 +189,18 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
 
   return (
     <div className="audit-logs-section">
-      <div className="audit-logs-header">
-        <div>
+      <div className="section-row">
+        <div className="section-row-copy">
           <h2 className="section-title">Audit Logs</h2>
           <p className="section-description">
-            View activity history for your organization. {total} total{' '}
-            {total === 1 ? 'entry' : 'entries'}.
+            {total} total {total === 1 ? 'entry' : 'entries'} for this organization.
           </p>
         </div>
-        <div className="audit-logs-actions">
-          <Button onClick={() => setShowFilters(!showFilters)} variant="secondary">
+        <div className="section-row-actions">
+          <Button onClick={() => setShowFilters(!showFilters)} variant="ghost" size="sm">
             {showFilters ? 'Hide Filters' : 'Show Filters'}
           </Button>
-          <Button onClick={handleExport} loading={exporting} variant="primary">
+          <Button onClick={handleExport} loading={exporting} size="sm">
             Export CSV
           </Button>
         </div>
@@ -296,31 +279,48 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
           </div>
 
           <div className="filter-actions">
-            <Button onClick={handleResetFilters} variant="secondary">
+            <Button onClick={handleResetFilters} variant="ghost">
               Reset
             </Button>
-            <Button onClick={handleApplyFilters} variant="primary">
-              Apply Filters
-            </Button>
+            <Button onClick={handleApplyFilters}>Apply Filters</Button>
           </div>
         </div>
       )}
 
-      {error && <div className="audit-logs-error">{error}</div>}
-
-      {logs.length === 0 ? (
-        <div className="empty-state">
-          <p>No audit logs found{hasActiveFilters ? ' matching the selected filters' : ''}.</p>
-          {hasActiveFilters && (
-            <Button onClick={handleResetFilters} variant="secondary">
-              Clear Filters
-            </Button>
-          )}
+      {error && (
+        <div className="alert alert-error" role="alert">
+          {error}
         </div>
+      )}
+      {logs.length === 0 ? (
+        <EmptyState
+          icon={
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M12 8v4l3 3M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          }
+          title={`No audit logs found${hasActiveFilters ? ' matching the selected filters' : ''}.`}
+          description="Member, invitation, workspace and AI settings changes are recorded here."
+          action={
+            hasActiveFilters ? (
+              <Button onClick={handleResetFilters} variant="secondary">
+                Clear Filters
+              </Button>
+            ) : undefined
+          }
+        />
       ) : (
         <>
           <div className="audit-logs-table-wrapper">
             <table className="audit-logs-table">
+              <colgroup>
+                <col className="audit-col-time" />
+                <col className="audit-col-actor" />
+                <col className="audit-col-action" />
+                <col className="audit-col-type" />
+                <col className="audit-col-id" />
+                <col className="audit-col-details" />
+              </colgroup>
               <thead>
                 <tr>
                   <th>Time</th>
@@ -335,13 +335,18 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
                 {logs.map((log) => (
                   <Fragment key={log.id}>
                     <tr className="audit-log-row">
-                      <td className="timestamp-cell">
-                        <span title={log.created_at}>{formatTimestamp(log.created_at)}</span>
+                      <td className="timestamp-cell" title={log.created_at}>
+                        <span className="timestamp-relative">
+                          {formatTimestamp(log.created_at).relative}
+                        </span>
+                        <span className="timestamp-absolute">
+                          {formatTimestamp(log.created_at).absolute}
+                        </span>
                       </td>
                       <td className="actor-cell">
                         <div className="actor-info">
-                          <span className="actor-email">{log.actor_email}</span>
-                          <span className="actor-id">{log.actor_id}</span>
+                          <span className="actor-email">{log.actor_email ?? 'System'}</span>
+                          <span className="actor-id">{log.actor_id ?? ''}</span>
                         </div>
                       </td>
                       <td className="action-cell">
@@ -351,25 +356,37 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
                       </td>
                       <td className="resource-type-cell">{log.resource_type}</td>
                       <td className="resource-id-cell">
-                        <code>{log.resource_id}</code>
+                        <code title={log.resource_id ?? undefined}>{log.resource_id ?? '—'}</code>
                       </td>
                       <td className="details-cell">
-                        <button
+                        <Button
                           type="button"
                           onClick={() => toggleExpanded(log.id)}
                           className="expand-button"
+                          variant="ghost"
+                          size="sm"
                           aria-expanded={expandedLog === log.id}
                         >
                           {expandedLog === log.id ? 'Hide' : 'Show'}
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                     {expandedLog === log.id && (
                       <tr className="metadata-row">
                         <td colSpan={6}>
                           <div className="metadata-content">
-                            <h4>Metadata</h4>
-                            <pre>{JSON.stringify(log.metadata, null, 2)}</pre>
+                            <h4>Recorded values</h4>
+                            <pre>
+                              {JSON.stringify(
+                                {
+                                  workspace_id: log.workspace_id,
+                                  old_values: log.old_values,
+                                  new_values: log.new_values,
+                                },
+                                null,
+                                2
+                              )}
+                            </pre>
                           </div>
                         </td>
                       </tr>
@@ -382,7 +399,7 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
 
           {hasMore && (
             <div className="load-more-section">
-              <Button onClick={handleLoadMore} loading={loading} variant="secondary">
+              <Button onClick={handleLoadMore} loading={loading} variant="ghost" size="sm">
                 Load More ({total - offset - logs.length} remaining)
               </Button>
             </div>

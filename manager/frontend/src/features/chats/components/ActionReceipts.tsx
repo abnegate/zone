@@ -43,35 +43,26 @@ function ReceiptCard({ receipt }: { receipt: ActionReceipt }) {
       <header className="action-receipt-header">
         <span className="action-receipt-status" aria-hidden="true" />
         <h3 className="action-receipt-action">{actionLabel(receipt)}</h3>
+        <time className="action-receipt-time" dateTime={receipt.occurred_at}>
+          {formatDate(receipt.occurred_at)}
+        </time>
       </header>
       <p className="action-receipt-target">{receipt.target_label}</p>
-      <dl className="action-receipt-meta">
-        <div>
-          <dt>Actor</dt>
-          <dd>{receipt.actor_name || receipt.actor_id}</dd>
-        </div>
-        <div>
-          <dt>When</dt>
-          <dd>
-            <time dateTime={receipt.occurred_at}>{formatDate(receipt.occurred_at)}</time>
-          </dd>
-        </div>
-        <div>
-          <dt>Outcome</dt>
-          <dd>{receipt.outcome}</dd>
-        </div>
-        {stated ? (
-          <div className="action-receipt-reason" data-testid="action-receipt-reason">
-            <dt>{REASON_LABEL}</dt>
-            <dd>{stated}</dd>
-          </div>
-        ) : null}
-      </dl>
-      {receipt.href ? (
-        <Link to={receipt.href} className="action-receipt-link" data-testid="action-receipt-link">
-          {LINK_LABELS[receipt.target_type]}
-        </Link>
+      {stated ? (
+        <p className="action-receipt-reason" data-testid="action-receipt-reason">
+          <span className="action-receipt-reason-label">{REASON_LABEL} </span>
+          {stated}
+        </p>
       ) : null}
+      <footer className="action-receipt-meta">
+        <span>{receipt.actor_name || receipt.actor_id}</span>
+        <span>{receipt.outcome}</span>
+        {receipt.href ? (
+          <Link to={receipt.href} className="action-receipt-link" data-testid="action-receipt-link">
+            {LINK_LABELS[receipt.target_type]}
+          </Link>
+        ) : null}
+      </footer>
     </article>
   );
 }

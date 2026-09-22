@@ -81,7 +81,7 @@ export interface JwtPayload {
 // Session Types
 export interface Session {
   id: string;
-  user_id: string;
+  user_id?: string;
   ip_address: string | null;
   user_agent: string | null;
   device_info: string | null;
@@ -119,6 +119,6 @@ export interface InvitationDetails {
   org_role: OrgRole;
   workspace_name: string | null;
   workspace_role: WorkspaceRole | null;
-  invited_by_email: string;
+  invited_by_email: string | null;
   expires_at: string;
 }

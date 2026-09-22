@@ -300,6 +300,16 @@ describe('ContextSearchPage', () => {
     });
   });
 
+  it('centres the toolbar and the results in the page container', () => {
+    searchState = { results: mockResults, total: 2, loading: false, error: null };
+    const { container } = render(<ContextSearchPage />);
+
+    const centred = container.querySelector('.page-body > .page-container');
+    expect(centred).not.toBeNull();
+    expect(centred?.querySelector('.search-toolbar')).not.toBeNull();
+    expect(centred?.querySelectorAll('.result-card')).toHaveLength(2);
+  });
+
   it('should display initial empty state', () => {
     render(<ContextSearchPage />);
 

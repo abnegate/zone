@@ -192,7 +192,7 @@ describe('InvitationsSection', () => {
     fireEvent.change(screen.getByLabelText(/organization role/i), {
       target: { value: 'member' },
     });
-    fireEvent.change(screen.getByLabelText(/workspace \(optional\)/i), {
+    fireEvent.change(screen.getByLabelText(/^workspace\s+optional$/i), {
       target: { value: 'ws-1' },
     });
 
@@ -310,10 +310,14 @@ describe('InvitationsSection', () => {
     fireEvent.click(screen.getByRole('button', { name: /invite member/i }));
     expect(screen.getByRole('heading', { name: /invite member/i })).toBeInTheDocument();
 
-    // Close modal - find by class to distinguish from other elements
-    const closeButton = document.querySelector('.modal-close') as HTMLElement;
+    expect(screen.getByRole('dialog', { name: 'Invite Member' })).toHaveClass('ui-dialog-content');
+    expect(document.querySelector('.modal-content')).toBeNull();
+    const closeButton = document.querySelector('.ui-dialog-close') as HTMLElement;
+    expect(closeButton.querySelector('svg')).not.toBeNull();
     fireEvent.click(closeButton);
-    expect(screen.queryByRole('heading', { name: /invite member/i })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: /invite member/i })).not.toBeInTheDocument();
+    });
   });
 
   it('closes modal when cancel button clicked', async () => {
@@ -329,10 +333,12 @@ describe('InvitationsSection', () => {
 
     // Click cancel
     fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
-    expect(screen.queryByRole('heading', { name: /invite member/i })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: /invite member/i })).not.toBeInTheDocument();
+    });
   });
 
-  it('closes modal when clicking overlay', async () => {
+  it('closes modal on Escape', async () => {
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 
     await waitFor(() => {
@@ -343,13 +349,10 @@ describe('InvitationsSection', () => {
     fireEvent.click(screen.getByRole('button', { name: /invite member/i }));
     expect(screen.getByRole('heading', { name: /invite member/i })).toBeInTheDocument();
 
-    // Click overlay (parent of modal-content)
-    const modal = screen.getByRole('heading', { name: /invite member/i }).closest('.modal-content');
-    const overlay = modal?.parentElement;
-    if (overlay) {
-      fireEvent.click(overlay);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => {
       expect(screen.queryByRole('heading', { name: /invite member/i })).not.toBeInTheDocument();
-    }
+    });
   });
 
   it('displays role badges with correct styling', async () => {

@@ -23,6 +23,8 @@ const mockUnarchiveChat = mock();
 const mockDeleteChat = mock();
 const mockSearchChatMessages = mock();
 const mockUpdateChat = mock();
+const mockGetChatSources = mock();
+const mockSetChatSources = mock();
 const mockWsSend = mock();
 const mockWsClose = mock();
 
@@ -56,6 +58,8 @@ mock.module('../../../api/chats', () => ({
     unarchiveChat: mockUnarchiveChat,
     deleteChat: mockDeleteChat,
     searchChatMessages: mockSearchChatMessages,
+    getChatSources: mockGetChatSources,
+    setChatSources: mockSetChatSources,
     setGetAccessToken: mock(),
     getMessages: mock(),
     updateChat: mockUpdateChat,
@@ -66,6 +70,50 @@ mock.module('../../../api/chats', () => ({
       return socket;
     },
   },
+}));
+
+const workspaceSources = [
+  {
+    id: 'source-repo',
+    name: 'abnegate/zone-tests',
+    source_type: 'github',
+    category: 'file',
+    config: {},
+    description: null,
+    url: 'https://github.com/abnegate/zone-tests',
+    is_active: true,
+    last_verified_at: null,
+    last_error: null,
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+  },
+  {
+    id: 'source-notes',
+    name: 'Team notes',
+    source_type: 'text',
+    category: 'text',
+    config: {},
+    description: null,
+    url: '',
+    is_active: true,
+    last_verified_at: null,
+    last_error: null,
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+  },
+];
+
+mock.module('../../sources/hooks/useSources', () => ({
+  useSources: () => ({
+    sources: workspaceSources,
+    loading: false,
+    error: null,
+    createSource: mock(),
+    updateSource: mock(),
+    deleteSource: mock(),
+    verifySource: mock(),
+    refresh: mock(),
+  }),
 }));
 
 // Mock useModels - include all exports from models module for proper mocking
@@ -261,6 +309,8 @@ const mockChatWithSystemMessage: ChatWithMessages = {
   ],
 };
 
+const newChatButtons = () => screen.getAllByRole('button', { name: 'New chat' });
+
 const renderChatsPage = () => {
   return render(
     <BrowserRouter>
@@ -279,6 +329,9 @@ afterAll(() => {
 
 describe('ChatsPage', () => {
   beforeEach(() => {
+    mockGetChatSources.mockReset();
+    mockSetChatSources.mockReset();
+    mockGetChatSources.mockResolvedValue([]);
     window.history.pushState({}, '', '/');
     mockGetChats.mockReset();
     mockGetChat.mockReset();
@@ -443,8 +496,16 @@ describe('ChatsPage', () => {
     it('renders new chat button', async () => {
       renderChatsPage();
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
+    });
+
+    it('keeps the new chat control an icon-only button drawn with the shared plus icon', async () => {
+      renderChatsPage();
+      await waitFor(() => {
+        expect(newChatButtons()[0]).toHaveClass('btn-icon');
+      });
+      expect(newChatButtons()[0].querySelector('svg.plus-icon')).not.toBeNull();
     });
 
     it('renders filter buttons', async () => {
@@ -560,6 +621,45 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('hides the waiting placeholder body of a turn that asked a question', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          {
+            ...mockChatWithMessages.messages[1],
+            content: '[Waiting for your answer]',
+            metadata: {
+              tool_calls: [
+                {
+                  id: 'call_q',
+                  name: 'ask_user',
+                  arguments: '{}',
+                  success: true,
+                  detail: 'Waiting for your answer…',
+                  duration_ms: 0,
+                  questions: [
+                    {
+                      header: 'Which city?',
+                      question: 'Which city do you mean?',
+                      required: false,
+                      multi_select: false,
+                      choices: [{ label: 'Auckland', description: 'North Island' }],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      await screen.findByTestId('question-card');
+      expect(screen.queryByText('[Waiting for your answer]')).not.toBeInTheDocument();
+    });
+
     it('shows thinking interleaved with the tool trace', async () => {
       mockClient.getChat.mockResolvedValueOnce({
         ...mockChatWithMessages,
@@ -630,9 +730,16 @@ describe('ChatsPage', () => {
 
       const blocks = screen.getAllByTestId('reasoning');
       expect(blocks).toHaveLength(3);
-      expect(blocks[0]).toHaveAttribute('open');
-      expect(blocks[1]).toHaveAttribute('open');
-      expect(blocks[2]).not.toHaveAttribute('open');
+      expect(document.querySelectorAll('.message-activity-toggle')).toHaveLength(1);
+      for (const block of blocks) {
+        expect(block).toHaveAttribute('hidden');
+      }
+
+      fireEvent.click(screen.getByRole('button', { name: 'Reasoning' }));
+
+      for (const block of blocks) {
+        expect(block).not.toHaveAttribute('hidden');
+      }
     });
 
     it('shows error when chat loading fails', async () => {
@@ -715,7 +822,7 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'Start New Chat' })).toBeInTheDocument();
+        expect(newChatButtons()[1]).toBeInTheDocument();
       });
     });
 
@@ -723,10 +830,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'Start New Chat' })).toBeInTheDocument();
+        expect(newChatButtons()[1]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'Start New Chat' }));
+      fireEvent.click(newChatButtons()[1]);
 
       expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
     });
@@ -737,10 +844,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
 
       expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
       expect(screen.getByLabelText('Select Model')).toBeInTheDocument();
@@ -754,10 +861,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
       expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
 
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -771,10 +878,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
@@ -797,10 +904,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
 
       // Press Escape to close
       fireEvent.keyDown(document, { key: 'Escape' });
@@ -826,10 +933,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
@@ -880,10 +987,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
       fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
 
       await waitFor(() => {
@@ -899,7 +1006,7 @@ describe('ChatsPage', () => {
 
     it('shows Agent mode only for a model that can call tools', async () => {
       renderChatsPage();
-      fireEvent.click(await screen.findByRole('button', { name: 'New chat' }));
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
       });
@@ -933,10 +1040,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+        expect(newChatButtons()[0]).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(newChatButtons()[0]);
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
@@ -1484,6 +1591,8 @@ describe('ChatsPage', () => {
       expect(
         screen.getByText('Are you sure you want to delete this chat? This action cannot be undone.')
       ).toBeInTheDocument();
+      const confirm = screen.getByRole('dialog', { name: 'Delete Chat' });
+      expect(confirm.querySelector('.ui-btn-destructive')).toHaveTextContent('Delete');
     });
 
     it('cancels delete on cancel button', async () => {
@@ -1637,7 +1746,8 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 2'));
 
       await waitFor(() => {
-        expect(screen.getByText('No messages yet. Start a conversation!')).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'No messages yet' })).toBeInTheDocument();
+        expect(screen.getByText('Send a message to start the conversation')).toBeInTheDocument();
       });
     });
 
@@ -1656,6 +1766,75 @@ describe('ChatsPage', () => {
         expect(screen.getByText('System')).toBeInTheDocument();
         expect(screen.getByText('System message')).toBeInTheDocument();
       });
+    });
+
+    it('labels the model badge with the full model id and splits the list meta', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        model_name: 'hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest',
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+
+      const item = screen.getByText('Chat 1').closest('.chat-item');
+      expect(item?.querySelector('.chat-meta-model')).toHaveTextContent('llama2');
+      expect(item?.querySelector('.chat-meta-time')).toHaveTextContent('·');
+
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Hello')).toBeInTheDocument();
+      });
+      const badge = document.querySelector('.chat-header-info .chat-model');
+      expect(badge).toHaveAttribute(
+        'title',
+        'hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest'
+      );
+    });
+
+    it('keeps the messages anchored to the bottom when the scroller resizes', async () => {
+      const Original = globalThis.ResizeObserver;
+      const callbacks: ResizeObserverCallback[] = [];
+      class StubObserver {
+        constructor(callback: ResizeObserverCallback) {
+          callbacks.push(callback);
+        }
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      }
+      globalThis.ResizeObserver = StubObserver as unknown as typeof ResizeObserver;
+      try {
+        renderChatsPage();
+
+        await waitFor(() => {
+          expect(screen.getByText('Chat 1')).toBeInTheDocument();
+        });
+
+        fireEvent.click(screen.getByText('Chat 1'));
+
+        await waitFor(() => {
+          expect(screen.getByText('Hello')).toBeInTheDocument();
+        });
+        const container = document.querySelector('.messages-container') as HTMLDivElement;
+        Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 900 });
+        const scrollTo = spyOn(container, 'scrollTo').mockImplementation(() => {});
+        expect(callbacks.length).toBeGreaterThan(0);
+
+        act(() => {
+          for (const callback of callbacks) {
+            callback([], {} as ResizeObserver);
+          }
+        });
+
+        expect(scrollTo).toHaveBeenCalledWith({ top: 900, behavior: 'instant' });
+      } finally {
+        globalThis.ResizeObserver = Original;
+      }
     });
 
     it('badges an assistant reply that read stored memory, never a user message', async () => {
@@ -1927,7 +2106,7 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(screen.getByText('llama2')).toBeInTheDocument();
+        expect(document.querySelector('.chat-header-info .chat-model')).toHaveTextContent('llama2');
       });
     });
   });
@@ -2001,6 +2180,89 @@ describe('ChatsPage', () => {
     await waitFor(() => {
       expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { auto_approve: true });
     });
+  });
+
+  it('shows the agent confined to Zone tools until the reader says otherwise', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: true,
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: false,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument());
+    expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByTestId('agent-sandbox-toggle'));
+    await waitFor(() => {
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { agent_sandboxed: false });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false')
+    );
+  });
+
+  it('puts an agent that kept its own tools back inside Zone', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: false,
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: true,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument());
+    expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('agent-sandbox-toggle').getAttribute('title')).toContain(
+      'run commands on this host'
+    );
+    fireEvent.click(screen.getByTestId('agent-sandbox-toggle'));
+    await waitFor(() => {
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { agent_sandboxed: true });
+    });
+  });
+
+  it('leaves auto-approve alone when the reader changes tool access', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: true,
+      auto_approve: true,
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: false,
+      auto_approve: true,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('agent-sandbox-toggle'));
+    await waitFor(() => {
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { agent_sandboxed: false });
+    });
+    expect(screen.getByTestId('auto-approve-toggle')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('hides the tool-access toggle when the chat is not agentic', async () => {
+    mockClient.getChat.mockResolvedValueOnce({ ...mockChatWithMessages, tools: true });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-toggle')).toBeInTheDocument());
+    expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
   });
 
   it('saves a pasted character card onto the open chat', async () => {
@@ -2079,6 +2341,73 @@ describe('ChatsPage', () => {
     expect(screen.getByTestId('character-toggle')).toHaveTextContent('Ada');
   });
 
+  describe('attached sources', () => {
+    const openChat = async () => {
+      mockGetChats.mockResolvedValue(mockChats);
+      mockGetChat.mockResolvedValue(mockChatWithMessages);
+      window.history.pushState({}, '', '/?id=chat-1');
+      renderChatsPage();
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-sources')).toBeInTheDocument();
+      });
+    };
+
+    it('keeps the Sources chip, the attach button, the draft and Send on one composer row', async () => {
+      await openChat();
+      const row = screen.getByPlaceholderText('Type a message, or drop a file...').parentElement;
+      expect(row).toHaveClass('message-form-row');
+      expect(
+        screen
+          .getByRole('button', { name: 'Sources: whole workspace' })
+          .closest('.message-form-row')
+      ).toBe(row);
+      expect(screen.getByRole('button', { name: 'Attach files' }).parentElement).toBe(row);
+      expect(screen.getByRole('button', { name: 'Send' }).parentElement).toBe(row);
+    });
+
+    it('offers a Sources chip in the composer that reads whole-workspace when nothing is attached', async () => {
+      await openChat();
+      expect(mockGetChatSources).toHaveBeenCalledWith('chat-1');
+      const toggle = screen.getByRole('button', { name: 'Sources: whole workspace' });
+      expect(toggle).toBeInTheDocument();
+      expect(screen.queryAllByTestId('chat-source-chip')).toHaveLength(0);
+    });
+
+    it('attaches a workspace source for this chat and shows it as a chip', async () => {
+      mockSetChatSources.mockResolvedValue([
+        { id: 'source-repo', name: 'abnegate/zone-tests', source_type: 'github' },
+      ]);
+      await openChat();
+      fireEvent.click(screen.getByRole('button', { name: 'Sources: whole workspace' }));
+      fireEvent.click(screen.getByLabelText(/abnegate\/zone-tests/));
+      await waitFor(() => {
+        expect(mockSetChatSources).toHaveBeenCalledWith('chat-1', ['source-repo']);
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-source-chip')).toHaveTextContent('abnegate/zone-tests');
+      });
+      expect(screen.getByRole('button', { name: 'Sources: 1 attached' })).toBeInTheDocument();
+    });
+
+    it('shows the attachment the server already holds and detaches from the chip', async () => {
+      mockGetChatSources.mockResolvedValue([
+        { id: 'source-notes', name: 'Team notes', source_type: 'text' },
+      ]);
+      mockSetChatSources.mockResolvedValue([]);
+      await openChat();
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-source-chip')).toHaveTextContent('Team notes');
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Detach Team notes' }));
+      await waitFor(() => {
+        expect(mockSetChatSources).toHaveBeenCalledWith('chat-1', []);
+      });
+      await waitFor(() => {
+        expect(screen.queryAllByTestId('chat-source-chip')).toHaveLength(0);
+      });
+    });
+  });
+
   describe('chat search', () => {
     const mockSearchResults: ChatSearchResult[] = [
       {
@@ -2128,6 +2457,7 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(mockClient.searchChatMessages).toHaveBeenCalledWith({
           query: 'TypeScript',
+          workspace_id: 'ws-1',
           limit: 20,
         });
       });
@@ -2155,7 +2485,68 @@ describe('ChatsPage', () => {
 
       expect(screen.getByText('Chat 1')).toBeInTheDocument();
       expect(screen.getByText('...test message about TypeScript...')).toBeInTheDocument();
-      expect(screen.getByText('95%')).toBeInTheDocument();
+      expect(screen.queryByText('95%')).not.toBeInTheDocument();
+    });
+
+    it('shows a snippet as prose, without the markdown marks or collapsed line breaks', async () => {
+      mockClient.searchChatMessages.mockResolvedValueOnce({
+        results: [
+          {
+            ...mockSearchResults[0],
+            snippet:
+              'Here are the documents in the wiki: ⏎ - **Deployment checklist mua9iw0u1qg** — knowledge base note',
+          },
+        ],
+        total: 1,
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-search-input')).toBeInTheDocument();
+      });
+
+      const searchInput = screen.getByTestId('chat-search-input');
+      fireEvent.change(searchInput, { target: { value: 'deployment' } });
+      fireEvent.submit(searchInput.closest('form')!);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('search-results-list')).toBeInTheDocument();
+      });
+
+      expect(
+        screen.getByText(
+          'Here are the documents in the wiki: Deployment checklist mua9iw0u1qg — knowledge base note'
+        )
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/\*\*|⏎/)).not.toBeInTheDocument();
+    });
+
+    it('names a result after the loaded chat when the server sent no title', async () => {
+      mockClient.searchChatMessages.mockResolvedValueOnce({
+        results: [
+          { ...mockSearchResults[0], chat_title: '', chat_id: 'chat-2' },
+          { ...mockSearchResults[1], chat_title: '', chat_id: 'chat-gone' },
+        ],
+        total: 2,
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-search-input')).toBeInTheDocument();
+      });
+
+      const searchInput = screen.getByTestId('chat-search-input');
+      fireEvent.change(searchInput, { target: { value: 'TypeScript' } });
+      fireEvent.submit(searchInput.closest('form')!);
+
+      const titles = await waitFor(() => {
+        const list = screen.getByTestId('search-results-list');
+        return [...list.querySelectorAll('.search-result-chat')].map((node) => node.textContent);
+      });
+      expect(titles).toEqual(['Chat 2', 'Untitled chat']);
+      expect(screen.queryByText('Chat', { selector: '.search-result-chat' })).toBeNull();
     });
 
     it('shows no results message when search returns empty', async () => {
@@ -2175,8 +2566,20 @@ describe('ChatsPage', () => {
       fireEvent.submit(searchInput.closest('form')!);
 
       await waitFor(() => {
-        expect(screen.getByText('No messages found')).toBeInTheDocument();
+        expect(screen.getByText('No messages match')).toBeInTheDocument();
       });
+      const empty = screen.getByText('No messages match').closest('.ui-empty');
+      expect(empty).not.toBeNull();
+      expect(empty).toHaveTextContent('Try another search');
+      expect(screen.queryByTestId('search-results-list')).not.toBeInTheDocument();
+
+      fireEvent.click(empty?.querySelector('.ui-empty-action button') as HTMLButtonElement);
+
+      await waitFor(() => {
+        expect(screen.queryByText('No messages match')).not.toBeInTheDocument();
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      expect(searchInput).toHaveValue('');
     });
 
     it('shows searching state while searching', async () => {
@@ -2269,7 +2672,7 @@ describe('ChatsPage', () => {
       expect(screen.getByTestId('clear-search-btn')).toBeInTheDocument();
     });
 
-    it('hides filter buttons when showing search results', async () => {
+    it('keeps the filter tabs mounted but disabled while showing search results', async () => {
       mockClient.searchChatMessages.mockResolvedValueOnce({
         results: mockSearchResults,
         total: 2,
@@ -2278,8 +2681,8 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('tab', { name: 'Active' })).toBeInTheDocument();
-        expect(screen.getByRole('tab', { name: 'Archived' })).toBeInTheDocument();
+        expect(screen.getByRole('tab', { name: 'Active' })).toBeEnabled();
+        expect(screen.getByRole('tab', { name: 'Archived' })).toBeEnabled();
       });
 
       const searchInput = screen.getByTestId('chat-search-input');
@@ -2290,8 +2693,14 @@ describe('ChatsPage', () => {
         expect(screen.getByTestId('search-results-list')).toBeInTheDocument();
       });
 
-      expect(screen.queryByRole('tab', { name: 'Active' })).not.toBeInTheDocument();
-      expect(screen.queryByRole('tab', { name: 'Archived' })).not.toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'Active' })).toBeDisabled();
+      expect(screen.getByRole('tab', { name: 'Archived' })).toBeDisabled();
+
+      fireEvent.click(screen.getByTestId('clear-search-btn'));
+
+      await waitFor(() => {
+        expect(screen.getByRole('tab', { name: 'Active' })).toBeEnabled();
+      });
     });
 
     it('does not search with empty query', async () => {

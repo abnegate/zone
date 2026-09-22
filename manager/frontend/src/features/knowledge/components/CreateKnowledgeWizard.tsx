@@ -66,6 +66,18 @@ export function CreateKnowledgeWizard({
     return true;
   }, [currentStep, type, content, title]);
 
+  const handleClose = useCallback(() => {
+    setCurrentStep(0);
+    setType('text');
+    setTitle('');
+    setContent('');
+    setTags([]);
+    setTagInput('');
+    setError(null);
+    setFieldErrors({});
+    onClose();
+  }, [onClose]);
+
   const handleComplete = useCallback(async () => {
     if (!currentWorkspace) {
       setError('No workspace selected. Please select or create a workspace first.');
@@ -76,7 +88,7 @@ export function CreateKnowledgeWizard({
       workspace_id: currentWorkspace.id,
       title: title.trim(),
       type,
-      content: content.trim(),
+      ...(type === 'url' ? { source_url: content.trim() } : { content: content.trim() }),
       tags: tags.length > 0 ? tags : undefined,
     };
 
@@ -99,19 +111,7 @@ export function CreateKnowledgeWizard({
     } finally {
       setLoading(false);
     }
-  }, [currentWorkspace, title, type, content, tags, createEntry, onCreated]);
-
-  const handleClose = useCallback(() => {
-    setCurrentStep(0);
-    setType('text');
-    setTitle('');
-    setContent('');
-    setTags([]);
-    setTagInput('');
-    setError(null);
-    setFieldErrors({});
-    onClose();
-  }, [onClose]);
+  }, [currentWorkspace, title, type, content, tags, createEntry, onCreated, handleClose]);
 
   const handleAddTag = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -166,9 +166,7 @@ export function CreateKnowledgeWizard({
                 </div>
                 <div className="knowledge-type-info">
                   <span className="knowledge-type-name">Text Content</span>
-                  <span className="knowledge-type-desc">
-                    Store text directly in the knowledge base
-                  </span>
+                  <span className="knowledge-type-desc">Store text in the knowledge base</span>
                 </div>
               </button>
               <button
@@ -215,15 +213,15 @@ export function CreateKnowledgeWizard({
                   value={content}
                   onChange={(e) => {
                     setContent(e.target.value);
-                    if (fieldErrors.content) {
+                    if (fieldErrors.source_url) {
                       setFieldErrors((prev) => {
-                        const { content: _content, ...next } = prev;
+                        const { source_url: _url, ...next } = prev;
                         return next;
                       });
                     }
                   }}
                   placeholder="https://example.com/article"
-                  className={fieldErrors.content ? 'input-error' : ''}
+                  className={fieldErrors.source_url ? 'input-error' : ''}
                 />
               ) : (
                 <textarea
@@ -239,11 +237,13 @@ export function CreateKnowledgeWizard({
                     }
                   }}
                   placeholder="Enter your text content here..."
-                  rows={8}
+                  rows={5}
                   className={fieldErrors.content ? 'input-error' : ''}
                 />
               )}
-              {fieldErrors.content && <span className="field-error">{fieldErrors.content}</span>}
+              {(fieldErrors.content || fieldErrors.source_url) && (
+                <span className="field-error">{fieldErrors.content ?? fieldErrors.source_url}</span>
+              )}
             </div>
           </div>
         );
@@ -313,7 +313,7 @@ export function CreateKnowledgeWizard({
                   value={tagInput}
                   onChange={(e) => setTagInput(e.target.value)}
                   onKeyDown={handleAddTag}
-                  placeholder={tags.length === 0 ? 'Press Enter to add tags...' : 'Add more...'}
+                  placeholder={tags.length === 0 ? 'e.g. release, history' : 'Add more...'}
                 />
               </div>
               <span className="form-hint">Press Enter to add each tag</span>

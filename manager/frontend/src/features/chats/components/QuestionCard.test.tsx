@@ -91,6 +91,15 @@ describe('QuestionCard', () => {
     expect(markers[1]).toHaveTextContent('Optional');
   });
 
+  it('titles each question in a row inside its group rather than on a legend', () => {
+    render(<QuestionCard questions={[question()]} answered={false} onSubmit={() => {}} />);
+
+    const group = screen.getByRole('group', { name: /Scope/ });
+    expect(group.querySelector('legend')).toBeNull();
+    expect(group.firstElementChild).toHaveClass('question-card-header');
+    expect(group.firstElementChild).toHaveTextContent('Scope');
+  });
+
   it('offers radios for a single-select question and keeps one answer', () => {
     render(<QuestionCard questions={[question()]} answered={false} onSubmit={() => {}} />);
 
@@ -125,6 +134,22 @@ describe('QuestionCard', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Other' }));
 
     expect(screen.getByTestId('question-free-text')).toBeEnabled();
+  });
+
+  it('gives every choice the same row and puts the free-text box on a row of its own', () => {
+    render(<QuestionCard questions={[question()]} answered={false} onSubmit={() => {}} />);
+
+    const rows = document.querySelectorAll('.question-card-choice');
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      const line = row.querySelector('.question-card-choice-row');
+      expect(line).not.toBeNull();
+      expect(line?.querySelector('.question-card-control')).not.toBeNull();
+      expect(line?.querySelector('.question-card-choice-description')).not.toBeNull();
+    }
+    const text = screen.getByTestId('question-free-text');
+    expect(text.closest('.question-card-choice-row')).toBeNull();
+    expect(text.parentElement).toHaveClass('question-card-choice');
   });
 
   it('will not send while a required question is unanswered', () => {

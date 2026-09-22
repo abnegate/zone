@@ -25,8 +25,9 @@ pub struct ChatRow {
     /// Whether this chat runs the tool-calling agent loop instead of a plain
     /// completion.
     pub agent_enabled: bool,
-    /// Whether the agent is restricted to authorized workspace tools. When
-    /// false it also gets the host tools that read, write and run commands.
+    /// Whether the agent may only call the tools zone hands it. When false it
+    /// also keeps its own tools, which read, write and run commands on the host
+    /// without zone ever seeing the call.
     pub agent_sandboxed: bool,
     /// When true, mutating file and shell tools run without a confirmation.
     pub auto_approve: bool,
@@ -125,6 +126,17 @@ pub async fn list_chats(
             Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
         }
     }
+}
+
+/// The titles of the given chats, for labelling rows that carry only a chat id.
+pub async fn titles(pool: &PgPool, ids: &[Uuid]) -> DbResult<Vec<(Uuid, String)>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, (Uuid, String)>("SELECT id, title FROM chats WHERE id = ANY($1)")
+        .bind(ids)
+        .fetch_all(pool)
+        .await
 }
 
 /// Get chat by ID
@@ -694,9 +706,9 @@ pub async fn link(pool: &PgPool, chat_id: Uuid) -> DbResult<Option<ChatLink>> {
 
 /// Make a chat with a purpose inside a caller's transaction.
 ///
-/// An updates chat has no agent: it is written to, never talked to. A planner
-/// chat runs the agent, sandboxed, without auto-approval, so the one outward
-/// call the interview can make -- creating a repository -- is confirmed.
+/// An updates chat has no agent: it is written to, never talked to. It is stored
+/// sandboxed and without auto-approval all the same, so switching the agent on
+/// later starts it confined to zone's own tools, confirming every call it makes.
 pub(crate) async fn create_project_chat_in(
     connection: &mut sqlx::PgConnection,
     workspace_id: Uuid,

@@ -5,9 +5,10 @@
 
 use futures::StreamExt;
 use sqlx::PgPool;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
@@ -23,10 +24,10 @@ use crate::agent::prompt::{self, Environment, Vcs};
 use crate::agent::question::{self, Question};
 use crate::agent::wait::{self, Waited, Waiting};
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
-use crate::db::{ai_settings, tasks, workspaces};
+use crate::db::{ai_settings, task_tool_calls, tasks, workspaces};
 use crate::services::chat::session::{self, RunContext};
 use crate::services::stages;
-use crate::state::AppState;
+use crate::state::{AppState, llm_backend};
 use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
 use crate::workers::instructions;
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
@@ -518,7 +519,16 @@ pub struct DatabaseTaskCallback {
     pool: PgPool,
     run_id: Uuid,
     owner: Option<Uuid>,
+    /// Calls started and not yet finished, per tool, oldest first.
+    ///
+    /// The loop reports a start and a finish with no shared id, but it reports
+    /// them in the same order per tool, so the oldest open call of a tool is
+    /// the one its next result belongs to.
+    open_calls: Arc<Mutex<OpenCalls>>,
 }
+
+/// Per tool, the calls started and not yet finished, oldest first.
+type OpenCalls = HashMap<String, VecDeque<(Uuid, serde_json::Value)>>;
 
 impl DatabaseTaskCallback {
     /// Create a new database task callback
@@ -527,7 +537,32 @@ impl DatabaseTaskCallback {
             pool,
             run_id,
             owner: None,
+            open_calls: Arc::default(),
         }
+    }
+
+    fn open_call(&self, name: &str, arguments: &str) -> (Uuid, serde_json::Value) {
+        let id = Uuid::new_v4();
+        let input = serde_json::from_str(arguments)
+            .unwrap_or_else(|_| serde_json::json!({ "raw": arguments }));
+        let mut open = self
+            .open_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        open.entry(name.to_string())
+            .or_default()
+            .push_back((id, input.clone()));
+        (id, input)
+    }
+
+    fn close_call(&self, name: &str) -> (Uuid, serde_json::Value) {
+        let mut open = self
+            .open_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        open.get_mut(name)
+            .and_then(VecDeque::pop_front)
+            .unwrap_or_else(|| (Uuid::new_v4(), serde_json::json!({})))
     }
     async fn log(
         &self,
@@ -584,7 +619,14 @@ impl AgentCallback for DatabaseTaskCallback {
         let callback = self.clone();
         let name = name.to_string();
         let arguments = arguments.to_string();
+        let (call_id, input) = self.open_call(&name, &arguments);
         tokio::spawn(async move {
+            if let Err(error) =
+                task_tool_calls::start(&callback.pool, call_id, callback.run_id, &name, &input)
+                    .await
+            {
+                tracing::warn!(%error, tool = %name, "Could not record a tool call starting");
+            }
             let _ = callback
                 .log(
                     "acting",
@@ -601,7 +643,22 @@ impl AgentCallback for DatabaseTaskCallback {
         let callback = self.clone();
         let name = name.to_string();
         let result = result.clone();
+        let (call_id, input) = self.close_call(&name);
         tokio::spawn(async move {
+            if let Err(error) = task_tool_calls::finish(
+                &callback.pool,
+                call_id,
+                callback.run_id,
+                &name,
+                &input,
+                result.success,
+                &serde_json::json!(result.output),
+                result.error.as_deref(),
+            )
+            .await
+            {
+                tracing::warn!(%error, tool = %name, "Could not record a tool call finishing");
+            }
             let level = if result.success { "info" } else { "error" };
             let _ = callback.log("acting", "tool", level, &format!("Tool {name} finished"), Some(serde_json::json!({"tool":name,"success":result.success,"output":result.output,"error":result.error}))).await;
         });
@@ -1889,6 +1946,7 @@ async fn attempt_run(
         default_model: model.to_string(),
         temperature: TASK_TEMPERATURE,
         max_tokens: policy.reserved,
+        backend: llm_backend(state.config()),
     });
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(model, limit);
@@ -1909,6 +1967,7 @@ async fn attempt_run(
         pool: state.db().clone(),
         run_id,
         owner: Some(owner),
+        open_calls: Arc::default(),
     };
     let task_prompt = match &approved {
         Some(plan) => format!("{task_prompt}\n\n{}", plan::Approval::resumed(plan)),

@@ -6,7 +6,7 @@ export const githubSource: SourceDefinition = {
   id: 'github',
   name: 'GitHub',
   category: 'file',
-  description: 'Connect to a GitHub repository',
+  description: 'GitHub repository',
   icon: GitHubIcon,
   badgeColor: 'badge-purple',
   iconWrapperClass: 'github',
@@ -45,8 +45,6 @@ export const githubSource: SourceDefinition = {
     placeholder: 'ghp_xxxxx',
     hint: 'Token required for private repos and write access',
   },
-
-  formHint: 'Token required for private repos and write access',
 
   buildConfig: (state): GitHubConfig => ({
     owner: state.ghOwner as string,

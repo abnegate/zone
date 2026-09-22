@@ -1,7 +1,7 @@
 import type { WizardStep } from '@zone/ui';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { client } from '../../../api/client';
-import { Wizard } from '../../../components';
+import { Button, Wizard } from '../../../components';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Source } from '../../../types';
 import { getErrors } from '../../../validation';
@@ -13,6 +13,7 @@ interface CreateProjectWizardProps {
   onClose: () => void;
   onCreated: (project: Project) => void;
   createProject: (request: CreateProjectRequest) => Promise<Project>;
+  onAuto?: () => void;
 }
 
 const WIZARD_STEPS: WizardStep[] = [
@@ -50,6 +51,7 @@ export function CreateProjectWizard({
   onClose,
   onCreated,
   createProject,
+  onAuto,
 }: CreateProjectWizardProps) {
   const { currentWorkspace } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
@@ -88,6 +90,17 @@ export function CreateProjectWizard({
     return true;
   }, [currentStep, name]);
 
+  const handleClose = useCallback(() => {
+    setCurrentStep(0);
+    setName('');
+    setDescription('');
+    setStatus('active');
+    setSourceId('');
+    setError(null);
+    setFieldErrors({});
+    onClose();
+  }, [onClose]);
+
   const handleComplete = useCallback(async () => {
     if (!currentWorkspace) {
       setError('No workspace selected');
@@ -121,18 +134,16 @@ export function CreateProjectWizard({
     } finally {
       setLoading(false);
     }
-  }, [currentWorkspace, name, description, status, sourceId, createProject, onCreated]);
-
-  const handleClose = useCallback(() => {
-    setCurrentStep(0);
-    setName('');
-    setDescription('');
-    setStatus('active');
-    setSourceId('');
-    setError(null);
-    setFieldErrors({});
-    onClose();
-  }, [onClose]);
+  }, [
+    currentWorkspace,
+    name,
+    description,
+    status,
+    sourceId,
+    createProject,
+    onCreated,
+    handleClose,
+  ]);
 
   const activeSources = useMemo(() => sources.filter((s) => s.is_active), [sources]);
 
@@ -177,6 +188,22 @@ export function CreateProjectWizard({
                 rows={3}
               />
             </div>
+            {onAuto && (
+              <div className="project-wizard-auto">
+                <p>Or describe what you want and let Zone plan the project and its tasks.</p>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    handleClose();
+                    onAuto();
+                  }}
+                  data-testid="auto-project-button"
+                >
+                  Auto project
+                </Button>
+              </div>
+            )}
           </div>
         );
 
@@ -209,8 +236,7 @@ export function CreateProjectWizard({
                       fill="none"
                       stroke="currentColor"
                       strokeWidth="2"
-                      width="20"
-                      height="20"
+                      aria-hidden="true"
                     >
                       <circle cx="12" cy="12" r="10" />
                       <path d="M8 12h8" />
@@ -282,6 +308,7 @@ export function CreateProjectWizard({
       onClose={handleClose}
       title="New Project"
       subtitle="Create a new project to organize your work"
+      className="project-wizard"
       steps={WIZARD_STEPS}
       currentStep={currentStep}
       onStepChange={handleStepChange}

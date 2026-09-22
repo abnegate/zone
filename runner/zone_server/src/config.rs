@@ -1,6 +1,9 @@
 //! Server configuration
 
 use std::env;
+use std::path::PathBuf;
+
+use zone_core::llm::AgentKind;
 
 /// Settings live with the clients that consume them.
 pub use zone_comfy::Config as ComfyUiConfig;
@@ -35,9 +38,11 @@ pub struct Config {
     pub jwt_access_lifetime: u64,
     /// JWT refresh token lifetime in seconds (default: 604800 = 7 days)
     pub jwt_refresh_lifetime: u64,
-    /// LiteLLM host URL
+    /// Which backend serves completions.
+    pub model_backend: ModelBackend,
+    /// LiteLLM host URL. Empty when a CLI backend serves completions.
     pub litellm_host: String,
-    /// LiteLLM API key
+    /// LiteLLM API key. Empty when a CLI backend serves completions.
     pub litellm_key: String,
     /// Ollama host URL (for model management)
     pub ollama_host: String,
@@ -76,6 +81,75 @@ pub struct Config {
     pub train_upload_limit_mb: u64,
     /// Auto projects: what the driver admits, how it reviews, when it merges.
     pub auto: AutoProjectConfig,
+}
+
+/// Which backend serves completions.
+const MODEL_BACKEND: &str = "ZONE_LLM_BACKEND";
+
+/// The binary a host agent backend runs, for one that is not on `PATH`.
+const MODEL_BACKEND_EXECUTABLE: &str = "ZONE_LLM_BACKEND_EXECUTABLE";
+
+/// Where a completion comes from.
+///
+/// A coding agent CLI runs as the host user, with that user's whole file
+/// system and outside `tool_runner`'s sandbox, under a single host identity
+/// that no workspace or organization divides and nothing meters. The choice
+/// therefore belongs to whoever runs the process, which is why it is read from
+/// the environment and never from a row a workspace administrator can write.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ModelBackend {
+    /// The OpenAI-compatible HTTP endpoint `LITELLM_HOST` names.
+    #[default]
+    LiteLlm,
+    /// A coding agent CLI already signed in on the host, run as a child
+    /// process against the operator's own subscription.
+    Cli {
+        agent: AgentKind,
+        /// Overrides the agent's own executable name.
+        executable: Option<PathBuf>,
+    },
+}
+
+impl ModelBackend {
+    /// Read the selection from the environment, defaulting to LiteLLM.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let executable = env::var(MODEL_BACKEND_EXECUTABLE)
+            .ok()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
+
+        let selection = env::var(MODEL_BACKEND)
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+
+        let agent = match selection.as_deref() {
+            None | Some("litellm") => None,
+            Some("claude") => Some(AgentKind::Claude),
+            Some("codex") => Some(AgentKind::Codex),
+            Some(_) => {
+                return Err(ConfigError::Invalid(
+                    "ZONE_LLM_BACKEND must be litellm, claude or codex",
+                ));
+            }
+        };
+
+        match agent {
+            Some(agent) => Ok(Self::Cli { agent, executable }),
+            None if executable.is_some() => Err(ConfigError::Invalid(
+                "ZONE_LLM_BACKEND_EXECUTABLE needs ZONE_LLM_BACKEND set to claude or codex",
+            )),
+            None => Ok(Self::LiteLlm),
+        }
+    }
+
+    /// Whether `LITELLM_HOST` and `LITELLM_KEY` have to be configured. An
+    /// agent already signed in on the host needs neither, and a self-host
+    /// running one may have no LiteLLM deployed at all.
+    pub fn requires_litellm(&self) -> bool {
+        matches!(self, Self::LiteLlm)
+    }
 }
 
 /// Periodic source indexing settings loaded from `SOURCE_RESYNC_*` env vars.
@@ -449,6 +523,11 @@ impl Config {
         &self.encryption_key
     }
 
+    /// Which backend serves completions
+    pub fn model_backend(&self) -> &ModelBackend {
+        &self.model_backend
+    }
+
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
         let jwt_secret = env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
@@ -519,6 +598,18 @@ impl Config {
             }
         }
 
+        let model_backend = ModelBackend::from_env()?;
+        let litellm_host = env::var("LITELLM_HOST").ok();
+        let litellm_key = env::var("LITELLM_KEY").ok();
+        if model_backend.requires_litellm() {
+            if litellm_host.is_none() {
+                return Err(ConfigError::Missing("LITELLM_HOST"));
+            }
+            if litellm_key.is_none() {
+                return Err(ConfigError::Missing("LITELLM_KEY"));
+            }
+        }
+
         Ok(Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: env::var("PORT")
@@ -537,10 +628,9 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(604_800),
-            litellm_host: env::var("LITELLM_HOST")
-                .map_err(|_| ConfigError::Missing("LITELLM_HOST"))?,
-            litellm_key: env::var("LITELLM_KEY")
-                .map_err(|_| ConfigError::Missing("LITELLM_KEY"))?,
+            model_backend,
+            litellm_host: litellm_host.unwrap_or_default(),
+            litellm_key: litellm_key.unwrap_or_default(),
             ollama_host: env::var("OLLAMA_HOST")
                 .unwrap_or_else(|_| "http://ollama:11434".to_string()),
             gpt4all_models_url: env::var("GPT4ALL_MODELS_URL")
@@ -582,6 +672,7 @@ impl std::fmt::Debug for Config {
             .field("jwt_secret", &"[REDACTED]")
             .field("jwt_access_lifetime", &self.jwt_access_lifetime)
             .field("jwt_refresh_lifetime", &self.jwt_refresh_lifetime)
+            .field("model_backend", &self.model_backend)
             .field("litellm_host", &self.litellm_host)
             .field("litellm_key", &"[REDACTED]")
             .field("ollama_host", &self.ollama_host)
@@ -675,6 +766,7 @@ mod tests {
             jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
             jwt_access_lifetime: 900,
             jwt_refresh_lifetime: 604800,
+            model_backend: ModelBackend::default(),
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),
@@ -862,6 +954,8 @@ mod tests {
             "LITELLM_HOST",
             "LITELLM_KEY",
             "REDIS_URL",
+            MODEL_BACKEND,
+            MODEL_BACKEND_EXECUTABLE,
         ];
         let _environment = Environment::isolated(&names);
         Environment::set("JWT_SECRET", "12345678901234567890123456789012");
@@ -1051,6 +1145,142 @@ mod tests {
         }
     }
 
+    /// A coding agent CLI runs on the host as the operator, outside the tool
+    /// sandbox and under one identity for every workspace, so the selection is
+    /// process configuration that no workspace administrator can reach.
+    #[test]
+    fn the_model_backend_is_selected_by_the_environment() {
+        let _lock = ENVIRONMENT.lock().expect("environment lock");
+        let _environment = Environment::isolated(&[MODEL_BACKEND, MODEL_BACKEND_EXECUTABLE]);
+
+        assert_eq!(
+            ModelBackend::from_env().expect("unset falls back"),
+            ModelBackend::LiteLlm,
+            "a deployment that configures nothing keeps paying for the HTTP API"
+        );
+
+        for (value, agent) in [
+            ("claude", AgentKind::Claude),
+            ("codex", AgentKind::Codex),
+            ("  CODEX  ", AgentKind::Codex),
+        ] {
+            Environment::set(MODEL_BACKEND, value);
+            assert_eq!(
+                ModelBackend::from_env().expect("a known agent"),
+                ModelBackend::Cli {
+                    agent,
+                    executable: None
+                },
+                "{value} names a CLI this build drives"
+            );
+        }
+
+        Environment::set(MODEL_BACKEND, "litellm");
+        assert_eq!(
+            ModelBackend::from_env().expect("the HTTP backend, named"),
+            ModelBackend::LiteLlm
+        );
+
+        Environment::set(MODEL_BACKEND, "gemini");
+        assert!(
+            matches!(
+                ModelBackend::from_env(),
+                Err(ConfigError::Invalid(
+                    "ZONE_LLM_BACKEND must be litellm, claude or codex"
+                ))
+            ),
+            "an unrecognised backend must be refused, not silently ignored"
+        );
+
+        Environment::set(MODEL_BACKEND, "claude");
+        Environment::set(MODEL_BACKEND_EXECUTABLE, "  /opt/homebrew/bin/claude  ");
+        assert_eq!(
+            ModelBackend::from_env().expect("a binary that is not on PATH"),
+            ModelBackend::Cli {
+                agent: AgentKind::Claude,
+                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+            }
+        );
+
+        Environment::set(MODEL_BACKEND, "litellm");
+        assert!(
+            matches!(
+                ModelBackend::from_env(),
+                Err(ConfigError::Invalid(
+                    "ZONE_LLM_BACKEND_EXECUTABLE needs ZONE_LLM_BACKEND set to claude or codex"
+                ))
+            ),
+            "an executable with no CLI backend to run it means the operator \
+             believes a CLI is in use while the HTTP API is being billed"
+        );
+
+        Environment::set(MODEL_BACKEND, "codex");
+        Environment::set(MODEL_BACKEND_EXECUTABLE, "   ");
+        assert_eq!(
+            ModelBackend::from_env().expect("blank is not a path"),
+            ModelBackend::Cli {
+                agent: AgentKind::Codex,
+                executable: None
+            }
+        );
+    }
+
+    /// A single-user self-host pointing Zone at the CLI it is already signed
+    /// in to has no LiteLLM to name, and refusing to boot without one left
+    /// that deployment impossible.
+    #[test]
+    fn litellm_is_required_only_by_the_http_backend() {
+        let _lock = ENVIRONMENT.lock().expect("environment lock");
+        let names = [
+            "DATABASE_URL",
+            "ENCRYPTION_KEY",
+            "GITHUB_API_URL",
+            "JWT_SECRET",
+            "LITELLM_HOST",
+            "LITELLM_KEY",
+            "REDIS_URL",
+            MODEL_BACKEND,
+            MODEL_BACKEND_EXECUTABLE,
+        ];
+        let _environment = Environment::isolated(&names);
+        Environment::set("JWT_SECRET", "12345678901234567890123456789012");
+        Environment::set("ENCRYPTION_KEY", "12345678901234567890123456789012");
+        Environment::set("DATABASE_URL", "postgres://database/zone");
+        Environment::set("REDIS_URL", "redis://cache:6379");
+
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Missing("LITELLM_HOST"))
+        ));
+        Environment::set("LITELLM_HOST", "http://models:4000");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Missing("LITELLM_KEY"))
+        ));
+        Environment::set("LITELLM_KEY", "models-key");
+        assert_eq!(
+            Config::from_env()
+                .expect("the HTTP backend is configured")
+                .model_backend(),
+            &ModelBackend::LiteLlm
+        );
+
+        Environment::remove("LITELLM_HOST");
+        Environment::remove("LITELLM_KEY");
+        Environment::set(MODEL_BACKEND, "claude");
+        let cli = Config::from_env().expect("a CLI backend needs no LiteLLM");
+        assert_eq!(
+            cli.model_backend(),
+            &ModelBackend::Cli {
+                agent: AgentKind::Claude,
+                executable: None
+            }
+        );
+        assert!(cli.litellm_host.is_empty());
+        assert!(cli.litellm_key.is_empty());
+        assert!(format!("{cli:?}").contains("model_backend: Cli"));
+    }
+
     #[test]
     fn test_web_search_default_is_off_for_tests() {
         let config = WebSearchConfig::default();
@@ -1127,6 +1357,8 @@ mod tests {
             "SOURCE_RESYNC_INTERVAL_SECS",
             "SOURCE_RESYNC_POLL_SECS",
             "TRAIN_UPLOAD_LIMIT_MB",
+            MODEL_BACKEND,
+            MODEL_BACKEND_EXECUTABLE,
         ];
         let _environment = Environment::isolated(&names);
 

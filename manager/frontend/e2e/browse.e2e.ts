@@ -22,7 +22,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
     // Open the Browse catalogue
     await page.click('button[role="tab"]:has-text("Browse")');
-    await expect(page.locator('.search-container')).toBeVisible();
+    await expect(page.locator('.browse-search')).toBeVisible();
   });
 
   test('handles large model list with virtual scrolling', async ({ page }) => {
@@ -50,8 +50,8 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     });
 
     // Trigger a search to load with new route
-    await page.fill('.search-container input', '');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', '');
+    await page.click('.browse-search button');
 
     // Virtual list should be present with items
     await expect(page.locator('.virtual-browse-container')).toBeVisible();
@@ -93,8 +93,8 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     });
 
     // Trigger a search to load with new route
-    await page.fill('.search-container input', '');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', '');
+    await page.click('.browse-search button');
 
     // Initial load should show first page models
     await expect(page.locator('.browse-item').first()).toBeVisible();
@@ -132,8 +132,8 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     });
 
     // Trigger a search to load with new route
-    await page.fill('.search-container input', '');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', '');
+    await page.click('.browse-search button');
 
     // Should show browse results
     await expect(page.locator('.virtual-browse-container')).toBeVisible();
@@ -180,8 +180,8 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     await expect(page.locator('.browse-item').first()).toBeVisible();
 
     // Search
-    await page.fill('.search-container input', 'model-0');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', 'model-0');
+    await page.click('.browse-search button');
 
     // Should show filtered results - only one result
     await expect(page.locator('.browse-item')).toHaveCount(1);
@@ -276,8 +276,8 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     });
 
     // Trigger a search to load with new route
-    await page.fill('.search-container input', '');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', '');
+    await page.click('.browse-search button');
 
     // Initial load should work
     await expect(page.locator('.browse-item').first()).toBeVisible();
@@ -308,13 +308,14 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     });
 
     // Trigger a search to load with new route
-    await page.fill('.search-container input', '');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', '');
+    await page.click('.browse-search button');
 
     await page.locator('.browse-item').first().click();
 
-    await expect(page.locator('.modal-details')).toBeVisible();
-    await expect(page.locator('.modal-details-header h3')).toHaveText('model-0');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('heading')).toHaveText('model-0');
   });
 
   test('install button on browse item triggers install', async ({ page }) => {
@@ -353,17 +354,17 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     });
 
     // Trigger a search to load with new route
-    await page.fill('.search-container input', '');
-    await page.click('.search-container button');
+    await page.fill('.browse-search input', '');
+    await page.click('.browse-search button');
 
     // Click install button - this triggers the install and switches tabs
-    await page.locator('.browse-item').first().locator('.btn-primary').click();
+    await page.locator('.browse-item').first().getByRole('button', { name: 'Install' }).click();
 
     // Switch to Installed tab to see the model form input
     await page.click('button[role="tab"]:has-text("Installed")');
 
     // Model input should be populated with the model name
-    await expect(page.locator('.model-form input')).toHaveValue('model-0');
+    await expect(page.locator('.models-install-form input')).toHaveValue('model-0');
   });
 });
 
@@ -377,7 +378,7 @@ test.describe('Browse Models - Source Tab Switching', () => {
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
     // Open the Browse catalogue
     await page.click('button[role="tab"]:has-text("Browse")');
-    await expect(page.locator('.search-container')).toBeVisible();
+    await expect(page.locator('.browse-search')).toBeVisible();
   });
 
   test('downloadable source tabs are visible', async ({ page }) => {
@@ -432,7 +433,7 @@ test.describe('Browse Models - HuggingFace Specific', () => {
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
     // Open the Browse catalogue
     await page.click('button[role="tab"]:has-text("Browse")');
-    await expect(page.locator('.search-container')).toBeVisible();
+    await expect(page.locator('.browse-search')).toBeVisible();
   });
 
   test('displays HuggingFace model with author', async ({ page }) => {
@@ -530,11 +531,13 @@ test.describe('Browse Models - HuggingFace Specific', () => {
     await page.click('button[role="tab"]:has-text("HuggingFace")');
     await page.locator('.browse-item').first().click();
 
-    await expect(page.locator('.modal-details')).toBeVisible();
-    // Model name is displayed in header
-    await expect(page.locator('.modal-details-header h3')).toHaveText('Model-GGUF');
-    // Source badge shows HUGGINGFACE
-    await expect(page.locator('.details-source')).toContainText(/huggingface/i);
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    // Model name is displayed in the dialog title
+    await expect(dialog.getByRole('heading')).toHaveText('Model-GGUF');
+    // Source badge shows Hugging Face
+    await expect(dialog.locator('.ui-badge')).toContainText(/hugging ?face/i);
+    await expect(dialog.locator('.details-author')).toContainText('TheBloke');
   });
 
   test('HuggingFace details shows install command', async ({ page }) => {

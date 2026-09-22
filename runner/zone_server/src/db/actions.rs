@@ -47,6 +47,7 @@ pub struct Update {
     pub title: Option<String>,
     pub description: Option<String>,
     pub status: Option<Status>,
+    pub priority: Option<i32>,
     #[serde(default, deserialize_with = "patch")]
     pub assignee_id: Option<Option<Uuid>>,
 }
@@ -141,14 +142,20 @@ pub async fn update_task(
     {
         return Err(invalid("Title must not be blank"));
     }
+    if input
+        .priority
+        .is_some_and(|priority| !(1..=5).contains(&priority))
+    {
+        return Err(invalid("priority must be between 1 and 5"));
+    }
     let mut transaction = pool.begin().await?;
     authorize(&mut transaction, workspace_id, user_id, true).await?;
     if let Some(Some(assignee)) = input.assignee_id {
         authorize(&mut transaction, workspace_id, assignee, false).await?;
     }
     let status = input.status.as_ref().map(Status::as_str);
-    let result = sqlx::query_scalar("UPDATE tasks SET title = COALESCE($3, title), description = COALESCE($4, description), status = COALESCE($5, status), assignee_id = CASE WHEN $6 THEN $7 ELSE assignee_id END, started_at = CASE WHEN $5 = 'in_progress' THEN COALESCE(started_at, NOW()) ELSE started_at END, completed_at = CASE WHEN $5 = 'complete' THEN COALESCE(completed_at, NOW()) WHEN $5 IS NOT NULL THEN NULL ELSE completed_at END, updated_at = NOW() WHERE id = $1 AND workspace_id = $2 AND NOT is_agentic RETURNING to_jsonb(tasks.*)")
-        .bind(input.task_id).bind(workspace_id).bind(input.title).bind(input.description).bind(status).bind(input.assignee_id.is_some()).bind(input.assignee_id.flatten()).fetch_optional(&mut *transaction).await?;
+    let result = sqlx::query_scalar("UPDATE tasks SET title = COALESCE($3, title), description = COALESCE($4, description), status = COALESCE($5, status), assignee_id = CASE WHEN $6 THEN $7 ELSE assignee_id END, priority = COALESCE($8, priority), started_at = CASE WHEN $5 = 'in_progress' THEN COALESCE(started_at, NOW()) ELSE started_at END, completed_at = CASE WHEN $5 = 'complete' THEN COALESCE(completed_at, NOW()) WHEN $5 IS NOT NULL THEN NULL ELSE completed_at END, updated_at = NOW() WHERE id = $1 AND workspace_id = $2 AND NOT is_agentic RETURNING to_jsonb(tasks.*)")
+        .bind(input.task_id).bind(workspace_id).bind(input.title).bind(input.description).bind(status).bind(input.assignee_id.is_some()).bind(input.assignee_id.flatten()).bind(input.priority).fetch_optional(&mut *transaction).await?;
     transaction.commit().await?;
     result.ok_or_else(|| invalid("Task not found or is managed by the task runner"))
 }
@@ -601,6 +608,22 @@ mod tests {
         let reopened = update_task(&pool, workspace, user, update).await.unwrap();
         assert!(reopened["assignee_id"].is_null());
         assert!(reopened["completed_at"].is_null());
+        let raised: Update =
+            serde_json::from_value(json!({"task_id":task_id,"priority":1})).unwrap();
+        let raised = update_task(&pool, workspace, user, raised).await.unwrap();
+        assert_eq!(raised["priority"], json!(1));
+        assert_eq!(
+            raised["status"],
+            json!("created"),
+            "priority alone changes nothing else"
+        );
+        let out_of_range: Update =
+            serde_json::from_value(json!({"task_id":task_id,"priority":9})).unwrap();
+        assert!(
+            update_task(&pool, workspace, user, out_of_range)
+                .await
+                .is_err()
+        );
         let (_, other_organization, other, other_user, other_chat) = fixture().await;
         sqlx::query(
             "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
@@ -745,7 +768,7 @@ mod tests {
         let automation =
             |rrule: Option<&str>, prompt: Option<&str>, mode: Option<&str>| reminders::Reminder {
                 content: "Check the build".into(),
-                due_at: Utc::now() + Duration::hours(1),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
                 rrule: rrule.map(str::to_string),
                 prompt: prompt.map(str::to_string),
                 timing_mode: mode.map(str::to_string),
@@ -870,7 +893,7 @@ mod tests {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let watch = |name: &str| reminders::Reminder {
             content: name.into(),
-            due_at: Utc::now() + Duration::hours(1),
+            due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
             rrule: Some("FREQ=DAILY".into()),
             prompt: Some("Check whether the release branch is green".into()),
             timing_mode: Some("condition_watch".into()),
@@ -955,7 +978,7 @@ mod tests {
             chat_id,
             reminders::Reminder {
                 content: "Release branch".into(),
-                due_at: Utc::now() + Duration::hours(1),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
                 rrule: Some("FREQ=DAILY".into()),
                 prompt: Some("Check whether the release branch is green".into()),
                 timing_mode: Some("condition_watch".into()),
@@ -1036,7 +1059,7 @@ mod tests {
             chat_id,
             reminders::Reminder {
                 content: "Release branch".into(),
-                due_at: Utc::now() + Duration::hours(1),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
                 rrule: Some("FREQ=DAILY".into()),
                 prompt: Some("Check whether the release branch is green".into()),
                 timing_mode: Some("condition_watch".into()),
@@ -1058,7 +1081,7 @@ mod tests {
             chat_id,
             reminders::Reminder {
                 content: "Standup".into(),
-                due_at: Utc::now() + Duration::hours(1),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
                 rrule: Some("FREQ=DAILY".into()),
                 prompt: Some("Say what is on today".into()),
                 timing_mode: None,
@@ -1138,14 +1161,14 @@ mod tests {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let one_shot = reminders::Reminder {
             content: "Once".into(),
-            due_at: Utc::now() + Duration::hours(1),
+            due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
             rrule: None,
             prompt: None,
             timing_mode: None,
         };
         let daily = reminders::Reminder {
             content: "Every morning".into(),
-            due_at: Utc::now() + Duration::hours(1),
+            due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
             rrule: Some("FREQ=DAILY".into()),
             // No prompt: this test is about a schedule moving on rather than
             // ending, and a prompt would replace the message it counts with a
@@ -1247,7 +1270,7 @@ mod tests {
             chat_id,
             reminders::Reminder {
                 content: "Once only".into(),
-                due_at: Utc::now() + Duration::hours(1),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
                 rrule: Some("FREQ=DAILY;COUNT=1".into()),
                 prompt: None,
                 timing_mode: None,
@@ -1306,7 +1329,7 @@ mod tests {
             chat_id,
             reminders::Reminder {
                 content: "unused when a prompt is given".into(),
-                due_at: Utc::now() + Duration::hours(1),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
                 rrule: Some("FREQ=DAILY".into()),
                 prompt: Some(
                     "Say what changed since yesterday. If nothing did, say nothing.".into(),
@@ -1389,7 +1412,7 @@ mod tests {
             chat_id,
             reminders::Reminder {
                 content: "Overnight check".into(),
-                due_at: Utc::now() + Duration::hours(1),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
                 rrule: None,
                 prompt: Some("Say what changed overnight.".into()),
                 timing_mode: None,
@@ -1448,7 +1471,7 @@ mod tests {
             chat_id,
             reminders::Reminder {
                 content: "Hourly check".into(),
-                due_at: Utc::now() + Duration::hours(1),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
                 rrule: Some("FREQ=HOURLY".into()),
                 prompt: Some("Say what changed in the last hour.".into()),
                 timing_mode: None,
@@ -1489,7 +1512,7 @@ mod tests {
             chat_id,
             reminders::Reminder {
                 content: "Every morning".into(),
-                due_at: Utc::now() + Duration::hours(1),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
                 rrule: Some("FREQ=DAILY".into()),
                 prompt: None,
                 timing_mode: None,
@@ -1545,7 +1568,7 @@ mod tests {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let reminder = || reminders::Reminder {
             content: "Check release".into(),
-            due_at: Utc::now() + Duration::hours(1),
+            due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
             rrule: None,
             prompt: None,
             timing_mode: None,

@@ -1,3 +1,4 @@
+import { Button } from '@zone/ui';
 import { useEffect, useRef, useState } from 'react';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import './ContextSwitcher.css';
@@ -5,6 +6,14 @@ import './ContextSwitcher.css';
 type ContextSwitcherProps = {
   useWorkspaceHook?: typeof useWorkspace;
 };
+
+function CheckIcon() {
+  return (
+    <svg className="check-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+    </svg>
+  );
+}
 
 export default function ContextSwitcher({ useWorkspaceHook = useWorkspace }: ContextSwitcherProps) {
   const {
@@ -14,13 +23,14 @@ export default function ContextSwitcher({ useWorkspaceHook = useWorkspace }: Con
     currentWorkspace,
     setCurrentOrganization,
     setCurrentWorkspace,
+    refreshOrganizations,
     loading,
+    error,
   } = useWorkspaceHook();
 
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Close dropdown when clicking outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -31,18 +41,15 @@ export default function ContextSwitcher({ useWorkspaceHook = useWorkspace }: Con
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  if (loading) {
+  if (loading && !currentOrganization) {
     return (
       <div className="context-switcher">
-        <div className="context-switcher-loading">Loading...</div>
-      </div>
-    );
-  }
-
-  if (!currentOrganization) {
-    return (
-      <div className="context-switcher">
-        <div className="context-switcher-empty">No organization</div>
+        <div
+          className="context-switcher-placeholder"
+          role="status"
+          aria-busy="true"
+          aria-label="Loading organizations"
+        />
       </div>
     );
   }
@@ -57,12 +64,13 @@ export default function ContextSwitcher({ useWorkspaceHook = useWorkspace }: Con
         aria-haspopup="listbox"
       >
         <span className="context-label">
-          <span className="org-name">{currentOrganization.name}</span>
-          {currentWorkspace && (
+          {currentOrganization ? (
             <>
-              <span className="separator">/</span>
-              <span className="ws-name">{currentWorkspace.name}</span>
+              <span className="org-name">{currentOrganization.name}</span>
+              {currentWorkspace && <span className="ws-name">{currentWorkspace.name}</span>}
             </>
+          ) : (
+            <span className="ws-name context-prompt">Select organization</span>
           )}
         </span>
         <svg
@@ -81,61 +89,59 @@ export default function ContextSwitcher({ useWorkspaceHook = useWorkspace }: Con
         <div className="context-dropdown" role="listbox">
           <div className="dropdown-section">
             <h4>Organizations</h4>
-            {organizations.map((org) => (
-              <button
-                key={org.id}
-                className={`dropdown-item ${org.id === currentOrganization.id ? 'active' : ''}`}
-                onClick={() => {
-                  setCurrentOrganization(org);
-                  setIsOpen(false);
-                }}
-                type="button"
-                role="option"
-                aria-selected={org.id === currentOrganization.id}
-              >
-                <span className="item-name">{org.name}</span>
-                {org.id === currentOrganization.id && (
-                  <svg
-                    className="check-icon"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                    aria-hidden="true"
-                  >
-                    <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
-                  </svg>
+            {organizations.length === 0 && (
+              <div className="dropdown-empty">
+                <span>{error ? 'Could not load' : 'No organizations yet'}</span>
+                {error && (
+                  <Button variant="ghost" size="sm" onClick={() => refreshOrganizations()}>
+                    Retry
+                  </Button>
                 )}
-              </button>
-            ))}
+              </div>
+            )}
+            {organizations.map((org) => {
+              const active = org.id === currentOrganization?.id;
+              return (
+                <button
+                  key={org.id}
+                  className={`dropdown-item ${active ? 'active' : ''}`}
+                  onClick={() => {
+                    setCurrentOrganization(org);
+                    setIsOpen(false);
+                  }}
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                >
+                  <span className="item-name">{org.name}</span>
+                  {active && <CheckIcon />}
+                </button>
+              );
+            })}
           </div>
 
           {workspaces.length > 0 && (
             <div className="dropdown-section">
               <h4>Workspaces</h4>
-              {workspaces.map((ws) => (
-                <button
-                  key={ws.id}
-                  className={`dropdown-item ${ws.id === currentWorkspace?.id ? 'active' : ''}`}
-                  onClick={() => {
-                    setCurrentWorkspace(ws);
-                    setIsOpen(false);
-                  }}
-                  type="button"
-                  role="option"
-                  aria-selected={ws.id === currentWorkspace?.id}
-                >
-                  <span className="item-name">{ws.name}</span>
-                  {ws.id === currentWorkspace?.id && (
-                    <svg
-                      className="check-icon"
-                      viewBox="0 0 24 24"
-                      fill="currentColor"
-                      aria-hidden="true"
-                    >
-                      <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
-                    </svg>
-                  )}
-                </button>
-              ))}
+              {workspaces.map((ws) => {
+                const active = ws.id === currentWorkspace?.id;
+                return (
+                  <button
+                    key={ws.id}
+                    className={`dropdown-item ${active ? 'active' : ''}`}
+                    onClick={() => {
+                      setCurrentWorkspace(ws);
+                      setIsOpen(false);
+                    }}
+                    type="button"
+                    role="option"
+                    aria-selected={active}
+                  >
+                    <span className="item-name">{ws.name}</span>
+                    {active && <CheckIcon />}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>

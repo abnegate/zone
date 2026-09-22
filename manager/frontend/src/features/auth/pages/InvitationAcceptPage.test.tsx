@@ -192,6 +192,20 @@ describe('InvitationAcceptPage', () => {
     expect(screen.getByRole('button', { name: /go to home/i })).toBeInTheDocument();
   });
 
+  it('renders the error on the auth card with the logo row and the empty-state body', async () => {
+    mockGetInvitationByToken.mockRejectedValue(new Error('Invitation not found'));
+
+    const { container } = renderPage();
+
+    const title = await screen.findByRole('heading', { name: 'Invalid Invitation' });
+    expect(title).toHaveClass('error-title');
+    const card = container.querySelector('.auth-container');
+    expect(card?.querySelector('.auth-header .zone-logo')).not.toBeNull();
+    expect(card?.querySelector('.auth-error-state .error-icon svg')).not.toBeNull();
+    expect(screen.getByText('Invitation not found')).toHaveClass('error-message');
+    expect(container.querySelector('.invitation-card')).toBeNull();
+  });
+
   it('displays error when token is missing', async () => {
     mockUseSearchParams.mockReturnValue([new URLSearchParams('')]);
     renderPage();

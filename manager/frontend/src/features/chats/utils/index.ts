@@ -5,3 +5,4 @@ export * from './citations';
 export { formatDate } from './formatters';
 export * from './links';
 export * from './modelOptions';
+export * from './plainText';

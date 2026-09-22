@@ -103,6 +103,7 @@ enum Operation {
     Build,
     Deployments,
     Issues,
+    Issue,
     File,
     PullRequests,
     ReleasePipelines,
@@ -116,6 +117,7 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Operation::Build,
         Operation::Deployments,
         Operation::Issues,
+        Operation::Issue,
         Operation::File,
         Operation::PullRequests,
         Operation::ReleasePipelines,
@@ -180,6 +182,7 @@ impl Tool for Integration {
             Operation::Build => "get_build_status",
             Operation::Deployments => "list_deployments",
             Operation::Issues => "list_issues",
+            Operation::Issue => "get_issue",
             Operation::File => "read_repository_file",
             Operation::CheckLogs => "read_check_logs",
             Operation::PullRequests => "assess_pull_requests",
@@ -198,13 +201,16 @@ impl Tool for Integration {
                 "Read live GitHub deployments and their latest statuses for a connected source at an immutable commit. Results are paginated; deployment records do not prove the deployed service is healthy."
             }
             Operation::Issues => {
-                "Read live GitHub issues (excluding pull requests) from a connected workspace source. Returns titles, numbers, state, urls and bounded body snippets, plus a next page when more provider records exist."
+                "List the GitHub issues (open, closed or all; never pull requests) of a connected workspace source. Returns titles, numbers, state, urls and bounded body snippets, plus a next page when more provider records exist; get_issue reads one issue in full."
+            }
+            Operation::Issue => {
+                "Read one GitHub issue in full by number from a connected workspace source: its title, state, labels, assignees, complete body and first page of comments. Use it for the details of a specific issue; list_issues only carries a body snippet. Pull requests are refused here: assess_pull_requests reviews those."
             }
             Operation::File => {
-                "Read UTF-8 content of a specific repository file from a connected GitHub source at an immutable commit, with a source URL. Returns a character page that fits the context budget; follow next to continue. Does not read host files. GitHub files over 100 MB are unsupported."
+                "Read one file from a connected GitHub repository at an immutable commit, which is how to review what a pull request or branch changed. Returns UTF-8 content as a character page that fits the context budget, with a source URL; follow next to continue. Does not read host files. GitHub files over 100 MB are unsupported."
             }
             Operation::PullRequests => {
-                "Assess whether pull requests on a connected GitHub source are ready to merge, returning a verdict plus every blocker behind it. Ready is the conjunction of every positive condition: no unresolved review threads, a summary from every recognised review bot that spoke, each at its own full confidence on its own scale and naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and a head commit the observations disagree on are all reported as not ready. Each verdict also carries a blast radius read from the changed files; that is information for a reviewer and never affects readiness, and it says so when no file list was observed. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
+                "Review the open pull requests of a connected GitHub source (or one by number) and say whether each is ready to merge, which are still missing a review, whose checks fail, and every other blocker. Ready is the conjunction of every positive condition: no unresolved review threads, a summary from every recognised review bot that spoke, each at its own full confidence on its own scale and naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and a head commit the observations disagree on are all reported as not ready. Each verdict also carries a blast radius read from the changed files; that is information for a reviewer and never affects readiness, and it says so when no file list was observed. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
             }
             Operation::ReleasePipelines => {
                 "Assess the workflow pipelines behind published GitHub releases on a connected source, returning each release's pipeline state plus every reason it is not green. Succeeded is the conjunction of every positive condition: the lookup completed, at least one release-triggered workflow run was observed, every observed run names the same commit, and every one of them succeeded. A lookup that could not be completed, a run record whose identity or state does not add up, runs that disagree on the commit they built, and a release with no observed run are all reported as unknown rather than succeeded. Results are paginated. This is what the workflows reported: it is not proof that release artifacts were published, that the deployed service is healthy, or that a rerun would pass."
@@ -225,9 +231,15 @@ impl Tool for Integration {
         let mut properties = json!({"source_id": {"type": "string", "format": "uuid"}});
         if !matches!(
             self.operation,
-            Operation::Issues | Operation::PullRequests | Operation::ReleasePipelines
+            Operation::Issues
+                | Operation::Issue
+                | Operation::PullRequests
+                | Operation::ReleasePipelines
         ) {
             properties["ref"] = json!({"type": "string", "description": "Branch, tag or commit; defaults to the source branch or repository default branch."});
+        }
+        if matches!(self.operation, Operation::Issue) {
+            properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Issue number, as list_issues shows it."});
         }
         if matches!(self.operation, Operation::Deployments | Operation::Issues) {
             properties["page"] = json!({"type": "integer", "minimum": 1, "description": "Provider page (100 records), default 1. Follow next_page until null."});
@@ -244,6 +256,9 @@ impl Tool for Integration {
             properties["tag"] = json!({"type": "string", "description": "Assess only the release published under this tag instead of a page of releases."});
         }
         let mut required = vec!["source_id"];
+        if matches!(self.operation, Operation::Issue) {
+            required.push("number");
+        }
         if matches!(self.operation, Operation::File) {
             properties["path"] = json!({"type": "string", "description": "Exact repository-relative file path, within the configured source path."});
             properties["offset"] = json!({"type": "integer", "minimum": 0, "description": "Unicode character offset into the file, default 0."});
@@ -295,6 +310,7 @@ impl Tool for Integration {
             Operation::Build
             | Operation::Deployments
             | Operation::Issues
+            | Operation::Issue
             | Operation::File
             | Operation::CheckLogs
             | Operation::PullRequests
@@ -714,6 +730,15 @@ impl Github {
                 .collect();
             return Ok(json!({"repository": repository, "issues": issues, "next_page": next}));
         }
+        if matches!(operation, Operation::Issue) {
+            let number = arguments
+                .number
+                .filter(|number| *number > 0)
+                .ok_or("number is required.")?;
+            let mut result = self.issue(number).await?;
+            result["repository"] = json!(repository);
+            return Ok(result);
+        }
         if matches!(operation, Operation::CheckLogs) {
             let mut result = self.check_logs(arguments).await?;
             result["repository"] = json!(repository);
@@ -733,6 +758,7 @@ impl Github {
                 .await?
             }
             Operation::Issues
+            | Operation::Issue
             | Operation::PullRequests
             | Operation::ReleasePipelines
             | Operation::CheckLogs
@@ -743,6 +769,58 @@ impl Github {
         result["ref"] = json!(reference);
         result["sha"] = json!(sha);
         Ok(result)
+    }
+
+    /// One issue with its whole body and first page of comments. The list
+    /// endpoint bounds bodies so a page of issues fits the context; a single
+    /// issue is what a person asks for when they want the full text.
+    async fn issue(&self, number: u64) -> Result<Value, String> {
+        let number = number.to_string();
+        let record = self.get(&["issues", &number], &[]).await?;
+        if record.get("pull_request").is_some() {
+            return Err(format!(
+                "#{number} is a pull request, not an issue; assess_pull_requests reviews it."
+            ));
+        }
+        let comments = self
+            .get(
+                &["issues", &number, "comments"],
+                &[
+                    ("per_page", PAGE_SIZE.to_string()),
+                    ("page", "1".to_string()),
+                ],
+            )
+            .await?;
+        let comments: Vec<Value> = array(&comments)?
+            .iter()
+            .map(|comment| {
+                let mut projected = project(comment, &["id", "body", "html_url", "created_at"]);
+                projected["author"] = comment["user"]["login"].clone();
+                projected
+            })
+            .collect();
+        let mut issue = project(
+            &record,
+            &[
+                "number",
+                "title",
+                "body",
+                "state",
+                "html_url",
+                "created_at",
+                "updated_at",
+                "closed_at",
+                "labels",
+                "assignees",
+                "comments",
+            ],
+        );
+        issue["author"] = record["user"]["login"].clone();
+        Ok(json!({
+            "issue": issue,
+            "comments": comments,
+            "comments_complete": comments.len() < PAGE_SIZE,
+        }))
     }
 
     async fn pages(
@@ -2263,6 +2341,7 @@ mod tests {
             Operation::Build,
             Operation::Deployments,
             Operation::Issues,
+            Operation::Issue,
             Operation::File,
             Operation::PullRequests,
             Operation::ReleasePipelines,
@@ -2276,6 +2355,109 @@ mod tests {
                 tool.name()
             );
         }
+    }
+
+    /// The pass asked for "the full details of issue number 5" and the model
+    /// had only list_issues, whose bodies are snippets; it answered from the
+    /// snippet. One issue in full is its own read, and a pull request number
+    /// is turned away towards the tool that reviews those.
+    #[tokio::test]
+    async fn get_issue_reads_one_issue_in_full_with_its_comments() {
+        let server = MockServer::start().await;
+        let body = "the whole body ".repeat(400);
+        mock(
+            &server,
+            "issues/5",
+            json!({
+                "number": 5,
+                "title": "Document how to run the widget checks locally",
+                "body": body,
+                "state": "open",
+                "html_url": "https://github.com/owner/repository/issues/5",
+                "user": {"login": "abnegate"},
+                "labels": [{"name": "docs"}],
+                "assignees": [],
+                "comments": 1,
+                "created_at": "2026-09-01T00:00:00Z",
+                "updated_at": "2026-09-02T00:00:00Z",
+                "closed_at": null
+            }),
+        )
+        .await;
+        mock(
+            &server,
+            "issues/5/comments",
+            json!([{
+                "id": 11,
+                "body": "README should explain check.sh",
+                "html_url": "https://github.com/owner/repository/issues/5#issuecomment-11",
+                "user": {"login": "reviewer"},
+                "created_at": "2026-09-02T00:00:00Z"
+            }]),
+        )
+        .await;
+        mock(
+            &server,
+            "issues/8",
+            json!({"number": 8, "pull_request": {}}),
+        )
+        .await;
+
+        let tool = tool(Operation::Issue);
+        assert_eq!(tool.name(), "get_issue");
+        assert!(purpose_of(tool.description()).contains("one GitHub issue in full"));
+        let schema = tool.parameters_schema();
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("number"))
+        );
+        assert!(schema["properties"].get("ref").is_none());
+
+        let arguments = |number: u64| Arguments {
+            source_id: Uuid::new_v4(),
+            reference: None,
+            path: None,
+            page: None,
+            offset: None,
+            limit: None,
+            state: None,
+            title: None,
+            head: None,
+            base: None,
+            body: None,
+            number: Some(number),
+            job_id: None,
+            tag: None,
+            reason: None,
+        };
+        let result = github(&server)
+            .observe(Operation::Issue, &arguments(5))
+            .await
+            .unwrap();
+        assert_eq!(result["issue"]["number"], 5);
+        assert_eq!(result["issue"]["body"], body, "the body is not a snippet");
+        assert_eq!(result["issue"]["author"], "abnegate");
+        assert_eq!(result["issue"]["labels"][0]["name"], "docs");
+        assert_eq!(result["comments"][0]["author"], "reviewer");
+        assert_eq!(
+            result["comments"][0]["body"],
+            "README should explain check.sh"
+        );
+        assert_eq!(result["comments_complete"], true);
+        assert_eq!(result["repository"], "https://github.com/owner/repository");
+
+        let refused = github(&server)
+            .observe(Operation::Issue, &arguments(8))
+            .await
+            .unwrap_err();
+        assert!(refused.contains("pull request"), "{refused}");
+        assert!(refused.contains("assess_pull_requests"), "{refused}");
+    }
+
+    fn purpose_of(description: &str) -> String {
+        crate::agent::toolbox::purpose(description)
     }
 
     #[test]

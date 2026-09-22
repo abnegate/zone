@@ -228,7 +228,7 @@ test.describe('Tasks Page', () => {
     await projectsLoaded;
     await expect(page).toHaveURL('/tasks');
     await expect(page.locator('.tasks-page')).toBeVisible({ timeout: 10000 });
-    await expect(page.getByRole('button', { name: /New Task/ })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /New task/ })).toBeEnabled();
   });
 
   test.describe('Page Header', () => {
@@ -238,9 +238,9 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows new task button', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeVisible({ timeout: 10000 });
-      await expect(newTaskButton).toContainText('New Task');
+      await expect(newTaskButton).toContainText('New task');
     });
   });
 
@@ -302,7 +302,9 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows agentic badge for agentic tasks', async ({ page }) => {
-      await expect(page.locator('.task-agentic-badge')).toHaveCount(2);
+      await expect(
+        page.locator('.task-badges').getByText('Agentic', { exact: true })
+      ).toHaveCount(2);
     });
 
     test('displays priority in task meta', async ({ page }) => {
@@ -312,7 +314,7 @@ test.describe('Tasks Page', () => {
 
   test.describe('Filters', () => {
     test('displays project and status filter dropdowns', async ({ page }) => {
-      await expect(page.locator('.filters select')).toHaveCount(2);
+      await expect(page.locator('.tasks-filters select')).toHaveCount(2);
     });
 
     test('filters by project', async ({ context, page }) => {
@@ -345,7 +347,7 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
       await expect(page.locator('.task-card')).toHaveCount(3);
 
-      await page.selectOption('.filters select:first-of-type', 'proj-1');
+      await page.getByLabel('Filter by project').selectOption('proj-1');
 
       await expect(page.locator('.task-card')).toHaveCount(2);
     });
@@ -378,7 +380,7 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
       await expect(page.locator('.task-card')).toHaveCount(3);
 
-      await page.selectOption('.filters select:last-of-type', 'complete');
+      await page.getByLabel('Filter by status').selectOption('complete');
 
       await expect(page.locator('.task-card')).toHaveCount(1);
     });
@@ -386,14 +388,14 @@ test.describe('Tasks Page', () => {
 
   test.describe('Create Task Modal', () => {
     test('opens create modal from header button', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
       await expect(page.getByRole('dialog', { name: 'New Task' })).toBeVisible();
     });
 
     test('shows project selection options', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
 
@@ -402,7 +404,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows all form fields', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
 
@@ -419,7 +421,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows source dropdown when agentic mode enabled', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
 
@@ -459,7 +461,7 @@ test.describe('Tasks Page', () => {
         }
       });
 
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
       await page.locator('.project-selection-option').first().click();
@@ -495,7 +497,7 @@ test.describe('Tasks Page', () => {
       });
 
       // Wait for button to be enabled (projects loaded)
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
       await page.locator('.project-selection-option').first().click();
@@ -525,7 +527,7 @@ test.describe('Tasks Page', () => {
       });
 
       // Wait for button to be enabled (projects loaded)
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
       await page.locator('.project-selection-option').first().click();
@@ -540,7 +542,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('closes modal on cancel', async ({ page }) => {
-      const newTaskButton = page.getByRole('button', { name: /New Task/ });
+      const newTaskButton = page.getByRole('button', { name: /New task/ });
       await expect(newTaskButton).toBeEnabled({ timeout: 10000 });
       await newTaskButton.click();
       await page.getByRole('button', { name: 'Cancel' }).click();
@@ -808,7 +810,7 @@ test.describe('Tasks Page', () => {
       await page.goto('/tasks');
       await expect(page).toHaveURL('/tasks');
 
-      await expect(page.getByRole('button', { name: /New Task/ })).toBeDisabled();
+      await expect(page.getByRole('button', { name: /New task/ })).toBeDisabled();
     });
   });
 });

@@ -39,12 +39,18 @@ pub struct KnowledgeRow {
     pub indexed: bool,
 }
 
+/// How much of an entry's content a list row carries: enough for the two-line
+/// excerpt a card shows, never the whole page a web entry can be.
+pub const EXCERPT_CHARS: usize = 160;
+
 /// Lightweight knowledge entry for list views (without full content)
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct KnowledgeListRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub title: String,
+    /// The first `EXCERPT_CHARS` characters of the content.
+    pub excerpt: String,
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub token_count: i32,
@@ -57,6 +63,8 @@ pub struct KnowledgeListRow {
     pub refresh_interval_minutes: Option<i32>,
     /// Last fetch error (indicates failed state)
     pub last_fetch_error: Option<String>,
+    pub created_at: Option<NaiveDateTime>,
+    pub updated_at: Option<NaiveDateTime>,
     /// Whether the entry has a stored vector, and so can be found by meaning
     /// rather than by keyword alone.
     pub indexed: bool,
@@ -124,8 +132,9 @@ pub async fn list_knowledge(
     if let Some(category) = category {
         sqlx::query_as::<_, KnowledgeListRow>(concat!(
             r#"
-            SELECT id, workspace_id, title, category, tags, token_count, is_active,
-                   source_url, last_fetched_at, refresh_interval_minutes, last_fetch_error,
+            SELECT id, workspace_id, title, LEFT(content, $5) AS excerpt, category, tags,
+                   token_count, is_active, source_url, last_fetched_at,
+                   refresh_interval_minutes, last_fetch_error, created_at, updated_at,
                    EXISTS (
                        SELECT 1 FROM knowledge_embeddings stored
                        WHERE stored.knowledge_entry_id = knowledge_entries.id
@@ -143,13 +152,15 @@ pub async fn list_knowledge(
         .bind(category)
         .bind(limit)
         .bind(offset)
+        .bind(EXCERPT_CHARS as i32)
         .fetch_all(pool)
         .await
     } else {
         sqlx::query_as::<_, KnowledgeListRow>(concat!(
             r#"
-            SELECT id, workspace_id, title, category, tags, token_count, is_active,
-                   source_url, last_fetched_at, refresh_interval_minutes, last_fetch_error,
+            SELECT id, workspace_id, title, LEFT(content, $4) AS excerpt, category, tags,
+                   token_count, is_active, source_url, last_fetched_at,
+                   refresh_interval_minutes, last_fetch_error, created_at, updated_at,
                    EXISTS (
                        SELECT 1 FROM knowledge_embeddings stored
                        WHERE stored.knowledge_entry_id = knowledge_entries.id
@@ -166,6 +177,7 @@ pub async fn list_knowledge(
         .bind(workspace_id)
         .bind(limit)
         .bind(offset)
+        .bind(EXCERPT_CHARS as i32)
         .fetch_all(pool)
         .await
     }
@@ -834,6 +846,33 @@ mod tests {
             .expect("Failed to list knowledge");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].title, "Entry 1");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
+    async fn list_rows_carry_an_excerpt_and_their_dates() {
+        let pool = create_test_pool().await;
+        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+        let long = "x".repeat(EXCERPT_CHARS * 3);
+
+        create_knowledge(&pool, workspace_id, "Long", &long, None, &[], 1, user_id)
+            .await
+            .expect("Failed to create knowledge");
+
+        let listed = list_knowledge(&pool, workspace_id, None, 100, 0)
+            .await
+            .expect("Failed to list knowledge");
+        let row = listed
+            .iter()
+            .find(|row| row.title == "Long")
+            .expect("listed");
+
+        assert_eq!(row.excerpt.chars().count(), EXCERPT_CHARS);
+        assert!(row.created_at.is_some());
+        assert!(row.updated_at.is_some());
     }
 
     #[tokio::test]

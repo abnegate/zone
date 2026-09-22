@@ -114,6 +114,7 @@ const defaultModelsHook = {
   disk: null,
   loading: false,
   error: null,
+  providerErrors: {},
   refresh: mock(),
   deleteModel: mock(),
 };
@@ -211,9 +212,13 @@ describe('ModelsPage', () => {
       expect(screen.getByRole('tab', { name: 'Browse' })).toBeInTheDocument();
     });
 
-    it('shows installed tab by default', () => {
+    it('shows installed tab by default with an inline add-model row', () => {
       renderModelsPage();
-      expect(screen.getByRole('heading', { name: 'Add Model' })).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Add Model' })).not.toBeInTheDocument();
+      const add = screen.getByRole('region', { name: 'Add model' });
+      expect(within(add).getByLabelText('Model name')).toBeInTheDocument();
+      expect(within(add).getByRole('button', { name: 'Install' })).toBeInTheDocument();
+      expect(add.querySelector('.models-section-head')).toBeNull();
       expect(screen.getByRole('heading', { name: 'Installed Models' })).toBeInTheDocument();
     });
   });
@@ -255,6 +260,40 @@ describe('ModelsPage', () => {
       mockUseModels.mockReturnValue({ ...defaultModelsHook, error: 'Failed to load' });
       renderModelsPage();
       expect(screen.getByText('Cannot connect to Ollama')).toBeInTheDocument();
+    });
+
+    it('says Ollama is down beside the ComfyUI rows it could still list', () => {
+      const refresh = mock();
+      mockUseModels.mockReturnValue({
+        ...defaultModelsHook,
+        refresh,
+        models: [
+          {
+            name: 'flux1-dev.safetensors',
+            size: 1,
+            modified_at: '2024-01-01T00:00:00Z',
+            capabilities: ['image_generation'],
+          },
+        ],
+        providerErrors: { ollama: 'Failed to connect to Ollama: connection refused' },
+      });
+      renderModelsPage();
+      const banner = screen.getByRole('alert');
+      expect(within(banner).getByText('Cannot connect to Ollama')).toBeInTheDocument();
+      expect(screen.getByText('flux1-dev.safetensors')).toBeInTheDocument();
+      fireEvent.click(within(banner).getByRole('button', { name: 'Retry' }));
+      expect(refresh).toHaveBeenCalled();
+    });
+
+    it('shows the Ollama empty state when nothing else could be listed', () => {
+      mockUseModels.mockReturnValue({
+        ...defaultModelsHook,
+        providerErrors: { ollama: 'Failed to connect to Ollama: connection refused' },
+      });
+      renderModelsPage();
+      expect(screen.getByText('Cannot connect to Ollama')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+      expect(screen.queryByText('No models installed')).not.toBeInTheDocument();
     });
 
     it('shows empty state', () => {
@@ -735,8 +774,46 @@ describe('ModelsPage', () => {
         expect(screen.getByText('Size')).toBeInTheDocument();
       });
       expect(screen.getByText('Modified')).toBeInTheDocument();
+      expect(document.querySelector('.details-meta')).toHaveClass('details-meta--row');
       const source = screen.getByRole('link', { name: 'View source' });
       expect(source).toHaveAttribute('href', 'https://ollama.com/library/llama2');
+    });
+
+    it('sets an installed model id in the mono face in the details title', async () => {
+      mockUseModels.mockReturnValue({
+        ...defaultModelsHook,
+        models: [
+          {
+            name: 'hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M',
+            size: 1,
+            modified_at: '',
+            digest: '',
+          },
+        ],
+      });
+
+      renderModelsPage();
+
+      fireEvent.click(screen.getByText('hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M'));
+
+      const dialog = await screen.findByRole('dialog', {
+        name: 'hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M',
+      });
+      expect(dialog.querySelector('.ui-dialog-title')).toHaveClass('ui-dialog-title--mono');
+    });
+
+    it('keeps a browse display name in the display face in the details title', async () => {
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        models: [{ id: 'llama', name: 'llama3.2', display_name: 'Llama 3.2', source: 'ollama' }],
+      });
+
+      renderModelsPage();
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Browse' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+
+      const dialog = await screen.findByRole('dialog', { name: 'Llama 3.2' });
+      expect(dialog.querySelector('.ui-dialog-title')).not.toHaveClass('ui-dialog-title--mono');
     });
 
     it('closes modal on close button click', async () => {
@@ -753,7 +830,11 @@ describe('ModelsPage', () => {
         expect(screen.getByText('Size')).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByLabelText('Close'));
+      expect(screen.getByRole('dialog', { name: 'llama2' })).toHaveClass('ui-dialog--lg');
+      expect(document.querySelector('.modal-content')).toBeNull();
+      const close = document.querySelector('.ui-dialog-close') as HTMLElement;
+      expect(close.querySelector('svg')).not.toBeNull();
+      fireEvent.click(close);
 
       await waitFor(() => {
         expect(screen.queryByText('Modified')).not.toBeInTheDocument();
@@ -1166,6 +1247,7 @@ describe('ModelsPage', () => {
             size: 3800000000,
             description: 'A general-purpose local chat model.',
             capabilities: ['text', 'tools'],
+            tags: ['tools', 'thinking', 'cloud'],
             details: {
               family: 'llama',
               parameter_size: '7B',
@@ -1192,8 +1274,14 @@ describe('ModelsPage', () => {
         expect(screen.getByText('A general-purpose local chat model.')).toBeInTheDocument();
         expect(screen.getByText('Capabilities')).toBeInTheDocument();
         const capabilities = screen.getByRole('group', { name: 'Model capabilities' });
-        expect(within(capabilities).getByText('Text')).toBeInTheDocument();
-        expect(within(capabilities).getByText('Tools')).toBeInTheDocument();
+        expect([...capabilities.querySelectorAll('.tag')].map((tag) => tag.textContent)).toEqual([
+          'Text',
+          'Tools',
+          'Thinking',
+          'Cloud',
+        ]);
+        expect(document.querySelector('.details-tags')).toBeNull();
+        expect(screen.queryByText('tools')).not.toBeInTheDocument();
         expect(screen.getByText('Parameters')).toBeInTheDocument();
         expect(screen.getByText('128K')).toBeInTheDocument();
       });
@@ -1431,9 +1519,7 @@ describe('ModelsPage', () => {
         expect(screen.getByText('Size')).toBeInTheDocument();
       });
 
-      // Press Escape on the backdrop to close the details modal
-      const backdrop = screen.getByLabelText('Close modal');
-      fireEvent.keyDown(backdrop, { key: 'Escape' });
+      fireEvent.keyDown(document, { key: 'Escape' });
 
       await waitFor(() => {
         expect(screen.queryByText('Modified')).not.toBeInTheDocument();

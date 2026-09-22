@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{OrgMember, WorkspaceAdmin, WorkspaceMember, WorkspaceOwner};
+use crate::db::audit::{actions, resources};
 use crate::db::{workspace_members, workspaces};
 use crate::state::AppState;
 
-use super::common::{ErrorResponse, Timestamps};
+use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
 
 // ============================================================================
 // Workspace Endpoints
@@ -135,10 +136,28 @@ pub async fn update_workspace(
     )
     .await
     {
-        Ok(Some(ws)) => Json(SingleWorkspaceResponse {
-            workspace: WorkspaceResponse::from(ws),
-        })
-        .into_response(),
+        Ok(Some(ws)) => {
+            let response = WorkspaceResponse::from(ws);
+            audit(
+                state.db(),
+                AuditEvent {
+                    organization_id: Some(response.organization_id),
+                    workspace_id: Some(admin.workspace_id),
+                    actor_id: admin.user_id,
+                    actor_email: &admin.email,
+                    action: actions::WORKSPACE_UPDATED,
+                    resource_type: resources::WORKSPACE,
+                    resource_id: Some(admin.workspace_id),
+                    old_values: None,
+                    new_values: serde_json::to_value(&response).ok(),
+                },
+            )
+            .await;
+            Json(SingleWorkspaceResponse {
+                workspace: response,
+            })
+            .into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Workspace not found")),
@@ -164,8 +183,37 @@ pub async fn delete_workspace(
     State(state): State<AppState>,
     owner: WorkspaceOwner,
 ) -> impl IntoResponse {
+    let organization_id = match workspaces::get_workspace(state.db(), owner.workspace_id).await {
+        Ok(workspace) => workspace.map(|workspace| workspace.organization_id),
+        Err(e) => {
+            tracing::error!("Database error: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+
     match workspaces::delete_workspace(state.db(), owner.workspace_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            audit(
+                state.db(),
+                AuditEvent {
+                    organization_id,
+                    workspace_id: Some(owner.workspace_id),
+                    actor_id: owner.user_id,
+                    actor_email: &owner.email,
+                    action: actions::WORKSPACE_DELETED,
+                    resource_type: resources::WORKSPACE,
+                    resource_id: Some(owner.workspace_id),
+                    old_values: None,
+                    new_values: None,
+                },
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Workspace not found")),
@@ -195,6 +243,8 @@ pub struct WorkspaceMemberResponse {
     role: String,
     is_active: bool,
     invited_by: Option<Uuid>,
+    email: Option<String>,
+    display_name: Option<String>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -208,7 +258,19 @@ impl From<workspace_members::WorkspaceMemberRow> for WorkspaceMemberResponse {
             role: row.role.as_str().to_string(),
             is_active: row.is_active,
             invited_by: row.invited_by,
+            email: None,
+            display_name: None,
             timestamps: Timestamps::from_naive(Some(row.created_at), Some(row.updated_at)),
+        }
+    }
+}
+
+impl From<workspace_members::MemberWithUser> for WorkspaceMemberResponse {
+    fn from(member: workspace_members::MemberWithUser) -> Self {
+        Self {
+            email: Some(member.email),
+            display_name: member.display_name,
+            ..Self::from(member.member)
         }
     }
 }
@@ -236,7 +298,7 @@ pub async fn list_members(
     State(state): State<AppState>,
     member: WorkspaceMember,
 ) -> impl IntoResponse {
-    match workspace_members::list_members(state.db(), member.workspace_id).await {
+    match workspace_members::list_members_with_users(state.db(), member.workspace_id).await {
         Ok(members) => Json(WorkspaceMembersListResponse {
             members: members
                 .into_iter()
@@ -256,6 +318,30 @@ pub async fn list_members(
 }
 
 /// POST /api/workspaces/:workspace_id/members - Add member (requires admin)
+async fn audit_member(
+    state: &AppState,
+    admin: &WorkspaceAdmin,
+    action: &str,
+    user_id: Uuid,
+    role: Option<&str>,
+) {
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: None,
+            workspace_id: Some(admin.workspace_id),
+            actor_id: admin.user_id,
+            actor_email: &admin.email,
+            action,
+            resource_type: resources::MEMBER,
+            resource_id: Some(user_id),
+            old_values: None,
+            new_values: role.map(|role| serde_json::json!({ "user_id": user_id, "role": role })),
+        },
+    )
+    .await;
+}
+
 pub async fn add_member(
     State(state): State<AppState>,
     admin: WorkspaceAdmin,
@@ -319,6 +405,14 @@ pub async fn add_member(
                         .await
                         {
                             Ok(Some(member)) => {
+                                audit_member(
+                                    &state,
+                                    &admin,
+                                    actions::MEMBER_ADDED,
+                                    member.user_id,
+                                    Some(member.role.as_str()),
+                                )
+                                .await;
                                 (StatusCode::OK, Json(WorkspaceMemberResponse::from(member)))
                                     .into_response()
                             }
@@ -364,11 +458,21 @@ pub async fn add_member(
                     match workspace_members::get_member(state.db(), admin.workspace_id, req.user_id)
                         .await
                     {
-                        Ok(Some(member)) => (
-                            StatusCode::CREATED,
-                            Json(WorkspaceMemberResponse::from(member)),
-                        )
-                            .into_response(),
+                        Ok(Some(member)) => {
+                            audit_member(
+                                &state,
+                                &admin,
+                                actions::MEMBER_ADDED,
+                                member.user_id,
+                                Some(member.role.as_str()),
+                            )
+                            .await;
+                            (
+                                StatusCode::CREATED,
+                                Json(WorkspaceMemberResponse::from(member)),
+                            )
+                                .into_response()
+                        }
                         Ok(None) => (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse::new("Failed to retrieve created member")),
@@ -454,6 +558,14 @@ pub async fn update_member_role(
     .await
     {
         Ok(workspace_members::RoleChange::Applied(member)) => {
+            audit_member(
+                &state,
+                &admin,
+                actions::MEMBER_ROLE_CHANGED,
+                member.user_id,
+                Some(member.role.as_str()),
+            )
+            .await;
             Json(WorkspaceMemberResponse::from(*member)).into_response()
         }
         Ok(workspace_members::RoleChange::Forbidden) => (
@@ -507,7 +619,10 @@ pub async fn remove_member(
     )
     .await
     {
-        Ok(workspace_members::Removal::Removed) => StatusCode::NO_CONTENT.into_response(),
+        Ok(workspace_members::Removal::Removed) => {
+            audit_member(&state, &admin, actions::MEMBER_REMOVED, path.user_id, None).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(workspace_members::Removal::Forbidden) => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new(

@@ -1,19 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  EmptyState,
-  Tabs,
-  TabsList,
-  TabsTrigger,
-} from '@zone/ui';
+import { Badge, Button, EmptyState, Modal, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
 import { projectsApi } from '../../../api/projects';
 import { useAuth } from '../../../features/auth';
+import PageBar from '../../../shared/components/PageBar/PageBar';
+import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { getErrors } from '../../../validation';
 import { AutomationPanel, AutoProjectModal, CreateProjectWizard } from '../components';
 import { useAutomation, useProjects, useSyncConfigs } from '../hooks';
@@ -22,6 +15,7 @@ import type {
   CreateSyncConfigRequest,
   Project,
   ProjectStatus,
+  SyncConfig,
   SyncDirection,
   SyncProvider,
   UpdateProjectRequest,
@@ -41,6 +35,14 @@ const statusVariants: Record<ProjectStatus, 'success' | 'warning' | 'destructive
   on_hold: 'warning',
   cancelled: 'destructive',
 };
+
+function FolderIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+      <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+    </svg>
+  );
+}
 
 export default function ProjectsPage() {
   const { isAuthenticated } = useAuth();
@@ -142,6 +144,16 @@ export default function ProjectsPage() {
   const [formSyncProjectId, setFormSyncProjectId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [operationError, setOperationError] = useState<string | null>(null);
+
+  const failed = (err: unknown, fallback: string) =>
+    setOperationError(err instanceof Error ? err.message : fallback);
+  const modalOpen = showEditModal || showDeleteConfirm || showSourceModal || showSyncModal;
+
+  const openModal = (open: (value: boolean) => void) => {
+    setOperationError(null);
+    open(true);
+  };
 
   const handleProjectCreated = useCallback((_project: Project) => {
     // Project is already added to the list by the hook
@@ -165,12 +177,13 @@ export default function ProjectsPage() {
 
     setFieldErrors({});
     setSubmitting(true);
+    setOperationError(null);
     try {
       const updated = await updateProjectMutation(selectedProject.id, request);
       setSelectedProject(updated);
       setShowEditModal(false);
     } catch (err) {
-      console.error('Failed to update project:', err);
+      failed(err, 'Failed to update project');
     } finally {
       setSubmitting(false);
     }
@@ -212,12 +225,13 @@ export default function ProjectsPage() {
     if (!isAuthenticated || !selectedProject) return;
 
     setSubmitting(true);
+    setOperationError(null);
     try {
       await deleteProjectMutation(selectedProject.id);
       setSelectedProject(null);
       setShowDeleteConfirm(false);
     } catch (err) {
-      console.error('Failed to delete project:', err);
+      failed(err, 'Failed to delete project');
     } finally {
       setSubmitting(false);
     }
@@ -228,13 +242,14 @@ export default function ProjectsPage() {
     if (!isAuthenticated || !selectedProject || !formSourceId) return;
 
     setSubmitting(true);
+    setOperationError(null);
     try {
       const updated = await client.linkSource(selectedProject.id, formSourceId);
       setSelectedProject(updated);
       setShowSourceModal(false);
       setFormSourceId('');
     } catch (err) {
-      console.error('Failed to link source:', err);
+      failed(err, 'Failed to link source');
     } finally {
       setSubmitting(false);
     }
@@ -243,11 +258,12 @@ export default function ProjectsPage() {
   const handleUnlinkSource = async () => {
     if (!isAuthenticated || !selectedProject) return;
 
+    setOperationError(null);
     try {
       const updated = await client.unlinkSource(selectedProject.id);
       setSelectedProject(updated);
     } catch (err) {
-      console.error('Failed to unlink source:', err);
+      failed(err, 'Failed to unlink source');
     }
   };
 
@@ -255,7 +271,7 @@ export default function ProjectsPage() {
     setFormName(project.name);
     setFormDescription(project.description || '');
     setFormStatus(project.status);
-    setShowEditModal(true);
+    openModal(setShowEditModal);
   };
 
   const resetForm = () => {
@@ -289,12 +305,13 @@ export default function ProjectsPage() {
 
     setFieldErrors({});
     setSubmitting(true);
+    setOperationError(null);
     try {
       await createSyncConfigMutation(request);
       setShowSyncModal(false);
       resetForm();
     } catch (err) {
-      console.error('Failed to create sync config:', err);
+      failed(err, 'Failed to add sync');
     } finally {
       setSubmitting(false);
     }
@@ -303,12 +320,18 @@ export default function ProjectsPage() {
   const handleDeleteSyncConfig = async (configId: string) => {
     if (!isAuthenticated || !selectedProject) return;
 
+    setOperationError(null);
     try {
       await deleteSyncConfigMutation(configId);
     } catch (err) {
-      console.error('Failed to delete sync config:', err);
+      failed(err, 'Failed to remove sync');
     }
   };
+
+  const syncState = (config: SyncConfig) =>
+    config.last_synced_at
+      ? `Synced ${formatDate(config.last_synced_at)}`
+      : 'Configured, not yet synced';
 
   // Helper to get source info for display
   const getProjectSource = (project: Project) => {
@@ -317,11 +340,7 @@ export default function ProjectsPage() {
 
   return (
     <div className="page page--workspace projects-page">
-      <header className="projects-header">
-        <div className="projects-header-copy">
-          <h1>Projects</h1>
-          <p>Organize work with GitHub integration</p>
-        </div>
+      <PageBar title="Projects" subtitle="Organize work with GitHub integration">
         <Tabs
           value={statusFilter}
           onValueChange={(v) => setStatusFilter(v as ProjectStatus | 'all')}
@@ -334,24 +353,16 @@ export default function ProjectsPage() {
             <TabsTrigger value="cancelled">Cancelled</TabsTrigger>
           </TabsList>
         </Tabs>
-        <div className="projects-header-actions">
-          <Button
-            variant="secondary"
-            onClick={() => setShowAutoModal(true)}
-            data-testid="auto-project-button"
-          >
-            Auto project
-          </Button>
-          <Button
-            onClick={() => {
-              resetForm();
-              setShowCreateModal(true);
-            }}
-          >
-            + New Project
-          </Button>
-        </div>
-      </header>
+        <Button
+          onClick={() => {
+            resetForm();
+            setShowCreateModal(true);
+          }}
+        >
+          <PlusIcon />
+          New project
+        </Button>
+      </PageBar>
 
       <div className="projects-workspace">
         {loading ? (
@@ -364,29 +375,32 @@ export default function ProjectsPage() {
         ) : projects.length === 0 ? (
           <EmptyState
             className="projects-empty"
-            icon={
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                width="48"
-                height="48"
-              >
-                <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-              </svg>
+            icon={<FolderIcon />}
+            title={
+              statusFilter === 'all'
+                ? 'No projects yet'
+                : `No ${statusLabels[statusFilter].toLowerCase()} projects`
             }
-            title="No projects yet"
-            description="Create your first project to get started"
+            description={
+              statusFilter === 'all'
+                ? 'Create your first project to get started'
+                : 'Nothing in this workspace has that status'
+            }
             action={
-              <Button
-                onClick={() => {
-                  resetForm();
-                  setShowCreateModal(true);
-                }}
-              >
-                Create Project
-              </Button>
+              statusFilter === 'all' ? (
+                <Button
+                  onClick={() => {
+                    resetForm();
+                    setShowCreateModal(true);
+                  }}
+                >
+                  Create Project
+                </Button>
+              ) : (
+                <Button variant="secondary" onClick={() => setStatusFilter('all')}>
+                  Show all projects
+                </Button>
+              )
             }
           />
         ) : (
@@ -394,53 +408,49 @@ export default function ProjectsPage() {
             <div className="projects-list-pane">
               <div className="projects-list">
                 {projects.map((project) => (
-                  <Card
+                  <div
                     key={project.id}
-                    className={`project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
+                    className={`card--list project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
                     onClick={() => selectProject(project)}
                     onKeyDown={(e) => e.key === 'Enter' && selectProject(project)}
                     role="button"
                     tabIndex={0}
                   >
-                    <CardContent className="project-card-body">
-                      <div className="project-card-header">
-                        <h3 className="project-name">{project.name}</h3>
-                        <span className="project-card-badges">
-                          {project.auto && (
-                            <Badge variant="default" data-testid="auto-badge">
-                              Auto
-                            </Badge>
-                          )}
-                          <Badge variant={statusVariants[project.status]}>
-                            {statusLabels[project.status]}
+                    <div className="project-card-header">
+                      <h3 className="project-name">{project.name}</h3>
+                      <span className="project-card-badges">
+                        {project.auto && (
+                          <Badge variant="accent" data-testid="auto-badge">
+                            Auto
                           </Badge>
-                        </span>
-                      </div>
-                      {project.description && (
-                        <p className="project-description">{project.description}</p>
-                      )}
-                      <div className="project-card-footer">
-                        {(() => {
-                          const source = getProjectSource(project);
-                          return source ? (
-                            <a
-                              href={source.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="source-link"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <span className={`source-type-icon ${source.source_type}`} />
-                              {source.name}
-                            </a>
-                          ) : (
-                            <span className="no-source">No source</span>
-                          );
-                        })()}
-                        <span>{formatDate(project.updated_at)}</span>
-                      </div>
-                    </CardContent>
-                  </Card>
+                        )}
+                        <Badge variant={statusVariants[project.status]}>
+                          {statusLabels[project.status]}
+                        </Badge>
+                      </span>
+                    </div>
+                    <p className="project-description">{project.description}</p>
+                    <div className="project-card-footer">
+                      {(() => {
+                        const source = getProjectSource(project);
+                        return source ? (
+                          <a
+                            href={source.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="source-link"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <span className={`source-type-icon ${source.source_type}`} />
+                            {source.name}
+                          </a>
+                        ) : (
+                          <span className="no-source">No source</span>
+                        );
+                      })()}
+                      <span>{formatDate(project.updated_at)}</span>
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
@@ -454,8 +464,9 @@ export default function ProjectsPage() {
                       fill="none"
                       stroke="currentColor"
                       strokeWidth="2"
-                      width="20"
-                      height="20"
+                      width="16"
+                      height="16"
+                      aria-hidden="true"
                     >
                       <path d="M6 18L18 6M6 6l12 12" />
                     </svg>
@@ -463,34 +474,89 @@ export default function ProjectsPage() {
                 </div>
 
                 <div className="details-content">
-                  <div className="detail-row">
-                    <span className="detail-label">Status</span>
-                    <Badge variant={statusVariants[selectedProject.status]}>
-                      {statusLabels[selectedProject.status]}
-                    </Badge>
-                  </div>
-
-                  <div className="detail-row">
-                    <span className="detail-label">Automation</span>
-                    <button
-                      type="button"
-                      className="auto-toggle"
-                      aria-pressed={!!selectedProject.auto}
-                      data-testid="auto-toggle"
-                      disabled={togglingAuto}
-                      onClick={handleToggleAuto}
-                      title={
-                        selectedProject.auto
-                          ? 'Stop running the tasks of this project on their own'
-                          : 'Run, review and merge every task of this project on its own'
-                      }
-                    >
-                      <span className="auto-toggle-track" aria-hidden="true">
-                        <span className="auto-toggle-thumb" />
-                      </span>
-                      Auto
-                    </button>
-                  </div>
+                  {operationError && !modalOpen && (
+                    <div className="form-error details-error" role="alert">
+                      {operationError}
+                    </div>
+                  )}
+                  <dl className="detail-facts">
+                    <dt className="detail-label">Status</dt>
+                    <dd className="detail-value">
+                      <Badge variant={statusVariants[selectedProject.status]}>
+                        {statusLabels[selectedProject.status]}
+                      </Badge>
+                    </dd>
+                    <dt className="detail-label">Created</dt>
+                    <dd className="detail-value">{formatDate(selectedProject.created_at)}</dd>
+                    <dt className="detail-label">Updated</dt>
+                    <dd className="detail-value">{formatDate(selectedProject.updated_at)}</dd>
+                    <dt className="detail-label">Automation</dt>
+                    <dd className="detail-value">
+                      <button
+                        type="button"
+                        className="auto-toggle"
+                        aria-pressed={!!selectedProject.auto}
+                        data-testid="auto-toggle"
+                        disabled={togglingAuto}
+                        onClick={handleToggleAuto}
+                        title={
+                          selectedProject.auto
+                            ? 'Stop running the tasks of this project on their own'
+                            : 'Run, review and merge every task of this project on its own'
+                        }
+                      >
+                        <span className="auto-toggle-track" aria-hidden="true">
+                          <span className="auto-toggle-thumb" />
+                        </span>
+                        Auto
+                      </button>
+                    </dd>
+                    {selectedProject.description && (
+                      <>
+                        <dt className="detail-label">Description</dt>
+                        <dd className="detail-value">{selectedProject.description}</dd>
+                      </>
+                    )}
+                    <dt className="detail-label">Source</dt>
+                    <dd className="detail-value">
+                      {(() => {
+                        const source = getProjectSource(selectedProject);
+                        return source ? (
+                          <div className="source-detail">
+                            <span className={`source-type-badge ${source.source_type}`}>
+                              {source.source_type}
+                            </span>
+                            <span className="source-name">{source.name}</span>
+                            <a
+                              href={source.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="source-url"
+                            >
+                              {source.url}
+                            </a>
+                            <Button variant="secondary" size="sm" onClick={handleUnlinkSource}>
+                              Unlink
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="source-detail">
+                            <span className="no-source">No source</span>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => {
+                                setFormSourceId('');
+                                openModal(setShowSourceModal);
+                              }}
+                            >
+                              Link Source
+                            </Button>
+                          </div>
+                        );
+                      })()}
+                    </dd>
+                  </dl>
 
                   {automationActionError && (
                     <p className="field-error" role="alert" data-testid="automation-action-error">
@@ -508,63 +574,6 @@ export default function ProjectsPage() {
                     />
                   )}
 
-                  {selectedProject.description && (
-                    <div className="detail-row">
-                      <span className="detail-label">Description</span>
-                      <p className="detail-value">{selectedProject.description}</p>
-                    </div>
-                  )}
-
-                  <div className="detail-row">
-                    <span className="detail-label">Source</span>
-                    {(() => {
-                      const source = getProjectSource(selectedProject);
-                      return source ? (
-                        <div className="source-detail">
-                          <div className="source-info">
-                            <span className={`source-type-badge ${source.source_type}`}>
-                              {source.source_type}
-                            </span>
-                            <span className="source-name">{source.name}</span>
-                          </div>
-                          <a
-                            href={source.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="source-url"
-                          >
-                            {source.url}
-                          </a>
-                          <Button variant="secondary" size="sm" onClick={handleUnlinkSource}>
-                            Unlink
-                          </Button>
-                        </div>
-                      ) : (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => {
-                            setFormSourceId('');
-                            setShowSourceModal(true);
-                          }}
-                        >
-                          Link Source
-                        </Button>
-                      );
-                    })()}
-                  </div>
-
-                  <div className="detail-row">
-                    <span className="detail-label">Created</span>
-                    <span className="detail-value">{formatDate(selectedProject.created_at)}</span>
-                  </div>
-
-                  <div className="detail-row">
-                    <span className="detail-label">Updated</span>
-                    <span className="detail-value">{formatDate(selectedProject.updated_at)}</span>
-                  </div>
-
-                  {/* Sync Configuration Section */}
                   <div className="sync-config-section">
                     <div className="sync-config-header">
                       <h3>External Sync</h3>
@@ -573,7 +582,7 @@ export default function ProjectsPage() {
                         size="sm"
                         onClick={() => {
                           resetForm();
-                          setShowSyncModal(true);
+                          openModal(setShowSyncModal);
                         }}
                       >
                         + Add Sync
@@ -582,11 +591,12 @@ export default function ProjectsPage() {
 
                     {syncLoading ? (
                       <div className="sync-config-empty">
-                        <span className="spinner" /> Loading...
+                        <span className="spinner" /> Loading sync configurations…
                       </div>
                     ) : syncConfigs.length === 0 ? (
                       <div className="sync-config-empty">
-                        No sync configurations. Add one to sync with GitHub or Linear.
+                        No sync configured. Add one to point this project at a GitHub repository or
+                        a Linear project.
                       </div>
                     ) : (
                       <div className="sync-config-list">
@@ -613,14 +623,30 @@ export default function ProjectsPage() {
                                   {config.external_project_id}
                                 </span>
                               )}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="sync-config-remove"
+                                onClick={() => handleDeleteSyncConfig(config.id)}
+                              >
+                                Remove
+                              </Button>
                             </div>
-                            <Button
-                              variant="destructive"
-                              size="sm"
-                              onClick={() => handleDeleteSyncConfig(config.id)}
-                            >
-                              Remove
-                            </Button>
+                            <div className="sync-config-state">
+                              <span
+                                className={`sync-status ${config.last_synced_at ? 'synced' : ''}`}
+                              >
+                                {syncState(config)}
+                              </span>
+                              {config.webhook_path && (
+                                <code
+                                  className="sync-webhook"
+                                  title="Register this webhook URL with the provider"
+                                >
+                                  {`${window.location.origin}${config.webhook_path}`}
+                                </code>
+                              )}
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -629,26 +655,32 @@ export default function ProjectsPage() {
                 </div>
 
                 <div className="details-actions">
-                  <Button
-                    variant="secondary"
-                    className="flex-1"
-                    onClick={() => openEditModal(selectedProject)}
-                  >
+                  <Button variant="secondary" onClick={() => openEditModal(selectedProject)}>
                     Edit Project
                   </Button>
-                  <Button
-                    variant="destructive"
-                    className="flex-1"
-                    onClick={() => setShowDeleteConfirm(true)}
-                  >
+                  <Button variant="destructive" onClick={() => openModal(setShowDeleteConfirm)}>
                     Delete
                   </Button>
                 </div>
               </aside>
             ) : (
               <div className="projects-detail-placeholder">
-                <h3>Select a project</h3>
-                <p>Choose one from the list, or create a new one.</p>
+                <EmptyState
+                  icon={<FolderIcon />}
+                  title="Select a project"
+                  description="Choose one from the list, or create a new one."
+                  action={
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        resetForm();
+                        setShowCreateModal(true);
+                      }}
+                    >
+                      Create a project
+                    </Button>
+                  }
+                />
               </div>
             )}
           </>
@@ -661,6 +693,7 @@ export default function ProjectsPage() {
         onClose={() => setShowCreateModal(false)}
         onCreated={handleProjectCreated}
         createProject={createProjectMutation}
+        onAuto={() => setShowAutoModal(true)}
       />
 
       {/* Auto project: a brief, then the planner chat asks the rest */}
@@ -679,233 +712,214 @@ export default function ProjectsPage() {
         }}
       />
 
-      {/* Edit Project Modal */}
-      {showEditModal && selectedProject && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowEditModal(false)}
-            onKeyDown={(e) => e.key === 'Escape' && setShowEditModal(false)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content">
-            <h3>Edit Project</h3>
-            <form onSubmit={handleUpdateProject}>
-              <div className="form-group">
-                <label htmlFor="edit-name">Name</label>
-                <input
-                  id="edit-name"
-                  type="text"
-                  value={formName}
-                  onChange={(e) => setFormName(e.target.value)}
-                  placeholder="Project name"
-                  className={fieldErrors.name ? 'input-error' : ''}
-                />
-                {fieldErrors.name && <span className="field-error">{fieldErrors.name}</span>}
-              </div>
-              <div className="form-group">
-                <label htmlFor="edit-description">Description</label>
-                <textarea
-                  id="edit-description"
-                  value={formDescription}
-                  onChange={(e) => setFormDescription(e.target.value)}
-                  placeholder="Optional description"
-                  rows={3}
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="edit-status">Status</label>
-                <select
-                  id="edit-status"
-                  value={formStatus}
-                  onChange={(e) => setFormStatus(e.target.value as ProjectStatus)}
-                >
-                  <option value="active">Active</option>
-                  <option value="on_hold">On Hold</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-              </div>
-              <div className="modal-actions">
-                <Button variant="secondary" type="button" onClick={() => setShowEditModal(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={submitting} loading={submitting}>
-                  {submitting ? 'Saving...' : 'Save Changes'}
-                </Button>
-              </div>
-            </form>
+      <Modal
+        isOpen={showEditModal && selectedProject !== null}
+        onClose={() => setShowEditModal(false)}
+        title="Edit Project"
+      >
+        <form onSubmit={handleUpdateProject}>
+          <div className="form-group">
+            <label htmlFor="edit-name">Name</label>
+            <input
+              id="edit-name"
+              type="text"
+              value={formName}
+              onChange={(e) => setFormName(e.target.value)}
+              placeholder="Project name"
+              className={fieldErrors.name ? 'input-error' : ''}
+            />
+            {fieldErrors.name && <span className="field-error">{fieldErrors.name}</span>}
           </div>
-        </div>
-      )}
+          <div className="form-group">
+            <label htmlFor="edit-description">Description</label>
+            <textarea
+              id="edit-description"
+              value={formDescription}
+              onChange={(e) => setFormDescription(e.target.value)}
+              placeholder="Optional description"
+              rows={3}
+            />
+          </div>
+          <div className="form-group">
+            <label htmlFor="edit-status">Status</label>
+            <select
+              id="edit-status"
+              value={formStatus}
+              onChange={(e) => setFormStatus(e.target.value as ProjectStatus)}
+            >
+              <option value="active">Active</option>
+              <option value="on_hold">On Hold</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </div>
+          {operationError && (
+            <div className="form-error" role="alert">
+              {operationError}
+            </div>
+          )}
+          <div className="modal-actions">
+            <Button variant="secondary" type="button" onClick={() => setShowEditModal(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={submitting} loading={submitting}>
+              {submitting ? 'Saving...' : 'Save Changes'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
-      {/* Delete Confirmation Modal */}
-      {showDeleteConfirm && selectedProject && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowDeleteConfirm(false)}
-            onKeyDown={(e) => e.key === 'Escape' && setShowDeleteConfirm(false)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content">
-            <h3>Delete Project</h3>
-            <p>
-              Are you sure you want to delete <strong>{selectedProject.name}</strong>? This action
-              cannot be undone.
-            </p>
-            <div className="modal-actions">
-              <Button variant="secondary" type="button" onClick={() => setShowDeleteConfirm(false)}>
-                Cancel
-              </Button>
-              <Button
-                variant="destructive"
-                type="button"
-                onClick={handleDeleteProject}
-                disabled={submitting}
-                loading={submitting}
+      <Modal
+        isOpen={showDeleteConfirm && selectedProject !== null}
+        onClose={() => setShowDeleteConfirm(false)}
+        title="Delete Project"
+        size="sm"
+      >
+        <p>
+          Are you sure you want to delete <strong>{selectedProject?.name}</strong>? This action
+          cannot be undone.
+        </p>
+        {operationError && (
+          <div className="form-error" role="alert">
+            {operationError}
+          </div>
+        )}
+        <div className="modal-actions">
+          <Button variant="secondary" type="button" onClick={() => setShowDeleteConfirm(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            type="button"
+            onClick={handleDeleteProject}
+            disabled={submitting}
+            loading={submitting}
+          >
+            {submitting ? 'Deleting...' : 'Delete Project'}
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={showSourceModal && selectedProject !== null}
+        onClose={() => setShowSourceModal(false)}
+        title="Link Source"
+      >
+        <form onSubmit={handleLinkSource}>
+          <div className="form-group">
+            <label htmlFor="source-select">Source</label>
+            <select
+              id="source-select"
+              value={formSourceId}
+              onChange={(e) => setFormSourceId(e.target.value)}
+              required
+            >
+              <option value="">Select a source...</option>
+              {sources
+                .filter((s) => s.is_active)
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.source_type})
+                  </option>
+                ))}
+            </select>
+            {sources.length === 0 && (
+              <span className="form-hint">No sources configured. Add one in the Sources page.</span>
+            )}
+          </div>
+          {operationError && (
+            <div className="form-error" role="alert">
+              {operationError}
+            </div>
+          )}
+          <div className="modal-actions">
+            <Button variant="secondary" type="button" onClick={() => setShowSourceModal(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={submitting || !formSourceId} loading={submitting}>
+              {submitting ? 'Linking...' : 'Link Source'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        isOpen={showSyncModal && selectedProject !== null}
+        onClose={() => setShowSyncModal(false)}
+        title="Add External Sync"
+      >
+        <form onSubmit={handleCreateSyncConfig}>
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="sync-provider">Provider</label>
+              <select
+                id="sync-provider"
+                value={formSyncProvider}
+                onChange={(e) => setFormSyncProvider(e.target.value as SyncProvider)}
               >
-                {submitting ? 'Deleting...' : 'Delete Project'}
-              </Button>
+                <option value="github">GitHub</option>
+                <option value="linear">Linear</option>
+              </select>
+            </div>
+            <div className="form-group">
+              <label htmlFor="sync-direction">Direction</label>
+              <select
+                id="sync-direction"
+                value={formSyncDirection}
+                onChange={(e) => setFormSyncDirection(e.target.value as SyncDirection)}
+              >
+                <option value="inbound">Inbound (External to Zone)</option>
+                <option value="outbound">Outbound (Zone to External)</option>
+                <option value="bidirectional">Bidirectional</option>
+              </select>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Link Source Modal */}
-      {showSourceModal && selectedProject && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowSourceModal(false)}
-            onKeyDown={(e) => e.key === 'Escape' && setShowSourceModal(false)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content">
-            <h3>Link Source</h3>
-            <form onSubmit={handleLinkSource}>
-              <div className="form-group">
-                <label htmlFor="source-select">Source</label>
-                <select
-                  id="source-select"
-                  value={formSourceId}
-                  onChange={(e) => setFormSourceId(e.target.value)}
-                  required
-                >
-                  <option value="">Select a source...</option>
-                  {sources
-                    .filter((s) => s.is_active)
-                    .map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} ({s.source_type})
-                      </option>
-                    ))}
-                </select>
-                {sources.length === 0 && (
-                  <span className="form-hint">
-                    No sources configured. Add one in the Sources page.
-                  </span>
-                )}
-              </div>
-              <div className="modal-actions">
-                <Button variant="secondary" type="button" onClick={() => setShowSourceModal(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={submitting || !formSourceId} loading={submitting}>
-                  {submitting ? 'Linking...' : 'Link Source'}
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Add Sync Config Modal */}
-      {showSyncModal && selectedProject && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowSyncModal(false)}
-            onKeyDown={(e) => e.key === 'Escape' && setShowSyncModal(false)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content">
-            <h3>Add External Sync</h3>
-            <form onSubmit={handleCreateSyncConfig}>
-              <div className="form-group">
-                <label htmlFor="sync-provider">Provider</label>
-                <select
-                  id="sync-provider"
-                  value={formSyncProvider}
-                  onChange={(e) => setFormSyncProvider(e.target.value as SyncProvider)}
-                >
-                  <option value="github">GitHub</option>
-                  <option value="linear">Linear</option>
-                </select>
-              </div>
-              <div className="form-group">
-                <label htmlFor="sync-direction">Direction</label>
-                <select
-                  id="sync-direction"
-                  value={formSyncDirection}
-                  onChange={(e) => setFormSyncDirection(e.target.value as SyncDirection)}
-                >
-                  <option value="inbound">Inbound (External to Zone)</option>
-                  <option value="outbound">Outbound (Zone to External)</option>
-                  <option value="bidirectional">Bidirectional</option>
-                </select>
-              </div>
-              {formSyncProvider === 'github' && (
-                <div className="form-group">
-                  <label htmlFor="sync-repo-url">Repository URL</label>
-                  <input
-                    id="sync-repo-url"
-                    type="url"
-                    value={formSyncRepoUrl}
-                    onChange={(e) => setFormSyncRepoUrl(e.target.value)}
-                    placeholder="https://github.com/owner/repo"
-                    className={fieldErrors.external_repo_url ? 'input-error' : ''}
-                  />
-                  {fieldErrors.external_repo_url && (
-                    <span className="field-error">{fieldErrors.external_repo_url}</span>
-                  )}
-                </div>
+          {formSyncProvider === 'github' && (
+            <div className="form-group">
+              <label htmlFor="sync-repo-url">Repository URL</label>
+              <input
+                id="sync-repo-url"
+                type="url"
+                value={formSyncRepoUrl}
+                onChange={(e) => setFormSyncRepoUrl(e.target.value)}
+                placeholder="https://github.com/owner/repo"
+                className={fieldErrors.external_repo_url ? 'input-error' : ''}
+              />
+              {fieldErrors.external_repo_url && (
+                <span className="field-error">{fieldErrors.external_repo_url}</span>
               )}
-              {formSyncProvider === 'linear' && (
-                <div className="form-group">
-                  <label htmlFor="sync-project-id">Project ID</label>
-                  <input
-                    id="sync-project-id"
-                    type="text"
-                    value={formSyncProjectId}
-                    onChange={(e) => setFormSyncProjectId(e.target.value)}
-                    placeholder="LINEAR-123"
-                    className={fieldErrors.external_project_id ? 'input-error' : ''}
-                  />
-                  {fieldErrors.external_project_id && (
-                    <span className="field-error">{fieldErrors.external_project_id}</span>
-                  )}
-                </div>
+            </div>
+          )}
+          {formSyncProvider === 'linear' && (
+            <div className="form-group">
+              <label htmlFor="sync-project-id">Project ID</label>
+              <input
+                id="sync-project-id"
+                type="text"
+                value={formSyncProjectId}
+                onChange={(e) => setFormSyncProjectId(e.target.value)}
+                placeholder="LINEAR-123"
+                className={fieldErrors.external_project_id ? 'input-error' : ''}
+              />
+              {fieldErrors.external_project_id && (
+                <span className="field-error">{fieldErrors.external_project_id}</span>
               )}
-              <div className="modal-actions">
-                <Button variant="secondary" type="button" onClick={() => setShowSyncModal(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={submitting} loading={submitting}>
-                  {submitting ? 'Adding...' : 'Add Sync Config'}
-                </Button>
-              </div>
-            </form>
+            </div>
+          )}
+          {operationError && (
+            <div className="form-error" role="alert">
+              {operationError}
+            </div>
+          )}
+          <div className="modal-actions">
+            <Button variant="secondary" type="button" onClick={() => setShowSyncModal(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={submitting} loading={submitting}>
+              {submitting ? 'Adding...' : 'Add Sync Config'}
+            </Button>
           </div>
-        </div>
-      )}
+        </form>
+      </Modal>
     </div>
   );
 }

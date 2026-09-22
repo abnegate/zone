@@ -3,8 +3,8 @@
 //! firing.
 use super::{DbResult, actions};
 use crate::services::schedule::{self, MAX_LIFETIME, Recurrence};
-use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use chrono::{DateTime, FixedOffset, Utc};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::time::Duration;
@@ -35,7 +35,7 @@ const TIMING_MODES: [&str; 2] = ["exact_schedule", "condition_watch"];
 /// so a later writer cannot store a baseline this would not have kept.
 pub const OBSERVATION_CAP: usize = 4000;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reminder {
     /// The words a firing delivers, and required whether or not one is sent:
@@ -45,7 +45,10 @@ pub struct Reminder {
     /// instruction rather than a name — reading one back to somebody deciding
     /// whether to stop it tells them how the job works rather than what it is.
     pub content: String,
-    pub due_at: DateTime<Utc>,
+    /// Kept in the offset the caller wrote it in, so a refusal can answer in
+    /// the same clock the caller was reading.
+    #[serde(deserialize_with = "rfc3339")]
+    pub due_at: DateTime<FixedOffset>,
     /// An RFC 5545 rule, in the subset `services::schedule` accepts. Absent is
     /// what a one-shot is.
     #[serde(default)]
@@ -114,6 +117,33 @@ fn automation(input: &Reminder) -> Result<(Option<Recurrence>, &'static str), sq
     Ok((rule, mode))
 }
 
+fn rfc3339<'de, D: Deserializer<'de>>(deserializer: D) -> Result<DateTime<FixedOffset>, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    DateTime::parse_from_rfc3339(raw.trim()).map_err(|_| {
+        serde::de::Error::custom(format!(
+            "due_at \"{raw}\" is not RFC3339 with an explicit UTC offset (e.g. \
+             2026-09-20T19:30:00+12:00)"
+        ))
+    })
+}
+
+/// Both instants in the caller's own offset. A model that wrote 19:23+12:00
+/// needs to read that it is 19:29+12:00 now, not that the format was wrong:
+/// told the latter it retries the same past instant in every spelling it knows.
+fn past_due(due: DateTime<FixedOffset>, now: DateTime<Utc>) -> String {
+    let now = now.with_timezone(due.offset());
+    let format = if due.date_naive() == now.date_naive() {
+        "%H:%M:%S%:z"
+    } else {
+        "%Y-%m-%dT%H:%M:%S%:z"
+    };
+    format!(
+        "due_at {} is in the past; now is {}",
+        due.format(format),
+        now.format(format)
+    )
+}
+
 pub async fn create(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -121,16 +151,20 @@ pub async fn create(
     chat_id: Uuid,
     input: Reminder,
 ) -> DbResult<Value> {
-    if input.content.trim().is_empty() || input.due_at <= Utc::now() {
+    if input.content.trim().is_empty() {
         return Err(actions::invalid(
-            "Provide nonblank content and a future RFC3339 due_at with an explicit UTC offset",
+            "content is blank; say what the reminder delivers",
         ));
+    }
+    let now = Utc::now();
+    if input.due_at <= now {
+        return Err(actions::invalid(&past_due(input.due_at, now)));
     }
     let (rule, mode) = automation(&input)?;
     // The first firing is the anchor: a recurrence is measured from a fixed
     // point, because due_at moves on every firing and measuring from it would
     // let "every second Monday" drift a period each time one landed late.
-    let anchor = rule.as_ref().map(|_| input.due_at);
+    let anchor = rule.as_ref().map(|_| input.due_at.with_timezone(&Utc));
     // A schedule nobody renews is a schedule nobody wanted, so a recurring one
     // stops on its own after a week unless it is asked for again.
     let expires = rule.as_ref().map(|_| Utc::now() + MAX_LIFETIME);
@@ -147,7 +181,7 @@ pub async fn create(
     .bind(user_id)
     .bind(chat_id)
     .bind(input.content)
-    .bind(input.due_at)
+    .bind(input.due_at.with_timezone(&Utc))
     .bind(
         input
             .rrule
@@ -590,4 +624,153 @@ pub async fn record_observation(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Timelike};
+    use sqlx::postgres::PgPoolOptions;
+
+    /// Validation answers before the pool is touched, so a pool nothing listens
+    /// behind is enough to read the refusal.
+    fn unreachable_pool() -> PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://127.0.0.1:1/zone")
+            .expect("a lazy pool needs no server")
+    }
+
+    fn reminder(due_at: DateTime<FixedOffset>) -> Reminder {
+        Reminder {
+            content: "Stand up".into(),
+            due_at,
+            rrule: None,
+            prompt: None,
+            timing_mode: None,
+        }
+    }
+
+    fn refusal(error: sqlx::Error) -> String {
+        match error {
+            sqlx::Error::Protocol(message) => message,
+            other => panic!("expected a validation refusal, got {other}"),
+        }
+    }
+
+    /// An offset that puts the present at midday, so a due_at a few minutes
+    /// back shares its date and the refusal names a bare time whatever hour
+    /// the suite runs at.
+    fn midday_offset() -> FixedOffset {
+        FixedOffset::east_opt((12 - Utc::now().hour() as i32) * 3600)
+            .expect("twelve hours either side of UTC is an offset")
+    }
+
+    #[test]
+    fn the_refusal_drops_the_date_only_when_both_instants_share_one() {
+        let due = DateTime::parse_from_rfc3339("2026-09-21T23:57:32+12:00").unwrap();
+        let same_day = "2026-09-21T11:59:32Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            past_due(due, same_day),
+            "due_at 23:57:32+12:00 is in the past; now is 23:59:32+12:00"
+        );
+        let next_day = "2026-09-21T12:03:32Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            past_due(due, next_day),
+            "due_at 2026-09-21T23:57:32+12:00 is in the past; now is 2026-09-22T00:03:32+12:00"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_past_due_at_is_named_against_now_in_its_own_offset() {
+        let offset = midday_offset();
+        let due = (Utc::now() - Duration::minutes(6)).with_timezone(&offset);
+        let error = create(
+            &unreachable_pool(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            reminder(due),
+        )
+        .await
+        .expect_err("a past due_at is refused");
+        let message = refusal(error);
+        let expected = format!(
+            "due_at {} is in the past; now is ",
+            due.format("%H:%M:%S%:z")
+        );
+        assert!(
+            message.starts_with(&expected),
+            "the refusal names the time that was asked for: {message}"
+        );
+        assert!(
+            message.ends_with(&offset.to_string()),
+            "now is given in the caller's offset: {message}"
+        );
+        assert!(
+            !message.contains("RFC3339"),
+            "a well-formed value is not told about the format: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_past_due_at_on_another_day_carries_its_date() {
+        let due = (Utc::now() - Duration::days(2)).fixed_offset();
+        let message = refusal(
+            create(
+                &unreachable_pool(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                reminder(due),
+            )
+            .await
+            .expect_err("a past due_at is refused"),
+        );
+        assert!(
+            message.starts_with(&format!("due_at {}", due.format("%Y-%m-%dT%H:%M:%S%:z"))),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_content_is_named_on_its_own() {
+        let mut input = reminder((Utc::now() + Duration::hours(1)).fixed_offset());
+        input.content = "   ".into();
+        let message = refusal(
+            create(
+                &unreachable_pool(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                input,
+            )
+            .await
+            .expect_err("blank content is refused"),
+        );
+        assert!(message.starts_with("content is blank"), "{message}");
+    }
+
+    #[test]
+    fn a_due_at_without_an_offset_is_told_the_format() {
+        let error = serde_json::from_value::<Reminder>(
+            json!({"content": "check", "due_at": "2026-09-20T19:30:00"}),
+        )
+        .expect_err("no offset is refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("due_at \"2026-09-20T19:30:00\" is not RFC3339"),
+            "{message}"
+        );
+        assert!(message.contains("2026-09-20T19:30:00+12:00"), "{message}");
+    }
+
+    #[test]
+    fn a_due_at_keeps_the_offset_it_was_written_in() {
+        let input: Reminder = serde_json::from_value(
+            json!({"content": "check", "due_at": "2026-09-20T19:30:00+12:00"}),
+        )
+        .unwrap();
+        assert_eq!(input.due_at.offset().local_minus_utc(), 12 * 3600);
+        assert_eq!(input.due_at.to_rfc3339(), "2026-09-20T19:30:00+12:00");
+    }
 }

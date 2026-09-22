@@ -175,6 +175,34 @@ describe('a task run that parked on a question', () => {
     expect(screen.queryByTestId('wait-countdown')).not.toBeInTheDocument();
   });
 
+  it('shows a log line as one row that expands on click', async () => {
+    const message =
+      'Attempt 1 of 4 failed (transient); retrying in 1.9s: the model answered nothing';
+    mockGetTaskRunLogs.mockImplementation(() =>
+      Promise.resolve([
+        {
+          id: 'log-long',
+          phase: 'thinking',
+          agent_type: 'retry',
+          level: 'warning',
+          message,
+          metadata: null,
+          created_at: '2026-09-10T00:00:01Z',
+        },
+      ])
+    );
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    const line = await screen.findByRole('button', { name: message });
+    expect(line).toHaveClass('log-message');
+    expect(line).toHaveAttribute('aria-expanded', 'false');
+    expect(line.closest('.log-entry')?.querySelector('.log-details')?.textContent).toBe(
+      'retry · warning'
+    );
+    fireEvent.click(line);
+    expect(line).toHaveAttribute('aria-expanded', 'true');
+  });
+
   it('asks the question above the log the run stopped in', async () => {
     render(<TaskExecutionView task={task} onClose={() => {}} />);
 

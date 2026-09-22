@@ -1,7 +1,6 @@
 import { mock } from 'bun:test';
 import type { ReactNode } from 'react';
 
-// Mock implementations
 export const useNavigate = mock(() => mock());
 export const useLocation = mock(() => ({
   pathname: '/',
@@ -13,20 +12,15 @@ export const useLocation = mock(() => ({
 export const useParams = mock(() => ({}));
 export const useSearchParams = mock(() => [new URLSearchParams(), mock()]);
 
-// Mock components
 export const BrowserRouter = ({ children }: { children: ReactNode }) => <>{children}</>;
-export const MemoryRouter = ({
-  children,
-  initialEntries = ['/'],
-}: {
-  children: ReactNode;
-  initialEntries?: string[];
-}) => <>{children}</>;
+export const MemoryRouter = ({ children }: { children: ReactNode; initialEntries?: string[] }) => (
+  <>{children}</>
+);
 export const Routes = ({ children }: { children: ReactNode }) => <>{children}</>;
 export const Route = ({ element }: { path?: string; element?: ReactNode; index?: boolean }) => (
   <>{element}</>
 );
-export const Navigate = ({ to, replace }: { to: string; replace?: boolean }) => null;
+export const Navigate = (_props: { to: string; replace?: boolean }) => null;
 export const Outlet = () => null;
 
 export const Link = ({

@@ -78,7 +78,7 @@ export default function RegisterPage() {
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <ZoneLogo size="xl" />
+          <ZoneLogo size="md" />
           <p>Create your account</p>
         </div>
 

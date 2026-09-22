@@ -1,197 +1,11 @@
 import React, { forwardRef, useEffect, useCallback, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 import { Button } from '../Button';
 
-const overlayVariants = cva([
-  'fixed inset-0',
-  'flex items-center justify-center',
-  'bg-[var(--ui-overlay-medium)]',
-  'backdrop-blur-sm',
-]);
+export type WizardSize = 'sm' | 'md' | 'lg' | 'xl';
 
-const wizardVariants = cva(
-  [
-    'relative flex flex-col',
-    'bg-[var(--ui-bg-elevated)]',
-    'border border-[var(--ui-border)]',
-    'rounded-[var(--ui-radius-xl)]',
-    'shadow-[var(--ui-shadow-xl)]',
-    'max-h-[90vh] overflow-hidden',
-  ],
-  {
-    variants: {
-      size: {
-        sm: 'ui-wizard--sm',
-        md: 'ui-wizard--md',
-        lg: 'ui-wizard--lg',
-        xl: 'ui-wizard--xl',
-      },
-    },
-    defaultVariants: {
-      size: 'md',
-    },
-  }
-);
-
-const headerVariants = cva([
-  'flex items-start justify-between gap-[var(--ui-space-4)]',
-  'p-[var(--ui-panel-padding)]',
-  'border-b border-[var(--ui-border)]',
-]);
-
-const titleVariants = cva([
-  'text-[var(--ui-heading-size)] font-display font-semibold leading-tight tracking-tight',
-  'text-[var(--ui-text-primary)]',
-]);
-
-const subtitleVariants = cva([
-  'mt-[var(--ui-space-1)]',
-  'text-[var(--ui-text-sm)]',
-  'text-[var(--ui-text-muted)]',
-]);
-
-const closeButtonVariants = cva([
-  'flex items-center justify-center',
-  'w-8 h-8',
-  'rounded-[var(--ui-radius-md)]',
-  'text-[var(--ui-text-muted)]',
-  'hover:bg-[var(--ui-bg-hover)] hover:text-[var(--ui-text-primary)]',
-  'transition-colors duration-[var(--ui-duration-fast)]',
-  'disabled:opacity-50 disabled:cursor-not-allowed',
-]);
-
-const stepsNavVariants = cva([
-  'px-[var(--ui-panel-padding)] py-[var(--ui-space-3)]',
-  'border-b border-[var(--ui-border)]',
-  'bg-[var(--ui-bg-surface)]',
-]);
-
-const progressTrackVariants = cva([
-  'h-1 w-full',
-  'bg-[var(--ui-bg-muted)]',
-  'rounded-full',
-  'mb-[var(--ui-space-4)]',
-  'overflow-hidden',
-]);
-
-const progressFillVariants = cva([
-  'h-full',
-  'bg-gradient-to-r from-[var(--ui-accent-500)] to-[var(--ui-accent-400)]',
-  'rounded-full',
-  'transition-all duration-[var(--ui-duration-normal)] ease-out',
-]);
-
-const stepListVariants = cva([
-  'flex items-center justify-between gap-[var(--ui-space-2)]',
-  'list-none m-0 p-0',
-]);
-
-const stepItemVariants = cva(['flex-1'], {
-  variants: {
-    state: {
-      completed: '',
-      current: '',
-      upcoming: '',
-    },
-    clickable: {
-      true: 'cursor-pointer',
-      false: '',
-    },
-  },
-  defaultVariants: {
-    state: 'upcoming',
-    clickable: false,
-  },
-});
-
-const stepButtonVariants = cva(
-  [
-    'flex items-center gap-[var(--ui-space-2)] w-full',
-    'p-[var(--ui-space-2)]',
-    'rounded-[var(--ui-radius-md)]',
-    'transition-colors duration-[var(--ui-duration-fast)]',
-    'disabled:cursor-not-allowed',
-  ],
-  {
-    variants: {
-      state: {
-        completed: 'hover:bg-[var(--ui-bg-hover)]',
-        current: 'bg-[var(--ui-accent-muted)]',
-        upcoming: 'opacity-50',
-      },
-      clickable: {
-        true: 'hover:bg-[var(--ui-bg-hover)]',
-        false: '',
-      },
-    },
-    defaultVariants: {
-      state: 'upcoming',
-      clickable: false,
-    },
-  }
-);
-
-const stepIndicatorVariants = cva(
-  [
-    'flex items-center justify-center shrink-0',
-    'w-8 h-8',
-    'rounded-full',
-    'text-[var(--ui-text-sm)] font-medium',
-    'transition-colors duration-[var(--ui-duration-fast)]',
-  ],
-  {
-    variants: {
-      state: {
-        completed: 'bg-[var(--ui-accent-500)] text-white',
-        current: 'bg-[var(--ui-accent-500)] text-white',
-        upcoming: 'bg-[var(--ui-bg-muted)] text-[var(--ui-text-muted)]',
-      },
-    },
-    defaultVariants: {
-      state: 'upcoming',
-    },
-  }
-);
-
-const stepTitleVariants = cva(['text-[var(--ui-text-sm)] font-medium'], {
-  variants: {
-    state: {
-      completed: 'text-[var(--ui-text-primary)]',
-      current: 'text-[var(--ui-text-primary)]',
-      upcoming: 'text-[var(--ui-text-muted)]',
-    },
-  },
-  defaultVariants: {
-    state: 'upcoming',
-  },
-});
-
-const stepDescriptionVariants = cva(['text-[var(--ui-text-xs)]', 'text-[var(--ui-text-muted)]']);
-
-const contentVariants = cva(
-  ['overflow-auto', 'p-[var(--ui-panel-padding)]', 'transition-all duration-150 ease-out'],
-  {
-    variants: {
-      animating: {
-        next: 'opacity-0 -translate-x-4',
-        prev: 'opacity-0 translate-x-4',
-        none: 'opacity-100 translate-x-0',
-      },
-    },
-    defaultVariants: {
-      animating: 'none',
-    },
-  }
-);
-
-const footerVariants = cva([
-  'flex flex-wrap items-center justify-between gap-2',
-  'px-[var(--ui-panel-padding)] py-[var(--ui-space-4)]',
-  'border-t border-[var(--ui-border)]',
-  'bg-[var(--ui-bg-surface)]',
-]);
+type StepState = 'completed' | 'current' | 'upcoming';
 
 export interface WizardStep {
   id: string;
@@ -200,9 +14,7 @@ export interface WizardStep {
   icon?: React.ReactNode;
 }
 
-export interface WizardProps
-  extends Omit<React.HTMLAttributes<HTMLDivElement>, 'title'>,
-    VariantProps<typeof wizardVariants> {
+export interface WizardProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'title'> {
   isOpen: boolean;
   onClose?: () => void;
   title: string;
@@ -220,7 +32,10 @@ export interface WizardProps
   canProceed?: boolean;
   showStepNumbers?: boolean;
   allowStepClick?: boolean;
+  size?: WizardSize | null;
 }
+
+const STEP_TRANSITION_MS = 150;
 
 const Wizard = forwardRef<HTMLDivElement, WizardProps>(
   (
@@ -277,44 +92,39 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
       };
     }, [isOpen, onClose]);
 
+    const transitionTo = useCallback(
+      (step: number, direction: 'next' | 'prev') => {
+        setAnimatingStep(direction);
+        setTimeout(() => {
+          onStepChange?.(step);
+          setAnimatingStep(null);
+        }, STEP_TRANSITION_MS);
+      },
+      [onStepChange]
+    );
+
     const handleNext = useCallback(() => {
       if (currentStep < steps.length - 1 && canProceed && !loading) {
-        setAnimatingStep('next');
-        setTimeout(() => {
-          onStepChange?.(currentStep + 1);
-          setAnimatingStep(null);
-        }, 150);
+        transitionTo(currentStep + 1, 'next');
       }
-    }, [currentStep, steps.length, canProceed, loading, onStepChange]);
+    }, [currentStep, steps.length, canProceed, loading, transitionTo]);
 
     const handlePrevious = useCallback(() => {
       if (currentStep > 0 && !loading) {
-        setAnimatingStep('prev');
-        setTimeout(() => {
-          onStepChange?.(currentStep - 1);
-          setAnimatingStep(null);
-        }, 150);
+        transitionTo(currentStep - 1, 'prev');
       }
-    }, [currentStep, loading, onStepChange]);
+    }, [currentStep, loading, transitionTo]);
 
     const handleStepClick = useCallback(
       (stepIndex: number) => {
         if (!allowStepClick || loading) return;
         if (stepIndex < currentStep) {
-          setAnimatingStep('prev');
-          setTimeout(() => {
-            onStepChange?.(stepIndex);
-            setAnimatingStep(null);
-          }, 150);
+          transitionTo(stepIndex, 'prev');
         } else if (stepIndex > currentStep && canProceed) {
-          setAnimatingStep('next');
-          setTimeout(() => {
-            onStepChange?.(stepIndex);
-            setAnimatingStep(null);
-          }, 150);
+          transitionTo(stepIndex, 'next');
         }
       },
-      [allowStepClick, loading, currentStep, canProceed, onStepChange]
+      [allowStepClick, loading, currentStep, canProceed, transitionTo]
     );
 
     const handleComplete = useCallback(() => {
@@ -334,16 +144,15 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
 
     const isLastStep = currentStep === steps.length - 1;
     const isFirstStep = currentStep === 0;
-    const progressPercent = ((currentStep + 1) / steps.length) * 100;
 
-    const getStepState = (index: number): 'completed' | 'current' | 'upcoming' => {
+    const stateOf = (index: number): StepState => {
       if (index < currentStep) return 'completed';
       if (index === currentStep) return 'current';
       return 'upcoming';
     };
 
     const dialog = (
-      <div className={cn('ui-wizard-overlay', overlayVariants())}>
+      <div className="ui-wizard-overlay">
         <button
           type="button"
           className="ui-wizard-dismiss"
@@ -353,37 +162,27 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
         />
         <div
           ref={ref}
-          className={cn(
-            'ui-wizard',
-            `ui-wizard--${size ?? 'md'}`,
-            wizardVariants({ size, className })
-          )}
+          className={cn('ui-wizard', `ui-wizard--${size ?? 'md'}`, className)}
           role="dialog"
           aria-modal="true"
           aria-labelledby="wizard-title"
           {...props}
         >
-          {/* Header */}
-          <header className={cn('ui-wizard-header', headerVariants())}>
-            <div>
-              <h2 id="wizard-title" className={cn(titleVariants())}>
-                {title}
-              </h2>
-              {subtitle && (
-                <p className={cn('ui-wizard-subtitle', subtitleVariants())}>{subtitle}</p>
-              )}
+          <header className="ui-wizard-header">
+            <div className="ui-wizard-heading">
+              <h2 id="wizard-title">{title}</h2>
+              {subtitle && <p className="ui-wizard-subtitle">{subtitle}</p>}
             </div>
             {onClose && (
               <button
                 type="button"
-                className={cn('ui-wizard-close', closeButtonVariants())}
+                className="ui-wizard-close"
                 onClick={onClose}
                 aria-label="Close wizard"
                 disabled={loading}
               >
                 <svg
                   aria-hidden="true"
-                  className="w-5 h-5"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -397,38 +196,29 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
             )}
           </header>
 
-          {/* Step Indicator */}
-          <nav className={cn('ui-wizard-steps', stepsNavVariants())} aria-label="Wizard steps">
-            <div className={cn('ui-wizard-progress', progressTrackVariants())}>
-              <div
-                className={cn(progressFillVariants())}
-                style={{ width: `${progressPercent}%` }}
-              />
-            </div>
-            <ol className={cn(stepListVariants())}>
+          <nav className="ui-wizard-steps" aria-label="Wizard steps">
+            <ol>
               {steps.map((step, index) => {
-                const state = getStepState(index);
-                const isClickable =
+                const state = stateOf(index);
+                const clickable =
                   allowStepClick &&
                   (state === 'completed' || (canProceed && index === currentStep + 1));
 
                 return (
-                  <li
-                    key={step.id}
-                    className={cn(stepItemVariants({ state, clickable: isClickable }))}
-                  >
+                  <li key={step.id}>
                     <button
                       type="button"
-                      className={cn(stepButtonVariants({ state, clickable: isClickable }))}
+                      className="ui-wizard-step"
+                      data-state={state}
+                      data-clickable={clickable}
                       onClick={() => handleStepClick(index)}
-                      disabled={!isClickable || loading}
+                      disabled={!clickable || loading}
                       aria-current={state === 'current' ? 'step' : undefined}
                     >
-                      <span className={cn(stepIndicatorVariants({ state }))}>
+                      <span className="ui-wizard-step-indicator">
                         {state === 'completed' ? (
                           <svg
                             aria-hidden="true"
-                            className="w-4 h-4"
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="currentColor"
@@ -442,20 +232,12 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
                           step.icon
                         ) : showStepNumbers ? (
                           index + 1
-                        ) : (
-                          <span className="w-2 h-2 rounded-full bg-current" />
-                        )}
+                        ) : null}
                       </span>
-                      <span className="ui-wizard-step-copy flex flex-col items-start">
-                        <span className={cn('ui-wizard-step-title', stepTitleVariants({ state }))}>
-                          {step.title}
-                        </span>
+                      <span className="ui-wizard-step-copy">
+                        <span className="ui-wizard-step-title">{step.title}</span>
                         {step.description && (
-                          <span
-                            className={cn('ui-wizard-step-description', stepDescriptionVariants())}
-                          >
-                            {step.description}
-                          </span>
+                          <span className="ui-wizard-step-description">{step.description}</span>
                         )}
                       </span>
                     </button>
@@ -465,18 +247,11 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
             </ol>
           </nav>
 
-          {/* Content */}
-          <div
-            className={cn(
-              'ui-wizard-content',
-              contentVariants({ animating: animatingStep || 'none' })
-            )}
-          >
+          <div className="ui-wizard-content" data-animating={animatingStep ?? 'none'}>
             {children}
           </div>
 
-          {/* Footer */}
-          <footer className={cn('ui-wizard-footer', footerVariants())}>
+          <footer className="ui-wizard-footer">
             <div>
               <Button variant="ghost" onClick={handleCancel} disabled={loading}>
                 {cancelLabel}
@@ -518,4 +293,4 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
 
 Wizard.displayName = 'Wizard';
 
-export { Wizard, wizardVariants };
+export { Wizard };

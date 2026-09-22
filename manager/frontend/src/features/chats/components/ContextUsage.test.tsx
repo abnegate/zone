@@ -42,6 +42,19 @@ describe('ContextUsage', () => {
     expect(button.getAttribute('aria-expanded')).toBe('false');
     expect(document.activeElement).toBe(button);
   });
+  it('discloses with a chevron that turns, not a stray plus sign', () => {
+    render(<ContextUsage usage={usage} />);
+    const button = screen.getByRole('button', { name: /Context/ });
+    expect(button.textContent).not.toMatch(/[+−]/);
+    const caret = button.querySelector('svg.context-usage-caret');
+    expect(caret?.getAttribute('data-expanded')).toBe('false');
+    expect(caret?.getAttribute('aria-hidden')).toBe('true');
+    fireEvent.click(button);
+    expect(button.querySelector('svg.context-usage-caret')?.getAttribute('data-expanded')).toBe(
+      'true'
+    );
+  });
+
   it('keeps the percentage visible while a draft preview is in flight', () => {
     render(<ContextUsage usage={usage} previewing />);
     expect(screen.getByRole('button').textContent).toContain('24%');
@@ -101,4 +114,13 @@ it('explains paused compaction without claiming a fitting context is full', () =
   expect(screen.queryByText('Context full')).toBeNull();
   fireEvent.click(screen.getByRole('button'));
   expect(screen.getByText('The summary could not be prepared. History is unchanged.')).toBeTruthy();
+});
+
+it('abbreviates the token count on the meter row when there is no limit to measure against', () => {
+  render(<ContextUsage usage={{ ...usage, limit: null, used: 23409 }} />);
+  const button = screen.getByRole('button', { name: /Context/ });
+  expect(button.textContent).toContain('≈ 23.4k');
+  expect(button.textContent).not.toContain('tokens');
+  fireEvent.click(button);
+  expect(screen.getByText('≈ 23,409 tokens')).toBeTruthy();
 });

@@ -15,7 +15,7 @@ use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::completion_tokens::merge_stops;
-use crate::state::AppState;
+use crate::state::{AppState, llm_backend};
 use zone_chat::{capacity, history};
 use zone_search::client::SearchContext;
 
@@ -245,6 +245,11 @@ pub struct Preparation {
     pub model: String,
     pub agentic: bool,
     pub auto_approve: bool,
+    /// `chats.agent_sandboxed`: whether a spawned coding agent is confined to
+    /// zone's tools, or also keeps its own file and shell tools, which zone
+    /// never sees and cannot gate. An axis of its own, independent of
+    /// [`Self::auto_approve`].
+    pub sandboxed: bool,
     pub tools: ChatTools,
     pub context: RunContext,
     pub llm: LlmClient,
@@ -448,6 +453,7 @@ pub async fn build(
         default_model: chat.model_name.clone(),
         temperature: 0.7,
         max_tokens: policy.reserved,
+        backend: llm_backend(state.config()),
     })
     .with_stop(stop.clone());
     if let Some(limit) = capacity.ollama {
@@ -473,6 +479,7 @@ pub async fn build(
         model: chat.model_name.clone(),
         agentic,
         auto_approve: chat.auto_approve,
+        sandboxed: chat.agent_sandboxed,
         tools,
         context,
         llm,

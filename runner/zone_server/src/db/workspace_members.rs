@@ -361,6 +361,75 @@ pub async fn list_members(pool: &PgPool, workspace_id: Uuid) -> DbResult<Vec<Wor
         .collect())
 }
 
+/// An active member together with the account they sign in with.
+#[derive(Debug, Clone)]
+pub struct MemberWithUser {
+    pub member: WorkspaceMemberRow,
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct MemberWithUserRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role: String,
+    is_active: bool,
+    invited_by: Option<Uuid>,
+    invited_at: Option<chrono::NaiveDateTime>,
+    accepted_at: Option<chrono::NaiveDateTime>,
+    created_at: Option<chrono::NaiveDateTime>,
+    updated_at: Option<chrono::NaiveDateTime>,
+    email: String,
+    display_name: Option<String>,
+}
+
+impl From<MemberWithUserRow> for MemberWithUser {
+    fn from(row: MemberWithUserRow) -> Self {
+        let now = chrono::Utc::now().naive_utc();
+        Self {
+            member: WorkspaceMemberRow {
+                id: row.id,
+                workspace_id: row.workspace_id,
+                user_id: row.user_id,
+                role: row.role.parse().unwrap_or(WorkspaceRole::Member),
+                is_active: row.is_active,
+                invited_by: row.invited_by,
+                invited_at: row.invited_at,
+                accepted_at: row.accepted_at,
+                created_at: row.created_at.unwrap_or(now),
+                updated_at: row.updated_at.unwrap_or(now),
+            },
+            email: row.email,
+            display_name: row.display_name,
+        }
+    }
+}
+
+/// List the active members of a workspace with their emails and names.
+pub async fn list_members_with_users(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Vec<MemberWithUser>> {
+    let rows: Vec<MemberWithUserRow> = sqlx::query_as(sqlx::AssertSqlSafe(
+        r#"
+        SELECT wm.id, wm.workspace_id, wm.user_id, wm.role, wm.is_active,
+               wm.invited_by, wm.invited_at, wm.accepted_at, wm.created_at, wm.updated_at,
+               u.email, u.display_name
+        FROM workspace_members wm
+        INNER JOIN users u ON u.id = wm.user_id
+        WHERE wm.workspace_id = $1 AND wm.is_active = TRUE
+        ORDER BY wm.created_at ASC
+        "#,
+    ))
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(MemberWithUser::from).collect())
+}
+
 /// List all workspaces a user is a member of
 pub async fn list_user_workspaces(
     pool: &PgPool,
@@ -741,6 +810,36 @@ mod tests {
             .expect("Failed to check membership");
 
         assert!(is_member_result, "User should be a member of the workspace");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
+    async fn test_list_members_with_users_carries_email_and_name() {
+        let pool = create_test_pool().await;
+        let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
+
+        add_member(&pool, workspace_id, user_id, WorkspaceRole::Member, None)
+            .await
+            .expect("Failed to add member");
+
+        let members = list_members_with_users(&pool, workspace_id)
+            .await
+            .expect("Failed to list members");
+
+        let listed = members
+            .iter()
+            .find(|m| m.member.user_id == user_id)
+            .expect("member should be listed");
+        assert!(
+            listed.email.ends_with("@example.com"),
+            "email: {}",
+            listed.email
+        );
+        assert_eq!(listed.display_name.as_deref(), Some("Test User"));
+        assert_eq!(listed.member.role, WorkspaceRole::Member);
     }
 
     #[tokio::test]

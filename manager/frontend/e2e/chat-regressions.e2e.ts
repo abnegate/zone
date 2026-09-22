@@ -212,7 +212,7 @@ test.describe('Chat regressions', () => {
     await expect(page.getByText('That hit looks right; read it.')).toBeVisible();
     await expect(page.getByText('Read a workspace document')).toBeVisible();
     await expect(page.getByText('Fridays are the deploy window.')).toBeVisible();
-    await expect(page.locator('[data-testid="reasoning"][open]')).toHaveCount(3);
+    await expect(page.locator('[data-testid="reasoning"]:not([hidden])')).toHaveCount(3);
     completeResponse();
     await expect(page.getByText('We deploy on Fridays.')).toBeVisible();
 
@@ -229,7 +229,10 @@ test.describe('Chat regressions', () => {
 
     const reasoningBlocks = page.locator('[data-testid="reasoning"]');
     await expect(reasoningBlocks).toHaveCount(3);
-    await expect(page.locator('[data-testid="reasoning"][open]')).toHaveCount(2);
+    await expect(page.locator('[data-testid="reasoning"]:not([hidden])')).toHaveCount(3);
+    await expect(
+      page.getByRole('button', { name: 'Reasoning' })
+    ).toHaveAttribute('aria-expanded', 'true');
     await expect(page.locator('[data-testid="reasoning"] blockquote')).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('thinking-between-tools.png'), fullPage: true });
   });

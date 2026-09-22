@@ -36,11 +36,18 @@ type WorkspaceState = {
   currentWorkspace: (typeof mockWorkspaces)[number] | null;
   setCurrentOrganization: (org: (typeof mockOrganizations)[number]) => void;
   setCurrentWorkspace: (ws: (typeof mockWorkspaces)[number]) => void;
+  refreshOrganizations: () => Promise<void>;
   loading: boolean;
+  error: string | null;
 };
 
 let setCurrentOrganizationCalls: Array<(typeof mockOrganizations)[number]> = [];
 let setCurrentWorkspaceCalls: Array<(typeof mockWorkspaces)[number]> = [];
+let refreshOrganizationsCalls = 0;
+
+const refreshOrganizations = async () => {
+  refreshOrganizationsCalls += 1;
+};
 
 const setCurrentOrganization = (org: (typeof mockOrganizations)[number]) => {
   setCurrentOrganizationCalls.push(org);
@@ -58,6 +65,7 @@ describe('ContextSwitcher', () => {
   beforeEach(() => {
     setCurrentOrganizationCalls = [];
     setCurrentWorkspaceCalls = [];
+    refreshOrganizationsCalls = 0;
     workspaceState = {
       organizations: mockOrganizations,
       currentOrganization: mockOrganizations[0],
@@ -65,38 +73,77 @@ describe('ContextSwitcher', () => {
       currentWorkspace: mockWorkspaces[0],
       setCurrentOrganization,
       setCurrentWorkspace,
+      refreshOrganizations,
       loading: false,
+      error: null,
     };
   });
 
-  it('shows loading state', () => {
+  it('shows a neutral placeholder while the organizations are still loading', () => {
     workspaceState = {
+      ...workspaceState,
       organizations: [],
       currentOrganization: null,
       workspaces: [],
       currentWorkspace: null,
-      setCurrentOrganization,
-      setCurrentWorkspace,
       loading: true,
     };
 
     render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
-    expect(screen.getByText('Loading...')).toBeInTheDocument();
+    const placeholder = screen.getByRole('status', { name: 'Loading organizations' });
+    expect(placeholder).toHaveClass('context-switcher-placeholder');
+    expect(placeholder).toHaveTextContent('');
+    expect(screen.queryByText('Loading...')).toBeNull();
+    expect(screen.queryByText('No organization')).toBeNull();
+    expect(screen.queryByRole('button')).toBeNull();
   });
 
-  it('shows no organization state', () => {
+  it('keeps the button once the organization is known while its workspaces load', () => {
+    workspaceState = { ...workspaceState, workspaces: [], currentWorkspace: null, loading: true };
+
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
+    expect(screen.getByRole('button', { expanded: false })).toHaveTextContent('Org 1');
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('offers to select an organization once none resolved', async () => {
+    const user = userEvent.setup();
     workspaceState = {
+      ...workspaceState,
       organizations: [],
       currentOrganization: null,
       workspaces: [],
       currentWorkspace: null,
-      setCurrentOrganization,
-      setCurrentWorkspace,
-      loading: false,
     };
 
     render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
-    expect(screen.getByText('No organization')).toBeInTheDocument();
+    const button = screen.getByRole('button', { name: 'Select organization' });
+    expect(button).toHaveClass('context-switcher-button');
+    expect(screen.queryByText('No organization')).toBeNull();
+
+    await user.click(button);
+    expect(screen.getByRole('heading', { name: 'Organizations' })).toBeInTheDocument();
+    expect(screen.getByText('No organizations yet')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('retries the organizations request from the dropdown after it failed', async () => {
+    const user = userEvent.setup();
+    workspaceState = {
+      ...workspaceState,
+      organizations: [],
+      currentOrganization: null,
+      workspaces: [],
+      currentWorkspace: null,
+      error: 'Network error',
+    };
+
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
+    await user.click(screen.getByRole('button', { name: 'Select organization' }));
+    expect(screen.getByText('Could not load')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(refreshOrganizationsCalls).toBe(1);
   });
 
   it('displays current organization name', () => {
@@ -107,6 +154,16 @@ describe('ContextSwitcher', () => {
   it('displays current workspace name when set', () => {
     render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
     expect(screen.getByText('Workspace 1')).toBeInTheDocument();
+  });
+
+  it('shows the organization as an eyebrow above the workspace name', () => {
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
+    const label = screen.getByRole('button', { expanded: false }).querySelector('.context-label');
+    expect(label?.children[0]).toHaveClass('org-name');
+    expect(label?.children[0]).toHaveTextContent('Org 1');
+    expect(label?.children[1]).toHaveClass('ws-name');
+    expect(label?.children[1]).toHaveTextContent('Workspace 1');
+    expect(label?.querySelector('.separator')).toBeNull();
   });
 
   it('opens dropdown on click', async () => {
@@ -169,15 +226,7 @@ describe('ContextSwitcher', () => {
 
   it('hides workspaces section when no workspaces', async () => {
     const user = userEvent.setup();
-    workspaceState = {
-      organizations: mockOrganizations,
-      currentOrganization: mockOrganizations[0],
-      workspaces: [],
-      currentWorkspace: null,
-      setCurrentOrganization,
-      setCurrentWorkspace,
-      loading: false,
-    };
+    workspaceState = { ...workspaceState, workspaces: [], currentWorkspace: null };
 
     render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
 

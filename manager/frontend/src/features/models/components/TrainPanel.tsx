@@ -10,6 +10,7 @@ import {
   type TrainResult,
   type TrainScreening,
 } from '../../../api/models';
+import DropZone from './DropZone';
 import './TrainPanel.css';
 
 type TrainBase = { id: string; label: string; edit: boolean };
@@ -32,8 +33,11 @@ type Draft = {
   reference?: Reference;
   group?: number;
   source?: string;
+  clip?: string;
   mirrored?: boolean;
 };
+
+type Clip = { key: string; name: string; summary: string };
 
 type Band = 'none' | 'weak' | 'healthy' | 'strong';
 
@@ -93,9 +97,9 @@ const REMEDIATION_OUTCOMES: Record<TrainRemediation['outcome'], string> = {
 
 let sequence = 0;
 
-function nextKey(): string {
+function nextKey(prefix = 'training-image'): string {
   sequence += 1;
-  return `training-image-${sequence}`;
+  return `${prefix}-${sequence}`;
 }
 
 function band(improvement: number): Band {
@@ -240,6 +244,64 @@ function Advice({ findings }: { findings: DatasetFinding[] }): ReactElement | nu
   );
 }
 
+const MIME_BY_EXTENSION: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+};
+
+function previewOf(image: Pick<Draft, 'filename' | 'bytes_base64'>): string | null {
+  if (!image.bytes_base64) return null;
+  const extension = image.filename.split('.').pop()?.toLowerCase() ?? '';
+  return `data:${MIME_BY_EXTENSION[extension] ?? 'image/png'};base64,${image.bytes_base64}`;
+}
+
+function Thumbnail({ image }: { image: Draft }): ReactElement {
+  const source = previewOf(image);
+  return (
+    <div className="train-pair-thumb" aria-hidden="true">
+      {source && <img src={source} alt="" />}
+    </div>
+  );
+}
+
+function ArrowIcon({ direction }: { direction: 'up' | 'down' }): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {direction === 'up' ? (
+        <path d="M12 19V5M5 12l7-7 7 7" />
+      ) : (
+        <path d="M12 5v14M19 12l-7 7-7-7" />
+      )}
+    </svg>
+  );
+}
+
+function CloseIcon(): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M18 6L6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -318,7 +380,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [captioning, setCaptioning] = useState(false);
   const [focusRequested, setFocusRequested] = useState(false);
   const [sampling, setSampling] = useState<string | null>(null);
-  const [sampled, setSampled] = useState<string | null>(null);
+  const [clips, setClips] = useState<Clip[]>([]);
 
   useEffect(() => {
     modelsApi
@@ -424,13 +486,13 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     if (!edit) setFocusRequested(true);
   };
 
-  const handleVideos = async (files: FileList | null) => {
-    if (busy || !files?.length) return;
+  const handleVideos = async (files: File[]) => {
+    if (busy || files.length === 0) return;
     setError(null);
-    setSampled(null);
     try {
-      for (const file of Array.from(files)) {
+      for (const file of files) {
         setSampling(file.name);
+        const key = nextKey('training-clip');
         const clip = await modelsApi.frames({
           filename: file.name,
           bytes_base64: await fileToBase64(file),
@@ -454,19 +516,31 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
               reading: false,
               group: offset + frame.group,
               source: file.name,
+              clip: key,
               mirrored: frame.mirrored,
             })),
           ];
         });
-        setSampled(
-          `${file.name}: ${clip.sampled} frames read at ${clip.sampled_fps.toFixed(1)}/s, ${clip.frames.length} kept`
-        );
+        setClips((current) => [
+          ...current,
+          {
+            key,
+            name: file.name,
+            summary: `${clip.sampled} frames read at ${clip.sampled_fps.toFixed(1)}/s, ${clip.frames.length} kept`,
+          },
+        ]);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not read the video');
     } finally {
       setSampling(null);
     }
+  };
+
+  const removeClip = (key: string) => {
+    if (busy) return;
+    setClips((current) => current.filter((clip) => clip.key !== key));
+    setImages((current) => current.filter((image) => image.clip !== key));
   };
 
   const handleCaption = async () => {
@@ -537,8 +611,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       });
       setResult(trained);
       setImages([]);
+      setClips([]);
       setName('');
-      setSampled(null);
       onTrained();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Training failed');
@@ -578,16 +652,28 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           <Advice findings={result.dataset ?? []} />
         </div>
       )}
-      <form className="ui-form" aria-busy={busy} onSubmit={handleSubmit}>
-        <Input
-          label="Name"
-          value={name}
-          disabled={busy}
-          onChange={(event) => {
-            if (!busy) setName(event.target.value);
-          }}
-          required
-        />
+      <form className="ui-form train-form" aria-busy={busy} onSubmit={handleSubmit}>
+        <div className="train-identity">
+          <Input
+            label="Name"
+            value={name}
+            disabled={busy}
+            onChange={(event) => {
+              if (!busy) setName(event.target.value);
+            }}
+            required
+          />
+          <Input
+            label="Trigger word"
+            value={trigger}
+            disabled={busy}
+            onChange={(event) => {
+              if (!busy) setTrigger(event.target.value);
+            }}
+            placeholder={edit ? 'optional subject name' : 'required for a unique identity'}
+            required={!edit}
+          />
+        </div>
         <Select
           label="Base"
           value={base}
@@ -596,62 +682,66 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           placeholder="No trainable base installed"
           disabled={busy || bases.length === 0}
         />
-        <Input
-          label="Trigger word"
-          value={trigger}
-          disabled={busy}
-          onChange={(event) => {
-            if (!busy) setTrigger(event.target.value);
-          }}
-          placeholder={edit ? 'optional subject name' : 'required for a unique identity'}
-          required={!edit}
-        />
-        <Input
-          id="train-targets"
-          label="Target images"
-          helpText={
-            edit
-              ? 'Choose the finished images. You will add one reference and instruction for each target.'
-              : 'Choose the images this LoRA should learn from.'
-          }
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          disabled={busy}
-          multiple
-          onChange={(event) => {
-            const files = Array.from(event.target.files ?? []);
-            event.target.value = '';
-            void handleTargets(files);
-          }}
-        />
-        {!edit && (
-          <>
-            <Input
+        <div className={`train-drops${edit ? ' train-drops--single' : ''}`}>
+          <DropZone
+            id="train-targets"
+            label="Target images"
+            prompt="Drop images here, or browse"
+            hint={
+              edit
+                ? 'Choose the finished images. You will add one reference and instruction for each target.'
+                : 'Choose the images this LoRA should learn from.'
+            }
+            accept="image/png,image/jpeg,image/webp"
+            disabled={busy}
+            onFiles={(files) => void handleTargets(files)}
+          />
+          {!edit && (
+            <DropZone
+              id="train-clips"
               label="Video"
-              type="file"
+              prompt="Drop a clip here, or browse"
+              hint="A clip is sampled above the rate it keeps, so the sharpest frame of each moment wins its slot, repeats of a shot already taken are dropped, and every frame is cropped around whatever moved."
               accept="video/*"
-              multiple
               disabled={busy || Boolean(sampling)}
-              onChange={(event) => void handleVideos(event.target.files)}
-            />
-            <p className="help-text">
-              A clip is sampled above the rate it keeps, so the sharpest frame of each moment wins
-              its slot, repeats of a shot already taken are dropped, and every frame is cropped
-              around whatever moved.
-            </p>
-            <Checkbox
-              label="Mirror half the frames of each second"
-              helpText="More variety from one angle, applied as each clip is read. Turn it off for a subject carrying text, or one a mirror would get wrong."
-              checked={mirror}
-              disabled={busy}
-              onCheckedChange={setMirror}
-            />
-            {sampling && <p className="help-text">Reading {sampling}…</p>}
-            {sampled && <p className="help-text">{sampled}</p>}
-          </>
+              onFiles={(files) => void handleVideos(files)}
+            >
+              {(clips.length > 0 || sampling) && (
+                <ul className="train-clips" aria-label="Accepted clips">
+                  {clips.map((clip) => (
+                    <li key={clip.key} className="train-clip">
+                      <span className="train-clip-receipt">
+                        <span className="train-clip-name">{clip.name}</span>: {clip.summary}
+                      </span>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        disabled={busy}
+                        aria-label={`Remove clip ${clip.name}`}
+                        onClick={() => removeClip(clip.key)}
+                      >
+                        <CloseIcon />
+                      </Button>
+                    </li>
+                  ))}
+                  {sampling && <li className="train-clip">Reading {sampling}…</li>}
+                </ul>
+              )}
+            </DropZone>
+          )}
+        </div>
+        {!edit && (
+          <Checkbox
+            label="Mirror half the frames of each second"
+            helpText="More variety from one angle, applied as each clip is read. Turn it off for a subject carrying text, or one a mirror would get wrong."
+            checked={mirror}
+            disabled={busy}
+            onCheckedChange={setMirror}
+          />
         )}
         {images.length > 0 && !edit && (
-          <div>
+          <div className="train-caption">
             <Button
               type="button"
               variant="secondary"
@@ -661,7 +751,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             >
               Auto-caption images
             </Button>
-            <p className="help-text">
+            <p className="train-caption-hint">
               Describes pose, setting, and lighting only, so the trigger word carries the identity.
               Captions you have written are kept, and frames of one shot are described once.
             </p>
@@ -692,89 +782,91 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                   aria-label={`Target pair ${number}: ${named}`}
                   aria-busy={image.reading || Boolean(image.reference?.reading)}
                 >
-                  <legend className="train-pair-title">
-                    <span>Target {number}</span>
-                    <span className="train-pair-filename">{named}</span>
-                  </legend>
-                  {edit && (
-                    <>
+                  <Thumbnail image={image} />
+                  <div className="train-pair-main">
+                    <div className="train-pair-head">
+                      <span className="train-pair-index">Target {number}</span>
+                      <span className="train-pair-filename">{named}</span>
+                    </div>
+                    <div className={`train-pair-fields ${edit ? 'train-pair-fields--edit' : ''}`}>
+                      {edit && (
+                        <Input
+                          id={`train-reference-${image.key}`}
+                          aria-label={referenceLabel}
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          disabled={busy}
+                          aria-required="true"
+                          helpText={
+                            image.reference ? `Reference: ${image.reference.filename}` : undefined
+                          }
+                          error={
+                            missingReference(image)
+                              ? 'Choose one reference image for this target.'
+                              : undefined
+                          }
+                          onChange={(event) => {
+                            const files = event.target.files;
+                            void handleReference(image.key, files);
+                          }}
+                        />
+                      )}
                       <Input
-                        id={`train-reference-${image.key}`}
-                        label={referenceLabel}
-                        type="file"
-                        accept="image/png,image/jpeg,image/webp"
+                        id={edit ? `train-instruction-${image.key}` : `train-caption-${image.key}`}
+                        aria-label={edit ? instructionLabel : `Caption for ${named}`}
+                        placeholder={edit ? 'Describe the edit' : 'Caption'}
+                        value={edit ? image.instruction : image.caption}
                         disabled={busy}
-                        aria-required="true"
+                        required={edit}
                         error={
-                          missingReference(image)
-                            ? 'Choose one reference image for this target.'
+                          edit && missingInstruction(image)
+                            ? 'Describe the edit that turns the reference into this target.'
                             : undefined
                         }
                         onChange={(event) => {
-                          const files = event.target.files;
-                          void handleReference(image.key, files);
+                          if (busy) return;
+                          const value = event.target.value;
+                          setImages((current) =>
+                            current.map((currentImage) =>
+                              currentImage.key === image.key
+                                ? edit
+                                  ? { ...currentImage, instruction: value }
+                                  : {
+                                      ...currentImage,
+                                      caption: value,
+                                      captionRevision: currentImage.captionRevision + 1,
+                                    }
+                                : currentImage
+                            )
+                          );
                         }}
                       />
-                      {image.reference && (
-                        <p className="train-reference-name">
-                          Reference: {image.reference.filename}
-                        </p>
-                      )}
-                    </>
-                  )}
-                  <Input
-                    id={edit ? `train-instruction-${image.key}` : `train-caption-${image.key}`}
-                    label={edit ? instructionLabel : `Caption for ${named}`}
-                    value={edit ? image.instruction : image.caption}
-                    disabled={busy}
-                    required={edit}
-                    error={
-                      edit && missingInstruction(image)
-                        ? 'Describe the edit that turns the reference into this target.'
-                        : undefined
-                    }
-                    onChange={(event) => {
-                      if (busy) return;
-                      const value = event.target.value;
-                      setImages((current) =>
-                        current.map((currentImage) =>
-                          currentImage.key === image.key
-                            ? edit
-                              ? { ...currentImage, instruction: value }
-                              : {
-                                  ...currentImage,
-                                  caption: value,
-                                  captionRevision: currentImage.captionRevision + 1,
-                                }
-                            : currentImage
-                        )
-                      );
-                    }}
-                  />
+                    </div>
+                  </div>
                   <div className="train-pair-actions" role="group" aria-label={`Arrange ${named}`}>
                     <Button
                       type="button"
-                      size="sm"
+                      size="icon"
                       variant="ghost"
                       disabled={busy || index === 0}
                       aria-label={`Move target ${number}: ${named} up`}
                       onClick={() => move(image.key, -1)}
                     >
-                      Move up
+                      <ArrowIcon direction="up" />
                     </Button>
                     <Button
                       type="button"
-                      size="sm"
+                      size="icon"
                       variant="ghost"
                       disabled={busy || index === images.length - 1}
                       aria-label={`Move target ${number}: ${named} down`}
                       onClick={() => move(image.key, 1)}
                     >
-                      Move down
+                      <ArrowIcon direction="down" />
                     </Button>
                     <Button
                       type="button"
-                      size="sm"
+                      size="icon"
                       variant="ghost"
                       disabled={busy}
                       aria-label={`Remove target ${number}: ${named}`}
@@ -785,7 +877,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                         );
                       }}
                     >
-                      Remove
+                      <CloseIcon />
                     </Button>
                   </div>
                 </fieldset>
@@ -793,14 +885,16 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             })}
           </div>
         )}
-        <Button
-          type="submit"
-          loading={busy}
-          disabled={busy || !ready || Boolean(sampling)}
-          aria-describedby={edit ? 'train-pairs-status' : undefined}
-        >
-          Train
-        </Button>
+        <div className="train-footer">
+          <Button
+            type="submit"
+            loading={busy}
+            disabled={busy || !ready || Boolean(sampling)}
+            aria-describedby={edit ? 'train-pairs-status' : undefined}
+          >
+            Train
+          </Button>
+        </div>
       </form>
     </section>
   );

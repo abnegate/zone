@@ -233,6 +233,18 @@ export const mockSources = [
   },
 ];
 
+const sourceTypes = [
+  { id: 'github', name: 'GitHub', category: 'file', description: 'GitHub repository', enabled: true },
+  { id: 'gitlab', name: 'GitLab', category: 'file', description: 'GitLab project', enabled: true },
+  { id: 'filesystem', name: 'Filesystem', category: 'file', description: 'Local directory', enabled: true },
+  { id: 'web', name: 'Web URL', category: 'web', description: 'Web page', enabled: true },
+  { id: 'text', name: 'Text', category: 'text', description: 'Raw text', enabled: true },
+  { id: 'ical', name: 'Calendar', category: 'calendar', description: 'iCal feed', enabled: false },
+  { id: 'imap', name: 'Mail', category: 'mail', description: 'IMAP mailbox', enabled: false },
+  { id: 'slack', name: 'Slack', category: 'chat', description: 'Slack workspace', enabled: false },
+  { id: 'discord', name: 'Discord', category: 'chat', description: 'Discord server', enabled: false },
+];
+
 // Sessions - matching expected session fields
 const mockSessions = [
   {
@@ -362,7 +374,7 @@ export async function setupCommonRoutes(
     else if (path.endsWith('/tasks'))
       body = { tasks: populated ? mockTasks : [] };
     else if (path.endsWith('/runs')) body = { runs: [] };
-    else if (path.endsWith('/sources/types')) body = { types: [] };
+    else if (path.endsWith('/sources/types')) body = { types: sourceTypes };
     else if (path.endsWith('/sources'))
       body = { sources: populated ? mockSources : [] };
     else if (path === '/api/knowledge')

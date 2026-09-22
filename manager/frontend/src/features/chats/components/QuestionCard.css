@@ -1,24 +1,21 @@
-/* A question the agent asked before it could carry on.
-   Sits on the tool row that asked it, stronger than the trace around it: the
-   turn has stopped and nothing moves until the reader answers. The preview
-   inside reuses the trace's own preview treatment, because it is the same kind
-   of claim — read from the call by the server, not stated by the model. */
 .question-card {
   display: grid;
-  gap: var(--ui-space-3);
+  gap: var(--ui-space-2);
   margin: 0 var(--ui-space-3) var(--ui-space-2);
   padding: var(--ui-space-3);
   border: 1px solid var(--ui-border);
-  border-left: 3px solid var(--ui-accent);
+  border-left: 2px solid var(--ui-accent);
+  border-radius: 0 var(--ui-radius-lg) var(--ui-radius-lg) 0;
   background: var(--ui-bg-surface);
 }
 
 .question-card--answered {
-  border-left-color: var(--ui-text-tertiary, var(--ui-text-secondary));
+  border-left-color: var(--ui-text-muted);
   opacity: 0.7;
 }
 
 .question-card-question {
+  min-width: 0;
   margin: 0;
   padding: 0;
   border: 0;
@@ -28,28 +25,34 @@
   display: flex;
   align-items: center;
   gap: var(--ui-space-2);
-  padding: 0;
   color: var(--ui-text-primary);
   font-size: var(--ui-text-sm);
   font-weight: 600;
+  line-height: var(--ui-space-5);
 }
 
 .question-card-marker {
-  color: var(--ui-text-secondary);
-  font-size: var(--ui-text-xs);
-  font-weight: 400;
-  letter-spacing: var(--ui-tracking-tight);
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-2xs);
+  font-weight: 500;
+  letter-spacing: var(--ui-tracking-wider);
+  text-transform: uppercase;
 }
 
 .question-card-prompt {
-  margin: var(--ui-space-1) 0 var(--ui-space-2);
+  margin: 0 0 var(--ui-space-2);
   color: var(--ui-text-primary);
   font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+}
+
+.question-card .tool-call-preview {
+  margin: 0 0 var(--ui-space-2);
 }
 
 .question-card-choices {
   display: grid;
-  gap: var(--ui-space-2);
+  gap: var(--ui-space-1);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -57,20 +60,35 @@
 
 .question-card-choice {
   display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: baseline;
-  gap: 2px var(--ui-space-2);
+  gap: var(--ui-space-2);
+  margin: 0;
+  padding: 0;
+  border-radius: var(--ui-radius-md);
+}
+
+.question-card-choice-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  height: var(--ui-control-height);
+  min-width: 0;
+  padding: 0 var(--ui-space-2);
+  border-radius: var(--ui-radius-md);
+}
+
+.question-card-choice-row:hover {
+  background: var(--ui-bg-hover);
 }
 
 .question-card-control {
-  grid-row: 1;
+  width: var(--ui-space-4);
+  height: var(--ui-space-4);
+  margin: 0;
   accent-color: var(--ui-accent);
 }
 
 .question-card-choice-heading {
   display: flex;
-  grid-row: 1;
-  grid-column: 2;
   align-items: center;
   gap: var(--ui-space-2);
 }
@@ -78,35 +96,51 @@
 .question-card-choice-label {
   color: var(--ui-text-primary);
   font-size: var(--ui-text-sm);
+  font-weight: 500;
+  line-height: var(--ui-space-5);
   cursor: pointer;
 }
 
-/* Set apart rather than folded into the label: the agent's own preference is a
-   claim about the choice, and a reader has to see it as one. */
 .question-card-recommended {
-  padding: 0 var(--ui-space-2);
-  border: 1px solid var(--ui-accent);
+  display: inline-flex;
+  align-items: center;
+  height: var(--ui-badge-height);
+  padding: 0 var(--ui-space-1-5);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-accent-muted);
   color: var(--ui-accent);
-  font-size: var(--ui-text-xs);
-  letter-spacing: var(--ui-tracking-tight);
-}
-
-.question-card-choice-description,
-.question-card-text {
-  grid-column: 2 / -1;
+  font-size: var(--ui-text-2xs);
+  font-weight: 600;
 }
 
 .question-card-choice-description {
+  flex: 1;
+  min-width: 0;
   margin: 0;
-  color: var(--ui-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-text-muted);
   font-size: var(--ui-text-xs);
+  line-height: var(--ui-space-5);
+}
+
+.question-card-choice-description:empty {
+  display: none;
+}
+
+.question-card-choice-description::before {
+  content: '— ';
 }
 
 .question-card-text {
-  min-height: var(--ui-control-height-sm);
-  margin-top: var(--ui-space-2);
-  padding: 0 var(--ui-space-2);
+  width: calc(100% - var(--ui-space-8) - var(--ui-space-2));
+  min-width: 0;
+  height: var(--ui-control-height);
+  margin: 0 var(--ui-space-2) 0 var(--ui-space-8);
+  padding: 0 var(--ui-space-2-5);
   border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
   background: var(--ui-bg-base);
   color: var(--ui-text-primary);
   font-size: var(--ui-text-sm);
@@ -119,22 +153,36 @@
 
 .question-card-submit {
   justify-self: start;
-  min-height: var(--ui-control-height-sm);
-  padding: 0 var(--ui-space-3);
-  border: 1px solid var(--ui-border);
-  background: var(--ui-bg-base);
-  color: var(--ui-text-primary);
+  height: var(--ui-control-height-sm);
+  padding: 0 var(--ui-space-2-5);
+  border: 1px solid var(--ui-accent);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-accent);
+  color: var(--ui-text-inverse);
   font-size: var(--ui-text-xs);
+  font-weight: 500;
   cursor: pointer;
 }
 
 .question-card-submit:hover:not(:disabled) {
-  background: var(--ui-bg-surface);
+  background: var(--ui-accent-hover);
 }
 
 .question-card-submit:disabled {
-  color: var(--ui-text-secondary);
+  border-color: var(--ui-border);
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-muted);
   cursor: not-allowed;
+}
+
+.question-card--answered .question-card-submit {
+  height: var(--ui-badge-height);
+  padding: 0 var(--ui-space-1-5);
+  border-color: transparent;
+  background: color-mix(in srgb, var(--ui-success) 14%, transparent);
+  color: var(--ui-success-600);
+  font-size: var(--ui-text-2xs);
+  font-weight: 600;
 }
 
 .question-card-submit:focus-visible,

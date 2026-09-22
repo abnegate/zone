@@ -109,7 +109,10 @@ describe('WikiPage', () => {
       type: 'text',
       content: 'This is text content',
       fetched_content: null,
+      excerpt: 'This is text content',
+      category: null,
       tags: ['tag1', 'tag2'],
+      token_count: 12,
       last_refreshed_at: null,
       indexed: true,
       created_at: '2024-01-01T00:00:00Z',
@@ -122,7 +125,10 @@ describe('WikiPage', () => {
       type: 'url',
       content: 'https://example.com',
       fetched_content: 'Fetched content from URL',
+      excerpt: 'Fetched content from URL',
+      category: null,
       tags: ['documentation'],
+      token_count: 40,
       last_refreshed_at: '2024-01-02T00:00:00Z',
       indexed: true,
       created_at: '2024-01-01T00:00:00Z',
@@ -223,6 +229,21 @@ describe('WikiPage', () => {
       expect(screen.getByText('No knowledge entries found')).toBeInTheDocument();
       expect(screen.getByText('Try adjusting your filters or search query')).toBeInTheDocument();
     });
+
+    it('offers to show all entries when the filter or search hides everything', () => {
+      renderWikiPage();
+      fireEvent.click(screen.getByRole('tab', { name: 'URL' }));
+      const searchInput = screen.getByPlaceholderText('Search knowledge...');
+      fireEvent.change(searchInput, { target: { value: 'nonexistent' } });
+      expect(screen.queryByRole('button', { name: 'Add Entry' })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Show all entries' }));
+
+      expect(screen.getByText('Text Entry')).toBeInTheDocument();
+      expect(screen.getByText('URL Entry')).toBeInTheDocument();
+      expect(searchInput).toHaveValue('');
+      expect(screen.getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'true');
+    });
   });
 
   describe('Filter Functionality', () => {
@@ -303,10 +324,27 @@ describe('WikiPage', () => {
       expect(badges.length).toBeGreaterThan(0);
     });
 
-    it('displays URL link for URL entries', () => {
+    it('links a URL entry by its host and keeps the full address as the tooltip', () => {
       renderWikiPage();
-      const link = screen.getByText('https://example.com') as HTMLAnchorElement;
+      const link = screen.getByText('example.com') as HTMLAnchorElement;
+      expect(link).toHaveClass('knowledge-card-url');
       expect(link.href).toBe('https://example.com/');
+      expect(link.title).toBe('https://example.com');
+    });
+
+    it('keeps the refresh date out of the card footer and in the details', () => {
+      renderWikiPage();
+      const card = screen.getByText('URL Entry').closest('.knowledge-card') as HTMLElement;
+      const footer = card.querySelector('.knowledge-card-footer');
+      expect(footer).toHaveTextContent('Updated Jan 2, 2024');
+      expect(footer).not.toHaveTextContent('Refreshed');
+      fireEvent.click(card);
+      const dialog = screen.getByRole('dialog', { name: 'URL Entry' });
+      expect(within(dialog).getByText('Last refreshed')).toBeInTheDocument();
+      expect(within(dialog).getByText('https://example.com')).toHaveAttribute(
+        'href',
+        'https://example.com'
+      );
     });
 
     it('displays fetched content for URL entries', () => {
@@ -319,9 +357,72 @@ describe('WikiPage', () => {
       const refreshButtons = screen.getAllByLabelText('Refresh URL content');
       expect(refreshButtons.length).toBe(1);
     });
+
+    it('leaves the excerpt slot empty rather than printing a placeholder on a bare list entry', () => {
+      const bare: KnowledgeEntry = {
+        ...defaultEntries[0],
+        id: 'kb-bare',
+        title: 'Runbook',
+        content: '',
+        excerpt: '',
+        tags: [],
+        token_count: 25,
+        created_at: '',
+        updated_at: '',
+      };
+      getMockState = () => ({ entries: [bare], loading: false, error: null });
+      renderWikiPage();
+
+      const card = screen.getByText('Runbook').closest('.knowledge-card') as HTMLElement;
+      expect(card.querySelector('.knowledge-card-content')).toBeNull();
+      expect(card.querySelector('.knowledge-card-tags')).toBeNull();
+      expect(screen.queryByText('No excerpt')).not.toBeInTheDocument();
+      expect(within(card).getByText('25 tokens')).toHaveClass('knowledge-card-date');
+    });
+
+    it('names the category in the excerpt slot and the type when nothing else is known', () => {
+      const bare: KnowledgeEntry = {
+        ...defaultEntries[0],
+        id: 'kb-bare',
+        title: 'Live run',
+        excerpt: '',
+        category: 'operations',
+        tags: [],
+        token_count: null,
+        created_at: '',
+        updated_at: '',
+      };
+      getMockState = () => ({ entries: [bare], loading: false, error: null });
+      renderWikiPage();
+
+      const card = screen.getByText('Live run').closest('.knowledge-card') as HTMLElement;
+      expect(within(card).getByText('operations')).toBeInTheDocument();
+      expect(within(card).getByText('text', { selector: '.knowledge-card-date' })).toBeTruthy();
+    });
+
+    it('prefers the tags row to a placeholder when an entry has tags but no excerpt', () => {
+      const tagged: KnowledgeEntry = {
+        ...defaultEntries[0],
+        id: 'kb-tagged',
+        title: 'Release checklist',
+        excerpt: '',
+        tags: ['release'],
+      };
+      getMockState = () => ({ entries: [tagged], loading: false, error: null });
+      renderWikiPage();
+
+      expect(screen.getByText('release')).toHaveClass('knowledge-tag');
+      expect(screen.queryByText('No excerpt')).not.toBeInTheDocument();
+    });
   });
 
   describe('Create Knowledge Wizard', () => {
+    it('labels the primary Add knowledge in sentence case with the plus icon', () => {
+      renderWikiPage();
+      const button = screen.getByRole('button', { name: 'Add knowledge' });
+      expect(button.querySelector('svg.plus-icon')).not.toBeNull();
+    });
+
     it('opens create wizard when Add Knowledge button is clicked', () => {
       renderWikiPage();
       const addButton = getAddKnowledgeButton();
@@ -385,6 +486,22 @@ describe('WikiPage', () => {
         expect(screen.getByLabelText('URL')).toBeInTheDocument();
       });
       expect((screen.getByLabelText('URL') as HTMLInputElement).type).toBe('url');
+    });
+
+    it('says how to add a tag once, in the hint rather than the placeholder', async () => {
+      renderWikiPage();
+      fireEvent.click(getAddKnowledgeButton());
+      fireEvent.click(screen.getByText('Text Content'));
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+      fireEvent.change(await screen.findByLabelText('Content'), {
+        target: { value: 'Enough content to move on' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      const tags = (await screen.findByLabelText(/^Tags/)) as HTMLInputElement;
+      expect(tags.placeholder).toBe('e.g. release, history');
+      expect(screen.getAllByText(/press enter/i)).toHaveLength(1);
+      expect(screen.getByText('Press Enter to add each tag')).toHaveClass('form-hint');
     });
   });
 
@@ -458,9 +575,10 @@ describe('WikiPage', () => {
           workspace_id: 'test-ws',
           title: 'New URL',
           type: 'url',
-          content: 'https://newurl.com',
+          source_url: 'https://newurl.com',
           tags: undefined,
         });
+        expect(mockCreateEntry.mock.calls[0][0]).not.toHaveProperty('content');
       });
     });
 
@@ -824,5 +942,76 @@ describe('WikiPage', () => {
       const alert = screen.getByRole('alert');
       expect(alert).toHaveTextContent('Load error');
     });
+  });
+});
+
+describe('WikiPage card anatomy', () => {
+  const bare: KnowledgeEntry = {
+    id: 'kb-bare',
+    workspace_id: 'ws-1',
+    title: 'Bare Entry',
+    type: 'text',
+    content: '',
+    fetched_content: null,
+    excerpt: '',
+    category: null,
+    tags: ['history', 'pass'],
+    token_count: null,
+    last_refreshed_at: null,
+    indexed: true,
+    created_at: '2024-03-04T00:00:00Z',
+    updated_at: '',
+  };
+
+  beforeEach(() => {
+    getMockState = () => ({ entries: [bare], loading: false, error: null });
+  });
+
+  it('fills the excerpt slot with the tags and the meta row with the created date', () => {
+    renderWikiPage();
+    const card = screen.getByText('Bare Entry').closest('.knowledge-card') as HTMLElement;
+    expect(card.querySelector('.knowledge-card-content')).toBeNull();
+    const tags = card.querySelector('.knowledge-card-tags');
+    expect(tags).toHaveTextContent('history');
+    expect(tags).toHaveTextContent('pass');
+    expect(card.querySelector('.knowledge-card-date')).toHaveTextContent(/Updated Mar 4, 2024/);
+  });
+
+  it('clamps the excerpt to one line and keeps the tags as chips under it when both exist', () => {
+    getMockState = () => ({
+      entries: [{ ...bare, excerpt: 'The bridge opened in 1959.' }],
+      loading: false,
+      error: null,
+    });
+    renderWikiPage();
+    const card = screen.getByText('Bare Entry').closest('.knowledge-card') as HTMLElement;
+    const content = card.querySelector('.knowledge-card-content');
+    expect(content).toHaveTextContent('The bridge opened in 1959.');
+    expect(content).toHaveClass('knowledge-card-content--line');
+    const tags = card.querySelector('.knowledge-card-tags');
+    expect(tags).toHaveTextContent('history');
+    expect(within(tags as HTMLElement).getByText('history')).toHaveClass('knowledge-tag');
+    expect(card.querySelector('.knowledge-card-footer')).not.toHaveTextContent('history');
+  });
+
+  it('flags an unindexed entry in the meta row and leaves the title row to the type badge', () => {
+    getMockState = () => ({
+      entries: [{ ...bare, indexed: false }],
+      loading: false,
+      error: null,
+    });
+    renderWikiPage();
+    const card = screen.getByText('Bare Entry').closest('.knowledge-card') as HTMLElement;
+    expect(card.querySelectorAll('.knowledge-card-header .ui-badge')).toHaveLength(1);
+    const flag = card.querySelector('.knowledge-card-footer .knowledge-card-flag');
+    expect(flag).toHaveTextContent('Not indexed');
+    expect(flag).toHaveAttribute('title', 'Semantic search cannot find this entry yet');
+  });
+
+  it('renders the page bar and body the frame scrolls', () => {
+    renderWikiPage();
+    const page = document.querySelector('.wiki-page') as HTMLElement;
+    expect(page.querySelector(':scope > .page-bar')).not.toBeNull();
+    expect(page.querySelector(':scope > .page-body .knowledge-grid')).not.toBeNull();
   });
 });

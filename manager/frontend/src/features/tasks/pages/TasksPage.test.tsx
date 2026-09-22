@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
@@ -234,6 +234,33 @@ describe('TasksPage', () => {
     });
   });
 
+  it('offers a way back when the active filters match nothing', async () => {
+    mockGetTasks.mockImplementation((_workspace: string, _project?: string, status?: string) =>
+      Promise.resolve(status ? [] : mockTasks)
+    );
+    renderTasksPage();
+    await waitFor(() => {
+      expect(screen.getByText('Implement login')).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by status' }), {
+      target: { value: 'blocked' },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('No tasks match')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Try adjusting your filters')).toBeInTheDocument();
+    expect(screen.queryByText('No tasks yet')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show all tasks' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Implement login')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('combobox', { name: 'Filter by status' })).toHaveValue('');
+  });
+
   it('renders tasks list', async () => {
     renderTasksPage();
     await waitFor(() => {
@@ -348,18 +375,24 @@ describe('TasksPage', () => {
   it('opens create task wizard', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New task' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
     expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
+  });
+
+  it('labels the primary New task in sentence case with the plus icon', async () => {
+    renderTasksPage();
+    const button = await screen.findByRole('button', { name: 'New task' });
+    expect(button.querySelector('svg.plus-icon')).not.toBeNull();
   });
 
   it('disables new task button when no projects', async () => {
     mockGetProjects.mockImplementation(() => Promise.resolve([]));
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'New task' })).toBeDisabled();
     });
   });
 
@@ -394,10 +427,10 @@ describe('TasksPage', () => {
 
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New task' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Project Alpha/i })).toBeInTheDocument();
@@ -433,10 +466,10 @@ describe('TasksPage', () => {
   it('cancels create task wizard', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New task' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
     expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -551,10 +584,10 @@ describe('TasksPage', () => {
   it('enables agentic mode in create wizard', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).not.toBeDisabled();
+      expect(screen.getByRole('button', { name: 'New task' })).not.toBeDisabled();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
 
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
@@ -590,10 +623,10 @@ describe('TasksPage', () => {
   it('shows project source info when agentic mode enabled', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).not.toBeDisabled();
+      expect(screen.getByRole('button', { name: 'New task' })).not.toBeDisabled();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
 
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
@@ -762,10 +795,10 @@ describe('TasksPage', () => {
 
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).not.toBeDisabled();
+      expect(screen.getByRole('button', { name: 'New task' })).not.toBeDisabled();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
 
     // Wait for wizard to appear
     await waitFor(() => {
@@ -810,19 +843,124 @@ describe('TasksPage', () => {
   it('displays PR link when pr_url exists', async () => {
     renderTasksPage();
     await waitFor(() => {
-      const prLink = screen.getByText('View Pull Request');
-      expect(prLink).toBeInTheDocument();
-      expect(prLink.closest('a')).toHaveAttribute('href', 'https://github.com/test/repo/pull/123');
-      expect(prLink.closest('a')).toHaveAttribute('target', '_blank');
-      expect(prLink.closest('a')).toHaveAttribute('rel', 'noopener noreferrer');
+      const prLink = screen.getByRole('link', { name: 'View PR' });
+      expect(prLink).toHaveAttribute('href', 'https://github.com/test/repo/pull/123');
+      expect(prLink).toHaveAttribute('target', '_blank');
+      expect(prLink).toHaveAttribute('rel', 'noopener noreferrer');
+      expect(prLink.closest('.task-pr')).not.toBeNull();
+      expect(prLink.closest('.task-meta')).not.toBeNull();
     });
+  });
+
+  it('folds the pull request into the meta row so every card keeps the same height', async () => {
+    mockGetTasks.mockImplementation(() =>
+      Promise.resolve([
+        {
+          ...mockTasks[0],
+          pr_status: 'open',
+          pr_url: 'https://github.com/test/repo/pull/7',
+          branch_name: 'zone/task-7',
+        },
+      ])
+    );
+
+    renderTasksPage();
+    const badge = await screen.findByText('PR: open');
+    const pr = badge.closest('.task-pr') as HTMLElement | null;
+    expect(pr).not.toBeNull();
+    expect(pr?.parentElement).toHaveClass('task-meta');
+    expect(pr?.nextElementSibling).toBeNull();
+    expect(pr?.parentElement?.nextElementSibling).toHaveClass('task-actions');
+    expect(badge.closest('.task-card-title')).toBeNull();
+    expect(within(pr as HTMLElement).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
+    expect(within(pr as HTMLElement).queryByText('zone/task-7')).toBeNull();
+    expect(document.querySelectorAll('.task-card-title .ui-badge')).toHaveLength(2);
+  });
+
+  it('sets the branch tag on the footer beside the actions, not on the meta row', async () => {
+    mockGetTasks.mockImplementation(() =>
+      Promise.resolve([
+        {
+          ...mockTasks[0],
+          pr_status: 'open',
+          pr_url: 'https://github.com/test/repo/pull/7',
+          branch_name: 'zone/task-7',
+        },
+      ])
+    );
+
+    renderTasksPage();
+    const branch = await screen.findByText('zone/task-7');
+    expect(branch).toHaveClass('task-branch');
+    expect(branch.closest('.task-meta')).toBeNull();
+    const slot = branch.parentElement as HTMLElement;
+    expect(slot).toHaveClass('task-branch-slot');
+    const footer = slot.parentElement as HTMLElement;
+    expect(footer).toHaveClass('task-actions');
+    expect(footer.firstElementChild).toBe(slot);
+    expect(within(footer).getByRole('button', { name: 'Execute' })).toBeInTheDocument();
+  });
+
+  it('keeps the branch tag off a card whose branch has no pull request yet', async () => {
+    mockGetTasks.mockImplementation(() =>
+      Promise.resolve([
+        { ...mockTasks[0], branch_name: 'zone/task-8', pr_status: null, pr_url: null },
+      ])
+    );
+
+    renderTasksPage();
+    await screen.findByText('Implement login');
+    expect(screen.queryByText('zone/task-8')).not.toBeInTheDocument();
+    expect(document.querySelector('.task-branch-slot')).toBeNull();
+  });
+
+  it('shows the pull request status before a link exists', async () => {
+    mockGetTasks.mockImplementation(() =>
+      Promise.resolve([{ ...mockTasks[0], pr_status: 'pending', pr_url: null }])
+    );
+
+    renderTasksPage();
+    const badge = await screen.findByText('PR: pending');
+    expect(badge.closest('.task-pr')).not.toBeNull();
+    expect(badge.closest('.task-meta')).not.toBeNull();
+    expect(screen.queryByRole('link', { name: 'View PR' })).not.toBeInTheDocument();
   });
 
   it('displays branch name when branch_name exists', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByText('Branch: feature/fix-button-styling')).toBeInTheDocument();
+      const branch = screen.getByText('feature/fix-button-styling');
+      expect(branch).toHaveClass('task-branch');
+      expect(branch).toHaveAttribute('title', 'feature/fix-button-styling');
+      expect(branch.closest('.task-pr')).toBeNull();
+      expect(branch.closest('.task-actions')).not.toBeNull();
     });
+  });
+
+  it('leaves the pull request row out of a card without a pull request', async () => {
+    mockGetTasks.mockImplementation(() => Promise.resolve([mockTasks[0]]));
+
+    renderTasksPage();
+    await screen.findByText('Implement login');
+    expect(document.querySelector('.task-pr')).toBeNull();
+    expect(document.querySelector('.task-meta')?.nextElementSibling).toHaveClass('task-actions');
+  });
+
+  it('reserves every slot of a card so siblings share one height', async () => {
+    renderTasksPage();
+    await waitFor(() => {
+      expect(screen.getByText('Implement login')).toBeInTheDocument();
+    });
+    const cards = document.querySelectorAll('.task-card');
+    expect(cards.length).toBeGreaterThan(1);
+    for (const card of cards) {
+      expect(card.querySelector('.task-card-title')).not.toBeNull();
+      expect(card.querySelector('.task-project')).not.toBeNull();
+      expect(card.querySelector('.task-description')).not.toBeNull();
+      expect(card.querySelector('.task-meta')).not.toBeNull();
+      expect(card.querySelector('.task-actions')).not.toBeNull();
+    }
+    expect(document.querySelector('.task-pr-info')).toBeNull();
   });
 
   it('does not display PR info when pr_url is null', async () => {

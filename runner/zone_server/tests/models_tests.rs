@@ -723,6 +723,49 @@ async fn test_list_models_ollama_connection_error() {
     );
 }
 
+/// Ollama being down must not make the ComfyUI inventory look like the whole
+/// one: the rows that could be read are listed, and the failure is named.
+#[tokio::test]
+async fn ollama_down_still_lists_comfy_rows_and_names_the_failure() {
+    let models_dir = std::env::temp_dir().join(format!("zone-models-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(models_dir.join("checkpoints")).unwrap();
+    std::fs::write(
+        models_dir.join("checkpoints/studio.safetensors"),
+        b"weights",
+    )
+    .unwrap();
+    let router = create_test_router_tuned(|config| {
+        config.comfyui.models_dir = models_dir.clone();
+    })
+    .await;
+    let token = get_auth_token(&router).await;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/models")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let inventory: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let names: Vec<&str> = inventory["models"]
+        .as_array()
+        .expect("a partial inventory is an object with a models list")
+        .iter()
+        .filter_map(|model| model["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["studio.safetensors"]);
+    let ollama = inventory["errors"]["ollama"]
+        .as_str()
+        .expect("the Ollama failure is named");
+    assert!(ollama.contains("Failed to connect to Ollama"), "{ollama}");
+    std::fs::remove_dir_all(&models_dir).ok();
+}
+
 #[tokio::test]
 async fn test_list_models_ollama_service_unavailable() {
     // Test without source param to use local Ollama

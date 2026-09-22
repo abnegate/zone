@@ -1,24 +1,37 @@
-import { Button, Checkbox, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
+import {
+  Badge,
+  Button,
+  Checkbox,
+  EmptyState,
+  Modal,
+  Select,
+  Tabs,
+  TabsList,
+  TabsTrigger,
+} from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
+import PageBar from '../../../shared/components/PageBar/PageBar';
+import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
+import { useSources } from '../../sources/hooks/useSources';
 import { isProtectedArtifactUrl } from '../api/protectedImages';
 import {
   ActionReceipts,
   AuthenticatedAudio,
   AuthenticatedImage,
   AuthenticatedVideo,
+  ChatSources,
   Citations,
   Generation,
   MemoryBadge,
   MessageContent,
-  Reasoning,
-  ToolTrace,
 } from '../components';
+import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
-import { useChat, useChatSearch, useChats } from '../hooks';
+import { useChat, useChatSearch, useChatSources, useChats } from '../hooks';
 import { type ChatSearchResult, REASONING_EFFORT_OPTIONS, type ReasoningEffort } from '../types';
 import {
   type Attachment,
@@ -40,9 +53,12 @@ import {
   parseCharacterText,
   readAttachment,
   sourceAttachment,
+  toPlainText,
   videoAttachments,
 } from '../utils';
 import './ChatsPage.css';
+
+const UNTITLED_CHAT_TITLE = 'Untitled chat';
 
 export default function ChatsPage() {
   const { isAuthenticated } = useAuth();
@@ -114,6 +130,7 @@ export default function ChatsPage() {
     approveTool,
     setAgentEnabled: setAgentEnabledFn,
     setAutoApprove: setAutoApproveFn,
+    setAgentSandboxed: setAgentSandboxedFn,
     setReasoningEffort: setReasoningEffortFn,
     setCharacter: setCharacterFn,
     clearCharacter: clearCharacterFn,
@@ -130,6 +147,14 @@ export default function ChatsPage() {
     search,
     clear: clearSearch,
   } = useChatSearch();
+
+  const { sources: workspaceSources } = useSources({ activeOnly: true });
+  const {
+    sources: attachedSources,
+    loading: attachedLoading,
+    error: attachedError,
+    setAttached: setAttachedSources,
+  } = useChatSources(selectedChatId);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -182,6 +207,7 @@ export default function ChatsPage() {
     stickToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 80;
   };
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a newly selected chat starts stuck to its bottom
   useEffect(() => {
     stickToBottom.current = true;
   }, [selectedChatId]);
@@ -193,6 +219,22 @@ export default function ChatsPage() {
     }
     scrollToBottom();
   }, [activeChat?.messages, chatError, chatStatus, streaming, linkedMessageId, scrollToBottom]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the scroller mounts with the displayed chat
+  useEffect(() => {
+    const node = messagesContainerRef.current;
+    if (!node) {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (!stickToBottom.current) {
+        return;
+      }
+      node.scrollTo({ top: node.scrollHeight, behavior: 'instant' });
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [displayedChat?.id]);
 
   useEffect(() => {
     if (!linkedMessageId || !displayedChat) return;
@@ -271,6 +313,17 @@ export default function ChatsPage() {
       await setAutoApproveFn(!displayedChat.auto_approve);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to change auto-approve');
+    }
+  };
+
+  const handleToggleAgentSandboxed = async () => {
+    if (!isAuthenticated || !displayedChat) return;
+    setOperationError(null);
+    try {
+      const sandboxed = displayedChat.agent_sandboxed !== false;
+      await setAgentSandboxedFn(!sandboxed);
+    } catch (err) {
+      setOperationError(err instanceof Error ? err.message : 'Failed to change tool access');
     }
   };
 
@@ -451,6 +504,9 @@ export default function ChatsPage() {
     setOperationError(null);
     try {
       await unarchiveChatFn(chatId);
+      if (selectedChatId === chatId) {
+        clearSelectedChat();
+      }
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to unarchive chat');
     }
@@ -478,6 +534,11 @@ export default function ChatsPage() {
     await search(searchQuery, { limit: 20 });
   };
 
+  const searchResultTitle = (result: ChatSearchResult): string =>
+    result.chat_title ||
+    chats.find((chat) => chat.id === result.chat_id)?.title ||
+    UNTITLED_CHAT_TITLE;
+
   const handleSearchResultClick = async (result: ChatSearchResult) => {
     selectChat(result.chat_id, result.message_id);
     setShowSearchResults(false);
@@ -494,19 +555,34 @@ export default function ChatsPage() {
   return (
     <div className={`page page--workspace chats-page ${selectedChatId ? 'has-chat' : ''}`}>
       <div className="chats-sidebar">
-        <div className="chats-sidebar-header">
-          <h1>Chats</h1>
-          <Button
-            variant="primary"
-            size="sm"
+        <PageBar title="Chats" className="chats-sidebar-header">
+          <Tabs
+            value={showArchived ? 'archived' : 'active'}
+            onValueChange={(v) => setShowArchived(v === 'archived')}
+            className="chats-filter"
+          >
+            <TabsList>
+              <TabsTrigger value="active" disabled={showSearchResults}>
+                Active
+              </TabsTrigger>
+              <TabsTrigger value="archived" disabled={showSearchResults}>
+                Archived
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+          <button
+            type="button"
+            className="btn-icon"
+            aria-label="New chat"
+            title="New chat"
             onClick={() => {
               setOperationError(null);
               setShowNewChatModal(true);
             }}
           >
-            New chat
-          </Button>
-        </div>
+            <PlusIcon />
+          </button>
+        </PageBar>
 
         <form className="chat-search" onSubmit={handleSearch}>
           <svg
@@ -552,23 +628,6 @@ export default function ChatsPage() {
           )}
         </form>
 
-        {!showSearchResults && (
-          <Tabs
-            value={showArchived ? 'archived' : 'active'}
-            onValueChange={(v) => setShowArchived(v === 'archived')}
-            className="chats-filter"
-          >
-            <TabsList className="w-full">
-              <TabsTrigger value="active" className="flex-1">
-                Active
-              </TabsTrigger>
-              <TabsTrigger value="archived" className="flex-1">
-                Archived
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-        )}
-
         {operationError && !showNewChatModal && (
           <div className="chats-error" role="alert">
             {operationError}
@@ -583,7 +642,21 @@ export default function ChatsPage() {
           ) : searchError ? (
             <div className="chats-error">{searchError}</div>
           ) : searchResults.length === 0 ? (
-            <div className="chats-empty">No messages found</div>
+            <EmptyState
+              icon={
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="M21 21l-4.3-4.3" />
+                </svg>
+              }
+              title="No messages match"
+              description="Try another search"
+              action={
+                <Button variant="secondary" onClick={handleClearSearch}>
+                  Clear search
+                </Button>
+              }
+            />
           ) : (
             <div className="chats-list" data-testid="search-results-list">
               {searchResults.map((result) => (
@@ -597,13 +670,10 @@ export default function ChatsPage() {
                   data-testid="search-result-item"
                 >
                   <div className="search-result-header">
-                    <span className="search-result-chat">{result.chat_title}</span>
-                    <span className="search-result-score">
-                      {Math.round(result.relevance_score * 100)}%
-                    </span>
+                    <span className="search-result-chat">{searchResultTitle(result)}</span>
+                    <span className="search-result-date">{formatDate(result.created_at)}</span>
                   </div>
-                  <div className="search-result-snippet">{result.snippet}</div>
-                  <span className="search-result-date">{formatDate(result.created_at)}</span>
+                  <div className="search-result-snippet">{toPlainText(result.snippet)}</div>
                 </div>
               ))}
             </div>
@@ -617,14 +687,7 @@ export default function ChatsPage() {
         ) : chats.length === 0 ? (
           <EmptyState
             icon={
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                width="48"
-                height="48"
-              >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <path d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 4z" />
               </svg>
             }
@@ -642,7 +705,7 @@ export default function ChatsPage() {
                     setShowNewChatModal(true);
                   }}
                 >
-                  New Chat
+                  New chat
                 </Button>
               ) : undefined
             }
@@ -663,7 +726,8 @@ export default function ChatsPage() {
                 <div className="chat-item-content">
                   <span className="chat-title">{chat.title}</span>
                   <span className="chat-meta">
-                    {modelLabel(chat.model_name)} · {formatDate(chat.updated_at)}
+                    <span className="chat-meta-model">{modelLabel(chat.model_name)}</span>
+                    <span className="chat-meta-time">· {formatDate(chat.updated_at)}</span>
                   </span>
                 </div>
                 <div className="chat-item-actions">
@@ -785,7 +849,13 @@ export default function ChatsPage() {
               </Button>
               <div className="chat-header-info">
                 <h3>{displayedChat.title}</h3>
-                <span className="chat-model">{modelLabel(displayedChat.model_name)}</span>
+                <Badge
+                  variant="neutral"
+                  className="chat-model"
+                  title={modelLabel(displayedChat.model_name)}
+                >
+                  {modelLabel(displayedChat.model_name)}
+                </Badge>
                 {displayedChat.purpose === 'project_planner' && (
                   <span className="chat-purpose" data-testid="chat-purpose">
                     Project planner
@@ -846,6 +916,22 @@ export default function ChatsPage() {
                     Auto-approve
                   </button>
                 )}
+                {displayedChat.agent_enabled && (
+                  <button
+                    type="button"
+                    className="agent-toggle"
+                    onClick={handleToggleAgentSandboxed}
+                    aria-pressed={displayedChat.agent_sandboxed !== false}
+                    title={
+                      displayedChat.agent_sandboxed !== false
+                        ? 'Zone tools only on: the agent can call nothing but the tools Zone gives it, so Zone sees and gates every call'
+                        : 'Zone tools only off: the agent can also read, write and run commands on this host with its own tools, which Zone never sees and cannot gate'
+                    }
+                    data-testid="agent-sandbox-toggle"
+                  >
+                    Zone tools only
+                  </button>
+                )}
                 {showCharacter && (
                   <button
                     type="button"
@@ -903,19 +989,28 @@ export default function ChatsPage() {
               onScroll={handleMessagesScroll}
             >
               {displayedChat.messages.length === 0 ? (
-                <div className="messages-empty">
-                  <p>No messages yet. Start a conversation!</p>
-                </div>
+                <EmptyState
+                  className="messages-empty"
+                  icon={
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      aria-hidden="true"
+                    >
+                      <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    </svg>
+                  }
+                  title="No messages yet"
+                  description="Send a message to start the conversation"
+                />
               ) : (
                 displayedChat.messages.map((message, index) => {
                   const images = imageAttachments(message.metadata);
                   const videos = videoAttachments(message.metadata);
                   const audios = audioAttachments(message.metadata);
                   const toolCalls = message.metadata?.tool_calls ?? [];
-                  const leftoverReasoning = message.metadata?.reasoning;
-                  const toolsHaveReasoning = toolCalls.some((call) =>
-                    Boolean(call.reasoning?.trim())
-                  );
                   const citations = message.metadata?.citations ?? [];
                   const receipts = message.metadata?.action_receipts ?? [];
                   const memoryUsed =
@@ -926,6 +1021,8 @@ export default function ChatsPage() {
                   // it, so this is also the only turn whose job cards can claim
                   // to be watching something that is still running.
                   const live = streaming && message.id === displayedChat.messages.at(-1)?.id;
+                  const body = message.content.trim();
+                  const awaitingAnswer = /^\[waiting for your answer\]$/i.test(body);
                   return (
                     <div
                       key={message.id}
@@ -960,7 +1057,7 @@ export default function ChatsPage() {
                                 />
                                 <button
                                   type="button"
-                                  className="message-image-use"
+                                  className="btn btn-secondary btn-sm message-image-use"
                                   onClick={() => addStartingImage(a)}
                                   disabled={starting}
                                 >
@@ -995,23 +1092,16 @@ export default function ChatsPage() {
                           ))}
                         </div>
                       )}
-                      {!toolsHaveReasoning && leftoverReasoning ? (
-                        <Reasoning content={leftoverReasoning} open={live} />
-                      ) : null}
-                      {toolCalls.length > 0 && (
-                        <ToolTrace
-                          calls={toolCalls}
-                          answered={index < lastUserIndex}
-                          live={live}
-                          onDecide={approveTool}
-                          onAnswer={handleAnswerQuestions}
-                        />
-                      )}
-                      {toolsHaveReasoning && leftoverReasoning ? (
-                        <Reasoning content={leftoverReasoning} open={live} />
-                      ) : null}
+                      <Activity
+                        reasoning={message.metadata?.reasoning}
+                        calls={toolCalls}
+                        live={live}
+                        answered={index < lastUserIndex}
+                        onDecide={approveTool}
+                        onAnswer={handleAnswerQuestions}
+                      />
                       {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
-                      {message.content.trim() ? (
+                      {body && !awaitingAnswer ? (
                         <div className="message-content">
                           <MessageContent
                             content={message.content}
@@ -1037,139 +1127,149 @@ export default function ChatsPage() {
               <div ref={messagesEndRef} />
             </div>
 
-            <form
-              className={`message-form${isDragging ? ' is-dragging' : ''}`}
-              onSubmit={handleSendMessage}
-              onDragOver={(e) => {
-                e.preventDefault();
-                setIsDragging(true);
-              }}
-              onDragLeave={(e) => {
-                if (e.currentTarget.contains(e.relatedTarget as Node)) return;
-                setIsDragging(false);
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                setIsDragging(false);
-                void handleIncomingFiles(e.dataTransfer.files);
-              }}
-            >
-              {attachments.length > 0 && (
-                <div className="message-attachments">
-                  {attachments.map((attachment) => (
-                    <span
-                      key={attachment.id}
-                      className={`attachment-chip${attachment.rejected ? ' is-rejected' : ''}${attachment.url ? ' has-thumb' : ''}`}
-                    >
-                      {attachment.url ? (
-                        isProtectedArtifactUrl(attachment.url) ? (
-                          <AuthenticatedImage
-                            src={attachment.url}
-                            alt=""
-                            className="attachment-chip-thumb"
-                            linked={false}
-                            compact
-                          />
-                        ) : (
-                          <img className="attachment-chip-thumb" src={attachment.url} alt="" />
-                        )
-                      ) : null}
-                      <span className="attachment-chip-name">{attachment.name}</span>
-                      <span className="attachment-chip-size">
-                        {attachment.rejected ? (
-                          <span className="attachment-chip-note">{attachment.rejected}</span>
-                        ) : isStartingImage(attachment) ? (
-                          <span className="attachment-chip-source">Starting image</span>
-                        ) : (
-                          formatBytes(attachment.size)
-                        )}
-                      </span>
-                      <button
-                        type="button"
-                        className="attachment-chip-remove"
-                        onClick={() => removeAttachment(attachment.id)}
-                        aria-label={`Remove ${attachment.name}`}
+            <div className="chat-composer">
+              <form
+                className={`message-form${isDragging ? ' is-dragging' : ''}`}
+                onSubmit={handleSendMessage}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={(e) => {
+                  if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                  setIsDragging(false);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDragging(false);
+                  void handleIncomingFiles(e.dataTransfer.files);
+                }}
+              >
+                {attachments.length > 0 && (
+                  <div className="message-attachments">
+                    {attachments.map((attachment) => (
+                      <span
+                        key={attachment.id}
+                        className={`attachment-chip${attachment.rejected ? ' is-rejected' : ''}${attachment.url ? ' has-thumb' : ''}`}
                       >
-                        ×
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-              {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
-                <p className="message-form-hint">
-                  Ask to generate, edit, remove an object, change the setting, or animate and this
-                  image will be the starting point.
-                </p>
-              ) : null}
-
-              <ContextUsage usage={context ?? null} error={contextError} previewing={previewing} />
-              <div className="message-form-row">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  hidden
-                  onChange={(e) => {
-                    void handleIncomingFiles(e.target.files);
-                    e.target.value = '';
-                  }}
-                />
-                <button
-                  type="button"
-                  className="btn-icon"
-                  onClick={() => fileInputRef.current?.click()}
-                  aria-label="Attach files"
-                  title="Attach files"
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.75"
-                    width="18"
-                    height="18"
-                    aria-hidden="true"
-                  >
-                    <rect x="4.5" y="4.5" width="15" height="15" rx="3.5" />
-                    <path d="M12 8.75v6.5M8.75 12h6.5" strokeLinecap="square" />
-                  </svg>
-                </button>
-                <textarea
-                  placeholder="Type a message, or drop a file..."
-                  value={messageInput}
-                  onChange={(e) => setMessageInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage(e);
-                    }
-                  }}
-                  onPaste={(e) => {
-                    if (e.clipboardData.files.length > 0) {
-                      e.preventDefault();
-                      void handleIncomingFiles(e.clipboardData.files);
-                    }
-                  }}
-                  disabled={sending}
-                  rows={1}
-                />
-                {streaming ? (
-                  <Button type="button" variant="secondary" onClick={cancelGeneration}>
-                    Stop
-                  </Button>
-                ) : (
-                  <Button
-                    type="submit"
-                    variant="primary"
-                    loading={sending}
-                    disabled={!messageInput.trim() && !attachments.some(isSendable)}
-                  >
-                    Send
-                  </Button>
+                        {attachment.url ? (
+                          isProtectedArtifactUrl(attachment.url) ? (
+                            <AuthenticatedImage
+                              src={attachment.url}
+                              alt=""
+                              className="attachment-chip-thumb"
+                              linked={false}
+                              compact
+                            />
+                          ) : (
+                            <img className="attachment-chip-thumb" src={attachment.url} alt="" />
+                          )
+                        ) : null}
+                        <span className="attachment-chip-name">{attachment.name}</span>
+                        <span className="attachment-chip-size">
+                          {attachment.rejected ? (
+                            <span className="attachment-chip-note">{attachment.rejected}</span>
+                          ) : isStartingImage(attachment) ? (
+                            <span className="attachment-chip-source">Starting image</span>
+                          ) : (
+                            formatBytes(attachment.size)
+                          )}
+                        </span>
+                        <button
+                          type="button"
+                          className="attachment-chip-remove"
+                          onClick={() => removeAttachment(attachment.id)}
+                          aria-label={`Remove ${attachment.name}`}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
                 )}
-              </div>
-            </form>
+                {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
+                  <p className="message-form-hint">
+                    Ask to generate, edit, remove an object, change the setting, or animate and this
+                    image will be the starting point.
+                  </p>
+                ) : null}
+
+                <div className="message-form-row">
+                  <ChatSources
+                    attached={attachedSources}
+                    available={workspaceSources}
+                    loading={attachedLoading}
+                    error={attachedError}
+                    onChange={setAttachedSources}
+                  />
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      void handleIncomingFiles(e.target.files);
+                      e.target.value = '';
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn-icon"
+                    onClick={() => fileInputRef.current?.click()}
+                    aria-label="Attach files"
+                    title="Attach files"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.75"
+                      width="16"
+                      height="16"
+                      aria-hidden="true"
+                    >
+                      <rect x="4.5" y="4.5" width="15" height="15" rx="3.5" />
+                      <path d="M12 8.75v6.5M8.75 12h6.5" strokeLinecap="square" />
+                    </svg>
+                  </button>
+                  <textarea
+                    placeholder="Type a message, or drop a file..."
+                    value={messageInput}
+                    onChange={(e) => setMessageInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage(e);
+                      }
+                    }}
+                    onPaste={(e) => {
+                      if (e.clipboardData.files.length > 0) {
+                        e.preventDefault();
+                        void handleIncomingFiles(e.clipboardData.files);
+                      }
+                    }}
+                    disabled={sending}
+                    rows={1}
+                  />
+                  {streaming ? (
+                    <Button type="button" variant="secondary" size="sm" onClick={cancelGeneration}>
+                      Stop
+                    </Button>
+                  ) : (
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      size="sm"
+                      loading={sending}
+                      disabled={!messageInput.trim() && !attachments.some(isSendable)}
+                    >
+                      Send
+                    </Button>
+                  )}
+                </div>
+              </form>
+              <ContextUsage usage={context ?? null} error={contextError} previewing={previewing} />
+            </div>
           </>
         ) : selectedChatId && chatError ? (
           <div className="chat-placeholder">
@@ -1185,29 +1285,26 @@ export default function ChatsPage() {
           </div>
         ) : (
           <div className="chat-placeholder">
-            <div className="placeholder-icon">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                width="40"
-                height="40"
-              >
-                <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-              </svg>
-            </div>
-            <h3>Select a chat to start</h3>
-            <p>Choose an existing conversation or create a new one</p>
-            <Button
-              variant="primary"
-              onClick={() => {
-                setOperationError(null);
-                setShowNewChatModal(true);
-              }}
-            >
-              Start New Chat
-            </Button>
+            <EmptyState
+              icon={
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                </svg>
+              }
+              title="Select a chat to start"
+              description="Choose an existing conversation or create a new one"
+              action={
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    setOperationError(null);
+                    setShowNewChatModal(true);
+                  }}
+                >
+                  New chat
+                </Button>
+              }
+            />
           </div>
         )}
       </div>
@@ -1232,7 +1329,7 @@ export default function ChatsPage() {
                 setNewChatReasoning('auto');
               }
             }}
-            helpText="Automatic picks chat, image, video, or audio from the message when those modules are installed. You can still pin a model."
+            helpText="Automatic picks a chat, image, video or audio model from the message."
             options={[
               { value: AUTO_MODEL, label: 'Automatic' },
               ...models
@@ -1243,7 +1340,7 @@ export default function ChatsPage() {
           {showNewChatAgent && (
             <Checkbox
               label="Agent mode"
-              helpText="Let replies search workspace content, check connected GitHub data and manage workspace work, run shell commands and read and write server files when requested. Requires a model that supports tool calling."
+              helpText="Search workspace content, use connected GitHub data and run tools when asked. Needs a tool-calling model."
               checked={newChatAgent}
               onCheckedChange={(checked) => {
                 setNewChatAgent(checked);
@@ -1289,9 +1386,12 @@ export default function ChatsPage() {
         title="Rename chat"
       >
         <form onSubmit={handleRename}>
-          <label htmlFor="chat-name">Chat name</label>
+          <label className="form-label" htmlFor="chat-name">
+            Chat name
+          </label>
           <input
             id="chat-name"
+            type="text"
             className="form-input"
             value={title}
             onChange={(event) => setTitle(event.target.value)}
@@ -1391,13 +1491,17 @@ export default function ChatsPage() {
         isOpen={deleteConfirm !== null}
         onClose={() => setDeleteConfirm(null)}
         title="Delete Chat"
+        size="sm"
       >
         <p>Are you sure you want to delete this chat? This action cannot be undone.</p>
         <div className="modal-actions">
           <Button variant="secondary" onClick={() => setDeleteConfirm(null)}>
             Cancel
           </Button>
-          <Button variant="danger" onClick={() => deleteConfirm && handleDeleteChat(deleteConfirm)}>
+          <Button
+            variant="destructive"
+            onClick={() => deleteConfirm && handleDeleteChat(deleteConfirm)}
+          >
             Delete
           </Button>
         </div>

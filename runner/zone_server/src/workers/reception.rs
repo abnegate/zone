@@ -43,6 +43,7 @@ WHERE task.pr_url IS NOT NULL
   AND run.completed_at IS NOT NULL
   AND run.completed_at > NOW() - make_interval(days => $1::int)
   AND (run.artifacts -> 'pr' ->> 'merged_at') IS NULL
+  AND COALESCE(run.artifacts -> 'pr' ->> 'pr_state', 'open') <> 'closed'
 ORDER BY run.completed_at ASC
 LIMIT $2::bigint
 "#;
@@ -104,6 +105,10 @@ mod tests {
         assert!(
             PENDING_QUERY.contains("'merged_at') IS NULL"),
             "a run whose pull request already merged has a final reception and must not be re-read"
+        );
+        assert!(
+            PENDING_QUERY.contains("'pr_state', 'open') <> 'closed'"),
+            "a pull request shut without merging has a final reception too"
         );
         assert!(
             PENDING_QUERY.contains("task.pr_url IS NOT NULL"),

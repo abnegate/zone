@@ -385,6 +385,15 @@ describe('Sidebar', () => {
       expect(screen.getByLabelText('Expand sidebar')).toBeInTheDocument();
     });
 
+    it('keeps the theme toggle in the header and the logout in the footer row', () => {
+      renderSidebar();
+      const header = document.querySelector('.sidebar-header');
+      const footer = document.querySelector('.sidebar-footer');
+      expect(header?.contains(screen.getByLabelText(/switch to (dark|light) mode/i))).toBe(true);
+      expect(footer?.contains(screen.getByLabelText('Collapse sidebar'))).toBe(true);
+      expect(footer?.contains(screen.getByRole('button', { name: /logout/i }))).toBe(true);
+    });
+
     it('hides text labels when collapsed', async () => {
       renderSidebar();
 

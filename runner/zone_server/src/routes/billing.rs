@@ -1,29 +1,38 @@
 //! Billing and subscription routes
+//!
+//! Provides endpoints for plans, subscriptions, usage and limits. An
+//! organization that has no subscription row yet is put on the default plan
+//! the first time its billing is read.
 
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::db::organization_members;
-use crate::db::plans::{Plan, get_plan_by_id, list_public_plans};
-use crate::db::subscriptions::{Subscription, get_org_limits, get_org_subscription};
+use crate::db::plans::{Plan, get_plan_by_id, get_plan_limits, list_public_plans};
+use crate::db::subscriptions::{Subscription, get_or_create_org_subscription};
 use crate::db::usage::get_usage_for_period;
+use crate::db::workspaces;
 use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
 
-/// Safe subscription data without sensitive Stripe information
+const USAGE_CHAT_MESSAGE: &str = "chat_message";
+
+/// A subscription without its Stripe identifiers, named by its plan.
 #[derive(Debug, Serialize)]
 pub struct SafeSubscription {
     pub id: Uuid,
     pub organization_id: Uuid,
     pub plan_id: Uuid,
+    pub plan_name: String,
+    pub plan_slug: String,
     pub status: String,
     pub current_period_start: chrono::DateTime<chrono::Utc>,
     pub current_period_end: chrono::DateTime<chrono::Utc>,
@@ -35,32 +44,32 @@ pub struct SafeSubscription {
     pub timestamps: Timestamps,
 }
 
-impl From<Subscription> for SafeSubscription {
-    fn from(sub: Subscription) -> Self {
+impl SafeSubscription {
+    fn new(subscription: Subscription, plan: &Plan) -> Self {
         SafeSubscription {
-            id: sub.id,
-            organization_id: sub.organization_id,
-            plan_id: sub.plan_id,
-            status: sub.status.as_str().to_string(),
-            current_period_start: sub.current_period_start,
-            current_period_end: sub.current_period_end,
-            cancel_at_period_end: sub.cancel_at_period_end,
-            canceled_at: sub.canceled_at,
-            trial_start: sub.trial_start,
-            trial_end: sub.trial_end,
-            timestamps: Timestamps::from_utc_opt(sub.created_at, sub.updated_at),
+            id: subscription.id,
+            organization_id: subscription.organization_id,
+            plan_id: subscription.plan_id,
+            plan_name: plan.name.clone(),
+            plan_slug: plan.slug.clone(),
+            status: subscription.status.as_str().to_string(),
+            current_period_start: subscription.current_period_start,
+            current_period_end: subscription.current_period_end,
+            cancel_at_period_end: subscription.cancel_at_period_end,
+            canceled_at: subscription.canceled_at,
+            trial_start: subscription.trial_start,
+            trial_end: subscription.trial_end,
+            timestamps: Timestamps::from_utc_opt(subscription.created_at, subscription.updated_at),
         }
     }
 }
 
-/// Response for subscription details
 #[derive(Debug, Serialize)]
 pub struct SubscriptionResponse {
     pub subscription: SafeSubscription,
     pub plan: Plan,
 }
 
-/// Response for usage stats
 #[derive(Debug, Serialize)]
 pub struct UsageResponse {
     pub current_period_start: chrono::DateTime<chrono::Utc>,
@@ -71,6 +80,8 @@ pub struct UsageResponse {
 #[derive(Debug, Serialize)]
 pub struct UsageStats {
     pub chat_messages: i64,
+    pub members: i64,
+    pub workspaces: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,24 +94,60 @@ struct SinglePlanResponse {
     plan: Plan,
 }
 
+fn failure(status: StatusCode, message: &str) -> Box<Response> {
+    Box::new((status, Json(ErrorResponse::new(message))).into_response())
+}
+
+fn internal(context: &str, error: impl std::fmt::Display) -> Box<Response> {
+    tracing::error!("{context}: {error}");
+    failure(StatusCode::INTERNAL_SERVER_ERROR, context)
+}
+
+async fn require_admin(
+    state: &AppState,
+    org_id: Uuid,
+    claims_sub: &str,
+) -> Result<(), Box<Response>> {
+    let user_id = Uuid::parse_str(claims_sub)
+        .map_err(|_| failure(StatusCode::UNAUTHORIZED, "Invalid user ID in token"))?;
+
+    let is_admin = organization_members::is_admin(state.db(), org_id, user_id)
+        .await
+        .map_err(|error| internal("Failed to check admin status", error))?;
+
+    if is_admin {
+        Ok(())
+    } else {
+        Err(failure(StatusCode::FORBIDDEN, "Admin access required"))
+    }
+}
+
+async fn current_subscription(
+    state: &AppState,
+    org_id: Uuid,
+) -> Result<Subscription, Box<Response>> {
+    get_or_create_org_subscription(state.db(), org_id)
+        .await
+        .map_err(|error| internal("Failed to get subscription", error))?
+        .ok_or_else(|| {
+            failure(
+                StatusCode::NOT_FOUND,
+                "No subscription found for this organization",
+            )
+        })
+}
+
 /// List all public plans
 ///
 /// GET /api/plans
 pub async fn list_plans(State(state): State<AppState>) -> impl IntoResponse {
     match list_public_plans(state.db()).await {
         Ok(plans) => Json(PlansListResponse { plans }).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to list plans: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to list plans")),
-            )
-                .into_response()
-        }
+        Err(error) => *internal("Failed to list plans", error),
     }
 }
 
-/// Get a specific plan by ID
+/// Get a specific plan
 ///
 /// GET /api/plans/:plan_id
 pub async fn get_plan(
@@ -109,23 +156,12 @@ pub async fn get_plan(
 ) -> impl IntoResponse {
     match get_plan_by_id(state.db(), plan_id).await {
         Ok(Some(plan)) => Json(SinglePlanResponse { plan }).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Plan not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get plan: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to get plan")),
-            )
-                .into_response()
-        }
+        Ok(None) => *failure(StatusCode::NOT_FOUND, "Plan not found"),
+        Err(error) => *internal("Failed to get plan", error),
     }
 }
 
-/// Get organization subscription
+/// Get the organization's subscription
 ///
 /// GET /api/organizations/:org_id/subscription
 pub async fn get_org_subscription_handler(
@@ -133,89 +169,29 @@ pub async fn get_org_subscription_handler(
     Path(org_id): Path<Uuid>,
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
-
-    // Verify user is an admin of the organization
-    let is_admin = match organization_members::is_admin(state.db(), org_id, user_id).await {
-        Ok(admin) => admin,
-        Err(e) => {
-            tracing::error!("Failed to check admin status: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to check admin status")),
-            )
-                .into_response();
-        }
-    };
-
-    if !is_admin {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new("Admin access required")),
-        )
-            .into_response();
+    if let Err(response) = require_admin(&state, org_id, &claims.sub).await {
+        return *response;
     }
 
-    // Get subscription
-    let subscription = match get_org_subscription(state.db(), org_id).await {
-        Ok(Some(sub)) => sub,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new(
-                    "No subscription found for this organization",
-                )),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to get subscription: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to get subscription")),
-            )
-                .into_response();
-        }
+    let subscription = match current_subscription(&state, org_id).await {
+        Ok(subscription) => subscription,
+        Err(response) => return *response,
     };
 
-    // Get plan details
     let plan = match get_plan_by_id(state.db(), subscription.plan_id).await {
         Ok(Some(plan)) => plan,
-        Ok(None) => {
-            tracing::error!("Plan not found for subscription");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Plan not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to get plan: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to get plan")),
-            )
-                .into_response();
-        }
+        Ok(None) => return *internal("Plan not found", subscription.plan_id),
+        Err(error) => return *internal("Failed to get plan", error),
     };
 
     Json(SubscriptionResponse {
-        subscription: subscription.into(),
+        subscription: SafeSubscription::new(subscription, &plan),
         plan,
     })
     .into_response()
 }
 
-/// Get organization usage
+/// Get usage for the current billing period
 ///
 /// GET /api/organizations/:org_id/usage
 pub async fn get_org_usage(
@@ -223,90 +199,51 @@ pub async fn get_org_usage(
     Path(org_id): Path<Uuid>,
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
-
-    // Verify user is an admin of the organization
-    let is_admin = match organization_members::is_admin(state.db(), org_id, user_id).await {
-        Ok(admin) => admin,
-        Err(e) => {
-            tracing::error!("Failed to check admin status: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to check admin status")),
-            )
-                .into_response();
-        }
-    };
-
-    if !is_admin {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new("Admin access required")),
-        )
-            .into_response();
+    if let Err(response) = require_admin(&state, org_id, &claims.sub).await {
+        return *response;
     }
 
-    // Get subscription to determine billing period
-    let subscription = match get_org_subscription(state.db(), org_id).await {
-        Ok(Some(sub)) => sub,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new(
-                    "No subscription found for this organization",
-                )),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to get subscription: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to get subscription")),
-            )
-                .into_response();
-        }
+    let subscription = match current_subscription(&state, org_id).await {
+        Ok(subscription) => subscription,
+        Err(response) => return *response,
     };
 
-    // Get usage for current period
     let chat_messages = match get_usage_for_period(
         state.db(),
         org_id,
-        "chat_message",
+        USAGE_CHAT_MESSAGE,
         subscription.current_period_start,
         subscription.current_period_end,
     )
     .await
     {
         Ok(usage) => usage,
-        Err(e) => {
-            tracing::error!("Failed to get usage: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to get usage")),
-            )
-                .into_response();
-        }
+        Err(error) => return *internal("Failed to get usage", error),
+    };
+
+    let members = match organization_members::count_active_members(state.db(), org_id).await {
+        Ok(count) => count,
+        Err(error) => return *internal("Failed to count members", error),
+    };
+
+    let workspaces = match workspaces::count_active_workspaces(state.db(), org_id).await {
+        Ok(count) => count,
+        Err(error) => return *internal("Failed to count workspaces", error),
     };
 
     Json(UsageResponse {
         current_period_start: subscription.current_period_start,
         current_period_end: subscription.current_period_end,
-        usage: UsageStats { chat_messages },
+        usage: UsageStats {
+            chat_messages,
+            members,
+            workspaces,
+        },
     })
     .into_response()
 }
 
-/// Get organization limits
+/// Get the organization's plan limits
 ///
 /// GET /api/organizations/:org_id/limits
 pub async fn get_org_limits_handler(
@@ -314,48 +251,17 @@ pub async fn get_org_limits_handler(
     Path(org_id): Path<Uuid>,
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
-    let user_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Invalid user ID in token")),
-            )
-                .into_response();
-        }
-    };
-
-    // Verify user is an admin of the organization
-    let is_admin = match organization_members::is_admin(state.db(), org_id, user_id).await {
-        Ok(admin) => admin,
-        Err(e) => {
-            tracing::error!("Failed to check admin status: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to check admin status")),
-            )
-                .into_response();
-        }
-    };
-
-    if !is_admin {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new("Admin access required")),
-        )
-            .into_response();
+    if let Err(response) = require_admin(&state, org_id, &claims.sub).await {
+        return *response;
     }
 
-    // Get limits
-    match get_org_limits(state.db(), org_id).await {
+    let subscription = match current_subscription(&state, org_id).await {
+        Ok(subscription) => subscription,
+        Err(response) => return *response,
+    };
+
+    match get_plan_limits(state.db(), subscription.plan_id).await {
         Ok(limits) => Json(limits).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get limits: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to get limits")),
-            )
-                .into_response()
-        }
+        Err(error) => *internal("Failed to get limits", error),
     }
 }

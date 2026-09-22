@@ -14,6 +14,7 @@ export const KnowledgeEntrySchema = z
     type: KnowledgeTypeSchema.optional(),
     content: z.string().nullable().optional(),
     fetched_content: z.string().nullable().optional(),
+    excerpt: z.string().nullable().optional(),
     category: z.string().nullable().optional(),
     tags: z.array(z.string()).optional().default([]),
     token_count: z.number().optional(),
@@ -36,7 +37,10 @@ export const KnowledgeEntrySchema = z
       type: entry.type ?? (sourceUrl ? 'url' : 'text'),
       content: entry.content ?? sourceUrl ?? '',
       fetched_content: entry.fetched_content ?? null,
+      excerpt: entry.excerpt ?? entry.fetched_content ?? entry.content ?? '',
+      category: entry.category ?? null,
       tags: entry.tags ?? [],
+      token_count: entry.token_count ?? null,
       last_refreshed_at: entry.last_refreshed_at ?? entry.last_fetched_at ?? null,
       // Null, not true, when the server did not say: an entry is only shown as
       // missing from the index on the server's word for it, so a payload from
@@ -47,12 +51,31 @@ export const KnowledgeEntrySchema = z
     };
   });
 
-export const CreateKnowledgeRequestSchema = z.object({
-  title: z.string().min(1, 'Title is required'),
-  type: KnowledgeTypeSchema,
-  content: z.string().min(1, 'Content is required'),
-  tags: z.array(z.string()).optional(),
-});
+export const CreateKnowledgeRequestSchema = z
+  .object({
+    title: z.string().min(1, 'Title is required'),
+    type: KnowledgeTypeSchema,
+    content: z.string().optional(),
+    source_url: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+  })
+  .superRefine((request, context) => {
+    if (request.type === 'text' && !request.content?.trim()) {
+      context.addIssue({ code: 'custom', path: ['content'], message: 'Content is required' });
+    }
+    if (request.type === 'url') {
+      const url = request.source_url?.trim() ?? '';
+      if (!url) {
+        context.addIssue({ code: 'custom', path: ['source_url'], message: 'URL is required' });
+      } else if (!/^https?:\/\/\S+$/i.test(url)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['source_url'],
+          message: 'Enter a full http:// or https:// address',
+        });
+      }
+    }
+  });
 
 export const KnowledgeResponseSchema = z.preprocess(
   (data) => (Array.isArray(data) ? { entries: data } : data),

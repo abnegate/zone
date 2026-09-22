@@ -267,4 +267,132 @@ describe('ProtectedRoute', () => {
       expect(screen.queryByTestId('protected-content')).not.toBeInTheDocument();
     });
   });
+
+  // Permissions are global to the account, so a member of one organization
+  // holds organizations:update everywhere; the role held in the current
+  // organization decides whether its settings open.
+  describe('Organization role', () => {
+    const organization = (role: 'owner' | 'admin' | 'member' | undefined) => ({
+      id: 'org-1',
+      name: 'Zone Verify',
+      slug: 'zone-verify',
+      description: null,
+      is_active: true,
+      role,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    const workspaceHook =
+      (role: 'owner' | 'admin' | 'member' | undefined, loading = false, resolvingRole = false) =>
+      () =>
+        ({
+          organizations: [organization(role)],
+          currentOrganization: organization(role),
+          currentWorkspace: null,
+          workspaces: [],
+          loading,
+          resolvingRole,
+          error: null,
+          setCurrentOrganization: () => {},
+          setCurrentWorkspace: () => {},
+          refreshOrganizations: async () => {},
+          refreshWorkspaces: async () => {},
+        }) as ReturnType<typeof import('../context/WorkspaceContext').useWorkspace>;
+
+    beforeEach(() => {
+      authState = createAuthState({
+        isAuthenticated: true,
+        hasPermission: () => true,
+      });
+    });
+
+    it('redirects a plain member of the current organization to unauthorized', () => {
+      renderProtectedRoute(
+        <ProtectedRoute
+          requiredPermission="organizations:update"
+          requiredOrganizationRole="admin"
+          useAuthHook={useAuthHook}
+          useWorkspaceHook={workspaceHook('member')}
+        >
+          <ProtectedContent />
+        </ProtectedRoute>
+      );
+
+      expect(mockCurrentRoute).toBe('/unauthorized');
+      expect(screen.queryByTestId('protected-content')).not.toBeInTheDocument();
+    });
+
+    it('renders children for an admin or owner of the current organization', () => {
+      for (const role of ['admin', 'owner'] as const) {
+        const { unmount } = renderProtectedRoute(
+          <ProtectedRoute
+            requiredPermission="organizations:update"
+            requiredOrganizationRole="admin"
+            useAuthHook={useAuthHook}
+            useWorkspaceHook={workspaceHook(role)}
+          >
+            <ProtectedContent />
+          </ProtectedRoute>
+        );
+
+        expect(screen.getByTestId('protected-content')).toBeInTheDocument();
+        unmount();
+      }
+    });
+
+    it('waits for the organizations to load before deciding', () => {
+      renderProtectedRoute(
+        <ProtectedRoute
+          requiredOrganizationRole="admin"
+          useAuthHook={useAuthHook}
+          useWorkspaceHook={workspaceHook('member', true)}
+        >
+          <ProtectedContent />
+        </ProtectedRoute>
+      );
+
+      expect(screen.getByText('Loading...')).toBeInTheDocument();
+      expect(mockCurrentRoute).toBe('/');
+    });
+
+    it('waits while the role is being resolved from the membership list', () => {
+      renderProtectedRoute(
+        <ProtectedRoute
+          requiredOrganizationRole="admin"
+          useAuthHook={useAuthHook}
+          useWorkspaceHook={workspaceHook(undefined, false, true)}
+        >
+          <ProtectedContent />
+        </ProtectedRoute>
+      );
+
+      expect(screen.getByText('Loading...')).toBeInTheDocument();
+      expect(mockCurrentRoute).toBe('/');
+    });
+
+    it('renders children when the server never says the role, denying only an explicit one', () => {
+      renderProtectedRoute(
+        <ProtectedRoute
+          requiredOrganizationRole="admin"
+          useAuthHook={useAuthHook}
+          useWorkspaceHook={workspaceHook(undefined)}
+        >
+          <ProtectedContent />
+        </ProtectedRoute>
+      );
+
+      expect(screen.getByTestId('protected-content')).toBeInTheDocument();
+      expect(mockCurrentRoute).toBe('/');
+    });
+
+    it('ignores the organization role when none is required', () => {
+      renderProtectedRoute(
+        <ProtectedRoute useAuthHook={useAuthHook} useWorkspaceHook={workspaceHook('member')}>
+          <ProtectedContent />
+        </ProtectedRoute>
+      );
+
+      expect(screen.getByTestId('protected-content')).toBeInTheDocument();
+    });
+  });
 });

@@ -236,9 +236,50 @@ pub async fn cancel_subscription(
     Ok(())
 }
 
+pub const DEFAULT_PLAN_SLUG: &str = "free";
+
+/// Put an organization on the default plan unless it already has a
+/// subscription. The period is the calendar month the row is created in.
+pub async fn ensure_default_subscription<'e, E>(
+    executor: E,
+    org_id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query(
+        r#"
+        INSERT INTO subscriptions (
+            organization_id, plan_id, status, current_period_start, current_period_end
+        )
+        SELECT $1, id, $2, date_trunc('month', NOW()), date_trunc('month', NOW()) + INTERVAL '1 month'
+        FROM plans
+        WHERE slug = $3 AND is_active = TRUE
+        ON CONFLICT (organization_id) DO NOTHING
+        "#,
+    )
+    .bind(org_id)
+    .bind(SubscriptionStatus::Active.as_str())
+    .bind(DEFAULT_PLAN_SLUG)
+    .execute(executor)
+    .await?;
+
+    Ok(())
+}
+
+/// The organization's subscription, created on the default plan for an
+/// organization that predates automatic enrolment.
+pub async fn get_or_create_org_subscription(
+    pool: &PgPool,
+    org_id: Uuid,
+) -> Result<Option<Subscription>, sqlx::Error> {
+    ensure_default_subscription(pool, org_id).await?;
+    get_org_subscription(pool, org_id).await
+}
+
 /// Get plan limits for an organization based on their subscription
 pub async fn get_org_limits(pool: &PgPool, org_id: Uuid) -> Result<PlanLimits, sqlx::Error> {
-    let subscription = get_org_subscription(pool, org_id)
+    let subscription = get_or_create_org_subscription(pool, org_id)
         .await?
         .ok_or_else(|| sqlx::Error::RowNotFound)?;
 

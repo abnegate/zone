@@ -6,14 +6,17 @@ import {
   citationHref,
   citationKindLabel,
   citationProvenanceLabel,
-  formatObservedAt,
-  formatRevision,
+  formatCitationTimes,
+  isRevisionTimestamp,
 } from '../utils/citations';
 
 function CitationItem({ citation }: { citation: Citation }) {
   const href = citationHref(citation);
   const evidence = citationEvidence(citation);
-  const revision = formatRevision(citation.revision);
+  const times = formatCitationTimes(citation);
+  const revisionClass = isRevisionTimestamp(citation.revision)
+    ? 'citation-revision citation-revision--time'
+    : 'citation-revision';
   const claim = citationProvenanceLabel(citation.provenance);
   const external = Boolean(href && /^https?:\/\//i.test(href));
   const title = (
@@ -41,11 +44,13 @@ function CitationItem({ citation }: { citation: Citation }) {
         <span className="citation-link citation-link--static">{title}</span>
       )}
       <span className="citation-meta">
-        {revision ? <span className="citation-revision">{revision}</span> : null}
-        <time className="citation-observed" dateTime={citation.observed_at}>
-          {formatObservedAt(citation.observed_at)}
-        </time>
-        <span className="citation-evidence">{citationEvidenceLabel(evidence)}</span>
+        {times.revision ? <span className={revisionClass}>{times.revision}</span> : null}
+        <span className="citation-observation">
+          <span className="citation-evidence">{citationEvidenceLabel(evidence)}</span>{' '}
+          <time className="citation-observed" dateTime={citation.observed_at}>
+            {times.observed}
+          </time>
+        </span>
         {claim ? <span className="citation-provenance">{claim}</span> : null}
       </span>
       {citation.note ? <p className="citation-note">{citation.note}</p> : null}

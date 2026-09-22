@@ -6,7 +6,7 @@ export const gitlabSource: SourceDefinition = {
   id: 'gitlab',
   name: 'GitLab',
   category: 'file',
-  description: 'Connect to a GitLab project',
+  description: 'GitLab project',
   icon: GitLabIcon,
   badgeColor: 'badge-orange',
   iconWrapperClass: 'gitlab',

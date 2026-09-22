@@ -1,6 +1,7 @@
 import {
   ChatResponseSchema,
   ChatSearchResponseSchema,
+  ChatSourcesResponseSchema,
   ChatsResponseSchema,
   ContextResponseSchema,
   MessageResponseSchema,
@@ -10,6 +11,7 @@ import type {
   Chat,
   ChatSearchOptions,
   ChatSearchResponse,
+  ChatSource,
   ChatWithMessages,
   ContextUsage,
   CreateChatRequest,
@@ -190,9 +192,32 @@ class ChatsApi {
     }
   }
 
+  async getChatSources(chatId: string): Promise<ChatSource[]> {
+    const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/sources`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(await this.failure(response, 'Failed to load attached sources'));
+    }
+    return parse(ChatSourcesResponseSchema, await response.json()).sources;
+  }
+
+  async setChatSources(chatId: string, sourceIds: string[]): Promise<ChatSource[]> {
+    const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/sources`, {
+      method: 'PUT',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ source_ids: sourceIds }),
+    });
+    if (!response.ok) {
+      throw new Error(await this.failure(response, 'Failed to attach sources'));
+    }
+    return parse(ChatSourcesResponseSchema, await response.json()).sources;
+  }
+
   async searchChatMessages(options: ChatSearchOptions): Promise<ChatSearchResponse> {
     const params = new URLSearchParams();
     params.set('query', options.query);
+    params.set('workspace_id', options.workspace_id);
     if (options.chat_id) params.set('chat_id', options.chat_id);
     if (options.limit !== undefined) params.set('limit', options.limit.toString());
 
@@ -200,9 +225,25 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to search chat messages: ${response.status}`);
+      throw new Error(await this.failure(response, 'Failed to search chat messages'));
     }
     return parse(ChatSearchResponseSchema, await response.json());
+  }
+
+  private async failure(response: Response, fallback: string): Promise<string> {
+    try {
+      const parsed = JSON.parse(await response.text()) as {
+        error?: unknown;
+        message?: unknown;
+      };
+      const detail = [parsed.error, parsed.message].find(
+        (value): value is string => typeof value === 'string' && value.length > 0
+      );
+      if (detail) return `${fallback}: ${detail}`;
+    } catch {
+      // A body that is missing or not JSON still names the status below.
+    }
+    return `${fallback}: ${response.status}`;
   }
 }
 

@@ -166,26 +166,3 @@ export async function setupAuth(page: Page, options?: { admin?: boolean }) {
     { token, user }
   );
 }
-
-// Setup common API route mocks for models page
-export async function setupModelsMock(page: Page) {
-  await routeApi(page, '**/api/models*', (route) => {
-    const url = new URL(route.request().url());
-    const source = url.searchParams.get('source');
-
-    if (source) {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ source, models: [], next_cursor: null }),
-      });
-      return;
-    }
-
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ models: [] }),
-    });
-  });
-}

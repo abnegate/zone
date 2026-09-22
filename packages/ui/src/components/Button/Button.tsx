@@ -20,6 +20,7 @@ const buttonVariants = cva(
         sm: 'ui-btn-sm',
         lg: 'ui-btn-lg',
         icon: 'ui-btn-icon',
+        'icon-lg': 'ui-btn-icon-lg',
       },
     },
     defaultVariants: {

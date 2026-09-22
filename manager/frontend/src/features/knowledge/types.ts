@@ -8,7 +8,11 @@ export interface KnowledgeEntry {
   type: KnowledgeType;
   content: string;
   fetched_content: string | null;
+  /** The opening of the content, which is all the list carries. */
+  excerpt: string;
+  category: string | null;
   tags: string[];
+  token_count: number | null;
   last_refreshed_at: string | null;
   /** Whether semantic search can see this entry; null if the server did not say. */
   indexed: boolean | null;
@@ -20,7 +24,10 @@ export interface CreateKnowledgeRequest {
   workspace_id: string;
   title: string;
   type: KnowledgeType;
-  content: string;
+  /** The text of a `text` entry. */
+  content?: string;
+  /** The page a `url` entry is fetched from; the server fetches and indexes it. */
+  source_url?: string;
   tags?: string[];
 }
 

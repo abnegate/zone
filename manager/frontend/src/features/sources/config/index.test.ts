@@ -97,13 +97,12 @@ describe('Source Registry', () => {
       }
     });
 
-    it('does not include disabled sources', () => {
-      const enabled = getEnabledSources();
-      const enabledIds = enabled.map((s) => s.id);
+    it('offers exactly the kinds the server has an adapter for', () => {
+      const enabledIds = getEnabledSources()
+        .map((s) => s.id)
+        .sort();
 
-      // Discord and Slack are disabled
-      expect(enabledIds).not.toContain('discord');
-      expect(enabledIds).not.toContain('slack');
+      expect(enabledIds).toEqual(['filesystem', 'github', 'gitlab', 'text', 'web']);
     });
   });
 
@@ -321,6 +320,10 @@ describe('Individual Source Definitions', () => {
   describe('IMAP Source', () => {
     const imap = getSourceById('imap')!;
 
+    it('is disabled until an adapter exists', () => {
+      expect(imap.enabled).toBe(false);
+    });
+
     it('builds config correctly', () => {
       const config = imap.buildConfig({
         imapHost: 'imap.example.com',
@@ -435,6 +438,10 @@ describe('Individual Source Definitions', () => {
 
   describe('iCal Source', () => {
     const ical = getSourceById('ical')!;
+
+    it('is disabled until an adapter exists', () => {
+      expect(ical.enabled).toBe(false);
+    });
 
     it('builds config correctly', () => {
       const config = ical.buildConfig({

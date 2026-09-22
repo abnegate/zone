@@ -39,7 +39,9 @@ const MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
 /// Configuration for GitLab sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitLabConfig {
-    /// Project path (e.g., "owner/project") or numeric project ID
+    /// Project path (e.g., "owner/project") or numeric project ID (the
+    /// console's wizard stores it as `project_id`)
+    #[serde(alias = "project_id")]
     pub project: String,
     /// Branch name (defaults to repo's default branch)
     #[serde(default)]
@@ -50,8 +52,9 @@ pub struct GitLabConfig {
     /// GitLab API token (optional)
     #[serde(default)]
     pub token: Option<String>,
-    /// Base URL for self-hosted GitLab (defaults to gitlab.com)
-    #[serde(default)]
+    /// Base URL for self-hosted GitLab (defaults to gitlab.com; the console's
+    /// wizard stores it as `host`)
+    #[serde(default, alias = "host")]
     pub base_url: Option<String>,
 }
 
@@ -1506,5 +1509,24 @@ mod tests {
 
         // Should succeed - branch name should be properly URL-encoded
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn the_consoles_project_id_and_host_keys_name_the_project() {
+        let adapter = GitLabAdapter::new();
+        let source = create_test_source(json!({
+            "project_id": "group/project",
+            "host": "https://gitlab.example.com",
+            "branch": "main"
+        }));
+
+        let config = adapter
+            .parse_config(&source)
+            .expect("a source the wizard wrote parses");
+        assert_eq!(config.project, "group/project");
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://gitlab.example.com")
+        );
     }
 }

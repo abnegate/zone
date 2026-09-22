@@ -1,29 +1,35 @@
 import { Link } from 'react-router-dom';
-import '../features/auth/pages/AuthPage.css';
+import { AuthCard, AuthStatus } from '../features/auth/components';
+
+const LockIcon = () => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <rect x="4" y="10" width="16" height="11" rx="2" />
+    <path d="M8 10V7a4 4 0 018 0v3" />
+    <path d="M12 14v3" />
+  </svg>
+);
 
 export default function UnauthorizedPage() {
   return (
-    <div className="auth-page">
-      <div className="auth-container">
-        <div className="auth-header">
-          <h1
-            style={{
-              background: 'linear-gradient(135deg, #ef4444, #f59e0b)',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-            }}
-          >
-            Access Denied
-          </h1>
-          <p>You don't have permission to access this page</p>
-        </div>
-
-        <div className="auth-footer auth-footer--plain">
-          <Link to="/" className="btn btn-primary btn-block">
+    <AuthCard>
+      <AuthStatus
+        icon={<LockIcon />}
+        title="Access Denied"
+        description="You don't have permission to access this page"
+        action={
+          <Link to="/" className="btn btn-primary">
             Go to Home
           </Link>
-        </div>
-      </div>
-    </div>
+        }
+      />
+    </AuthCard>
   );
 }

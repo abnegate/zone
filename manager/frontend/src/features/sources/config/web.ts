@@ -6,7 +6,7 @@ export const webSource: SourceDefinition = {
   id: 'web',
   name: 'Web URL',
   category: 'web',
-  description: 'Fetch content from a URL',
+  description: 'Web page',
   icon: GlobeIcon,
   badgeColor: 'badge-cyan',
   iconWrapperClass: 'web',

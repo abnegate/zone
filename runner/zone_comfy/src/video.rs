@@ -197,7 +197,7 @@ fn build(
 
 /// Seconds of video, as ffprobe reports them.
 async fn duration(config: &Config, clip: &Path) -> Option<f64> {
-    let output = Command::new(&config.ffprobe)
+    let output = Command::new(program(&config.ffprobe)?)
         .args([
             "-v",
             "error",
@@ -221,7 +221,7 @@ async fn sample(config: &Config, clip: &Path, stills: &Path, fps: f64) -> Result
         "fps={fps:.4},scale='min({WORKING_EDGE},iw)':'min({WORKING_EDGE},ih)':\
          force_original_aspect_ratio=decrease:force_divisible_by=2"
     );
-    let output = Command::new(&config.ffmpeg)
+    let output = Command::new(program(&config.ffmpeg).ok_or(TrainError::Disabled)?)
         .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i"])
         .arg(clip)
         .args(["-map", "0:v:0", "-vf", &filter])
@@ -253,6 +253,26 @@ async fn sample(config: &Config, clip: &Path, stills: &Path, fps: f64) -> Result
         ));
     }
     Ok(())
+}
+
+/// A setting read as the name of something to run: trimmed, present, and free
+/// of the control characters no program name carries.
+fn program_name(configured: &str) -> Option<String> {
+    let name = configured.trim();
+    let named = !name.is_empty() && !name.chars().any(char::is_control);
+    named.then(|| name.to_string())
+}
+
+/// The decoder the operator configured, as something this process may execute:
+/// a bare name for `PATH` to resolve, or a path to a file that is there. A
+/// setting shaped like neither is a misconfiguration, not a command.
+fn program(configured: &str) -> Option<String> {
+    let name = program_name(configured)?;
+    let spelled_as_path = name.contains('/') || name.contains('\\');
+    if spelled_as_path && !Path::new(&name).is_file() {
+        return None;
+    }
+    Some(name)
 }
 
 fn measure(stills: &Path, fps: f64) -> Result<Vec<Measured>, TrainError> {
@@ -669,6 +689,51 @@ mod tests {
             .stderr(Stdio::null())
             .status()
             .is_ok()
+    }
+
+    #[test]
+    fn a_decoder_setting_that_is_not_a_program_is_never_run() {
+        assert_eq!(program("ffmpeg").as_deref(), Some("ffmpeg"));
+        assert_eq!(
+            program("  ffprobe  ").as_deref(),
+            Some("ffprobe"),
+            "a padded setting still names the program it names"
+        );
+
+        let installed = std::env::current_exe().unwrap();
+        assert_eq!(
+            program(installed.to_str().unwrap()).as_deref(),
+            installed.to_str(),
+            "an operator may name the decoder by its absolute path"
+        );
+
+        let relative = installed
+            .strip_prefix(std::env::current_dir().unwrap())
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_string));
+        if let Some(relative) = relative {
+            assert_eq!(
+                program(&relative).as_deref(),
+                Some(relative.as_str()),
+                "a decoder named by a path that is there may be run"
+            );
+        }
+
+        for refused in [
+            "",
+            "   ",
+            "ffmpeg\nrm -rf /",
+            "bin/ffmpeg",
+            "../../usr/bin/ffmpeg",
+            "..\\ffmpeg.exe",
+            "/zone/has/no/such/decoder",
+        ] {
+            assert_eq!(
+                program(refused),
+                None,
+                "{refused:?} names no program this process can run"
+            );
+        }
     }
 
     #[test]

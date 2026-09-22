@@ -2,6 +2,7 @@ import { Badge, Button, EmptyState, Modal, Tabs, TabsList, TabsTrigger } from '@
 import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
+import PageBar from '../../../shared/components/PageBar/PageBar';
 import Capabilities from '../components/Capabilities';
 import DownloadOptions from '../components/DownloadOptions';
 import PullJobs from '../components/PullJobs';
@@ -27,10 +28,20 @@ import {
   modelDownload,
   modelDownloadSizes,
   modelSourceUrl,
+  sourceLabel,
 } from '../utils';
 import './ModelsPage.css';
 
 type Tab = 'installed' | 'browse' | 'train';
+
+const DISK_WARNING_PERCENT = 80;
+const DISK_ERROR_PERCENT = 90;
+
+function diskLevel(percent: number): string {
+  if (percent >= DISK_ERROR_PERCENT) return 'models-disk-fill--error';
+  if (percent >= DISK_WARNING_PERCENT) return 'models-disk-fill--warning';
+  return '';
+}
 
 export default function ModelsPage() {
   const {
@@ -38,9 +49,11 @@ export default function ModelsPage() {
     disk,
     loading: modelsLoading,
     error: modelsError,
+    providerErrors,
     refresh,
     deleteModel,
   } = useModels();
+  const ollamaError = modelsError ?? providerErrors.ollama ?? null;
   const browse = useBrowse();
   const pull = usePull();
 
@@ -158,6 +171,8 @@ export default function ModelsPage() {
     detailsModel && !isInstalledModel(detailsModel)
       ? modelDownload(detailsModel, selectedSize || undefined, browse.source)
       : null;
+  const detailsDisplayName =
+    detailsModel && !isInstalledModel(detailsModel) ? detailsModel.display_name : undefined;
   const sourceUrl = detailsModel
     ? modelSourceUrl(
         detailsModel.name,
@@ -171,11 +186,7 @@ export default function ModelsPage() {
 
   return (
     <div className="page page--workspace models-page">
-      <header className="models-header">
-        <div className="models-header-copy">
-          <h1>Models</h1>
-          <p>Manage local chat models and image adapters</p>
-        </div>
+      <PageBar title="Models" subtitle="Local chat models and image adapters">
         {disk && (
           <div
             className="models-disk"
@@ -193,7 +204,7 @@ export default function ModelsPage() {
               aria-label="Disk space used"
             >
               <div
-                className="models-disk-fill"
+                className={`models-disk-fill ${diskLevel(disk.percent)}`}
                 style={{ width: `${Math.min(100, Math.max(0, disk.percent))}%` }}
               />
             </div>
@@ -206,20 +217,20 @@ export default function ModelsPage() {
           className="models-tabs"
         >
           <TabsList>
-            <TabsTrigger value="installed" className="gap-2">
+            <TabsTrigger value="installed">
               Installed
-              {models.length > 0 && <Badge variant="secondary">{models.length}</Badge>}
+              {models.length > 0 && <Badge variant="neutral">{models.length}</Badge>}
             </TabsTrigger>
             <TabsTrigger value="browse">Browse</TabsTrigger>
             <TabsTrigger value="train">Train</TabsTrigger>
           </TabsList>
         </Tabs>
-      </header>
+      </PageBar>
 
-      <div className="models-body">
+      <div className="page-body models-body">
         {pull.jobs.length > 0 && (
           <section className="card pull-jobs-panel">
-            <div className="pull-jobs-panel-header">
+            <div className="card-header">
               <h2>Downloads</h2>
               <span className="help-text">
                 {pull.activeCount} of {MAX_PARALLEL_PULLS} slots in use
@@ -229,45 +240,39 @@ export default function ModelsPage() {
           </section>
         )}
 
-        {/* Installed Tab Content */}
         {activeTab === 'installed' && (
           <>
-            {/* Add Model Section */}
-            <section className="card models-install-panel">
-              <h2>Add Model</h2>
+            <section className="models-install-panel" aria-label="Add model">
+              <form className="models-install-form" onSubmit={handlePull}>
+                <input
+                  type="text"
+                  placeholder="Model name..."
+                  aria-label="Model name"
+                  value={modelInput}
+                  onChange={(e) => setModelInput(e.target.value)}
+                  disabled={pull.activeCount >= MAX_PARALLEL_PULLS}
+                />
+                <Button
+                  type="submit"
+                  loading={Boolean(currentJob)}
+                  disabled={!currentName || !pull.canStart(currentName)}
+                >
+                  {currentJob
+                    ? 'Installing...'
+                    : pull.activeCount >= MAX_PARALLEL_PULLS
+                      ? 'Slots full'
+                      : 'Install'}
+                </Button>
+              </form>
               <p className="help-text">
-                Enter an Ollama model:tag (e.g., llama3.2:3b) or a HuggingFace GGUF reference
+                An Ollama model:tag (llama3.2:3b) or a HuggingFace GGUF reference
                 (hf.co/owner/Model-GGUF). Downloads continue in the background if you leave this
                 page.
               </p>
-
-              <form className="model-form" onSubmit={handlePull}>
-                <div className="input-group">
-                  <input
-                    type="text"
-                    placeholder="Model name..."
-                    value={modelInput}
-                    onChange={(e) => setModelInput(e.target.value)}
-                    disabled={pull.activeCount >= MAX_PARALLEL_PULLS}
-                  />
-                  <Button
-                    type="submit"
-                    loading={Boolean(currentJob)}
-                    disabled={!currentName || !pull.canStart(currentName)}
-                  >
-                    {currentJob
-                      ? 'Installing...'
-                      : pull.activeCount >= MAX_PARALLEL_PULLS
-                        ? 'Slots full'
-                        : 'Install'}
-                  </Button>
-                </div>
-              </form>
             </section>
 
-            {/* Installed Models Section */}
-            <section className="card models-list-panel">
-              <div className="card-header">
+            <section className="models-list-panel">
+              <div className="models-section-head">
                 <h2>Installed Models</h2>
                 <Button variant="ghost" size="icon" onClick={refresh} title="Refresh">
                   <svg
@@ -288,28 +293,21 @@ export default function ModelsPage() {
                 <div className="loading-placeholder">
                   <span className="spinner" /> Loading models...
                 </div>
-              ) : modelsError ? (
+              ) : ollamaError && models.length === 0 ? (
                 <EmptyState
+                  className="models-outage"
                   icon={
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      width="48"
-                      height="48"
-                      className="text-destructive"
-                    >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                       <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                     </svg>
                   }
                   title={
-                    modelsError.includes('401')
+                    ollamaError.includes('401')
                       ? 'Authentication required'
                       : 'Cannot connect to Ollama'
                   }
                   description={
-                    modelsError.includes('401')
+                    ollamaError.includes('401')
                       ? 'Please log in to view installed models.'
                       : 'Unable to fetch models. Make sure Ollama is running and accessible.'
                   }
@@ -322,14 +320,7 @@ export default function ModelsPage() {
               ) : models.length === 0 ? (
                 <EmptyState
                   icon={
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      width="48"
-                      height="48"
-                    >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                       <path d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
                     </svg>
                   }
@@ -338,95 +329,125 @@ export default function ModelsPage() {
                   action={<Button onClick={() => setActiveTab('browse')}>Browse Models</Button>}
                 />
               ) : (
-                <div className="models-list">
-                  {models.map((model) => (
-                    <div
-                      key={model.name}
-                      className={`model-item ${deleting === model.name ? 'deleting' : ''}`}
-                      onClick={() => handleShowDetails(model)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleShowDetails(model)}
-                      role="button"
-                      tabIndex={0}
-                    >
-                      <div className="model-info">
-                        <span className="model-name">{model.name}</span>
-                        {model.details?.format === 'lora' && <span className="tag">adapter</span>}
-                        {model.ready === false && (
-                          <span className="tag">
-                            Requires {model.required_files?.[0] || 'base model'}
-                          </span>
-                        )}
-                        <span className="model-meta">
-                          {[
-                            formatBytes(model.size),
-                            model.details?.parameter_size,
-                            model.details?.quantization_level,
-                            formatDate(model.modified_at),
-                          ]
-                            .filter(Boolean)
-                            .join(' · ')}
+                <>
+                  {ollamaError ? (
+                    <div className="models-provider-banner" role="alert">
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.75"
+                        width="18"
+                        height="18"
+                        aria-hidden="true"
+                      >
+                        <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                      </svg>
+                      <div className="models-provider-banner-text">
+                        <strong>Cannot connect to Ollama</strong>
+                        <span>
+                          Chat and embedding models are missing from this list until Ollama is
+                          reachable. {ollamaError}
                         </span>
-                        <Capabilities capabilities={model.capabilities} />
                       </div>
-                      <div className="model-actions">
-                        <button
-                          className="btn btn-danger-icon"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDeleteConfirm(model.name);
-                          }}
-                          title="Delete model"
-                          type="button"
-                        >
-                          <svg
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            width="16"
-                            height="16"
-                            aria-hidden="true"
-                          >
-                            <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
-                      </div>
+                      <Button onClick={refresh} variant="secondary" size="sm">
+                        Retry
+                      </Button>
                     </div>
-                  ))}
-                </div>
+                  ) : null}
+                  <div className="models-list">
+                    {models.map((model) => (
+                      <div
+                        key={model.name}
+                        className={`model-item ${deleting === model.name ? 'deleting' : ''}`}
+                        onClick={() => handleShowDetails(model)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleShowDetails(model)}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <div className="model-info">
+                          <span className="model-name">{model.name}</span>
+                          <div className="model-meta-row">
+                            <span className="model-meta">
+                              {[
+                                formatBytes(model.size),
+                                model.details?.parameter_size,
+                                model.details?.quantization_level,
+                                formatDate(model.modified_at),
+                              ]
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </span>
+                            {model.details?.format === 'lora' && (
+                              <span className="tag">adapter</span>
+                            )}
+                            {model.ready === false && (
+                              <span className="tag">
+                                Requires {model.required_files?.[0] || 'base model'}
+                              </span>
+                            )}
+                            <Capabilities capabilities={model.capabilities} />
+                          </div>
+                        </div>
+                        <div className="model-actions">
+                          <button
+                            className="btn btn-danger-icon"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteConfirm(model.name);
+                            }}
+                            title="Delete model"
+                            type="button"
+                          >
+                            <svg
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              width="16"
+                              height="16"
+                              aria-hidden="true"
+                            >
+                              <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
               )}
             </section>
           </>
         )}
 
-        {/* Browse Tab Content */}
         {activeTab === 'browse' && (
-          <section className="card models-browse-panel">
-            <Tabs
-              value={browse.source}
-              onValueChange={(v) => browse.changeSource(v as typeof browse.source)}
-              className="mb-4"
-            >
-              <TabsList>
-                <TabsTrigger value="all">All</TabsTrigger>
-                <TabsTrigger value="ollama">Ollama</TabsTrigger>
-                <TabsTrigger value="huggingface">HuggingFace</TabsTrigger>
-              </TabsList>
-            </Tabs>
+          <section className="models-browse-panel">
+            <div className="browse-toolbar">
+              <Tabs
+                value={browse.source}
+                onValueChange={(v) => browse.changeSource(v as typeof browse.source)}
+              >
+                <TabsList>
+                  <TabsTrigger value="all">All</TabsTrigger>
+                  <TabsTrigger value="ollama">Ollama</TabsTrigger>
+                  <TabsTrigger value="huggingface">HuggingFace</TabsTrigger>
+                </TabsList>
+              </Tabs>
 
-            <form className="search-container" onSubmit={handleSearch}>
-              <input
-                type="text"
-                placeholder="Search models..."
-                value={browse.query}
-                onChange={(e) => browse.setQuery(e.target.value)}
-              />
-              <Button type="submit" variant="secondary">
-                Search
-              </Button>
-            </form>
+              <form className="browse-search" onSubmit={handleSearch}>
+                <input
+                  type="search"
+                  placeholder="Search models..."
+                  aria-label="Search models"
+                  value={browse.query}
+                  onChange={(e) => browse.setQuery(e.target.value)}
+                />
+                <Button type="submit" variant="secondary">
+                  Search
+                </Button>
+              </form>
 
-            <div className="browse-controls">
               <label className="browse-sort">
                 <span>Sort</span>
                 <select
@@ -441,7 +462,9 @@ export default function ModelsPage() {
                   ))}
                 </select>
               </label>
+            </div>
 
+            <div className="browse-filters">
               <div className="browse-filter-groups">
                 <div className="filter-pills" role="group" aria-label="Filter by medium">
                   {MODEL_MEDIUM_FILTERS.map((option) => (
@@ -487,13 +510,9 @@ export default function ModelsPage() {
               </div>
 
               {browse.hasActiveFilters && (
-                <button
-                  type="button"
-                  className="browse-clear-filters"
-                  onClick={browse.clearFilters}
-                >
+                <Button variant="ghost" size="sm" onClick={browse.clearFilters}>
                   Clear filters
-                </button>
+                </Button>
               )}
             </div>
 
@@ -519,11 +538,11 @@ export default function ModelsPage() {
         {activeTab === 'train' && <TrainPanel onTrained={refresh} />}
       </div>
 
-      {/* Delete Confirmation Modal */}
       <Modal
         isOpen={deleteConfirm !== null}
         onClose={() => setDeleteConfirm(null)}
         title="Delete Model"
+        size="sm"
       >
         <p>
           Are you sure you want to delete <strong>{deleteConfirm}</strong>?
@@ -543,72 +562,131 @@ export default function ModelsPage() {
         </div>
       </Modal>
 
-      {/* Model Details Modal */}
       {detailsModel && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setDetailsModel(null)}
-            onKeyDown={(e) => e.key === 'Escape' && setDetailsModel(null)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content modal-details">
-            <button
-              className="modal-close"
-              onClick={() => setDetailsModel(null)}
-              type="button"
-              aria-label="Close"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                width="20"
-                height="20"
-                aria-hidden="true"
-              >
-                <path d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-
-            <div className="modal-details-header">
-              <h3>
-                {!isInstalledModel(detailsModel) && detailsModel.display_name
-                  ? detailsModel.display_name
-                  : detailsModel.name}
-              </h3>
-              <span className="details-source">
-                {isInstalledModel(detailsModel)
-                  ? 'Installed'
-                  : detailsModel.source || browse.source}
-              </span>
+        <Modal
+          isOpen
+          onClose={() => setDetailsModel(null)}
+          title={detailsDisplayName || detailsModel.name}
+          titleClassName={detailsDisplayName ? undefined : 'ui-dialog-title--mono'}
+          badge={
+            isInstalledModel(detailsModel) ? (
+              <Badge variant="accent">Installed</Badge>
+            ) : (
+              <Badge variant="info">{sourceLabel(detailsModel.source || browse.source)}</Badge>
+            )
+          }
+          size="lg"
+        >
+          {sourceUrl && (
+            <div className="details-link">
+              <a href={sourceUrl} target="_blank" rel="noreferrer">
+                View source
+              </a>
             </div>
+          )}
 
-            {sourceUrl && (
-              <div className="details-link">
-                <a href={sourceUrl} target="_blank" rel="noreferrer">
-                  View source
-                </a>
-              </div>
-            )}
-
-            {isInstalledModel(detailsModel) ? (
-              <>
-                {detailsModel.details?.description && (
-                  <p className="details-description">{detailsModel.details.description}</p>
-                )}
-                <div className="details-meta">
+          {isInstalledModel(detailsModel) ? (
+            <>
+              {detailsModel.details?.description && (
+                <p className="details-description">{detailsModel.details.description}</p>
+              )}
+              <div className="details-meta details-meta--row">
+                <div className="details-meta-item">
+                  <span className="details-label">Size</span>
+                  <span>{formatBytes(detailsModel.size)}</span>
+                </div>
+                {detailsModel.details?.parameter_size && (
                   <div className="details-meta-item">
-                    <span className="details-label">Size</span>
-                    <span>{formatBytes(detailsModel.size)}</span>
+                    <span className="details-label">Parameters</span>
+                    <span>{detailsModel.details.parameter_size}</span>
                   </div>
+                )}
+                {detailsModel.details?.quantization_level && (
+                  <div className="details-meta-item">
+                    <span className="details-label">Quantization</span>
+                    <span>{detailsModel.details.quantization_level}</span>
+                  </div>
+                )}
+                {detailsModel.details?.family && (
+                  <div className="details-meta-item">
+                    <span className="details-label">Family</span>
+                    <span>{detailsModel.details.family}</span>
+                  </div>
+                )}
+                <div className="details-meta-item">
+                  <span className="details-label">Modified</span>
+                  <span>{formatDate(detailsModel.modified_at)}</span>
+                </div>
+              </div>
+              <div className="modal-actions">
+                <Button variant="ghost" onClick={() => setDetailsModel(null)}>
+                  Close
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    setDetailsModel(null);
+                    setDeleteConfirm(detailsModel.name);
+                  }}
+                >
+                  Delete Model
+                </Button>
+              </div>
+            </>
+          ) : (
+            <>
+              {detailsModel.description && (
+                <p className="details-description">{detailsModel.description}</p>
+              )}
+
+              {(detailsModel.details?.parameter_size ||
+                detailsModel.size ||
+                modelSize ||
+                detailsModel.details?.context_length) && (
+                <div className="details-stats">
                   {detailsModel.details?.parameter_size && (
+                    <div className="details-stat">
+                      <span className="details-stat-value">
+                        {detailsModel.details.parameter_size}
+                      </span>
+                      <span className="details-stat-label">Parameters</span>
+                    </div>
+                  )}
+                  {(detailsModel.size || modelSize) && (
+                    <div className="details-stat">
+                      <span className="details-stat-value">
+                        {formatBytes(detailsModel.size || modelSize || 0)}
+                      </span>
+                      <span className="details-stat-label">
+                        {detailsModel.source === 'huggingface' ? 'Repo size' : 'Size'}
+                      </span>
+                    </div>
+                  )}
+                  {detailsModel.details?.context_length && (
+                    <div className="details-stat">
+                      <span className="details-stat-value">
+                        {formatContextLength(detailsModel.details.context_length)}
+                      </span>
+                      <span className="details-stat-label">Context</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {(detailsModel.details?.family ||
+                detailsModel.details?.quantization_level ||
+                detailsModel.details?.format ||
+                detailsModel.details?.license ||
+                detailsModel.details?.ram_required_gb ||
+                detailsModel.author ||
+                detailsModel.downloads != null ||
+                detailsModel.likes != null ||
+                detailsModel.modified_at) && (
+                <div className="details-meta">
+                  {detailsModel.details?.family && (
                     <div className="details-meta-item">
-                      <span className="details-label">Parameters</span>
-                      <span>{detailsModel.details.parameter_size}</span>
+                      <span className="details-label">Family</span>
+                      <span>{detailsModel.details.family}</span>
                     </div>
                   )}
                   {detailsModel.details?.quantization_level && (
@@ -617,228 +695,134 @@ export default function ModelsPage() {
                       <span>{detailsModel.details.quantization_level}</span>
                     </div>
                   )}
-                  {detailsModel.details?.family && (
+                  {detailsModel.details?.format && (
                     <div className="details-meta-item">
-                      <span className="details-label">Family</span>
-                      <span>{detailsModel.details.family}</span>
+                      <span className="details-label">Format</span>
+                      <span>{detailsModel.details.format}</span>
                     </div>
                   )}
-                  <div className="details-meta-item">
-                    <span className="details-label">Modified</span>
-                    <span>{formatDate(detailsModel.modified_at)}</span>
-                  </div>
+                  {detailsModel.details?.license && (
+                    <div className="details-meta-item">
+                      <span className="details-label">License</span>
+                      <span>{detailsModel.details.license}</span>
+                    </div>
+                  )}
+                  {detailsModel.details?.ram_required_gb && (
+                    <div className="details-meta-item">
+                      <span className="details-label">RAM</span>
+                      <span>{detailsModel.details.ram_required_gb} GB</span>
+                    </div>
+                  )}
+                  {detailsModel.author && (
+                    <div className="details-meta-item details-author">
+                      <span className="details-label">Author</span>
+                      <span>{detailsModel.author}</span>
+                    </div>
+                  )}
+                  {detailsModel.downloads != null && (
+                    <div className="details-meta-item">
+                      <span className="details-label">
+                        {detailsModel.source === 'ollama' ? 'Pulls' : 'Downloads'}
+                      </span>
+                      <span>{formatNumber(detailsModel.downloads)}</span>
+                    </div>
+                  )}
+                  {detailsModel.likes != null && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Likes</span>
+                      <span>{formatNumber(detailsModel.likes)}</span>
+                    </div>
+                  )}
+                  {detailsModel.modified_at && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Updated</span>
+                      <span>{formatDate(detailsModel.modified_at)}</span>
+                    </div>
+                  )}
                 </div>
+              )}
+
+              <div className="details-use-cases">
+                <span className="details-label">Capabilities</span>
+                <Capabilities capabilities={detailsModel.capabilities} tags={detailsModel.tags} />
+              </div>
+
+              {download?.name && (
+                <DownloadOptions
+                  model={detailsModel}
+                  options={modelDownloadSizes(detailsModel)}
+                  pulling={!pull.canStart(download.name)}
+                  onInstall={(name) => handleInstall(detailsModel, name)}
+                />
+              )}
+
+              {download?.name && modelDownloadSizes(detailsModel).length < 2 && (
+                <div className="details-install">
+                  <span className="details-label">Install command</span>
+                  <code>{download.name}</code>
+                </div>
+              )}
+              {download?.reason && <p className="help-text">{download.reason}</p>}
+
+              {modelCard !== null && (
+                <div className="details-card">
+                  <div className="details-card-header">
+                    <span className="details-label">Model Card</span>
+                    <button
+                      className={`details-card-toggle ${modelCardExpanded ? 'expanded' : ''}`}
+                      onClick={() => setModelCardExpanded(!modelCardExpanded)}
+                      type="button"
+                    >
+                      {modelCardExpanded ? 'Collapse' : 'Expand'}
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        width="12"
+                        height="12"
+                        aria-hidden="true"
+                      >
+                        <path d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                  </div>
+                  {modelCardExpanded && (
+                    <div
+                      className="details-card-content details-card-text"
+                      // biome-ignore lint/security/noDangerouslySetInnerHtml: Content is sanitized with DOMPurify
+                      dangerouslySetInnerHTML={{
+                        __html: DOMPurify.sanitize(modelCard),
+                      }}
+                    />
+                  )}
+                </div>
+              )}
+
+              {modelCardLoading && (
+                <div className="details-card-loading">
+                  <span className="spinner" /> Loading model card...
+                </div>
+              )}
+
+              {modelDownloadSizes(detailsModel).length < 2 && (
                 <div className="modal-actions">
+                  <Button variant="ghost" onClick={() => setDetailsModel(null)}>
+                    Close
+                  </Button>
                   <Button
-                    variant="destructive"
-                    onClick={() => {
-                      setDetailsModel(null);
-                      setDeleteConfirm(detailsModel.name);
-                    }}
+                    disabled={!download?.name || !pull.canStart(download.name)}
+                    onClick={() =>
+                      handleInstall(detailsModel, selectedSize || defaultDownloadName(detailsModel))
+                    }
                   >
-                    Delete Model
+                    {download?.name ? 'Install Model' : download?.label}
                   </Button>
                 </div>
-              </>
-            ) : (
-              <>
-                {detailsModel.description && (
-                  <p className="details-description">{detailsModel.description}</p>
-                )}
-
-                {(detailsModel.details?.parameter_size ||
-                  detailsModel.size ||
-                  modelSize ||
-                  detailsModel.details?.context_length) && (
-                  <div className="details-stats">
-                    {detailsModel.details?.parameter_size && (
-                      <div className="details-stat">
-                        <span className="details-stat-value">
-                          {detailsModel.details.parameter_size}
-                        </span>
-                        <span className="details-stat-label">Parameters</span>
-                      </div>
-                    )}
-                    {(detailsModel.size || modelSize) && (
-                      <div className="details-stat">
-                        <span className="details-stat-value">
-                          {formatBytes(detailsModel.size || modelSize || 0)}
-                        </span>
-                        <span className="details-stat-label">
-                          {detailsModel.source === 'huggingface' ? 'Repo size' : 'Size'}
-                        </span>
-                      </div>
-                    )}
-                    {detailsModel.details?.context_length && (
-                      <div className="details-stat">
-                        <span className="details-stat-value">
-                          {formatContextLength(detailsModel.details.context_length)}
-                        </span>
-                        <span className="details-stat-label">Context</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {(detailsModel.details?.family ||
-                  detailsModel.details?.quantization_level ||
-                  detailsModel.details?.format ||
-                  detailsModel.details?.license ||
-                  detailsModel.details?.ram_required_gb ||
-                  detailsModel.author ||
-                  detailsModel.downloads != null ||
-                  detailsModel.likes != null ||
-                  detailsModel.modified_at) && (
-                  <div className="details-meta">
-                    {detailsModel.details?.family && (
-                      <div className="details-meta-item">
-                        <span className="details-label">Family</span>
-                        <span>{detailsModel.details.family}</span>
-                      </div>
-                    )}
-                    {detailsModel.details?.quantization_level && (
-                      <div className="details-meta-item">
-                        <span className="details-label">Quantization</span>
-                        <span>{detailsModel.details.quantization_level}</span>
-                      </div>
-                    )}
-                    {detailsModel.details?.format && (
-                      <div className="details-meta-item">
-                        <span className="details-label">Format</span>
-                        <span>{detailsModel.details.format}</span>
-                      </div>
-                    )}
-                    {detailsModel.details?.license && (
-                      <div className="details-meta-item">
-                        <span className="details-label">License</span>
-                        <span>{detailsModel.details.license}</span>
-                      </div>
-                    )}
-                    {detailsModel.details?.ram_required_gb && (
-                      <div className="details-meta-item">
-                        <span className="details-label">RAM</span>
-                        <span>{detailsModel.details.ram_required_gb} GB</span>
-                      </div>
-                    )}
-                    {detailsModel.author && (
-                      <div className="details-meta-item details-author">
-                        <span className="details-label">Author</span>
-                        <span>{detailsModel.author}</span>
-                      </div>
-                    )}
-                    {detailsModel.downloads != null && (
-                      <div className="details-meta-item">
-                        <span className="details-label">
-                          {detailsModel.source === 'ollama' ? 'Pulls' : 'Downloads'}
-                        </span>
-                        <span>{formatNumber(detailsModel.downloads)}</span>
-                      </div>
-                    )}
-                    {detailsModel.likes != null && (
-                      <div className="details-meta-item">
-                        <span className="details-label">Likes</span>
-                        <span>{formatNumber(detailsModel.likes)}</span>
-                      </div>
-                    )}
-                    {detailsModel.modified_at && (
-                      <div className="details-meta-item">
-                        <span className="details-label">Updated</span>
-                        <span>{formatDate(detailsModel.modified_at)}</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <div className="details-use-cases">
-                  <span className="details-label">Capabilities</span>
-                  <Capabilities capabilities={detailsModel.capabilities} />
-                </div>
-
-                {detailsModel.tags && detailsModel.tags.length > 0 && (
-                  <div className="details-tags">
-                    {detailsModel.tags.slice(0, 8).map((tag) => (
-                      <span key={tag} className="tag">
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-                {download?.name && (
-                  <DownloadOptions
-                    model={detailsModel}
-                    options={modelDownloadSizes(detailsModel)}
-                    pulling={!pull.canStart(download.name)}
-                    onInstall={(name) => handleInstall(detailsModel, name)}
-                  />
-                )}
-
-                {download?.name && modelDownloadSizes(detailsModel).length < 2 && (
-                  <div className="details-install">
-                    <span className="details-label">Install command</span>
-                    <code>{download.name}</code>
-                  </div>
-                )}
-                {download?.reason && <p className="help-text">{download.reason}</p>}
-
-                {modelCard !== null && (
-                  <div className="details-card">
-                    <div className="details-card-header">
-                      <span className="details-label">Model Card</span>
-                      <button
-                        className={`details-card-toggle ${modelCardExpanded ? 'expanded' : ''}`}
-                        onClick={() => setModelCardExpanded(!modelCardExpanded)}
-                        type="button"
-                      >
-                        {modelCardExpanded ? 'Collapse' : 'Expand'}
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          width="12"
-                          height="12"
-                          aria-hidden="true"
-                        >
-                          <path d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </button>
-                    </div>
-                    {modelCardExpanded && (
-                      <div
-                        className="details-card-content details-card-text"
-                        // biome-ignore lint/security/noDangerouslySetInnerHtml: Content is sanitized with DOMPurify
-                        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(modelCard) }}
-                      />
-                    )}
-                  </div>
-                )}
-
-                {modelCardLoading && (
-                  <div className="details-card-loading">
-                    <span className="spinner" /> Loading model card...
-                  </div>
-                )}
-
-                {modelDownloadSizes(detailsModel).length < 2 && (
-                  <div className="modal-actions">
-                    <Button
-                      disabled={!download?.name || !pull.canStart(download.name)}
-                      onClick={() =>
-                        handleInstall(
-                          detailsModel,
-                          selectedSize || defaultDownloadName(detailsModel)
-                        )
-                      }
-                    >
-                      {download?.name ? 'Install Model' : download?.label}
-                    </Button>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </div>
+              )}
+            </>
+          )}
+        </Modal>
       )}
     </div>
   );

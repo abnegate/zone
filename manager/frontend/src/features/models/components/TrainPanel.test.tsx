@@ -8,6 +8,28 @@ const mockTrainBases = mock(() =>
   ])
 );
 const mockCaptions = mock(() => Promise.resolve({ captions: ['generated caption'] }));
+const mockFrames = mock(() =>
+  Promise.resolve({
+    sampled: 32,
+    sampled_fps: 8,
+    frames: [
+      {
+        filename: 'frame-0000.png',
+        bytes_base64: 'aaa',
+        timestamp_ms: 0,
+        mirrored: false,
+        group: 0,
+      },
+      {
+        filename: 'frame-0001.png',
+        bytes_base64: 'bbb',
+        timestamp_ms: 250,
+        mirrored: true,
+        group: 0,
+      },
+    ],
+  })
+);
 const mockTrain = mock(() =>
   Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
 );
@@ -16,6 +38,7 @@ mock.module('../../../api/models', () => ({
   modelsApi: {
     trainBases: mockTrainBases,
     captions: mockCaptions,
+    frames: mockFrames,
     train: mockTrain,
   },
 }));
@@ -28,6 +51,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   mockCaptions.mockClear();
+  mockFrames.mockClear();
   mockTrain.mockClear();
   mockTrain.mockImplementation(() =>
     Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
@@ -122,6 +146,153 @@ function deferFileReads(): {
 }
 
 describe('TrainPanel', () => {
+  it('receipts an accepted clip under the Video zone and clears its frames from there', async () => {
+    const pending = deferred<Awaited<ReturnType<typeof mockFrames>>>();
+    mockFrames.mockImplementationOnce(() => pending.promise);
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit');
+    });
+    await selectBase('FLUX.1 Schnell');
+    const field = screen.getByLabelText('Video').closest('.drop-zone-field') as HTMLElement;
+
+    fireEvent.change(screen.getByLabelText('Video'), {
+      target: { files: [new File(['clip'], 'subject.mp4', { type: 'video/mp4' })] },
+    });
+    expect(field.contains(await screen.findByText('Reading subject.mp4…'))).toBe(true);
+    expect(screen.getByLabelText('Video')).toBeDisabled();
+
+    pending.resolve({
+      sampled: 32,
+      sampled_fps: 8,
+      frames: [
+        {
+          filename: 'frame-0000.png',
+          bytes_base64: 'aaa',
+          timestamp_ms: 0,
+          mirrored: false,
+          group: 0,
+        },
+        {
+          filename: 'frame-0001.png',
+          bytes_base64: 'bbb',
+          timestamp_ms: 250,
+          mirrored: true,
+          group: 0,
+        },
+      ],
+    });
+    const receipt = await screen.findByText(/32 frames read at 8\.0\/s, 2 kept/);
+    expect(receipt).toHaveTextContent('subject.mp4: 32 frames read at 8.0/s, 2 kept');
+    expect(field.contains(receipt)).toBe(true);
+    expect(screen.queryByText('Reading subject.mp4…')).toBeNull();
+    expect(screen.getAllByRole('group', { name: /target pair/i })).toHaveLength(2);
+    const mirror = screen.getByLabelText('Mirror half the frames of each second');
+    expect(mirror.compareDocumentPosition(receipt) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+
+    const remove = screen.getByRole('button', { name: 'Remove clip subject.mp4' });
+    expect(field.contains(remove)).toBe(true);
+    fireEvent.click(remove);
+    await waitFor(() => {
+      expect(screen.queryAllByRole('group', { name: /target pair/i })).toHaveLength(0);
+    });
+    expect(screen.queryByText(/frames read at/)).toBeNull();
+    expect(screen.getByLabelText('Video').closest('.drop-zone')).toHaveTextContent(
+      'Drop a clip here, or browse'
+    );
+  });
+
+  it('titles each target inside its own row instead of on the fieldset border', async () => {
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit');
+    });
+    await selectBase('FLUX.1 Schnell');
+    await addTargets(file('frame-0000.png', 'a'), file('frame-0001.png', 'b'));
+
+    expect(document.querySelector('legend')).toBeNull();
+    const [first] = screen.getAllByRole('group', { name: 'Target pair 1: frame-0000.png' });
+    const head = first.querySelector('.train-pair-head');
+    expect(head).toHaveTextContent('Target 1');
+    expect(head).toHaveTextContent('frame-0000.png');
+    expect(first.querySelector('.train-pair-thumb img')?.getAttribute('src')).toMatch(
+      /^data:image\/png;base64,/
+    );
+    expect(screen.getByLabelText('Caption for frame-0000.png')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Move target 1: frame-0000.png up' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Move target 2: frame-0001.png down' })
+    ).toBeDisabled();
+  });
+
+  it('lays the form out as paired drop zones, an identity row and a right-aligned footer', async () => {
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit');
+    });
+    await selectBase('FLUX.1 Schnell');
+
+    const targets = screen.getByLabelText('Target images');
+    const clips = screen.getByLabelText('Video');
+    expect(targets.closest('.drop-zone')).toHaveTextContent('Drop images here, or browse');
+    expect(clips.closest('.drop-zone')).toHaveTextContent('Drop a clip here, or browse');
+    expect(targets.closest('.train-drops')).toBe(clips.closest('.train-drops'));
+    expect(targets.closest('.train-drops')).not.toHaveClass('train-drops--single');
+    expect(screen.getByText('Target images')).toHaveAttribute(
+      'id',
+      targets.getAttribute('aria-labelledby')
+    );
+    expect(screen.getByText('Video')).toHaveAttribute('id', clips.getAttribute('aria-labelledby'));
+    expect(screen.getByText('Choose the images this LoRA should learn from.')).toHaveAttribute(
+      'id',
+      targets.getAttribute('aria-describedby')
+    );
+    expect(document.querySelector('.ui-input[type="file"]')).toBeNull();
+
+    const identity = screen.getByLabelText('Name').closest('.train-identity');
+    expect(identity).not.toBeNull();
+    expect(screen.getByLabelText('Trigger word').closest('.train-identity')).toBe(identity);
+    expect(screen.getByLabelText('Base').closest('.train-identity')).toBeNull();
+
+    const train = screen.getByRole('button', { name: 'Train' });
+    expect(train.parentElement).toHaveClass('train-footer');
+
+    await addTargets(file('frame-0000.png', 'a'));
+    const caption = screen.getByRole('button', { name: 'Auto-caption images' });
+    expect(caption.parentElement).toHaveClass('train-caption');
+    expect(caption.nextElementSibling).toHaveClass('train-caption-hint');
+
+    await selectBase('Qwen Image Edit');
+    expect(screen.queryByLabelText('Video')).toBeNull();
+    expect(screen.getByLabelText('Target images').closest('.train-drops')).toHaveClass(
+      'train-drops--single'
+    );
+  });
+
+  it('adds dropped images as targets and ignores files the zone does not accept', async () => {
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit');
+    });
+    await selectBase('FLUX.1 Schnell');
+
+    const zone = screen.getByLabelText('Target images').closest('.drop-zone') as HTMLElement;
+    fireEvent.dragOver(zone);
+    expect(zone).toHaveClass('drop-zone--over');
+    fireEvent.drop(zone, {
+      dataTransfer: {
+        files: [file('frame-0000.png', 'a'), new File(['x'], 'notes.txt', { type: 'text/plain' })],
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getAllByRole('group', { name: /target pair/i })).toHaveLength(1);
+    });
+    expect(
+      screen.getByRole('group', { name: 'Target pair 1: frame-0000.png' })
+    ).toBeInTheDocument();
+    expect(zone).not.toHaveClass('drop-zone--over');
+  });
+
   it('gives every field its own labelled control', async () => {
     render(<TrainPanel onTrained={mock()} />);
 
