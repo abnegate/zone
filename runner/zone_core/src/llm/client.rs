@@ -638,6 +638,11 @@ mod tests {
     const SIGNED_OUT: &str = r#"{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","result":"Not logged in · Please run /login"}"#;
     const REFUSAL: &str = "Not logged in \u{b7} Please run /login";
 
+    /// What `claude --print --output-format stream-json` really emits when the
+    /// host session has expired: the refusal arrives as assistant text first,
+    /// and only the result that follows says it was never an answer.
+    const SIGNED_OUT_ASSISTANT: &str = r#"{"type":"assistant","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4","content":[{"type":"text","text":"Not logged in \u00b7 Please run /login"}],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}},"session_id":"s1"}"#;
+
     /// A stand-in for an agent CLI, so no test needs one signed in on the host.
     fn fake(directory: &TempDir, script: &str) -> PathBuf {
         use std::io::Write;
@@ -1228,6 +1233,28 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         assert!(
             reasons(&delivered).is_empty(),
             "a refused turn was ended as a finished one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_spoken_before_it_is_declared_still_fails_the_turn() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let client = agent_client(fake(
+            &directory,
+            &format!("printf '%s\\n' '{SIGNED_OUT_ASSISTANT}' '{SIGNED_OUT}'"),
+        ));
+
+        let stream = stream_turn(&client, None).await.expect("a running agent");
+        let (delivered, failure) = collected(stream).await;
+
+        let failure = failure.expect("a signed-out agent to fail the turn");
+        assert!(
+            failure.to_string().contains(REFUSAL),
+            "lost the agent's wording: {failure}"
+        );
+        assert!(
+            reasons(&delivered).is_empty(),
+            "a turn that spoke before it failed was still ended as a finished one"
         );
     }
 
