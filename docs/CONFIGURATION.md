@@ -176,6 +176,17 @@ sees at all. Turning both off their safe settings on a single-user self-host is
 allowed, and means what it says: a chat message can read, write and run commands
 on the host with nothing standing in between.
 
+### Naming a model
+
+A chat's model name is passed to the agent as `--model`, so on a CLI backend it
+has to be a name that agent knows — `sonnet`, `opus`, `haiku` for `claude` —
+not one of the Ollama models the console's picker offers, which are resolved
+from the installed catalog and mean nothing to a coding agent. Naming one the
+agent does not have fails the turn in its own words ("There's an issue with the
+selected model... Run --model to pick a different model"), which is clear enough
+to act on but is not yet offered as a choice anywhere in the console. Until the
+picker knows about this backend, set the chat's model to the agent's own name.
+
 ### Before you switch
 
 The CLI has to be signed in **as the user the server runs as** — the child
