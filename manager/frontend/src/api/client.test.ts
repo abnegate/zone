@@ -272,6 +272,7 @@ describe('Client', () => {
     const parsed = <T extends typeof mockChat>(chat: T) => ({
       ...chat,
       reasoning_effort: 'auto',
+      agent_sandboxed: true,
     });
 
     it('getChats fetches all chats', async () => {
