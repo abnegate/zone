@@ -120,6 +120,63 @@ For production, regenerate secrets for security.
 
 ---
 
+## 🧑‍💻 Model Backend
+
+Where chat turns, task runs, titles and summaries get their completions. The
+default is the OpenAI-compatible endpoint `LITELLM_HOST` names. A single-user
+self-host can instead run a coding agent CLI that is already signed in on the
+host, and spend that personal subscription rather than a metered API key.
+
+### `ZONE_LLM_BACKEND`
+- **Default**: `litellm`
+- **Description**: Which backend answers a completion
+- **Options**:
+  - `litellm` (the endpoint `LITELLM_HOST` names)
+  - `claude` (runs the `claude` CLI on this host)
+  - `codex` (runs the `codex` CLI on this host)
+- **Note**: With `claude` or `codex`, `LITELLM_HOST` and `LITELLM_KEY` are no
+  longer required at boot, so a host with no LiteLLM at all can start.
+
+### `ZONE_LLM_BACKEND_EXECUTABLE`
+- **Default**: unset, so the agent's own name is looked up on `PATH`
+- **Description**: An explicit binary to run instead, for a CLI that is not on
+  the server's `PATH` (`/opt/homebrew/bin/codex`, say)
+- **Usage**: Only with `ZONE_LLM_BACKEND` set to `claude` or `codex`; setting it
+  otherwise is refused at boot, because it would mean believing a CLI was
+  serving turns while the HTTP endpoint was still being billed.
+
+### What a CLI backend gives up
+
+Zone's own tools are **not offered** on a turn a CLI agent serves. A coding
+agent runs its own tool loop against its own file access and has no way to call
+Zone's registry, so retrieval, the workspace tools, task control flow and
+citations are unavailable on those turns; the chat says so once, on the turn.
+What you get is the model itself, answering and streaming as it goes. Tasks,
+titles, summaries and media-intent classification all follow the same backend,
+because a CLI-only host has no endpoint for them to fall back to.
+
+### Before you switch
+
+The CLI has to be signed in **as the user the server runs as** — the child
+process inherits that host session, and any `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY` in the server's environment is removed from it so a stray key
+cannot quietly bill you instead. Check with `claude auth status` (it prints
+`loggedIn`) or `codex login status`. A signed-out agent fails the turn and says
+so in the agent's own words rather than answering; note that `codex login
+status` can report a session that has since expired.
+
+In a container, both the binary and its credentials have to be inside it — the
+compose images carry neither, so this backend suits a host install or an image
+you have added the CLI to.
+
+### Why this is not a workspace setting
+
+A CLI agent runs as the host user with that user's full file access, outside
+the sandbox Zone confines its own tools to, and every workspace shares the one
+host identity with no per-user separation and no metering. So the choice lives
+in the process environment, where the operator makes it, and there is no route
+or setting through which a workspace admin can turn it on.
+
 ## 🎨 ComfyUI Image, Video, and Audio Generation
 
 See [COMFYUI.md](COMFYUI.md) for model setup, hardware requirements, checksum

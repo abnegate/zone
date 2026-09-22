@@ -15,7 +15,7 @@ use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::completion_tokens::merge_stops;
-use crate::state::AppState;
+use crate::state::{AppState, llm_backend};
 use zone_chat::{capacity, history};
 use zone_search::client::SearchContext;
 
@@ -448,6 +448,7 @@ pub async fn build(
         default_model: chat.model_name.clone(),
         temperature: 0.7,
         max_tokens: policy.reserved,
+        backend: llm_backend(state.config()),
     })
     .with_stop(stop.clone());
     if let Some(limit) = capacity.ollama {

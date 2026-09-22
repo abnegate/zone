@@ -8,7 +8,7 @@
 
 use serde_json::Value;
 use std::time::Duration;
-use zone_core::llm::{LlmClient, LlmConfig, Message};
+use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message};
 
 use crate::config::ComfyUiConfig;
 use crate::services::media_source::Kind as MediaKind;
@@ -79,6 +79,7 @@ pub struct ImageIntentClassifier {
     config: ComfyUiConfig,
     litellm_host: String,
     litellm_key: String,
+    backend: LlmBackend,
 }
 
 /// A turn a schedule opened carries an instruction written for the model, not
@@ -93,11 +94,27 @@ fn is_automation_turn(metadata: Option<&Value>) -> bool {
 }
 
 impl ImageIntentClassifier {
-    pub fn new(config: ComfyUiConfig, litellm_host: String, litellm_key: String) -> Self {
+    pub fn new(
+        config: ComfyUiConfig,
+        litellm_host: String,
+        litellm_key: String,
+        backend: LlmBackend,
+    ) -> Self {
         Self {
             config,
             litellm_host,
             litellm_key,
+            backend,
+        }
+    }
+
+    /// Whether there is a model to ask at all. An empty host disqualifies only
+    /// the endpoint: a CLI backend runs an agent on this host, and a self-host
+    /// that serves completions that way has no LiteLLM to name.
+    fn reachable(&self) -> bool {
+        match self.backend {
+            LlmBackend::Http => !self.litellm_host.trim().is_empty(),
+            LlmBackend::Cli { .. } => true,
         }
     }
 
@@ -153,7 +170,7 @@ impl ImageIntentClassifier {
     }
 
     async fn classify_ambiguous(&self, content: &str, has_source_image: bool) -> AmbiguousVerdict {
-        if self.litellm_host.trim().is_empty() {
+        if !self.reachable() {
             return AmbiguousVerdict::Chat;
         }
         let client = LlmClient::new(LlmConfig {
@@ -162,6 +179,7 @@ impl ImageIntentClassifier {
             default_model: self.config.classifier_model.clone(),
             temperature: 0.0,
             max_tokens: 3,
+            backend: self.backend.clone(),
         });
         let prompt = if has_source_image {
             format!(
@@ -209,7 +227,7 @@ impl ImageIntentClassifier {
     /// Falls back to a heuristic if the classifier model is unavailable.
     pub async fn edit_prompt(&self, content: &str) -> String {
         let fallback = heuristic_edit_prompt(content);
-        if self.litellm_host.trim().is_empty() {
+        if !self.reachable() {
             return fallback;
         }
         let client = LlmClient::new(LlmConfig {
@@ -218,6 +236,7 @@ impl ImageIntentClassifier {
             default_model: self.config.classifier_model.clone(),
             temperature: 0.2,
             max_tokens: 160,
+            backend: self.backend.clone(),
         });
         let prompt = format!(
             "Rewrite the user's request as a positive prompt for an image model that starts from \
@@ -1028,6 +1047,20 @@ fn sanitize_rewritten_prompt(answer: &str, original: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use zone_core::llm::{AgentKind, CliSettings};
+
+    /// The backend every one of these cases assumes: an endpoint at the host
+    /// the case names, with nothing else on this machine to ask.
+    fn over_http(
+        config: ComfyUiConfig,
+        litellm_host: String,
+        litellm_key: String,
+    ) -> ImageIntentClassifier {
+        ImageIntentClassifier::new(config, litellm_host, litellm_key, LlmBackend::default())
+    }
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
@@ -1522,7 +1555,7 @@ mod tests {
             enabled: true,
             ..Default::default()
         };
-        let classifier = ImageIntentClassifier::new(config, String::new(), String::new());
+        let classifier = over_http(config, String::new(), String::new());
         assert_eq!(
             classifier
                 .classify("hello", Some(&serde_json::json!({"upscale": true})))
@@ -1564,7 +1597,7 @@ mod tests {
             enabled: true,
             ..Default::default()
         };
-        let classifier = ImageIntentClassifier::new(config.clone(), String::new(), String::new());
+        let classifier = over_http(config.clone(), String::new(), String::new());
         assert!(
             classifier
                 .is_image_request(
@@ -1583,7 +1616,7 @@ mod tests {
         );
 
         config.enabled = false;
-        let disabled = ImageIntentClassifier::new(config, String::new(), String::new());
+        let disabled = over_http(config, String::new(), String::new());
         assert!(
             !disabled
                 .is_image_request(
@@ -1596,7 +1629,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_metadata_flag_forces_and_skips_audio() {
-        let classifier = ImageIntentClassifier::new(
+        let classifier = over_http(
             ComfyUiConfig {
                 enabled: true,
                 ..Default::default()
@@ -1641,7 +1674,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = ImageIntentClassifier::new(
+        let classifier = over_http(
             ComfyUiConfig {
                 enabled: true,
                 classifier_model: "fast".to_string(),
@@ -1651,6 +1684,61 @@ mod tests {
             "key".to_string(),
         );
         (server, classifier)
+    }
+
+    /// A stand-in for a signed-in agent CLI, so the case needs none on the host.
+    fn fake_agent(directory: &TempDir, answer: &str) -> PathBuf {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = directory.path().join("agent");
+        let mut file = std::fs::File::create(&path).expect("the fake agent");
+        writeln!(
+            file,
+            "#!/bin/sh\necho '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{answer}\"}}]}}}}'\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}'"
+        )
+        .expect("the fake agent body");
+        drop(file);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the fake agent to be executable");
+        path
+    }
+
+    /// A CLI-only self-host has no `LITELLM_HOST` to name, so a guard that
+    /// reads an empty host as "no model configured" answers Chat for every
+    /// ambiguous turn and no media is ever generated on such a host.
+    #[tokio::test]
+    async fn a_host_agent_decides_the_ambiguous_turn_with_no_endpoint_configured() {
+        const SOFT_AUDIO: &str = "generate ambient rain sounds";
+        let directory = TempDir::new().expect("a temporary directory");
+        let comfyui = ComfyUiConfig {
+            enabled: true,
+            classifier_model: "sonnet".to_string(),
+            classifier_timeout_secs: 20,
+            ..Default::default()
+        };
+
+        let hostless = over_http(comfyui.clone(), String::new(), String::new());
+        assert_eq!(
+            hostless.classify(SOFT_AUDIO, None).await,
+            GenerationIntent::Chat,
+            "an HTTP backend with no host still has nothing to ask"
+        );
+
+        let agent = ImageIntentClassifier::new(
+            comfyui,
+            String::new(),
+            String::new(),
+            LlmBackend::cli(
+                AgentKind::Claude,
+                CliSettings::default().with_executable(fake_agent(&directory, "IMAGE")),
+            ),
+        );
+        assert_eq!(
+            agent.classify(SOFT_AUDIO, None).await,
+            GenerationIntent::Image,
+            "the configured agent was never asked, so the empty host decided the turn"
+        );
     }
 
     #[tokio::test]
@@ -1687,7 +1775,7 @@ mod tests {
             GenerationIntent::Chat
         );
 
-        let hostless = ImageIntentClassifier::new(
+        let hostless = over_http(
             ComfyUiConfig {
                 enabled: true,
                 ..Default::default()
@@ -1733,7 +1821,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = ImageIntentClassifier::new(
+        let classifier = over_http(
             ComfyUiConfig {
                 enabled: true,
                 classifier_model: "fast".to_string(),
@@ -1767,7 +1855,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = ImageIntentClassifier::new(
+        let classifier = over_http(
             ComfyUiConfig {
                 enabled: true,
                 ..Default::default()
@@ -1794,7 +1882,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let classifier = ImageIntentClassifier::new(
+        let classifier = over_http(
             ComfyUiConfig {
                 enabled: true,
                 classifier_timeout_secs: 1,
@@ -1869,7 +1957,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = ImageIntentClassifier::new(
+        let classifier = over_http(
             ComfyUiConfig {
                 enabled: true,
                 classifier_model: "fast".to_string(),
@@ -1887,7 +1975,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_prompt_falls_back_when_host_is_empty() {
-        let classifier = ImageIntentClassifier::new(
+        let classifier = over_http(
             ComfyUiConfig {
                 enabled: true,
                 ..Default::default()
@@ -1930,7 +2018,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = ImageIntentClassifier::new(
+        let classifier = over_http(
             ComfyUiConfig {
                 enabled: true,
                 classifier_model: "fast".to_string(),
@@ -1964,7 +2052,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = ImageIntentClassifier::new(
+        let classifier = over_http(
             ComfyUiConfig {
                 enabled: true,
                 classifier_model: "fast".to_string(),
@@ -1982,7 +2070,7 @@ mod tests {
 
     #[tokio::test]
     async fn attached_informal_edit_stays_chat_without_classifier_host() {
-        let classifier = ImageIntentClassifier::new(
+        let classifier = over_http(
             ComfyUiConfig {
                 enabled: true,
                 ..Default::default()
@@ -2019,7 +2107,7 @@ Answer the instruction against how things are now, and compare that with the rea
             enabled: true,
             ..Default::default()
         };
-        let classifier = ImageIntentClassifier::new(config, String::new(), String::new());
+        let classifier = over_http(config, String::new(), String::new());
         assert_eq!(
             classifier
                 .classify(prompt, Some(&serde_json::json!({"source": "reminder"})))

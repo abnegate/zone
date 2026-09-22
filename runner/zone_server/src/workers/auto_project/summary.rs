@@ -8,7 +8,7 @@ use zone_vcs::pull_request::PullRequestDetail;
 
 use crate::db::tasks::TaskRow;
 use crate::services::stages;
-use crate::state::AppState;
+use crate::state::{AppState, llm_backend};
 
 use super::review::model::preferences;
 
@@ -59,6 +59,7 @@ async fn generate(
         default_model: model,
         temperature: SUMMARY_TEMPERATURE,
         max_tokens: SUMMARY_TOKENS,
+        backend: llm_backend(state.config()),
     });
     let body = pull.body.as_deref().unwrap_or_default();
     let body: String = body.chars().take(BODY_CHARS).collect();

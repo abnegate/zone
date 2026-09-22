@@ -10,7 +10,8 @@ use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 use zone_core::llm::{
-    LlmClient, Message as LlmMessage, Role as LlmRole, StreamToolCall, ToolCall as LlmToolCall,
+    AgentKind, LlmBackend, LlmClient, Message as LlmMessage, Role as LlmRole, StreamToolCall,
+    ToolCall as LlmToolCall,
 };
 
 use super::Citation;
@@ -213,6 +214,16 @@ pub fn run_with_context(
             approval,
             ..
         } = run;
+        // Said out loud, once, because the turn still answers: a reader who
+        // asked for a tool would otherwise see only a reply that ignored them.
+        let host_agent = host_agent(&llm);
+        if let Some(agent) = host_agent.filter(|_| agentic && !tools.is_empty()) {
+            yield AgentEvent::Finalizing(format!(
+                "The {agent} CLI backend runs its own tools, so zone's are not offered on this \
+                 turn."
+            ));
+        }
+        let agentic = agentic && host_agent.is_none();
         let mut used = 0usize;
         let mut identifiers: BTreeSet<String> = context
             .entries
@@ -709,6 +720,19 @@ impl Park {
             Self::Question(_) => NOT_EXECUTED_AFTER_QUESTION,
             Self::Wait(_) => NOT_EXECUTED_AFTER_WAIT,
         }
+    }
+}
+
+/// The coding agent CLI serving this turn, when the configured backend is one.
+///
+/// Such an agent runs its own tool loop and cannot reach zone's registry, so
+/// [`LlmClient`] refuses a request that carries tool definitions rather than
+/// dropping them. Reading the backend here is what keeps every agentic turn
+/// from being refused for offering tools that could never have been called.
+fn host_agent(llm: &LlmClient) -> Option<AgentKind> {
+    match &llm.config().backend {
+        LlmBackend::Cli { agent, .. } => Some(*agent),
+        LlmBackend::Http => None,
     }
 }
 
@@ -1822,5 +1846,228 @@ mod tests {
                 .park("call_7", true, session())
                 .is_none()
         );
+    }
+
+    /// A coding agent CLI backend cannot be offered zone's tools: `LlmClient`
+    /// refuses such a request outright, so a loop that kept offering them would
+    /// fail every agentic turn instead of answering it.
+    mod host_agent_backend {
+        use super::*;
+        use serde_json::{Value, json};
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+        use tempfile::TempDir;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        use zone_core::llm::{CliSettings, LlmConfig};
+
+        const ANSWER: &str = "Ready.";
+
+        /// A stand-in for an agent CLI, so no test needs one signed in on the
+        /// host. Every run appends to `calls`, which is how a test tells one
+        /// model round from several.
+        fn agent(directory: &TempDir, calls: &std::path::Path) -> PathBuf {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+
+            let path = directory.path().join("agent");
+            let mut file = std::fs::File::create(&path).expect("the fake agent");
+            writeln!(
+                file,
+                "#!/bin/sh\necho round >> {calls}\necho '{assistant}'\necho '{result}'",
+                calls = calls.display(),
+                assistant = json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": ANSWER}]},
+                }),
+                result = json!({"type": "result", "subtype": "success", "is_error": false}),
+            )
+            .expect("the fake agent body");
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the fake agent to be executable");
+            path
+        }
+
+        fn cli(executable: PathBuf) -> LlmClient {
+            LlmClient::new(
+                LlmConfig::default().with_backend(LlmBackend::cli(
+                    AgentKind::Claude,
+                    CliSettings::default()
+                        .with_executable(executable)
+                        .with_timeout(Duration::from_secs(20)),
+                )),
+            )
+        }
+
+        async fn turn(llm: LlmClient, tools: ChatTools) -> Vec<AgentEvent> {
+            let run = AgentRun {
+                llm,
+                model: "sonnet".into(),
+                tools,
+                messages: vec![LlmMessage::user("Plan the release.")],
+                budget: LoopBudget::chat(),
+                approval: ApprovalPolicy::auto(),
+            };
+            let context = RunContext::from_messages(run.messages.clone());
+            let events = run_with_context(run, context, true);
+            futures::pin_mut!(events);
+            let mut collected = Vec::new();
+            while let Some(event) = events.next().await {
+                collected.push(event);
+            }
+            collected
+        }
+
+        fn spoken(events: &[AgentEvent]) -> String {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::Chunk(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn failures(events: &[AgentEvent]) -> Vec<&str> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::Failed(reason) => Some(reason.as_str()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn announcements(events: &[AgentEvent]) -> Vec<&str> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::Finalizing(reason) => Some(reason.as_str()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn rounds(calls: &std::path::Path) -> usize {
+            std::fs::read_to_string(calls)
+                .expect("the agent to have run")
+                .lines()
+                .count()
+        }
+
+        #[tokio::test]
+        async fn a_cli_backend_answers_without_being_offered_zone_tools() {
+            let directory = TempDir::new().expect("a temporary directory");
+            let calls = directory.path().join("calls");
+            let tools = ChatTools::empty().with_plan_approval();
+            assert!(
+                !tools.is_empty(),
+                "the turn has tools it could have offered"
+            );
+
+            let events = turn(cli(agent(&directory, &calls)), tools).await;
+
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert_eq!(spoken(&events), ANSWER);
+            assert_eq!(
+                rounds(&calls),
+                1,
+                "a text-only turn spent more than the round it needed"
+            );
+        }
+
+        /// The turn answers, so nothing else reports that the tools the reader
+        /// asked for were never on the table.
+        #[tokio::test]
+        async fn a_cli_backend_says_why_zone_tools_went_unused() {
+            let directory = TempDir::new().expect("a temporary directory");
+            let calls = directory.path().join("calls");
+
+            let events = turn(
+                cli(agent(&directory, &calls)),
+                ChatTools::empty().with_plan_approval(),
+            )
+            .await;
+
+            let announced = announcements(&events);
+            assert_eq!(announced.len(), 1, "{announced:?}");
+            assert!(
+                announced[0].contains("claude") && announced[0].contains("not offered"),
+                "the reader is not told which backend declined zone's tools: {announced:?}"
+            );
+        }
+
+        /// A chat that was never going to call anything has nothing to explain.
+        #[tokio::test]
+        async fn a_turn_with_no_tools_announces_nothing() {
+            let directory = TempDir::new().expect("a temporary directory");
+            let calls = directory.path().join("calls");
+
+            let events = turn(cli(agent(&directory, &calls)), ChatTools::empty()).await;
+
+            assert_eq!(spoken(&events), ANSWER);
+            assert!(
+                announcements(&events).is_empty(),
+                "{:?}",
+                announcements(&events)
+            );
+        }
+
+        #[tokio::test]
+        async fn an_http_backend_is_offered_its_tools_as_before() {
+            let provider = MockServer::start().await;
+            let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let seen = bodies.clone();
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(move |request: &Request| {
+                    seen.lock()
+                        .expect("the recorded requests")
+                        .push(serde_json::from_slice(&request.body).expect("a JSON request"));
+                    let chunk = json!({
+                        "id": "completion",
+                        "object": "chat.completion.chunk",
+                        "created": 0,
+                        "model": "gpt-4",
+                        "choices": [{"index": 0, "delta": {"content": ANSWER}, "finish_reason": null}],
+                    });
+                    let end = json!({
+                        "id": "completion",
+                        "object": "chat.completion.chunk",
+                        "created": 0,
+                        "model": "gpt-4",
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    });
+                    ResponseTemplate::new(200)
+                        .insert_header("Content-Type", "text/event-stream")
+                        .set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+                })
+                .mount(&provider)
+                .await;
+            let llm = LlmClient::new(LlmConfig {
+                base_url: provider.uri(),
+                ..LlmConfig::default()
+            });
+
+            let events = turn(llm, ChatTools::empty().with_plan_approval()).await;
+
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert!(
+                announcements(&events).is_empty(),
+                "{:?}",
+                announcements(&events)
+            );
+            let bodies = bodies.lock().expect("the recorded requests");
+            assert_eq!(bodies.len(), 1);
+            let offered = bodies[0]["tools"]
+                .as_array()
+                .expect("an HTTP turn to carry its tool definitions")
+                .iter()
+                .filter_map(|tool| tool["function"]["name"].as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(offered, [plan::SUBMIT_PLAN]);
+        }
     }
 }

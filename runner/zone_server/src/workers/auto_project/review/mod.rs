@@ -20,8 +20,10 @@ use zone_core::llm::{LlmClient, LlmConfig, Message, ToolDefinition};
 use zone_core::tools::{ToolContext, ToolResult};
 use zone_vcs::pull_request::{ChangedFile, PrService, PullRequestDetail, PullRequestReference};
 
+use crate::config::Config;
 use crate::db::auto_projects::{Finding, ReviewRow};
 use crate::db::tasks::TaskRow;
+use crate::state::llm_backend;
 
 pub use verdict::{Outcome, Verdict};
 
@@ -61,17 +63,17 @@ pub struct ReviewRequest<'a> {
 
 /// Run one review and return its verdict.
 pub async fn run(
-    litellm_host: &str,
-    litellm_key: &str,
+    config: &Config,
     pr: PrService,
     request: ReviewRequest<'_>,
 ) -> Result<Verdict, ReviewError> {
     let client = LlmClient::new(LlmConfig {
-        base_url: litellm_host.to_string(),
-        api_key: litellm_key.to_string(),
+        base_url: config.litellm_host.clone(),
+        api_key: config.litellm_key.clone(),
         default_model: request.reviewer.clone(),
         temperature: REVIEW_TEMPERATURE,
         max_tokens: REVIEW_TOKENS,
+        backend: llm_backend(config),
     });
     let shared = Arc::new(tools::Shared {
         pr,

@@ -1745,6 +1745,7 @@ async fn handle_image_generation(
             image_config.clone(),
             state.config().litellm_host.clone(),
             state.config().litellm_key.clone(),
+            crate::state::llm_backend(state.config()),
         )
         .edit_prompt(prompt)
         .await
@@ -2575,6 +2576,7 @@ async fn prepare_message(
         image_config.clone(),
         state.config().litellm_host.clone(),
         state.config().litellm_key.clone(),
+        crate::state::llm_backend(state.config()),
     );
     let intent = classifier
         .classify(content, metadata)

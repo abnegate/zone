@@ -27,7 +27,7 @@ use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBu
 use crate::db::{ai_settings, task_tool_calls, tasks, workspaces};
 use crate::services::chat::session::{self, RunContext};
 use crate::services::stages;
-use crate::state::AppState;
+use crate::state::{AppState, llm_backend};
 use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
 use crate::workers::instructions;
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
@@ -1946,6 +1946,7 @@ async fn attempt_run(
         default_model: model.to_string(),
         temperature: TASK_TEMPERATURE,
         max_tokens: policy.reserved,
+        backend: llm_backend(state.config()),
     });
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(model, limit);
