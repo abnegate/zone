@@ -5,9 +5,12 @@ use std::time::Duration;
 
 use super::credential::Credential;
 
-/// Five minutes matches [`tool_runner`]'s default, which is the other place in
-/// this workspace that decides how long a child may run.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+/// Thirty minutes is the chat turn's own budget, which is what a coding agent
+/// driven as a provider has to fit inside. [`tool_runner`]'s five minutes is
+/// the budget for one command; an agent spends its turn running a loop of
+/// them, so a turn cut off at that mark would report a timeout on work that
+/// was still going well.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// A coding agent's stream is structured JSON, not build output, so the cap
 /// that matters is far below `tool_runner`'s ten megabytes for arbitrary
@@ -98,6 +101,16 @@ mod tests {
             "credential leaked: {rendered}"
         );
         assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn an_agents_turn_gets_longer_than_a_single_command_does() {
+        let command = Duration::from_millis(tool_runner::executor::DEFAULT_TIMEOUT_MS);
+
+        assert!(
+            DEFAULT_TIMEOUT > command,
+            "an agent runs a loop of commands, so {DEFAULT_TIMEOUT:?} must exceed one command's {command:?}"
+        );
     }
 
     #[test]

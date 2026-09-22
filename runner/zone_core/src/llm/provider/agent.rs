@@ -27,6 +27,13 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
+    /// Every agent this crate drives.
+    ///
+    /// A caller that must act on all of them -- clearing their keys out of a
+    /// child environment, for one -- reads this instead of repeating the list
+    /// and going stale when an agent is added.
+    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -115,6 +122,18 @@ mod tests {
         for agent in [AgentKind::Claude, AgentKind::Codex] {
             assert_eq!(agent.delivery(), Delivery::Stdin, "{agent}");
         }
+    }
+
+    #[test]
+    fn every_agent_is_listed_with_the_key_variable_it_reads() {
+        assert!(AgentKind::ALL.contains(&AgentKind::Claude));
+        assert!(AgentKind::ALL.contains(&AgentKind::Codex));
+
+        let variables: Vec<&str> = AgentKind::ALL
+            .iter()
+            .map(|agent| agent.variable())
+            .collect();
+        assert_eq!(variables, ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
     }
 
     #[test]

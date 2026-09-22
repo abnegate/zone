@@ -160,6 +160,7 @@ fn llm_config(config: &Config) -> Result<LlmConfig, RunError> {
         default_model: config.model.clone(),
         temperature: 0.7,
         max_tokens: 4096,
+        ..LlmConfig::default()
     })
 }
 

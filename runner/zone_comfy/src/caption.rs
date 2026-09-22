@@ -215,6 +215,7 @@ impl Captioner {
             default_model: self.model.clone(),
             temperature: 0.0,
             max_tokens,
+            ..LlmConfig::default()
         });
         let result = tokio::time::timeout(
             self.timeout,
