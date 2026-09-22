@@ -14,9 +14,12 @@ Zone's: no OpenAI or Anthropic key for row 10, and a headless `magents` session
 that never goes live for row 32. Every product defect the first pass found is
 fixed and re-verified here.
 
-Evidence for every row is under `docs/live-real-pass-2026-09-21/`: the
-screenshots named in the table and `evidence.jsonl` (one JSON line per row, the
-latest line per row is the verdict). The first pass and its defects are in
+Evidence for every row -- the screenshots named in the table and
+`evidence.jsonl`, one JSON line per row with the latest line its verdict -- was
+kept in `docs/live-real-pass-2026-09-21/` and removed from the tree at d1a6ac8e,
+rather than carry 40 MB of it in the repository for good. `git show
+d1a6ac8e:docs/live-real-pass-2026-09-21/<file>` reads any of it back while this
+branch exists; a later pass regenerates the lot. The first pass and its defects are in
 `docs/LIVE-REAL-PASS-2026-09-20.md`; the fixes are the commits between
 `b2cdd81e` and the head of this branch.
 

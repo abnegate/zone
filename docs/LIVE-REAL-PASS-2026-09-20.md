@@ -6,10 +6,13 @@ real Postgres and Valkey-compatible Redis, and the real scratch repository on
 GitHub. No stand-in and no mock ran at any point: `ZONE_LIVE_MODEL_STUB` stayed
 unset, neither stub script was started, and the trainer was ComfyUI's own.
 
-Evidence for every row is under `docs/live-real-pass-2026-09-20/`: the
-screenshots named in the table, `evidence.jsonl` (one JSON line per row with the
-ids, database rows, tool calls and log lines each lane read), the media the chat
-produced, and the training clip. The lanes that drove the rows are under
+Evidence for every row -- the screenshots named in the table,
+`evidence.jsonl` (one JSON line per row with the ids, database rows, tool calls
+and log lines each lane read), the media the chat produced, and the training
+clip -- was kept in `docs/live-real-pass-2026-09-20/` and removed from the tree
+at d1a6ac8e, rather than carry 43 MB of it in the repository for good. `git show
+d1a6ac8e:docs/live-real-pass-2026-09-20/<file>` reads any of it back while this
+branch exists. The lanes that drove the rows are under
 `manager/frontend/live/pass/`, opt-in with `ZONE_LIVE_REAL_PASS=1`.
 
 ## 1. The machine
