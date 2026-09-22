@@ -245,6 +245,11 @@ pub struct Preparation {
     pub model: String,
     pub agentic: bool,
     pub auto_approve: bool,
+    /// `chats.agent_sandboxed`: whether a spawned coding agent is confined to
+    /// zone's tools, or also keeps its own file and shell tools, which zone
+    /// never sees and cannot gate. An axis of its own, independent of
+    /// [`Self::auto_approve`].
+    pub sandboxed: bool,
     pub tools: ChatTools,
     pub context: RunContext,
     pub llm: LlmClient,
@@ -474,6 +479,7 @@ pub async fn build(
         model: chat.model_name.clone(),
         agentic,
         auto_approve: chat.auto_approve,
+        sandboxed: chat.agent_sandboxed,
         tools,
         context,
         llm,

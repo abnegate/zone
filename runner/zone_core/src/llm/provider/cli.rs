@@ -18,7 +18,7 @@ use super::credential::Credential;
 use super::error::{ExitStatus, ProviderError};
 use super::event::AgentEvent;
 use super::lines::{Lines, Overlong};
-use super::settings::CliSettings;
+use super::settings::{CliSettings, Toolset};
 use super::transcript;
 use crate::llm::{Message, Usage};
 
@@ -30,11 +30,13 @@ pub type AgentStream = Pin<Box<dyn Stream<Item = Result<AgentEvent, ProviderErro
 /// Drives a coding agent CLI as a completion provider.
 ///
 /// The agent runs its own tool loop, so [`CompletionRequest::tools`] is not
-/// forwarded: the agent has its own tools and no way to call zone's. What
-/// comes back is the agent's final prose. Tool activity is still parsed, so a
-/// stream full of it cannot derail the run, but it is not returned as tool
-/// calls -- the agent already executed them, and replaying them through zone's
-/// registry would run each one a second time.
+/// forwarded: schemas on a completions request are not something an agent
+/// reads. Zone's tools reach it as [`CliSettings::toolset`] instead, over MCP,
+/// and the calls come back to zone to be approved and run. What this returns
+/// is the agent's final prose. Tool activity is still parsed, so a stream full
+/// of it cannot derail the run, but it is not returned as tool calls -- the
+/// agent already made them, and replaying them through zone's registry would
+/// run each one a second time.
 ///
 /// [`CliProvider::stream`] is the primary form. A turn takes minutes, and the
 /// child's output is framed a line at a time, so the answer exists long before
@@ -82,7 +84,11 @@ impl CliProvider {
 
         let mut command = Command::new(executable);
         command
-            .args(self.agent.arguments(Some(model)))
+            .args(self.agent.arguments_with(
+                Some(model),
+                self.settings.toolset.as_deref(),
+                self.settings.builtin_tools,
+            ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -90,6 +96,17 @@ impl CliProvider {
 
         if let Some(directory) = &self.settings.working_directory {
             command.current_dir(directory);
+        }
+
+        match &self.settings.toolset {
+            Some(toolset) => {
+                command.env(Toolset::TOKEN_VARIABLE, toolset.token.expose());
+            }
+            // A turn serving no tools hands out no token, and a token left in
+            // zone's own environment is not this turn's to pass on.
+            None => {
+                command.env_remove(Toolset::TOKEN_VARIABLE);
+            }
         }
 
         match &self.settings.credential {
@@ -844,6 +861,78 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 "{variable} in the server's environment would be spent instead of the host session: {cleared:?}"
             );
         }
+    }
+
+    fn toolset() -> Toolset {
+        Toolset::new(
+            "http://127.0.0.1:8421/mcp",
+            "zone-turn-notarealtoken",
+            ["read_file"],
+        )
+    }
+
+    fn arguments(command: &Command) -> Vec<String> {
+        command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_turns_token_reaches_the_agents_environment_and_never_its_arguments() {
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            CliSettings::default().with_toolset(toolset()),
+        );
+
+        let command = provider.command("sonnet");
+        let token = command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| name.to_string_lossy() == Toolset::TOKEN_VARIABLE)
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned());
+
+        assert_eq!(token.as_deref(), Some("zone-turn-notarealtoken"));
+
+        let arguments = arguments(&command);
+        assert!(arguments.iter().any(|argument| argument == "--mcp-config"));
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument == "mcp__zone__read_file")
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.contains("zone-turn-notarealtoken")),
+            "the token reached argv: {arguments:?}"
+        );
+    }
+
+    #[test]
+    fn a_turn_serving_no_tools_withholds_the_agents_own_and_clears_the_token() {
+        let provider = CliProvider::agent(AgentKind::Claude, CliSettings::default());
+
+        let command = provider.command("sonnet");
+        let cleared: Vec<String> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            cleared.contains(&Toolset::TOKEN_VARIABLE.to_string()),
+            "a token from the server's own environment would have been passed on: {cleared:?}"
+        );
+
+        let arguments = arguments(&command);
+        assert!(
+            arguments.iter().any(|argument| argument == "--tools"),
+            "the agent kept its own file and shell tools: {arguments:?}"
+        );
     }
 
     #[test]

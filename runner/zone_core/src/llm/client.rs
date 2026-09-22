@@ -10,8 +10,8 @@ use thiserror::Error;
 use tokio::runtime;
 
 use super::provider::{
-    AgentEvent, AgentKind, AgentStream, CliProvider, CliSettings, Completion, CompletionProvider,
-    CompletionRequest,
+    AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Completion,
+    CompletionProvider, CompletionRequest, Toolset,
 };
 use super::types::{
     ChatRequest, ChatResponse, ChatStreamChunk, Choice, Message, StreamChoice, StreamDelta,
@@ -355,6 +355,26 @@ impl LlmClient {
     /// their own end tokens unless the request repeats them.
     pub fn with_stop(mut self, stop: Vec<String>) -> Self {
         self.stop = stop;
+        self
+    }
+
+    /// Serve a turn's own tools to a CLI backend's agent, and say whether it
+    /// also keeps the tools it ships with.
+    ///
+    /// Attached after construction because a turn's toolset does not exist
+    /// until the turn does: the token is minted against that turn's registry
+    /// and its approval policy, and neither is built when the client is.
+    ///
+    /// An HTTP backend is left exactly as it was rather than refused. It
+    /// spawns no child to configure, and its tools travel in the request
+    /// itself, so there is nothing here for it to lose: a request it makes
+    /// still carries whatever definitions it was given.
+    pub fn with_toolset(mut self, toolset: Toolset, builtin_tools: BuiltinTools) -> Self {
+        if let LlmBackend::Cli { settings, .. } = &mut self.config.backend {
+            *settings = std::mem::take(settings)
+                .with_toolset(toolset)
+                .with_builtin_tools(builtin_tools);
+        }
         self
     }
 
@@ -1103,6 +1123,64 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_turns_toolset_reaches_the_agent_the_backend_spawns() {
+        let toolset = Toolset::new(
+            "http://127.0.0.1:8421/mcp",
+            "zone-turn-notarealtoken",
+            ["read_file"],
+        );
+
+        let client = LlmClient::new(
+            LlmConfig::default()
+                .with_backend(LlmBackend::cli(AgentKind::Claude, CliSettings::default())),
+        )
+        .with_toolset(toolset, BuiltinTools::Withheld);
+
+        let LlmBackend::Cli { settings, .. } = &client.config().backend else {
+            panic!("the backend stayed on the endpoint");
+        };
+        let attached = settings.toolset.as_ref().expect("the turn's toolset");
+        assert_eq!(attached.endpoint, "http://127.0.0.1:8421/mcp");
+        assert_eq!(attached.tools, ["read_file"]);
+        assert_eq!(settings.builtin_tools, BuiltinTools::Withheld);
+    }
+
+    /// An HTTP backend spawns nothing to configure and carries its tools in
+    /// the request itself, so there is nothing here for it to lose.
+    #[test]
+    fn a_toolset_leaves_an_http_backend_exactly_as_it_was() {
+        let client = LlmClient::new(LlmConfig::default()).with_toolset(
+            Toolset::new("http://127.0.0.1:8421/mcp", "token", ["read_file"]),
+            BuiltinTools::Granted,
+        );
+
+        assert!(matches!(client.config().backend, LlmBackend::Http));
+    }
+
+    /// The builder replaces what a turn decides and nothing else: the executable
+    /// the operator configured is still the one that runs.
+    #[test]
+    fn attaching_a_toolset_keeps_the_rest_of_the_settings() {
+        let client = LlmClient::new(LlmConfig::default().with_backend(LlmBackend::cli(
+            AgentKind::Claude,
+            CliSettings::default().with_executable("/opt/bin/claude"),
+        )))
+        .with_toolset(
+            Toolset::new("http://127.0.0.1:8421/mcp", "token", ["read_file"]),
+            BuiltinTools::Granted,
+        );
+
+        let LlmBackend::Cli { settings, .. } = &client.config().backend else {
+            panic!("the backend stayed on the endpoint");
+        };
+        assert_eq!(
+            settings.executable,
+            Some(std::path::PathBuf::from("/opt/bin/claude"))
+        );
+        assert_eq!(settings.builtin_tools, BuiltinTools::Granted);
     }
 
     #[tokio::test]

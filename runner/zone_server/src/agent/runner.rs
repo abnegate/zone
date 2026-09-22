@@ -10,8 +10,8 @@ use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 use zone_core::llm::{
-    AgentKind, LlmBackend, LlmClient, Message as LlmMessage, Role as LlmRole, StreamToolCall,
-    ToolCall as LlmToolCall,
+    AgentKind, BuiltinTools, LlmBackend, LlmClient, Message as LlmMessage, Role as LlmRole,
+    StreamToolCall, ToolCall as LlmToolCall,
 };
 
 use super::Citation;
@@ -214,14 +214,13 @@ pub fn run_with_context(
             approval,
             ..
         } = run;
-        // Said out loud, once, because the turn still answers: a reader who
-        // asked for a tool would otherwise see only a reply that ignored them.
-        let host_agent = host_agent(&llm);
-        if let Some(agent) = host_agent.filter(|_| agentic && !tools.is_empty()) {
-            yield AgentEvent::Finalizing(format!(
-                "The {agent} CLI backend runs its own tools, so zone's are not offered on this \
-                 turn."
-            ));
+        let host_agent = HostAgent::of(&llm);
+        if agentic
+            && let Some(note) = host_agent
+                .as_ref()
+                .and_then(|host| host.note(!tools.is_empty()))
+        {
+            yield AgentEvent::Finalizing(note);
         }
         let agentic = agentic && host_agent.is_none();
         let mut used = 0usize;
@@ -723,16 +722,58 @@ impl Park {
     }
 }
 
-/// The coding agent CLI serving this turn, when the configured backend is one.
+/// The coding agent CLI serving this turn, when the configured backend is one,
+/// and what it was told about tools before the turn started.
 ///
-/// Such an agent runs its own tool loop and cannot reach zone's registry, so
-/// [`LlmClient`] refuses a request that carries tool definitions rather than
-/// dropping them. Reading the backend here is what keeps every agentic turn
-/// from being refused for offering tools that could never have been called.
-fn host_agent(llm: &LlmClient) -> Option<AgentKind> {
-    match &llm.config().backend {
-        LlmBackend::Cli { agent, .. } => Some(*agent),
-        LlmBackend::Http => None,
+/// Such an agent runs its own tool loop, so zone's loop runs a single round
+/// and offers no definitions over the completions API -- [`LlmClient`] refuses
+/// a request that carries them rather than dropping them. Reading the backend
+/// here is what keeps every agentic turn from being refused for offering tools
+/// that could never have been called.
+///
+/// Whether the agent can call zone's tools at all is decided before the turn
+/// runs, by whether a [`zone_core::llm::Toolset`] was attached for it to reach
+/// them through.
+struct HostAgent {
+    kind: AgentKind,
+    /// Zone's tools, served to this agent over MCP for the life of the turn.
+    toolset: bool,
+    builtin_tools: BuiltinTools,
+}
+
+impl HostAgent {
+    fn of(llm: &LlmClient) -> Option<Self> {
+        match &llm.config().backend {
+            LlmBackend::Cli { agent, settings } => Some(Self {
+                kind: *agent,
+                toolset: settings.toolset.is_some(),
+                builtin_tools: settings.builtin_tools,
+            }),
+            LlmBackend::Http => None,
+        }
+    }
+
+    /// What the reader is told about this turn's tools, said once and only
+    /// where it changes what they can expect to see.
+    ///
+    /// An agent serving zone's tools and none of its own behaves as any other
+    /// turn does, and its cards say so themselves. The two cases worth a line
+    /// are an agent also working with tools zone never shows or gates, and a
+    /// turn whose tools were never on the table at all -- without which a
+    /// reader who asked for one sees only a reply that ignored them.
+    fn note(&self, offered: bool) -> Option<String> {
+        let agent = self.kind;
+        match (self.toolset, self.builtin_tools) {
+            (true, BuiltinTools::Granted) => Some(format!(
+                "The {agent} CLI backend also runs its own file and shell tools on this turn, \
+                 which zone neither shows nor approves."
+            )),
+            (false, _) if offered => Some(format!(
+                "The {agent} CLI backend runs its own tools, so zone's are not offered on this \
+                 turn."
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -1860,7 +1901,7 @@ mod tests {
         use tempfile::TempDir;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-        use zone_core::llm::{CliSettings, LlmConfig};
+        use zone_core::llm::{CliSettings, LlmConfig, Toolset};
 
         const ANSWER: &str = "Ready.";
 
@@ -1899,6 +1940,35 @@ mod tests {
                         .with_timeout(Duration::from_secs(20)),
                 )),
             )
+        }
+
+        fn toolset() -> Toolset {
+            Toolset::new(
+                "http://127.0.0.1:8421/mcp",
+                "zone-turn-notarealtoken",
+                ["read_file"],
+            )
+        }
+
+        /// A turn whose agent reaches zone's tools over MCP, keeping or losing
+        /// the tools it ships with.
+        fn served(executable: PathBuf, builtin_tools: BuiltinTools) -> LlmClient {
+            cli(executable).with_toolset(toolset(), builtin_tools)
+        }
+
+        fn host(
+            agent: AgentKind,
+            toolset: Option<Toolset>,
+            builtin_tools: BuiltinTools,
+        ) -> HostAgent {
+            let mut settings = CliSettings::default().with_builtin_tools(builtin_tools);
+            if let Some(toolset) = toolset {
+                settings = settings.with_toolset(toolset);
+            }
+            HostAgent::of(&LlmClient::new(
+                LlmConfig::default().with_backend(LlmBackend::cli(agent, settings)),
+            ))
+            .expect("a CLI backend is a host agent")
         }
 
         async fn turn(llm: LlmClient, tools: ChatTools) -> Vec<AgentEvent> {
@@ -2012,6 +2082,91 @@ mod tests {
                 announcements(&events).is_empty(),
                 "{:?}",
                 announcements(&events)
+            );
+        }
+
+        /// The cards the agent's calls raise say what ran, so a line repeating
+        /// that zone's tools are in play tells the reader nothing they are not
+        /// already watching.
+        #[tokio::test]
+        async fn a_turn_served_zone_tools_announces_nothing() {
+            let directory = TempDir::new().expect("a temporary directory");
+            let calls = directory.path().join("calls");
+
+            let events = turn(
+                served(agent(&directory, &calls), BuiltinTools::Withheld),
+                ChatTools::empty().with_plan_approval(),
+            )
+            .await;
+
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert_eq!(spoken(&events), ANSWER);
+            assert!(
+                announcements(&events).is_empty(),
+                "a turn whose tools are zone's own has nothing to explain: {:?}",
+                announcements(&events)
+            );
+            assert_eq!(
+                rounds(&calls),
+                1,
+                "the agent runs its own loop, so zone's spends one round on it"
+            );
+        }
+
+        /// The one thing the reader cannot see for themselves: work done with
+        /// tools that never reach zone, and so never reach an approval card.
+        #[tokio::test]
+        async fn a_turn_that_kept_the_agents_own_tools_says_so() {
+            let directory = TempDir::new().expect("a temporary directory");
+            let calls = directory.path().join("calls");
+
+            let events = turn(
+                served(agent(&directory, &calls), BuiltinTools::Granted),
+                ChatTools::empty().with_plan_approval(),
+            )
+            .await;
+
+            let announced = announcements(&events);
+            assert_eq!(announced.len(), 1, "{announced:?}");
+            assert!(
+                announced[0].contains("claude") && announced[0].contains("own file and shell"),
+                "the reader is not told the agent is working with tools zone cannot gate: \
+                 {announced:?}"
+            );
+        }
+
+        /// Codex is served no toolset at all, so its turn reads exactly as it
+        /// did before zone could serve one.
+        #[test]
+        fn a_codex_turn_still_reports_that_zone_tools_went_unused() {
+            let codex = host(AgentKind::Codex, None, BuiltinTools::Granted);
+
+            let note = codex.note(true).expect("a turn with tools explains them");
+            assert!(
+                note.contains("codex") && note.contains("not offered"),
+                "{note}"
+            );
+            assert_eq!(
+                codex.note(false),
+                None,
+                "a chat that was never going to call anything has nothing to explain"
+            );
+        }
+
+        #[test]
+        fn a_turn_is_described_by_what_its_agent_was_actually_given() {
+            assert_eq!(
+                host(AgentKind::Claude, Some(toolset()), BuiltinTools::Withheld).note(true),
+                None
+            );
+            assert_eq!(
+                host(AgentKind::Claude, None, BuiltinTools::Withheld)
+                    .note(true)
+                    .as_deref(),
+                Some(
+                    "The claude CLI backend runs its own tools, so zone's are not offered on this \
+                     turn."
+                )
             );
         }
 

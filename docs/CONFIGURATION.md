@@ -145,15 +145,36 @@ host, and spend that personal subscription rather than a metered API key.
   otherwise is refused at boot, because it would mean believing a CLI was
   serving turns while the HTTP endpoint was still being billed.
 
-### What a CLI backend gives up
+### What the agent can reach
 
-Zone's own tools are **not offered** on a turn a CLI agent serves. A coding
-agent runs its own tool loop against its own file access and has no way to call
-Zone's registry, so retrieval, the workspace tools, task control flow and
-citations are unavailable on those turns; the chat says so once, on the turn.
-What you get is the model itself, answering and streaming as it goes. Tasks,
-titles, summaries and media-intent classification all follow the same backend,
-because a CLI-only host has no endpoint for them to fall back to.
+Zone's own tools are offered to the agent over MCP: zone serves them from its
+own port for the life of one turn, behind a bearer token minted for that turn
+and revoked when it ends. The agent calls them as `mcp__zone__<name>`, zone
+executes them, and every call goes through the same approval policy a chat tool
+call goes through today — a chat with auto-approve off raises the usual card and
+waits for you, and a denial refuses the call. So retrieval, the workspace tools
+and citations work on these turns, and what the agent did shows up in the
+console the way it always does.
+
+Two things differ from a turn served by the endpoint. The agent runs its own
+loop rather than zone's, so zone takes one round and the agent decides for
+itself how many tool calls it makes inside that round. And `codex` does not
+take a per-invocation MCP configuration the way `claude` does, so a codex turn
+is text-only, with no tools, and says so.
+
+### The agent's own tools
+
+Each chat carries a **Zone tools only** toggle, on by default, beside
+Auto-approve. On, the agent is confined to the tools zone serves it. Off, it
+also keeps its own file and shell tools — which run inside the agent process as
+the user the server runs as, outside the sandbox zone confines its own tools
+to, where zone can neither show them to you nor approve them.
+
+The two toggles are independent on purpose. Auto-approve decides whether zone's
+tools run without asking; the sandbox decides whether there are tools zone never
+sees at all. Turning both off their safe settings on a single-user self-host is
+allowed, and means what it says: a chat message can read, write and run commands
+on the host with nothing standing in between.
 
 ### Before you switch
 
