@@ -120,6 +120,95 @@ For production, regenerate secrets for security.
 
 ---
 
+## 🧑‍💻 Model Backend
+
+Where chat turns, task runs, titles and summaries get their completions. The
+default is the OpenAI-compatible endpoint `LITELLM_HOST` names. A single-user
+self-host can instead run a coding agent CLI that is already signed in on the
+host, and spend that personal subscription rather than a metered API key.
+
+### `ZONE_LLM_BACKEND`
+- **Default**: `litellm`
+- **Description**: Which backend answers a completion
+- **Options**:
+  - `litellm` (the endpoint `LITELLM_HOST` names)
+  - `claude` (runs the `claude` CLI on this host)
+  - `codex` (runs the `codex` CLI on this host)
+- **Note**: With `claude` or `codex`, `LITELLM_HOST` and `LITELLM_KEY` are no
+  longer required at boot, so a host with no LiteLLM at all can start.
+
+### `ZONE_LLM_BACKEND_EXECUTABLE`
+- **Default**: unset, so the agent's own name is looked up on `PATH`
+- **Description**: An explicit binary to run instead, for a CLI that is not on
+  the server's `PATH` (`/opt/homebrew/bin/codex`, say)
+- **Usage**: Only with `ZONE_LLM_BACKEND` set to `claude` or `codex`; setting it
+  otherwise is refused at boot, because it would mean believing a CLI was
+  serving turns while the HTTP endpoint was still being billed.
+
+### What the agent can reach
+
+Zone's own tools are offered to the agent over MCP: zone serves them from its
+own port for the life of one turn, behind a bearer token minted for that turn
+and revoked when it ends. The agent calls them as `mcp__zone__<name>`, zone
+executes them, and every call goes through the same approval policy a chat tool
+call goes through today — a chat with auto-approve off raises the usual card and
+waits for you, and a denial refuses the call. So retrieval, the workspace tools
+and citations work on these turns, and what the agent did shows up in the
+console the way it always does.
+
+Two things differ from a turn served by the endpoint. The agent runs its own
+loop rather than zone's, so zone takes one round and the agent decides for
+itself how many tool calls it makes inside that round. And `codex` does not
+take a per-invocation MCP configuration the way `claude` does, so a codex turn
+is text-only, with no tools, and says so.
+
+### The agent's own tools
+
+Each chat carries a **Zone tools only** toggle, on by default, beside
+Auto-approve. On, the agent is confined to the tools zone serves it. Off, it
+also keeps its own file and shell tools — which run inside the agent process as
+the user the server runs as, outside the sandbox zone confines its own tools
+to, where zone can neither show them to you nor approve them.
+
+The two toggles are independent on purpose. Auto-approve decides whether zone's
+tools run without asking; the sandbox decides whether there are tools zone never
+sees at all. Turning both off their safe settings on a single-user self-host is
+allowed, and means what it says: a chat message can read, write and run commands
+on the host with nothing standing in between.
+
+### Naming a model
+
+A chat's model name is passed to the agent as `--model`, so on a CLI backend it
+has to be a name that agent knows — `sonnet`, `opus`, `haiku` for `claude` —
+not one of the Ollama models the console's picker offers, which are resolved
+from the installed catalog and mean nothing to a coding agent. Naming one the
+agent does not have fails the turn in its own words ("There's an issue with the
+selected model... Run --model to pick a different model"), which is clear enough
+to act on but is not yet offered as a choice anywhere in the console. Until the
+picker knows about this backend, set the chat's model to the agent's own name.
+
+### Before you switch
+
+The CLI has to be signed in **as the user the server runs as** — the child
+process inherits that host session, and any `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY` in the server's environment is removed from it so a stray key
+cannot quietly bill you instead. Check with `claude auth status` (it prints
+`loggedIn`) or `codex login status`. A signed-out agent fails the turn and says
+so in the agent's own words rather than answering; note that `codex login
+status` can report a session that has since expired.
+
+In a container, both the binary and its credentials have to be inside it — the
+compose images carry neither, so this backend suits a host install or an image
+you have added the CLI to.
+
+### Why this is not a workspace setting
+
+A CLI agent runs as the host user with that user's full file access, outside
+the sandbox Zone confines its own tools to, and every workspace shares the one
+host identity with no per-user separation and no metering. So the choice lives
+in the process environment, where the operator makes it, and there is no route
+or setting through which a workspace admin can turn it on.
+
 ## 🎨 ComfyUI Image, Video, and Audio Generation
 
 See [COMFYUI.md](COMFYUI.md) for model setup, hardware requirements, checksum

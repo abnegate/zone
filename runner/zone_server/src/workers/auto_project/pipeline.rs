@@ -710,8 +710,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .unwrap_or_default();
         let open = auto_projects::open_findings_of(&rows);
         let outcome = review::run(
-            &step.drive.state.config().litellm_host,
-            &step.drive.state.config().litellm_key,
+            step.drive.state.config(),
             pr.clone(),
             ReviewRequest {
                 task: &step.row,

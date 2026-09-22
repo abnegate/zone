@@ -2182,6 +2182,89 @@ describe('ChatsPage', () => {
     });
   });
 
+  it('shows the agent confined to Zone tools until the reader says otherwise', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: true,
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: false,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument());
+    expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByTestId('agent-sandbox-toggle'));
+    await waitFor(() => {
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { agent_sandboxed: false });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false')
+    );
+  });
+
+  it('puts an agent that kept its own tools back inside Zone', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: false,
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: true,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument());
+    expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('agent-sandbox-toggle').getAttribute('title')).toContain(
+      'run commands on this host'
+    );
+    fireEvent.click(screen.getByTestId('agent-sandbox-toggle'));
+    await waitFor(() => {
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { agent_sandboxed: true });
+    });
+  });
+
+  it('leaves auto-approve alone when the reader changes tool access', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: true,
+      auto_approve: true,
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      agent_sandboxed: false,
+      auto_approve: true,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('agent-sandbox-toggle'));
+    await waitFor(() => {
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { agent_sandboxed: false });
+    });
+    expect(screen.getByTestId('auto-approve-toggle')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('hides the tool-access toggle when the chat is not agentic', async () => {
+    mockClient.getChat.mockResolvedValueOnce({ ...mockChatWithMessages, tools: true });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-toggle')).toBeInTheDocument());
+    expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
+  });
+
   it('saves a pasted character card onto the open chat', async () => {
     mockClient.getChat.mockResolvedValueOnce({
       ...mockChatWithMessages,

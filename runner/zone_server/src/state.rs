@@ -8,10 +8,11 @@ use zone_context::adapters::{
 };
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
+use zone_core::llm::{CliSettings, LlmBackend};
 use zone_core::mcp::McpHub;
 
 use crate::cache::Cache;
-use crate::config::Config;
+use crate::config::{Config, ModelBackend};
 use crate::pull::PullRegistry;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
@@ -38,6 +39,23 @@ pub fn default_adapter_registry() -> AdapterRegistry {
     registry.register(TextAdapter::new());
     registry.register(WebAdapter::new());
     registry
+}
+
+/// The backend every model client in this process is built on.
+///
+/// A CLI-only self-host leaves `litellm_host` empty, so a client left on HTTP
+/// has nowhere to send its turn rather than somewhere slower to send it.
+pub fn llm_backend(config: &Config) -> LlmBackend {
+    match config.model_backend() {
+        ModelBackend::LiteLlm => LlmBackend::Http,
+        ModelBackend::Cli { agent, executable } => LlmBackend::cli(
+            *agent,
+            match executable {
+                Some(executable) => CliSettings::default().with_executable(executable),
+                None => CliSettings::default(),
+            },
+        ),
+    }
 }
 
 /// Shared application state
@@ -336,6 +354,7 @@ pub(crate) fn test_config() -> Config {
         jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
+        model_backend: Default::default(),
         litellm_host: "http://localhost:4000".to_string(),
         litellm_key: "test-key".to_string(),
         ollama_host: "http://localhost:11434".to_string(),
@@ -360,7 +379,9 @@ pub(crate) fn test_config() -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
+    use zone_core::llm::AgentKind;
     use zone_email::EmailConfig;
 
     fn create_test_config() -> Config {
@@ -372,6 +393,7 @@ mod tests {
             jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
             jwt_access_lifetime: 900,
             jwt_refresh_lifetime: 604800,
+            model_backend: Default::default(),
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),
@@ -391,6 +413,62 @@ mod tests {
             train_upload_limit_mb: 512,
             auto: Default::default(),
         }
+    }
+
+    fn backed_by(backend: ModelBackend) -> Config {
+        Config {
+            model_backend: backend,
+            ..create_test_config()
+        }
+    }
+
+    #[test]
+    fn an_unconfigured_host_keeps_sending_completions_to_the_endpoint() {
+        assert!(matches!(
+            llm_backend(&create_test_config()),
+            LlmBackend::Http
+        ));
+    }
+
+    #[test]
+    fn every_configured_agent_reaches_the_client_as_its_own_backend() {
+        for agent in AgentKind::ALL {
+            let config = backed_by(ModelBackend::Cli {
+                agent,
+                executable: None,
+            });
+
+            let LlmBackend::Cli {
+                agent: chosen,
+                settings,
+            } = llm_backend(&config)
+            else {
+                panic!("{agent} was configured and the client was still built on HTTP");
+            };
+            assert_eq!(chosen, agent);
+            assert!(
+                settings.executable.is_none(),
+                "an unnamed binary has to stay a PATH lookup, not become a literal path"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configured_binary_is_the_one_the_agent_is_run_from() {
+        let executable = PathBuf::from("/opt/homebrew/bin/claude");
+        let config = backed_by(ModelBackend::Cli {
+            agent: AgentKind::Claude,
+            executable: Some(executable.clone()),
+        });
+
+        let LlmBackend::Cli { settings, .. } = llm_backend(&config) else {
+            panic!("a configured agent has to reach the client as a CLI backend");
+        };
+        assert_eq!(
+            settings.executable,
+            Some(executable),
+            "the operator named a binary off PATH and it was dropped, so the agent would not be found"
+        );
     }
 
     #[test]

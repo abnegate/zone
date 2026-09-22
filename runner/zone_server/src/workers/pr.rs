@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::db::{ai_settings, projects, tasks, workspaces};
 use crate::services::checkout::{Baseline, Repository};
 use crate::services::stages;
-use crate::state::AppState;
+use crate::state::{AppState, llm_backend};
 use crate::workers::conflict::agent::ModelRepairAgent;
 use crate::workers::conflict::{RepairOutcome, RepairRequest, repair};
 use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
@@ -575,6 +575,7 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
             default_model: model.clone(),
             temperature: REPAIR_TEMPERATURE,
             max_tokens: REPAIR_TOKENS,
+            backend: llm_backend(state.config()),
         }),
         model,
     );
@@ -692,6 +693,7 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
         default_model: model,
         temperature: SUBJECT_TEMPERATURE,
         max_tokens: SUBJECT_TOKENS,
+        backend: llm_backend(state.config()),
     });
     let messages = [
         Message::system(SUBJECT_INSTRUCTIONS),

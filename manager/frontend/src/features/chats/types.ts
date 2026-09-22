@@ -291,6 +291,13 @@ export interface Chat {
    */
   agent_enabled: boolean;
   /**
+   * When true the agent may only call the tools Zone hands it. When false it
+   * also keeps its own tools, which read, write and run commands on the host
+   * without Zone ever seeing the call. Older servers omit this; treat those
+   * chats as confined to Zone's tools.
+   */
+  agent_sandboxed?: boolean;
+  /**
    * When true, mutating file and shell tools run without a confirmation.
    * Older servers omit this; treat those chats as requiring approval.
    */
@@ -334,6 +341,7 @@ export interface CreateChatRequest {
   first_message?: string;
   automatic_title?: boolean;
   agent_enabled?: boolean;
+  agent_sandboxed?: boolean;
   auto_approve?: boolean;
   reasoning_effort?: ReasoningEffort;
   character?: ChatCharacter;
@@ -342,6 +350,7 @@ export interface CreateChatRequest {
 export interface UpdateChatRequest {
   title?: string;
   agent_enabled?: boolean;
+  agent_sandboxed?: boolean;
   auto_approve?: boolean;
   reasoning_effort?: ReasoningEffort;
   character?: ChatCharacter | null;

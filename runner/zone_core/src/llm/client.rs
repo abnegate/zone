@@ -1,13 +1,22 @@
 //! LLM client for OpenAI-compatible APIs
 
+use futures::{Stream, StreamExt};
 use reqwest::{Client, Url};
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::runtime;
 
-use super::types::{ChatRequest, ChatResponse, ChatStreamChunk, Message, ToolDefinition};
+use super::provider::{
+    AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Completion,
+    CompletionProvider, CompletionRequest, Toolset,
+};
+use super::types::{
+    ChatRequest, ChatResponse, ChatStreamChunk, Choice, Message, StreamChoice, StreamDelta,
+    ToolDefinition,
+};
 
 fn pool() -> Client {
     Client::builder()
@@ -50,6 +59,10 @@ pub enum LlmError {
     Json(#[from] serde_json::Error),
     #[error("Stream error: {0}")]
     Stream(String),
+    /// A coding agent CLI's own report of what went wrong, rendered in its own
+    /// words so the operator reads "Not logged in" rather than a status code.
+    #[error("{0}")]
+    Agent(String),
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
 }
@@ -76,6 +89,37 @@ impl LlmError {
     }
 }
 
+/// A completion in pieces, whichever backend produced it.
+pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamChunk, LlmError>> + Send>>;
+
+/// OpenAI's word for a turn that ended normally.
+///
+/// Claude reports `success` and codex `completed`. The agent loop takes a
+/// reply as final only on `stop`, so a turn carrying the agent's own word
+/// would never be accepted and would run to the iteration limit instead.
+const STOP: &str = "stop";
+
+/// Where completions come from.
+#[derive(Debug, Clone, Default)]
+pub enum LlmBackend {
+    /// The OpenAI-compatible endpoint at [`LlmConfig::base_url`].
+    #[default]
+    Http,
+    /// A coding agent CLI on this host, run as a child process. A single-user
+    /// self-host can point zone at the `claude` or `codex` it has already
+    /// signed in and spend that subscription instead of a metered API key.
+    Cli {
+        agent: AgentKind,
+        settings: CliSettings,
+    },
+}
+
+impl LlmBackend {
+    pub fn cli(agent: AgentKind, settings: CliSettings) -> Self {
+        Self::Cli { agent, settings }
+    }
+}
+
 /// Configuration for the LLM client
 #[derive(Clone)]
 pub struct LlmConfig {
@@ -89,6 +133,15 @@ pub struct LlmConfig {
     pub temperature: f32,
     /// Default max tokens
     pub max_tokens: u32,
+    /// Where completions are fetched from. Defaults to the endpoint above.
+    pub backend: LlmBackend,
+}
+
+impl LlmConfig {
+    pub fn with_backend(mut self, backend: LlmBackend) -> Self {
+        self.backend = backend;
+        self
+    }
 }
 
 /// The key is the one field here that must never be printed, and this config
@@ -102,6 +155,7 @@ impl std::fmt::Debug for LlmConfig {
             .field("default_model", &self.default_model)
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
+            .field("backend", &self.backend)
             .finish()
     }
 }
@@ -114,6 +168,7 @@ impl Default for LlmConfig {
             default_model: "gpt-4".to_string(),
             temperature: 0.7,
             max_tokens: 4096,
+            backend: LlmBackend::Http,
         }
     }
 }
@@ -171,6 +226,119 @@ fn validate_outbound_url(url: &str) -> Result<Url, LlmError> {
     Ok(parsed)
 }
 
+/// Refuse a turn that expects zone's tools to be callable.
+///
+/// A coding agent runs its own tool loop and has no way to reach zone's
+/// registry, so tools handed to a CLI backend would simply not be offered to
+/// the model. Silently answering without them looks like a model that chose
+/// not to call anything, which is the one reading a caller must not be given.
+fn refuse_tools(tools: Option<&[ToolDefinition]>, agent: AgentKind) -> Result<(), LlmError> {
+    let Some(tools) = tools.filter(|tools| !tools.is_empty()) else {
+        return Ok(());
+    };
+
+    let names = tools
+        .iter()
+        .map(|tool| tool.function.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(LlmError::InvalidConfig(format!(
+        "the {agent} CLI backend runs its own tools and cannot be offered zone's ({names})"
+    )))
+}
+
+/// One agent event in the shape the agent loop already consumes.
+///
+/// Tool activity becomes reasoning rather than a tool-call delta. The agent
+/// has already run those tools, so replaying them through zone's registry
+/// would run each a second time -- but a turn that spends ten minutes reading
+/// and editing files should not look to the reader like a turn doing nothing,
+/// so what the agent reached for is shown as the thinking it was.
+fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, LlmError> {
+    let mut delta = StreamDelta::default();
+    let mut finish_reason = None;
+    let mut usage = None;
+
+    match event {
+        AgentEvent::Text(text) => delta.content = Some(text),
+        AgentEvent::Tool(call) => {
+            delta.reasoning_content = Some(format!("{}\n", call.function.name));
+        }
+        AgentEvent::Usage(counts) => usage = Some(counts),
+        AgentEvent::Finished {
+            finish_reason: reported,
+        } => {
+            tracing::debug!(
+                provider,
+                reported = reported.as_deref().unwrap_or("none"),
+                "agent finished its turn"
+            );
+            finish_reason = Some(STOP.to_string());
+        }
+        AgentEvent::Failed(message) => return Err(LlmError::Agent(message)),
+    }
+
+    Ok(ChatStreamChunk {
+        id: None,
+        object: None,
+        created: None,
+        model: None,
+        choices: vec![StreamChoice {
+            index: 0,
+            delta,
+            finish_reason,
+        }],
+        usage,
+    })
+}
+
+fn chunks(
+    events: AgentStream,
+    provider: String,
+) -> impl Stream<Item = Result<ChatStreamChunk, LlmError>> + Send {
+    async_stream::stream! {
+        let mut events = events;
+        while let Some(event) = events.next().await {
+            let translated = match event {
+                Ok(event) => chunk(event, &provider),
+                Err(error) => Err(LlmError::Agent(error.to_string())),
+            };
+            match translated {
+                Ok(chunk) => yield Ok(chunk),
+                Err(error) => {
+                    yield Err(error);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// A completion from an agent CLI, in the envelope an endpoint would have
+/// returned. Nothing upstream issues an identifier or a timestamp for a local
+/// child process, so both are this machine's.
+fn response(completion: Completion, model: &str) -> ChatResponse {
+    tracing::debug!(
+        provider = completion.provider,
+        reported = completion.finish_reason.as_deref().unwrap_or("none"),
+        "agent finished its turn"
+    );
+
+    ChatResponse {
+        id: format!("{}-{}", completion.provider, uuid::Uuid::new_v4()),
+        object: "chat.completion".to_string(),
+        created: chrono::Utc::now().timestamp(),
+        model: model.to_string(),
+        choices: vec![Choice {
+            index: 0,
+            message: completion.message,
+            finish_reason: Some(STOP.to_string()),
+        }],
+        usage: completion.usage,
+    }
+}
+
 impl LlmClient {
     /// Create a new LLM client
     pub fn new(config: LlmConfig) -> Self {
@@ -187,6 +355,26 @@ impl LlmClient {
     /// their own end tokens unless the request repeats them.
     pub fn with_stop(mut self, stop: Vec<String>) -> Self {
         self.stop = stop;
+        self
+    }
+
+    /// Serve a turn's own tools to a CLI backend's agent, and say whether it
+    /// also keeps the tools it ships with.
+    ///
+    /// Attached after construction because a turn's toolset does not exist
+    /// until the turn does: the token is minted against that turn's registry
+    /// and its approval policy, and neither is built when the client is.
+    ///
+    /// An HTTP backend is left exactly as it was rather than refused. It
+    /// spawns no child to configure, and its tools travel in the request
+    /// itself, so there is nothing here for it to lose: a request it makes
+    /// still carries whatever definitions it was given.
+    pub fn with_toolset(mut self, toolset: Toolset, builtin_tools: BuiltinTools) -> Self {
+        if let LlmBackend::Cli { settings, .. } = &mut self.config.backend {
+            *settings = std::mem::take(settings)
+                .with_toolset(toolset)
+                .with_builtin_tools(builtin_tools);
+        }
         self
     }
 
@@ -286,6 +474,20 @@ impl LlmClient {
         tools: Option<&[ToolDefinition]>,
         options: RequestOptions,
     ) -> Result<ChatResponse, LlmError> {
+        if let LlmBackend::Cli { agent, settings } = &self.config.backend {
+            refuse_tools(tools, *agent)?;
+            let completion = CliProvider::agent(*agent, settings.clone())
+                .complete(CompletionRequest {
+                    model,
+                    messages,
+                    tools: None,
+                    options,
+                })
+                .await
+                .map_err(|error| LlmError::Agent(error.to_string()))?;
+            return Ok(response(completion, model));
+        }
+
         let request = ChatRequest {
             model,
             messages,
@@ -319,8 +521,7 @@ impl LlmClient {
         &self,
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
-    ) -> Result<impl futures::Stream<Item = Result<ChatStreamChunk, LlmError>> + use<>, LlmError>
-    {
+    ) -> Result<ChatStream, LlmError> {
         self.chat_stream_with_model(&self.config.default_model, messages, tools)
             .await
     }
@@ -331,8 +532,7 @@ impl LlmClient {
         model: &str,
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
-    ) -> Result<impl futures::Stream<Item = Result<ChatStreamChunk, LlmError>> + use<>, LlmError>
-    {
+    ) -> Result<ChatStream, LlmError> {
         self.chat_stream_with_options(
             model,
             messages,
@@ -350,8 +550,20 @@ impl LlmClient {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
         options: RequestOptions,
-    ) -> Result<impl futures::Stream<Item = Result<ChatStreamChunk, LlmError>> + use<>, LlmError>
-    {
+    ) -> Result<ChatStream, LlmError> {
+        if let LlmBackend::Cli { agent, settings } = &self.config.backend {
+            refuse_tools(tools, *agent)?;
+            let events = CliProvider::agent(*agent, settings.clone())
+                .stream(CompletionRequest {
+                    model,
+                    messages,
+                    tools: None,
+                    options,
+                })
+                .map_err(|error| LlmError::Agent(error.to_string()))?;
+            return Ok(Box::pin(chunks(events, agent.to_string())));
+        }
+
         let request = ChatRequest {
             model,
             messages,
@@ -381,7 +593,6 @@ impl LlmClient {
             let mut bytes = response.bytes_stream();
             let mut buffer = Vec::<u8>::new();
 
-            use futures::StreamExt;
             while let Some(chunk) = bytes.next().await {
                 let chunk = match chunk {
                     Ok(c) => c,
@@ -424,7 +635,7 @@ impl LlmClient {
             }
         };
 
-        Ok(stream)
+        Ok(Box::pin(stream))
     }
 
     /// Get the current configuration
@@ -437,7 +648,97 @@ impl LlmClient {
 mod tests {
     use super::*;
     use crate::llm::Effort;
-    use crate::llm::types::{ChatRequest, Message};
+    use crate::llm::provider::ProviderError;
+    use crate::llm::types::{ChatRequest, FunctionCall, Message, ToolCall, Usage};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// The line a signed-out claude 2.1.269 ends its run with. The subtype
+    /// says success and the run still failed.
+    const SIGNED_OUT: &str = r#"{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","result":"Not logged in · Please run /login"}"#;
+    const REFUSAL: &str = "Not logged in \u{b7} Please run /login";
+
+    /// What `claude --print --output-format stream-json` really emits when the
+    /// host session has expired: the refusal arrives as assistant text first,
+    /// and only the result that follows says it was never an answer.
+    const SIGNED_OUT_ASSISTANT: &str = r#"{"type":"assistant","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4","content":[{"type":"text","text":"Not logged in \u00b7 Please run /login"}],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}},"session_id":"s1"}"#;
+
+    /// A stand-in for an agent CLI, so no test needs one signed in on the host.
+    fn fake(directory: &TempDir, script: &str) -> PathBuf {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = directory.path().join("agent");
+        let mut file = std::fs::File::create(&path).expect("the fake agent");
+        write!(file, "#!/bin/sh\n{script}\n").expect("the fake agent body");
+        drop(file);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the fake agent to be executable");
+        path
+    }
+
+    fn agent_client(executable: PathBuf) -> LlmClient {
+        let settings = CliSettings::default()
+            .with_executable(executable)
+            .with_timeout(Duration::from_secs(20));
+        LlmClient::new(
+            LlmConfig::default().with_backend(LlmBackend::cli(AgentKind::Claude, settings)),
+        )
+    }
+
+    fn agent_events(events: Vec<Result<AgentEvent, ProviderError>>) -> AgentStream {
+        Box::pin(futures::stream::iter(events))
+    }
+
+    async fn collected(
+        stream: impl Stream<Item = Result<ChatStreamChunk, LlmError>>,
+    ) -> (Vec<ChatStreamChunk>, Option<LlmError>) {
+        let mut stream = Box::pin(stream);
+        let mut delivered = Vec::new();
+        let mut failure = None;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => delivered.push(chunk),
+                Err(error) => failure = Some(error),
+            }
+        }
+        (delivered, failure)
+    }
+
+    fn spoken(chunks: &[ChatStreamChunk]) -> String {
+        chunks
+            .iter()
+            .filter_map(|chunk| chunk.choices.first()?.delta.content.clone())
+            .collect()
+    }
+
+    fn reasoned(chunks: &[ChatStreamChunk]) -> String {
+        chunks
+            .iter()
+            .filter_map(|chunk| chunk.choices.first()?.delta.reasoning_content.clone())
+            .collect()
+    }
+
+    fn reasons(chunks: &[ChatStreamChunk]) -> Vec<String> {
+        chunks
+            .iter()
+            .filter_map(|chunk| chunk.choices.first()?.finish_reason.clone())
+            .collect()
+    }
+
+    async fn stream_turn(
+        client: &LlmClient,
+        tools: Option<&[ToolDefinition]>,
+    ) -> Result<ChatStream, LlmError> {
+        client
+            .chat_stream_with_options(
+                "sonnet",
+                &[Message::user("What does a.rs do?")],
+                tools,
+                RequestOptions { reserved: 512 },
+            )
+            .await
+    }
 
     #[test]
     fn classifies_explicit_tool_capability_rejections() {
@@ -498,6 +799,7 @@ mod tests {
             default_model: "gpt-3.5-turbo".to_string(),
             temperature: 0.5,
             max_tokens: 2048,
+            ..LlmConfig::default()
         };
 
         assert_eq!(config.base_url, "https://custom.api.com/v1");
@@ -515,6 +817,7 @@ mod tests {
             default_model: "test-model".to_string(),
             temperature: 0.9,
             max_tokens: 1000,
+            ..LlmConfig::default()
         };
 
         let cloned = config.clone();
@@ -569,6 +872,7 @@ mod tests {
             default_model: "gpt-4-turbo".to_string(),
             temperature: 0.3,
             max_tokens: 8192,
+            ..LlmConfig::default()
         };
 
         let client = LlmClient::new(config);
@@ -588,6 +892,7 @@ mod tests {
             default_model: "test-model".to_string(),
             temperature: 0.6,
             max_tokens: 512,
+            ..LlmConfig::default()
         };
 
         let client = LlmClient::new(config);
@@ -804,5 +1109,289 @@ mod tests {
             .expect("a compose service host is reachable");
         assert_eq!(checked.as_str(), "http://litellm:4000/v1/chat/completions");
         assert_eq!(checked.host_str(), Some("litellm"));
+    }
+
+    #[test]
+    fn completions_come_from_the_endpoint_unless_a_backend_says_otherwise() {
+        assert!(matches!(LlmConfig::default().backend, LlmBackend::Http));
+        assert!(matches!(
+            LlmConfig::default()
+                .with_backend(LlmBackend::cli(AgentKind::Codex, CliSettings::default()))
+                .backend,
+            LlmBackend::Cli {
+                agent: AgentKind::Codex,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_turns_toolset_reaches_the_agent_the_backend_spawns() {
+        let toolset = Toolset::new(
+            "http://127.0.0.1:8421/mcp",
+            "zone-turn-notarealtoken",
+            ["read_file"],
+        );
+
+        let client = LlmClient::new(
+            LlmConfig::default()
+                .with_backend(LlmBackend::cli(AgentKind::Claude, CliSettings::default())),
+        )
+        .with_toolset(toolset, BuiltinTools::Withheld);
+
+        let LlmBackend::Cli { settings, .. } = &client.config().backend else {
+            panic!("the backend stayed on the endpoint");
+        };
+        let attached = settings.toolset.as_ref().expect("the turn's toolset");
+        assert_eq!(attached.endpoint, "http://127.0.0.1:8421/mcp");
+        assert_eq!(attached.tools, ["read_file"]);
+        assert_eq!(settings.builtin_tools, BuiltinTools::Withheld);
+    }
+
+    /// An HTTP backend spawns nothing to configure and carries its tools in
+    /// the request itself, so there is nothing here for it to lose.
+    #[test]
+    fn a_toolset_leaves_an_http_backend_exactly_as_it_was() {
+        let client = LlmClient::new(LlmConfig::default()).with_toolset(
+            Toolset::new("http://127.0.0.1:8421/mcp", "token", ["read_file"]),
+            BuiltinTools::Granted,
+        );
+
+        assert!(matches!(client.config().backend, LlmBackend::Http));
+    }
+
+    /// The builder replaces what a turn decides and nothing else: the executable
+    /// the operator configured is still the one that runs.
+    #[test]
+    fn attaching_a_toolset_keeps_the_rest_of_the_settings() {
+        let client = LlmClient::new(LlmConfig::default().with_backend(LlmBackend::cli(
+            AgentKind::Claude,
+            CliSettings::default().with_executable("/opt/bin/claude"),
+        )))
+        .with_toolset(
+            Toolset::new("http://127.0.0.1:8421/mcp", "token", ["read_file"]),
+            BuiltinTools::Granted,
+        );
+
+        let LlmBackend::Cli { settings, .. } = &client.config().backend else {
+            panic!("the backend stayed on the endpoint");
+        };
+        assert_eq!(
+            settings.executable,
+            Some(std::path::PathBuf::from("/opt/bin/claude"))
+        );
+        assert_eq!(settings.builtin_tools, BuiltinTools::Granted);
+    }
+
+    #[tokio::test]
+    async fn an_agents_successful_ending_becomes_the_one_the_loop_accepts() {
+        let events = agent_events(vec![
+            Ok(AgentEvent::Text("The suite passes.".to_string())),
+            Ok(AgentEvent::Usage(Usage {
+                prompt_tokens: 40,
+                completion_tokens: 8,
+                total_tokens: 48,
+            })),
+            Ok(AgentEvent::Finished {
+                finish_reason: Some("success".to_string()),
+            }),
+        ]);
+
+        let (delivered, failure) = collected(chunks(events, "claude".to_string())).await;
+
+        assert!(failure.is_none(), "a finished turn failed: {failure:?}");
+        assert_eq!(spoken(&delivered), "The suite passes.");
+        assert_eq!(
+            delivered
+                .iter()
+                .find_map(|chunk| chunk.usage.as_ref())
+                .map(|usage| usage.total_tokens),
+            Some(48)
+        );
+        assert_eq!(
+            reasons(&delivered),
+            [STOP],
+            "the agent's own word would spin the loop to its iteration limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agents_tool_use_is_shown_as_reasoning_rather_than_replayed() {
+        let events = agent_events(vec![
+            Ok(AgentEvent::Tool(ToolCall {
+                id: "toolu_01".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "Read".to_string(),
+                    arguments: r#"{"file_path":"/w/a.rs"}"#.to_string(),
+                },
+            })),
+            Ok(AgentEvent::Finished {
+                finish_reason: Some("success".to_string()),
+            }),
+        ]);
+
+        let (delivered, failure) = collected(chunks(events, "claude".to_string())).await;
+
+        assert!(failure.is_none(), "a finished turn failed: {failure:?}");
+        assert!(
+            reasoned(&delivered).contains("Read"),
+            "the reader was shown nothing for the work the agent did"
+        );
+        assert!(
+            delivered.iter().all(|chunk| chunk
+                .choices
+                .iter()
+                .all(|choice| choice.delta.tool_calls.is_none())),
+            "zone would run the agent's own tool a second time"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusing_agent_ends_the_stream_in_its_own_words() {
+        let events = agent_events(vec![Ok(AgentEvent::Failed(REFUSAL.to_string()))]);
+
+        let (delivered, failure) = collected(chunks(events, "claude".to_string())).await;
+
+        let failure = failure.expect("a refused turn to fail");
+        assert!(
+            failure.to_string().contains(REFUSAL),
+            "lost the agent's wording: {failure}"
+        );
+        assert!(
+            delivered.is_empty(),
+            "a refusal was delivered as an answer: {delivered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_agent_answers_a_streaming_turn() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = r#"
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Looking now. "}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"/w/a.rs"}}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"It is empty."}]}}'
+echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":9,"cache_read_input_tokens":1600,"output_tokens":24}}'
+"#;
+        let client = agent_client(fake(&directory, script));
+
+        let stream = stream_turn(&client, None).await.expect("a running agent");
+        let (delivered, failure) = collected(stream).await;
+
+        assert!(failure.is_none(), "the turn failed: {failure:?}");
+        assert_eq!(spoken(&delivered), "Looking now. It is empty.");
+        assert!(reasoned(&delivered).contains("Read"));
+        assert_eq!(reasons(&delivered), [STOP]);
+        assert_eq!(
+            delivered
+                .iter()
+                .find_map(|chunk| chunk.usage.as_ref())
+                .map(|usage| usage.prompt_tokens),
+            Some(9 + 1600)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_signed_out_host_agent_fails_the_turn_rather_than_answering_it() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let client = agent_client(fake(&directory, &format!("printf '%s\\n' '{SIGNED_OUT}'")));
+
+        let stream = stream_turn(&client, None).await.expect("a running agent");
+        let (delivered, failure) = collected(stream).await;
+
+        let failure = failure.expect("a signed-out agent to fail the turn");
+        assert!(
+            failure.to_string().contains(REFUSAL),
+            "lost the agent's wording: {failure}"
+        );
+        assert!(
+            !spoken(&delivered).contains("Not logged in"),
+            "the refusal was streamed as the answer"
+        );
+        assert!(
+            reasons(&delivered).is_empty(),
+            "a refused turn was ended as a finished one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_spoken_before_it_is_declared_still_fails_the_turn() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let client = agent_client(fake(
+            &directory,
+            &format!("printf '%s\\n' '{SIGNED_OUT_ASSISTANT}' '{SIGNED_OUT}'"),
+        ));
+
+        let stream = stream_turn(&client, None).await.expect("a running agent");
+        let (delivered, failure) = collected(stream).await;
+
+        let failure = failure.expect("a signed-out agent to fail the turn");
+        assert!(
+            failure.to_string().contains(REFUSAL),
+            "lost the agent's wording: {failure}"
+        );
+        assert!(
+            reasons(&delivered).is_empty(),
+            "a turn that spoke before it failed was still ended as a finished one"
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_offered_to_a_cli_backend_are_refused_rather_than_dropped() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let client = agent_client(fake(&directory, "exit 1"));
+        let tools = [ToolDefinition::function(
+            "read_file",
+            "Read a file",
+            serde_json::json!({}),
+        )];
+
+        let Err(streaming) = stream_turn(&client, Some(&tools)).await else {
+            panic!("a streaming turn offered zone's tools to an agent that cannot call them");
+        };
+        let buffered = client
+            .chat_with_options(
+                "sonnet",
+                &[Message::user("hi")],
+                Some(&tools),
+                RequestOptions { reserved: 512 },
+            )
+            .await
+            .expect_err("a refusal");
+
+        for error in [streaming, buffered] {
+            assert!(
+                matches!(error, LlmError::InvalidConfig(_)),
+                "expected a rejected request, got {error:?}"
+            );
+            assert!(
+                error.to_string().contains("read_file"),
+                "the refusal has to name the tools it could not serve: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_buffered_turn_reaches_the_host_agent_too() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = r#"
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Two."}]}}'
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#;
+        let client = agent_client(fake(&directory, script));
+
+        let response = client
+            .chat_with_options(
+                "sonnet",
+                &[Message::user("one plus one?")],
+                None,
+                RequestOptions { reserved: 512 },
+            )
+            .await
+            .expect("an answer");
+
+        let choice = response.choices.first().expect("one choice");
+        assert_eq!(choice.message.content.as_deref(), Some("Two."));
+        assert_eq!(choice.finish_reason.as_deref(), Some(STOP));
     }
 }

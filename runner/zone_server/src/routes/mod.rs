@@ -104,6 +104,12 @@ pub fn create_router(state: AppState) -> Router {
             "/api/webhooks/sync/{sync_config_id}/linear",
             post(webhooks::linear_webhook),
         )
+        // Zone's tools, served to a spawned coding agent (auth: the turn's
+        // own bearer token, which no other route accepts)
+        .route(
+            crate::mcp::PATH,
+            post(crate::mcp::serve).layer(DefaultBodyLimit::max(crate::mcp::BODY_LIMIT)),
+        )
         // WebSocket routes (auth via first message)
         .route("/ws/pull", get(ws::handle_pull_ws))
         .route("/ws/chats/{chat_id}", get(ws::handle_chat_ws))

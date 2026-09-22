@@ -117,6 +117,9 @@ pub struct ChatResponse {
     model_name: String,
     archived: bool,
     agent_enabled: bool,
+    /// When true the agent may only call the tools zone hands it. When false it
+    /// also keeps its own file and shell tools, which zone never sees.
+    agent_sandboxed: bool,
     auto_approve: bool,
     reasoning_effort: zone_core::llm::ReasoningEffort,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,6 +149,7 @@ impl From<chats::ChatRow> for ChatResponse {
             model_name: row.model_name,
             archived: row.archived.unwrap_or(false),
             agent_enabled: row.agent_enabled,
+            agent_sandboxed: row.agent_sandboxed,
             auto_approve: row.auto_approve,
             reasoning_effort: row.reasoning_effort,
             character: row.character,
@@ -337,6 +341,8 @@ pub struct CreateChatRequest {
     model_name: String,
     #[serde(default)]
     agent_enabled: bool,
+    #[serde(default = "sandboxed_by_default")]
+    agent_sandboxed: bool,
     #[serde(default)]
     auto_approve: bool,
     #[serde(default)]
@@ -345,11 +351,16 @@ pub struct CreateChatRequest {
     character: Option<ChatCharacter>,
 }
 
+const fn sandboxed_by_default() -> bool {
+    true
+}
+
 /// Update chat request
 #[derive(Debug, Deserialize)]
 pub struct UpdateChatRequest {
     title: Option<String>,
     agent_enabled: Option<bool>,
+    agent_sandboxed: Option<bool>,
     auto_approve: Option<bool>,
     reasoning_effort: Option<zone_core::llm::ReasoningEffort>,
     #[serde(default)]
@@ -419,8 +430,7 @@ pub async fn create(
         Some(req.workspace_id),
         &req.title,
         &req.model_name,
-        // Preserve the legacy column default; it no longer controls tools.
-        (req.agent_enabled, true),
+        (req.agent_enabled, req.agent_sandboxed),
         req.automatic_title,
         req.auto_approve,
         req.reasoning_effort.unwrap_or_default(),
@@ -496,13 +506,12 @@ pub async fn update(
         )
             .into_response();
     }
-    // Leave the inert legacy sandbox column unchanged.
     match chats::update_chat(
         state.db(),
         id,
         title,
         req.agent_enabled,
-        None,
+        req.agent_sandboxed,
         req.auto_approve,
         req.reasoning_effort,
     )
