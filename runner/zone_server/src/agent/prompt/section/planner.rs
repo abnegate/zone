@@ -8,6 +8,7 @@
 
 use crate::agent::planner::{CREATE_REPOSITORY, FINALIZE_PROJECT};
 use crate::agent::prompt::Context;
+use crate::agent::question::ASK_USER;
 
 const HEADING: &str = "Planning a project:";
 
@@ -33,6 +34,15 @@ const STOP: &str = "- Keep asking until every task can be written without guessi
      card that summarises the plan -- name, repository, the tasks in order -- and only on a \
      yes call finalize_project, exactly once. Do not call it while a decision is open.";
 
+/// The interview on a coding agent, which is served no ask_user: the questions
+/// go in the reply, and the person's yes in the chat is the confirmation.
+const MESSAGES: &str = "- Ask two to four related questions in a reply, one topic per reply, the option you would \
+     recommend first. State inline what the brief already decided rather than asking it again.";
+
+const CONFIRMATION: &str = "- Keep asking until every task can be written without guessing. Then summarise the plan in \
+     one reply -- name, repository, the tasks in order -- and ask the person to confirm it; only \
+     on a yes call finalize_project, exactly once. Do not call it while a decision is open.";
+
 const TASKS: &str = "- Tasks are ordered, one pull request each, with a kind, a description precise enough to \
      need no question, acceptance criteria, and depends_on by index. The first task scaffolds \
      the repository when it is new (toolchain, formatter, linter, an empty test suite); the \
@@ -50,7 +60,10 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
     if !context.tools.has(FINALIZE_PROJECT) {
         return None;
     }
-    let mut rules = vec![ROLE, ORDER, CARDS, STOP, TASKS];
+    let mut rules = match context.tools.has(ASK_USER) {
+        true => vec![ROLE, ORDER, CARDS, STOP, TASKS],
+        false => vec![ROLE, ORDER, MESSAGES, CONFIRMATION, TASKS],
+    };
     if context.tools.has(CREATE_REPOSITORY) {
         rules.push(REPOSITORY);
     }
@@ -81,6 +94,28 @@ mod tests {
             ChatTools::with_names(ToolProfile::Chat, &["ask_user", FINALIZE_PROJECT], None);
         let rendered = render(&chat_context(&without_repository, false, &environment)).unwrap();
         assert!(!rendered.contains(REPOSITORY), "{rendered}");
+    }
+
+    /// A planner chat on a coding agent is served no ask_user, so it is not
+    /// told to raise cards it cannot: it interviews in its replies, and the
+    /// person's yes in the chat is the confirmation.
+    #[test]
+    fn a_planner_with_no_cards_to_raise_interviews_in_its_replies() {
+        let environment = environment();
+        let planner = ChatTools::with_names(
+            ToolProfile::Chat,
+            &["read_file", FINALIZE_PROJECT, CREATE_REPOSITORY],
+            None,
+        );
+
+        let rendered = render(&chat_context(&planner, false, &environment)).unwrap();
+
+        assert!(!rendered.contains("ask_user"), "{rendered}");
+        assert!(!rendered.contains("card"), "{rendered}");
+        for rule in [ROLE, ORDER, MESSAGES, CONFIRMATION, TASKS, REPOSITORY] {
+            assert!(rendered.contains(rule), "{rendered}");
+        }
+        assert!(rendered.contains("exactly once"), "{rendered}");
     }
 
     #[test]

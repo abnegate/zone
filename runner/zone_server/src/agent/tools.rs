@@ -526,6 +526,29 @@ impl ChatTools {
         self
     }
 
+    /// These tools less the ones `names` lists, which leave the catalog, the
+    /// prompt and dispatch alike.
+    pub fn without(mut self, names: &[String]) -> Self {
+        let named = |name: &str| names.iter().any(|named| named == name);
+        let kept: Vec<_> = std::mem::replace(&mut self.registry, ToolRegistry::new())
+            .into_tools()
+            .into_iter()
+            .filter(|tool| !named(tool.name()))
+            .collect();
+        for tool in kept {
+            self.registry.register(tool);
+        }
+        self.names.retain(|name| !named(name));
+        self.name_set.retain(|name| !named(name));
+        self.definitions
+            .retain(|definition| !named(&definition.function.name));
+        self.core.retain(|name| !named(name));
+        self.workspace.retain(|name| !named(name));
+        self.remote.retain(|name| !named(name));
+        self.publish_catalog();
+        self
+    }
+
     /// `denied` is the agents' state root, which every host tool set is
     /// denied, whether or not a workspace scope came with it.
     async fn assemble(
@@ -1872,6 +1895,34 @@ mod tests {
         );
         assert!(with.deferred().is_empty(), "{:?}", with.deferred());
         assert!(with.ends_turn(super::super::plan::SUBMIT_PLAN));
+    }
+
+    #[tokio::test]
+    async fn a_tool_left_out_is_neither_listed_nor_offered_nor_run() {
+        let question = super::super::question::ASK_USER;
+        let tools = ChatTools::for_task(
+            &crate::state::AppState::for_tests(),
+            std::env::temp_dir(),
+            Uuid::new_v4(),
+            None,
+        )
+        .await;
+        assert!(tools.has(question));
+        let every = tools.names().len();
+
+        let tools = tools.without(&[question.to_string()]);
+
+        assert!(!tools.has(question));
+        assert_eq!(tools.names().len(), every - 1);
+        for definitions in [tools.definitions(), tools.all_definitions().to_vec()] {
+            assert!(
+                !definitions
+                    .iter()
+                    .any(|definition| definition.function.name == question)
+            );
+        }
+        assert!(!tools.execute(question, "{}").await.success);
+        assert!(tools.has("read_file"));
     }
     use super::*;
     use crate::state::test_config;

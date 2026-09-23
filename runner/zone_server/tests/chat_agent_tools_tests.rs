@@ -27,8 +27,15 @@ use tokio_tungstenite::connect_async;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::AgentKind;
+use zone_core::llm::{AgentKind, CliSettings, LlmBackend};
+use zone_server::agent::ASK_USER;
+use zone_server::agent::wait::WAIT_FOR;
 use zone_server::config::ModelBackend;
+use zone_server::db::chats;
+use zone_server::services::chat::session::{self, Mode};
+
+/// Longer than the thirty minutes a coding agent's turn gets by default.
+const CHAT_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// How long the test waits for the spawned agent to report how it was invoked.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -42,6 +49,7 @@ const ANSWER: &str = "Written.";
 /// still running -- which is the only moment at which it is supposed to work.
 struct Agent {
     executable: PathBuf,
+    prompt: PathBuf,
     arguments: PathBuf,
     token: PathBuf,
     release: PathBuf,
@@ -54,6 +62,7 @@ impl Agent {
 
         let agent = Self {
             executable: directory.join("agent"),
+            prompt: directory.join("prompt"),
             arguments: directory.join("arguments"),
             token: directory.join("token"),
             release: directory.join("release"),
@@ -61,9 +70,10 @@ impl Agent {
         let mut file = std::fs::File::create(&agent.executable).expect("the stand-in agent");
         writeln!(
             file,
-            "#!/bin/sh\ncat > /dev/null\nprintf '%s' \"$ZONE_MCP_TOKEN\" > {token}\nprintf \
+            "#!/bin/sh\ncat > {prompt}\nprintf '%s' \"$ZONE_MCP_TOKEN\" > {token}\nprintf \
              '%s' \"$*\" > {arguments}\nwhile [ ! -f {release} ]; do sleep 0.05; \
              done\necho '{assistant}'\necho '{result}'",
+            prompt = agent.prompt.display(),
             arguments = agent.arguments.display(),
             token = agent.token.display(),
             release = agent.release.display(),
@@ -314,6 +324,19 @@ async fn a_cli_turn_serves_its_tools_for_the_life_of_the_turn_and_no_longer() {
         .collect();
     assert!(names.contains(&"write_file"), "{names:?}");
 
+    // Over MCP a question or a wait returns at once, parking nothing, and the
+    // turn would read that as an answer nobody gave. So the agent is neither
+    // served one nor told of one, and asks the reader in its reply instead.
+    let prompt = std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt");
+    for tool in [ASK_USER, WAIT_FOR] {
+        assert!(!prompt.contains(tool), "the prompt teaches {tool}");
+        assert!(!names.contains(&tool), "{tool} was listed: {names:?}");
+        assert!(
+            !allowed.contains(&format!("mcp__zone__{tool}")),
+            "{tool} was allowlisted: {allowed:?}"
+        );
+    }
+
     let (status, called) = rpc(
         &endpoint,
         &token,
@@ -412,4 +435,68 @@ async fn an_unsandboxed_chat_leaves_the_agent_its_own_tools() {
         frames.iter().any(|frame| frame["type"] == "message_end"),
         "{frames:?}"
     );
+}
+
+fn system_prompt(preparation: &session::Preparation) -> String {
+    preparation.context.entries[0]
+        .message
+        .content
+        .clone()
+        .expect("the turn's system prompt")
+}
+
+/// A chat turn on a coding agent gets the chat's whole time budget on the
+/// agent's own clock too, which the operator may set past the thirty minutes
+/// an agent's turn has by default. And it is prepared with no tool that would
+/// park zone's own loop, in its catalog or in its prompt, where a turn on an
+/// endpoint keeps both.
+#[tokio::test]
+async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
+    let harness = common::context::Harness::new(None, true, Vec::new()).await;
+    let mut config = harness.config.clone();
+    config.chat.timeout = CHAT_TIMEOUT;
+    let state = create_test_state(config, harness.pool.clone());
+    let chat = chats::get_chat(&harness.pool, harness.chat)
+        .await
+        .unwrap()
+        .expect("the harness's chat");
+
+    let agent = session::build(
+        &state,
+        &chat,
+        Uuid::new_v4(),
+        None,
+        Mode::Generation(LlmBackend::cli(AgentKind::Claude, CliSettings::default())),
+    )
+    .await
+    .expect("a turn on an agent is prepared");
+    let endpoint = session::build(
+        &state,
+        &chat,
+        Uuid::new_v4(),
+        None,
+        Mode::Generation(LlmBackend::Http),
+    )
+    .await
+    .expect("a turn on the endpoint is prepared");
+
+    for tool in [ASK_USER, WAIT_FOR] {
+        assert!(
+            system_prompt(&endpoint).contains(tool),
+            "a turn on the endpoint is no longer taught {tool}"
+        );
+        assert!(
+            endpoint.tools.has(tool),
+            "a turn on the endpoint lost {tool}"
+        );
+        assert!(
+            !system_prompt(&agent).contains(tool),
+            "a turn on an agent is taught {tool}"
+        );
+        assert!(!agent.tools.has(tool), "a turn on an agent holds {tool}");
+    }
+    let LlmBackend::Cli { settings, .. } = &agent.llm.config().backend else {
+        panic!("the turn was moved off its agent");
+    };
+    assert_eq!(settings.timeout, CHAT_TIMEOUT);
 }

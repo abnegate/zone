@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_comfy::MediaType;
-use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Message as LlmMessage, Role as LlmRole};
+use zone_core::llm::{BuiltinTools, LlmBackend, Message as LlmMessage, Role as LlmRole};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -2956,72 +2956,15 @@ async fn prepare_chat(
     Ok(preparation)
 }
 
-/// What a CLI-backed turn needs to reach zone's tools, for exactly as long as
-/// it is held: the lease keeping this turn's token minted, and the calls the
-/// agent makes arriving as the events the console already renders.
-struct AgentTools {
-    lease: crate::mcp::Lease,
-    calls: mpsc::UnboundedReceiver<AgentEvent>,
-}
-
-/// The one turn zone's MCP endpoint decides a call by.
-struct TurnScope {
-    workspace: Uuid,
-    chat: Uuid,
-    user: Uuid,
-    /// `chats.agent_sandboxed`.
-    sandboxed: bool,
-    approval: crate::agent::ApprovalPolicy,
-    endpoint: String,
-}
-
-impl TurnScope {
-    /// A sandboxed chat gives the agent zone's tools and nothing else. An
-    /// unsandboxed one leaves it the file and shell tools it ships with, which
-    /// run outside zone, which zone never sees, and which no approval card can
-    /// reach.
-    fn builtin_tools(&self) -> BuiltinTools {
-        match self.sandboxed {
-            true => BuiltinTools::Withheld,
-            false => BuiltinTools::Granted,
-        }
+/// A sandboxed chat (`chats.agent_sandboxed`) gives the agent zone's tools and
+/// nothing else. An unsandboxed one leaves it the file and shell tools it
+/// ships with, which run outside zone, which zone never sees, and which no
+/// approval card can reach.
+fn builtin_tools(sandboxed: bool) -> BuiltinTools {
+    match sandboxed {
+        true => BuiltinTools::Withheld,
+        false => BuiltinTools::Granted,
     }
-}
-
-/// Serve this turn's tools to a spawned coding agent over MCP.
-///
-/// Only ever for an agentic turn: a chat whose agent the reader turned off
-/// gets no tools at all, and serving the registry to the child anyway would
-/// hand it exactly what that switch is there to withhold.
-///
-/// The agent runs its own tool loop and cannot be handed zone's schemas over
-/// the completions API, so the registry moves out of zone's loop and into the
-/// turn the endpoint answers for. What zone's loop keeps can call nothing,
-/// which is what it could have done with this backend either way.
-///
-/// `None` for a backend whose tools zone cannot decide -- an HTTP endpoint,
-/// which carries its tools in the request itself, or an agent that takes no
-/// toolset -- and then the turn's tools stay exactly where they were.
-fn serve_tools(turn: &TurnScope, llm: &LlmClient, tools: &mut ChatTools) -> Option<AgentTools> {
-    let LlmBackend::Cli { agent, .. } = &llm.config().backend else {
-        return None;
-    };
-    if !agent.accepts_toolset() {
-        return None;
-    }
-
-    let registry = Arc::new(std::mem::replace(tools, ChatTools::empty()));
-    let (events, calls) = mpsc::unbounded_channel();
-    let lease = crate::mcp::Turn::new(
-        turn.workspace,
-        turn.chat,
-        turn.user,
-        registry,
-        turn.approval.clone(),
-        events,
-    )
-    .open(turn.endpoint.as_str());
-    Some(AgentTools { lease, calls })
 }
 
 /// `jobs` collects the background jobs this turn started and has not yet
@@ -3055,22 +2998,27 @@ async fn handle_chat_generation(
     let model_name = model.as_str();
     let mut replay = context.clone();
     let definitions = agentic.then(|| tools.definitions().to_vec());
-    let turn = TurnScope {
-        workspace: workspace_id,
-        chat: chat_id,
-        user: user_id,
-        sandboxed,
-        approval: generation.approvals.clone(),
-        endpoint: crate::mcp::local_endpoint(state.config()),
-    };
     // Bound for the whole turn on purpose. The token is revoked when the lease
     // drops, and the agent is still calling with it until its last round has
     // returned.
     let mut agent_tools = agentic
-        .then(|| serve_tools(&turn, &llm_client, &mut tools))
+        .then(|| {
+            crate::mcp::AgentTools::serve(
+                &llm_client.config().backend,
+                &mut tools,
+                crate::mcp::Scope {
+                    workspace: workspace_id,
+                    chat: chat_id,
+                    user: Some(user_id),
+                    approval: generation.approvals.clone(),
+                    calls: budget.max_tool_calls,
+                },
+                &crate::mcp::local_endpoint(state.config()),
+            )
+        })
         .flatten();
     let llm_client = match &agent_tools {
-        Some(served) => llm_client.with_toolset(served.lease.toolset(), turn.builtin_tools()),
+        Some(served) => llm_client.with_toolset(served.lease.toolset(), builtin_tools(sandboxed)),
         None => llm_client,
     };
     let mut token_filter = TokenFilter::new(stop);
@@ -3386,7 +3334,7 @@ async fn handle_chat_generation(
                             stop_stream = true;
                         }
                         Some(AgentEvent::Failed(message)) => {
-                            failure = Some(crate::services::backend::remedied(&llm_client.config().backend, message));
+                            failure = Some(crate::services::backend::remedied(&llm_client.config().backend, message).message);
                             break;
                         }
                         None => {
@@ -6570,151 +6518,20 @@ mod tests {
         );
     }
 
-    /// Zone's tools reach a spawned coding agent over MCP or not at all, and
-    /// which of the agent's own tools survive beside them is `agent_sandboxed`
-    /// alone. Both are decided here, once the turn's registry and approval
-    /// policy exist, and both last exactly as long as the lease.
-    mod served_tools {
-        use super::*;
-        use zone_core::llm::{AgentKind, CliSettings, LlmConfig};
-
-        fn scope(sandboxed: bool) -> TurnScope {
-            TurnScope {
-                workspace: Uuid::new_v4(),
-                chat: Uuid::new_v4(),
-                user: Uuid::new_v4(),
-                sandboxed,
-                approval: crate::agent::ApprovalPolicy::auto(),
-                endpoint: crate::mcp::endpoint("http://127.0.0.1:8421"),
-            }
-        }
-
-        fn cli(agent: AgentKind) -> LlmClient {
-            LlmClient::new(
-                LlmConfig::default().with_backend(LlmBackend::cli(agent, CliSettings::default())),
-            )
-        }
-
-        fn tools() -> ChatTools {
-            let tools = ChatTools::empty().with_plan_approval();
-            assert!(!tools.is_empty(), "the turn has tools worth serving");
-            tools
-        }
-
-        /// What the child process is actually configured with: where zone
-        /// serves its tools, which tools those are, and whether the agent
-        /// keeps its own.
-        fn attached(llm: &LlmClient) -> Option<(String, Vec<String>, BuiltinTools)> {
-            match &llm.config().backend {
-                LlmBackend::Cli { settings, .. } => settings.toolset.as_ref().map(|toolset| {
-                    (
-                        toolset.endpoint.clone(),
-                        toolset.tools.clone(),
-                        settings.builtin_tools,
-                    )
-                }),
-                LlmBackend::Http => None,
-            }
-        }
-
-        fn served(sandboxed: bool) -> (LlmClient, ChatTools, AgentTools) {
-            let turn = scope(sandboxed);
-            let mut tools = tools();
-            let llm = cli(AgentKind::Claude);
-            let agent_tools =
-                serve_tools(&turn, &llm, &mut tools).expect("claude lets zone decide its tools");
-            let llm = llm.with_toolset(agent_tools.lease.toolset(), turn.builtin_tools());
-            (llm, tools, agent_tools)
-        }
-
-        #[test]
-        fn a_sandboxed_turn_serves_zone_tools_and_withholds_the_agents_own() {
-            let (llm, left_behind, served) = served(true);
-
-            let (endpoint, served_tools, builtin_tools) =
-                attached(&llm).expect("the agent is told where zone serves its tools");
-            assert_eq!(endpoint, crate::mcp::endpoint("http://127.0.0.1:8421"));
-            assert_eq!(served_tools, [crate::agent::plan::SUBMIT_PLAN]);
-            assert_eq!(
-                builtin_tools,
-                BuiltinTools::Withheld,
-                "a sandboxed chat must not leave the agent tools zone cannot gate"
-            );
-            assert!(
-                left_behind.is_empty(),
-                "the registry the endpoint answers from must not also sit in zone's own loop"
-            );
-            drop(served);
-        }
-
-        #[test]
-        fn an_unsandboxed_turn_grants_the_agent_its_own_tools_beside_zones() {
-            let (llm, _, served) = served(false);
-
-            let (_, served_tools, builtin_tools) =
-                attached(&llm).expect("the agent is told where zone serves its tools");
-            assert_eq!(served_tools, [crate::agent::plan::SUBMIT_PLAN]);
-            assert_eq!(
-                builtin_tools,
-                BuiltinTools::Granted,
-                "an unsandboxed chat keeps the agent's own file and shell tools"
-            );
-            drop(served);
-        }
-
-        #[test]
-        fn an_http_turn_serves_nothing_and_keeps_every_tool_it_had() {
-            let turn = scope(true);
-            let mut tools = tools();
-            let llm = LlmClient::new(LlmConfig::default());
-
-            let served = serve_tools(&turn, &llm, &mut tools);
-
-            assert!(served.is_none(), "an HTTP backend spawns nothing to serve");
-            assert!(
-                !tools.is_empty(),
-                "an HTTP turn offers its tools over the completions API and must keep them"
-            );
-            assert!(matches!(llm.config().backend, LlmBackend::Http));
-        }
-
-        #[test]
-        fn a_codex_turn_is_served_zones_tools() {
-            let turn = scope(true);
-            let mut tools = tools();
-            let llm = cli(AgentKind::Codex);
-
-            let served =
-                serve_tools(&turn, &llm, &mut tools).expect("codex lets zone decide its tools");
-            let llm = llm.with_toolset(served.lease.toolset(), turn.builtin_tools());
-
-            let (endpoint, served_tools, builtin_tools) =
-                attached(&llm).expect("codex is told where zone serves its tools");
-            assert_eq!(endpoint, crate::mcp::endpoint("http://127.0.0.1:8421"));
-            assert_eq!(served_tools, [crate::agent::plan::SUBMIT_PLAN]);
-            assert_eq!(builtin_tools, BuiltinTools::Withheld);
-            assert!(
-                tools.is_empty(),
-                "the registry the endpoint answers from must not also sit in zone's own loop"
-            );
-            drop(served);
-        }
-
-        #[test]
-        fn the_turns_token_stops_working_once_the_lease_is_dropped() {
-            let (_, _, served) = served(true);
-            let token = served.lease.toolset().token.expose().to_string();
-
-            assert!(
-                crate::mcp::Turn::find(&token).is_some(),
-                "the agent cannot reach zone's tools while its turn is running"
-            );
-            drop(served);
-
-            assert!(
-                crate::mcp::Turn::find(&token).is_none(),
-                "a token that outlives its turn is a standing grant on this workspace"
-            );
-        }
+    /// Zone's tools reach a spawned coding agent over MCP (see `crate::mcp`),
+    /// and which of the agent's own tools survive beside them is
+    /// `agent_sandboxed` alone.
+    #[test]
+    fn only_a_sandboxed_chat_withholds_the_agents_own_tools() {
+        assert_eq!(
+            builtin_tools(true),
+            BuiltinTools::Withheld,
+            "a sandboxed chat must not leave the agent tools zone cannot gate"
+        );
+        assert_eq!(
+            builtin_tools(false),
+            BuiltinTools::Granted,
+            "an unsandboxed chat keeps the agent's own file and shell tools"
+        );
     }
 }

@@ -317,6 +317,11 @@ pub async fn build(
         }
         _ => tools,
     };
+    let backend = match &mode {
+        Mode::Preview => backend::instance(state.config()),
+        Mode::Generation(backend) => backend::bounded(backend.clone(), settings.timeout),
+    };
+    let tools = crate::mcp::offered(&backend, tools);
     let agentic = chat.agent_enabled && !tools.is_empty();
     let policy = policy(settings, &capacity);
     let request = pending
@@ -449,10 +454,6 @@ pub async fn build(
             .map(|card| card.stop_sequences.as_slice())
             .unwrap_or(&[]),
     );
-    let backend = match mode {
-        Mode::Preview => backend::instance(state.config()),
-        Mode::Generation(backend) => backend,
-    };
     let mut llm = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
         api_key: state.config().litellm_key.clone(),
