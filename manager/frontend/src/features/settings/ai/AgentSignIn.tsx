@@ -100,7 +100,7 @@ export function AgentSignIn({
   const prompt = attempt?.login.agent === 'codex' ? attempt.login : null;
   const pending = status?.state === 'pending';
   const waiting = prompt !== null || pending;
-  const device = prompt ?? (pending ? (status?.pending ?? null) : null);
+  const device = pending ? (status?.pending ?? null) : prompt;
   const codeExpired = useExpired(device?.expires_at ?? null);
   const lapsed = useExpired(status?.state === 'signed_in' ? status.expires_at : null);
 

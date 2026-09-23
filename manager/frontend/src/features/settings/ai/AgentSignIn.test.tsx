@@ -509,6 +509,33 @@ describe('AgentSignIn', () => {
       expect(agentsApi.get).toHaveBeenCalledTimes(2);
     });
 
+    it('shows no code while the server records how the sign-in ended, and polls on', async () => {
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
+      const recording: AgentStatus = { ...codexPending, pending: null };
+      agentsApi.start.mockResolvedValue(prompt);
+      agentsApi.get.mockResolvedValueOnce(recording).mockResolvedValueOnce(codexSignedIn);
+      renderPanel('codex', codexSignedOut);
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
+      });
+      expect(screen.getByText('ABCD-EFGHI')).toBeInTheDocument();
+
+      await act(async () => {
+        vi.advanceTimersByTime(POLL_INTERVAL);
+      });
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+      expect(screen.getByText('Signing in')).toBeInTheDocument();
+      expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
+      expect(screen.queryByRole('link', { name: 'auth.openai.com/codex/device' })).toBeNull();
+
+      await act(async () => {
+        vi.advanceTimersByTime(POLL_INTERVAL);
+      });
+      expect(agentsApi.get).toHaveBeenCalledTimes(2);
+      expect(screen.getByText('Signed in')).toBeInTheDocument();
+    });
+
     it('resumes a sign-in already in progress and stops polling once unmounted', async () => {
       vi.useFakeTimers({ now: beforeTheCodeExpires });
       agentsApi.get.mockResolvedValue(codexPending);
