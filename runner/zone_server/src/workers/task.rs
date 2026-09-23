@@ -2019,7 +2019,12 @@ async fn attempt_run(
             )
             .await
             {
-                Err(error) => return Err(Fault::agent(error)),
+                Err(error) => {
+                    return Err(Fault::agent(backend::remedied(
+                        &llm.config().backend,
+                        error,
+                    )));
+                }
                 Ok(TurnOutcome::Finished(outcome)) => {
                     carried.absorb(outcome);
                     return Ok(carried);

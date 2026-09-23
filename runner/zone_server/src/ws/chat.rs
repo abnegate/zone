@@ -3336,7 +3336,7 @@ async fn handle_chat_generation(
                             stop_stream = true;
                         }
                         Some(AgentEvent::Failed(message)) => {
-                            failure = Some(message);
+                            failure = Some(crate::services::backend::remedied(&llm_client.config().backend, message));
                             break;
                         }
                         None => {
