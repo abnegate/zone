@@ -8,6 +8,7 @@ use std::path::Path;
 use serde_json::Value;
 use zone_core::llm::AgentKind;
 
+use super::claude;
 use super::codex::{Error, Output, command};
 
 const CLAUDE: &[&str] = &["auth", "status"];
@@ -44,6 +45,7 @@ pub async fn check(
 }
 
 /// `claude auth status` prints its JSON whether or not it is signed in, and exits 1 when it is not.
+/// Its plan is labelled the way a Zone-managed sign-in's is.
 fn claude(output: &Output, executable: &Path) -> Result<Probe, Error> {
     let status = match serde_json::from_str::<Value>(&output.stdout) {
         Ok(status) => status,
@@ -67,8 +69,9 @@ fn claude(output: &Output, executable: &Path) -> Result<Probe, Error> {
     let label = status
         .get(SUBSCRIPTION)
         .and_then(Value::as_str)
+        .filter(|_| signed_in)
         .map(str::trim)
-        .filter(|plan| signed_in && !plan.is_empty())
+        .and_then(claude::label)
         .map(str::to_string);
     Ok(Probe { signed_in, label })
 }
@@ -158,10 +161,22 @@ mod tests {
     }
 
     #[test]
-    fn claude_signed_in_to_claude_ai_is_labelled_with_its_plan() {
+    fn claude_signed_in_to_claude_ai_is_labelled_with_its_plan_as_a_zone_sign_in_is() {
         let probe = claude(&output(0, CLAUDE_SIGNED_IN, b""), cli()).expect("claude's status");
 
-        assert_eq!(probe, signed_in(Some("team")));
+        assert_eq!(probe, signed_in(Some("Claude Team")));
+        assert!(
+            String::from_utf8_lossy(CLAUDE_SIGNED_IN).contains(r#""subscriptionType": "team""#)
+        );
+    }
+
+    #[test]
+    fn a_claude_plan_the_cli_does_not_name_has_no_label() {
+        let status = String::from_utf8_lossy(CLAUDE_SIGNED_IN).replace(r#""team""#, r#""free""#);
+
+        let probe = claude(&output(0, status.as_bytes(), b""), cli()).expect("claude's status");
+
+        assert_eq!(probe, signed_in(None));
     }
 
     #[test]
@@ -243,7 +258,7 @@ mod tests {
                 "auth status",
                 CLAUDE_SIGNED_IN,
                 &b""[..],
-                signed_in(Some("team")),
+                signed_in(Some("Claude Team")),
             ),
             (
                 AgentKind::Codex,

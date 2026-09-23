@@ -4,6 +4,7 @@ mod authorization;
 mod client;
 mod code;
 mod error;
+mod plan;
 mod scope;
 mod tokens;
 
@@ -13,6 +14,7 @@ pub use authorization::Authorization;
 pub use client::Client;
 pub use code::Code;
 pub use error::Error;
+pub use plan::label;
 pub use scope::Scope;
 pub use tokens::Tokens;
 

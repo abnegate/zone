@@ -4,14 +4,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use zone_core::secret::SecretValue;
 
-use super::Error;
-
-const PLANS: &[(&str, &str)] = &[
-    ("max", "Claude Max"),
-    ("pro", "Claude Pro"),
-    ("team", "Claude Team"),
-    ("enterprise", "Claude Enterprise"),
-];
+use super::{Error, label};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
@@ -28,11 +21,10 @@ impl Tokens {
     }
 
     pub fn label(&self) -> Option<String> {
-        let subscription = self.subscription.as_deref()?;
-        PLANS
-            .iter()
-            .find(|(kind, _)| *kind == subscription)
-            .map(|(_, label)| label.to_string())
+        self.subscription
+            .as_deref()
+            .and_then(label)
+            .map(str::to_string)
     }
 
     pub fn seal(&self, key: &[u8; 32]) -> Result<String, Error> {
