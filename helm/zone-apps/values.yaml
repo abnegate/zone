@@ -114,7 +114,8 @@ server:
   # transcripts and working directories. Claude tokens are sealed in the
   # database, not here. This state is per pod, so the claim is used only
   # while zone-server runs one replica (replicaCount 1, autoscaling off);
-  # otherwise it is an emptyDir.
+  # otherwise it is an emptyDir. The chart keeps the claim when it stops
+  # using it, and every CLI turn adds a transcript to it: see the README.
   agentState:
     persistence:
       enabled: true

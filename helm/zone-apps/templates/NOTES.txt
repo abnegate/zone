@@ -68,13 +68,24 @@ Horizontal Pod Autoscaler is enabled for the server:
   kubectl get hpa --namespace {{ .Release.Namespace }} {{ include "zone-apps.fullname" . }}-server
 {{- end }}
 
-{{- if and .Values.server.enabled (dig "agentState" "persistence" "enabled" false .Values.server) (not (include "zone-apps.server.agentStateClaim" .)) }}
+{{- if .Values.server.enabled }}
+{{- if or .Values.server.autoscaling.enabled (gt (int .Values.server.replicaCount) 1) }}
 
-NOTE: Codex sign-ins and agent transcripts are not persisted. zone-server runs
-more than one replica and this state is per pod, so /app/agent-state is an
-emptyDir. Claude sign-ins are unaffected: their tokens are sealed in the
-database. To keep codex sign-ins, set server.replicaCount=1 and
-server.autoscaling.enabled=false.
+NOTE: zone-server can run more than one replica, so the coding agent providers
+will not work reliably. A sign-in in progress lives in one pod's memory and
+fails when its next request reaches another pod. A codex login exists only on
+the pod that made it, in an emptyDir that is lost when that pod is replaced.
+Saved Claude tokens are sealed in the database. To use either provider, set
+server.replicaCount=1 and server.autoscaling.enabled=false, and set
+server.podDisruptionBudget.enabled=false so that a node drain can still evict
+the one pod.
+{{- else if not (include "zone-apps.server.agentStateClaim" .) }}
+
+NOTE: server.agentState.persistence.enabled is false, so /app/agent-state is an
+emptyDir and zone-server loses codex logins whenever its pod is replaced (a
+rollout, an eviction or a reschedule). Saved Claude tokens are sealed in the
+database.
+{{- end }}
 {{- end }}
 
 {{- if and .Values.manager.enabled .Values.manager.autoscaling.enabled }}
