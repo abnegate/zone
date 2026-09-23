@@ -15,12 +15,6 @@ const NO_SETTING_SOURCES: &str = "";
 const SETTINGS: &str = "--settings";
 const CROSS_SESSION_REFUSED: &str = r#"{"crossSessionInbound":"refuse"}"#;
 
-/// Passed to every claude turn, whoever decides its tools.
-///
-/// Naming no setting source leaves out claude's settings files, and with them
-/// every hook, `CLAUDE.md`, skill and agent that the host user, the working
-/// directory or any directory above it would add. Settings given as a flag
-/// still apply; these refuse messages from the user's other claude sessions.
 const CLAUDE_ISOLATION: &[&str] = &[
     SETTING_SOURCES,
     NO_SETTING_SOURCES,
@@ -35,9 +29,6 @@ const AUTO: &str = "auto";
 /// Separates a local model's tag, as in `gpt-oss:20b`. No agent model has one.
 const TAG_SEPARATOR: char = ':';
 
-/// `fable` is known but not offered: a subscriber has to accept its usage
-/// credits interactively first, and a headless turn without that falls back
-/// to another model or fails.
 const CLAUDE_MODELS: &[&str] = &["sonnet", "opus", "haiku"];
 
 /// Claude's names for its latest models, in any case. `default` is left out:
@@ -107,8 +98,7 @@ const BUILTIN_TOOL_SETTINGS: [&str; 3] = [
     "tools.experimental_request_user_input.enabled=false",
 ];
 
-/// Codex lets every call to zone's tools through; zone decides each one.
-const APPROVAL_MODE: &str = "approve";
+const APPROVE: &str = "approve";
 
 /// Zone's tools are listed to the model up front rather than behind a search.
 const DEFERRED_EXPOSURE: &str = "deferred";
@@ -453,7 +443,7 @@ fn server_settings(toolset: &Toolset) -> Vec<String> {
         ("enabled_tools", toml_array(&toolset.tools)),
         ("tool_timeout_sec", DEFAULT_TIMEOUT.as_secs().to_string()),
         ("startup_timeout_sec", STARTUP_TIMEOUT.as_secs().to_string()),
-        ("default_tools_approval_mode", toml_string(APPROVAL_MODE)),
+        ("default_tools_approval_mode", toml_string(APPROVE)),
         ("required", true.to_string()),
         ("omit_tools_from", toml_array(&[DEFERRED_EXPOSURE])),
     ]
