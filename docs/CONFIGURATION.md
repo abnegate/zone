@@ -402,8 +402,10 @@ two programs codex runs: its bubblewrap, at
 `/usr/local/bin/codex-code-mode-host`. On the models that reach tools only
 through codex's code mode, which are all of its presets but `gpt-5.5`, codex
 makes every tool call through that host, and without it every tool call on
-those models fails. All of these are root-owned, so a turn cannot replace
-them, and claude's auto-updater is off.
+those models fails. Unlike bubblewrap, the host starts under Docker's default
+seccomp profile, so those models call tools in the compose stack too. All of
+these are root-owned, so a turn cannot replace them, and claude's
+auto-updater is off.
 
 ### What the agent can reach
 
@@ -449,11 +451,13 @@ beside Auto-approve. On, the agent is confined to the tools Zone serves it:
   other built-in tool that has a switch turned off. What remains is
   `apply_patch`, which the read-only sandbox refuses; the tools that read MCP
   resources, which reach only Zone's server; and, on the models that reach
-  tools only through code mode, `request_user_input_async`, which returns at
-  once by design and in a headless turn leaves its question in the agent's
-  reply. On those models the agent calls every tool, Zone's included, from
-  JavaScript that codex's `exec` tool runs with no file or network access of
-  its own, and `wait` collects the output of a script still running.
+  tools only through code mode, `request_user_input_async`. No codex 0.156.1
+  flag switches that one off; only an override of codex's model catalog
+  would, and Zone passes none. When the model calls it, the call returns at
+  once, the question appears in the reply as ordinary text, and the turn
+  completes. On those models the agent calls every tool, Zone's included,
+  from JavaScript that codex's `exec` tool runs, and `wait` collects the
+  output of a script still running.
 
 Either way, claude runs with `--strict-mcp-config`, so no MCP server but Zone's
 loads, and codex with `--ignore-user-config`, `--disable apps` and
