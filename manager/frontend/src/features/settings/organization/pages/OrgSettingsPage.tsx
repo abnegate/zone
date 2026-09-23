@@ -204,6 +204,7 @@ export default function OrgSettingsPage() {
             />
             {agent && (
               <AgentSignIn
+                key={`${currentOrganization.id}:${agent}`}
                 organizationId={currentOrganization.id}
                 agent={agent}
                 canManage={canManageAgents(currentOrganization.role)}

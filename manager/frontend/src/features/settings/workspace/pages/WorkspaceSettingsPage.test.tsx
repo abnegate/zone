@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import type { OrgRole } from '../../organization/types';
@@ -978,6 +978,84 @@ describe('WorkspaceSettingsPage', () => {
         ).toBeInTheDocument();
         expect(panel?.querySelectorAll('button')).toHaveLength(0);
         expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
+      });
+
+      describe('after the provider changes', () => {
+        const [claudeStatus, codexStatus] = fixture.agents;
+        const signedOut = [
+          { ...claudeStatus, state: 'signed_out', source: null, label: null, expires_at: null },
+          { ...codexStatus, state: 'signed_out', pending: null },
+        ];
+        const later = () => new Date(Date.now() + 10 * 60_000).toISOString();
+
+        beforeEach(() => {
+          organizationRole = 'owner';
+          agentsApi.list.mockResolvedValue(signedOut);
+        });
+
+        it("shows Claude none of Codex's sign-in", async () => {
+          mockClient.getWorkspaceAiSettings.mockResolvedValue(codexOnly);
+          agentsApi.start.mockResolvedValue({
+            agent: 'codex',
+            verification_url: 'https://auth.openai.com/codex/device',
+            user_code: 'ABCD-EFGHI',
+            expires_at: later(),
+          });
+          agentsApi.signOut.mockRejectedValue(new Error('Failed to sign out of codex: 500'));
+          const user = userEvent.setup();
+          render(<WorkspaceSettingsPage />);
+          await openAiTab(user);
+
+          await user.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }));
+          expect(await screen.findByText('ABCD-EFGHI')).toBeInTheDocument();
+          await user.click(screen.getByRole('button', { name: 'Cancel' }));
+          expect(await screen.findByRole('alert')).toHaveTextContent(
+            'Failed to sign out of codex: 500'
+          );
+
+          await user.selectOptions(screen.getByLabelText('AI Provider'), 'claude_code');
+
+          const panel = screen.getByRole('region', { name: 'Claude Code sign-in' });
+          expect(within(panel).getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+          expect(within(panel).getByText('Not signed in')).toBeInTheDocument();
+          expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
+          expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+          expect(screen.queryByRole('alert')).toBeNull();
+        });
+
+        it("shows Codex none of Claude's sign-in", async () => {
+          mockClient.getWorkspaceAiSettings.mockResolvedValue({
+            ...codexOnly,
+            provider: 'claude_code',
+          });
+          agentsApi.start.mockResolvedValue({
+            agent: 'claude',
+            authorize_url: 'https://claude.com/cai/oauth/authorize?code=true&state=fake-state',
+            expires_at: later(),
+          });
+          agentsApi.submitCode.mockRejectedValue(
+            new Error('Claude rejected the code: Invalid authorization code')
+          );
+          const user = userEvent.setup();
+          render(<WorkspaceSettingsPage />);
+          await openAiTab(user);
+
+          await user.click(await screen.findByRole('button', { name: 'Sign in with Claude' }));
+          await user.type(
+            await screen.findByLabelText('Code from claude.com'),
+            'fake-code#fake-state'
+          );
+          await user.click(screen.getByRole('button', { name: 'Submit code' }));
+          expect(await screen.findByRole('alert')).toHaveTextContent('Claude rejected the code');
+
+          await user.selectOptions(screen.getByLabelText('AI Provider'), 'codex');
+
+          const panel = screen.getByRole('region', { name: 'Codex sign-in' });
+          expect(within(panel).getByRole('button', { name: 'Sign in with ChatGPT' })).toBeEnabled();
+          expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
+          expect(screen.queryByLabelText('Code from claude.com')).toBeNull();
+          expect(screen.queryByRole('alert')).toBeNull();
+        });
       });
 
       it('saves the override without credentials', async () => {

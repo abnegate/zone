@@ -663,6 +663,7 @@ export default function WorkspaceSettingsPage() {
                 />
                 {agent && (
                   <AgentSignIn
+                    key={`${orgId}:${agent}`}
                     organizationId={orgId}
                     agent={agent}
                     canManage={canManageAgents(currentOrganization?.role)}
