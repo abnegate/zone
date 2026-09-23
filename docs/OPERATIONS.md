@@ -58,6 +58,26 @@ other volumes regardless.
 the archive carried no cluster, which is what every archive taken before the
 mount moved looks like. Restore with the stack down and start it afterwards.
 
+### Coding agent sign-ins in an archive
+
+The archive includes `zone_manager_agent_state`, under `manager_agent_state/`.
+It holds each organization's Claude Code and Codex state: codex's `auth.json`,
+a working ChatGPT login stored in plain form, and both CLIs' session
+transcripts. Anyone holding the archive can use those logins, so keep archives
+private. The Claude tokens are not in that volume. They are in the database,
+sealed with a key derived from `ENCRYPTION_KEY`, and a restored instance needs
+the same `ENCRYPTION_KEY` to use them.
+
+## Upgrading to migration 048
+
+The first start of a server that includes coding agent sign-ins applies
+migration 048, which adds the `agent_logins` table and lets AI settings store
+the `claude_code` and `codex` providers. An image built before it cannot start
+against the migrated database: it stops with
+`Failed to run migrations: VersionMissing(48)`. Run `make backup` before the
+upgrade. Going back to an older image means restoring that backup, and losing
+whatever changed after it was taken.
+
 ## Pulling models into the bundled Ollama
 
 With `PROFILES=bundled-ollama`, `ollama-init` pulls `OLLAMA_MODEL_FAST`,
