@@ -633,12 +633,14 @@ What stands in the way:
 - Zone's file tools, `read_file`, `list_files`, `search_code`, `write_file`
   and `apply_patch`, refuse any path under the agent state directory and any
   process's `/proc/<pid>` entry, `/proc/self` included, whatever the chat's
-  provider or approval setting. The path is resolved first, so `..`, a symlink
-  or a link under a `/proc` entry does not get around the refusal, and it is
-  compared by file identity rather than by spelling, so neither does a name
-  that differs only in case or Unicode normalization, a firmlink such as
-  `/System/Volumes/Data`, or a bind mount. On macOS they also refuse `/dev/fd`
-  and `/.vol`, which open files by descriptor and by inode number. A
+  provider or approval setting. They compare paths by file identity, not by
+  spelling: the state directory is known by its device and inode number, and
+  a path is refused when any directory it leads through is that one. So
+  neither `..`, a symlink or a link under a `/proc` entry, nor a name that
+  differs only in case or Unicode normalization, a firmlink such as
+  `/System/Volumes/Data`, or a bind mount gets around the refusal. They also
+  refuse `/dev/fd` and `/.vol` whole, however they are spelled, since both
+  open files by descriptor or by inode number rather than by name. A
   recursive listing or search leaves those paths out. The check runs just
   before the file is opened, so a process swapping a symlink into the path in
   between would get past it, but a process that can do that as the server's
