@@ -32,6 +32,9 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    #[cfg(target_os = "linux")]
+    forbid_dumping();
+
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let migrate = migration_mode(&arguments).expect("Usage: zone-server [--migrate-only]");
     if migrate {
@@ -228,6 +231,19 @@ fn migration_mode(arguments: &[String]) -> Result<bool, &'static str> {
     }
 }
 
+/// Make the server non-dumpable. The files under its `/proc/<pid>` then
+/// belong to root, so the agent CLIs it runs as its own user cannot read its
+/// environment.
+#[cfg(target_os = "linux")]
+fn forbid_dumping() {
+    if let Err(error) = nix::sys::prctl::set_dumpable(false) {
+        tracing::warn!(
+            %error,
+            "Could not make the server non-dumpable; processes running as its user can read its environment"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::migration_mode;
@@ -238,5 +254,12 @@ mod tests {
         assert_eq!(migration_mode(&["--migrate-only".into()]), Ok(true));
         assert!(migration_mode(&["--migrate-only".into(), "extra".into()]).is_err());
         assert!(migration_mode(&["--migrate".into()]).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_server_cannot_be_dumped() {
+        super::forbid_dumping();
+        assert_eq!(nix::sys::prctl::get_dumpable(), Ok(false));
     }
 }
