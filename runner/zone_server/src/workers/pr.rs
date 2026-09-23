@@ -691,14 +691,11 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
         settings.as_ref(),
         &state.config().comfyui.classifier_model,
     );
-    let model = stages::classifier_model(
+    let model = stages::summary_model(
         &preferences,
         &catalog,
         task.model_name.as_deref().unwrap_or(stages::AUTO),
-    );
-    if stages::is_auto(&model) {
-        return None;
-    }
+    )?;
 
     let client = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
@@ -802,6 +799,39 @@ mod tests {
         let result = PrCreationResult::NoChanges;
         let debug = format!("{:?}", result);
         assert!(debug.contains("NoChanges"));
+    }
+
+    #[tokio::test]
+    async fn an_agent_left_to_choose_its_own_model_still_names_the_change() {
+        let agent = crate::services::stages::testing::AgentWorkspace::answering(
+            "(feat): add a shopping cart",
+        )
+        .await;
+        let task = tasks::create_task(
+            &agent.pool,
+            agent.workspace,
+            &[],
+            "Add a cart",
+            "Shoppers want to buy more than one item.",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .expect("a task");
+
+        let subject = classify(&agent.state, &task, "Added a cart to the shop.").await;
+        agent.remove().await;
+
+        assert_eq!(
+            subject.map(|subject| subject.to_string()).as_deref(),
+            Some("(feat): add a shopping cart")
+        );
+        assert!(
+            agent.chose_its_own_model(),
+            "claude was not left to choose its model"
+        );
     }
 
     #[test]

@@ -13,6 +13,9 @@ use zone_core::llm::{AgentKind, LlmBackend};
 
 use crate::db::ai_settings::EffectiveAiSettings;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 pub const AUTO: &str = "auto";
 
 static CLIENT: LazyLock<Client> = LazyLock::new(|| {
@@ -212,7 +215,7 @@ pub fn chat_model(
         .unwrap_or_else(|| fallback_name(requested, prefs.fast.as_deref()))
 }
 
-/// LiteLLM model used to classify image intent and to title chats.
+/// The model that classifies image intent, and that [`summary_model`] runs.
 ///
 /// On an agent's catalog, only a classifier or fast model the agent knows;
 /// otherwise [`AUTO`].
@@ -236,6 +239,14 @@ pub fn classifier_model(prefs: &Preferences, catalog: &Catalog, chat_model: &str
                 .map(|model| model.name.clone())
         })
         .unwrap_or_else(|| fallback_name(AUTO, prefs.classifier.as_deref()))
+}
+
+/// The model a chat title, a pull request subject or a merge summary runs on,
+/// or `None` when there is nothing to run it on: an agent chooses its own on
+/// [`AUTO`], and the endpoint has to be given a name.
+pub fn summary_model(prefs: &Preferences, catalog: &Catalog, chat_model: &str) -> Option<String> {
+    let model = classifier_model(prefs, catalog, chat_model);
+    (catalog.chooses() || !is_auto(&model)).then_some(model)
 }
 
 /// The first of `names` the agent knows, or [`AUTO`] for it to choose.
@@ -759,6 +770,35 @@ mod tests {
             classifier_model(&classifying(Some("llama3.2:3b"), None), &claude, "opus"),
             AUTO,
             "the chat's own model is not borrowed to classify"
+        );
+    }
+
+    #[test]
+    fn a_summary_runs_on_the_agents_choice_but_never_on_the_endpoints_auto() {
+        let claude = Catalog::agent(AgentKind::Claude);
+        let unknown = classifying(Some("llama3.2:3b"), Some("llama3.2:3b"));
+
+        assert_eq!(
+            summary_model(&unknown, &claude, AUTO).as_deref(),
+            Some(AUTO)
+        );
+        assert_eq!(
+            summary_model(&classifying(None, Some("haiku")), &claude, AUTO).as_deref(),
+            Some("haiku")
+        );
+        assert_eq!(
+            summary_model(&Preferences::default(), &catalog(&[]), AUTO),
+            None,
+            "the endpoint was handed auto with nothing installed to route it to"
+        );
+        assert_eq!(
+            summary_model(
+                &Preferences::default(),
+                &catalog(&[installed("llama3.2:3b", 2_000, 3_000)]),
+                AUTO
+            )
+            .as_deref(),
+            Some("llama3.2:3b")
         );
     }
 

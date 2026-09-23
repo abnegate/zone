@@ -69,10 +69,7 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
             &state.config().comfyui.classifier_model,
         )
     };
-    let model = crate::services::stages::classifier_model(&prefs, &catalog, &chat.model_name);
-    if crate::services::stages::is_auto(&model) {
-        return None;
-    }
+    let model = crate::services::stages::summary_model(&prefs, &catalog, &chat.model_name)?;
     let client = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
         api_key: state.config().litellm_key.clone(),
@@ -113,6 +110,40 @@ fn fallback(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::stages::testing::{AgentWorkspace, UNKNOWN_TO_AGENTS};
+
+    #[tokio::test]
+    async fn an_agent_left_to_choose_its_own_model_still_titles_the_chat() {
+        let agent = AgentWorkspace::answering("Planning a summer trip to Japan").await;
+        let chat = chats::create_chat(
+            &agent.pool,
+            Some(agent.workspace),
+            "New chat",
+            UNKNOWN_TO_AGENTS,
+            false,
+            false,
+        )
+        .await
+        .expect("a chat");
+        let message = chats::create_message(
+            &agent.pool,
+            chat.id,
+            "user",
+            "Help me plan a trip to Japan next summer",
+            None,
+        )
+        .await
+        .expect("the first message");
+
+        let title = summarize(&agent.state, &message).await;
+        agent.remove().await;
+
+        assert_eq!(title.as_deref(), Some("Planning a summer trip to Japan"));
+        assert!(
+            agent.chose_its_own_model(),
+            "claude was not left to choose its model"
+        );
+    }
 
     #[test]
     fn fallback_is_concise_and_unicode_safe() {
