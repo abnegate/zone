@@ -59,6 +59,8 @@ const UNREADABLE_CODE: &str =
 const FOREIGN_CALLBACK: &str = "That URL is not Claude's sign-in callback";
 const UNKNOWN_SIGN_IN: &str =
     "That code is not from a sign-in you started here, or the sign-in expired. Start again.";
+const INVALID_CODE: &str = "invalid_code";
+const START_AGAIN: &str = "start_again";
 const REFUSAL: &str =
     "Error logging in with device code: device code request failed with status 403 Forbidden";
 const POLL_FAILED: &str =
@@ -950,21 +952,22 @@ async fn a_malformed_paste_or_a_state_zone_never_issued_is_refused_before_claude
     let started = stage.start(organization, "claude", json!({}), &owner).await;
     let state = parameter(started["authorize_url"].as_str().expect("a URL"), "state");
 
-    for (pasted, reason) in [
-        (CODE.to_string(), UNREADABLE_CODE),
-        (format!("{CODE}#"), UNREADABLE_CODE),
-        ("   ".to_string(), UNREADABLE_CODE),
+    for (pasted, reason, kind) in [
+        (CODE.to_string(), UNREADABLE_CODE, INVALID_CODE),
+        (format!("{CODE}#"), UNREADABLE_CODE, INVALID_CODE),
+        ("   ".to_string(), UNREADABLE_CODE, INVALID_CODE),
         (
             format!("https://attacker.example/oauth/code/callback?code={CODE}&state={state}"),
             FOREIGN_CALLBACK,
+            INVALID_CODE,
         ),
-        (format!("{CODE}#never-issued"), UNKNOWN_SIGN_IN),
+        (format!("{CODE}#never-issued"), UNKNOWN_SIGN_IN, START_AGAIN),
     ] {
         let response = stage.submit(organization, &pasted, &owner).await;
         response.assert_status(StatusCode::BAD_REQUEST);
         assert_eq!(
             response.json_value(),
-            json!({ "error": reason }),
+            json!({ "error": reason, "kind": kind }),
             "{pasted:?}"
         );
     }
@@ -989,7 +992,10 @@ async fn a_state_finishes_once_and_only_for_the_admin_and_organization_that_star
         |started: &Value| parameter(started["authorize_url"].as_str().expect("a URL"), "state");
     let refused = |response: common::TestResponse| {
         response.assert_status(StatusCode::BAD_REQUEST);
-        assert_eq!(response.json_value(), json!({ "error": UNKNOWN_SIGN_IN }));
+        assert_eq!(
+            response.json_value(),
+            json!({ "error": UNKNOWN_SIGN_IN, "kind": START_AGAIN })
+        );
     };
 
     let taken = state_of(&stage.start(organization, "claude", json!({}), &owner).await);
@@ -1058,7 +1064,10 @@ async fn claude_refusing_the_code_is_a_bad_gateway_that_carries_its_reason() {
     response.assert_status(StatusCode::BAD_GATEWAY);
     assert_eq!(
         response.json_value(),
-        json!({ "error": "Claude refused the sign-in (HTTP 400): Invalid authorization code" })
+        json!({
+            "error": "Claude refused the sign-in (HTTP 400): Invalid authorization code",
+            "kind": START_AGAIN,
+        })
     );
     assert!(stage.login_row(organization, "claude").await.is_none());
     assert_eq!(
@@ -1124,7 +1133,12 @@ async fn codex_has_no_code_to_paste() {
         .await;
 
     response.assert_status(StatusCode::BAD_REQUEST);
-    assert!(response.json_value()["error"].is_string());
+    let body = response.json_value();
+    assert!(body["error"].is_string(), "{body}");
+    assert!(
+        body.get("kind").is_none(),
+        "a codex refusal said what to do with a Claude code: {body}"
+    );
 }
 
 #[tokio::test]

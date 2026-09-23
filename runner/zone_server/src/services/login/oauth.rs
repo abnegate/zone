@@ -57,7 +57,7 @@ pub async fn finish(
     email: &str,
     pasted: &str,
 ) -> Result<(), Error> {
-    let code: Code = pasted.parse().map_err(invalid)?;
+    let code: Code = pasted.parse().map_err(unreadable)?;
     let pending = pending::claim(&code.state)
         .filter(|pending| pending.organization == organization && pending.user == user)
         .ok_or(Error::Invalid(UNKNOWN))?;
@@ -86,9 +86,9 @@ pub async fn finish(
     Ok(())
 }
 
-fn invalid(error: claude::Error) -> Error {
+fn unreadable(error: claude::Error) -> Error {
     match error {
-        claude::Error::Malformed(reason) => Error::Invalid(reason),
+        claude::Error::Malformed(reason) => Error::Unreadable(reason),
         error => Error::Internal(error.to_string()),
     }
 }
@@ -153,7 +153,7 @@ mod tests {
         .await
         .expect_err("a paste with no state");
 
-        assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+        assert!(matches!(error, Error::Unreadable(_)), "{error:?}");
         assert!(
             pending::claim(&state).is_some(),
             "a malformed paste spent the sign-in"

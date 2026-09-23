@@ -4,7 +4,10 @@ use zone_core::llm::AgentKind;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// What the caller sent cannot finish a sign-in.
+    /// The pasted code could not be read. The sign-in it came from still waits for it.
+    #[error("{0}")]
+    Unreadable(&'static str),
+    /// What the caller sent cannot finish any sign-in that is waiting.
     #[error("{0}")]
     Invalid(&'static str),
     #[error("The {0} CLI is not installed on this server")]

@@ -2,6 +2,7 @@
 //! and every member sees how it is signed in.
 
 mod failure;
+mod kind;
 
 use axum::{
     Json,
@@ -143,7 +144,8 @@ pub async fn finish(
         &auth.0.email,
         request.code.expose(),
     )
-    .await?;
+    .await
+    .map_err(Failure::exchange)?;
     let viewer = Viewer {
         user,
         manages: true,
