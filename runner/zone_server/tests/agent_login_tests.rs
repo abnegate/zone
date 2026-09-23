@@ -59,6 +59,8 @@ const NOT_INSTALLED: &str = "The codex CLI is not installed on this server";
 const UNREADABLE_CODE: &str =
     "Paste the code Claude showed, as code#state, or the whole callback URL";
 const FOREIGN_CALLBACK: &str = "That URL is not Claude's sign-in callback";
+const DECLINED: &str =
+    "Claude did not approve the sign-in. Open the link, approve it, then paste the new code";
 const UNKNOWN_SIGN_IN: &str =
     "That code is not from a sign-in you started here, or the sign-in expired. Start again.";
 const INVALID_CODE: &str = "invalid_code";
@@ -1069,6 +1071,13 @@ async fn a_malformed_paste_or_a_state_zone_never_issued_is_refused_before_claude
         (
             format!("https://attacker.example/oauth/code/callback?code={CODE}&state={state}"),
             FOREIGN_CALLBACK,
+            INVALID_CODE,
+        ),
+        (
+            format!(
+                "https://platform.claude.com/oauth/code/callback?error=access_denied&state={state}"
+            ),
+            DECLINED,
             INVALID_CODE,
         ),
         (format!("{CODE}#never-issued"), UNKNOWN_SIGN_IN, START_AGAIN),

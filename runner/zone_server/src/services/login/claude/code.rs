@@ -10,7 +10,8 @@ use super::{Error, REDIRECT_URL};
 const SEPARATOR: char = '#';
 const UNREADABLE: &str = "Paste the code Claude showed, as code#state, or the whole callback URL";
 const FOREIGN: &str = "That URL is not Claude's sign-in callback";
-const DECLINED: &str = "Claude did not approve the sign-in; start it again";
+const DECLINED: &str =
+    "Claude did not approve the sign-in. Open the link, approve it, then paste the new code";
 const INCOMPLETE: &str = "The callback URL is missing its code or its state";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -172,5 +173,21 @@ mod tests {
             ),
             DECLINED
         );
+    }
+
+    /// A declined callback is refused before any state is claimed, so the
+    /// sign-in still waits on the same link.
+    #[test]
+    fn a_declined_callback_asks_for_the_same_link_to_be_approved() {
+        let message = refusal(
+            "https://platform.claude.com/oauth/code/callback\
+             ?error=access_denied&state=fake-state",
+        )
+        .to_ascii_lowercase();
+
+        assert!(!message.contains("start"), "{message}");
+        for step in ["open the link", "approve it", "paste the new code"] {
+            assert!(message.contains(step), "{step:?} missing from {message:?}");
+        }
     }
 }
