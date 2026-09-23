@@ -366,6 +366,7 @@ backup: ## Backup volumes to ./backups directory (the postgres cluster lives in 
 		-v zone_valkey_data:/data/valkey:ro \
 		-v zone_manager_repos:/data/manager_repos:ro \
 		-v zone_manager_artifacts:/data/manager_artifacts:ro \
+		-v zone_manager_agent_state:/data/manager_agent_state:ro \
 		-v zone_prometheus_data:/data/prometheus:ro \
 		-v zone_grafana_data:/data/grafana:ro \
 		-v zone_traefik_letsencrypt:/data/traefik:ro \
@@ -386,6 +387,7 @@ restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_
 		-v zone_valkey_data:/data/valkey \
 		-v zone_manager_repos:/data/manager_repos \
 		-v zone_manager_artifacts:/data/manager_artifacts \
+		-v zone_manager_agent_state:/data/manager_agent_state \
 		-v zone_prometheus_data:/data/prometheus \
 		-v zone_grafana_data:/data/grafana \
 		-v zone_traefik_letsencrypt:/data/traefik \

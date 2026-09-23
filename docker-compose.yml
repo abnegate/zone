@@ -311,6 +311,10 @@ services:
       - ZONE_CHAT_TIMEOUT_SECONDS=${ZONE_CHAT_TIMEOUT_SECONDS:-1800}
       - ZONE_CHAT_OUTPUT_TOKENS=${ZONE_CHAT_OUTPUT_TOKENS:-4096}
       - ZONE_CHAT_CONTEXT_TOKENS=${ZONE_CHAT_CONTEXT_TOKENS:-32768}
+      - ZONE_CHAT_AGENT_CWD=${ZONE_CHAT_AGENT_CWD:-/app/workspace}
+      - ZONE_LLM_BACKEND=${ZONE_LLM_BACKEND:-litellm}
+      - ZONE_AGENT_STATE_DIR=/app/agent-state
+      - ZONE_AGENT_HOST_LOGIN=${ZONE_AGENT_HOST_LOGIN:-false}
       - ZONE_AUTO_ENABLED=${ZONE_AUTO_ENABLED:-true}
       - ZONE_AUTO_TICK_SECS=${ZONE_AUTO_TICK_SECS:-15}
       - ZONE_AUTO_PARALLEL_TASKS=${ZONE_AUTO_PARALLEL_TASKS:-3}
@@ -407,6 +411,7 @@ services:
       - manager_repos:/tmp/repos
       - manager_artifacts:/app/artifacts
       - manager_embed_cache:/app/embed-cache
+      - manager_agent_state:/app/agent-state
       - comfyui_models:/app/comfyui/models
       - ./comfyui/workflows:/app/comfyui/workflows:ro
       - ./comfyui/recipes:/app/comfyui/recipes:ro
@@ -775,6 +780,8 @@ volumes:
     name: zone_manager_artifacts
   manager_embed_cache:
     name: zone_manager_embed_cache
+  manager_agent_state:
+    name: zone_manager_agent_state
   prometheus_data:
     name: zone_prometheus_data
   grafana_data:
