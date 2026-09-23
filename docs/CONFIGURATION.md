@@ -191,7 +191,9 @@ organizations that must not see each other's data.
 - **Contents**: codex's login (`auth.json`, which codex renews itself) and both
   CLIs' session transcripts. Zone keeps the Claude token in the database and
   hands it to each turn in `CLAUDE_CODE_OAUTH_TOKEN`; it does not write it
-  here. Zone does not prune the transcripts.
+  here. Zone does not prune the transcripts. Deleting an organization stops
+  any codex sign-in it has in progress, runs `codex logout` in its codex home,
+  and removes `<dir>/<organization id>` with everything in it.
 - **Note**: Must be an absolute path. A relative one is refused at boot, and so
   is an unset one when neither `XDG_STATE_HOME` nor `HOME` is absolute.
 
@@ -278,28 +280,42 @@ in" while the agent is not signed in.
    approve access.
 2. claude.com shows a code. Paste it, or the address of the page showing it,
    into **Code from claude.com** and submit it. The admin who started has to do
-   this, within ten minutes.
+   this within ten minutes. The panel shows until when, and drops the link
+   once that time has passed.
 3. Zone exchanges the code at `ZONE_CLAUDE_TOKEN_URL` and stores the tokens in
    the database, sealed with a key derived from `ENCRYPTION_KEY`. The panel
-   shows the plan, such as Claude Team, when the token response names one,
-   and the expiry date.
+   shows the plan, such as Claude Team, when the token response names one. It
+   shows an expiry date only for a sign-in Zone cannot renew, one whose token
+   came without a refresh token.
 
 Zone asks for inference access only, with a one-year lifetime, as
-`claude setup-token` does. If claude.com refuses that on its page, or the code
-is rejected, **Try again with full access**, which the panel shows beside the
-code field, starts over with the wider set of scopes claude's own login asks
-for, without the one-year lifetime. Zone renews
-a Claude token within five minutes of its expiry when a refresh token came with
-it. Concurrent turns renew it once, and a renewal that fails before the token
-expires leaves the current token in use.
+`claude setup-token` does. If claude.com refuses that on its page, **Try again
+with full access**, which the panel shows beside the code field, starts over
+with the wider set of scopes claude's own login asks for, without the one-year
+lifetime. The panel leaves that button out when the sign-in already asks for
+full access.
+
+A paste Zone cannot read, such as a code with its `#state` cut off, leaves the
+sign-in open, so you can paste again. Any other failure ends it: claude.com
+rejecting the code, or a sign-in that expired or was already used. The panel
+then drops the link and offers **Start again**, which starts over with the same
+access, beside **Try again with full access**. A sign-in in progress survives
+switching to another settings tab and back.
+
+When a refresh token came with it, Zone renews a Claude token before handing
+it to a turn if the token would expire within the hour, the longest a task
+attempt runs. A task run takes the token afresh for each attempt. Concurrent
+turns renew it once, and a renewal that fails before the token expires leaves
+the current token in use.
 
 **Codex** uses codex's own device-code sign-in:
 
 1. **Sign in with ChatGPT** runs `codex login --device-auth` on the server.
 2. The panel shows OpenAI's link, `https://auth.openai.com/codex/device`, and a
    one-time code that expires after 15 minutes. Open the link, sign in to
-   ChatGPT and enter the code. The panel checks every three seconds and shows
-   Signed in once codex has saved the login.
+   ChatGPT and enter the code. The panel checks every three seconds, backing
+   off while checks fail, and shows Signed in once codex has saved the login.
+   It stops showing the code once the code has expired.
 
 The one-time code is shown only to organization admins and owners and to
 whoever started the sign-in. codex signs in inside a staging directory, and
@@ -308,24 +324,30 @@ succeeds, so a refused or expired attempt leaves an existing login as it was.
 **Cancel** stops the sign-in by signing the organization out of codex. If
 OpenAI refuses to issue a code, the panel shows codex's error, such as
 `device code request failed with status 403 Forbidden`: codex reports the HTTP
-status OpenAI answered with, not the body of the answer.
+status OpenAI answered with, not the body of the answer. A sign-in that fails
+on the server's own disk, such as a state directory it cannot write, shows
+only an internal error; the server's log has the details.
 
 **Signed in means the credentials are there.** Neither CLI checks a login when
 asked for its status: `claude auth status` reports one for any token it finds,
 and `codex login status` reads `auth.json` without calling OpenAI. Zone does
-not check either. Claude Code shows Signed in while Zone holds a token that
-has not expired or can be renewed, and Codex while the organization's
-`auth.json` exists. A login revoked upstream, or one codex can no longer
-renew, shows up on the next turn instead: the turn fails in the CLI's own
-words, followed by "Sign in again under Organization Settings > AI Settings."
-A task run that fails that way stops without spending its retries, since a
-retry signs no one in.
+not check either. Claude Code shows Signed in while Zone holds a token that it
+can open with the current `ENCRYPTION_KEY` and that has not expired or can be
+renewed; a token sealed under another key shows as expired. Codex shows Signed
+in while the organization's `auth.json` exists. A login revoked upstream, or
+one codex can no longer renew, shows up on the next turn instead: the turn
+fails in the CLI's own words, followed by "Sign in again under Organization
+Settings > AI Settings." A task run that fails that way stops without spending
+its retries, since a retry signs no one in.
 
 **Signing out** deletes the organization's Claude tokens from Zone; it does not
 revoke them with Anthropic. For Codex it stops a sign-in in progress and runs
 `codex logout`, which asks OpenAI to revoke the login and deletes `auth.json`.
-Sign-ins and sign-outs are recorded in the organization's audit log as
-`agent.signed_in` and `agent.signed_out`.
+The panel asks before it signs out, since the sign-out applies to every
+workspace of the organization. Sign-ins and sign-outs are recorded in the
+organization's audit log as `agent.signed_in` and `agent.signed_out`. Deleting
+the organization deletes its Claude tokens with it and signs it out of codex
+the same way.
 
 The panel uses these routes, where `{agent}` is `claude` or `codex`:
 
@@ -334,7 +356,7 @@ The panel uses these routes, where `{agent}` is `claude` or `codex`:
 | `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models |
 | `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status |
 | `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access |
-| `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}` |
+| `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}`; a refusal's `kind` is `invalid_code` (paste again) or `start_again` |
 | `DELETE /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Sign out |
 
 ### How a turn runs
