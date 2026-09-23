@@ -681,6 +681,11 @@ fn effective(
 
     if let Some(ws) = workspace {
         if let Some(provider) = ws.provider {
+            if provider != effective.provider {
+                effective.model_fast = None;
+                effective.model_reasoning = None;
+                effective.model_embedding = None;
+            }
             effective.provider = provider;
         }
         if ws.litellm_host.is_some() {

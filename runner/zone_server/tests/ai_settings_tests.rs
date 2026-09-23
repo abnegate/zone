@@ -4,11 +4,17 @@ mod common;
 
 use axum::http::StatusCode;
 use serde_json::json;
+use zone_server::db::ai_settings;
 
 use common::{TestClient, test_email, test_password};
 
 const AGENT_PROVIDERS: [&str; 2] = ["claude_code", "codex"];
 const MODEL_FIELDS: [&str; 3] = ["model_fast", "model_reasoning", "model_embedding"];
+const COMFYUI_MODELS: [(&str, &str); 3] = [
+    ("model_image", "organization-image.safetensors"),
+    ("model_video", "organization-video.safetensors"),
+    ("model_audio", "organization-audio.safetensors"),
+];
 const INVALID_PROVIDER: &str =
     "Invalid provider. Must be one of: self_hosted, openai, anthropic, bedrock, claude_code, codex";
 
@@ -633,7 +639,11 @@ async fn test_get_effective_settings_workspace_override() {
     assert_eq!(body["provider"], "anthropic");
     assert_eq!(body["has_anthropic_api_key"], true);
     assert_eq!(body["model_fast"], "claude-3-haiku-20240307");
-    assert_eq!(body["model_reasoning"], "gpt-4o");
+    assert!(
+        body["model_reasoning"].is_null(),
+        "an anthropic workspace must not inherit the openai organization's reasoning model, got {}",
+        body["model_reasoning"]
+    );
 }
 
 #[tokio::test]
@@ -1064,7 +1074,7 @@ async fn test_blank_models_clear_saved_workspace_models() {
         .put_json_auth(
             &organization,
             &json!({
-                "provider": "claude_code",
+                "provider": "codex",
                 "model_fast": "organization-model",
                 "model_reasoning": "organization-model",
                 "model_embedding": "organization-model"
@@ -1141,6 +1151,180 @@ async fn test_blank_models_clear_saved_workspace_models() {
             "organization-model",
             "clearing the workspace's {field} must fall back to the organization's"
         );
+    }
+}
+
+fn organization_models(provider: &str, models: [&str; 3]) -> serde_json::Value {
+    let mut body = json!({ "provider": provider });
+    for (field, model) in MODEL_FIELDS.into_iter().zip(models) {
+        body[field] = json!(model);
+    }
+    for (field, model) in COMFYUI_MODELS {
+        body[field] = json!(model);
+    }
+    body
+}
+
+fn blank_models(provider: &str) -> serde_json::Value {
+    let mut body = json!({ "provider": provider });
+    for field in MODEL_FIELDS {
+        body[field] = json!("");
+    }
+    body
+}
+
+#[tokio::test]
+async fn test_a_workspace_on_another_provider_inherits_none_of_its_organizations_models() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace_id = uuid::Uuid::parse_str(&ws_id).unwrap();
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let effective = format!("{workspace}/effective");
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &organization_models("openai", ["gpt-4o", "o1-preview", "text-embedding-3-small"]),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    for provider in [
+        "codex",
+        "claude_code",
+        "anthropic",
+        "bedrock",
+        "self_hosted",
+    ] {
+        client
+            .put_json_auth(&workspace, &blank_models(provider), &token)
+            .await
+            .assert_status(StatusCode::OK);
+
+        let running = ai_settings::for_workspace(client.state().db(), workspace_id)
+            .await
+            .expect("the workspace's settings to be readable");
+        assert_eq!(running.provider, provider);
+        assert_eq!(
+            [
+                running.model_fast,
+                running.model_reasoning,
+                running.model_embedding
+            ],
+            [None, None, None],
+            "a {provider} workspace must run without the openai organization's models"
+        );
+
+        let response = client.get_auth(&effective, &token).await;
+        response.assert_status(StatusCode::OK);
+        let body = response.json_value();
+        assert_eq!(body["provider"], provider);
+        for field in MODEL_FIELDS {
+            assert!(
+                body[field].is_null(),
+                "a {provider} workspace must not inherit the openai organization's {field}, got {}",
+                body[field]
+            );
+        }
+        for (field, model) in COMFYUI_MODELS {
+            assert_eq!(
+                body[field], model,
+                "a {provider} workspace still inherits the organization's {field}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_a_workspace_on_its_organizations_provider_inherits_its_models() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let models = ["gpt-5.5", "gpt-6-sol", "organization-embedding"];
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &organization_models("codex", models),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    client
+        .put_json_auth(&workspace, &blank_models("codex"), &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    let response = client
+        .get_auth(&format!("{workspace}/effective"), &token)
+        .await;
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["provider"], "codex");
+    for (field, model) in MODEL_FIELDS.into_iter().zip(models) {
+        assert_eq!(
+            body[field], model,
+            "a codex workspace in a codex organization inherits its {field}"
+        );
+    }
+    for (field, model) in COMFYUI_MODELS {
+        assert_eq!(body[field], model, "the workspace inherits the {field}");
+    }
+}
+
+#[tokio::test]
+async fn test_a_self_hosted_workspace_under_a_self_hosted_organization_is_unchanged() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let effective = format!("{workspace}/effective");
+    let models = ["llama3.1:8b", "deepseek-r1:7b", "nomic-embed-text"];
+    let mut organization = organization_models("self_hosted", models);
+    organization["litellm_host"] = json!("http://litellm:4000");
+    organization["litellm_key"] = json!("sk-organization-litellm");
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &organization,
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    let inherited = client.get_auth(&effective, &token).await;
+    inherited.assert_status(StatusCode::OK);
+
+    client
+        .put_json_auth(&workspace, &blank_models("self_hosted"), &token)
+        .await
+        .assert_status(StatusCode::OK);
+    let overridden = client.get_auth(&effective, &token).await;
+    overridden.assert_status(StatusCode::OK);
+
+    assert_eq!(
+        overridden.json_value(),
+        inherited.json_value(),
+        "a self_hosted workspace with blank models runs exactly as its self_hosted organization"
+    );
+    let body = overridden.json_value();
+    assert_eq!(body["provider"], "self_hosted");
+    assert_eq!(body["litellm_host"], "http://litellm:4000");
+    assert_eq!(body["has_litellm_key"], true);
+    for (field, model) in MODEL_FIELDS.into_iter().zip(models) {
+        assert_eq!(
+            body[field], model,
+            "the workspace inherits the organization's {field}"
+        );
+    }
+    for (field, model) in COMFYUI_MODELS {
+        assert_eq!(body[field], model, "the workspace inherits the {field}");
     }
 }
 
