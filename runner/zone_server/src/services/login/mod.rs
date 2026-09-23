@@ -1,5 +1,10 @@
+pub mod audit;
 pub mod claude;
 pub mod codex;
 pub mod credential;
+pub mod devices;
+pub mod error;
+pub mod oauth;
 pub mod pending;
 pub mod probe;
+pub mod status;

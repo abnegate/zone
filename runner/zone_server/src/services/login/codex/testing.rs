@@ -68,11 +68,19 @@ pub fn capture(directory: &TempDir, name: &str, bytes: &[u8]) -> String {
 /// It runs `script` only when called with exactly `arguments`. Anything else exits at once, which
 /// is what makes the run in [`wait_until_executable`] harmless.
 pub fn fake(directory: &TempDir, arguments: &str, script: &str) -> PathBuf {
+    self::script(
+        directory,
+        &format!(
+            "[ \"$*\" = '{arguments}' ] || {{ echo \"unexpected arguments: $*\" >&2; exit 64; }}\n{script}"
+        ),
+    )
+}
+
+/// A stand-in CLI that runs `body` whatever it is called with. Called without arguments, `body`
+/// must exit at once, as [`wait_until_executable`] runs it that way.
+pub fn script(directory: &TempDir, body: &str) -> PathBuf {
     let path = directory.path().join("cli");
-    let body = format!(
-        "#!/bin/sh\n[ \"$*\" = '{arguments}' ] || {{ echo \"unexpected arguments: $*\" >&2; exit 64; }}\n{script}\n"
-    );
-    std::fs::write(&path, body).expect("the fake CLI to be written");
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("the fake CLI to be written");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .expect("the fake CLI to be executable");
     wait_until_executable(&path);

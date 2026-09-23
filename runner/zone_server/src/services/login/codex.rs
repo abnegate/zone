@@ -25,7 +25,7 @@ pub use prompt::Prompt;
 
 pub(super) use output::Output;
 
-const CREDENTIALS: &str = "auth.json";
+pub(super) const CREDENTIALS: &str = "auth.json";
 const LOGIN: &[&str] = &["login", "--device-auth"];
 const LOGOUT: &[&str] = &["logout"];
 

@@ -1,0 +1,33 @@
+//! Why a change to an organization's coding agent sign-in did not happen.
+
+use zone_core::llm::AgentKind;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// What the caller sent cannot finish a sign-in.
+    #[error("{0}")]
+    Invalid(&'static str),
+    #[error("The {0} CLI is not installed on this server")]
+    Unavailable(AgentKind),
+    /// The agent's own service or CLI refused, in its own words.
+    #[error("{0}")]
+    Refused(String),
+    /// Zone could not do its own part.
+    #[error("{0}")]
+    Internal(String),
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_cli_is_named_as_the_sign_in_panel_shows_it() {
+        assert_eq!(
+            Error::Unavailable(AgentKind::Codex).to_string(),
+            "The codex CLI is not installed on this server"
+        );
+    }
+}
