@@ -1,17 +1,22 @@
 import type { InstalledModel } from '../../models/types';
 import { mergeStageOptions } from '../../models/utils/stageOptions';
 import type { OrgRole } from '../organization/types';
+import { AiProviderSchema } from '../workspace/schemas';
 import type { AiProvider, AiSettings, UpdateAiSettingsRequest } from '../workspace/types';
 import { type Agent, type AgentProvider, AgentProviderSchema } from './schemas';
 
-export const providerOptions: { value: AiProvider; label: string }[] = [
-  { value: 'self_hosted', label: 'Self-Hosted (Ollama via LiteLLM)' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'bedrock', label: 'AWS Bedrock' },
-  { value: 'claude_code', label: 'Claude Code (Claude subscription)' },
-  { value: 'codex', label: 'Codex (ChatGPT subscription)' },
-];
+const providerLabels: Record<AiProvider, string> = {
+  self_hosted: 'Self-Hosted (Ollama via LiteLLM)',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  bedrock: 'AWS Bedrock',
+  claude_code: 'Claude Code (Claude subscription)',
+  codex: 'Codex (ChatGPT subscription)',
+};
+
+export const providerOptions: { value: AiProvider; label: string }[] = AiProviderSchema.options.map(
+  (value) => ({ value, label: providerLabels[value] })
+);
 
 const agents: Record<AgentProvider, Agent> = {
   claude_code: 'claude',

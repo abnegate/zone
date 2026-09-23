@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test';
+import { AgentProviderSchema } from '../features/settings/ai/schemas';
+import * as workspace from '../features/settings/workspace/schemas';
 import {
+  AiProviderSchema,
   AiSettingsResponseSchema,
   AiSettingsSchema,
   UpdateAiSettingsRequestSchema,
@@ -29,6 +32,16 @@ describe('AI settings schemas', () => {
     expect(AiSettingsResponseSchema.parse({ ...settings, provider }).provider).toBe(provider);
     expect(AiSettingsSchema.parse({ ...settings, provider }).provider).toBe(provider);
     expect(UpdateAiSettingsRequestSchema.parse({ provider }).provider).toBe(provider);
+  });
+
+  it('validates against the one provider list the settings feature defines', () => {
+    expect(AiProviderSchema).toBe(workspace.AiProviderSchema);
+    expect(AiSettingsSchema).toBe(workspace.AiSettingsSchema);
+    expect(AiSettingsResponseSchema).toBe(workspace.AiSettingsResponseSchema);
+    expect(UpdateAiSettingsRequestSchema).toBe(workspace.UpdateAiSettingsRequestSchema);
+    expect(
+      AgentProviderSchema.options.every((agent) => AiProviderSchema.options.includes(agent))
+    ).toBe(true);
   });
 
   it('still rejects a provider the server does not know', () => {

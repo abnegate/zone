@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
+import { AiProviderSchema } from '../workspace/schemas';
 import type { AiSettings } from '../workspace/types';
 import { AiProviderFields } from './AiProviderFields';
 import {
@@ -54,6 +55,11 @@ describe('coding agent providers', () => {
       value: 'codex',
       label: 'Codex (ChatGPT subscription)',
     });
+  });
+
+  it('labels every provider the schema knows, in its order', () => {
+    expect(providerOptions.map((option) => option.value)).toEqual(AiProviderSchema.options);
+    expect(providerOptions.every((option) => option.label.length > 0)).toBe(true);
   });
 
   it('maps each agent provider to the agent that serves it and every other provider to none', () => {

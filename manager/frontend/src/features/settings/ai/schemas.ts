@@ -1,9 +1,10 @@
 import { z } from 'zod';
+import { AiProviderSchema } from '../workspace/schemas';
 
 const WebUrlSchema = z.url({ protocol: /^https?$/ });
 
 export const AgentSchema = z.enum(['claude', 'codex']);
-export const AgentProviderSchema = z.enum(['claude_code', 'codex']);
+export const AgentProviderSchema = AiProviderSchema.extract(['claude_code', 'codex']);
 export const AgentStateSchema = z.enum(['signed_in', 'signed_out', 'pending', 'expired']);
 export const AgentSourceSchema = z.enum(['zone', 'host']);
 export const ClaudeScopeSchema = z.enum(['inference', 'full']);
