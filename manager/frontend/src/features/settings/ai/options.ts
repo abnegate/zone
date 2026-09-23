@@ -167,7 +167,8 @@ export function modelsFromSettings(settings: AiSettings): ModelSelection {
 
 export function hasOverrides(settings: AiSettings): boolean {
   return Boolean(
-    settings.has_litellm_key ||
+    settings.provider !== 'self_hosted' ||
+      settings.has_litellm_key ||
       settings.has_openai_api_key ||
       settings.has_anthropic_api_key ||
       settings.has_bedrock_credentials ||
