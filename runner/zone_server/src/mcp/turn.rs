@@ -1,10 +1,11 @@
 //! The one turn a bearer token stands for.
 //!
 //! A token is minted when a CLI-backed turn opens and revoked when its
-//! [`Lease`] drops, so it names a workspace, a chat and an acting user for as
-//! long as that turn runs and nothing afterwards. The turn it names is what
-//! decides every call: its own tool registry answers `tools/list`, and its own
-//! [`ApprovalPolicy`] decides each `tools/call` before the registry runs it.
+//! [`Lease`] drops, so it names a workspace, the chat or task run it serves and
+//! who acts in it for as long as that turn runs and nothing afterwards. The
+//! turn it names is what decides every call: its own tool registry answers
+//! `tools/list`, and its own [`ApprovalPolicy`] decides each `tools/call`
+//! before the registry runs it.
 
 use dashmap::DashMap;
 use futures::{Stream, StreamExt};

@@ -10,11 +10,11 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc};
 use uuid::Uuid;
 use zone_core::agent::{AgentCallback, AgentPhase};
 use zone_core::context::Entry;
-use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message as LlmMessage};
+use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, LlmConfig, Message as LlmMessage};
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
@@ -1949,7 +1949,7 @@ async fn attempt_run(
     // with the approved plan in hand and no plan phase to go through again.
     let approved = approval.approved();
     let mut plan_held = plan_approval && approved.is_none();
-    let tools = task_tools(
+    let mut tools = task_tools(
         state,
         run_id,
         owner,
@@ -1992,6 +1992,17 @@ async fn attempt_run(
     }
     let mut system_prompt = prompt::task(&tools, &environment);
     system_prompt.push_str(guidance);
+    let mut agent_tools = serve_tools(
+        &llm,
+        &mut tools,
+        workspace_id,
+        run_id,
+        owner,
+        &crate::mcp::local_endpoint(state.config()),
+    );
+    if let Some(served) = &agent_tools {
+        llm = llm.with_toolset(served.lease.toolset(), BuiltinTools::Withheld);
+    }
 
     let callback = DatabaseTaskCallback {
         pool: state.db().clone(),
@@ -2035,6 +2046,7 @@ async fn attempt_run(
                 context,
                 budget,
                 &callback,
+                agent_tools.as_mut().map(|served| &mut served.calls),
             )
             .await
             {
@@ -2156,6 +2168,49 @@ async fn task_tools(
     } else {
         tools
     }
+}
+
+/// An attempt's tools, served to the coding agent CLI it runs on for as long
+/// as this is held, and the calls the agent makes arriving as the events the
+/// run already logs.
+struct AgentTools {
+    lease: crate::mcp::Lease,
+    calls: mpsc::UnboundedReceiver<AgentEvent>,
+}
+
+/// Serve an attempt's tools to the coding agent CLI it runs on.
+///
+/// The agent runs its own tool loop, so the registry moves out of zone's loop,
+/// which under such a backend runs one round and calls nothing, and into the
+/// turn the MCP endpoint answers for. `None` for a backend whose tools zone
+/// cannot decide, and then the attempt's tools stay where they were.
+fn serve_tools(
+    llm: &LlmClient,
+    tools: &mut ChatTools,
+    workspace_id: Uuid,
+    run_id: Uuid,
+    owner: Uuid,
+    endpoint: &str,
+) -> Option<AgentTools> {
+    let LlmBackend::Cli { agent, .. } = &llm.config().backend else {
+        return None;
+    };
+    if !agent.accepts_toolset() {
+        return None;
+    }
+
+    let registry = Arc::new(std::mem::replace(tools, ChatTools::empty()));
+    let (events, calls) = mpsc::unbounded_channel();
+    let lease = crate::mcp::Turn::new(
+        workspace_id,
+        run_id,
+        owner,
+        registry,
+        ApprovalPolicy::auto(),
+        events,
+    )
+    .open(endpoint);
+    Some(AgentTools { lease, calls })
 }
 
 /// No window when any question is required -- unless nobody is there to
@@ -2663,13 +2718,14 @@ async fn run_task_loop(
     context: RunContext,
     budget: LoopBudget,
     callback: &DatabaseTaskCallback,
+    calls: Option<&mut mpsc::UnboundedReceiver<AgentEvent>>,
 ) -> Result<TurnOutcome, String> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
     let mut tool_calls = 0usize;
     let mut parked: Option<Park> = None;
     let mut replay = context.clone();
-    let mut events = std::pin::pin!(agent::run_with_context(
+    let round = agent::run_with_context(
         AgentRun {
             llm,
             model,
@@ -2679,8 +2735,12 @@ async fn run_task_loop(
             approval: ApprovalPolicy::auto(),
         },
         context,
-        true
-    ));
+        true,
+    );
+    let mut events = std::pin::pin!(match calls {
+        Some(calls) => futures::future::Either::Left(crate::mcp::merged(round, calls)),
+        None => futures::future::Either::Right(round),
+    });
     while let Some(event) = next_or_stall(&mut events, |silent| async move {
         let seconds = silent.as_secs();
         callback
@@ -3172,6 +3232,7 @@ mod tests {
                 )]),
                 LoopBudget::task(),
                 &callback,
+                None,
             ),
         )
         .await
@@ -5508,5 +5569,406 @@ mod watchdog_tests {
             "the allowance the refused eleventh wait is counted against has to start empty"
         );
         sqlx::query("DELETE FROM organizations WHERE id=(SELECT organization_id FROM workspaces WHERE id=$1)").bind(workspace_id).execute(&pool).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use crate::config::{Config, ModelBackend};
+    use crate::db::{organizations, users, workspace_members, workspaces};
+    use axum::http::{HeaderMap, HeaderValue, header};
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use wiremock::MockServer;
+    use zone_core::llm::{AgentKind, Toolset};
+
+    const ANSWER: &str = "Wrote it.";
+    const EXECUTABLE: &str = "claude";
+    const ARGUMENTS: &str = "arguments";
+    const TOKEN: &str = "token";
+    const RELEASE: &str = "release";
+    const POLL: Duration = Duration::from_millis(25);
+    const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// A stand-in for the host's `claude`.
+    ///
+    /// It records how the run invoked it, one argument per line, and the token
+    /// in its environment, then holds the turn open until released, so the
+    /// token is exercised while the attempt that minted it is still running.
+    struct Agent {
+        directory: TempDir,
+    }
+
+    impl Agent {
+        fn write() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+
+            let agent = Self {
+                directory: TempDir::new().expect("a directory for the stand-in agent"),
+            };
+            let script = format!(
+                "#!/bin/sh\ncat > /dev/null\nprintf '%s' \"$ZONE_MCP_TOKEN\" > '{token}'\nfor \
+                 argument in \"$@\"; do printf '%s\\n' \"$argument\"; done > '{arguments}.partial'\nmv \
+                 '{arguments}.partial' '{arguments}'\nwhile [ ! -f '{release}' ]; do sleep 0.05; \
+                 done\necho '{assistant}'\necho '{result}'\n",
+                token = agent.path(TOKEN).display(),
+                arguments = agent.path(ARGUMENTS).display(),
+                release = agent.path(RELEASE).display(),
+                assistant = json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": ANSWER}]},
+                }),
+                result = json!({"type": "result", "subtype": "success", "is_error": false}),
+            );
+            std::fs::write(agent.path(EXECUTABLE), script).expect("the stand-in agent");
+            std::fs::set_permissions(
+                agent.path(EXECUTABLE),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("the stand-in agent to be executable");
+            agent
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.directory.path().join(name)
+        }
+
+        /// How the run invoked the agent, and the token it handed it, which is
+        /// empty when the run served it no tools.
+        async fn spawned(&self) -> (Vec<String>, String) {
+            let deadline = tokio::time::Instant::now() + SPAWN_TIMEOUT;
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(arguments) = std::fs::read_to_string(self.path(ARGUMENTS)) {
+                    let token = std::fs::read_to_string(self.path(TOKEN)).unwrap_or_default();
+                    return (arguments.lines().map(str::to_string).collect(), token);
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            panic!("the run never spawned its agent");
+        }
+
+        fn release(&self) {
+            std::fs::write(self.path(RELEASE), "go").expect("releasing the agent");
+        }
+    }
+
+    impl Drop for Agent {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.path(RELEASE), "go");
+        }
+    }
+
+    /// The value the agent was given for `name`.
+    fn flag<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
+        let position = arguments.iter().position(|argument| argument == name)?;
+        arguments.get(position + 1).map(String::as_str)
+    }
+
+    /// One JSON-RPC call to zone's MCP endpoint, as the agent would make it.
+    async fn rpc(token: &str, method: &str, params: Value) -> Value {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("a header value"),
+        );
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let response = crate::mcp::serve(headers, request.to_string().into()).await;
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("the endpoint answers")
+            .to_bytes();
+        serde_json::from_slice(&body).expect("the endpoint answers JSON")
+    }
+
+    /// A queued run of a writer's task, on a model the agent knows.
+    struct Fixture {
+        pool: PgPool,
+        organization: Uuid,
+        user: Uuid,
+        workspace: Uuid,
+        task: Uuid,
+        run: Uuid,
+    }
+
+    impl Fixture {
+        async fn new(plan_approval: bool) -> Self {
+            let pool =
+                PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("disposable database"))
+                    .await
+                    .unwrap();
+            let organization = organizations::create_organization(
+                &pool,
+                "Agent run",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            let workspace = workspaces::create_workspace(
+                &pool,
+                organization.id,
+                "Agent run",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            let user = users::create_user(
+                &pool,
+                &format!("{}@example.com", Uuid::new_v4()),
+                "unused",
+                Some("Agent actor"),
+                false,
+            )
+            .await
+            .unwrap();
+            workspace_members::add_member(
+                &pool,
+                workspace.id,
+                user.id,
+                workspace_members::WorkspaceRole::Member,
+                None,
+            )
+            .await
+            .unwrap();
+            let task = tasks::create_task_as(
+                &pool,
+                workspace.id,
+                &[],
+                "Agent run",
+                "Write the file",
+                None,
+                None,
+                true,
+                None,
+                Some(user.id),
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE tasks SET model_name = 'sonnet', require_plan_approval = $2 WHERE id = $1",
+            )
+            .bind(task.id)
+            .bind(plan_approval)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let run = tasks::create_task_run_as(&pool, task.id, Some(user.id))
+                .await
+                .unwrap();
+            Self {
+                pool,
+                organization: organization.id,
+                user: user.id,
+                workspace: workspace.id,
+                task: task.id,
+                run: run.id,
+            }
+        }
+
+        /// A server whose instance backend is the stand-in agent, and whose
+        /// capacity lookups all miss rather than reaching a real endpoint.
+        fn state(&self, agent: &Agent, provider: &MockServer) -> AppState {
+            let state = AppState::new(
+                Config {
+                    model_backend: ModelBackend::Cli {
+                        agent: AgentKind::Claude,
+                        executable: Some(agent.path(EXECUTABLE)),
+                    },
+                    litellm_host: provider.uri(),
+                    ollama_host: provider.uri(),
+                    ..crate::state::test_config()
+                },
+                self.pool.clone(),
+                None,
+            );
+            state.disable_mcp();
+            state
+        }
+
+        async fn remove(self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(self.user)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// The agent is pointed at this server with exactly the run's own registry
+    /// allowed, reaches it with a token that names this attempt, and loses it
+    /// the moment the attempt ends.
+    #[tokio::test]
+    async fn a_run_on_a_coding_agent_serves_it_the_tasks_own_tools() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::write();
+        let provider = MockServer::start().await;
+        let state = fixture.state(&agent, &provider);
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+
+        let (arguments, token) = agent.spawned().await;
+        let definition: Value = serde_json::from_str(
+            flag(&arguments, "--mcp-config")
+                .expect("the agent is told where zone serves the run's tools"),
+        )
+        .expect("the server definition is JSON");
+        assert_eq!(
+            definition["mcpServers"][Toolset::SERVER]["url"],
+            crate::mcp::local_endpoint(state.config())
+        );
+        assert_eq!(
+            flag(&arguments, "--tools"),
+            Some(""),
+            "a run on an agent is served zone's tools and keeps none of its own"
+        );
+
+        let turn = crate::mcp::Turn::find(&token)
+            .expect("the token reaches the attempt that minted it while it runs");
+        let owner: Uuid = sqlx::query_scalar("SELECT owner FROM task_runs WHERE id = $1")
+            .bind(fixture.run)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            (turn.workspace(), turn.chat(), turn.user()),
+            (fixture.workspace, fixture.run, owner)
+        );
+        let served: Vec<String> = turn
+            .tools()
+            .names()
+            .iter()
+            .map(|name| format!("mcp__{}__{name}", Toolset::SERVER))
+            .collect();
+        let allowed: Vec<String> = flag(&arguments, "--allowedTools")
+            .expect("the agent is allowed the run's tools")
+            .split(',')
+            .map(str::to_string)
+            .collect();
+        assert_eq!(allowed, served);
+        for tool in [
+            "apply_patch",
+            "read_file",
+            "run_command",
+            "write_file",
+            "create_document",
+        ] {
+            assert!(turn.tools().has(tool), "the run's own {tool} is served");
+        }
+        assert!(
+            !turn.tools().has("run_shell"),
+            "a run is served its own sandboxed registry, not a chat's"
+        );
+
+        let answer = rpc(
+            &token,
+            "tools/call",
+            json!({"name": "write_file", "arguments": {
+                "path": "served.txt",
+                "content": "written",
+                "reason": "The task asked for this file.",
+            }}),
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+
+        agent.release();
+        tokio::time::timeout(SPAWN_TIMEOUT, running)
+            .await
+            .expect("the run finishes once its agent does")
+            .unwrap();
+        let finished = tasks::get_task_run(&fixture.pool, fixture.run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(
+            finished
+                .artifacts
+                .as_ref()
+                .expect("a finished run's artifacts")["tool_calls"],
+            1,
+            "the call the agent made over MCP is counted as the run's own"
+        );
+        assert!(
+            crate::mcp::Turn::find(&token).is_none(),
+            "a token that outlives its attempt is a standing grant on the workspace"
+        );
+        let logs = tasks::get_task_run_logs(&fixture.pool, fixture.run)
+            .await
+            .unwrap();
+        assert!(
+            !logs.iter().any(|log| log.message.contains("not offered")),
+            "the run said zone's tools went unoffered: {:?}",
+            logs.iter().map(|log| &log.message).collect::<Vec<_>>()
+        );
+        fixture.remove().await;
+    }
+
+    async fn attempt_tools(state: &AppState) -> ChatTools {
+        ChatTools::for_task(state, std::env::temp_dir(), Uuid::new_v4(), None).await
+    }
+
+    fn serve(state: &AppState, llm: &LlmClient, tools: &mut ChatTools) -> Option<AgentTools> {
+        serve_tools(
+            llm,
+            tools,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &crate::mcp::local_endpoint(state.config()),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_attempt_on_an_agent_leaves_zones_own_loop_nothing_to_call() {
+        let state = AppState::for_tests();
+        for agent in AgentKind::ALL {
+            let llm = LlmClient::new(LlmConfig::default().with_backend(LlmBackend::cli(
+                agent,
+                zone_core::llm::CliSettings::default(),
+            )));
+            let mut tools = attempt_tools(&state).await;
+            let registered = tools.names().to_vec();
+
+            let served = serve(&state, &llm, &mut tools)
+                .unwrap_or_else(|| panic!("{agent} lets zone decide its tools"));
+
+            assert!(
+                tools.is_empty(),
+                "the registry the endpoint answers from must not also sit in zone's own loop"
+            );
+            assert_eq!(served.lease.toolset().tools, registered);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_attempt_on_an_endpoint_keeps_its_tools_in_zones_own_loop() {
+        let state = AppState::for_tests();
+        let mut tools = attempt_tools(&state).await;
+        let registered = tools.names().to_vec();
+
+        let served = serve(&state, &LlmClient::new(LlmConfig::default()), &mut tools);
+
+        assert!(served.is_none(), "an HTTP backend spawns nothing to serve");
+        assert_eq!(tools.names(), registered);
     }
 }
