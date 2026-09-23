@@ -552,7 +552,7 @@ docker compose restart <service-name>
 ## Backup & Recovery
 
 ```bash
-# Backup all volumes
+# Back up the stack's data volumes (docs/OPERATIONS.md lists which)
 make backup
 
 # Restore from backup

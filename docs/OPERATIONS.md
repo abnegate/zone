@@ -48,11 +48,22 @@ the name the script printed: `docker volume rm <64-hex-name>`.
 
 ## Backup and restore
 
-`make backup` archives every named volume into
-`backups/zone_backup_<date>.tar.gz`, with the cluster under `postgres/`. It
-checks that `zone_postgres_data` holds a `PG_VERSION` first and stops with the
-migration steps above when it does not; `ALLOW_EMPTY_POSTGRES=1` archives the
-other volumes regardless.
+`make backup` archives nine named volumes into
+`backups/zone_backup_<date>.tar.gz`: `zone_postgres_data` (the cluster, under
+`postgres/`), `zone_valkey_data`, `zone_ollama_data`, `zone_manager_repos`,
+`zone_manager_artifacts`, `zone_manager_agent_state`, `zone_prometheus_data`,
+`zone_grafana_data` and `zone_traefik_letsencrypt`. It leaves out
+`zone_comfyui_models` (downloaded weights, and the LoRAs Zone trains),
+`zone_comfyui_output`, `zone_manager_embed_cache`, and every volume of the
+`dev` profile, `zone_dev_agent_state` included. It checks that
+`zone_postgres_data` holds a `PG_VERSION` first and stops with the migration
+steps above when it does not; `ALLOW_EMPTY_POSTGRES=1` archives the other
+volumes regardless.
+
+It creates `backups/` with mode 0700 when the directory does not exist yet,
+and writes each archive with mode 0600. Docker runs the archiving container as
+root, so on a Linux host whose Docker daemon runs as root the archive belongs
+to root: read or copy it with `sudo`.
 
 `make restore BACKUP=<archive>` extracts into the same volumes and warns when
 the archive carried no cluster, which is what every archive taken before the
@@ -64,9 +75,12 @@ The archive includes `zone_manager_agent_state`, under `manager_agent_state/`.
 It holds each organization's Claude Code and Codex state: codex's `auth.json`,
 a working ChatGPT login stored in plain form, and both CLIs' session
 transcripts. Anyone holding the archive can use those logins, so keep archives
-private. The Claude tokens are not in that volume. They are in the database,
+private. Deleting an organization signs it out of codex and removes its
+directory from the volume, but archives taken before then still hold its
+login. The Claude tokens are not in that volume. They are in the database,
 sealed with a key derived from `ENCRYPTION_KEY`, and a restored instance needs
-the same `ENCRYPTION_KEY` to use them.
+the same `ENCRYPTION_KEY` to use them: under another key, every Claude Code
+sign-in shows as expired until an organization admin signs in again.
 
 ## Upgrading to migration 048
 
