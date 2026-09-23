@@ -8,12 +8,12 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use chrono::{DateTime, SubsecRound, Utc};
 use dashmap::DashMap;
 use futures::future::{BoxFuture, FutureExt, Shared};
-use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
@@ -22,6 +22,7 @@ use zone_core::secret::redact;
 
 use super::codex::{self, CREDENTIALS, Device, Prompt};
 use super::error::Error;
+use super::locks::Locks;
 use super::{audit, probe};
 use crate::config::Config;
 use crate::db::agent_logins::{self, Upsert};
@@ -50,7 +51,7 @@ struct Attempt {
 
 #[derive(Default)]
 struct Devices {
-    locks: DashMap<Uuid, Arc<Mutex<()>>>,
+    locks: Locks,
     attempts: DashMap<Uuid, Attempt>,
     failures: DashMap<Uuid, String>,
 }
@@ -121,11 +122,6 @@ impl Attempt {
 }
 
 impl Devices {
-    async fn lock(&self, organization: Uuid) -> OwnedMutexGuard<()> {
-        let lock = self.locks.entry(organization).or_default().value().clone();
-        lock.lock_owned().await
-    }
-
     /// The prompt, and for a new attempt the task that records how it ends. An attempt whose code
     /// can no longer be entered is ended, and how it ended recorded, before a new one starts.
     async fn start(
@@ -136,7 +132,7 @@ impl Devices {
         email: &str,
     ) -> Result<(Prompt, Option<Completion>), Error> {
         let _guard = loop {
-            let guard = self.lock(organization).await;
+            let guard = self.locks.lock(organization).await;
             let ending = match self.attempts.get_mut(&organization) {
                 None => None,
                 Some(attempt) if attempt.waiting(Utc::now()) => {
@@ -213,7 +209,7 @@ impl Devices {
             Err(_) => None,
         };
 
-        let _guard = self.lock(organization).await;
+        let _guard = self.locks.lock(organization).await;
         let Some((initiator, email)) = self
             .attempts
             .get(&organization)
@@ -258,7 +254,7 @@ impl Devices {
         user: Uuid,
         email: &str,
     ) -> Result<(), Error> {
-        let _guard = self.lock(organization).await;
+        let _guard = self.locks.lock(organization).await;
         if agent == AgentKind::Codex {
             self.stop(organization).await;
             log_out(state.config(), organization).await?;
@@ -641,6 +637,10 @@ esac"#
         scene.sign_out().await;
         finished(second).await;
         assert!(pending(scene.organization).is_none());
+        assert!(
+            !DEVICES.locks.kept(scene.organization),
+            "an idle organization's lock was kept"
+        );
         scene.remove().await;
     }
 
