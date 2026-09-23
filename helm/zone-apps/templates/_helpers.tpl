@@ -67,9 +67,9 @@ app.kubernetes.io/component: server
 {{- end }}
 
 {{/*
-Claim holding zone-server's agent sign-ins, or nothing. The claim is
-ReadWriteOnce and sign-in state is per pod, so it is used only while the
-server runs a single replica.
+Claim holding zone-server's agent state, or nothing. The claim is
+ReadWriteOnce and that state is per pod, so it is used only while the server
+runs a single replica.
 */}}
 {{- define "zone-apps.server.agentStateClaim" -}}
 {{- $persistence := dig "agentState" "persistence" dict .Values.server -}}

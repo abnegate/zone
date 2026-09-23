@@ -61,9 +61,9 @@ The following table lists the configurable parameters and their default values.
 | `server.autoscaling.minReplicas` | Minimum number of replicas | `2` |
 | `server.autoscaling.maxReplicas` | Maximum number of replicas | `10` |
 | `server.autoscaling.targetCPUUtilization` | Target CPU utilization percentage | `70` |
-| `server.agentState.persistence.enabled` | Keep codex sign-ins and both agent CLIs' state on a claim; applies only with one replica and autoscaling off | `true` |
-| `server.agentState.persistence.size` | Size of the agent state claim | `1Gi` |
-| `server.agentState.persistence.storageClass` | Storage class of the agent state claim; empty uses the cluster default | `""` |
+| `server.agentState.persistence.enabled` | Keep agent state (codex sign-ins, CLI homes and transcripts) on a claim; applies only with one replica and autoscaling off. Claude tokens are in the database either way | `true` |
+| `server.agentState.persistence.size` | Size of the agent-state claim | `1Gi` |
+| `server.agentState.persistence.storageClass` | Storage class of the agent-state claim; empty uses the cluster default | `""` |
 
 ### Manager Configuration
 

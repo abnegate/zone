@@ -69,9 +69,11 @@ Horizontal Pod Autoscaler is enabled for the server:
 
 {{- if and .Values.server.enabled (dig "agentState" "persistence" "enabled" false .Values.server) (not (include "zone-apps.server.agentStateClaim" .)) }}
 
-NOTE: Claude and codex sign-ins are not persisted. zone-server runs more than
-one replica and sign-in state is per pod, so /app/agent-state is an emptyDir.
-To keep sign-ins, set server.replicaCount=1 and server.autoscaling.enabled=false.
+NOTE: Codex sign-ins and agent transcripts are not persisted. zone-server runs
+more than one replica and this state is per pod, so /app/agent-state is an
+emptyDir. Claude sign-ins are unaffected: their tokens are sealed in the
+database. To keep codex sign-ins, set server.replicaCount=1 and
+server.autoscaling.enabled=false.
 {{- end }}
 
 {{- if and .Values.manager.enabled .Values.manager.autoscaling.enabled }}
