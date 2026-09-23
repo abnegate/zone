@@ -1,5 +1,6 @@
 //! A provider backed by a coding agent CLI run as a child process.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::time::Duration;
@@ -10,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
-use tool_runner::executor::{GRACE_PERIOD, OutputLimiter, ProcessGroup};
+use tool_runner::executor::{GRACE_PERIOD, ProcessGroup};
 
 use super::agent::AgentKind;
 use super::completion::{Completion, CompletionProvider, CompletionRequest, ProviderKind};
@@ -18,7 +19,7 @@ use super::credential::Credential;
 use super::environment;
 use super::error::{ExitStatus, ProviderError};
 use super::event::AgentEvent;
-use super::lines::{Lines, Overlong};
+use super::lines::{Frame, Lines};
 use super::settings::{CliSettings, Toolset};
 use super::transcript;
 use crate::llm::{Message, Usage};
@@ -171,9 +172,9 @@ impl CliProvider {
 
         Ok(Box::pin(async_stream::try_stream! {
             let mut lines = Lines::new(line_limit);
-            let mut limiter = OutputLimiter::new(output_limit);
             let mut buffer = [0_u8; READ_BUFFER];
             let mut events = Vec::new();
+            let mut kept = 0_usize;
             let mut ended = false;
             let mut terminal = false;
 
@@ -181,26 +182,13 @@ impl CliProvider {
                 let read = session.read(&mut buffer).await?;
                 if read == 0 {
                     ended = true;
-                    match lines.flush() {
-                        Ok(Some(line)) => agent.interpret(&line, &mut events),
-                        Ok(None) => {}
-                        Err(overlong) => Err(session.stop(unframed(&name, overlong)).await)?,
+                    if let Some(frame) = lines.flush() {
+                        interpret(agent, &name, line_limit, frame, &mut events);
                     }
                 } else {
-                    let (accepted, count, _) = limiter.check(read);
-                    if !accepted || count < read {
-                        Err(session.stop(ProviderError::agent(
-                            &name,
-                            &format!("the agent produced more than {output_limit} bytes of output"),
-                        )).await)?;
-                    }
-                    lines.extend(&buffer[..count]);
-                    loop {
-                        match lines.take() {
-                            Ok(Some(line)) => agent.interpret(&line, &mut events),
-                            Ok(None) => break,
-                            Err(overlong) => Err(session.stop(unframed(&name, overlong)).await)?,
-                        }
+                    lines.extend(&buffer[..read]);
+                    while let Some(frame) = lines.take() {
+                        interpret(agent, &name, line_limit, frame, &mut events);
                     }
                 }
 
@@ -209,6 +197,13 @@ impl CliProvider {
                     // code, which says only that something did.
                     if let AgentEvent::Failed(message) = &event {
                         Err(session.fail(message).await)?;
+                    }
+                    kept = kept.saturating_add(retained(&event));
+                    if kept > output_limit {
+                        Err(session.stop(ProviderError::agent(
+                            &name,
+                            &format!("the agent's answer grew past {output_limit} bytes"),
+                        )).await)?;
                     }
                     terminal |= event.terminal();
                     yield event;
@@ -408,11 +403,30 @@ impl CompletionProvider for CliProvider {
     }
 }
 
-fn unframed(provider: &str, overlong: Overlong) -> ProviderError {
-    ProviderError::malformed(
-        provider,
-        format!("one event exceeded {} bytes", overlong.limit),
-    )
+fn interpret(
+    agent: AgentKind,
+    provider: &str,
+    limit: usize,
+    frame: Frame,
+    events: &mut Vec<AgentEvent>,
+) {
+    match frame {
+        Frame::Line(line) => agent.interpret(&line, events),
+        Frame::Dropped => tracing::warn!(
+            provider,
+            limit,
+            "dropped an agent event longer than the line limit; the turn goes on without it"
+        ),
+    }
+}
+
+/// The bytes of `event` that whoever reads the stream keeps.
+fn retained(event: &AgentEvent) -> usize {
+    match event {
+        AgentEvent::Text(text) | AgentEvent::Failed(text) => text.len(),
+        AgentEvent::Tool(call) => call.function.name.len() + call.function.arguments.len(),
+        AgentEvent::Usage(_) | AgentEvent::Finished { .. } => 0,
+    }
 }
 
 /// `message`, then the last whole lines of `diagnostics` that fit in
@@ -433,36 +447,45 @@ fn failure(message: &str, diagnostics: &str) -> String {
     format!("{message}\n{tail}")
 }
 
-/// Stderr is drained whether or not it is ever read back. An agent run with a
-/// piped-but-unread stderr blocks the moment it fills the pipe buffer, which
-/// on a verbose agent happens long before it reaches its answer.
+/// The last `limit` bytes of the agent's stderr, which is read to its end
+/// whether or not it is ever read back: an agent writing into a pipe nobody
+/// reads blocks once the pipe is full, and one whose pipe was closed dies of
+/// the next write.
 async fn read_diagnostics(stderr: Option<ChildStderr>, limit: usize) -> String {
     let Some(mut stderr) = stderr else {
         return String::new();
     };
 
-    let mut collected = Vec::new();
-    let mut limiter = OutputLimiter::new(limit);
+    let mut kept = VecDeque::new();
     let mut buffer = [0_u8; READ_BUFFER];
 
     while let Ok(read) = stderr.read(&mut buffer).await {
         if read == 0 {
             break;
         }
-        let (accepted, count, _) = limiter.check(read);
-        if !accepted {
-            break;
-        }
-        collected.extend_from_slice(&buffer[..count]);
+        kept.extend(&buffer[..read]);
+        kept.drain(..kept.len().saturating_sub(limit));
     }
 
-    String::from_utf8_lossy(&collected).into_owned()
+    let kept = Vec::from(kept);
+    let start = kept
+        .iter()
+        .position(|byte| !is_continuation(*byte))
+        .unwrap_or(kept.len());
+    String::from_utf8_lossy(&kept[start..]).into_owned()
+}
+
+/// Whether `byte` continues a UTF-8 character rather than starting one.
+fn is_continuation(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::llm::RequestOptions;
+    use crate::llm::provider::settings::DEFAULT_LINE_LIMIT;
+    use serde_json::json;
     use std::collections::BTreeMap;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -860,21 +883,156 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         assert_eq!(failure("the turn failed", " \n\t"), "the turn failed");
     }
 
+    /// Codex echoes what each of zone's tools returned, so a file the agent
+    /// read can make one event longer than any answer.
+    fn codex_tool_result(id: usize, bytes: usize) -> String {
+        json!({
+            "type": "item.completed",
+            "item": {
+                "id": format!("item_{id}"),
+                "type": "mcp_tool_call",
+                "server": "zone",
+                "tool": "read_file",
+                "arguments": {"path": "a.rs"},
+                "result": {"content": [{"type": "text", "text": "x".repeat(bytes)}]},
+                "error": null,
+                "status": "completed",
+            },
+        })
+        .to_string()
+    }
+
+    const CODEX_ANSWER: &str = r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"The file is large."}}"#;
+    const CODEX_COMPLETED: &str =
+        r#"{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}"#;
+
+    fn replaying(directory: &TempDir, lines: &[String]) -> String {
+        let recording = directory.path().join("recording.jsonl");
+        std::fs::write(&recording, format!("{}\n", lines.join("\n"))).expect("the recording");
+        format!("cat '{}'", recording.display())
+    }
+
     #[tokio::test]
-    async fn a_single_oversized_event_is_reported_as_malformed_output() {
+    async fn an_event_past_the_line_limit_is_dropped_and_the_turn_still_answers() {
         let directory = TempDir::new().expect("a temporary directory");
-        let mut settings = settings(&directory, "head -c 5000 /dev/zero | tr '\\0' 'x'; echo");
+        let script = replaying(
+            &directory,
+            &[
+                codex_tool_result(1, DEFAULT_LINE_LIMIT + 1),
+                CODEX_ANSWER.to_string(),
+                CODEX_COMPLETED.to_string(),
+            ],
+        );
+        let provider = CliProvider::agent(AgentKind::Codex, settings(&directory, &script));
+
+        let completion = run(&provider, &[Message::user("Read a.rs.")])
+            .await
+            .expect("the answer that followed the dropped event");
+
+        assert_eq!(
+            completion.message.content.as_deref(),
+            Some("The file is large.")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unterminated_event_past_the_line_limit_is_skipped_to_its_end() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = r#"
+head -c 5000 /dev/zero | tr '\0' 'x'
+sleep 0.2
+head -c 5000 /dev/zero | tr '\0' 'y'
+echo
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Still here."}]}}'
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#;
+        let mut settings = settings(&directory, script);
         settings.line_limit = 256;
         let provider = CliProvider::agent(AgentKind::Claude, settings);
+
+        let completion = run(&provider, &[Message::user("hi")])
+            .await
+            .expect("the answer after the skipped event");
+
+        assert_eq!(completion.message.content.as_deref(), Some("Still here."));
+    }
+
+    #[tokio::test]
+    async fn tool_results_the_agent_reads_past_the_output_cap_do_not_end_its_turn() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let mut lines: Vec<String> = (1..=32).map(|id| codex_tool_result(id, 4 * 1024)).collect();
+        lines.extend([CODEX_ANSWER.to_string(), CODEX_COMPLETED.to_string()]);
+        let script = replaying(&directory, &lines);
+        let provider = CliProvider::agent(
+            AgentKind::Codex,
+            settings(&directory, &script).with_output_limit(4 * 1024),
+        );
+
+        let completion = run(&provider, &[Message::user("Read every file.")])
+            .await
+            .expect("an answer after 128 KiB of tool results");
+
+        assert_eq!(
+            completion.message.content.as_deref(),
+            Some("The file is large.")
+        );
+    }
+
+    #[tokio::test]
+    async fn stderr_past_the_output_cap_is_still_drained() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = r#"
+head -c 262144 /dev/zero | tr '\0' 'e' >&2
+echo 'still logging' >&2
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}'
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#;
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            settings(&directory, script)
+                .with_output_limit(4 * 1024)
+                .with_timeout(Duration::from_secs(5)),
+        );
+
+        let completion = run(&provider, &[Message::user("hi")])
+            .await
+            .expect("an answer from an agent that wrote 256 KiB to stderr");
+
+        assert_eq!(completion.message.content.as_deref(), Some("Done."));
+    }
+
+    #[tokio::test]
+    async fn a_failure_past_the_output_cap_reports_the_end_of_stderr() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = r#"
+head -c 262144 /dev/zero | tr '\0' 'e' >&2
+echo 'error: the real reason' >&2
+exit 3
+"#;
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            settings(&directory, script)
+                .with_output_limit(4 * 1024)
+                .with_timeout(Duration::from_secs(5)),
+        );
 
         let error = run(&provider, &[Message::user("hi")])
             .await
             .expect_err("a failure");
 
+        let ProviderError::Exit {
+            status, message, ..
+        } = &error
+        else {
+            panic!("expected an exit failure, got {error:?}");
+        };
+        assert_eq!(*status, ExitStatus::Code(3));
         assert!(
-            matches!(error, ProviderError::Malformed { .. }),
-            "expected malformed output, got {error:?}"
+            message.trim_end().ends_with("error: the real reason"),
+            "lost the end of stderr: {}",
+            &message[message.len().saturating_sub(200)..]
         );
+        assert!(message.len() <= 4 * 1024 + 256, "{} bytes", message.len());
     }
 
     /// Recorded from claude 2.1.269 with no session on the host. The subtype
@@ -941,9 +1099,14 @@ echo '{"type":"result","subtype":"success","is_error":false}'
     }
 
     #[tokio::test]
-    async fn output_past_the_cap_stops_the_run_instead_of_waiting_for_the_timeout() {
+    async fn an_answer_past_the_output_cap_stops_the_run_instead_of_waiting_for_the_timeout() {
         let directory = TempDir::new().expect("a temporary directory");
-        let settings = settings(&directory, "yes 'xxxxxxxxxxxxxxxx'").with_output_limit(4 * 1024);
+        let script = r#"
+while :; do
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"xxxxxxxxxxxxxxxx"}]}}'
+done
+"#;
+        let settings = settings(&directory, script).with_output_limit(4 * 1024);
         let provider = CliProvider::agent(AgentKind::Claude, settings);
 
         let started = std::time::Instant::now();

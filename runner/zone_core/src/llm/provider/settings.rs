@@ -15,12 +15,10 @@ use crate::secret::SecretValue;
 /// was still going well.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 
-/// A coding agent's stream is structured JSON, not build output, so the cap
-/// that matters is far below `tool_runner`'s ten megabytes for arbitrary
-/// commands.
+/// The most of a turn's answer that is kept, and of the end of its stderr.
 pub const DEFAULT_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 
-/// One event is a JSON object holding at most a turn's worth of text.
+/// An event longer than this is dropped, and the turn goes on without it.
 pub const DEFAULT_LINE_LIMIT: usize = 1024 * 1024;
 
 /// Whether a spawned agent keeps the tools it ships with.
@@ -136,9 +134,10 @@ pub struct CliSettings {
     pub builtin_tools: BuiltinTools,
     pub sandbox: CodexSandbox,
     pub timeout: Duration,
-    /// Bytes of stdout and stderr kept before the run is abandoned.
+    /// Bytes of the answer kept before the run is abandoned, and of the end
+    /// of stderr kept for a failure to report.
     pub output_limit: usize,
-    /// Bytes one event may occupy before the stream is treated as malformed.
+    /// Bytes one event may occupy before it is dropped.
     pub line_limit: usize,
 }
 

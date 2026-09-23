@@ -500,6 +500,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_codex_that_prints_a_line_too_long_to_be_a_prompt_is_refused() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let home = home(&directory);
+        let codex = fake(
+            &directory,
+            &login(),
+            "head -c 5000 /dev/zero | tr '\\0' 'x'\necho\nexec sleep 60",
+        );
+
+        let error = device(&codex, &home, &environment())
+            .await
+            .expect_err("no prompt");
+
+        assert!(
+            matches!(&error, Error::Unreadable(message) if message.contains("longer than 4096 bytes")),
+            "{error:?}"
+        );
+        assert!(!staging(&home).exists(), "the staging directory was left");
+    }
+
+    #[tokio::test]
     async fn a_codex_that_exits_without_a_prompt_or_a_reason_says_how_it_exited() {
         let directory = TempDir::new().expect("a temporary directory");
         let home = home(&directory);

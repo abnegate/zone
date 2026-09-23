@@ -18,8 +18,8 @@
 //! sandbox denies all network access and grants `process-exec` for a single
 //! literal command, and a coding agent needs the network to reach its own API
 //! and forks a tree of helper processes to do its work. It does reuse that
-//! crate's process-group termination and output caps, so a timed-out agent
-//! takes its whole process tree with it.
+//! crate's process-group termination, so a timed-out agent takes its whole
+//! process tree with it.
 
 mod agent;
 mod cli;
@@ -46,7 +46,7 @@ pub use credential::Credential;
 pub use error::{ExitStatus, ProviderError};
 pub use event::AgentEvent;
 pub use http::HttpProvider;
-pub use lines::{Lines, Overlong};
+pub use lines::{Frame, Lines};
 pub use router::Router;
 pub use selection::{SelectionStrategy, Weighted, choose, sample};
 pub use settings::{

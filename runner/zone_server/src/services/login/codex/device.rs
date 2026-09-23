@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout_at};
 use zone_core::llm::AgentKind;
-use zone_core::llm::provider::Lines;
+use zone_core::llm::provider::{Frame, Lines};
 
 use super::output::{self, collect, failure};
 use super::process::Process;
@@ -116,18 +116,18 @@ async fn read(
             }
         };
         if read == 0 {
-            if let Ok(Some(line)) = lines.flush() {
+            if let Some(Frame::Line(line)) = lines.flush() {
                 append(&mut text, &line);
             }
             return Ok(Prompt::read(&text, Utc::now()).ok());
         }
         lines.extend(&buffer[..read]);
-        while let Some(line) = lines.take().map_err(|overlong| {
-            Error::Unreadable(format!(
-                "codex printed a line longer than {} bytes instead of a sign-in prompt",
-                overlong.limit
-            ))
-        })? {
+        while let Some(frame) = lines.take() {
+            let Frame::Line(line) = frame else {
+                return Err(Error::Unreadable(format!(
+                    "codex printed a line longer than {LINE} bytes instead of a sign-in prompt"
+                )));
+            };
             append(&mut text, &line);
         }
         if text.len() > PRINTED {
