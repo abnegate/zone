@@ -61,9 +61,9 @@ The following table lists the configurable parameters and their default values.
 | `server.autoscaling.minReplicas` | Minimum number of replicas | `2` |
 | `server.autoscaling.maxReplicas` | Maximum number of replicas | `10` |
 | `server.autoscaling.targetCPUUtilization` | Target CPU utilization percentage | `70` |
-| `server.agentState.persistence.enabled` | Keep claude and codex sign-ins on a claim; applies only with one replica and autoscaling off | `true` |
-| `server.agentState.persistence.size` | Size of the sign-in claim | `1Gi` |
-| `server.agentState.persistence.storageClass` | Storage class of the sign-in claim; empty uses the cluster default | `""` |
+| `server.agentState.persistence.enabled` | Keep codex sign-ins and both agent CLIs' state on a claim; applies only with one replica and autoscaling off | `true` |
+| `server.agentState.persistence.size` | Size of the agent state claim | `1Gi` |
+| `server.agentState.persistence.storageClass` | Storage class of the agent state claim; empty uses the cluster default | `""` |
 
 ### Manager Configuration
 
@@ -270,6 +270,33 @@ The chart is configured for high availability by default:
 - **Topology Spread Constraints**: Ensures even distribution across the cluster
 - **Horizontal Pod Autoscaler**: Automatically scales based on CPU utilization
 - **Health Checks**: Liveness and readiness probes ensure traffic only goes to healthy pods
+
+Organizations on the Claude Code or Codex provider need a single server replica instead; see [Coding Agent Sign-ins](#coding-agent-sign-ins).
+
+## Coding Agent Sign-ins
+
+zone-server can run the claude and codex CLIs its image ships for organizations that choose the Claude Code or Codex provider, as described under Model Backend in [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md). The chart prepares the server pod for them:
+
+- `server.env.ZONE_AGENT_HOST_LOGIN` is `"false"`, so an organization that has not signed in gets an error rather than a login made inside the pod.
+- The server container sets `HOME=/home/zone`, `ZONE_AGENT_STATE_DIR=/app/agent-state` and `ZONE_CHAT_AGENT_CWD=/app/workspace`. The root filesystem is read-only, so `/home/zone`, `/app/workspace` and `/tmp` are emptyDirs.
+- `/app/agent-state` is a ReadWriteOnce claim, set by `server.agentState.persistence`, only when `server.replicaCount` is `1` and `server.autoscaling.enabled` is `false`. The Deployment then uses the `Recreate` strategy. Otherwise it is an emptyDir, and the install notes say that sign-ins are not persisted.
+
+The claim holds codex's logins and both CLIs' state; Claude sign-ins are kept in the database. With an emptyDir, every pod restart loses the organizations' codex logins.
+
+Agent providers need a single server replica. A Claude sign-in waiting for its code and a codex sign-in in progress live in one server process's memory, and a codex login lives on the pod that made it. With several replicas a sign-in can start on one pod and fail on another, and a turn on another pod finds no codex login. The chart's defaults run two replicas with autoscaling, so set:
+
+```yaml
+server:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+```
+
+The image sets `ZONE_CODEX_SANDBOX=danger-full-access`: codex sandboxes its own shell with bubblewrap, which needs user namespaces, and Docker's default seccomp profile blocks them. Whether the pods' `RuntimeDefault` profile allows them has not been tested; set `server.env.ZONE_CODEX_SANDBOX: workspace-write` only where it does.
+
+With `networkPolicy.enabled`, the server's egress policy admits DNS, the database, Valkey and LiteLLM only, so neither the CLIs nor zone-server's own Claude token exchange can reach Anthropic or OpenAI.
+
+Every organization's CLI runs as the pod's user, uid 1000 with the chart's default security context. Read the security notes under Model Backend in [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) before enabling these providers on a shared instance.
 
 ## Monitoring
 
