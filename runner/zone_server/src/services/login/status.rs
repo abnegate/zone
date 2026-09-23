@@ -1,9 +1,14 @@
 //! How an organization's sign-in to each coding agent looks to its members.
 
+mod host;
 mod prompt;
 mod source;
 mod state;
 mod viewer;
+
+use std::path::PathBuf;
+use std::sync::LazyLock;
+use std::time::Duration;
 
 use chrono::{DateTime, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,6 +28,12 @@ use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::db::ai_settings;
 use crate::state::AppState;
+use host::Host;
+
+/// How long one check of the host's own sign-in answers for every organization.
+const FRESH: Duration = Duration::from_secs(30);
+
+static HOST: LazyLock<Host> = LazyLock::new(|| Host::new(FRESH));
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStatus {
@@ -147,6 +158,11 @@ async fn host(config: &Config, agent: AgentKind) -> Option<Probe> {
         return None;
     }
     let executable = config.agent_executable(agent);
+    HOST.check(agent, executable.clone(), ask(agent, executable))
+        .await
+}
+
+async fn ask(agent: AgentKind, executable: PathBuf) -> Option<Probe> {
     match probe::check(agent, &executable, &devices::variables(agent)).await {
         Ok(probe) => probe.signed_in.then_some(probe),
         Err(codex::Error::Unavailable {
@@ -191,12 +207,16 @@ mod name {
 #[cfg(test)]
 mod tests {
     use chrono::TimeDelta;
+    use futures::future::join_all;
     use serde_json::{Value, json};
     use tempfile::TempDir;
     use zone_core::secret::SecretValue;
 
     use super::*;
-    use crate::config::AgentConfig;
+    use crate::config::{AgentConfig, ModelBackend};
+    use crate::services::login::codex::testing::fake;
+
+    const STATUSES: usize = 5;
 
     const FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -349,6 +369,49 @@ mod tests {
             saved(&config, Uuid::new_v4()),
             State::Expired,
             "another organization's home counted"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_hosts_sign_in_is_checked_once_for_everyone_who_asks() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let checked = directory.path().join("checked");
+        let codex = fake(
+            &directory,
+            "login status",
+            &format!(
+                "echo checked >> '{}'\nsleep 0.2\necho 'Logged in using ChatGPT' >&2\nexit 0",
+                checked.display()
+            ),
+        );
+        let config = Config {
+            model_backend: ModelBackend::Cli {
+                agent: AgentKind::Codex,
+                executable: Some(codex),
+            },
+            agents: AgentConfig {
+                state: directory.path().join("agents"),
+                host_login: true,
+                ..AgentConfig::default()
+            },
+            ..crate::state::test_config()
+        };
+
+        let answers = join_all((0..STATUSES).map(|_| host(&config, AgentKind::Codex))).await;
+        let later = host(&config, AgentKind::Codex).await;
+
+        let expected = Some(Probe {
+            signed_in: true,
+            label: Some("ChatGPT".to_string()),
+        });
+        for answer in answers.into_iter().chain([later]) {
+            assert_eq!(answer, expected);
+        }
+        let checks = std::fs::read_to_string(&checked).expect("codex was asked");
+        assert_eq!(
+            checks.lines().count(),
+            1,
+            "every status asked the host's codex for itself"
         );
     }
 
