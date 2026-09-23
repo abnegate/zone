@@ -10,7 +10,7 @@ import {
   setSystemTime,
   vi,
 } from 'bun:test';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { type ComponentProps, useCallback, useState } from 'react';
 import fixture from '../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { AgentRequestError } from '../../../api/AgentRequestError';
@@ -391,10 +391,30 @@ describe('AgentSignIn', () => {
       expect(screen.getByText('Claude Max · Expires Sep 23, 2027')).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
 
+      const dialog = await screen.findByRole('dialog', { name: 'Sign out of Claude Code?' });
+      expect(dialog).toHaveTextContent(
+        'This signs Claude Code out for every workspace in this organization.'
+      );
+      expect(agentsApi.signOut).not.toHaveBeenCalled();
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Sign out' }));
+
       await waitFor(() => expect(onChange).toHaveBeenCalledWith(claudeSignedOut));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
       expect(agentsApi.signOut).toHaveBeenCalledWith(organization, 'claude');
       expect(agentsApi.get).toHaveBeenCalledWith(organization, 'claude');
       expect(await screen.findByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+    });
+
+    it('keeps the sign-in when the sign-out is not confirmed', async () => {
+      renderPanel('claude', claudeSignedIn);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Sign out of Claude Code?' });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(agentsApi.signOut).not.toHaveBeenCalled();
+      expect(screen.getByText('Signed in')).toBeInTheDocument();
     });
 
     it('leaves out an expiry that has passed while the sign-in still holds', () => {
@@ -727,6 +747,8 @@ describe('AgentSignIn', () => {
       );
 
       fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Sign out of Claude Code?' });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Sign out' }));
       unmount();
       await act(async () => finish());
 

@@ -5,6 +5,7 @@ import { agentsApi } from '../../../api/agents';
 import { ClaudeSteps } from './ClaudeSteps';
 import { DeviceSteps } from './DeviceSteps';
 import type { Agent, AgentState, AgentStatus, ClaudeScope } from './schemas';
+import { SignOutDialog } from './SignOutDialog';
 import type { AgentAccess, Attempt, SignInAction } from './types';
 import { useExpired } from './useExpired';
 import './AgentSignIn.css';
@@ -70,6 +71,7 @@ export function AgentSignIn({
   const [codeError, setCodeError] = useState<string | null>(null);
   const [busy, setBusy] = useState<SignInAction | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const shown = useRef(organizationId);
   const runs = useRef(0);
 
@@ -179,6 +181,11 @@ export function AgentSignIn({
       if (current()) onStatusChange(next);
     });
 
+  const confirmSignOut = async () => {
+    await signOut();
+    setConfirming(false);
+  };
+
   const abandon = () => {
     onAttemptChange(agent, null);
     setCode('');
@@ -241,7 +248,7 @@ export function AgentSignIn({
           <Button
             size="sm"
             variant="secondary"
-            onClick={() => void signOut()}
+            onClick={() => setConfirming(true)}
             loading={busy === 'signOut'}
             disabled={busy !== null}
           >
@@ -297,6 +304,14 @@ export function AgentSignIn({
           onCancel={() => void signOut()}
         />
       )}
+
+      <SignOutDialog
+        open={confirming}
+        name={name}
+        busy={busy === 'signOut'}
+        onConfirm={() => void confirmSignOut()}
+        onClose={() => setConfirming(false)}
+      />
 
       {error && (
         <div className="alert alert-error" role="alert">
