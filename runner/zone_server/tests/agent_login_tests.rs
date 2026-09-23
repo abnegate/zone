@@ -61,6 +61,7 @@ const UNKNOWN_SIGN_IN: &str =
     "That code is not from a sign-in you started here, or the sign-in expired. Start again.";
 const INVALID_CODE: &str = "invalid_code";
 const START_AGAIN: &str = "start_again";
+const NOT_FOUND: &str = "Organization not found";
 const REFUSAL: &str =
     "Error logging in with device code: device code request failed with status 403 Forbidden";
 const POLL_FAILED: &str =
@@ -694,20 +695,35 @@ async fn a_stranger_or_an_unknown_agent_finds_nothing() {
     ] {
         let response = stage.client.get_auth(&uri, &stranger.token).await;
         response.assert_status(StatusCode::NOT_FOUND);
-        assert_eq!(
-            response.json_value(),
-            json!({ "error": "Organization not found" })
+        assert_eq!(response.json_value(), json!({ "error": NOT_FOUND }));
+    }
+    let mut refused = vec![
+        stage
+            .submit(organization, &format!("{CODE}#fake-state"), &stranger)
+            .await,
+    ];
+    for agent in ["claude", "codex"] {
+        refused.push(
+            stage
+                .client
+                .post_json_auth(
+                    &login_path(organization, agent),
+                    &json!({}),
+                    &stranger.token,
+                )
+                .await,
+        );
+        refused.push(
+            stage
+                .client
+                .delete_auth(&login_path(organization, agent), &stranger.token)
+                .await,
         );
     }
-    let started = stage
-        .client
-        .post_json_auth(
-            &login_path(organization, "codex"),
-            &json!({}),
-            &stranger.token,
-        )
-        .await;
-    started.assert_status(StatusCode::NOT_FOUND);
+    for response in refused {
+        response.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(response.json_value(), json!({ "error": NOT_FOUND }));
+    }
 
     let unknown = [
         stage
