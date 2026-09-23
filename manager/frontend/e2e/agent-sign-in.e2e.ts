@@ -35,6 +35,7 @@ const callback =
   'https://platform.claude.com/oauth/code/callback?code=e2e-fake-code&state=e2e-fake-state';
 const refusal =
   'Error logging in with device code: device code request failed with status 403 Forbidden';
+const now = new Date('2026-09-23T04:00:00Z');
 const device = {
   verification_url: 'https://auth.openai.com/codex/device',
   user_code: 'ABCD-EFGHI',
@@ -198,8 +199,9 @@ async function capture(page: Page, name: string): Promise<void> {
 test.use({ viewport: { width: 1280, height: 1200 }, timezoneId: 'UTC', locale: 'en-US' });
 
 test.describe('Coding agent sign-in', () => {
-  test.beforeEach(async ({ context }) => {
+  test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
+    await page.clock.setFixedTime(now);
   });
 
   test('an owner signs Claude Code in by pasting the callback address', async ({ page }) => {

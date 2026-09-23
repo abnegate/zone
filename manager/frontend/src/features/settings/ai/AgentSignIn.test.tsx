@@ -2,7 +2,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, vi } from 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { type ComponentProps, useCallback, useState } from 'react';
 import fixture from '../../../../../../runner/zone_server/tests/fixtures/agents.json';
-import type { AgentStatus } from './schemas';
+import { AgentRequestError } from '../../../api/AgentRequestError';
+import type { Agent, AgentStatus } from './schemas';
+import type { Attempt } from './types';
 
 const agentsApi = {
   list: mock(),
@@ -46,6 +48,10 @@ const authorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=user%3Ainference&state=fake-state';
 const fullAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=org%3Acreate_api_key+user%3Ainference&state=fake-state-2';
+const restartAuthorize =
+  'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=user%3Ainference&state=fake-state-3';
+const later = (minutes = 10) => new Date(Date.now() + minutes * 60_000).toISOString();
+const claudeLogin = (url: string) => ({ agent: 'claude', authorize_url: url, expires_at: later() });
 const prompt = {
   agent: 'codex',
   verification_url: 'https://auth.openai.com/codex/device',
@@ -61,11 +67,15 @@ function Harness({
   initial,
   onChange,
   ...props
-}: Omit<Props, 'status' | 'onStatusChange' | 'organizationId' | 'loadError'> & {
+}: Omit<
+  Props,
+  'status' | 'attempt' | 'onStatusChange' | 'onAttemptChange' | 'organizationId' | 'loadError'
+> & {
   initial: AgentStatus | undefined;
   onChange: (status: AgentStatus) => void;
 }) {
   const [status, setStatus] = useState(initial);
+  const [attempts, setAttempts] = useState<Partial<Record<Agent, Attempt>>>({});
   const report = useCallback(
     (next: AgentStatus) => {
       onChange(next);
@@ -73,13 +83,18 @@ function Harness({
     },
     [onChange]
   );
+  const hold = useCallback((agent: Agent, attempt: Attempt | null) => {
+    setAttempts((current) => ({ ...current, [agent]: attempt ?? undefined }));
+  }, []);
   return (
     <AgentSignIn
       {...props}
       organizationId={organization}
       loadError={null}
       status={status}
+      attempt={attempts[props.agent]}
       onStatusChange={report}
+      onAttemptChange={hold}
     />
   );
 }
@@ -104,7 +119,7 @@ describe('AgentSignIn', () => {
       agentsApi.start.mockResolvedValue({
         agent: 'claude',
         authorize_url: authorize,
-        expires_at: '2026-09-23T04:10:00Z',
+        expires_at: later(),
       });
       agentsApi.submitCode.mockResolvedValue(claudeSignedIn);
       const { onChange } = renderPanel('claude', claudeSignedOut);
@@ -135,23 +150,12 @@ describe('AgentSignIn', () => {
     });
 
     it('submits a code#state pasted with Enter without saving the settings around it', async () => {
-      agentsApi.start.mockResolvedValue({
-        agent: 'claude',
-        authorize_url: authorize,
-        expires_at: '2026-09-23T04:10:00Z',
-      });
+      agentsApi.start.mockResolvedValue(claudeLogin(authorize));
       agentsApi.submitCode.mockResolvedValue(claudeSignedIn);
       const save = mock((event: Event) => event.preventDefault());
       render(
         <form onSubmit={save}>
-          <AgentSignIn
-            organizationId={organization}
-            agent="claude"
-            canManage
-            status={claudeSignedOut}
-            loadError={null}
-            onStatusChange={mock()}
-          />
+          <Harness agent="claude" canManage initial={claudeSignedOut} onChange={mock()} />
           <button type="submit">Save Changes</button>
         </form>
       );
@@ -167,18 +171,10 @@ describe('AgentSignIn', () => {
       expect(save).not.toHaveBeenCalled();
     });
 
-    it('offers full access before a code is submitted', async () => {
+    it('offers full access before a code is submitted, and not once the link asks for it', async () => {
       agentsApi.start
-        .mockResolvedValueOnce({
-          agent: 'claude',
-          authorize_url: authorize,
-          expires_at: '2026-09-23T04:10:00Z',
-        })
-        .mockResolvedValueOnce({
-          agent: 'claude',
-          authorize_url: fullAuthorize,
-          expires_at: '2026-09-23T04:11:00Z',
-        });
+        .mockResolvedValueOnce(claudeLogin(authorize))
+        .mockResolvedValueOnce(claudeLogin(fullAuthorize));
       renderPanel('claude', claudeSignedOut);
 
       fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
@@ -195,21 +191,14 @@ describe('AgentSignIn', () => {
       );
       expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', 'full');
       expect(screen.getByText(/full access to your Claude account/)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Try again with full access' })).toBeNull();
       expect(agentsApi.submitCode).not.toHaveBeenCalled();
     });
 
-    it('offers full access after claude.com rejects the code for any reason', async () => {
+    it('keeps the link and offers full access after a failure that names no kind', async () => {
       agentsApi.start
-        .mockResolvedValueOnce({
-          agent: 'claude',
-          authorize_url: authorize,
-          expires_at: '2026-09-23T04:10:00Z',
-        })
-        .mockResolvedValueOnce({
-          agent: 'claude',
-          authorize_url: fullAuthorize,
-          expires_at: '2026-09-23T04:11:00Z',
-        });
+        .mockResolvedValueOnce(claudeLogin(authorize))
+        .mockResolvedValueOnce(claudeLogin(fullAuthorize));
       agentsApi.submitCode.mockRejectedValue(
         new Error('Claude rejected the code: Invalid authorization code')
       );
@@ -225,6 +214,10 @@ describe('AgentSignIn', () => {
         'Claude rejected the code: Invalid authorization code'
       );
       expect(onChange).not.toHaveBeenCalled();
+      expect(screen.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+        'href',
+        authorize
+      );
 
       fireEvent.click(screen.getByRole('button', { name: 'Try again with full access' }));
 
@@ -239,6 +232,125 @@ describe('AgentSignIn', () => {
       );
       expect(screen.queryByRole('alert')).toBeNull();
       expect(screen.getByLabelText('Code from claude.com')).toHaveValue('');
+    });
+
+    it('keeps the link and lets a code that could not be read be pasted again', async () => {
+      const unreadable = 'The code could not be read. Paste the whole code claude.com shows.';
+      agentsApi.start.mockResolvedValue(claudeLogin(authorize));
+      agentsApi.submitCode
+        .mockRejectedValueOnce(new AgentRequestError(unreadable, 400, 'invalid_code'))
+        .mockResolvedValueOnce(claudeSignedIn);
+      const { onChange } = renderPanel('claude', claudeSignedOut);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+      const field = await screen.findByLabelText('Code from claude.com');
+      fireEvent.change(field, { target: { value: 'half-a-code' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
+
+      expect(await screen.findByText(unreadable)).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+        'href',
+        authorize
+      );
+      expect(screen.queryByRole('button', { name: 'Start again' })).toBeNull();
+
+      fireEvent.change(field, { target: { value: 'fake-code#fake-state' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
+
+      await waitFor(() => expect(onChange).toHaveBeenCalledWith(claudeSignedIn));
+      expect(agentsApi.submitCode).toHaveBeenLastCalledWith(organization, 'fake-code#fake-state');
+      expect(agentsApi.start).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText(unreadable)).toBeNull();
+    });
+
+    it('drops a link the server spent and offers to start again beside full access', async () => {
+      const spent = 'The sign-in expired or was already used. Start again.';
+      agentsApi.start
+        .mockResolvedValueOnce(claudeLogin(authorize))
+        .mockResolvedValueOnce(claudeLogin(restartAuthorize));
+      agentsApi.submitCode.mockRejectedValue(new AgentRequestError(spent, 400, 'start_again'));
+      renderPanel('claude', claudeSignedOut);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+      fireEvent.change(await screen.findByLabelText('Code from claude.com'), {
+        target: { value: 'fake-code#fake-state' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(spent);
+      expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
+      expect(screen.queryByLabelText('Code from claude.com')).toBeNull();
+      expect(screen.getByText('Not signed in')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Try again with full access' })).toBeEnabled();
+      expect(screen.queryByRole('button', { name: 'Sign in with Claude' })).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Start again' }));
+
+      await waitFor(() =>
+        expect(screen.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+          'href',
+          restartAuthorize
+        )
+      );
+      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', undefined);
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('starts a spent full-access sign-in again at full access', async () => {
+      agentsApi.start
+        .mockResolvedValueOnce(claudeLogin(authorize))
+        .mockResolvedValue(claudeLogin(fullAuthorize));
+      agentsApi.submitCode.mockRejectedValue(
+        new AgentRequestError('Claude rejected the code. Start again.', 502, 'start_again')
+      );
+      renderPanel('claude', claudeSignedOut);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Try again with full access' }));
+      await waitFor(() =>
+        expect(screen.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+          'href',
+          fullAuthorize
+        )
+      );
+      fireEvent.change(screen.getByLabelText('Code from claude.com'), {
+        target: { value: 'fake-code#fake-state' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Start again' }));
+
+      await waitFor(() => expect(agentsApi.start).toHaveBeenCalledTimes(3));
+      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', 'full');
+      expect(await screen.findByRole('link', { name: 'Open claude.com' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Try again with full access' })).toBeNull();
+    });
+
+    it('shows when the link expires and drops it once it has', async () => {
+      vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
+      agentsApi.start.mockResolvedValue({
+        agent: 'claude',
+        authorize_url: authorize,
+        expires_at: '2026-09-23T04:10:00Z',
+      });
+      renderPanel('claude', claudeSignedOut);
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+      });
+      expect(screen.getByText('The link expires at 4:10 AM.')).toBeInTheDocument();
+
+      await act(async () => {
+        vi.advanceTimersByTime(10 * 60_000 - 1);
+      });
+      expect(screen.getByRole('link', { name: 'Open claude.com' })).toBeInTheDocument();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
+      expect(screen.queryByLabelText('Code from claude.com')).toBeNull();
+      expect(screen.getByText(/The link from claude.com expired/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Start again' })).toBeEnabled();
     });
 
     it('shows the plan and expiry of a sign-in this organization holds, and signs it out', async () => {
@@ -330,8 +442,10 @@ describe('AgentSignIn', () => {
           agent="codex"
           canManage
           status={codexPending}
+          attempt={undefined}
           loadError={null}
           onStatusChange={mock()}
+          onAttemptChange={mock()}
         />
       );
 
@@ -419,8 +533,10 @@ describe('AgentSignIn', () => {
           agent="claude"
           canManage
           status={undefined}
+          attempt={undefined}
           loadError="Failed to load coding agent sign-ins: 502"
           onStatusChange={mock()}
+          onAttemptChange={mock()}
         />
       );
 

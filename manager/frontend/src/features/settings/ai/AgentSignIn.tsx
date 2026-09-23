@@ -1,10 +1,12 @@
 import { Badge, type BadgeProps, Button } from '@zone/ui';
 import { type ReactNode, useEffect, useId, useState } from 'react';
+import { AgentRequestError } from '../../../api/AgentRequestError';
 import { agentsApi } from '../../../api/agents';
 import { ClaudeSteps } from './ClaudeSteps';
 import { DeviceSteps } from './DeviceSteps';
-import type { Agent, AgentState, AgentStatus, ClaudeScope, DevicePrompt } from './schemas';
-import type { SignInAction } from './types';
+import type { Agent, AgentState, AgentStatus, ClaudeScope } from './schemas';
+import type { Attempt, SignInAction } from './types';
+import { useExpired } from './useExpired';
 import './AgentSignIn.css';
 
 export const POLL_INTERVAL = 3000;
@@ -19,18 +21,15 @@ const states: Record<AgentState, { label: string; tint: BadgeProps['variant'] }>
   expired: { label: 'Sign-in expired', tint: 'warning' },
 };
 
-interface Authorization {
-  url: string;
-  scope: ClaudeScope | undefined;
-}
-
 interface AgentSignInProps {
   organizationId: string;
   agent: Agent;
   canManage: boolean;
   status: AgentStatus | undefined;
+  attempt: Attempt | undefined;
   loadError: string | null;
   onStatusChange: (status: AgentStatus) => void;
+  onAttemptChange: (agent: Agent, attempt: Attempt | null) => void;
 }
 
 function reasonOf(failure: unknown): string {
@@ -58,17 +57,21 @@ export function AgentSignIn({
   agent,
   canManage,
   status,
+  attempt,
   loadError,
   onStatusChange,
+  onAttemptChange,
 }: AgentSignInProps) {
   const headingId = useId();
-  const [authorization, setAuthorization] = useState<Authorization | null>(null);
-  const [prompt, setPrompt] = useState<DevicePrompt | null>(null);
   const [code, setCode] = useState('');
+  const [codeError, setCodeError] = useState<string | null>(null);
   const [busy, setBusy] = useState<SignInAction | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
-  const [rejected, setRejected] = useState(false);
 
+  const authorization = attempt?.login.agent === 'claude' ? attempt.login : null;
+  const expired = useExpired(authorization?.expires_at ?? null);
+  const usable = authorization !== null && !attempt?.spent && !expired;
+  const prompt = attempt?.login.agent === 'codex' ? attempt.login : null;
   const pending = status?.state === 'pending';
   const waiting = prompt !== null || pending;
   const device = prompt ?? (pending ? (status?.pending ?? null) : null);
@@ -86,7 +89,7 @@ export function AgentSignIn({
         if (next.state === 'pending') {
           timer = setTimeout(poll, POLL_INTERVAL);
         } else {
-          setPrompt(null);
+          onAttemptChange(agent, null);
         }
       } catch (reason) {
         if (cancelled) return;
@@ -99,72 +102,79 @@ export function AgentSignIn({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [waiting, organizationId, agent, onStatusChange]);
+  }, [waiting, organizationId, agent, onStatusChange, onAttemptChange]);
 
-  const perform = async (action: SignInAction, work: () => Promise<void>): Promise<boolean> => {
+  const perform = async (
+    action: SignInAction,
+    work: () => Promise<void>,
+    fail: (reason: unknown) => void = (reason) => setFailure(reasonOf(reason))
+  ): Promise<void> => {
     setBusy(action);
     setFailure(null);
+    setCodeError(null);
     try {
       await work();
-      return true;
     } catch (reason) {
-      setFailure(reasonOf(reason));
-      return false;
+      fail(reason);
     } finally {
       setBusy(null);
     }
   };
 
-  const start = (scope?: ClaudeScope) =>
-    perform(scope === 'full' ? 'full' : 'start', async () => {
+  const start = (action: SignInAction, scope?: ClaudeScope) =>
+    perform(action, async () => {
       const login = await agentsApi.start(organizationId, agent, scope);
-      if (login.agent === 'claude') {
-        setAuthorization({ url: login.authorize_url, scope });
-        setCode('');
-        setRejected(false);
-      } else {
-        setPrompt({
-          verification_url: login.verification_url,
-          user_code: login.user_code,
-          expires_at: login.expires_at,
-        });
-      }
+      onAttemptChange(agent, { login, scope, spent: false });
+      setCode('');
     });
 
-  const submit = async () => {
+  const submit = () => {
     const value = code.trim();
-    if (!value || busy) return;
-    const exchanged = await perform('submit', async () => {
-      const next = await agentsApi.submitCode(organizationId, value);
-      setAuthorization(null);
-      setCode('');
-      onStatusChange(next);
-    });
-    setRejected(!exchanged);
+    if (!value || busy !== null || !attempt) return;
+    void perform(
+      'submit',
+      async () => {
+        const next = await agentsApi.submitCode(organizationId, value);
+        onAttemptChange(agent, null);
+        setCode('');
+        onStatusChange(next);
+      },
+      (reason) => {
+        const kind = reason instanceof AgentRequestError ? reason.kind : undefined;
+        if (kind === 'invalid_code') {
+          setCodeError(reasonOf(reason));
+          return;
+        }
+        setFailure(reasonOf(reason));
+        if (kind === 'start_again') onAttemptChange(agent, { ...attempt, spent: true });
+      }
+    );
   };
 
   const signOut = () =>
     perform('signOut', async () => {
       await agentsApi.signOut(organizationId, agent);
-      setPrompt(null);
-      setAuthorization(null);
+      onAttemptChange(agent, null);
       onStatusChange(await agentsApi.get(organizationId, agent));
     });
 
   const abandon = () => {
-    setAuthorization(null);
+    onAttemptChange(agent, null);
     setCode('');
+    setCodeError(null);
     setFailure(null);
-    setRejected(false);
   };
 
   const name = names[agent];
   const account = accounts[agent];
-  const signingIn = authorization !== null || waiting;
+  const signingIn = usable || waiting;
   const manageable = canManage && status !== undefined;
   const offerSignIn =
-    manageable && !signingIn && (status.state !== 'signed_in' || status.source === 'host');
-  const offerSignOut = manageable && !signingIn && status.source === 'zone';
+    manageable &&
+    !authorization &&
+    !waiting &&
+    (status.state !== 'signed_in' || status.source === 'host');
+  const offerSignOut = manageable && !authorization && !waiting && status.source === 'zone';
   const error = failure ?? (status ? (signingIn ? null : status.error) : loadError);
   const badge = states[signingIn ? 'pending' : (status?.state ?? 'signed_out')];
 
@@ -173,8 +183,12 @@ export function AgentSignIn({
     detail = signedInDetail(status, agent);
   } else if (status && !canManage) {
     detail = 'Ask an organization admin to sign in.';
-  } else if (authorization) {
+  } else if (usable) {
     detail = 'Waiting for the code from claude.com.';
+  } else if (authorization && expired) {
+    detail = 'The link from claude.com expired. Start again to get a new one.';
+  } else if (authorization) {
+    detail = 'Start again to get a new link from claude.com.';
   } else if (waiting) {
     detail = 'Waiting for you to finish signing in.';
   } else if (status?.state === 'expired') {
@@ -190,7 +204,7 @@ export function AgentSignIn({
         {offerSignIn && (
           <Button
             size="sm"
-            onClick={() => void start()}
+            onClick={() => void start('start')}
             loading={busy === 'start'}
             disabled={busy !== null}
           >
@@ -228,16 +242,19 @@ export function AgentSignIn({
         !loadError && <p className="agent-sign-in-detail">Checking sign-in…</p>
       )}
 
-      {manageable && authorization && (
+      {manageable && authorization && attempt && (
         <ClaudeSteps
-          url={authorization.url}
-          full={authorization.scope === 'full'}
+          url={authorization.authorize_url}
+          full={attempt.scope === 'full'}
+          expiresAt={authorization.expires_at}
+          usable={usable}
           code={code}
+          codeError={codeError}
           busy={busy}
-          rejected={rejected}
           onCodeChange={setCode}
-          onSubmit={() => void submit()}
-          onFullAccess={() => void start('full')}
+          onSubmit={submit}
+          onRestart={() => void start('restart', attempt.scope)}
+          onFullAccess={() => void start('full', 'full')}
           onCancel={abandon}
         />
       )}

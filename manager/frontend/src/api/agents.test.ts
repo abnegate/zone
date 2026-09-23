@@ -5,6 +5,7 @@ import {
   AgentStatusesSchema,
   AgentStatusSchema,
 } from '../features/settings/ai/schemas';
+import { AgentRequestError } from './AgentRequestError';
 import { agentsApi } from './agents';
 
 const original = globalThis.fetch;
@@ -148,6 +149,37 @@ describe('agentsApi', () => {
     await expect(agentsApi.start(organization, 'claude')).rejects.toThrow(
       'Only organization admins can sign in to coding agents'
     );
+  });
+
+  it('says whether a failed code can be pasted again or the sign-in has to start over', async () => {
+    respond({ error: 'The code could not be read.', kind: 'invalid_code' }, 400);
+    const unreadable = await agentsApi
+      .submitCode(organization, 'nonsense')
+      .catch((reason) => reason);
+    expect(unreadable).toBeInstanceOf(AgentRequestError);
+    expect(unreadable).toMatchObject({
+      message: 'The code could not be read.',
+      status: 400,
+      kind: 'invalid_code',
+    });
+
+    respond({ error: 'Claude rejected the code. Start again.', kind: 'start_again' }, 502);
+    const spent = await agentsApi.submitCode(organization, 'code#state').catch((reason) => reason);
+    expect(spent).toMatchObject({ status: 502, kind: 'start_again' });
+  });
+
+  it('keeps the reason of a failure whose kind it does not know, without a kind', async () => {
+    respond({ error: 'Something new went wrong.', kind: 'surprise' }, 400);
+    const failure = await agentsApi
+      .submitCode(organization, 'code#state')
+      .catch((reason) => reason);
+    expect(failure).toMatchObject({ message: 'Something new went wrong.', status: 400 });
+    expect(failure.kind).toBeUndefined();
+
+    respond({ error: 'Only organization admins can sign in to coding agents' }, 403);
+    const denied = await agentsApi.start(organization, 'claude').catch((reason) => reason);
+    expect(denied).toMatchObject({ status: 403 });
+    expect(denied.kind).toBeUndefined();
   });
 
   it('names the status code when the failure has no readable reason', async () => {

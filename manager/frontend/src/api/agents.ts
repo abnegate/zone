@@ -1,5 +1,6 @@
 import {
   type Agent,
+  AgentFailureSchema,
   type AgentLogin,
   AgentLoginSchema,
   type AgentStatus,
@@ -8,6 +9,7 @@ import {
   type ClaudeScope,
 } from '../features/settings/ai/schemas';
 import { parse } from '../validation';
+import { AgentRequestError } from './AgentRequestError';
 import { client } from './client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -18,13 +20,14 @@ function agentsUrl(organizationId: string): string {
   return `${API_BASE}/api/organizations/${encodeURIComponent(organizationId)}/agents`;
 }
 
-async function failure(response: Response, fallback: string): Promise<Error> {
-  const body: unknown = await response.json().catch(() => null);
-  const reason =
-    body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
-      ? body.error
-      : null;
-  return new Error(reason || `${fallback}: ${response.status}`);
+async function failure(response: Response, fallback: string): Promise<AgentRequestError> {
+  const body = AgentFailureSchema.safeParse(await response.json().catch(() => null));
+  const reason = body.success ? body.data.error : '';
+  return new AgentRequestError(
+    reason || `${fallback}: ${response.status}`,
+    response.status,
+    body.success ? body.data.kind : undefined
+  );
 }
 
 async function send(url: string, init: RequestInit, fallback: string): Promise<Response> {

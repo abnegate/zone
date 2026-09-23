@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { act, renderHook, waitFor } from '@testing-library/react';
 import fixture from '../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import type { AgentStatus } from './schemas';
+import type { Attempt } from './types';
 
 const agentsApi = {
   list: mock(),
@@ -24,6 +25,25 @@ afterAll(() => {
 });
 
 const [claude, codex] = fixture.agents as AgentStatus[];
+const authorization: Attempt = {
+  login: {
+    agent: 'claude',
+    authorize_url: 'https://claude.com/cai/oauth/authorize?code=true&state=fake-state',
+    expires_at: '2026-09-23T04:10:00Z',
+  },
+  scope: 'full',
+  spent: false,
+};
+const device: Attempt = {
+  login: {
+    agent: 'codex',
+    verification_url: 'https://auth.openai.com/codex/device',
+    user_code: 'ABCD-EFGHI',
+    expires_at: '2026-09-23T04:15:00Z',
+  },
+  scope: undefined,
+  spent: false,
+};
 
 describe('useAgentStatuses', () => {
   beforeEach(() => {
@@ -56,6 +76,49 @@ describe('useAgentStatuses', () => {
     act(() => result.current.update(signedIn));
     expect(result.current.statuses.codex).toEqual(signedIn);
     expect(result.current.statuses.claude).toEqual(claude);
+  });
+
+  it("holds each agent's sign-in in flight until it is cleared", async () => {
+    const { result } = renderHook(() => useAgentStatuses('org-1', true));
+    await waitFor(() => expect(result.current.statuses.claude).toBeDefined());
+    expect(result.current.attempts).toEqual({});
+
+    act(() => result.current.setAttempt('claude', authorization));
+    act(() => result.current.setAttempt('codex', device));
+    expect(result.current.attempts).toEqual({ claude: authorization, codex: device });
+
+    act(() => result.current.setAttempt('claude', null));
+    expect(result.current.attempts).toEqual({ codex: device });
+  });
+
+  it('keeps a sign-in in flight when the statuses load again for the same organization', async () => {
+    const { result, rerender } = renderHook(({ enabled }) => useAgentStatuses('org-1', enabled), {
+      initialProps: { enabled: true },
+    });
+    await waitFor(() => expect(result.current.statuses.claude).toBeDefined());
+    act(() => result.current.setAttempt('claude', authorization));
+
+    rerender({ enabled: false });
+    rerender({ enabled: true });
+
+    await waitFor(() => expect(agentsApi.list).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(result.current.attempts).toEqual({ claude: authorization });
+  });
+
+  it("never shows one organization's sign-in in flight under another", async () => {
+    const { result, rerender } = renderHook(
+      ({ organization }) => useAgentStatuses(organization, true),
+      { initialProps: { organization: 'org-1' } }
+    );
+    await waitFor(() => expect(result.current.statuses.claude).toBeDefined());
+    act(() => result.current.setAttempt('claude', authorization));
+
+    rerender({ organization: 'org-2' });
+
+    await waitFor(() => expect(agentsApi.list).toHaveBeenLastCalledWith('org-2'));
+    await act(async () => {});
+    expect(result.current.attempts).toEqual({});
   });
 
   it('reports a status list that failed to load', async () => {

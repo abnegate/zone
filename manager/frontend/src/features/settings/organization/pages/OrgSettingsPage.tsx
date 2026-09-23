@@ -212,8 +212,10 @@ export default function OrgSettingsPage() {
                 agent={agent}
                 canManage={canManageAgents(currentOrganization.role)}
                 status={agents.statuses[agent]}
+                attempt={agents.attempts[agent]}
                 loadError={agents.error}
                 onStatusChange={agents.update}
+                onAttemptChange={agents.setAttempt}
               />
             )}
           </div>

@@ -436,6 +436,39 @@ describe('OrgSettingsPage', () => {
       });
     });
 
+    it('keeps a Claude sign-in in flight while another tab is open', async () => {
+      const [claudeStatus, codexStatus] = fixture.agents;
+      const link = 'https://claude.com/cai/oauth/authorize?code=true&state=kept-state';
+      mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      agentsApi.list.mockResolvedValue([
+        { ...claudeStatus, state: 'signed_out', source: null, label: null, expires_at: null },
+        codexStatus,
+      ]);
+      agentsApi.start.mockResolvedValue({
+        agent: 'claude',
+        authorize_url: link,
+        expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+      });
+      render(<OrgSettingsPage />);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Claude' }));
+      expect(await screen.findByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+        'href',
+        link
+      );
+
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Members' }), { button: 0 });
+      expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'AI Settings' }), { button: 0 });
+
+      expect(await screen.findByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+        'href',
+        link
+      );
+      expect(agentsApi.start).toHaveBeenCalledTimes(1);
+    });
+
     it('lets an owner sign in and shows a member whom to ask', async () => {
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
       agentsApi.list.mockResolvedValue([
