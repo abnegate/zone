@@ -2913,9 +2913,8 @@ impl TurnScope {
 /// which is what it could have done with this backend either way.
 ///
 /// `None` for a backend whose tools zone cannot decide -- an HTTP endpoint,
-/// which carries its tools in the request itself, or an agent that would end
-/// up holding the operator's own servers and an ungated shell beside zone's --
-/// and then the turn's tools stay exactly where they were.
+/// which carries its tools in the request itself, or an agent that takes no
+/// toolset -- and then the turn's tools stay exactly where they were.
 fn serve_tools(turn: &TurnScope, llm: &LlmClient, tools: &mut ChatTools) -> Option<AgentTools> {
     let LlmBackend::Cli { agent, .. } = &llm.config().backend else {
         return None;
