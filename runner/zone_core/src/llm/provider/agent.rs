@@ -244,14 +244,17 @@ impl AgentKind {
     /// The same invocation, told which tools the turn may call.
     ///
     /// Zone's tools arrive over MCP because an agent runs its own loop and
-    /// cannot be handed tool schemas over a completions API. They are
-    /// allowlisted so the agent raises no second prompt that nobody is there
-    /// to answer: the call executes in zone, where the chat's approval policy
-    /// decides it first.
+    /// cannot be handed tool schemas over a completions API. Each agent lets
+    /// every call to them through -- claude's `--allowedTools`, codex's
+    /// `default_tools_approval_mode` -- and zone decides each call where it
+    /// runs, under the chat's approval policy.
     ///
-    /// No permission-bypass flag is passed to any agent. These commands run
-    /// with the user's own credentials and file access, so whatever the agent
-    /// still owns is still the agent's own to ask about.
+    /// Nothing else is approved in advance, and no agent is passed a
+    /// permission-bypass flag, so claude's own tools keep claude's own
+    /// permission checks. Codex's do not: `codex exec` never asks for
+    /// approval, so only its sandbox confines them -- `read-only` while they
+    /// are withheld, and whichever sandbox a turn that grants them is given,
+    /// of which `danger-full-access` confines nothing.
     pub fn arguments_with(
         self,
         model: Option<&str>,
@@ -862,23 +865,72 @@ mod tests {
         }
     }
 
+    const PERMISSION_BYPASSES: [&str; 8] = [
+        "--dangerously-skip-permissions",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--full-auto",
+        "--always-approve",
+        "--yolo",
+        "--permission-mode",
+        "--permission-prompts",
+        "--ask-for-approval",
+    ];
+
     #[test]
-    fn no_agent_is_ever_asked_to_skip_its_permission_prompts() {
-        for agent in [AgentKind::Claude, AgentKind::Codex] {
-            let arguments = AgentKind::arguments(agent, Some("model")).join(" ");
-            for bypass in [
-                "--dangerously-skip-permissions",
-                "--full-auto",
-                "--always-approve",
-                "--yolo",
-                "--permission-mode",
-            ] {
-                assert!(
-                    !arguments.contains(bypass),
-                    "{agent} was handed {bypass}: {arguments}"
-                );
+    fn only_zones_tools_are_let_through_and_only_its_sandbox_confines_codex() {
+        let toolset = toolset();
+        let mut unconfined = Vec::new();
+
+        for served in [None, Some(&toolset)] {
+            for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
+                for sandbox in CodexSandbox::ALL {
+                    let claude = AgentKind::Claude.arguments_with(
+                        Some("opus"),
+                        served,
+                        builtin_tools,
+                        sandbox,
+                    );
+                    let codex = codex(served, builtin_tools, sandbox);
+                    for arguments in [&claude, &codex] {
+                        let joined = arguments.join(" ");
+                        for bypass in PERMISSION_BYPASSES {
+                            assert!(!joined.contains(bypass), "{bypass}: {joined}");
+                        }
+                    }
+
+                    assert_eq!(
+                        value_after(&claude, ALLOWED_TOOLS),
+                        served.map(|_| "mcp__zone__read_file,mcp__zone__run_command"),
+                        "{claude:?}"
+                    );
+                    assert_eq!(
+                        values_after(&codex, CONFIG)
+                            .contains(&r#"mcp_servers.zone.default_tools_approval_mode="approve""#),
+                        served.is_some(),
+                        "{codex:?}"
+                    );
+
+                    let confinement = values_after(&codex, SANDBOX);
+                    let expected = match builtin_tools {
+                        BuiltinTools::Withheld => READ_ONLY,
+                        BuiltinTools::Granted => sandbox.as_str(),
+                    };
+                    assert_eq!(confinement, [expected], "{codex:?}");
+                    if expected == CodexSandbox::DangerFullAccess.as_str() {
+                        unconfined.push((served.is_some(), builtin_tools, sandbox));
+                    }
+                }
             }
         }
+
+        assert_eq!(
+            unconfined,
+            [
+                (false, BuiltinTools::Granted, CodexSandbox::DangerFullAccess),
+                (true, BuiltinTools::Granted, CodexSandbox::DangerFullAccess),
+            ],
+            "codex's own tools run unconfined exactly when a turn grants them danger-full-access"
+        );
     }
 
     fn toolset() -> Toolset {
@@ -1240,39 +1292,6 @@ mod tests {
             values_after(&arguments, "-c").contains(&"mcp_servers.zone.enabled_tools=[]"),
             "codex offers every tool a server lists unless it is told otherwise: {arguments:?}"
         );
-    }
-
-    #[test]
-    fn no_agent_is_ever_asked_to_skip_its_permission_prompts_while_zone_serves_its_tools() {
-        let toolset = toolset();
-
-        for agent in AgentKind::ALL {
-            for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
-                for sandbox in CodexSandbox::ALL {
-                    let arguments = agent
-                        .arguments_with(Some("model"), Some(&toolset), builtin_tools, sandbox)
-                        .join(" ");
-                    assert!(
-                        arguments.contains(&toolset.endpoint),
-                        "{agent} was never served zone's tools, so this proves nothing: {arguments}"
-                    );
-                    for bypass in [
-                        "--dangerously-skip-permissions",
-                        "--dangerously-bypass-approvals-and-sandbox",
-                        "--full-auto",
-                        "--always-approve",
-                        "--yolo",
-                        "--permission-mode",
-                        "--permission-prompts",
-                    ] {
-                        assert!(
-                            !arguments.contains(bypass),
-                            "{agent} was handed {bypass}: {arguments}"
-                        );
-                    }
-                }
-            }
-        }
     }
 
     #[test]
