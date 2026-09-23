@@ -733,6 +733,28 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
     }
 
     #[tokio::test]
+    async fn a_codex_turn_that_recovers_from_an_error_still_answers() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let recording = directory.path().join("recording.jsonl");
+        std::fs::write(
+            &recording,
+            include_str!("parser/fixtures/codex/rung3-mock-reconnect-then-complete.jsonl"),
+        )
+        .expect("the recording");
+        let script = format!("cat '{}'", recording.display());
+        let provider = CliProvider::agent(AgentKind::Codex, settings(&directory, &script));
+
+        let completion = run(&provider, &[Message::user("Echo the nonce.")])
+            .await
+            .expect("the answer codex reached after reconnecting");
+
+        assert_eq!(
+            completion.message.content.as_deref(),
+            Some("The echo tool returned: Wall time: 0.0012 seconds\nOutput: r6-rung3-nonce-9b2d")
+        );
+    }
+
+    #[tokio::test]
     async fn a_single_oversized_event_is_reported_as_malformed_output() {
         let directory = TempDir::new().expect("a temporary directory");
         let mut settings = settings(&directory, "head -c 5000 /dev/zero | tr '\\0' 'x'; echo");
