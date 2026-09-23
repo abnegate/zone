@@ -25,6 +25,9 @@ use crate::llm::{Message, Usage};
 
 const READ_BUFFER: usize = 8 * 1024;
 
+/// Bytes of the agent's stderr that a failure it reported carries.
+const DIAGNOSTIC_TAIL: usize = 1024;
+
 /// A coding agent's events, yielded as the child emits them.
 pub type AgentStream = Pin<Box<dyn Stream<Item = Result<AgentEvent, ProviderError>> + Send>>;
 
@@ -205,7 +208,7 @@ impl CliProvider {
                     // The agent's own report of what went wrong beats an exit
                     // code, which says only that something did.
                     if let AgentEvent::Failed(message) = &event {
-                        Err(session.stop(ProviderError::agent(&name, message)).await)?;
+                        Err(session.fail(message).await)?;
                     }
                     terminal |= event.terminal();
                     yield event;
@@ -320,10 +323,22 @@ impl Session {
     }
 
     /// Stop the agent, then report why.
-    ///
+    async fn stop(&mut self, error: ProviderError) -> ProviderError {
+        self.halt().await;
+        error
+    }
+
+    /// Stop the agent, then report the failure it named, followed by the end
+    /// of its stderr: codex reports a sign-in it could not renew only there.
+    async fn fail(&mut self, message: &str) -> ProviderError {
+        self.halt().await;
+        let diagnostics = self.diagnostics().await;
+        ProviderError::agent(&self.name, &failure(message, &diagnostics))
+    }
+
     /// Every abnormal end goes through here: a child left running writes into
     /// a pipe nobody is reading and blocks there until it is killed anyway.
-    async fn stop(&mut self, error: ProviderError) -> ProviderError {
+    async fn halt(&mut self) {
         self.writer.abort();
         if let Some(group) = &self.group {
             let _ = group.terminate();
@@ -336,8 +351,6 @@ impl Session {
             let _ = self.child.wait().await;
         }
         self.reaped = true;
-
-        error
     }
 
     /// Whatever the agent wrote to stderr, given a bounded wait.
@@ -400,6 +413,24 @@ fn unframed(provider: &str, overlong: Overlong) -> ProviderError {
         provider,
         format!("one event exceeded {} bytes", overlong.limit),
     )
+}
+
+/// `message`, then the last whole lines of `diagnostics` that fit in
+/// [`DIAGNOSTIC_TAIL`] bytes.
+fn failure(message: &str, diagnostics: &str) -> String {
+    let diagnostics = diagnostics.trim();
+    if diagnostics.is_empty() {
+        return message.to_string();
+    }
+    let mut start = diagnostics.len().saturating_sub(DIAGNOSTIC_TAIL);
+    while !diagnostics.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = match diagnostics[start..].split_once('\n') {
+        Some((_, whole)) if start > 0 => whole,
+        _ => &diagnostics[start..],
+    };
+    format!("{message}\n{tail}")
 }
 
 /// Stderr is drained whether or not it is ever read back. An agent run with a
@@ -753,6 +784,80 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
             completion.message.content.as_deref(),
             Some("The echo tool returned: Wall time: 0.0012 seconds\nOutput: r6-rung3-nonce-9b2d")
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_codex_turn_carries_the_renewal_failure_codex_wrote_only_to_stderr() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let recording = directory.path().join("recording.jsonl");
+        std::fs::write(
+            &recording,
+            include_str!("parser/fixtures/codex/refresh-invalidated.jsonl"),
+        )
+        .expect("the recording");
+        let diagnostics = directory.path().join("diagnostics.stderr");
+        std::fs::write(
+            &diagnostics,
+            include_str!("parser/fixtures/codex/refresh-invalidated-errors.stderr"),
+        )
+        .expect("the diagnostics");
+        let script = format!(
+            "cat '{}' >&2\ncat '{}'\nexit 1",
+            diagnostics.display(),
+            recording.display()
+        );
+        let provider = CliProvider::agent(AgentKind::Codex, settings(&directory, &script));
+
+        let error = run(&provider, &[Message::user("Echo the nonce.")])
+            .await
+            .expect_err("a failed turn");
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("workspace routing discovery unauthorized (401)"),
+            "lost codex's own wording: {rendered}"
+        );
+        assert!(
+            rendered.contains("Your access token could not be refreshed"),
+            "lost the reason codex gave on stderr: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_failure_keeps_only_the_last_whole_lines_of_stderr() {
+        let lines: Vec<String> = (0..500)
+            .map(|number| format!("diagnostic line {number}"))
+            .collect();
+
+        let rendered = failure("the turn failed", &lines.join("\n"));
+
+        let (message, tail) = rendered
+            .split_once('\n')
+            .expect("the agent's words, then its stderr");
+        assert_eq!(message, "the turn failed");
+        assert!(tail.len() <= DIAGNOSTIC_TAIL, "{} bytes", tail.len());
+        assert!(tail.ends_with("diagnostic line 499"), "{tail}");
+        assert!(
+            tail.lines()
+                .all(|line| lines.iter().any(|whole| whole == line)),
+            "a line was cut short: {tail}"
+        );
+    }
+
+    #[test]
+    fn a_failure_cuts_one_long_stderr_line_between_characters() {
+        let rendered = failure("the turn failed", &"—".repeat(1000));
+
+        let (_, tail) = rendered
+            .split_once('\n')
+            .expect("the agent's words, then its stderr");
+        assert!(!tail.is_empty() && tail.len() <= DIAGNOSTIC_TAIL);
+        assert!(tail.chars().all(|character| character == '—'), "{tail}");
+    }
+
+    #[test]
+    fn a_failure_with_nothing_on_stderr_is_the_agents_words_alone() {
+        assert_eq!(failure("the turn failed", " \n\t"), "the turn failed");
     }
 
     #[tokio::test]
