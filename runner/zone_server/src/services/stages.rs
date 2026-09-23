@@ -2,12 +2,14 @@
 //!
 //! Workspace/org settings and `OLLAMA_MODEL_*` / `COMFYUI_*` env vars can pin
 //! every stage. When they are empty, chat messages pick from the models that
-//! are actually installed.
+//! are actually installed. On a coding agent, a stage runs only a pin the
+//! agent knows, and otherwise leaves the choice to the agent.
 
 use reqwest::Client;
 use serde::Deserialize;
 use std::sync::LazyLock;
 use std::time::Duration;
+use zone_core::llm::{AgentKind, LlmBackend};
 
 use crate::db::ai_settings::EffectiveAiSettings;
 
@@ -79,6 +81,9 @@ impl Installed {
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
     pub models: Vec<Installed>,
+    /// The coding agent that completes instead of the endpoint. It runs the
+    /// models it knows, whatever Ollama has installed.
+    pub agent: Option<AgentKind>,
 }
 
 impl Catalog {
@@ -95,11 +100,56 @@ impl Catalog {
         };
         Self {
             models: body.models.into_iter().map(Installed::from).collect(),
+            agent: None,
         }
     }
 
+    /// The models an agent offers, in its own order.
+    pub fn agent(agent: AgentKind) -> Self {
+        Self {
+            models: agent
+                .models()
+                .iter()
+                .map(|name| Installed {
+                    name: (*name).to_string(),
+                    bytes: 0,
+                    million_params: None,
+                    embedding: false,
+                    vision: false,
+                    reranker: false,
+                })
+                .collect(),
+            agent: Some(agent),
+        }
+    }
+
+    /// What `backend` can run: Ollama's installed models behind the
+    /// endpoint, or the agent's own.
+    pub async fn for_backend(ollama_host: &str, backend: &LlmBackend) -> Self {
+        match backend {
+            LlmBackend::Http => Self::load(ollama_host).await,
+            LlmBackend::Cli { agent, .. } => Self::agent(*agent),
+        }
+    }
+
+    /// Whether a model named in settings runs under that name. The endpoint
+    /// routes whatever it is given; an agent is given only names it knows,
+    /// and runs a model of its own choosing in place of any other.
+    pub fn accepts(&self, name: &str) -> bool {
+        self.agent.is_none_or(|agent| agent.knows(name))
+    }
+
+    /// Whether a completion left on [`AUTO`] still runs: an agent chooses its
+    /// own model, while the endpoint has to be given one.
+    pub fn chooses(&self) -> bool {
+        self.agent.is_some()
+    }
+
     pub fn contains(&self, name: &str) -> bool {
-        self.find(name).is_some()
+        match self.agent {
+            Some(agent) => agent.knows(name),
+            None => self.find(name).is_some(),
+        }
     }
 
     pub fn find(&self, name: &str) -> Option<&Installed> {
@@ -121,6 +171,10 @@ pub fn is_auto(name: &str) -> bool {
 }
 
 /// Chat completion model for this message.
+///
+/// On an agent's catalog a requested name the agent does not know counts as
+/// [`AUTO`], and so does a preference it does not know; [`AUTO`] then means
+/// the agent chooses.
 pub fn chat_model(
     requested: &str,
     prefs: &Preferences,
@@ -129,6 +183,14 @@ pub fn chat_model(
     has_image: bool,
     agent: bool,
 ) -> String {
+    if let Some(kind) = catalog.agent {
+        let preferred = if wants_reason(message) {
+            &prefs.reasoning
+        } else {
+            &prefs.fast
+        };
+        return known(kind, [Some(requested), preferred.as_deref()]);
+    }
     if !is_auto(requested) {
         return requested.to_string();
     }
@@ -151,7 +213,13 @@ pub fn chat_model(
 }
 
 /// LiteLLM model used to classify image intent and to title chats.
+///
+/// On an agent's catalog, only a classifier or fast model the agent knows;
+/// otherwise [`AUTO`].
 pub fn classifier_model(prefs: &Preferences, catalog: &Catalog, chat_model: &str) -> String {
+    if let Some(kind) = catalog.agent {
+        return known(kind, [prefs.classifier.as_deref(), prefs.fast.as_deref()]);
+    }
     if let Some(name) = prefs.classifier.as_deref().filter(|name| !is_auto(name))
         && catalog_allows(catalog, name)
     {
@@ -168,6 +236,17 @@ pub fn classifier_model(prefs: &Preferences, catalog: &Catalog, chat_model: &str
                 .map(|model| model.name.clone())
         })
         .unwrap_or_else(|| fallback_name(AUTO, prefs.classifier.as_deref()))
+}
+
+/// The first of `names` the agent knows, or [`AUTO`] for it to choose.
+fn known<'a>(kind: AgentKind, names: impl IntoIterator<Item = Option<&'a str>>) -> String {
+    names
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|name| kind.knows(name))
+        .unwrap_or(AUTO)
+        .to_string()
 }
 
 #[derive(Clone, Copy)]
@@ -375,6 +454,7 @@ mod tests {
     fn catalog(models: &[Installed]) -> Catalog {
         Catalog {
             models: models.to_vec(),
+            agent: None,
         }
     }
 
@@ -532,6 +612,219 @@ mod tests {
         assert_eq!(
             chat_model(AUTO, &prefs(None, None), &catalog, "hi", false, false),
             "llama3.2:3b"
+        );
+    }
+
+    const REASONING: &str = "Prove that this algorithm is correct and list edge cases";
+
+    fn classifying(classifier: Option<&str>, fast: Option<&str>) -> Preferences {
+        Preferences {
+            fast: fast.map(str::to_string),
+            classifier: classifier.map(str::to_string),
+            ..Preferences::default()
+        }
+    }
+
+    fn names(catalog: &Catalog) -> Vec<&str> {
+        catalog
+            .models
+            .iter()
+            .map(|model| model.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn an_agent_runs_a_requested_model_it_knows() {
+        let claude = Catalog::agent(AgentKind::Claude);
+        let prefs = prefs(Some("haiku"), Some("sonnet"));
+
+        assert_eq!(
+            chat_model("opus", &prefs, &claude, "hello", false, true),
+            "opus"
+        );
+        assert_eq!(
+            chat_model("claude-opus-4-1", &prefs, &claude, REASONING, false, true),
+            "claude-opus-4-1",
+            "a full name the agent knows is kept, though the agent offers only aliases"
+        );
+    }
+
+    #[test]
+    fn a_requested_model_the_agent_does_not_know_is_left_to_the_preferences() {
+        let claude = Catalog::agent(AgentKind::Claude);
+        let prefs = prefs(Some("haiku"), Some("opus"));
+
+        assert_eq!(
+            chat_model("llama3.2:3b", &prefs, &claude, "hello", false, true),
+            "haiku"
+        );
+        assert_eq!(
+            chat_model("llama3.2:3b", &prefs, &claude, REASONING, false, true),
+            "opus"
+        );
+    }
+
+    #[test]
+    fn an_agent_reasons_on_the_reasoning_model_and_answers_on_the_fast_one() {
+        let codex = Catalog::agent(AgentKind::Codex);
+        let prefs = prefs(Some("gpt-6-luna"), Some("gpt-6-astra"));
+
+        assert_eq!(
+            chat_model(AUTO, &prefs, &codex, "hello", false, true),
+            "gpt-6-luna"
+        );
+        assert_eq!(
+            chat_model(AUTO, &prefs, &codex, REASONING, false, true),
+            "gpt-6-astra"
+        );
+    }
+
+    #[test]
+    fn an_agent_chooses_its_own_model_when_no_preference_is_one_it_knows() {
+        let claude = Catalog::agent(AgentKind::Claude);
+        let installed = prefs(Some("llama3.2:3b"), Some("qwen3.8:27b"));
+
+        assert_eq!(
+            chat_model(AUTO, &installed, &claude, "hello", false, true),
+            AUTO
+        );
+        assert_eq!(
+            chat_model(AUTO, &installed, &claude, REASONING, true, true),
+            AUTO
+        );
+        assert_eq!(
+            chat_model(AUTO, &prefs(None, None), &claude, "hello", false, false),
+            AUTO
+        );
+        assert_eq!(
+            chat_model(
+                AUTO,
+                &prefs(Some("gpt-6-sol"), None),
+                &claude,
+                "hello",
+                false,
+                true
+            ),
+            AUTO,
+            "another agent's model is not one this agent runs"
+        );
+    }
+
+    #[test]
+    fn each_prompt_uses_only_its_own_stage_before_the_agent_chooses() {
+        let claude = Catalog::agent(AgentKind::Claude);
+
+        assert_eq!(
+            chat_model(
+                AUTO,
+                &prefs(Some("haiku"), None),
+                &claude,
+                REASONING,
+                false,
+                true
+            ),
+            AUTO,
+            "a reasoning prompt is not handed to the fast model"
+        );
+        assert_eq!(
+            chat_model(
+                AUTO,
+                &prefs(None, Some("opus")),
+                &claude,
+                "hello",
+                false,
+                true
+            ),
+            AUTO
+        );
+    }
+
+    #[test]
+    fn an_agent_classifies_on_a_classifier_or_fast_model_it_knows_or_not_at_all() {
+        let claude = Catalog::agent(AgentKind::Claude);
+
+        assert_eq!(
+            classifier_model(&classifying(Some("haiku"), Some("sonnet")), &claude, AUTO),
+            "haiku"
+        );
+        assert_eq!(
+            classifier_model(
+                &classifying(Some("llama3.2:3b"), Some("sonnet")),
+                &claude,
+                AUTO
+            ),
+            "sonnet"
+        );
+        assert_eq!(
+            classifier_model(&classifying(Some("llama3.2:3b"), None), &claude, "opus"),
+            AUTO,
+            "the chat's own model is not borrowed to classify"
+        );
+    }
+
+    #[test]
+    fn an_agent_contains_every_model_it_knows_and_nothing_installed() {
+        let claude = Catalog::agent(AgentKind::Claude);
+        let codex = Catalog::agent(AgentKind::Codex);
+
+        assert!(claude.contains("sonnet"));
+        assert!(claude.contains("claude-opus-4-1"));
+        assert!(!claude.contains("llama3.2:3b"));
+        assert!(!claude.contains(AUTO));
+        assert!(codex.contains("gpt-6-sol"));
+        assert!(!codex.contains("sonnet"));
+    }
+
+    #[test]
+    fn only_an_agent_refuses_a_name_or_runs_without_one() {
+        let installed = catalog(&[installed("llama3.2:3b", 2_000, 3_000)]);
+        let claude = Catalog::agent(AgentKind::Claude);
+
+        assert!(
+            installed.accepts("gpt-4o"),
+            "the endpoint routes names Ollama does not have"
+        );
+        assert!(!installed.chooses());
+        assert!(claude.accepts("opus"));
+        assert!(!claude.accepts("llama3.2:3b"));
+        assert!(claude.chooses());
+    }
+
+    #[tokio::test]
+    async fn an_agent_backend_runs_its_own_models_whatever_ollama_has_installed() {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use zone_core::llm::CliSettings;
+
+        let ollama = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"models": [{"name": "llama3.2:3b", "size": 2_000}]})),
+            )
+            .mount(&ollama)
+            .await;
+
+        let codex = Catalog::for_backend(
+            &ollama.uri(),
+            &LlmBackend::cli(AgentKind::Codex, CliSettings::default()),
+        )
+        .await;
+        let endpoint = Catalog::for_backend(&ollama.uri(), &LlmBackend::Http).await;
+
+        assert_eq!(codex.agent, Some(AgentKind::Codex));
+        assert_eq!(names(&codex), AgentKind::Codex.models());
+        assert_eq!(endpoint.agent, None);
+        assert_eq!(names(&endpoint), ["llama3.2:3b"]);
+        assert_eq!(
+            ollama
+                .received_requests()
+                .await
+                .map(|requests| requests.len()),
+            Some(1),
+            "only the endpoint's catalog is read from Ollama"
         );
     }
 }

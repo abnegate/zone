@@ -14,7 +14,7 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 use zone_core::agent::{AgentCallback, AgentPhase};
 use zone_core::context::Entry;
-use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage};
+use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message as LlmMessage};
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
@@ -220,14 +220,6 @@ impl Fault {
             failure: Failure::Terminal,
             status: RUN_FAILED,
             message: ANSWER_WITHDRAWN.to_string(),
-        }
-    }
-
-    fn backend(error: backend::Error) -> Self {
-        Self {
-            failure: Failure::Terminal,
-            status: RUN_FAILED,
-            message: error.to_string(),
         }
     }
 }
@@ -963,28 +955,31 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     // author has since been cleared must not cost its initiator their memory.
     let actor = run.triggered_by;
     let workspace_id = task.workspace_id;
-    let model = resolve_model(state, &task).await;
-    if stages::is_auto(&model) {
-        obs.set_status(RUN_FAILED);
-        tracing::error!("Task {} has no resolvable completion model", task_id);
-        if let Err(error) = tasks::complete_owned_task_run(
-            state.db(),
-            run_id,
-            Some(owner),
-            RUN_FAILED,
-            Some(NO_MODEL),
-            None,
-        )
-        .await
-        {
-            tracing::error!(
-                "CRITICAL: Failed to update run {} status: {}",
+    let resolved = backend::for_workspace(state, workspace_id).await;
+    let (backend, model) = match prepare(state, &task, resolved).await {
+        Ok(prepared) => prepared,
+        Err(message) => {
+            obs.set_status(RUN_FAILED);
+            tracing::error!("Task {} cannot start: {}", task_id, message);
+            if let Err(error) = tasks::complete_owned_task_run(
+                state.db(),
                 run_id,
-                error
-            );
+                Some(owner),
+                RUN_FAILED,
+                Some(&message),
+                None,
+            )
+            .await
+            {
+                tracing::error!(
+                    "CRITICAL: Failed to update run {} status: {}",
+                    run_id,
+                    error
+                );
+            }
+            return;
         }
-        return;
-    }
+    };
 
     // A run automation started answers its own questions; the model it runs
     // on is written down so the reviewer can be chosen against it.
@@ -1037,6 +1032,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let policy = RetryPolicy::default();
     let pool = state.db();
     let workspace = workspace_path.as_path();
+    let backend = &backend;
     let model = model.as_str();
     let task_prompt = task_prompt.as_str();
     let guidance = guidance.as_str();
@@ -1059,6 +1055,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 owner,
                 workspace_id,
                 actor,
+                backend,
                 model,
                 task_prompt,
                 guidance,
@@ -1193,10 +1190,31 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     }
 }
 
+/// Where a run's turns go and the model they run on, or why the run cannot
+/// start. Both come from one resolution, so the model is always one that
+/// backend can run.
+async fn prepare(
+    state: &AppState,
+    task: &tasks::TaskRow,
+    resolved: Result<LlmBackend, backend::Error>,
+) -> Result<(LlmBackend, String), String> {
+    let backend = resolved.map_err(|error| error.to_string())?;
+    let model = resolve_model(state, task, &backend)
+        .await
+        .ok_or_else(|| NO_MODEL.to_string())?;
+    Ok((backend, model))
+}
+
 /// Resolves the run's model the way a chat resolves its own: workspace settings
-/// over org settings, then the installed catalogue, never a hardcoded name.
-async fn resolve_model(state: &AppState, task: &tasks::TaskRow) -> String {
-    let catalog = stages::Catalog::load(&state.config().ollama_host).await;
+/// over org settings, then what the backend can run, never a hardcoded name.
+/// `None` when nothing is left to run: an agent chooses its own model when
+/// given none, the endpoint cannot.
+async fn resolve_model(
+    state: &AppState,
+    task: &tasks::TaskRow,
+    backend: &LlmBackend,
+) -> Option<String> {
+    let catalog = stages::Catalog::for_backend(&state.config().ollama_host, backend).await;
     let settings = match workspaces::get_workspace(state.db(), task.workspace_id).await {
         Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
             state.db(),
@@ -1211,7 +1229,7 @@ async fn resolve_model(state: &AppState, task: &tasks::TaskRow) -> String {
             None
         }
     };
-    stages::chat_model(
+    let model = stages::chat_model(
         task.model_name.as_deref().unwrap_or(stages::AUTO),
         &stages::Preferences::from_optional_settings(
             settings.as_ref(),
@@ -1221,7 +1239,8 @@ async fn resolve_model(state: &AppState, task: &tasks::TaskRow) -> String {
         &format!("{}\n\n{}", task.title, task.description),
         false,
         true,
-    )
+    );
+    (!stages::is_auto(&model) || catalog.chooses()).then_some(model)
 }
 
 /// What a run appends after `prompt::task`, once each source has been read.
@@ -1912,6 +1931,7 @@ async fn attempt_run(
     owner: Uuid,
     workspace_id: Uuid,
     actor: Option<Uuid>,
+    backend: &LlmBackend,
     model: &str,
     task_prompt: &str,
     guidance: &str,
@@ -1956,9 +1976,7 @@ async fn attempt_run(
         default_model: model.to_string(),
         temperature: TASK_TEMPERATURE,
         max_tokens: policy.reserved,
-        backend: backend::for_workspace(state, workspace_id)
-            .await
-            .map_err(Fault::backend)?,
+        backend: backend.clone(),
     });
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(model, limit);
@@ -2798,6 +2816,171 @@ mod tests {
         assert_eq!(callback.run_id, run_id);
     }
 
+    /// A task in a `claude_code` organization, on an instance whose Ollama
+    /// has models installed.
+    struct AgentTask {
+        pool: PgPool,
+        organization: Uuid,
+        task: tasks::TaskRow,
+        state: AppState,
+        ollama: wiremock::MockServer,
+    }
+
+    impl AgentTask {
+        async fn new(fast: &str, reasoning: &str, title: &str) -> Self {
+            use crate::db::organizations;
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .unwrap();
+            let organization = organizations::create_organization(
+                &pool,
+                "Agent models",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            let workspace = workspaces::create_workspace(
+                &pool,
+                organization.id,
+                "Agent models",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO organization_ai_settings \
+                 (organization_id, provider, model_fast, model_reasoning) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(organization.id)
+            .bind(ai_settings::PROVIDER_CLAUDE_CODE)
+            .bind(fast)
+            .bind(reasoning)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let task = tasks::create_task(
+                &pool,
+                workspace.id,
+                &[],
+                title,
+                "Keep every existing behaviour.",
+                None,
+                None,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            let ollama = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/tags"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "models": [
+                        {"name": "llama3.2:3b", "size": 2_000_000_000_u64, "details": {"parameter_size": "3.2B"}},
+                        {"name": "qwen3.8:27b", "size": 17_000_000_000_u64, "details": {"parameter_size": "27B"}},
+                    ]
+                })))
+                .mount(&ollama)
+                .await;
+            let state = AppState::new(
+                crate::config::Config {
+                    ollama_host: ollama.uri(),
+                    ..crate::state::test_config()
+                },
+                pool.clone(),
+                None,
+            );
+            Self {
+                pool,
+                organization: organization.id,
+                task,
+                state,
+                ollama,
+            }
+        }
+
+        async fn remove(self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    fn claude() -> LlmBackend {
+        LlmBackend::cli(
+            zone_core::llm::AgentKind::Claude,
+            zone_core::llm::CliSettings::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_agent_task_runs_on_the_model_its_organization_chose_not_an_installed_one() {
+        let fixture =
+            AgentTask::new("haiku", "opus", "Find the root cause of the flaky login").await;
+
+        let agent = resolve_model(&fixture.state, &fixture.task, &claude()).await;
+        let consulted = fixture
+            .ollama
+            .received_requests()
+            .await
+            .map(|requests| requests.len());
+        let endpoint = resolve_model(&fixture.state, &fixture.task, &LlmBackend::Http).await;
+        fixture.remove().await;
+
+        assert_eq!(agent.as_deref(), Some("opus"));
+        assert_eq!(
+            consulted,
+            Some(0),
+            "an agent's model is not looked up in Ollama"
+        );
+        assert_eq!(
+            endpoint.as_deref(),
+            Some("qwen3.8:27b"),
+            "the endpoint still runs on what is installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_task_naming_no_model_the_agent_knows_leaves_the_choice_to_the_agent() {
+        let fixture =
+            AgentTask::new("llama3.2:3b", "qwen3.8:27b", "Rename the settings page").await;
+
+        let prepared = prepare(&fixture.state, &fixture.task, Ok(claude())).await;
+        fixture.remove().await;
+
+        let (backend, model) = prepared.expect("an agent chooses its own model, so the run starts");
+        assert_eq!(model, stages::AUTO);
+        assert!(matches!(
+            backend,
+            LlmBackend::Cli {
+                agent: zone_core::llm::AgentKind::Claude,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_backend_cannot_be_resolved_does_not_start() {
+        let fixture = AgentTask::new("haiku", "opus", "Rename the settings page").await;
+        let signed_out = || backend::Error::SignedOut {
+            agent: zone_core::llm::AgentKind::Claude,
+        };
+
+        let prepared = prepare(&fixture.state, &fixture.task, Err(signed_out())).await;
+        fixture.remove().await;
+
+        assert_eq!(prepared.err(), Some(signed_out().to_string()));
+    }
+
     #[tokio::test]
     async fn capacity_waits_keep_heartbeats_and_stop_on_lease_loss() {
         let _execution = EXECUTION.lock().await;
@@ -3607,36 +3790,6 @@ mod retry_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_backend_that_cannot_be_resolved_fails_the_run_with_its_message() {
-        let signed_out = || backend::Error::SignedOut {
-            agent: zone_core::llm::AgentKind::Claude,
-        };
-        let runs = Arc::new(AtomicU32::new(0));
-        let stopped = run_with_policy(
-            RetryPolicy::default(),
-            |_| {
-                let runs = Arc::clone(&runs);
-                async move {
-                    runs.fetch_add(1, Ordering::SeqCst);
-                    Err(Fault::backend(signed_out()))
-                }
-            },
-            |_| async {},
-        )
-        .await
-        .expect_err("a run with no backend to run on must stop");
-
-        assert_eq!(
-            runs.load(Ordering::SeqCst),
-            1,
-            "a retry signs nobody in, so it must not be spent"
-        );
-        assert!(!stopped.exhausted);
-        assert_eq!(stopped.fault.status, RUN_FAILED);
-        assert_eq!(stopped.fault.message, signed_out().to_string());
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn transient_failures_stop_at_the_attempt_cap() {
         let policy = RetryPolicy::default();
         let runs = Arc::new(AtomicU32::new(0));
@@ -4327,6 +4480,7 @@ mod watchdog_tests {
                 owner,
                 workspace_id,
                 None,
+                &LlmBackend::Http,
                 "gpt-4",
                 "# Task: Budget\n\nKeep asking until something stops you",
                 "",
@@ -5319,6 +5473,7 @@ mod watchdog_tests {
             owner,
             workspace_id,
             None,
+            &LlmBackend::Http,
             "gpt-4",
             "# Task: Retry\n\nFinish without waiting",
             "",

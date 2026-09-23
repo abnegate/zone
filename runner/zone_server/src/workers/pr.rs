@@ -577,7 +577,7 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
     ) else {
         return RepairOutcome::Failed(NO_REPAIR_BACKEND.to_string());
     };
-    let model = repair_model(state, &task).await;
+    let model = repair_model(state, &task, &backend).await;
     let repairer = ModelRepairAgent::new(
         LlmClient::new(LlmConfig {
             base_url: state.config().litellm_host.clone(),
@@ -673,7 +673,10 @@ async fn subject(state: &AppState, task: &tasks::TaskRow, report: &str) -> Subje
 }
 
 async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Option<Subject> {
-    let catalog = stages::Catalog::load(&state.config().ollama_host).await;
+    let backend = backend::for_workspace(state, task.workspace_id)
+        .await
+        .ok()?;
+    let catalog = stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
     let settings = match workspaces::get_workspace(state.db(), task.workspace_id).await {
         Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
             state.db(),
@@ -703,9 +706,7 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
         default_model: model,
         temperature: SUBJECT_TEMPERATURE,
         max_tokens: SUBJECT_TOKENS,
-        backend: backend::for_workspace(state, task.workspace_id)
-            .await
-            .ok()?,
+        backend,
     });
     let messages = [
         Message::system(SUBJECT_INSTRUCTIONS),
@@ -732,8 +733,8 @@ fn repair_backend(
 
 /// The model a repair runs on: the one the task itself ran on, resolved the same
 /// way, because the branch being repaired is that run's own work.
-async fn repair_model(state: &AppState, task: &tasks::TaskRow) -> String {
-    let catalog = stages::Catalog::load(&state.config().ollama_host).await;
+async fn repair_model(state: &AppState, task: &tasks::TaskRow, backend: &LlmBackend) -> String {
+    let catalog = stages::Catalog::for_backend(&state.config().ollama_host, backend).await;
     let settings = match workspaces::get_workspace(state.db(), task.workspace_id).await {
         Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
             state.db(),

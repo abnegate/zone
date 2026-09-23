@@ -2565,7 +2565,9 @@ async fn prepare_message(
     if let Some(effective) = &settings {
         effective.apply_to_comfyui(&mut image_config);
     }
-    let catalog = crate::services::stages::Catalog::load(&state.config().ollama_host).await;
+    let backend = classifier_backend(state, workspace_id).await;
+    let catalog =
+        crate::services::stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
     let prefs = crate::services::stages::Preferences::from_optional_settings(
         settings.as_ref(),
         &image_config.classifier_model,
@@ -2576,7 +2578,7 @@ async fn prepare_message(
         image_config.clone(),
         state.config().litellm_host.clone(),
         state.config().litellm_key.clone(),
-        classifier_backend(state, workspace_id).await,
+        backend,
     );
     let intent = classifier
         .classify(content, metadata)
@@ -2691,7 +2693,9 @@ async fn prepare_chat(
     mut chat: chats::ChatRow,
     web_search_requested: bool,
 ) -> Result<ChatPreparation, Box<dyn std::error::Error + Send + Sync>> {
-    let catalog = crate::services::stages::Catalog::load(&state.config().ollama_host).await;
+    let backend = crate::services::backend::for_workspace(state, workspace_id).await?;
+    let catalog =
+        crate::services::stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
     let prefs = if let Ok(Some(workspace)) =
         workspaces::get_workspace(state.db(), workspace_id).await
         && let Ok(settings) = ai_settings::get_effective_ai_settings(
@@ -2728,8 +2732,14 @@ async fn prepare_chat(
         )
         .await;
     }
-    let mut preparation =
-        session::build(state, &chat, user_id, None, session::Mode::Generation).await?;
+    let mut preparation = session::build(
+        state,
+        &chat,
+        user_id,
+        None,
+        session::Mode::Generation(backend),
+    )
+    .await?;
     let search = load_web_search(state, chat_id, content, web_search_requested).await;
     let agentic = preparation.agentic;
     let character = chat.character.as_ref();

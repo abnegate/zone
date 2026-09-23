@@ -663,7 +663,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 .await
                 .ok()
                 .flatten()
-                .and_then(|mode| mode.model),
+                .and_then(|mode| model::author(mode.model)),
             None => None,
         };
         let resolved = backend::for_workspace(step.drive.state, step.drive.workspace_id).await;
@@ -671,7 +671,8 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             Ok(backend) => backend,
             Err(error) => return step.pause(&error.to_string()).await,
         };
-        let (prefs, catalog) = model::preferences(step.drive.state, step.drive.workspace_id).await;
+        let (prefs, catalog) =
+            model::preferences(step.drive.state, step.drive.workspace_id, &backend).await;
         let round = auto_projects::latest_round(pool, step.task.task_id)
             .await
             .map_err(|error| error.to_string())?

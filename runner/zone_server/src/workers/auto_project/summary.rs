@@ -45,7 +45,10 @@ async fn generate(
     pull: &PullRequestDetail,
     review_summary: &str,
 ) -> Option<String> {
-    let (prefs, catalog) = preferences(state, task.workspace_id).await;
+    let backend = backend::for_workspace(state, task.workspace_id)
+        .await
+        .ok()?;
+    let (prefs, catalog) = preferences(state, task.workspace_id, &backend).await;
     let model = stages::classifier_model(
         &prefs,
         &catalog,
@@ -60,9 +63,7 @@ async fn generate(
         default_model: model,
         temperature: SUMMARY_TEMPERATURE,
         max_tokens: SUMMARY_TOKENS,
-        backend: backend::for_workspace(state, task.workspace_id)
-            .await
-            .ok()?,
+        backend,
     });
     let body = pull.body.as_deref().unwrap_or_default();
     let body: String = body.chars().take(BODY_CHARS).collect();

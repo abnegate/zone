@@ -44,7 +44,12 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
         return None;
     }
     let chat = chats::get_chat(state.db(), message.chat_id).await.ok()??;
-    let catalog = crate::services::stages::Catalog::load(&state.config().ollama_host).await;
+    let backend = match chat.workspace_id {
+        Some(workspace) => backend::for_workspace(state, workspace).await.ok()?,
+        None => backend::instance(state.config()),
+    };
+    let catalog =
+        crate::services::stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
     let prefs = if let Some(workspace_id) = chat.workspace_id
         && let Ok(Some(workspace)) = workspaces::get_workspace(state.db(), workspace_id).await
         && let Ok(settings) = ai_settings::get_effective_ai_settings(
@@ -68,10 +73,6 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
     if crate::services::stages::is_auto(&model) {
         return None;
     }
-    let backend = match chat.workspace_id {
-        Some(workspace) => backend::for_workspace(state, workspace).await.ok()?,
-        None => backend::instance(state.config()),
-    };
     let client = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
         api_key: state.config().litellm_key.clone(),
