@@ -1,0 +1,2 @@
+WARNING: proceeding, even though we could not create PATH aliases: CODEX_HOME points to "/var/folders/t8/16_y1ct955l693_zpzt6_0s40000gn/T/tmp.bU7bzCl2xG/does-not-exist", but that path does not exist
+Error loading configuration: CODEX_HOME points to "/var/folders/t8/16_y1ct955l693_zpzt6_0s40000gn/T/tmp.bU7bzCl2xG/does-not-exist", but that path does not exist

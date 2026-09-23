@@ -1,0 +1,8 @@
+{
+  "loggedIn": true,
+  "authMethod": "oauth_token",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/var/folders/t8/16_y1ct955l693_zpzt6_0s40000gn/T/tmp.lo0p8WBXni/projects",
+  "configDirectory": "/var/folders/t8/16_y1ct955l693_zpzt6_0s40000gn/T/tmp.lo0p8WBXni"
+}
