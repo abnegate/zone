@@ -14,6 +14,7 @@ use super::beneath::{self, Access};
 use super::denied::Denied;
 use super::identity::Identity;
 use super::{REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolResult, reason_property};
+use crate::llm::provider::environment;
 
 // Prompt budget; matches `read_repository_file` paging in zone_server.
 const FILE_PAGE_CHARS: usize = super::MAX_TOOL_OUTPUT_CHARS;
@@ -989,6 +990,8 @@ async fn search_ripgrep(
     // Each match is judged by the file rg names for it, so the output has to
     // keep the shape read below, which a config file could change.
     command
+        .env_clear()
+        .envs(environment::inherited())
         .arg("--no-config")
         .arg("--null")
         .arg("--with-filename")
@@ -1073,6 +1076,8 @@ fn ripgrep_available() -> bool {
     *AVAILABLE.get_or_init(|| {
         std::process::Command::new("rg")
             .arg("--version")
+            .env_clear()
+            .envs(environment::inherited())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -1085,7 +1090,7 @@ fn ripgrep_available() -> bool {
 mod tests {
     use super::*;
     use crate::tools::Session;
-    use crate::tools::test_support::captured_logs;
+    use crate::tools::test_support::{self, Recorder, captured_logs};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -3005,6 +3010,31 @@ mod tests {
             escaped.to_string().contains("escapes working directory"),
             "{escaped}"
         );
+    }
+
+    /// The server makes itself non-dumpable, and the children it starts are
+    /// not, so a child handed the server's environment shows it to anything
+    /// able to read `/proc/<pid>/environ` as the server's user.
+    #[tokio::test]
+    async fn search_code_starts_ripgrep_from_the_allowlisted_environment() {
+        const TEST: &str =
+            "tools::file::tests::search_code_starts_ripgrep_from_the_allowlisted_environment";
+        if test_support::copied() {
+            let directory = tempdir().unwrap();
+            SearchCodeTool
+                .execute(
+                    serde_json::json!({"pattern": "anything"}),
+                    &create_test_context(directory.path()),
+                )
+                .await
+                .expect("a search");
+            return;
+        }
+
+        let ripgrep = Recorder::new("rg", 0);
+        ripgrep.run(TEST).await;
+
+        ripgrep.assert_allowlisted();
     }
 
     #[test]

@@ -510,8 +510,138 @@ pub(crate) mod test_support {
     use std::cell::RefCell;
     use std::future::Future;
     use std::io;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex, Once};
+    use tempfile::TempDir;
     use tracing_subscriber::fmt::MakeWriter;
+
+    use crate::llm::provider::environment;
+
+    /// What a server's environment holds that no child of a tool may be
+    /// handed. Every value says `notreal`, so a leak shows under any name.
+    const SERVER_SECRETS: [(&str, &str); 4] = [
+        (
+            "DATABASE_URL",
+            "postgres://zone:notrealpassword@postgres/zone",
+        ),
+        ("JWT_SECRET", "notreal-jwt-secret"),
+        ("ENCRYPTION_KEY", "notreal-encryption-key"),
+        ("LITELLM_KEY", "sk-notreal-litellm-key"),
+    ];
+
+    /// A name the operator adds to the allowlist, which a child is handed.
+    const PASSED_THROUGH: (&str, &str) = ("CORPORATE_CA", "/etc/ssl/corporate.pem");
+
+    /// What `sh` sets for itself while it runs a stand-in's script.
+    const SHELL_OWN: [&str; 3] = ["PWD", "SHLVL", "_"];
+
+    /// Set on the copy of this binary a [`Recorder`] runs a test in.
+    const COPY: &str = "ZONE_CORE_TEST_COPY";
+
+    /// Whether this process is the copy a [`Recorder`] started, whose
+    /// environment holds the server's secrets.
+    pub(crate) fn copied() -> bool {
+        std::env::var_os(COPY).is_some()
+    }
+
+    /// A stand-in for a program a tool starts by name, which records the
+    /// environment it was started with.
+    ///
+    /// Setting the secrets in this process would race every other test that
+    /// starts a child, so [`Self::run`] puts them on a copy of the binary that
+    /// runs one test and finds the stand-in first on its `PATH`.
+    pub(crate) struct Recorder {
+        program: &'static str,
+        directory: TempDir,
+    }
+
+    impl Recorder {
+        const RECORD: &'static str = "environment";
+
+        /// A stand-in for `program` that exits with `status`.
+        pub(crate) fn new(program: &'static str, status: u8) -> Self {
+            let directory = TempDir::new().expect("a directory for the stand-in");
+            let script = directory.path().join(program);
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\n/usr/bin/env -0 >> '{}'\nexit {status}\n",
+                    directory.path().join(Self::RECORD).display()
+                ),
+            )
+            .expect("the stand-in's script");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("an executable stand-in");
+            Self { program, directory }
+        }
+
+        /// Run `test`, and only it, in a copy of this binary whose
+        /// environment holds the server's secrets.
+        pub(crate) async fn run(&self, test: &str) {
+            let path =
+                std::env::join_paths(std::iter::once(self.directory.path().to_path_buf()).chain(
+                    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+                ))
+                .expect("a PATH with the stand-in first");
+            let output =
+                tokio::process::Command::new(std::env::current_exe().expect("this test binary"))
+                    .args(["--exact", test, "--nocapture"])
+                    .env(COPY, "1")
+                    .envs(SERVER_SECRETS)
+                    .env(environment::PASSTHROUGH, PASSED_THROUGH.0)
+                    .env(PASSED_THROUGH.0, PASSED_THROUGH.1)
+                    .env("PATH", path)
+                    .output()
+                    .await
+                    .expect("a copy of this test binary");
+            let printed = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            assert!(output.status.success(), "{printed}");
+            assert!(
+                printed.contains("1 passed"),
+                "the copy ran no test: {printed}"
+            );
+        }
+
+        /// Assert the stand-in ran, and was handed the allowlisted environment
+        /// with the operator's passthrough and nothing else.
+        pub(crate) fn assert_allowlisted(&self) {
+            let recorded = std::fs::read(self.directory.path().join(Self::RECORD))
+                .unwrap_or_else(|_| panic!("the stand-in for {} never ran", self.program));
+            let variables: Vec<(String, String)> = String::from_utf8_lossy(&recorded)
+                .split_terminator('\0')
+                .filter_map(|entry| entry.split_once('='))
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect();
+            let allowed = environment::filter(variables.clone(), PASSED_THROUGH.0);
+            let handed: Vec<&str> = variables
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .filter(|name| !allowed.contains_key(*name) && !SHELL_OWN.contains(name))
+                .collect();
+
+            assert!(
+                handed.is_empty(),
+                "{} was handed what the allowlist refuses: {handed:?}",
+                self.program
+            );
+            assert!(
+                allowed.contains_key("PATH"),
+                "{} was not handed the allowlist: {variables:?}",
+                self.program
+            );
+            assert_eq!(
+                allowed.get(PASSED_THROUGH.0).map(String::as_str),
+                Some(PASSED_THROUGH.1),
+                "the operator's passthrough did not reach {}",
+                self.program
+            );
+        }
+    }
 
     /// One subscriber for the whole binary, because a scoped one is not
     /// reliable here: `tracing` caches each callsite's interest globally, and a

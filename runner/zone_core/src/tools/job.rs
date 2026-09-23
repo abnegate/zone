@@ -29,6 +29,7 @@ use tool_runner::Proxy;
 use uuid::Uuid;
 
 use super::Session;
+use crate::llm::provider::environment;
 
 pub const TAIL_JOB: &str = "tail_job";
 
@@ -523,6 +524,8 @@ async fn exclude(checkout: &Path) {
         .arg("--git-path")
         .arg(EXCLUDE_PATH)
         .current_dir(checkout)
+        .env_clear()
+        .envs(environment::inherited())
         .stdin(Stdio::null())
         .output()
         .await
@@ -666,7 +669,7 @@ fn is_job_id(candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::test_support::captured_logs;
+    use crate::tools::test_support::{Recorder, captured_logs, copied};
     use std::process::Command as Process;
     use tempfile::TempDir;
 
@@ -1341,6 +1344,25 @@ mod tests {
         );
 
         Jobs::kill_session(session).await;
+    }
+
+    /// The server makes itself non-dumpable, and the children it starts are
+    /// not, so a child handed the server's environment shows it to anything
+    /// able to read `/proc/<pid>/environ` as the server's user.
+    #[tokio::test]
+    async fn the_exclude_asks_git_from_the_allowlisted_environment() {
+        const TEST: &str =
+            "tools::job::tests::the_exclude_asks_git_from_the_allowlisted_environment";
+        if copied() {
+            let checkout = directory();
+            exclude(checkout.path()).await;
+            return;
+        }
+
+        let git = Recorder::new("git", 1);
+        git.run(TEST).await;
+
+        git.assert_allowlisted();
     }
 
     #[test]
