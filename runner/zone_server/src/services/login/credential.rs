@@ -11,10 +11,12 @@ use zone_core::secret::SecretValue;
 
 use super::claude;
 use super::locks::Locks;
+use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::state::AppState;
 
-/// A Claude token is renewed once it would run out within the longest turn it is handed to.
+/// The longest a task attempt runs, and so the least time a Claude token handed to a turn has to
+/// have left.
 const MARGIN: TimeDelta = TimeDelta::hours(1);
 
 const UNOPENED: &str = "the stored sign-in could not be opened";
@@ -75,8 +77,9 @@ pub(crate) async fn resolve_claude(
     let Some(login) = agent_logins::get(state.db(), organization, agent).await? else {
         return Ok(None);
     };
+    let margin = margin(state.config());
     let tokens = open(state, &login)?;
-    if !renewable(&tokens, Utc::now()) {
+    if !renewable(&tokens, Utc::now(), margin) {
         return current(tokens).map(Some);
     }
 
@@ -86,7 +89,7 @@ pub(crate) async fn resolve_claude(
         return Ok(None);
     };
     let tokens = open(state, &login)?;
-    if !renewable(&tokens, Utc::now()) {
+    if !renewable(&tokens, Utc::now(), margin) {
         return current(tokens).map(Some);
     }
     match client.refresh(&tokens).await {
@@ -152,8 +155,16 @@ async fn keep(
     }
 }
 
-fn renewable(tokens: &claude::Tokens, now: DateTime<Utc>) -> bool {
-    tokens.refresh.is_some() && tokens.expiring(now, MARGIN)
+fn renewable(tokens: &claude::Tokens, now: DateTime<Utc>, margin: TimeDelta) -> bool {
+    tokens.refresh.is_some() && tokens.expiring(now, margin)
+}
+
+/// How long a Claude token has to last to be handed to a turn: the longest turn it may be handed
+/// to, a task attempt or a chat, whichever the operator allows longer.
+fn margin(config: &Config) -> TimeDelta {
+    TimeDelta::from_std(config.chat.timeout)
+        .unwrap_or(TimeDelta::MAX)
+        .max(MARGIN)
 }
 
 /// The access token as it is, while it has not expired.
@@ -192,6 +203,7 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, Config};
     use crate::db::agent_logins::Upsert;
+    use crate::services::chat::session::Settings;
 
     const TOKEN_PATH: &str = "/v1/oauth/token";
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";
@@ -267,6 +279,11 @@ mod tests {
 
         /// A fixture whose server runs on `server`.
         async fn on(server: PgPool, token_url: String) -> Self {
+            Self::chatting(server, token_url, Settings::default()).await
+        }
+
+        /// A fixture whose server runs on `server` and gives its chats `chat`.
+        async fn chatting(server: PgPool, token_url: String, chat: Settings) -> Self {
             let pool = connect().await;
             let organization = Uuid::new_v4();
             sqlx::query(
@@ -284,6 +301,7 @@ mod tests {
                         claude_token_url: token_url,
                         ..AgentConfig::default()
                     },
+                    chat,
                     ..crate::state::test_config()
                 },
                 server,
@@ -421,6 +439,50 @@ mod tests {
             token(login),
             RENEWED,
             "a token with 50 minutes left was handed to a turn that may run an hour"
+        );
+        server.verify().await;
+    }
+
+    #[test]
+    fn a_token_lasts_the_longer_of_a_task_attempt_and_a_chat() {
+        let chatting = |seconds| Config {
+            chat: Settings {
+                timeout: Duration::from_secs(seconds),
+                ..Settings::default()
+            },
+            ..crate::state::test_config()
+        };
+
+        assert_eq!(margin(&chatting(30 * 60)), MARGIN);
+        assert_eq!(margin(&chatting(60 * 60)), MARGIN);
+        assert_eq!(margin(&chatting(2 * 60 * 60)), TimeDelta::hours(2));
+    }
+
+    /// An operator may give a chat longer than a task attempt's hour, and a
+    /// token handed to that chat has to last it too.
+    #[tokio::test]
+    async fn a_claude_login_that_would_expire_during_a_longer_chat_is_renewed_first() {
+        let server = token_endpoint(renewed(), 1).await;
+        let fixture = Fixture::chatting(
+            connect().await,
+            format!("{}{TOKEN_PATH}", server.uri()),
+            Settings {
+                timeout: Duration::from_secs(2 * 60 * 60),
+                ..Settings::default()
+            },
+        )
+        .await;
+        fixture
+            .sign_in(&tokens(Utc::now() + TimeDelta::minutes(90), Some(REFRESH)))
+            .await;
+
+        let login = fixture.resolve(AgentKind::Claude).await;
+        fixture.remove().await;
+
+        assert_eq!(
+            token(login),
+            RENEWED,
+            "a token with 90 minutes left was handed to a chat that may run two hours"
         );
         server.verify().await;
     }
