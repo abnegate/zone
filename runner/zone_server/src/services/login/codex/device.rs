@@ -10,13 +10,14 @@ use tokio::process::ChildStdout;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout_at};
+use zone_core::llm::AgentKind;
 use zone_core::llm::provider::Lines;
 
 use super::output::{self, collect, failure};
 use super::process::Process;
 use super::prompt::{NO_LINK, strip};
 use super::staging::Staging;
-use super::{Error, HOME, LOGIN, Limits, Prompt, command};
+use super::{Error, LOGIN, Limits, Prompt, command};
 
 const LINE: usize = 4 * 1024;
 const PRINTED: usize = 64 * 1024;
@@ -42,7 +43,7 @@ impl Device {
     ) -> Result<Self, Error> {
         let staging = Staging::create(home)?;
         let mut command = command(executable, LOGIN, environment);
-        command.env(HOME, staging.path());
+        command.env(AgentKind::Codex.home(), staging.path());
         let mut process = Process::spawn(command, executable)?;
         let stderr = tokio::spawn(output::read(process.stderr()));
         let mut stdout = process

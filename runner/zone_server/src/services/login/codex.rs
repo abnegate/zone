@@ -16,6 +16,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use tokio::process::Command;
+use zone_core::llm::AgentKind;
 
 pub use device::Device;
 pub use error::Error;
@@ -24,7 +25,6 @@ pub use prompt::Prompt;
 
 pub(super) use output::Output;
 
-const HOME: &str = "CODEX_HOME";
 const CREDENTIALS: &str = "auth.json";
 const LOGIN: &[&str] = &["login", "--device-auth"];
 const LOGOUT: &[&str] = &["logout"];
@@ -60,7 +60,7 @@ pub async fn logout(
     environment: &BTreeMap<String, String>,
 ) -> Result<(), Error> {
     let mut command = command(executable, LOGOUT, environment);
-    command.env(HOME, home);
+    command.env(AgentKind::Codex.home(), home);
     let output = Output::capture(command, executable).await?;
     if output.status.success() {
         Ok(())
@@ -145,7 +145,10 @@ mod tests {
     /// The environment Zone hands a codex child: its home is the organization's.
     fn organization(home: &Path) -> BTreeMap<String, String> {
         let mut environment = environment();
-        environment.insert(HOME.to_string(), home.display().to_string());
+        environment.insert(
+            AgentKind::Codex.home().to_string(),
+            home.display().to_string(),
+        );
         environment
     }
 
@@ -529,7 +532,10 @@ mod tests {
         let _ = device(&codex, &home, &given).await;
 
         let mut expected = given.clone();
-        expected.insert(HOME.to_string(), staging(&home).display().to_string());
+        expected.insert(
+            AgentKind::Codex.home().to_string(),
+            staging(&home).display().to_string(),
+        );
         assert!(
             std::env::var_os("CARGO_MANIFEST_DIR").is_some(),
             "the test runner no longer sets CARGO_MANIFEST_DIR, so its absence below proves nothing"
@@ -567,13 +573,19 @@ mod tests {
                 &format!("env > '{}'\ncat '{stderr}' >&2\nexit 0", record.display()),
             );
             let mut given = environment();
-            given.insert(HOME.to_string(), "/somewhere/else".to_string());
+            given.insert(
+                AgentKind::Codex.home().to_string(),
+                "/somewhere/else".to_string(),
+            );
 
             let result = logout(&codex, &home, &given).await;
 
             assert!(result.is_ok(), "{result:?}");
             let mut expected = given.clone();
-            expected.insert(HOME.to_string(), home.display().to_string());
+            expected.insert(
+                AgentKind::Codex.home().to_string(),
+                home.display().to_string(),
+            );
             assert_eq!(recorded(&record), expected);
         }
     }
