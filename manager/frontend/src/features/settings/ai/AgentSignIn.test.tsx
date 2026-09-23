@@ -15,7 +15,7 @@ import { type ComponentProps, useCallback, useState } from 'react';
 import fixture from '../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { AgentRequestError } from '../../../api/AgentRequestError';
 import type { Agent, AgentStatus } from './schemas';
-import type { Attempt } from './types';
+import type { AgentAccess, Attempt } from './types';
 
 const agentsApi = {
   list: mock(),
@@ -115,10 +115,10 @@ function Harness({
 function renderPanel(
   agent: Props['agent'],
   initial: AgentStatus | undefined,
-  canManage = true
+  access: AgentAccess = 'manage'
 ): { onChange: ReturnType<typeof mock> } {
   const onChange = mock();
-  render(<Harness agent={agent} canManage={canManage} initial={initial} onChange={onChange} />);
+  render(<Harness agent={agent} access={access} initial={initial} onChange={onChange} />);
   return { onChange };
 }
 
@@ -168,7 +168,7 @@ describe('AgentSignIn', () => {
       const save = mock((event: Event) => event.preventDefault());
       render(
         <form onSubmit={save}>
-          <Harness agent="claude" canManage initial={claudeSignedOut} onChange={mock()} />
+          <Harness agent="claude" access="manage" initial={claudeSignedOut} onChange={mock()} />
           <button type="submit">Save Changes</button>
         </form>
       );
@@ -476,7 +476,7 @@ describe('AgentSignIn', () => {
         <AgentSignIn
           organizationId={organization}
           agent="codex"
-          canManage
+          access="manage"
           status={codexPending}
           attempt={undefined}
           loadError={null}
@@ -636,7 +636,7 @@ describe('AgentSignIn', () => {
         <AgentSignIn
           organizationId={organizationId}
           agent="claude"
-          canManage
+          access="manage"
           status={claudeSignedOut}
           attempt={undefined}
           loadError={null}
@@ -667,7 +667,7 @@ describe('AgentSignIn', () => {
         <AgentSignIn
           organizationId={organization}
           agent="claude"
-          canManage
+          access="manage"
           status={claudeSignedIn}
           attempt={undefined}
           loadError={null}
@@ -686,7 +686,7 @@ describe('AgentSignIn', () => {
 
   describe('members', () => {
     it('see the status and whom to ask, with no buttons and no code', () => {
-      renderPanel('codex', codexPending, false);
+      renderPanel('codex', codexPending, 'view');
 
       expect(screen.getByText('Signing in')).toBeInTheDocument();
       expect(screen.getByText('Ask an organization admin to sign in.')).toBeInTheDocument();
@@ -696,7 +696,7 @@ describe('AgentSignIn', () => {
     });
 
     it('see a signed-out agent without a way to start signing in', () => {
-      renderPanel('claude', claudeSignedOut, false);
+      renderPanel('claude', claudeSignedOut, 'view');
 
       expect(screen.getByText('Not signed in')).toBeInTheDocument();
       expect(screen.getByText('Ask an organization admin to sign in.')).toBeInTheDocument();
@@ -704,9 +704,26 @@ describe('AgentSignIn', () => {
     });
 
     it('see a signed-in agent without a way to sign it out', () => {
-      renderPanel('claude', claudeSignedIn, false);
+      renderPanel('claude', claudeSignedIn, 'view');
 
       expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(screen.queryAllByRole('button')).toHaveLength(0);
+    });
+  });
+
+  describe('while the role is resolving', () => {
+    it('shows the status alone, with no buttons and no one to ask', () => {
+      renderPanel('claude', claudeSignedOut, 'resolving');
+
+      expect(screen.getByText('Not signed in')).toBeInTheDocument();
+      expect(screen.queryAllByRole('button')).toHaveLength(0);
+      expect(screen.queryByText('Ask an organization admin to sign in.')).toBeNull();
+    });
+
+    it('shows no device code, even to someone who may turn out to be an admin', () => {
+      renderPanel('codex', codexPending, 'resolving');
+
+      expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
       expect(screen.queryAllByRole('button')).toHaveLength(0);
     });
   });
@@ -724,7 +741,7 @@ describe('AgentSignIn', () => {
         <AgentSignIn
           organizationId={organization}
           agent="claude"
-          canManage
+          access="manage"
           status={undefined}
           attempt={undefined}
           loadError="Failed to load coding agent sign-ins: 502"

@@ -89,10 +89,12 @@ const organizations: Record<'unknown' | OrgRole, typeof organization & { role?: 
   member: { ...organization, role: 'member' },
 };
 let organizationRole: 'unknown' | OrgRole = 'unknown';
+let resolvingRole = false;
 
 mock.module('../../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: () => ({
     currentOrganization: organizations[organizationRole],
+    resolvingRole,
     currentWorkspace: {
       id: selectedWorkspace,
       organization_id: '00000000-0000-0000-0000-000000000001',
@@ -174,6 +176,7 @@ describe('WorkspaceSettingsPage', () => {
   beforeEach(() => {
     mock.clearAllMocks();
     organizationRole = 'unknown';
+    resolvingRole = false;
     agentsApi.list.mockResolvedValue(fixture.agents);
     selectedWorkspace = '00000000-0000-0000-0000-000000000001';
     savedTheme = mockTheme;
@@ -1004,6 +1007,39 @@ describe('WorkspaceSettingsPage', () => {
           expect(screen.queryByLabelText('Code from claude.com')).toBeNull();
           expect(screen.queryByRole('alert')).toBeNull();
         });
+      });
+
+      it('shows the sign-in status alone while the role resolves, then fails closed', async () => {
+        resolvingRole = true;
+        mockClient.getWorkspaceAiSettings.mockResolvedValue({
+          ...codexOnly,
+          provider: 'claude_code',
+        });
+        agentsApi.list.mockResolvedValue([
+          {
+            ...fixture.agents[0],
+            state: 'signed_out',
+            source: null,
+            label: null,
+            expires_at: null,
+          },
+          fixture.agents[1],
+        ]);
+        const { rerender } = render(<WorkspaceSettingsPage />);
+        await openAiTab(userEvent.setup());
+
+        const panel = await screen.findByRole('region', { name: 'Claude Code sign-in' });
+        expect(await within(panel).findByText('Not signed in')).toBeInTheDocument();
+        expect(within(panel).queryAllByRole('button')).toHaveLength(0);
+        expect(within(panel).queryByText('Ask an organization admin to sign in.')).toBeNull();
+
+        resolvingRole = false;
+        rerender(<WorkspaceSettingsPage />);
+
+        expect(
+          within(panel).getByText('Ask an organization admin to sign in.')
+        ).toBeInTheDocument();
+        expect(within(panel).queryAllByRole('button')).toHaveLength(0);
       });
 
       it('saves the override without credentials', async () => {

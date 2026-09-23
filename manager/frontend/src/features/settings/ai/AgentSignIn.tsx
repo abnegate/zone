@@ -5,7 +5,7 @@ import { agentsApi } from '../../../api/agents';
 import { ClaudeSteps } from './ClaudeSteps';
 import { DeviceSteps } from './DeviceSteps';
 import type { Agent, AgentState, AgentStatus, ClaudeScope } from './schemas';
-import type { Attempt, SignInAction } from './types';
+import type { AgentAccess, Attempt, SignInAction } from './types';
 import { useExpired } from './useExpired';
 import './AgentSignIn.css';
 
@@ -25,7 +25,7 @@ const states: Record<AgentState, { label: string; tint: BadgeProps['variant'] }>
 interface AgentSignInProps {
   organizationId: string;
   agent: Agent;
-  canManage: boolean;
+  access: AgentAccess;
   status: AgentStatus | undefined;
   attempt: Attempt | undefined;
   loadError: string | null;
@@ -56,7 +56,7 @@ function signedInDetail(status: AgentStatus, agent: Agent, lapsed: boolean): str
 export function AgentSignIn({
   organizationId,
   agent,
-  canManage,
+  access,
   status,
   attempt,
   loadError,
@@ -187,7 +187,8 @@ export function AgentSignIn({
   const name = names[agent];
   const account = accounts[agent];
   const signingIn = usable || waiting;
-  const manageable = canManage && status !== undefined;
+  const manage = access === 'manage';
+  const manageable = manage && status !== undefined;
   const offerSignIn =
     manageable &&
     !authorization &&
@@ -201,8 +202,8 @@ export function AgentSignIn({
   let detail: string | null = null;
   if (status?.state === 'signed_in') {
     detail = signedInDetail(status, agent, lapsed);
-  } else if (status && !canManage) {
-    detail = 'Ask an organization admin to sign in.';
+  } else if (status && !manage) {
+    detail = access === 'view' ? 'Ask an organization admin to sign in.' : null;
   } else if (usable) {
     detail = 'Waiting for the code from claude.com.';
   } else if (authorization && expired) {

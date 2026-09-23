@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { AiProviderSchema } from '../workspace/schemas';
 import { AiProviderFields } from './AiProviderFields';
 import {
+  agentAccess,
   agentOf,
   buildAiSettingsRequest,
   emptyCredentials,
@@ -50,6 +51,22 @@ describe('coding agent providers', () => {
       expect(agentOf(provider)).toBeNull();
       expect(isAgentProvider(provider)).toBe(false);
     }
+  });
+});
+
+describe('agentAccess', () => {
+  it('lets owners and admins manage the organization sign-ins', () => {
+    expect(agentAccess('owner', false)).toBe('manage');
+    expect(agentAccess('admin', false)).toBe('manage');
+  });
+
+  it('shows only the status while the role is still resolving', () => {
+    expect(agentAccess(undefined, true)).toBe('resolving');
+  });
+
+  it('fails closed for a member and for a role that never resolved', () => {
+    expect(agentAccess('member', false)).toBe('view');
+    expect(agentAccess(undefined, false)).toBe('view');
   });
 });
 

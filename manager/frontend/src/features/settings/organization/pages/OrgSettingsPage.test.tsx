@@ -253,6 +253,7 @@ describe('OrgSettingsPage', () => {
     });
 
     it('asks for sign-in status only once a coding agent is chosen', async () => {
+      mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
       render(<OrgSettingsPage />);
       const select = await screen.findByLabelText('AI Provider');
       expect(agentsApi.list).not.toHaveBeenCalled();

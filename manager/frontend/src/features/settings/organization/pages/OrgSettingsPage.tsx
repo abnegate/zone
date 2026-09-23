@@ -10,7 +10,7 @@ import {
   AiProviderFields,
   agentOf,
   buildAiSettingsRequest,
-  canManageAgents,
+  agentAccess,
   configuredFromSettings,
   credentialsFromSettings,
   emptyCredentials,
@@ -38,7 +38,7 @@ const TITLE = 'Organization Settings';
 
 export default function OrgSettingsPage() {
   const { isAuthenticated } = useAuth();
-  const { currentOrganization } = useWorkspace();
+  const { currentOrganization, resolvingRole } = useWorkspace();
   const { models: installedModels } = useModels();
 
   const [activeTab, setActiveTab] = useState<TabType>('ai');
@@ -210,7 +210,7 @@ export default function OrgSettingsPage() {
                 key={`${currentOrganization.id}:${agent}`}
                 organizationId={currentOrganization.id}
                 agent={agent}
-                canManage={canManageAgents(currentOrganization.role)}
+                access={agentAccess(currentOrganization.role, resolvingRole)}
                 status={agents.statuses[agent]}
                 attempt={agents.attempts[agent]}
                 loadError={agents.error}

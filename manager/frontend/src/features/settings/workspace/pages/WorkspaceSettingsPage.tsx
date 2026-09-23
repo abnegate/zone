@@ -19,7 +19,7 @@ import {
   AiProviderFields,
   agentOf,
   buildAiSettingsRequest,
-  canManageAgents,
+  agentAccess,
   configuredFromSettings,
   credentialsFromSettings,
   emptyCredentials,
@@ -111,7 +111,7 @@ export default function WorkspaceSettingsPage() {
     setWorkspaceTheme,
     previewWorkspaceTheme,
   } = useTheme();
-  const { currentOrganization, currentWorkspace } = useWorkspace();
+  const { currentOrganization, currentWorkspace, resolvingRole } = useWorkspace();
   const orgId = currentOrganization?.id ?? null;
   const workspaceId = currentWorkspace?.id ?? null;
 
@@ -679,7 +679,7 @@ export default function WorkspaceSettingsPage() {
                     key={`${orgId}:${agent}`}
                     organizationId={orgId}
                     agent={agent}
-                    canManage={canManageAgents(currentOrganization?.role)}
+                    access={agentAccess(currentOrganization?.role, resolvingRole)}
                     status={agents.statuses[agent]}
                     attempt={agents.attempts[agent]}
                     loadError={agents.error}

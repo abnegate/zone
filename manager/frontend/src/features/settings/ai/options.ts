@@ -4,6 +4,7 @@ import type { OrgRole } from '../organization/types';
 import { AiProviderSchema } from '../workspace/schemas';
 import type { AiProvider, AiSettings, UpdateAiSettingsRequest } from '../workspace/types';
 import { type Agent, type AgentProvider, AgentProviderSchema } from './schemas';
+import type { AgentAccess } from './types';
 
 const providerLabels: Record<AiProvider, string> = {
   self_hosted: 'Self-Hosted (Ollama via LiteLLM)',
@@ -31,8 +32,9 @@ export function agentOf(provider: AiProvider): Agent | null {
   return isAgentProvider(provider) ? agents[provider] : null;
 }
 
-export function canManageAgents(role: OrgRole | undefined): boolean {
-  return role === undefined || role === 'owner' || role === 'admin';
+export function agentAccess(role: OrgRole | undefined, resolving: boolean): AgentAccess {
+  if (role === 'owner' || role === 'admin') return 'manage';
+  return resolving ? 'resolving' : 'view';
 }
 
 export const modelOptions: Record<
