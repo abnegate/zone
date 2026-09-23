@@ -428,9 +428,10 @@ always do. Neither a chat's agent nor a task run's is offered the tools that
 end Zone's own turn to wait, `ask_user`, `wait_for` and a task's
 `submit_plan`, and a call to one is refused as an unknown tool: over MCP such
 a call returns at once with nothing waiting behind it, so the turn would end
-on a question no one sees or a job nothing waits for. The agent's
-instructions leave those tools out, so in a chat it asks its question in its
-reply, and you answer it in your next message.
+on a question no one sees or a job nothing waits for. The agent's prompt
+leaves those tools out, and the tool descriptions and results that mention
+`wait_for` say to use it only when the agent has it, so in a chat the agent
+asks its question in its reply, and you answer it in your next message.
 
 codex is told to pass every call to Zone without asking, because headless
 codex has no one to ask and Zone applies the approval policy itself; to fail
@@ -441,10 +442,11 @@ leave an approval card open for a call codex had already given up on.
 
 One thing differs from a turn served by the endpoint: the agent runs its own
 loop rather than Zone's, so Zone takes one round and the agent decides for
-itself how many tool calls it makes inside that round. A task attempt's agent
-is still held to a cap on its calls to Zone's tools. A chat with **Agent
-mode** off offers no tools: the CLI runs with its own tools withheld and
-without Zone's.
+itself how many tool calls it makes inside that round. Its calls to Zone's
+tools are still held to the budget Zone's own loop has for the same chat turn
+or task attempt: a call past it is refused without running. A chat with
+**Agent mode** off offers no tools: the CLI runs with its own tools withheld
+and without Zone's.
 
 ### The agent's own tools
 
@@ -525,6 +527,12 @@ made from the task's title, and an auto-project summary is the pull request's
 first paragraph. Search and retrieval keep using the server's own embedding
 engine (`EMBEDDING_ENGINE` and `OLLAMA_MODEL_EMBED`).
 
+With media generation on, a message the image-intent rules leave unsure, and
+the prompt for an edit of an attached image, go to the agent only when the
+Fast model, or with Fast on Automatic `COMFYUI_CLASSIFIER_MODEL`, is one the
+agent knows. Otherwise neither starts the agent: the message is answered as
+chat, and the edit keeps the prompt Zone writes from the words alone.
+
 ### Reviews, conflict repair and plan approval
 
 - **Auto-project reviews** run on the workspace's CLI without Zone's review
@@ -550,9 +558,11 @@ engine (`EMBEDDING_ENGINE` and `OLLAMA_MODEL_EMBED`).
   its checkout is prepared, without a retry, with "Plan approval is not
   available when a task runs on a coding agent CLI; turn off Require plan
   approval or use the Self-Hosted provider." When `ZONE_LLM_BACKEND` is itself
-  `claude` or `codex`, so that Self-Hosted runs a CLI too, the message does
-  not suggest Self-Hosted. A run an auto project starts is never held for
-  approval, so it is unaffected.
+  `claude` or `codex`, so that Self-Hosted runs a CLI too, the message is
+  "Plan approval is not available when a task runs on a coding agent CLI, and
+  every provider on this server runs on one; turn off Require plan approval."
+  A run an auto project starts is never held for approval, so it is
+  unaffected.
 
 ### Running Zone natively: the host login
 
