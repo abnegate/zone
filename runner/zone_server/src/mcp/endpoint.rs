@@ -195,7 +195,7 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{open, state, tools, wait_for_card, write};
+    use super::super::testing::{open, scope, state, tools, wait_for_card, write};
     use super::*;
     use crate::agent::wait::WAIT_FOR;
     use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy};
@@ -298,6 +298,7 @@ mod tests {
             .all_definitions()
             .iter()
             .map(|definition| definition.function.name.as_str())
+            .filter(|name| !opened.tools.ends_turn(name))
             .collect();
         assert_eq!(served, registered);
         assert!(!served.is_empty());
@@ -378,19 +379,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_turn_without_parks_neither_lists_nor_runs_a_tool_that_ends_zones_turn() {
+    async fn a_turn_neither_lists_nor_runs_a_tool_that_ends_zones_turn() {
         let chat = Uuid::new_v4();
         let (sender, _events) = unbounded_channel();
-        let lease = Turn::new(
-            Uuid::new_v4(),
-            chat,
-            Uuid::new_v4(),
-            tools(chat).await,
-            ApprovalPolicy::auto(),
-            sender,
-        )
-        .without_parks()
-        .open(endpoint("http://127.0.0.1:8080"));
+        let lease = Turn::new(scope(chat), tools(chat).await, sender)
+            .open(endpoint("http://127.0.0.1:8080"));
         let token = lease.toolset().token.expose().to_string();
 
         let (_, answer) = post(Some(&token), rpc(13, protocol::TOOLS_LIST, json!({}))).await;

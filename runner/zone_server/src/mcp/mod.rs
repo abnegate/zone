@@ -14,12 +14,16 @@
 //! child is spawned. Those tools never reach this endpoint and zone never sees
 //! them.
 
+mod agent_tools;
 mod endpoint;
 mod protocol;
+mod scope;
 mod turn;
 
 #[cfg(test)]
 pub(crate) mod testing;
 
+pub use agent_tools::{AgentTools, offered};
 pub use endpoint::{BODY_LIMIT, PATH, endpoint, local_endpoint, serve};
+pub use scope::Scope;
 pub use turn::{Lease, Turn, merged};

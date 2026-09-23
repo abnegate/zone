@@ -6,9 +6,24 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use uuid::Uuid;
 
 use super::endpoint::PATH;
+use super::scope::Scope;
 use super::turn::{Lease, Turn};
 use crate::agent::{AgentEvent, ApprovalPolicy, ChatTools, WorkspaceScope};
 use crate::state::AppState;
+
+/// A budget no test reaches, for the tests that are not about the budget.
+pub(crate) const UNLIMITED: usize = usize::MAX;
+
+/// An auto-approved turn of `chat` in a workspace of its own.
+pub(crate) fn scope(chat: Uuid) -> Scope {
+    Scope {
+        workspace: Uuid::new_v4(),
+        chat,
+        user: Some(Uuid::new_v4()),
+        approval: ApprovalPolicy::auto(),
+        calls: UNLIMITED,
+    }
+}
 
 pub(crate) fn state() -> AppState {
     let db = sqlx::PgPool::connect_lazy("postgres://localhost/test")
@@ -48,11 +63,14 @@ pub(crate) async fn open(approval: ApprovalPolicy) -> Opened {
     let tools = tools(chat).await;
     let (sender, events) = unbounded_channel();
     let lease = Turn::new(
-        workspace,
-        chat,
-        user,
+        Scope {
+            workspace,
+            chat,
+            user: Some(user),
+            approval: approval.clone(),
+            calls: UNLIMITED,
+        },
         Arc::clone(&tools),
-        approval.clone(),
         sender,
     )
     .open(super::endpoint::endpoint("http://127.0.0.1:8080"));
