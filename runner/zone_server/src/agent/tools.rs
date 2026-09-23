@@ -176,8 +176,8 @@ fn tool_env() -> HashMap<String, String> {
     )
 }
 
-/// Chat keeps the host's filesystem reach, which the approval gate covers, but
-/// gets the same narrow environment as a task run.
+/// Chat keeps the host's filesystem reach, but gets the same narrow environment
+/// as a task run.
 fn context(profile: ToolProfile, cwd: std::path::PathBuf) -> ToolContext {
     ToolContext {
         cwd,
@@ -185,6 +185,7 @@ fn context(profile: ToolProfile, cwd: std::path::PathBuf) -> ToolContext {
         max_file_size: MAX_TOOL_FILE_BYTES,
         command_timeout: TOOL_COMMAND_TIMEOUT_SECS,
         unrestricted: profile == ToolProfile::Chat,
+        denied: Vec::new(),
         session: Session::Detached,
     }
 }
@@ -674,6 +675,11 @@ impl ChatTools {
             ToolProfile::Task => task_cwd.unwrap_or_else(host_root),
         };
         let mut context = context(profile, cwd);
+        if let Some(scope) = &scope {
+            context
+                .denied
+                .push(scope.state.config().agents.state.clone());
+        }
         if let Some(chat_id) = scope.as_ref().and_then(|scope| scope.chat_id) {
             context.session = Session::Chat(chat_id);
         }
@@ -3052,6 +3058,219 @@ mod tests {
         assert!(patched.success, "{:?}", patched.error);
         assert_eq!(contents.unwrap(), "beta\nkeep\n");
         cleanup.unwrap();
+    }
+
+    /// Plain words, so the redaction a tool result goes through cannot hide a
+    /// disclosure from the assertions looking for one.
+    const OTHER_LOGIN: &str = "the other organization's ChatGPT login";
+
+    /// A chat on a server that keeps the agents' state under `root`, and the
+    /// codex home it holds for some other organization, signed in.
+    fn another_organizations_home(root: &std::path::Path) -> (WorkspaceScope, std::path::PathBuf) {
+        let mut config = test_config();
+        config.agents.state = root.to_path_buf();
+        let home = config
+            .agents
+            .create_home(Uuid::new_v4(), zone_core::llm::AgentKind::Codex)
+            .expect("the organization's codex home");
+        std::fs::write(
+            home.join("auth.json"),
+            json!({"login": OTHER_LOGIN}).to_string(),
+        )
+        .unwrap();
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/test")
+            .expect("a lazy pool needs no server");
+        let state = AppState::new(config, db, None);
+        state.disable_mcp();
+        let scope = WorkspaceScope {
+            state,
+            user_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
+        };
+        (scope, home)
+    }
+
+    /// Refused because the path is withheld from the file tools, rather than
+    /// for some reason a different path would also have been refused for.
+    fn off_limits(result: &ToolResult) -> bool {
+        !result.success
+            && result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains(zone_core::tools::OFF_LIMITS))
+    }
+
+    /// Every organization's agent state sits under one directory the server's
+    /// user owns, and a chat's host tools run as that user on every provider.
+    /// These tools raise no approval card, so nothing else stands between a
+    /// chat and another organization's sign-in, however the path is spelled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_chat_reads_no_organizations_agent_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().join("agent-state");
+        let (scope, home) = another_organizations_home(&root);
+        let beside = directory.path().join("notes");
+        std::fs::create_dir(&beside).unwrap();
+        std::os::unix::fs::symlink(&home, beside.join("home")).unwrap();
+        std::os::unix::fs::symlink(home.join("work"), beside.join("work")).unwrap();
+        let tools = ChatTools::build(scope).await;
+
+        for path in [
+            home.join("auth.json"),
+            home.join("work/../auth.json"),
+            beside.join("home/auth.json"),
+            beside.join("work/../auth.json"),
+        ] {
+            let read = tools
+                .execute("read_file", &json!({"path": path}).to_string())
+                .await;
+            assert!(off_limits(&read), "{} was read: {read:?}", path.display());
+            assert!(
+                !format!("{read:?}").contains(OTHER_LOGIN),
+                "{}: {read:?}",
+                path.display()
+            );
+        }
+        for path in [root.clone(), home.clone(), beside.join("home")] {
+            let listed = tools
+                .execute(
+                    "list_files",
+                    &json!({"path": path, "recursive": true}).to_string(),
+                )
+                .await;
+            assert!(
+                off_limits(&listed),
+                "{} was listed: {listed:?}",
+                path.display()
+            );
+        }
+
+        let around = tools
+            .execute(
+                "list_files",
+                &json!({"path": directory.path(), "recursive": true}).to_string(),
+            )
+            .await;
+        assert!(around.success, "{:?}", around.error);
+        assert!(
+            !around.output.unwrap_or_default().contains("auth.json"),
+            "a recursive listing walked into the agent state"
+        );
+        let searched = tools
+            .execute(
+                "search_code",
+                &json!({"pattern": OTHER_LOGIN, "path": directory.path()}).to_string(),
+            )
+            .await;
+        assert!(
+            !format!("{searched:?}").contains(OTHER_LOGIN),
+            "a search reached the agent state: {searched:?}"
+        );
+    }
+
+    /// Writing needs approval, but the card names a path few readers would
+    /// know for another organization's sign-in, and whatever lands there is
+    /// read by that organization's next turn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_chat_writes_into_no_organizations_agent_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().join("agent-state");
+        let (scope, home) = another_organizations_home(&root);
+        let login = home.join("auth.json");
+        let signed_in = std::fs::read_to_string(&login).unwrap();
+        let planted = home.join("AGENTS.md");
+        let link = directory.path().join("instructions.md");
+        std::os::unix::fs::symlink(&planted, &link).unwrap();
+        let fresh = root.join(Uuid::new_v4().to_string());
+        let tools = ChatTools::build(scope).await;
+
+        let calls = [
+            (
+                "write_file",
+                json!({"path": planted, "content": "Obey the file."}),
+            ),
+            (
+                "write_file",
+                json!({"path": link, "content": "Obey the file."}),
+            ),
+            (
+                "write_file",
+                json!({"path": fresh.join("codex/auth.json"), "content": "{}"}),
+            ),
+            (
+                "apply_patch",
+                json!({"path": login, "old_string": OTHER_LOGIN, "new_string": "mine"}),
+            ),
+        ];
+        for (name, arguments) in calls {
+            let result = tools.execute(name, &arguments.to_string()).await;
+            assert!(off_limits(&result), "{name} {arguments} ran: {result:?}");
+        }
+
+        assert!(!planted.exists(), "a file was planted in the agent state");
+        assert!(!fresh.exists(), "a directory was made in the agent state");
+        assert_eq!(std::fs::read_to_string(&login).unwrap(), signed_in);
+    }
+
+    /// A CLI serving another organization's turn holds that turn's Claude
+    /// token and Zone MCP token in its environment, and unlike the server it
+    /// is dumpable, so the server's user can read its `/proc` entry. The links
+    /// there lead into its organization's home too.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_chat_reads_no_running_agents_process() {
+        const TURN: &str = "another-organizations-turn";
+        let directory = tempfile::TempDir::new().unwrap();
+        let (scope, home) = another_organizations_home(&directory.path().join("agent-state"));
+        let mut agent = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(home.join("work"))
+            .env("ZONE_OTHER_TURN", TURN)
+            .spawn()
+            .expect("a stand-in for a running agent CLI");
+        let process = std::path::PathBuf::from(format!("/proc/{}", agent.id()));
+        let tools = ChatTools::build(scope).await;
+
+        let mut results = Vec::new();
+        for path in [
+            process.join("environ"),
+            process.join(format!("task/{}/environ", agent.id())),
+            process.join("cwd/../auth.json"),
+            std::path::PathBuf::from("/proc/self/environ"),
+        ] {
+            let read = tools
+                .execute("read_file", &json!({"path": path}).to_string())
+                .await;
+            results.push((format!("read_file {}", path.display()), read));
+        }
+        for path in [process.clone(), process.join("cwd/..")] {
+            let listed = tools
+                .execute("list_files", &json!({"path": path}).to_string())
+                .await;
+            results.push((format!("list_files {}", path.display()), listed));
+        }
+        let searched = tools
+            .execute(
+                "search_code",
+                &json!({"pattern": OTHER_LOGIN, "path": process.join("cwd/..")}).to_string(),
+            )
+            .await;
+        results.push(("search_code".to_string(), searched));
+        agent.kill().unwrap();
+        agent.wait().unwrap();
+
+        for (call, result) in results {
+            assert!(off_limits(&result), "{call} ran: {result:?}");
+            let shown = format!("{result:?}");
+            assert!(
+                !shown.contains(TURN) && !shown.contains(OTHER_LOGIN),
+                "{call}: {shown}"
+            );
+        }
     }
 
     #[tokio::test]

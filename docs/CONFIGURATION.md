@@ -518,10 +518,12 @@ The processes that run as that user are:
 
 - each CLI, and on a turn with **Zone tools only** off, its own shell and file
   tools;
-- Zone's own chat tools, whatever the provider. With Agent mode on, `read_file`
-  and `list_files` reach any path the server's user can read without an
-  approval card, and `write_file`, `apply_patch` and `run_shell` do once
-  approved or with Auto-approve on;
+- Zone's own chat tools, whatever the provider. With Agent mode on,
+  `read_file`, `list_files` and `search_code` reach any path the server's user
+  can read, other than the agent state and the `/proc` entries described below,
+  without an approval card. `write_file` and `apply_patch` do the same once
+  approved or with Auto-approve on, and `run_shell` and `run_command` then
+  reach everything above;
 - configured stdio MCP servers and `COMFYUI_TRAIN_COMMAND`, which also inherit
   the server's full environment.
 
@@ -532,6 +534,16 @@ What stands in the way:
   encryption keys and the LiteLLM key. That protects the server process only.
   The CLIs, MCP servers and training commands it starts can be read as above,
   and the last two carry that same full environment.
+- Zone's file tools, `read_file`, `list_files`, `search_code`, `write_file`
+  and `apply_patch`, refuse any path under the agent state directory and any
+  process's `/proc/<pid>` entry, `/proc/self` included, whatever the chat's
+  provider or approval setting. The path is resolved first, so `..`, a symlink
+  or a link under a `/proc` entry does not get around the refusal, and a
+  recursive listing or search leaves those paths out. The check runs just
+  before the file is opened, so a process swapping a symlink into the path in
+  between would get past it, but a process that can do that as the server's
+  user can read the state itself. `run_shell` and `run_command` are not held to
+  it.
 - `--setting-sources ""`, with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, stops claude
   from loading settings, hooks, `CLAUDE.md` files or memory planted in its
   home, its working directory or any directory above it, `/app/agent-state`
@@ -557,8 +569,9 @@ These providers suit an instance whose organizations trust each other, such
 as a personal or single-team compose stack. On an instance shared by
 organizations that must not reach each other's data, leave them unselected:
 per-organization OS users, which would be the fix, do not exist yet, and
-nothing turns the providers off for the whole instance. Zone's own chat tools
-read across organizations with or without them.
+nothing turns the providers off for the whole instance. With or without them,
+a chat's `run_shell` and `run_command` reach every organization's agent state
+once approved, and its file tools read whatever else the server's user can.
 
 ### Operations
 
