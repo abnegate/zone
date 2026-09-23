@@ -10,10 +10,15 @@ spec:
   {{- if not .Values.server.autoscaling.enabled }}
   replicas: {{ .Values.server.replicaCount }}
   {{- end }}
-  {{- if $agentStateClaim }}
   strategy:
+    {{- if $agentStateClaim }}
     type: Recreate
-  {{- end }}
+    {{- else }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    {{- end }}
   selector:
     matchLabels:
       {{- include "zone-apps.server.selectorLabels" . | nindent 6 }}
