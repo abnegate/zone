@@ -491,6 +491,67 @@ describe('AgentSignIn', () => {
     });
   });
 
+  describe('when the organization changes or the panel goes away', () => {
+    it('shows none of a sign-in that another organization started', async () => {
+      let finish!: (login: unknown) => void;
+      agentsApi.start.mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        })
+      );
+      const onAttemptChange = mock();
+      const panel = (organizationId: string) => (
+        <AgentSignIn
+          organizationId={organizationId}
+          agent="claude"
+          canManage
+          status={claudeSignedOut}
+          attempt={undefined}
+          loadError={null}
+          onStatusChange={mock()}
+          onAttemptChange={onAttemptChange}
+        />
+      );
+      const { rerender } = render(panel(organization));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+      rerender(panel('00000000-0000-0000-0000-000000000002'));
+      await act(async () => finish(claudeLogin(authorize)));
+
+      expect(onAttemptChange).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+    });
+
+    it('still reports a sign-out that finishes after its panel closed', async () => {
+      let finish!: () => void;
+      agentsApi.signOut.mockReturnValue(
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        })
+      );
+      agentsApi.get.mockResolvedValue(claudeSignedOut);
+      const onStatusChange = mock();
+      const { unmount } = render(
+        <AgentSignIn
+          organizationId={organization}
+          agent="claude"
+          canManage
+          status={claudeSignedIn}
+          attempt={undefined}
+          loadError={null}
+          onStatusChange={onStatusChange}
+          onAttemptChange={mock()}
+        />
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+      unmount();
+      await act(async () => finish());
+
+      await waitFor(() => expect(onStatusChange).toHaveBeenCalledWith(claudeSignedOut));
+    });
+  });
+
   describe('members', () => {
     it('see the status and whom to ask, with no buttons and no code', () => {
       renderPanel('codex', codexPending, false);

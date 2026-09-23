@@ -121,6 +121,26 @@ describe('useAgentStatuses', () => {
     expect(result.current.attempts).toEqual({});
   });
 
+  it('drops a late write for an organization that is no longer the loaded one', async () => {
+    const second: AgentStatus = { ...claude, state: 'signed_out', source: null, label: null };
+    agentsApi.list.mockResolvedValueOnce([claude, codex]).mockResolvedValueOnce([second, codex]);
+    const { result, rerender } = renderHook(
+      ({ organization }) => useAgentStatuses(organization, true),
+      { initialProps: { organization: 'org-1' } }
+    );
+    await waitFor(() => expect(result.current.statuses.claude?.state).toBe('signed_in'));
+    const late = result.current.update;
+    const lateAttempt = result.current.setAttempt;
+
+    rerender({ organization: 'org-2' });
+    await waitFor(() => expect(result.current.statuses.claude?.state).toBe('signed_out'));
+    act(() => late({ ...codex, state: 'signed_out', pending: null }));
+    act(() => lateAttempt('claude', authorization));
+
+    expect(result.current.statuses).toEqual({ claude: second, codex });
+    expect(result.current.attempts).toEqual({});
+  });
+
   it('reports a status list that failed to load', async () => {
     agentsApi.list.mockRejectedValueOnce(new Error('Failed to load coding agent sign-ins: 502'));
     const { result } = renderHook(() => useAgentStatuses('org-1', true));

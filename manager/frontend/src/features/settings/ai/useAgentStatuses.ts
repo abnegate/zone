@@ -62,15 +62,11 @@ export function useAgentStatuses(
 
   const update = useCallback(
     (status: AgentStatus) => {
-      if (!organizationId) return;
-      setLoaded((current) => {
-        const same = current?.organizationId === organizationId;
-        return {
-          organizationId,
-          statuses: { ...(same ? current.statuses : none), [status.agent]: status },
-          attempts: same ? current.attempts : idle,
-        };
-      });
+      setLoaded((current) =>
+        current?.organizationId === organizationId
+          ? { ...current, statuses: { ...current.statuses, [status.agent]: status } }
+          : current
+      );
     },
     [organizationId]
   );

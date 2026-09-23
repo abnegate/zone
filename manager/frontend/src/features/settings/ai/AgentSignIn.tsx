@@ -1,5 +1,5 @@
 import { Badge, type BadgeProps, Button } from '@zone/ui';
-import { type ReactNode, useEffect, useId, useState } from 'react';
+import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { AgentRequestError } from '../../../api/AgentRequestError';
 import { agentsApi } from '../../../api/agents';
 import { ClaudeSteps } from './ClaudeSteps';
@@ -67,6 +67,12 @@ export function AgentSignIn({
   const [codeError, setCodeError] = useState<string | null>(null);
   const [busy, setBusy] = useState<SignInAction | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const shown = useRef(organizationId);
+  const runs = useRef(0);
+
+  useEffect(() => {
+    shown.current = organizationId;
+  }, [organizationId]);
 
   const authorization = attempt?.login.agent === 'claude' ? attempt.login : null;
   const expired = useExpired(authorization?.expires_at ?? null);
@@ -106,24 +112,27 @@ export function AgentSignIn({
 
   const perform = async (
     action: SignInAction,
-    work: () => Promise<void>,
+    work: (current: () => boolean) => Promise<void>,
     fail: (reason: unknown) => void = (reason) => setFailure(reasonOf(reason))
   ): Promise<void> => {
+    const run = ++runs.current;
+    const current = () => shown.current === organizationId;
     setBusy(action);
     setFailure(null);
     setCodeError(null);
     try {
-      await work();
+      await work(current);
     } catch (reason) {
-      fail(reason);
+      if (current()) fail(reason);
     } finally {
-      setBusy(null);
+      if (runs.current === run) setBusy(null);
     }
   };
 
   const start = (action: SignInAction, scope?: ClaudeScope) =>
-    perform(action, async () => {
+    perform(action, async (current) => {
       const login = await agentsApi.start(organizationId, agent, scope);
+      if (!current()) return;
       onAttemptChange(agent, { login, scope, spent: false });
       setCode('');
     });
@@ -133,8 +142,9 @@ export function AgentSignIn({
     if (!value || busy !== null || !attempt) return;
     void perform(
       'submit',
-      async () => {
+      async (current) => {
         const next = await agentsApi.submitCode(organizationId, value);
+        if (!current()) return;
         onAttemptChange(agent, null);
         setCode('');
         onStatusChange(next);
@@ -152,10 +162,12 @@ export function AgentSignIn({
   };
 
   const signOut = () =>
-    perform('signOut', async () => {
+    perform('signOut', async (current) => {
       await agentsApi.signOut(organizationId, agent);
+      if (!current()) return;
       onAttemptChange(agent, null);
-      onStatusChange(await agentsApi.get(organizationId, agent));
+      const next = await agentsApi.get(organizationId, agent);
+      if (current()) onStatusChange(next);
     });
 
   const abandon = () => {
