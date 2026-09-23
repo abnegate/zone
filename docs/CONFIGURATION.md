@@ -248,8 +248,14 @@ organizations that must not see each other's data.
   `NO_PROXY` and `ALL_PROXY`, in upper or lower case), `SSL_CERT_FILE`,
   `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS` and the names listed here. Unless named
   here, the database URL, the JWT and encryption keys, `LITELLM_KEY`,
-  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
-  stay behind. Zone then adds what the turn needs; see *How a turn runs*.
+  `CLAUDE_CONFIG_DIR` and `CODEX_HOME` stay behind. `CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`,
+  `CODEX_API_KEY` and `ZONE_MCP_TOKEN` stay behind even when named here: each
+  would decide whose account a CLI's turn is billed to or whose tools it
+  reaches. Zone then adds what the turn needs; see *How a turn runs*. The
+  `rg` that `search_code` runs, the `git` a background job runs to find its
+  checkout, and `ffmpeg` and `ffprobe` also start from an allowlist rather
+  than the server's environment.
 - **Behaviour change**: A CLI used to inherit the server's whole environment
   apart from the provider API keys. A setup that relied on that, such as an
   `ANTHROPIC_BASE_URL` in the server's environment, now has to name the
@@ -585,12 +591,20 @@ another's, so any process running as that user can:
 - read the `/proc/<pid>/environ` of any CLI running at the time, which holds
   that turn's `CLAUDE_CODE_OAUTH_TOKEN` and, when Zone serves it tools, its
   `ZONE_MCP_TOKEN`. The second lets its holder call that turn's Zone tools, as
-  that turn's user and under its approval policy, until the turn ends;
+  that turn's user and under its approval policy, until the turn ends. A task
+  run approves every call, so whoever holds a task run's token can use its
+  write tools without anyone approving, and what they write lands in that
+  run's pull request;
 - write into any organization's agent state: replace or delete its codex
-  login, or plant files for its CLI to read;
+  login, or plant files for its CLI to read; and into the shared home
+  `/home/zone`, whose `.profile` codex's shell loads before the commands it
+  runs for any organization;
 - reach whatever the server can reach on the network. In the compose stack
-  that includes Valkey, which has no password there, and a host Ollama at
-  `host.docker.internal`.
+  that includes Valkey, which has no password there, Prometheus's API with its
+  lifecycle endpoints when the `monitoring` profile runs, and, through
+  `host.docker.internal`, every port the Docker host offers to containers. On
+  Docker Desktop that includes services bound to the host's loopback, such as
+  a host Ollama or Postgres.
 
 The processes that run as that user are:
 
@@ -607,16 +621,24 @@ The processes that run as that user are:
 
 What stands in the way:
 
-- On Linux the server makes itself non-dumpable, so no process of its user can
-  read the server's own environment, which holds the database URL, the JWT and
-  encryption keys and the LiteLLM key. That protects the server process only.
-  The CLIs, MCP servers and training commands it starts can be read as above,
-  and the last two carry that same full environment.
+- On Linux the server makes itself non-dumpable, so no other process of its
+  user can read the server's own environment, which holds the database URL,
+  the JWT and encryption keys and the LiteLLM key. That protects the server
+  process only: any process of the same user can read a child's environment
+  while the child runs. The CLIs, Zone's shell tools, and the `rg`, `git`,
+  `ffmpeg` and `ffprobe` it runs start from an allowlisted environment,
+  without those secrets. Configured stdio MCP servers and
+  `COMFYUI_TRAIN_COMMAND` start from the server's full environment, so they
+  carry them.
 - Zone's file tools, `read_file`, `list_files`, `search_code`, `write_file`
   and `apply_patch`, refuse any path under the agent state directory and any
   process's `/proc/<pid>` entry, `/proc/self` included, whatever the chat's
   provider or approval setting. The path is resolved first, so `..`, a symlink
-  or a link under a `/proc` entry does not get around the refusal, and a
+  or a link under a `/proc` entry does not get around the refusal, and it is
+  compared by file identity rather than by spelling, so neither does a name
+  that differs only in case or Unicode normalization, a firmlink such as
+  `/System/Volumes/Data`, or a bind mount. On macOS they also refuse `/dev/fd`
+  and `/.vol`, which open files by descriptor and by inode number. A
   recursive listing or search leaves those paths out. The check runs just
   before the file is opened, so a process swapping a symlink into the path in
   between would get past it, but a process that can do that as the server's
