@@ -24,7 +24,8 @@ use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception
 
 use super::driver::Drive;
 use super::notification::{self, MergeReport};
-use super::review::{self, Outcome, ReviewError, ReviewRequest, bots, model, verdict};
+use super::review::model::{self, Author};
+use super::review::{self, Outcome, ReviewError, ReviewRequest, bots, verdict};
 use super::summary;
 
 /// Rounds in a row a reviewer may end without a readable verdict before the
@@ -663,8 +664,8 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 .await
                 .ok()
                 .flatten()
-                .and_then(|mode| model::author(mode.model)),
-            None => None,
+                .map_or(Author::Unrecorded, |mode| Author::recorded(mode.model)),
+            None => Author::Unrecorded,
         };
         let resolved = backend::for_workspace(step.drive.state, step.drive.workspace_id).await;
         let backend = match resolved {
@@ -678,7 +679,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .map_err(|error| error.to_string())?
             + 1;
         let reviewer = model::select(
-            author.as_deref(),
+            &author,
             &prefs,
             &catalog,
             &config.review_models,
@@ -689,23 +690,11 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 .pause("no completion model is installed to review with")
                 .await;
         }
-        if config.require_distinct_reviewer && !bot_on_head {
-            if author.is_none() {
-                return step
-                    .pause(
-                        "the model that wrote the change was not recorded, so no review can be \
-                         shown to be independent, and no review bot answered",
-                    )
-                    .await;
-            }
-            if reviewer.same_model {
-                return step
-                    .pause(
-                        "no model other than the one that wrote the change is available to review \
-                         it, and no review bot answered",
-                    )
-                    .await;
-            }
+        if config.require_distinct_reviewer
+            && !bot_on_head
+            && let Some(reason) = model::objection(&author, &reviewer)
+        {
+            return step.pause(reason).await;
         }
         let diff = pr
             .fetch_diff(&step.reference, &step.token, DIFF_BYTES)
@@ -764,7 +753,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                         head: &head,
                         reviewer_kind: ReviewerKind::Model,
                         reviewer: &reviewer.model,
-                        author_model: author.as_deref(),
+                        author_model: author.model(),
                         same_model: reviewer.same_model,
                         verdict: match verdict.outcome {
                             Outcome::Approve => Recorded::Approve,
@@ -790,7 +779,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                         head: &head,
                         reviewer_kind: ReviewerKind::Model,
                         reviewer: &reviewer.model,
-                        author_model: author.as_deref(),
+                        author_model: author.model(),
                         same_model: reviewer.same_model,
                         verdict: Recorded::Unparseable,
                         summary: &message,

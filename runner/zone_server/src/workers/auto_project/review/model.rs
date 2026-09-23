@@ -6,11 +6,46 @@ use crate::state::AppState;
 use uuid::Uuid;
 use zone_core::llm::LlmBackend;
 
+const UNRECORDED_AUTHOR: &str = "the model that wrote the change was not recorded, so no review \
+     can be shown to be independent, and no review bot answered";
+const CHOSEN_AUTHOR: &str = "the agent chose its own model to write the change, so no review can \
+     be shown to be independent of it, and no review bot answered; set Fast and Reasoning models \
+     the agent knows in AI settings";
+const NO_OTHER_MODEL: &str = "no model other than the one that wrote the change is available to \
+     review it, and no review bot answered";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reviewer {
     pub model: String,
-    /// The author's own model, because nothing else was available.
+    /// Not shown to differ from the author's model: nothing else was
+    /// available, or the agent chose the author's model itself.
     pub same_model: bool,
+}
+
+/// Who wrote a change, as its run recorded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Author {
+    Model(String),
+    /// The agent chose its own model, which the run could not name.
+    Chosen,
+    Unrecorded,
+}
+
+impl Author {
+    pub fn recorded(model: Option<String>) -> Self {
+        match model {
+            None => Self::Unrecorded,
+            Some(model) if stages::is_auto(&model) => Self::Chosen,
+            Some(model) => Self::Model(model),
+        }
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            Self::Model(model) => Some(model),
+            Self::Chosen | Self::Unrecorded => None,
+        }
+    }
 }
 
 /// Pick a reviewer for `round` of a change `author` wrote.
@@ -22,21 +57,23 @@ pub struct Reviewer {
 /// the author reviews itself, and says so.
 ///
 /// On an agent, a candidate is a model the agent knows, and the agent's own
-/// models stand in for what is installed.
+/// models stand in for what is installed. A change the agent wrote on a model
+/// of its own choosing may have come from any of them.
 pub fn select(
-    author: Option<&str>,
+    author: &Author,
     prefs: &Preferences,
     catalog: &Catalog,
     configured: &[String],
     round: u32,
 ) -> Reviewer {
+    let named = author.model();
     let mut candidates: Vec<String> = Vec::new();
     let mut push = |name: &str| {
         let name = name.trim();
         if name.is_empty() || stages::is_auto(name) || !catalog.accepts(name) {
             return;
         }
-        if author.is_some_and(|author| stages::same_model(author, name)) {
+        if named.is_some_and(|author| stages::same_model(author, name)) {
             return;
         }
         if candidates
@@ -65,7 +102,7 @@ pub fn select(
     }
     if candidates.is_empty() {
         return Reviewer {
-            model: author
+            model: named
                 .map(str::to_string)
                 .or_else(|| prefs.reasoning.clone())
                 .or_else(|| prefs.fast.clone())
@@ -76,15 +113,18 @@ pub fn select(
     let index = usize::try_from(round.saturating_sub(1)).unwrap_or(0) % candidates.len();
     Reviewer {
         model: candidates[index].clone(),
-        same_model: false,
+        same_model: *author == Author::Chosen && catalog.chooses(),
     }
 }
 
-/// The model that wrote a change, as its run recorded it. A run whose agent
-/// chose its own model recorded [`stages::AUTO`], which names no model, so no
-/// review can be shown to be independent of it.
-pub fn author(recorded: Option<String>) -> Option<String> {
-    recorded.filter(|model| !stages::is_auto(model))
+/// Why a review by `reviewer` cannot count as independent of `author`, or
+/// `None` when it can.
+pub fn objection(author: &Author, reviewer: &Reviewer) -> Option<&'static str> {
+    match author {
+        Author::Unrecorded => Some(UNRECORDED_AUTHOR),
+        Author::Chosen => Some(CHOSEN_AUTHOR),
+        Author::Model(_) => reviewer.same_model.then_some(NO_OTHER_MODEL),
+    }
 }
 
 /// The workspace's model preferences and what `backend` can run, read the way
@@ -145,15 +185,16 @@ mod tests {
     #[test]
     fn the_author_is_never_its_own_reviewer_while_another_model_exists() {
         let prefs = Preferences::default();
-        let first = select(Some("author"), &prefs, &catalog(), &[], 1);
+        let author = Author::Model("author".into());
+        let first = select(&author, &prefs, &catalog(), &[], 1);
         assert_eq!(first.model, "big:latest");
         assert!(!first.same_model);
-        let second = select(Some("author"), &prefs, &catalog(), &[], 2);
+        let second = select(&author, &prefs, &catalog(), &[], 2);
         assert_eq!(
             second.model, "small:latest",
             "rounds rotate through the rest"
         );
-        let third = select(Some("author"), &prefs, &catalog(), &[], 3);
+        let third = select(&author, &prefs, &catalog(), &[], 3);
         assert_eq!(third.model, "big:latest");
     }
 
@@ -164,16 +205,11 @@ mod tests {
             fast: Some("author".into()),
             ..Preferences::default()
         };
-        let picked = select(
-            Some("author"),
-            &prefs,
-            &catalog(),
-            &["ops-reviewer".into()],
-            1,
-        );
+        let author = Author::Model("author".into());
+        let picked = select(&author, &prefs, &catalog(), &["ops-reviewer".into()], 1);
         assert_eq!(picked.model, "ops-reviewer");
         let alone = select(
-            Some("author"),
+            &author,
             &Preferences::default(),
             &Catalog {
                 models: vec![installed("author", 5)],
@@ -194,29 +230,94 @@ mod tests {
         };
         let claude = Catalog::agent(AgentKind::Claude);
         let configured = ["qwen3:32b".to_string(), "opus".to_string()];
+        let sonnet = Author::Model("sonnet".into());
 
         assert_eq!(
-            select(Some("sonnet"), &prefs, &claude, &configured, 1),
+            select(&sonnet, &prefs, &claude, &configured, 1),
             Reviewer {
                 model: "opus".into(),
                 same_model: false,
             }
         );
         assert_eq!(
-            select(Some("sonnet"), &prefs, &claude, &configured, 2).model,
+            select(&sonnet, &prefs, &claude, &configured, 2).model,
             "haiku",
             "the agent's other models follow the ones configured"
         );
         assert_eq!(
-            select(Some("sonnet"), &prefs, &claude, &configured, 3).model,
+            select(&sonnet, &prefs, &claude, &configured, 3).model,
             "opus"
         );
     }
 
     #[test]
-    fn a_run_left_to_the_agent_s_choice_names_no_author() {
-        assert_eq!(author(Some(stages::AUTO.into())), None);
-        assert_eq!(author(Some("sonnet".into())), Some("sonnet".into()));
-        assert_eq!(author(None), None);
+    fn a_run_left_to_the_agent_s_choice_is_never_reviewed_as_independent() {
+        let claude = Catalog::agent(AgentKind::Claude);
+        let author = Author::recorded(Some(stages::AUTO.into()));
+
+        for round in 1..=3 {
+            let reviewer = select(&author, &Preferences::default(), &claude, &[], round);
+            assert!(
+                reviewer.same_model,
+                "round {round}: {reviewer:?} counted as independent of a model the agent chose"
+            );
+            assert_eq!(objection(&author, &reviewer), Some(CHOSEN_AUTHOR));
+        }
+    }
+
+    #[test]
+    fn an_agent_s_choice_is_not_called_an_endpoint_reviewer_s_own_model_nor_independent_of_it() {
+        let author = Author::recorded(Some(stages::AUTO.into()));
+
+        let reviewer = select(&author, &Preferences::default(), &catalog(), &[], 1);
+
+        assert_eq!(
+            reviewer,
+            Reviewer {
+                model: "big:latest".into(),
+                same_model: false,
+            }
+        );
+        assert_eq!(objection(&author, &reviewer), Some(CHOSEN_AUTHOR));
+    }
+
+    #[test]
+    fn only_a_named_author_and_another_model_make_a_review_independent() {
+        let claude = Catalog::agent(AgentKind::Claude);
+        let sonnet = Author::Model("sonnet".into());
+        let alone = Catalog {
+            models: vec![installed("author", 5)],
+            agent: None,
+        };
+        let author = Author::Model("author".into());
+
+        let other = select(&sonnet, &Preferences::default(), &claude, &[], 1);
+        assert_eq!(objection(&sonnet, &other), None, "{other:?}");
+        let itself = select(&author, &Preferences::default(), &alone, &[], 1);
+        assert_eq!(objection(&author, &itself), Some(NO_OTHER_MODEL));
+        let unknown = select(
+            &Author::Unrecorded,
+            &Preferences::default(),
+            &claude,
+            &[],
+            1,
+        );
+        assert!(!unknown.same_model);
+        assert_eq!(
+            objection(&Author::Unrecorded, &unknown),
+            Some(UNRECORDED_AUTHOR)
+        );
+    }
+
+    #[test]
+    fn a_run_names_its_author_only_when_it_recorded_a_model() {
+        assert_eq!(Author::recorded(Some(stages::AUTO.into())), Author::Chosen);
+        assert_eq!(
+            Author::recorded(Some("sonnet".into())),
+            Author::Model("sonnet".into())
+        );
+        assert_eq!(Author::recorded(None), Author::Unrecorded);
+        assert_eq!(Author::Chosen.model(), None);
+        assert_eq!(Author::Model("sonnet".into()).model(), Some("sonnet"));
     }
 }
