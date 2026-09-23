@@ -104,9 +104,13 @@ export function AgentSignIn({
   const codeExpired = useExpired(device?.expires_at ?? null);
   const lapsed = useExpired(status?.state === 'signed_in' ? status.expires_at : null);
 
+  const outdated = expired || codeExpired;
+  const wasOutdated = useRef(outdated);
+
   useEffect(() => {
-    if (expired || codeExpired) setFocus('status');
-  }, [expired, codeExpired]);
+    if (outdated && !wasOutdated.current) setFocus('status');
+    wasOutdated.current = outdated;
+  }, [outdated]);
 
   useEffect(() => {
     if (!waiting) return;

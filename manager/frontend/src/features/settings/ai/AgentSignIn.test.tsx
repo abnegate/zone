@@ -374,6 +374,7 @@ describe('AgentSignIn', () => {
         vi.advanceTimersByTime(10 * 60_000 - 1);
       });
       expect(screen.getByRole('link', { name: 'Open claude.com' })).toBeInTheDocument();
+      screen.getByLabelText('Code from claude.com').focus();
 
       await act(async () => {
         vi.advanceTimersByTime(1);
@@ -382,6 +383,7 @@ describe('AgentSignIn', () => {
       expect(screen.queryByLabelText('Code from claude.com')).toBeNull();
       expect(screen.getByText(/The link from claude.com expired/)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Start again' })).toBeEnabled();
+      expect(focused(screen.getByRole('status'))).toBe(true);
     });
 
     it('shows the plan and expiry of a sign-in this organization holds, and signs it out', async () => {
@@ -751,6 +753,16 @@ describe('AgentSignIn', () => {
       });
       expect(screen.getByText('Signed in')).toBeInTheDocument();
       expect(focused(elsewhere)).toBe(true);
+    });
+
+    it('takes no focus when it opens on a code that has already expired', async () => {
+      renderPanel('codex', codexPending);
+
+      expect(
+        screen.getByText('The one-time code expired. Cancel, then sign in again.')
+      ).toBeInTheDocument();
+      await act(async () => {});
+      expect(focused(screen.getByRole('status'))).toBe(false);
     });
 
     it('describes the paste field by its hint, and by its error once a code cannot be read', async () => {
