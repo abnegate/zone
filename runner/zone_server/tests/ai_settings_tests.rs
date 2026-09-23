@@ -8,6 +8,7 @@ use serde_json::json;
 use common::{TestClient, test_email, test_password};
 
 const AGENT_PROVIDERS: [&str; 2] = ["claude_code", "codex"];
+const MODEL_FIELDS: [&str; 3] = ["model_fast", "model_reasoning", "model_embedding"];
 const INVALID_PROVIDER: &str =
     "Invalid provider. Must be one of: self_hosted, openai, anthropic, bedrock, claude_code, codex";
 
@@ -982,6 +983,165 @@ async fn test_workspace_model_audio_overrides_organization() {
         "org-audio.safetensors",
         "clearing the workspace override must fall back to the organization"
     );
+}
+
+#[tokio::test]
+async fn test_blank_models_clear_saved_organization_models() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let path = format!("/api/organizations/{org_id}/settings/ai");
+
+    let first = client
+        .put_json_auth(
+            &path,
+            &json!({
+                "provider": "claude_code",
+                "model_fast": "",
+                "model_reasoning": "",
+                "model_embedding": ""
+            }),
+            &token,
+        )
+        .await;
+    first.assert_status(StatusCode::OK);
+    for field in MODEL_FIELDS {
+        assert!(
+            first.json_value()[field].is_null(),
+            "the first save must store a blank {field} as no model"
+        );
+    }
+
+    for field in MODEL_FIELDS {
+        client
+            .put_json_auth(&path, &json!({ field: "saved-model" }), &token)
+            .await
+            .assert_status(StatusCode::OK);
+
+        let omitted = client
+            .put_json_auth(&path, &json!({ "provider": "claude_code" }), &token)
+            .await;
+        omitted.assert_status(StatusCode::OK);
+        assert_eq!(
+            omitted.json_value()[field],
+            "saved-model",
+            "leaving {field} out must keep the saved model"
+        );
+
+        let cleared = client
+            .put_json_auth(
+                &path,
+                &json!({ "provider": "claude_code", field: "" }),
+                &token,
+            )
+            .await;
+        cleared.assert_status(StatusCode::OK);
+        assert!(
+            cleared.json_value()[field].is_null(),
+            "a blank {field} must clear the saved model"
+        );
+
+        let stored = client.get_auth(&path, &token).await;
+        stored.assert_status(StatusCode::OK);
+        assert!(
+            stored.json_value()[field].is_null(),
+            "the cleared {field} must stay cleared"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_blank_models_clear_saved_workspace_models() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let effective = format!("{workspace}/effective");
+
+    client
+        .put_json_auth(
+            &organization,
+            &json!({
+                "provider": "claude_code",
+                "model_fast": "organization-model",
+                "model_reasoning": "organization-model",
+                "model_embedding": "organization-model"
+            }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let first = client
+        .put_json_auth(
+            &workspace,
+            &json!({
+                "provider": "codex",
+                "model_fast": "",
+                "model_reasoning": "",
+                "model_embedding": ""
+            }),
+            &token,
+        )
+        .await;
+    first.assert_status(StatusCode::OK);
+    let inherited = client.get_auth(&effective, &token).await;
+    inherited.assert_status(StatusCode::OK);
+    for field in MODEL_FIELDS {
+        assert!(
+            first.json_value()[field].is_null(),
+            "the first save must store a blank {field} as no model"
+        );
+        assert_eq!(
+            inherited.json_value()[field],
+            "organization-model",
+            "a blank {field} must leave the organization's model in effect"
+        );
+    }
+
+    for field in MODEL_FIELDS {
+        client
+            .put_json_auth(
+                &workspace,
+                &json!({ "provider": "codex", field: "workspace-model" }),
+                &token,
+            )
+            .await
+            .assert_status(StatusCode::OK);
+
+        let omitted = client
+            .put_json_auth(&workspace, &json!({ "provider": "codex" }), &token)
+            .await;
+        omitted.assert_status(StatusCode::OK);
+        assert_eq!(
+            omitted.json_value()[field],
+            "workspace-model",
+            "leaving {field} out must keep the workspace's model"
+        );
+
+        let cleared = client
+            .put_json_auth(
+                &workspace,
+                &json!({ "provider": "codex", field: "" }),
+                &token,
+            )
+            .await;
+        cleared.assert_status(StatusCode::OK);
+        assert!(
+            cleared.json_value()[field].is_null(),
+            "a blank {field} must clear the workspace's model"
+        );
+
+        let reinherited = client.get_auth(&effective, &token).await;
+        reinherited.assert_status(StatusCode::OK);
+        assert_eq!(
+            reinherited.json_value()[field],
+            "organization-model",
+            "clearing the workspace's {field} must fall back to the organization's"
+        );
+    }
 }
 
 #[tokio::test]

@@ -314,7 +314,8 @@ where
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
             model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio
         ) VALUES (
-            $1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            $1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), '')
         )
         ON CONFLICT (organization_id) DO UPDATE SET
@@ -329,10 +330,22 @@ where
             bedrock_access_key = COALESCE($10, organization_ai_settings.bedrock_access_key),
             bedrock_secret_key = COALESCE($11, organization_ai_settings.bedrock_secret_key),
             bedrock_use_iam_role = COALESCE($12, organization_ai_settings.bedrock_use_iam_role),
-            model_fast = COALESCE($13, organization_ai_settings.model_fast),
-            model_reasoning = COALESCE($14, organization_ai_settings.model_reasoning),
-            model_embedding = COALESCE($15, organization_ai_settings.model_embedding),
-            -- NULL keeps the previous filename; empty string clears to NULL (server default).
+            -- NULL keeps the saved model; an empty string clears it to NULL.
+            model_fast = CASE
+                WHEN $13 IS NULL THEN organization_ai_settings.model_fast
+                WHEN BTRIM($13) = '' THEN NULL
+                ELSE $13
+            END,
+            model_reasoning = CASE
+                WHEN $14 IS NULL THEN organization_ai_settings.model_reasoning
+                WHEN BTRIM($14) = '' THEN NULL
+                ELSE $14
+            END,
+            model_embedding = CASE
+                WHEN $15 IS NULL THEN organization_ai_settings.model_embedding
+                WHEN BTRIM($15) = '' THEN NULL
+                ELSE $15
+            END,
             model_image = CASE
                 WHEN $16 IS NULL THEN organization_ai_settings.model_image
                 WHEN BTRIM($16) = '' THEN NULL
@@ -488,7 +501,8 @@ where
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
             model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), '')
         )
         ON CONFLICT (workspace_id) DO UPDATE SET
@@ -503,10 +517,22 @@ where
             bedrock_access_key = COALESCE($10, workspace_ai_settings.bedrock_access_key),
             bedrock_secret_key = COALESCE($11, workspace_ai_settings.bedrock_secret_key),
             bedrock_use_iam_role = COALESCE($12, workspace_ai_settings.bedrock_use_iam_role),
-            model_fast = COALESCE($13, workspace_ai_settings.model_fast),
-            model_reasoning = COALESCE($14, workspace_ai_settings.model_reasoning),
-            model_embedding = COALESCE($15, workspace_ai_settings.model_embedding),
-            -- NULL keeps the previous filename; empty string clears to NULL (inherit).
+            -- NULL keeps the saved model; an empty string clears it to NULL.
+            model_fast = CASE
+                WHEN $13 IS NULL THEN workspace_ai_settings.model_fast
+                WHEN BTRIM($13) = '' THEN NULL
+                ELSE $13
+            END,
+            model_reasoning = CASE
+                WHEN $14 IS NULL THEN workspace_ai_settings.model_reasoning
+                WHEN BTRIM($14) = '' THEN NULL
+                ELSE $14
+            END,
+            model_embedding = CASE
+                WHEN $15 IS NULL THEN workspace_ai_settings.model_embedding
+                WHEN BTRIM($15) = '' THEN NULL
+                ELSE $15
+            END,
             model_image = CASE
                 WHEN $16 IS NULL THEN workspace_ai_settings.model_image
                 WHEN BTRIM($16) = '' THEN NULL
