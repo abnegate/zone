@@ -59,16 +59,18 @@ ARG CODEX_SHA256_AMD64=aff46539a83aff86e3c62c592bce2c50d95391f9df289afaf03a50c01
 ARG CODEX_SHA256_ARM64=558e12aaa6dacb335ec47240bf9721db8a54746806d64f01185a403f44f79b72
 ARG BWRAP_SHA256_AMD64=74bb868f29e845da36ab287b88459a5fbb1fa4e16ff59837660312eaf0b33f3a
 ARG BWRAP_SHA256_ARM64=42803e6a0f5557bb32fbef636aa9efa805eb5a108c28a670e83fd1a0e1c672aa
+ARG CODE_MODE_HOST_SHA256_AMD64=a929daa9f6a0bddc00c0c9e6402df117b125acd96f9d554f6c99c32c7e66c608
+ARG CODE_MODE_HOST_SHA256_ARM64=40198138b03798ffa8c0da4c827a8ca5896774ea104b7110c2a2c0c7560cbe94
 
 WORKDIR /agents
 RUN set -eu; \
     case "$TARGETARCH" in \
         amd64) platform=linux-x64; triple=x86_64-unknown-linux-musl; \
             claude_sha256=$CLAUDE_SHA256_AMD64; codex_sha256=$CODEX_SHA256_AMD64; \
-            bwrap_sha256=$BWRAP_SHA256_AMD64 ;; \
+            bwrap_sha256=$BWRAP_SHA256_AMD64; host_sha256=$CODE_MODE_HOST_SHA256_AMD64 ;; \
         arm64) platform=linux-arm64; triple=aarch64-unknown-linux-musl; \
             claude_sha256=$CLAUDE_SHA256_ARM64; codex_sha256=$CODEX_SHA256_ARM64; \
-            bwrap_sha256=$BWRAP_SHA256_ARM64 ;; \
+            bwrap_sha256=$BWRAP_SHA256_ARM64; host_sha256=$CODE_MODE_HOST_SHA256_ARM64 ;; \
         *) echo "No claude or codex release for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
     esac; \
     fetch() { \
@@ -85,11 +87,13 @@ RUN set -eu; \
     fetch claude "https://downloads.claude.ai/claude-code-releases/$CLAUDE_VERSION/$platform/claude" "$claude_sha256"; \
     fetch codex.tar.gz "$releases/codex-$triple.tar.gz" "$codex_sha256"; \
     fetch bwrap.tar.gz "$releases/bwrap-$triple.tar.gz" "$bwrap_sha256"; \
+    fetch codex-code-mode-host.tar.gz "$releases/codex-code-mode-host-$triple.tar.gz" "$host_sha256"; \
     unpack codex; \
     unpack bwrap; \
-    chmod 0755 claude codex bwrap; \
+    unpack codex-code-mode-host; \
+    chmod 0755 claude codex bwrap codex-code-mode-host; \
     mkdir /usr/local/bin/codex-resources; \
-    mv claude codex /usr/local/bin/; \
+    mv claude codex codex-code-mode-host /usr/local/bin/; \
     mv bwrap /usr/local/bin/codex-resources/bwrap
 
 FROM runtime-base AS runtime
