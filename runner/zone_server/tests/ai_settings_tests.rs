@@ -7,6 +7,10 @@ use serde_json::json;
 
 use common::{TestClient, test_email, test_password};
 
+const AGENT_PROVIDERS: [&str; 2] = ["claude_code", "codex"];
+const INVALID_PROVIDER: &str =
+    "Invalid provider. Must be one of: self_hosted, openai, anthropic, bedrock, claude_code, codex";
+
 async fn get_auth_token(client: &TestClient) -> String {
     let email = test_email();
     let password = test_password();
@@ -254,8 +258,31 @@ async fn test_upsert_org_ai_settings_invalid_provider() {
         .await;
 
     response.assert_status(StatusCode::BAD_REQUEST);
-    let body = response.json_value();
-    assert!(body["error"].as_str().unwrap().contains("Invalid provider"));
+    assert_eq!(response.json_value()["error"], INVALID_PROVIDER);
+}
+
+#[tokio::test]
+async fn test_upsert_org_ai_settings_agent_providers() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let path = format!("/api/organizations/{org_id}/settings/ai");
+
+    for provider in AGENT_PROVIDERS {
+        let response = client
+            .put_json_auth(&path, &json!({ "provider": provider }), &token)
+            .await;
+        response.assert_status(StatusCode::OK);
+        assert_eq!(response.json_value()["provider"], provider);
+
+        let stored = client.get_auth(&path, &token).await;
+        stored.assert_status(StatusCode::OK);
+        assert_eq!(
+            stored.json_value()["provider"],
+            provider,
+            "the organization must keep {provider} once it is saved"
+        );
+    }
 }
 
 #[tokio::test]
@@ -417,6 +444,32 @@ async fn test_upsert_workspace_ai_settings_invalid_provider() {
         .await;
 
     response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(response.json_value()["error"], INVALID_PROVIDER);
+}
+
+#[tokio::test]
+async fn test_upsert_workspace_ai_settings_agent_providers() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let path = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    for provider in AGENT_PROVIDERS {
+        let response = client
+            .put_json_auth(&path, &json!({ "provider": provider }), &token)
+            .await;
+        response.assert_status(StatusCode::OK);
+        assert_eq!(response.json_value()["provider"], provider);
+
+        let effective = client.get_auth(&format!("{path}/effective"), &token).await;
+        effective.assert_status(StatusCode::OK);
+        assert_eq!(
+            effective.json_value()["provider"],
+            provider,
+            "a workspace override to {provider} must win over the organization's self_hosted"
+        );
+    }
 }
 
 #[tokio::test]

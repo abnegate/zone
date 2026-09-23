@@ -7,6 +7,7 @@ use zone_context::embeddings::providers::{
     PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
 };
 use zone_core::SecretValue;
+use zone_core::llm::AgentKind;
 
 use super::{
     DbResult,
@@ -15,6 +16,32 @@ use super::{
 };
 
 const PROVIDER_ANTHROPIC: &str = "anthropic";
+pub const PROVIDER_CLAUDE_CODE: &str = "claude_code";
+pub const PROVIDER_CODEX: &str = "codex";
+
+const PROVIDERS: [&str; 6] = [
+    PROVIDER_SELF_HOSTED,
+    PROVIDER_OPENAI,
+    PROVIDER_ANTHROPIC,
+    PROVIDER_BEDROCK,
+    PROVIDER_CLAUDE_CODE,
+    PROVIDER_CODEX,
+];
+
+pub fn agent(provider: &str) -> Option<AgentKind> {
+    match provider {
+        PROVIDER_CLAUDE_CODE => Some(AgentKind::Claude),
+        PROVIDER_CODEX => Some(AgentKind::Codex),
+        _ => None,
+    }
+}
+
+pub fn provider(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Claude => PROVIDER_CLAUDE_CODE,
+        AgentKind::Codex => PROVIDER_CODEX,
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AccessError {
@@ -30,6 +57,7 @@ pub enum AccessError {
 
 type AccessResult<T> = Result<T, AccessError>;
 
+#[derive(Default)]
 pub struct Update<'a> {
     pub provider: Option<&'a str>,
     pub litellm_host: Option<&'a str>,
@@ -51,20 +79,13 @@ pub struct Update<'a> {
 }
 
 fn validate(update: &Update<'_>) -> AccessResult<()> {
-    if update.provider.is_some_and(|provider| {
-        ![
-            PROVIDER_SELF_HOSTED,
-            PROVIDER_OPENAI,
-            PROVIDER_ANTHROPIC,
-            PROVIDER_BEDROCK,
-        ]
-        .contains(&provider)
-    }) {
-        return Err(AccessError::Invalid(format!(
-            "Invalid provider. Must be one of: {PROVIDER_SELF_HOSTED}, {PROVIDER_OPENAI}, {PROVIDER_ANTHROPIC}, {PROVIDER_BEDROCK}"
-        )));
+    match update.provider {
+        Some(provider) if !PROVIDERS.contains(&provider) => Err(AccessError::Invalid(format!(
+            "Invalid provider. Must be one of: {}",
+            PROVIDERS.join(", ")
+        ))),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// The organization's own settings carry its provider credentials, so reading
@@ -203,6 +224,10 @@ pub struct EffectiveAiSettings {
 }
 
 impl EffectiveAiSettings {
+    pub fn agent(&self) -> Option<AgentKind> {
+        agent(&self.provider)
+    }
+
     /// Overlay workspace/org image settings onto the process ComfyUI defaults.
     ///
     /// `model_fast` classifies image intent when rules are unsure, including
@@ -774,6 +799,62 @@ mod tests {
             model_video: None,
             model_audio: None,
         }
+    }
+
+    #[test]
+    fn each_agent_provider_selects_its_agent_and_back() {
+        assert_eq!(agent(PROVIDER_CLAUDE_CODE), Some(AgentKind::Claude));
+        assert_eq!(agent(PROVIDER_CODEX), Some(AgentKind::Codex));
+        for kind in AgentKind::ALL {
+            assert_eq!(agent(provider(kind)), Some(kind));
+        }
+    }
+
+    #[test]
+    fn a_provider_that_is_no_agent_selects_none() {
+        for name in [
+            PROVIDER_SELF_HOSTED,
+            PROVIDER_OPENAI,
+            PROVIDER_ANTHROPIC,
+            PROVIDER_BEDROCK,
+            AgentKind::Claude.as_str(),
+            "",
+            "gemini",
+        ] {
+            assert_eq!(agent(name), None, "{name:?} must not select an agent");
+        }
+    }
+
+    #[test]
+    fn effective_settings_select_the_agent_their_provider_names() {
+        let mut settings = settings(None, None);
+        assert_eq!(settings.agent(), None);
+        settings.provider = PROVIDER_CLAUDE_CODE.to_string();
+        assert_eq!(settings.agent(), Some(AgentKind::Claude));
+        settings.provider = PROVIDER_CODEX.to_string();
+        assert_eq!(settings.agent(), Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn validate_accepts_every_provider_and_lists_them_all_when_it_refuses() {
+        for provider in PROVIDERS {
+            let update = Update {
+                provider: Some(provider),
+                ..Update::default()
+            };
+            assert!(validate(&update).is_ok(), "{provider} must be accepted");
+        }
+        assert!(validate(&Update::default()).is_ok());
+
+        let refused = validate(&Update {
+            provider: Some("gemini"),
+            ..Update::default()
+        })
+        .expect_err("gemini is not a provider");
+        assert_eq!(
+            refused.to_string(),
+            "Invalid provider. Must be one of: self_hosted, openai, anthropic, bedrock, claude_code, codex"
+        );
     }
 
     #[test]
