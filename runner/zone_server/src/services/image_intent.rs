@@ -3,8 +3,8 @@
 //! High-confidence rules route immediately. Anything leftover — including
 //! informal edits of an attached photo that the word lists miss — is decided
 //! by a short LiteLLM call (workspace Fast, the current chat model, or a small
-//! installed completion model) with a small token budget. Timeouts and empty
-//! hosts fall back to chat.
+//! installed completion model) with a small token budget. Timeouts, empty
+//! hosts and an agent with no model named for it fall back to chat.
 
 use serde_json::Value;
 use std::time::Duration;
@@ -108,13 +108,14 @@ impl ImageIntentClassifier {
         }
     }
 
-    /// Whether there is a model to ask at all. An empty host disqualifies only
-    /// the endpoint: a CLI backend runs an agent on this host, and a self-host
-    /// that serves completions that way has no LiteLLM to name.
+    /// Whether there is a model to ask at all: the endpoint needs a host, and
+    /// an agent a model named for it.
     fn reachable(&self) -> bool {
         match self.backend {
             LlmBackend::Http => !self.litellm_host.trim().is_empty(),
-            LlmBackend::Cli { .. } => true,
+            LlmBackend::Cli { .. } => {
+                !crate::services::stages::is_auto(&self.config.classifier_model)
+            }
         }
     }
 
@@ -1738,6 +1739,38 @@ mod tests {
             agent.classify(SOFT_AUDIO, None).await,
             GenerationIntent::Image,
             "the configured agent was never asked, so the empty host decided the turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_left_to_choose_its_own_model_is_asked_neither_to_classify_nor_to_rewrite() {
+        const SOFT_AUDIO: &str = "generate ambient rain sounds";
+        const EDIT: &str = "Remove this object from an image";
+        let directory = TempDir::new().expect("a temporary directory");
+        let agent = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                classifier_model: crate::services::stages::AUTO.to_string(),
+                classifier_timeout_secs: 20,
+                ..Default::default()
+            },
+            String::new(),
+            String::new(),
+            LlmBackend::cli(
+                AgentKind::Claude,
+                CliSettings::default().with_executable(fake_agent(&directory, "IMAGE")),
+            ),
+        );
+
+        assert_eq!(
+            agent.classify(SOFT_AUDIO, None).await,
+            GenerationIntent::Chat,
+            "an agent with no model named for it was asked to classify"
+        );
+        assert_eq!(
+            agent.edit_prompt(EDIT).await,
+            heuristic_edit_prompt(EDIT),
+            "an agent with no model named for it was asked to rewrite the edit"
         );
     }
 
