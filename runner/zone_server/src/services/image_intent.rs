@@ -74,6 +74,22 @@ impl GenerationIntent {
     }
 }
 
+/// What the message's flags and the word rules make of it, before any model
+/// is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    Settled(GenerationIntent),
+    /// Only a model can tell; these are the lanes it may still choose.
+    Unsettled(Lanes),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lanes {
+    has_source_image: bool,
+    image: bool,
+    audio: bool,
+}
+
 #[derive(Clone)]
 pub struct ImageIntentClassifier {
     config: ComfyUiConfig,
@@ -91,6 +107,50 @@ fn is_automation_turn(metadata: Option<&Value>) -> bool {
         .and_then(|m| m.get("source"))
         .and_then(Value::as_str)
         .is_some_and(|source| source == "reminder")
+}
+
+/// What `config`, the message's flags and the word rules decide on their own.
+pub fn reading(config: &ComfyUiConfig, content: &str, metadata: Option<&Value>) -> Reading {
+    if !config.enabled || is_automation_turn(metadata) {
+        return Reading::Settled(GenerationIntent::Chat);
+    }
+    let flag = |name: &str| metadata.and_then(|m| m.get(name)).and_then(Value::as_bool);
+    if flag("upscale") == Some(true) {
+        return Reading::Settled(GenerationIntent::Upscale);
+    }
+    if flag("video_generation") == Some(true) {
+        return Reading::Settled(GenerationIntent::Video);
+    }
+    if flag("audio_generation") == Some(true) {
+        return Reading::Settled(GenerationIntent::Audio);
+    }
+    if flag("image_generation") == Some(true) {
+        return Reading::Settled(GenerationIntent::Image);
+    }
+    let skip_video = flag("video_generation") == Some(false);
+    let skip_audio = flag("audio_generation") == Some(false);
+    let skip_image = flag("image_generation") == Some(false);
+    let skip_upscale = flag("upscale") == Some(false);
+    // Turning every generator off means "produce no media", which upscaling
+    // would violate; `upscale: false` on its own only suppresses this path.
+    if skip_video && skip_audio && skip_image {
+        return Reading::Settled(GenerationIntent::Chat);
+    }
+
+    let has_source_image = crate::services::media_source::has_image_attachment(metadata);
+    let has_source_media = crate::services::media_source::has_media_attachment(metadata);
+    match deterministic_decision(content, has_source_image, has_source_media) {
+        RuleDecision::Upscale if !skip_upscale => Reading::Settled(GenerationIntent::Upscale),
+        RuleDecision::Video if !skip_video => Reading::Settled(GenerationIntent::Video),
+        RuleDecision::Audio if !skip_audio => Reading::Settled(GenerationIntent::Audio),
+        RuleDecision::Image if !skip_image => Reading::Settled(GenerationIntent::Image),
+        RuleDecision::Ambiguous if !skip_image || !skip_audio => Reading::Unsettled(Lanes {
+            has_source_image,
+            image: !skip_image,
+            audio: !skip_audio,
+        }),
+        _ => Reading::Settled(GenerationIntent::Chat),
+    }
 }
 
 impl ImageIntentClassifier {
@@ -122,46 +182,20 @@ impl ImageIntentClassifier {
     /// Classify a message. Any unavailable, timed-out, or malformed model result
     /// safely falls back to normal chat.
     pub async fn classify(&self, content: &str, metadata: Option<&Value>) -> GenerationIntent {
-        if !self.config.enabled || is_automation_turn(metadata) {
-            return GenerationIntent::Chat;
+        match reading(&self.config, content, metadata) {
+            Reading::Settled(intent) => intent,
+            Reading::Unsettled(lanes) => self.settle(content, lanes).await,
         }
-        let flag = |name: &str| metadata.and_then(|m| m.get(name)).and_then(Value::as_bool);
-        if flag("upscale") == Some(true) {
-            return GenerationIntent::Upscale;
-        }
-        if flag("video_generation") == Some(true) {
-            return GenerationIntent::Video;
-        }
-        if flag("audio_generation") == Some(true) {
-            return GenerationIntent::Audio;
-        }
-        if flag("image_generation") == Some(true) {
-            return GenerationIntent::Image;
-        }
-        let skip_video = flag("video_generation") == Some(false);
-        let skip_audio = flag("audio_generation") == Some(false);
-        let skip_image = flag("image_generation") == Some(false);
-        let skip_upscale = flag("upscale") == Some(false);
-        // Turning every generator off means "produce no media", which upscaling
-        // would violate; `upscale: false` on its own only suppresses this path.
-        if skip_video && skip_audio && skip_image {
-            return GenerationIntent::Chat;
-        }
+    }
 
-        let has_source_image = crate::services::media_source::has_image_attachment(metadata);
-        let has_source_media = crate::services::media_source::has_media_attachment(metadata);
-        match deterministic_decision(content, has_source_image, has_source_media) {
-            RuleDecision::Upscale if !skip_upscale => GenerationIntent::Upscale,
-            RuleDecision::Video if !skip_video => GenerationIntent::Video,
-            RuleDecision::Audio if !skip_audio => GenerationIntent::Audio,
-            RuleDecision::Image if !skip_image => GenerationIntent::Image,
-            RuleDecision::Ambiguous if !skip_image || !skip_audio => {
-                match self.classify_ambiguous(content, has_source_image).await {
-                    AmbiguousVerdict::Image if !skip_image => GenerationIntent::Image,
-                    AmbiguousVerdict::Audio if !skip_audio => GenerationIntent::Audio,
-                    _ => GenerationIntent::Chat,
-                }
-            }
+    /// What the model makes of a message the rules left unsettled.
+    pub async fn settle(&self, content: &str, lanes: Lanes) -> GenerationIntent {
+        match self
+            .classify_ambiguous(content, lanes.has_source_image)
+            .await
+        {
+            AmbiguousVerdict::Image if lanes.image => GenerationIntent::Image,
+            AmbiguousVerdict::Audio if lanes.audio => GenerationIntent::Audio,
             _ => GenerationIntent::Chat,
         }
     }

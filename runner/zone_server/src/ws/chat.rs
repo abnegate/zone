@@ -388,11 +388,78 @@ impl Drop for Generation {
 type ChatPreparation = session::Preparation;
 
 enum Routing {
-    Image(crate::config::ComfyUiConfig),
+    Image(crate::config::ComfyUiConfig, LlmBackend),
     Video(crate::config::ComfyUiConfig),
     Audio(crate::config::ComfyUiConfig),
     Upscale(crate::config::ComfyUiConfig),
-    Chat(chats::ChatRow),
+    Chat(chats::ChatRow, Option<WorkspaceSettings>),
+}
+
+/// A workspace's AI settings, read once for a turn, and the organization
+/// they belong to.
+struct WorkspaceSettings {
+    organization: Uuid,
+    effective: ai_settings::EffectiveAiSettings,
+}
+
+impl WorkspaceSettings {
+    async fn read(pool: &PgPool, workspace_id: Uuid) -> Option<Self> {
+        let organization = match workspaces::get_workspace(pool, workspace_id).await {
+            Ok(Some(workspace)) => workspace.organization_id,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    %workspace_id,
+                    %error,
+                    "Could not read the workspace for its AI settings"
+                );
+                return None;
+            }
+        };
+        match ai_settings::get_effective_ai_settings(pool, organization, workspace_id).await {
+            Ok(effective) => Some(Self {
+                organization,
+                effective,
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    %workspace_id,
+                    %error,
+                    "Could not read the workspace's AI settings"
+                );
+                None
+            }
+        }
+    }
+
+    /// The backend `settings` choose, or the instance's default when they
+    /// could not be read.
+    async fn backend(
+        settings: Option<&Self>,
+        state: &AppState,
+    ) -> Result<LlmBackend, crate::services::backend::Error> {
+        match settings {
+            Some(settings) => {
+                crate::services::backend::for_settings(
+                    state,
+                    settings.organization,
+                    &settings.effective,
+                )
+                .await
+            }
+            None => Ok(crate::services::backend::instance(state.config())),
+        }
+    }
+
+    fn preferences(
+        settings: Option<&Self>,
+        classifier: &str,
+    ) -> crate::services::stages::Preferences {
+        crate::services::stages::Preferences::from_optional_settings(
+            settings.map(|settings| &settings.effective),
+            classifier,
+        )
+    }
 }
 
 /// Client message types
@@ -1687,6 +1754,7 @@ async fn handle_image_generation(
     prompt: &str,
     metadata: Option<&serde_json::Value>,
     image_config: crate::config::ComfyUiConfig,
+    backend: LlmBackend,
     generation: &mut Generation,
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1745,7 +1813,7 @@ async fn handle_image_generation(
             image_config.clone(),
             state.config().litellm_host.clone(),
             state.config().litellm_key.clone(),
-            classifier_backend(state, workspace_id).await,
+            backend,
         )
         .edit_prompt(prompt)
         .await
@@ -2379,7 +2447,7 @@ async fn handle_send_message(
             return Ok(());
         }
         match routing {
-            Routing::Image(config) => {
+            Routing::Image(config, backend) => {
                 handle_image_generation(
                     state,
                     stream,
@@ -2388,6 +2456,7 @@ async fn handle_send_message(
                     content,
                     metadata.as_ref(),
                     config,
+                    backend,
                     &mut request,
                     &mut session,
                 )
@@ -2433,7 +2502,7 @@ async fn handle_send_message(
                 )
                 .await
             }
-            Routing::Chat(mut chat) => {
+            Routing::Chat(mut chat, settings) => {
                 // Cleared before the prompt is built rather than after it.
                 // `prepare_chat` renders the approval rules from this flag, so
                 // setting it on the preparation instead would gate the tools
@@ -2451,7 +2520,7 @@ async fn handle_send_message(
                         return Ok(());
                     }
                     _ = session.guard.lost() => { return Err(OWNERSHIP_LOST.into()); }
-                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, web_search_requested) => result?,
+                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, settings.as_ref(), web_search_requested) => result?,
                 };
                 handle_chat_generation(state, stream, chat_id, workspace_id, user_id, preparation, &mut request, &mut session, &mut jobs).await
             }
@@ -2560,30 +2629,36 @@ async fn prepare_message(
     if chat.workspace_id != Some(workspace_id) {
         return Err("Chat does not belong to the authenticated workspace".into());
     }
+    let settings = WorkspaceSettings::read(state.db(), workspace_id).await;
     let mut image_config = state.config().comfyui.clone();
-    let settings = ai_settings::for_workspace(state.db(), workspace_id).await;
-    if let Some(effective) = &settings {
-        effective.apply_to_comfyui(&mut image_config);
+    if let Some(settings) = &settings {
+        settings.effective.apply_to_comfyui(&mut image_config);
     }
-    let backend = classifier_backend(state, workspace_id).await;
-    let catalog =
-        crate::services::stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
-    let prefs = crate::services::stages::Preferences::from_optional_settings(
-        settings.as_ref(),
-        &image_config.classifier_model,
-    );
-    image_config.classifier_model =
-        crate::services::stages::classifier_model(&prefs, &catalog, &chat.model_name);
-    let classifier = crate::services::image_intent::ImageIntentClassifier::new(
-        image_config.clone(),
-        state.config().litellm_host.clone(),
-        state.config().litellm_key.clone(),
-        backend,
-    );
-    let intent = classifier
-        .classify(content, metadata)
-        .await
-        .yielding_to_agent(chat.agent_enabled);
+    let mut backend = None;
+    let intent = match crate::services::image_intent::reading(&image_config, content, metadata) {
+        crate::services::image_intent::Reading::Settled(intent) => intent,
+        crate::services::image_intent::Reading::Unsettled(lanes) => {
+            let resolved = classifying(
+                state,
+                workspace_id,
+                &chat,
+                settings.as_ref(),
+                &mut image_config,
+            )
+            .await;
+            let intent = crate::services::image_intent::ImageIntentClassifier::new(
+                image_config.clone(),
+                state.config().litellm_host.clone(),
+                state.config().litellm_key.clone(),
+                resolved.clone(),
+            )
+            .settle(content, lanes)
+            .await;
+            backend = Some(resolved);
+            intent
+        }
+    }
+    .yielding_to_agent(chat.agent_enabled);
 
     if intent == crate::services::image_intent::GenerationIntent::Chat
         && crate::services::model::Model::completion(&state.config().ollama_host, &chat.model_name)
@@ -2595,15 +2670,38 @@ async fn prepare_message(
 
     Ok(match intent {
         crate::services::image_intent::GenerationIntent::Video => Routing::Video(image_config),
-        crate::services::image_intent::GenerationIntent::Image => Routing::Image(image_config),
+        crate::services::image_intent::GenerationIntent::Image => {
+            let backend = match backend {
+                Some(backend) => backend,
+                None => {
+                    classifying(
+                        state,
+                        workspace_id,
+                        &chat,
+                        settings.as_ref(),
+                        &mut image_config,
+                    )
+                    .await
+                }
+            };
+            Routing::Image(image_config, backend)
+        }
         crate::services::image_intent::GenerationIntent::Audio => Routing::Audio(image_config),
         crate::services::image_intent::GenerationIntent::Upscale => Routing::Upscale(image_config),
-        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat),
+        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat, settings),
     })
 }
 
-async fn classifier_backend(state: &AppState, workspace_id: Uuid) -> LlmBackend {
-    crate::services::backend::for_workspace(state, workspace_id)
+/// The backend a workspace's classifier runs on, with `config` naming the
+/// model it classifies with there.
+async fn classifying(
+    state: &AppState,
+    workspace_id: Uuid,
+    chat: &chats::ChatRow,
+    settings: Option<&WorkspaceSettings>,
+    config: &mut crate::config::ComfyUiConfig,
+) -> LlmBackend {
+    let backend = WorkspaceSettings::backend(settings, state)
         .await
         .unwrap_or_else(|error| {
             tracing::warn!(
@@ -2612,7 +2710,13 @@ async fn classifier_backend(state: &AppState, workspace_id: Uuid) -> LlmBackend 
                 "Could not resolve the workspace's model backend; classifying on the instance's"
             );
             crate::services::backend::instance(state.config())
-        })
+        });
+    let catalog =
+        crate::services::stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
+    let prefs = WorkspaceSettings::preferences(settings, &config.classifier_model);
+    config.classifier_model =
+        crate::services::stages::classifier_model(&prefs, &catalog, &chat.model_name);
+    backend
 }
 
 async fn load_web_search(
@@ -2691,30 +2795,13 @@ async fn prepare_chat(
     content: &str,
     metadata: Option<&serde_json::Value>,
     mut chat: chats::ChatRow,
+    settings: Option<&WorkspaceSettings>,
     web_search_requested: bool,
 ) -> Result<ChatPreparation, Box<dyn std::error::Error + Send + Sync>> {
-    let backend = crate::services::backend::for_workspace(state, workspace_id).await?;
+    let backend = WorkspaceSettings::backend(settings, state).await?;
     let catalog =
         crate::services::stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
-    let prefs = if let Ok(Some(workspace)) =
-        workspaces::get_workspace(state.db(), workspace_id).await
-        && let Ok(settings) = ai_settings::get_effective_ai_settings(
-            state.db(),
-            workspace.organization_id,
-            workspace_id,
-        )
-        .await
-    {
-        crate::services::stages::Preferences::from_settings(
-            &settings,
-            &state.config().comfyui.classifier_model,
-        )
-    } else {
-        crate::services::stages::Preferences::from_optional_settings(
-            None,
-            &state.config().comfyui.classifier_model,
-        )
-    };
+    let prefs = WorkspaceSettings::preferences(settings, &state.config().comfyui.classifier_model);
     chat.model_name = crate::services::stages::chat_model(
         &chat.model_name,
         &prefs,
@@ -4011,6 +4098,252 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    mod routing {
+        use super::*;
+        use crate::config::{AgentConfig, ComfyUiConfig, Config, ModelBackend};
+        use crate::db::ai_settings::PROVIDER_CLAUDE_CODE;
+        use crate::services::stages::AUTO;
+        use crate::services::stages::testing::{MODEL_FLAG, StandIn};
+        use tempfile::TempDir;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+        use zone_core::llm::AgentKind;
+
+        const CATALOG: &str = "/api/tags";
+        const QUESTION: &str = "What is a monad?";
+        const FAST: &str = "haiku";
+
+        /// An organization on `provider`, with a workspace and a chat left on
+        /// automatic model selection.
+        struct Organization {
+            pool: PgPool,
+            id: Uuid,
+            workspace: Uuid,
+            chat: Uuid,
+        }
+
+        impl Organization {
+            async fn on(provider: &str) -> Self {
+                let pool = PgPool::connect(
+                    &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+                )
+                .await
+                .expect("the test database");
+                let suffix = Uuid::new_v4().simple().to_string();
+                let organization =
+                    db::organizations::create_organization(&pool, "Routing", &suffix, None)
+                        .await
+                        .expect("an organization");
+                let workspace =
+                    workspaces::create_workspace(&pool, organization.id, "Routing", &suffix, None)
+                        .await
+                        .expect("a workspace");
+                sqlx::query(
+                    "INSERT INTO organization_ai_settings (organization_id, provider) VALUES ($1, $2)",
+                )
+                .bind(organization.id)
+                .bind(provider)
+                .execute(&pool)
+                .await
+                .expect("the organization's AI settings");
+                let chat =
+                    chats::create_chat(&pool, Some(workspace.id), "Routing", AUTO, false, false)
+                        .await
+                        .expect("a chat");
+                Self {
+                    pool,
+                    id: organization.id,
+                    workspace: workspace.id,
+                    chat: chat.id,
+                }
+            }
+
+            async fn remove(&self) {
+                sqlx::query("DELETE FROM organizations WHERE id = $1")
+                    .bind(self.id)
+                    .execute(&self.pool)
+                    .await
+                    .expect("the organization to be removed");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_turn_that_routes_no_media_reads_no_model_catalog() {
+            let ollama = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(CATALOG))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"models": []})),
+                )
+                .mount(&ollama)
+                .await;
+            let organization = Organization::on(PROVIDER_SELF_HOSTED).await;
+            let state = AppState::new(
+                Config {
+                    ollama_host: ollama.uri(),
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+
+            let routing = prepare_message(
+                &state,
+                organization.chat,
+                organization.workspace,
+                QUESTION,
+                None,
+            )
+            .await;
+            organization.remove().await;
+
+            assert!(matches!(routing, Ok(Routing::Chat(..))));
+            let reads = ollama
+                .received_requests()
+                .await
+                .expect("the requests Ollama received")
+                .iter()
+                .filter(|request| request.url.path() == CATALOG)
+                .count();
+            assert_eq!(
+                reads, 0,
+                "a turn that routes no media read the model catalog"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_turn_that_routes_no_media_leaves_the_organizations_agent_unresolved() {
+            let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
+            let agents = TempDir::new().expect("an agent state root");
+            let state = AppState::new(
+                Config {
+                    agents: AgentConfig {
+                        state: agents.path().to_path_buf(),
+                        host_login: true,
+                        ..AgentConfig::default()
+                    },
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+
+            let routing = prepare_message(
+                &state,
+                organization.chat,
+                organization.workspace,
+                QUESTION,
+                None,
+            )
+            .await;
+            organization.remove().await;
+
+            assert!(matches!(routing, Ok(Routing::Chat(..))));
+            assert!(
+                !agents.path().join(organization.id.to_string()).exists(),
+                "a turn that routes no media resolved the organization's agent"
+            );
+        }
+
+        /// An organization on Claude Code with `haiku` as its Fast model,
+        /// signed in through the host, and media routing on.
+        async fn routing_media_on_claude(
+            executable: Option<std::path::PathBuf>,
+        ) -> (Organization, TempDir, AppState) {
+            let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
+            sqlx::query(
+                "UPDATE organization_ai_settings SET model_fast = $2 WHERE organization_id = $1",
+            )
+            .bind(organization.id)
+            .bind(FAST)
+            .execute(&organization.pool)
+            .await
+            .expect("the organization's Fast model");
+            let agents = TempDir::new().expect("an agent state root");
+            let state = AppState::new(
+                Config {
+                    model_backend: ModelBackend::Cli {
+                        agent: AgentKind::Claude,
+                        executable,
+                    },
+                    agents: AgentConfig {
+                        state: agents.path().to_path_buf(),
+                        host_login: true,
+                        ..AgentConfig::default()
+                    },
+                    comfyui: ComfyUiConfig {
+                        enabled: true,
+                        classifier_timeout_secs: 20,
+                        ..ComfyUiConfig::default()
+                    },
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+            (organization, agents, state)
+        }
+
+        #[tokio::test]
+        async fn an_image_route_carries_the_backend_it_was_resolved_on() {
+            let (organization, _agents, state) = routing_media_on_claude(None).await;
+
+            let routing = prepare_message(
+                &state,
+                organization.chat,
+                organization.workspace,
+                "generate an image of a lighthouse at dusk",
+                None,
+            )
+            .await;
+            organization.remove().await;
+
+            let Ok(Routing::Image(config, LlmBackend::Cli { agent, settings })) = routing else {
+                panic!("expected an image route carrying the organization's agent");
+            };
+            assert_eq!(agent, AgentKind::Claude);
+            assert_eq!(config.classifier_model, FAST);
+            assert_eq!(
+                settings.working_directory,
+                Some(
+                    state
+                        .config()
+                        .agents
+                        .work(organization.id, AgentKind::Claude)
+                )
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unsettled_turn_asks_the_organizations_agent_once_and_routes_on_it() {
+            let claude = StandIn::answering("IMAGE");
+            let (organization, _agents, state) =
+                routing_media_on_claude(Some(claude.executable.clone())).await;
+
+            let routing = prepare_message(
+                &state,
+                organization.chat,
+                organization.workspace,
+                "generate ambient rain sounds",
+                None,
+            )
+            .await;
+            organization.remove().await;
+
+            let Ok(Routing::Image(_, LlmBackend::Cli { settings, .. })) = routing else {
+                panic!("expected the agent's IMAGE to route the turn to an image");
+            };
+            assert_eq!(settings.executable.as_ref(), Some(&claude.executable));
+            let runs = claude.runs();
+            assert_eq!(runs.len(), 1, "{runs:?}");
+            assert!(
+                runs[0].windows(2).any(|pair| pair == [MODEL_FLAG, FAST]),
+                "the classifier did not run on the Fast model: {runs:?}"
+            );
+        }
     }
 
     #[tokio::test]
