@@ -50,7 +50,9 @@ impl Failure {
         let kind = match &error {
             Error::Unreadable(_) => Some(Kind::InvalidCode),
             Error::Invalid(_) | Error::Refused(_) => Some(Kind::StartAgain),
-            Error::Unavailable(_) | Error::Internal(_) | Error::Database(_) => None,
+            Error::Unavailable(_) | Error::Deleted | Error::Internal(_) | Error::Database(_) => {
+                None
+            }
         };
         Self {
             kind,
@@ -90,6 +92,7 @@ impl From<Error> for Failure {
                 Self::new(StatusCode::BAD_REQUEST, message)
             }
             Error::Unavailable(_) => Self::new(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+            Error::Deleted => Self::new(StatusCode::NOT_FOUND, error.to_string()),
             Error::Refused(message) => Self::new(StatusCode::BAD_GATEWAY, message),
             Error::Internal(message) => Self::internal(message),
             Error::Database(error) => Self::database(error),
@@ -114,11 +117,12 @@ mod tests {
 
     use super::*;
 
-    fn refusals() -> [Error; 5] {
+    fn refusals() -> [Error; 6] {
         [
             Error::Unreadable("bad paste"),
             Error::Invalid("no such sign-in"),
             Error::Unavailable(AgentKind::Codex),
+            Error::Deleted,
             Error::Refused("device code request failed".to_string()),
             Error::Internal("/app/agent-state is read-only".to_string()),
         ]
@@ -142,6 +146,7 @@ mod tests {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The codex CLI is not installed on this server",
             ),
+            (StatusCode::NOT_FOUND, "Organization not found"),
             (StatusCode::BAD_GATEWAY, "device code request failed"),
             (StatusCode::INTERNAL_SERVER_ERROR, INTERNAL),
         ]) {
@@ -167,6 +172,7 @@ mod tests {
             (StatusCode::BAD_REQUEST, Some(Kind::InvalidCode)),
             (StatusCode::BAD_REQUEST, Some(Kind::StartAgain)),
             (StatusCode::SERVICE_UNAVAILABLE, None),
+            (StatusCode::NOT_FOUND, None),
             (StatusCode::BAD_GATEWAY, Some(Kind::StartAgain)),
             (StatusCode::INTERNAL_SERVER_ERROR, None),
         ]) {

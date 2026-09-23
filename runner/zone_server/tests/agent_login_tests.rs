@@ -31,6 +31,7 @@ use zone_core::SecretValue;
 use zone_core::llm::AgentKind;
 use zone_server::config::{AgentConfig, Config, ModelBackend};
 use zone_server::services::login::claude::{AUTHORIZE_URL, CLIENT_ID, REDIRECT_URL, Tokens};
+use zone_server::services::login::devices;
 
 use common::{TestClient, test_email, test_password};
 
@@ -299,6 +300,23 @@ impl Stage {
             .config()
             .agents
             .home(organization, AgentKind::Codex)
+    }
+
+    /// `<state>/<organization>`, where every agent home of the organization lives.
+    fn agent_state(&self, organization: Uuid) -> PathBuf {
+        self.client
+            .state()
+            .config()
+            .agents
+            .state
+            .join(organization.to_string())
+    }
+
+    async fn delete(&self, organization: Uuid, owner: &Person) {
+        self.client
+            .delete_auth(&format!("/api/organizations/{organization}"), &owner.token)
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
     }
 
     async fn status(&self, organization: Uuid, agent: &str, person: &Person) -> Value {
@@ -1585,6 +1603,70 @@ async fn a_codex_sign_in_zone_cannot_prepare_names_no_server_path() {
         "the server's own failure was kept to show to members"
     );
     assert_eq!(codex.starts(), 0);
+}
+
+#[tokio::test]
+async fn deleting_an_organization_logs_codex_out_and_removes_its_agent_state() {
+    let codex = Codex::new();
+    let stage = Stage::codex(&codex.executable).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.start(organization, "codex", json!({}), &owner).await;
+    codex.approve();
+    assert_eq!(
+        stage.settled(organization, &owner).await["state"],
+        "signed_in"
+    );
+    codex.refuse();
+    stage
+        .client
+        .post_json_auth(&login_path(organization, "codex"), &json!({}), &owner.token)
+        .await
+        .assert_status(StatusCode::BAD_GATEWAY);
+    assert_eq!(devices::failure(organization).as_deref(), Some(REFUSAL));
+    let home = stage.home(organization);
+    let agent_state = stage.agent_state(organization);
+    let claude = agent_state.join("claude");
+    fs::create_dir_all(&claude).expect("claude's home for the organization");
+    fs::write(claude.join(".claude.json"), "{}").expect("a file claude keeps");
+
+    stage.delete(organization, &owner).await;
+
+    assert_eq!(codex.logouts(), [home.display().to_string()]);
+    assert!(
+        !agent_state.exists(),
+        "the deleted organization's agent state was left on the server"
+    );
+    assert_eq!(
+        devices::failure(organization),
+        None,
+        "the deleted organization's last failure was kept"
+    );
+}
+
+#[tokio::test]
+async fn deleting_an_organization_mid_sign_in_stops_codex_and_removes_its_agent_state() {
+    let codex = Codex::new();
+    let stage = Stage::codex(&codex.executable).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.start(organization, "codex", json!({}), &owner).await;
+    let process = codex.process();
+    let home = stage.home(organization);
+    let agent_state = stage.agent_state(organization);
+
+    stage.delete(organization, &owner).await;
+
+    assert!(
+        ended(process).await,
+        "codex was left running for a deleted organization"
+    );
+    assert_eq!(codex.logouts(), [home.display().to_string()]);
+    assert!(
+        !agent_state.exists(),
+        "the deleted organization's agent state was left on the server"
+    );
+    assert!(devices::pending(organization).is_none());
 }
 
 #[tokio::test]

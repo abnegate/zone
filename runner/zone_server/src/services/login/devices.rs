@@ -7,7 +7,9 @@
 //! sign-out can never record a login after it.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use chrono::{DateTime, SubsecRound, Utc};
@@ -26,6 +28,7 @@ use super::locks::Locks;
 use super::{audit, probe};
 use crate::config::Config;
 use crate::db::agent_logins::{self, Upsert};
+use crate::db::organizations;
 use crate::state::AppState;
 
 const STOPPED: &str = "The codex sign-in stopped before it finished";
@@ -80,6 +83,20 @@ pub async fn sign_out(
     DEVICES
         .sign_out(state, organization, agent, user, email)
         .await
+}
+
+/// Forgets everything this server keeps for a deleted organization's coding agents: a pending
+/// codex sign-in is stopped, codex logs out of the organization's home, and the organization's
+/// agent state is removed. It runs to the end even when its caller stops waiting for it.
+pub async fn forget(state: &AppState, organization: Uuid) -> Result<(), Error> {
+    let state = state.clone();
+    tokio::spawn(async move { DEVICES.forget(&state, organization).await })
+        .await
+        .unwrap_or_else(|error| {
+            Err(Error::Internal(format!(
+                "Forgetting organization {organization}'s coding agents stopped: {error}"
+            )))
+        })
 }
 
 /// The organization's codex sign-in in flight: the prompt codex printed, while its code can still
@@ -151,6 +168,12 @@ impl Devices {
             drop(guard);
             completion.await;
         };
+        if organizations::get_organization(state.db(), organization)
+            .await?
+            .is_none()
+        {
+            return Err(Error::Deleted);
+        }
         self.failures.remove(&organization);
 
         let config = state.config();
@@ -281,6 +304,22 @@ impl Devices {
         Ok(())
     }
 
+    async fn forget(&self, state: &AppState, organization: Uuid) -> Result<(), Error> {
+        let _guard = self.locks.lock(organization).await;
+        self.stop(organization).await;
+        self.failures.remove(&organization);
+        let config = state.config();
+        let Some(directory) = agent_state(config, organization)? else {
+            return Ok(());
+        };
+        if let Err(error) = log_out(config, organization).await {
+            tracing::warn!(%organization, %error, "codex could not log a deleted organization out");
+        }
+        fs::remove_dir_all(&directory).map_err(|error| {
+            Error::Internal(format!("Could not remove {}: {error}", directory.display()))
+        })
+    }
+
     /// Ends the organization's pending sign-in and waits for codex to exit, so a login codex
     /// saved just before is already in place when codex logs out.
     async fn stop(&self, organization: Uuid) {
@@ -291,6 +330,28 @@ impl Devices {
             let _ = cancel.send(());
         }
         let _ = attempt.outcome.await;
+    }
+}
+
+/// `<state>/<organization>`, which holds every agent home of the organization, when it is a real
+/// directory. Anything else in its place is refused, so nothing done to it reaches outside the
+/// state root.
+fn agent_state(config: &Config, organization: Uuid) -> Result<Option<PathBuf>, Error> {
+    let home = config.agents.home(organization, AgentKind::Codex);
+    let Some(directory) = home.parent() else {
+        return Ok(None);
+    };
+    match fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.is_dir() => Ok(Some(directory.to_path_buf())),
+        Ok(_) => Err(Error::Internal(format!(
+            "{} is not a directory, so it was left in place",
+            directory.display()
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::Internal(format!(
+            "Could not inspect {}: {error}",
+            directory.display()
+        ))),
     }
 }
 
@@ -306,7 +367,7 @@ async fn log_out(config: &Config, organization: Uuid) -> Result<(), Error> {
         return Ok(());
     };
     tracing::warn!(%organization, error = %said(&error), "codex could not log out; deleting its login");
-    match std::fs::remove_file(home.join(CREDENTIALS)) {
+    match fs::remove_file(home.join(CREDENTIALS)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(Error::Internal(format!(
@@ -371,6 +432,7 @@ fn said(error: &codex::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -758,6 +820,93 @@ esac"#
         finished(first).await;
         scene.sign_out().await;
         finished(second).await;
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn forgetting_an_organization_stops_its_sign_in_and_leaves_nothing_of_it() {
+        let scene = Scene::new(PROMPT).await;
+        let (_, completion) = scene.start().await;
+        DEVICES
+            .failures
+            .insert(scene.organization, "an earlier sign-in failed".to_string());
+        let organization_state = scene
+            .home()
+            .parent()
+            .expect("the codex home is inside the organization's state")
+            .to_path_buf();
+        scene.delete_organization().await;
+
+        forget(&scene.state, scene.organization)
+            .await
+            .expect("the organization to be forgotten");
+        finished(completion).await;
+
+        assert_eq!(scene.lines(LOGOUTS), [scene.home().display().to_string()]);
+        assert!(
+            !organization_state.exists(),
+            "the deleted organization's agent state was left"
+        );
+        assert!(pending(scene.organization).is_none());
+        assert_eq!(failure(scene.organization), None);
+        assert!(!DEVICES.locks.kept(scene.organization));
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_start_that_waited_out_its_organizations_deletion_starts_nothing() {
+        let scene = Scene::new(PROMPT).await;
+        scene.delete_organization().await;
+
+        let started = DEVICES
+            .start(&scene.state, scene.organization, scene.user, EMAIL)
+            .await;
+
+        let error = started.err();
+        assert!(matches!(error, Some(Error::Deleted)), "{error:?}");
+        assert!(
+            scene.lines(STARTED).is_empty(),
+            "codex ran for a deleted organization"
+        );
+        assert!(
+            !scene.home().exists(),
+            "a deleted organization's codex home was made again"
+        );
+        assert_eq!(failure(scene.organization), None);
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn an_organizations_state_that_is_a_link_is_never_followed_when_it_is_forgotten() {
+        let scene = Scene::new(PROMPT).await;
+        let elsewhere = scene.control("elsewhere");
+        std::fs::create_dir_all(elsewhere.join(AgentKind::Codex.as_str()))
+            .expect("a directory outside the state root");
+        std::fs::write(elsewhere.join("kept"), b"").expect("a file outside the state root");
+        let root = scene.state.config().agents.state.clone();
+        std::fs::create_dir_all(&root).expect("the state root");
+        let linked = root.join(scene.organization.to_string());
+        symlink(&elsewhere, &linked).expect("a link in place of the organization's state");
+
+        let forgotten = forget(&scene.state, scene.organization).await;
+
+        assert!(
+            forgotten.is_err(),
+            "a link in place of the organization's state was taken for it"
+        );
+        assert!(
+            elsewhere.join("kept").exists(),
+            "forgetting followed a link out of the state root"
+        );
+        assert!(
+            std::fs::symlink_metadata(&linked)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink()),
+            "the link was removed"
+        );
+        assert!(
+            scene.lines(LOGOUTS).is_empty(),
+            "codex logged out of a home behind a link"
+        );
         scene.remove().await;
     }
 }

@@ -12,6 +12,9 @@ pub enum Error {
     Invalid(&'static str),
     #[error("The {0} CLI is not installed on this server")]
     Unavailable(AgentKind),
+    /// The organization was deleted while the request waited for its lock.
+    #[error("Organization not found")]
+    Deleted,
     /// The agent's own service or CLI refused, in its own words.
     #[error("{0}")]
     Refused(String),
