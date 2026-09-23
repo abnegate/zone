@@ -83,7 +83,9 @@ RUN set -eu; \
 FROM runtime-base AS runtime
 
 RUN groupadd --system zone \
-    && useradd --system --gid zone --create-home --home-dir /home/zone --shell /usr/sbin/nologin zone
+    && useradd --system --gid zone --create-home --home-dir /home/zone --shell /bin/bash zone
+
+ENV SHELL=/bin/bash
 
 COPY --from=agents /usr/local/bin/claude /usr/local/bin/codex /usr/local/bin/
 
