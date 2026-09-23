@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use chrono::{DateTime, TimeDelta, Utc};
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
 use zone_core::secret::SecretValue;
@@ -90,17 +91,7 @@ pub(crate) async fn resolve_claude(
     }
     match client.refresh(&tokens).await {
         Ok(renewed) => {
-            let sealed = renewed
-                .seal(state.encryption_key())
-                .map_err(|error| Error::Renewal(error.to_string()))?;
-            agent_logins::renew(
-                &mut *transaction,
-                login.id,
-                &sealed,
-                Some(renewed.expires_at),
-            )
-            .await?;
-            transaction.commit().await?;
+            keep(state, transaction, organization, login.id, &renewed).await;
             Ok(Some(Login::Claude {
                 token: renewed.access,
             }))
@@ -115,6 +106,49 @@ pub(crate) async fn resolve_claude(
                 .map(Some)
                 .map_err(|_| Error::Renewal(error.to_string()))
         }
+    }
+}
+
+/// Stores `renewed` over the login `id` it renews. A write that fails is tried once more on a
+/// fresh connection, and the turn runs on `renewed` either way.
+async fn keep(
+    state: &AppState,
+    mut transaction: Transaction<'_, Postgres>,
+    organization: Uuid,
+    id: Uuid,
+    renewed: &claude::Tokens,
+) {
+    let sealed = match renewed.seal(state.encryption_key()) {
+        Ok(sealed) => sealed,
+        Err(error) => {
+            tracing::error!(%organization, %error, "Could not seal the renewed Claude sign-in");
+            return;
+        }
+    };
+    let expires_at = Some(renewed.expires_at);
+    let stored = match agent_logins::renew(&mut *transaction, id, &sealed, expires_at).await {
+        Ok(()) => transaction.commit().await,
+        Err(error) => {
+            if let Err(error) = transaction.rollback().await {
+                tracing::warn!(%organization, %error, "Could not roll back a failed renewal");
+            }
+            Err(error)
+        }
+    };
+    let Err(error) = stored else {
+        return;
+    };
+    tracing::error!(
+        %organization,
+        %error,
+        "Could not store the renewed Claude sign-in; trying once more"
+    );
+    if let Err(error) = agent_logins::renew(state.db(), id, &sealed, expires_at).await {
+        tracing::error!(
+            %organization,
+            %error,
+            "Could not store the renewed Claude sign-in; this turn runs on it unstored"
+        );
     }
 }
 
@@ -144,12 +178,13 @@ fn open(state: &AppState, login: &AgentLoginRow) -> Result<claude::Tokens, Error
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
     use std::time::Duration;
 
     use futures::future::join_all;
     use serde_json::json;
     use sqlx::PgPool;
-    use sqlx::postgres::PgPoolOptions;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -171,9 +206,15 @@ mod tests {
     const ACQUIRE: Duration = Duration::from_secs(2);
     const HUNG: Duration = Duration::from_secs(4);
     const SETTLE: Duration = Duration::from_secs(1);
+    /// How long Claude takes to answer a renewal: long enough to drop a connection meanwhile.
+    const SLOW: Duration = Duration::from_secs(2);
+    const PAUSE: Duration = Duration::from_millis(50);
+    const ATTEMPTS: usize = 100;
 
     struct Fixture {
         state: AppState,
+        /// The fixture's own connections, which stay usable when a test breaks the server's.
+        pool: PgPool,
         organization: Uuid,
         _agents: TempDir,
     }
@@ -182,15 +223,51 @@ mod tests {
         std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL")
     }
 
+    async fn connect() -> PgPool {
+        PgPool::connect(&database())
+            .await
+            .expect("the test database")
+    }
+
+    /// A pool whose connections carry `name`, so a test can find them and drop them.
+    async fn named(name: &str) -> PgPool {
+        let options = PgConnectOptions::from_str(&database())
+            .expect("the test database's URL")
+            .application_name(name);
+        PgPoolOptions::new()
+            .connect_with(options)
+            .await
+            .expect("the test database")
+    }
+
+    /// Drops the connection of the pool `name` that holds a transaction open, as a renewal does
+    /// while it waits for Claude.
+    async fn drop_renewal(pool: &PgPool, name: &str) {
+        for _ in 0..ATTEMPTS {
+            let dropped: Option<bool> = sqlx::query_scalar(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                 WHERE application_name = $1 AND state = 'idle in transaction'",
+            )
+            .bind(name)
+            .fetch_optional(pool)
+            .await
+            .expect("the server's connections");
+            if dropped == Some(true) {
+                return;
+            }
+            tokio::time::sleep(PAUSE).await;
+        }
+        panic!("the renewal never held a transaction open");
+    }
+
     impl Fixture {
         async fn new(token_url: String) -> Self {
-            let pool = PgPool::connect(&database())
-                .await
-                .expect("the test database");
-            Self::on(pool, token_url).await
+            Self::on(connect().await, token_url).await
         }
 
-        async fn on(pool: PgPool, token_url: String) -> Self {
+        /// A fixture whose server runs on `server`.
+        async fn on(server: PgPool, token_url: String) -> Self {
+            let pool = connect().await;
             let organization = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Agent credentials', $1::text)",
@@ -209,11 +286,12 @@ mod tests {
                     },
                     ..crate::state::test_config()
                 },
-                pool,
+                server,
                 None,
             );
             Self {
                 state,
+                pool,
                 organization,
                 _agents: agents,
             }
@@ -238,7 +316,7 @@ mod tests {
             expires_at: Option<DateTime<Utc>>,
         ) {
             agent_logins::upsert(
-                self.state.db(),
+                &self.pool,
                 &Upsert {
                     organization_id: self.organization,
                     agent: agent.as_str(),
@@ -252,14 +330,11 @@ mod tests {
         }
 
         async fn stored(&self) -> (claude::Tokens, Option<DateTime<Utc>>) {
-            let login = agent_logins::get(
-                self.state.db(),
-                self.organization,
-                AgentKind::Claude.as_str(),
-            )
-            .await
-            .expect("the login to be readable")
-            .expect("a claude login");
+            let login =
+                agent_logins::get(&self.pool, self.organization, AgentKind::Claude.as_str())
+                    .await
+                    .expect("the login to be readable")
+                    .expect("a claude login");
             let sealed = login.credential.expect("a sealed credential");
             let tokens = claude::Tokens::open(self.state.encryption_key(), sealed.expose())
                 .expect("tokens Zone sealed");
@@ -273,7 +348,7 @@ mod tests {
         async fn remove(&self) {
             sqlx::query("DELETE FROM organizations WHERE id = $1")
                 .bind(self.organization)
-                .execute(self.state.db())
+                .execute(&self.pool)
                 .await
                 .expect("the organization to be removed");
         }
@@ -379,6 +454,56 @@ mod tests {
         for login in logins {
             assert_eq!(token(login), RENEWED);
         }
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_renewal_that_cannot_be_stored_still_runs_the_turn_and_is_stored_once_more() {
+        let server = token_endpoint(renewed().set_delay(SLOW), 1).await;
+        let name = format!("zone-renewal-{}", Uuid::new_v4().simple());
+        let fixture =
+            Fixture::on(named(&name).await, format!("{}{TOKEN_PATH}", server.uri())).await;
+        fixture
+            .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
+            .await;
+
+        let (login, ()) = tokio::join!(
+            fixture.resolve(AgentKind::Claude),
+            drop_renewal(&fixture.pool, &name)
+        );
+        let (stored, _) = fixture.stored().await;
+        fixture.remove().await;
+
+        assert_eq!(token(login), RENEWED);
+        assert_eq!(
+            stored.access.expose(),
+            RENEWED,
+            "the renewal Claude granted was never stored"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_renewal_that_is_never_stored_still_runs_the_turn() {
+        let server = token_endpoint(renewed().set_delay(SLOW), 1).await;
+        let name = format!("zone-renewal-{}", Uuid::new_v4().simple());
+        let fixture =
+            Fixture::on(named(&name).await, format!("{}{TOKEN_PATH}", server.uri())).await;
+        let current = tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH));
+        fixture.sign_in(&current).await;
+
+        let (login, ()) = tokio::join!(fixture.resolve(AgentKind::Claude), async {
+            drop_renewal(&fixture.pool, &name).await;
+            fixture.state.db().close().await;
+        });
+        let (stored, _) = fixture.stored().await;
+        fixture.remove().await;
+
+        assert_eq!(token(login), RENEWED);
+        assert_eq!(
+            stored, current,
+            "a renewal that could not be stored changed the login"
+        );
         server.verify().await;
     }
 
