@@ -67,6 +67,13 @@ Horizontal Pod Autoscaler is enabled for the server:
   kubectl get hpa --namespace {{ .Release.Namespace }} {{ include "zone-apps.fullname" . }}-server
 {{- end }}
 
+{{- if and .Values.server.enabled (dig "agentState" "persistence" "enabled" false .Values.server) (not (include "zone-apps.server.agentStateClaim" .)) }}
+
+NOTE: Claude and codex sign-ins are not persisted. zone-server runs more than
+one replica and sign-in state is per pod, so /app/agent-state is an emptyDir.
+To keep sign-ins, set server.replicaCount=1 and server.autoscaling.enabled=false.
+{{- end }}
+
 {{- if and .Values.manager.enabled .Values.manager.autoscaling.enabled }}
 
 Horizontal Pod Autoscaler is enabled for the manager:

@@ -110,6 +110,15 @@ server:
     HOST: "0.0.0.0"
     ZONE_AGENT_HOST_LOGIN: "false"
 
+  # Claude and codex sign-ins, one directory per organization. Sign-in state
+  # is per pod, so the claim is used only while zone-server runs one replica
+  # (replicaCount 1, autoscaling off); otherwise it is an emptyDir.
+  agentState:
+    persistence:
+      enabled: true
+      size: 1Gi
+      storageClass: ""
+
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
