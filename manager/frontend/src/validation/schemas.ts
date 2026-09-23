@@ -244,6 +244,7 @@ export {
   AiSettingsResponseSchema,
   AiSettingsSchema,
   UpdateAiSettingsRequestSchema,
+  WorkspaceAiSettingsResponseSchema,
 } from '../features/settings/workspace/schemas';
 
 export type { SessionsResponse, SessionZ } from '../features/auth/schemas';

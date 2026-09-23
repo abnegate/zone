@@ -86,6 +86,10 @@ export interface AiSettings {
   model_audio: string | null;
 }
 
+export interface WorkspaceAiSettings extends AiSettings {
+  overrides: boolean;
+}
+
 export interface UpdateAiSettingsRequest {
   provider?: AiProvider;
   litellm_host?: string;

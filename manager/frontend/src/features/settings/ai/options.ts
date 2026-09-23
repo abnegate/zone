@@ -223,26 +223,6 @@ export function modelsFromSettings(settings: AiSettings): ModelSelection {
   };
 }
 
-export function hasOverrides(settings: AiSettings): boolean {
-  return Boolean(
-    settings.provider !== 'self_hosted' ||
-      settings.has_litellm_key ||
-      settings.has_openai_api_key ||
-      settings.has_anthropic_api_key ||
-      settings.has_bedrock_credentials ||
-      settings.model_fast ||
-      settings.model_reasoning ||
-      settings.model_embedding ||
-      settings.model_image ||
-      settings.model_video ||
-      settings.model_audio ||
-      settings.litellm_host ||
-      settings.openai_base_url ||
-      settings.anthropic_base_url ||
-      settings.bedrock_region
-  );
-}
-
 export function buildAiSettingsRequest(
   provider: AiProvider,
   credentials: ProviderCredentials,

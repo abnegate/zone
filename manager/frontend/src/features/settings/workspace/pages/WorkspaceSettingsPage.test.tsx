@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import type { OrgRole } from '../../organization/types';
-import type { AiSettings, WorkspaceTheme } from '../types';
+import type { AiSettings, WorkspaceAiSettings, WorkspaceTheme } from '../types';
 
 // Mock client
 const mockClient = {
@@ -157,6 +157,19 @@ const mockAiSettings: AiSettings = {
   model_audio: 'ace_step_v1_3.5b.safetensors',
 };
 
+const savedAiSettings: WorkspaceAiSettings = { ...mockAiSettings, overrides: true };
+
+const inheritedAiSettings: WorkspaceAiSettings = {
+  ...mockAiSettings,
+  model_fast: null,
+  model_reasoning: null,
+  model_embedding: null,
+  model_image: null,
+  model_video: null,
+  model_audio: null,
+  overrides: false,
+};
+
 describe('WorkspaceSettingsPage', () => {
   beforeEach(() => {
     mock.clearAllMocks();
@@ -167,12 +180,12 @@ describe('WorkspaceSettingsPage', () => {
     themeLoading = false;
     themeError = null;
     mockClient.getWorkspaceTheme.mockResolvedValue(mockTheme);
-    mockClient.getWorkspaceAiSettings.mockResolvedValue(mockAiSettings);
+    mockClient.getWorkspaceAiSettings.mockResolvedValue(savedAiSettings);
     mockClient.getEffectiveAiSettings.mockResolvedValue(mockAiSettings);
     mockClient.updateWorkspaceTheme.mockResolvedValue(mockTheme);
-    mockClient.updateWorkspaceAiSettings.mockResolvedValue(mockAiSettings);
+    mockClient.updateWorkspaceAiSettings.mockResolvedValue(savedAiSettings);
     mockClient.resetWorkspaceTheme.mockResolvedValue(mockTheme);
-    mockClient.resetWorkspaceAiSettings.mockResolvedValue(mockAiSettings);
+    mockClient.resetWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
   });
 
   it('shows loading state', async () => {
@@ -468,7 +481,7 @@ describe('WorkspaceSettingsPage', () => {
 
   it('resets theme to defaults', async () => {
     mockClient.resetWorkspaceTheme.mockResolvedValueOnce(mockTheme);
-    mockClient.resetWorkspaceAiSettings.mockResolvedValueOnce(mockAiSettings);
+    mockClient.resetWorkspaceAiSettings.mockResolvedValueOnce(inheritedAiSettings);
     mockClient.getEffectiveAiSettings.mockResolvedValueOnce(mockAiSettings);
 
     render(<WorkspaceSettingsPage />);
@@ -485,7 +498,7 @@ describe('WorkspaceSettingsPage', () => {
 
   it('shows success message after reset', async () => {
     mockClient.resetWorkspaceTheme.mockResolvedValueOnce(mockTheme);
-    mockClient.resetWorkspaceAiSettings.mockResolvedValueOnce(mockAiSettings);
+    mockClient.resetWorkspaceAiSettings.mockResolvedValueOnce(inheritedAiSettings);
     mockClient.getEffectiveAiSettings.mockResolvedValueOnce(mockAiSettings);
 
     render(<WorkspaceSettingsPage />);
@@ -587,7 +600,7 @@ describe('WorkspaceSettingsPage', () => {
         resolveReset = resolve;
       })
     );
-    mockClient.resetWorkspaceAiSettings.mockResolvedValueOnce(mockAiSettings);
+    mockClient.resetWorkspaceAiSettings.mockResolvedValueOnce(inheritedAiSettings);
     mockClient.getEffectiveAiSettings.mockResolvedValueOnce(mockAiSettings);
 
     render(<WorkspaceSettingsPage />);
@@ -649,26 +662,7 @@ describe('WorkspaceSettingsPage', () => {
     });
 
     it('shows effective settings when not overriding', async () => {
-      // Use AI settings with no custom values so overrideAiSettings stays false
-      const noCustomSettings: AiSettings = {
-        provider: 'self_hosted',
-        has_litellm_key: false,
-        litellm_host: null,
-        has_openai_api_key: false,
-        openai_base_url: null,
-        has_anthropic_api_key: false,
-        anthropic_base_url: null,
-        bedrock_region: null,
-        bedrock_use_iam_role: false,
-        has_bedrock_credentials: false,
-        model_fast: null,
-        model_reasoning: null,
-        model_embedding: null,
-        model_image: null,
-        model_video: null,
-        model_audio: null,
-      };
-      mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
 
       const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
@@ -681,26 +675,7 @@ describe('WorkspaceSettingsPage', () => {
     });
 
     it('displays effective provider value', async () => {
-      // Use AI settings with no custom values so effective settings are shown
-      const noCustomSettings: AiSettings = {
-        provider: 'self_hosted',
-        has_litellm_key: false,
-        litellm_host: null,
-        has_openai_api_key: false,
-        openai_base_url: null,
-        has_anthropic_api_key: false,
-        anthropic_base_url: null,
-        bedrock_region: null,
-        bedrock_use_iam_role: false,
-        has_bedrock_credentials: false,
-        model_fast: null,
-        model_reasoning: null,
-        model_embedding: null,
-        model_image: null,
-        model_video: null,
-        model_audio: null,
-      };
-      mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
 
       const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
@@ -713,26 +688,7 @@ describe('WorkspaceSettingsPage', () => {
     });
 
     it('shows provider form when override is enabled', async () => {
-      // Use AI settings with no custom values so override starts as false
-      const noCustomSettings: AiSettings = {
-        provider: 'self_hosted',
-        has_litellm_key: false,
-        litellm_host: null,
-        has_openai_api_key: false,
-        openai_base_url: null,
-        has_anthropic_api_key: false,
-        anthropic_base_url: null,
-        bedrock_region: null,
-        bedrock_use_iam_role: false,
-        has_bedrock_credentials: false,
-        model_fast: null,
-        model_reasoning: null,
-        model_embedding: null,
-        model_image: null,
-        model_video: null,
-        model_audio: null,
-      };
-      mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
 
       const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
@@ -751,26 +707,7 @@ describe('WorkspaceSettingsPage', () => {
     });
 
     it('shows credential fields for selected provider when overriding', async () => {
-      // Use AI settings with no custom values so override starts as false
-      const noCustomSettings: AiSettings = {
-        provider: 'self_hosted',
-        has_litellm_key: false,
-        litellm_host: null,
-        has_openai_api_key: false,
-        openai_base_url: null,
-        has_anthropic_api_key: false,
-        anthropic_base_url: null,
-        bedrock_region: null,
-        bedrock_use_iam_role: false,
-        has_bedrock_credentials: false,
-        model_fast: null,
-        model_reasoning: null,
-        model_embedding: null,
-        model_image: null,
-        model_video: null,
-        model_audio: null,
-      };
-      mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
 
       const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
@@ -789,26 +726,7 @@ describe('WorkspaceSettingsPage', () => {
     });
 
     it('changes provider when dropdown changes', async () => {
-      // Use AI settings with no custom values so override starts as false
-      const noCustomSettings: AiSettings = {
-        provider: 'self_hosted',
-        has_litellm_key: false,
-        litellm_host: null,
-        has_openai_api_key: false,
-        openai_base_url: null,
-        has_anthropic_api_key: false,
-        anthropic_base_url: null,
-        bedrock_region: null,
-        bedrock_use_iam_role: false,
-        has_bedrock_credentials: false,
-        model_fast: null,
-        model_reasoning: null,
-        model_embedding: null,
-        model_image: null,
-        model_video: null,
-        model_audio: null,
-      };
-      mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
 
       const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
@@ -834,26 +752,7 @@ describe('WorkspaceSettingsPage', () => {
     });
 
     it('shows model selection when overriding', async () => {
-      // Use AI settings with no custom values so override starts as false
-      const noCustomSettings: AiSettings = {
-        provider: 'self_hosted',
-        has_litellm_key: false,
-        litellm_host: null,
-        has_openai_api_key: false,
-        openai_base_url: null,
-        has_anthropic_api_key: false,
-        anthropic_base_url: null,
-        bedrock_region: null,
-        bedrock_use_iam_role: false,
-        has_bedrock_credentials: false,
-        model_fast: null,
-        model_reasoning: null,
-        model_embedding: null,
-        model_image: null,
-        model_video: null,
-        model_audio: null,
-      };
-      mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
 
       const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
@@ -872,6 +771,63 @@ describe('WorkspaceSettingsPage', () => {
         expect(screen.getByLabelText('Reasoning Model')).toBeInTheDocument();
         expect(screen.getByLabelText('Embedding Model')).toBeInTheDocument();
       });
+    });
+
+    it('keeps the override of a workspace that saved the self-hosted provider', async () => {
+      mockClient.getWorkspaceAiSettings.mockResolvedValue({
+        ...inheritedAiSettings,
+        overrides: true,
+      });
+      mockClient.getEffectiveAiSettings.mockResolvedValue(inheritedAiSettings);
+      render(<WorkspaceSettingsPage />);
+      await openAiTab(userEvent.setup());
+
+      expect(await screen.findByLabelText('AI Provider')).toHaveValue('self_hosted');
+      expect(
+        screen.getByRole('checkbox', { name: 'Override organization AI settings' })
+      ).toBeChecked();
+      expect(screen.queryByText(/Effective Settings/)).toBeNull();
+    });
+
+    it('drops the override when it is switched off and saved', async () => {
+      const organizationSettings: AiSettings = { ...mockAiSettings, provider: 'claude_code' };
+      mockClient.getEffectiveAiSettings
+        .mockResolvedValueOnce(savedAiSettings)
+        .mockResolvedValueOnce(organizationSettings);
+      const user = userEvent.setup();
+      render(<WorkspaceSettingsPage />);
+      await openAiTab(user);
+
+      await user.click(
+        await screen.findByRole('checkbox', { name: 'Override organization AI settings' })
+      );
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText('Settings saved successfully')).toBeInTheDocument();
+      expect(mockClient.resetWorkspaceAiSettings).toHaveBeenCalledWith(
+        '00000000-0000-0000-0000-000000000001',
+        '00000000-0000-0000-0000-000000000001'
+      );
+      expect(mockClient.updateWorkspaceAiSettings).not.toHaveBeenCalled();
+      expect(mockClient.getEffectiveAiSettings).toHaveBeenCalledTimes(2);
+      expect(await screen.findByText('Claude Code (Claude subscription)')).toBeInTheDocument();
+      expect(
+        screen.getByRole('checkbox', { name: 'Override organization AI settings' })
+      ).not.toBeChecked();
+    });
+
+    it('sends nothing when a workspace that never overrode is saved', async () => {
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
+      const user = userEvent.setup();
+      render(<WorkspaceSettingsPage />);
+      await openAiTab(user);
+      await screen.findByText(/Effective Settings/);
+
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText('Settings saved successfully')).toBeInTheDocument();
+      expect(mockClient.resetWorkspaceAiSettings).not.toHaveBeenCalled();
+      expect(mockClient.updateWorkspaceAiSettings).not.toHaveBeenCalled();
     });
 
     it('loads AI settings when its tab opens', async () => {
@@ -920,15 +876,10 @@ describe('WorkspaceSettingsPage', () => {
     });
 
     describe('coding agent overrides', () => {
-      const codexOnly: AiSettings = {
-        ...mockAiSettings,
+      const codexOnly: WorkspaceAiSettings = {
+        ...inheritedAiSettings,
         provider: 'codex',
-        model_fast: null,
-        model_reasoning: null,
-        model_embedding: null,
-        model_image: null,
-        model_video: null,
-        model_audio: null,
+        overrides: true,
       };
 
       it('opens with the override on when the workspace only chose a coding agent', async () => {
@@ -953,10 +904,7 @@ describe('WorkspaceSettingsPage', () => {
       });
 
       it('does not ask for sign-in status while inheriting the organization', async () => {
-        mockClient.getWorkspaceAiSettings.mockResolvedValue({
-          ...codexOnly,
-          provider: 'self_hosted',
-        });
+        mockClient.getWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
         mockClient.getEffectiveAiSettings.mockResolvedValue({ ...codexOnly, provider: 'codex' });
         render(<WorkspaceSettingsPage />);
         await openAiTab(userEvent.setup());

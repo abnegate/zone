@@ -143,7 +143,12 @@ async function mockApi(page: Page, scenario: Scenario): Promise<Captured[]> {
     }
     const workspaceSettings = `/api/organizations/${organizationId}/workspaces/${workspaceId}/settings/ai`;
     if (path === workspaceSettings) {
-      await route.fulfill({ json: settings(scenario.workspaceProvider ?? 'self_hosted') });
+      await route.fulfill({
+        json: {
+          ...settings(scenario.workspaceProvider ?? 'self_hosted'),
+          overrides: scenario.workspaceProvider !== undefined,
+        },
+      });
       return;
     }
     if (path === `${workspaceSettings}/effective`) {

@@ -24,7 +24,6 @@ import {
   credentialsFromSettings,
   emptyCredentials,
   emptyModels,
-  hasOverrides,
   type ModelSelection,
   modelChoices,
   modelsFromSettings,
@@ -43,6 +42,7 @@ import type {
   BorderRadius,
   FontFamily,
   UpdateWorkspaceThemeRequest,
+  WorkspaceAiSettings,
   WorkspaceTheme,
 } from '../types';
 import './WorkspaceSettingsPage.css';
@@ -137,6 +137,7 @@ export default function WorkspaceSettingsPage() {
   const [borderRadius, setBorderRadius] = useState<BorderRadius | null>(null);
 
   const [overrideAiSettings, setOverrideAiSettings] = useState(false);
+  const [savedOverride, setSavedOverride] = useState(false);
   const [aiProvider, setAiProvider] = useState<AiProvider>('self_hosted');
   const [credentials, setCredentials] = useState<ProviderCredentials>(emptyCredentials);
   const [configured, setConfigured] = useState<ProviderConfigured>(nothingConfigured);
@@ -146,8 +147,9 @@ export default function WorkspaceSettingsPage() {
   const agent = overrideAiSettings ? agentOf(aiProvider) : null;
   const agents = useAgentStatuses(orgId, agent !== null);
 
-  const applyAiSettingsToForm = useCallback((settings: AiSettings): void => {
-    setOverrideAiSettings(hasOverrides(settings));
+  const applyAiSettingsToForm = useCallback((settings: WorkspaceAiSettings): void => {
+    setOverrideAiSettings(settings.overrides);
+    setSavedOverride(settings.overrides);
     setAiProvider(settings.provider);
     setCredentials(credentialsFromSettings(settings));
     setConfigured(configuredFromSettings(settings));
@@ -304,6 +306,23 @@ export default function WorkspaceSettingsPage() {
     }, 3000);
   };
 
+  const reloadEffectiveSettings = async (
+    organization: string,
+    workspace: string
+  ): Promise<boolean> => {
+    const effective = await client.getEffectiveAiSettings(organization, workspace);
+    if (currentScope.current !== scope) return false;
+    setEffectiveSettings(effective);
+    return true;
+  };
+
+  const inheritAiSettings = async (organization: string, workspace: string): Promise<boolean> => {
+    const settings = await client.resetWorkspaceAiSettings(organization, workspace);
+    if (currentScope.current !== scope) return false;
+    applyAiSettingsToForm(settings);
+    return reloadEffectiveSettings(organization, workspace);
+  };
+
   const handleSave = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     if (!isAuthenticated || !orgId || !workspaceId) return;
@@ -336,9 +355,9 @@ export default function WorkspaceSettingsPage() {
         );
         if (currentScope.current !== scope) return;
         applyAiSettingsToForm(aiSettings);
-        const effective = await client.getEffectiveAiSettings(orgId, workspaceId);
-        if (currentScope.current !== scope) return;
-        setEffectiveSettings(effective);
+        if (!(await reloadEffectiveSettings(orgId, workspaceId))) return;
+      } else if (activeTab === 'ai' && savedOverride) {
+        if (!(await inheritAiSettings(orgId, workspaceId))) return;
       }
 
       flash('Settings saved successfully');
@@ -368,13 +387,7 @@ export default function WorkspaceSettingsPage() {
         setDirty(false);
         previewWorkspaceTheme(null);
       } else if (activeTab === 'ai') {
-        const settings = await client.resetWorkspaceAiSettings(orgId, workspaceId);
-        if (currentScope.current !== scope) return;
-        applyAiSettingsToForm(settings);
-        setOverrideAiSettings(false);
-        const effective = await client.getEffectiveAiSettings(orgId, workspaceId);
-        if (currentScope.current !== scope) return;
-        setEffectiveSettings(effective);
+        if (!(await inheritAiSettings(orgId, workspaceId))) return;
       }
       flash('Settings reset to defaults');
     } catch (err) {

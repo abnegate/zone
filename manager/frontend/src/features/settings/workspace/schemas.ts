@@ -192,6 +192,10 @@ export const AiSettingsResponseSchema = z.object({
   model_audio: z.string().nullable(),
 });
 
+export const WorkspaceAiSettingsResponseSchema = AiSettingsResponseSchema.extend({
+  overrides: z.boolean(),
+});
+
 export type WorkspaceZ = z.infer<typeof WorkspaceSchema>;
 export type WorkspaceMemberZ = z.infer<typeof WorkspaceMemberSchema>;
 export type WorkspaceMembersResponse = z.infer<typeof WorkspaceMembersResponseSchema>;

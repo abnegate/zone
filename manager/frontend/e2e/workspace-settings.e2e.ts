@@ -25,7 +25,6 @@ test.describe('Workspace Settings Page', () => {
     // Set up API mocks (includes organizations, workspaces, and models)
     await mockCommonEndpoints(page);
 
-    // Mock AI settings endpoints - matches AiSettingsResponseSchema
     const mockAiSettings = {
       provider: 'openai',
       has_litellm_key: false,
@@ -43,6 +42,7 @@ test.describe('Workspace Settings Page', () => {
       model_image: 'flux1-schnell-fp8.safetensors',
       model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
       model_audio: 'ace_step_v1_3.5b.safetensors',
+      overrides: true,
     };
     await routeApiContext(
       context,
@@ -441,6 +441,7 @@ test.describe('Workspace Settings Page', () => {
             model_image: 'flux1-schnell-fp8.safetensors',
             model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
             model_audio: 'ace_step_v1_3.5b.safetensors',
+            overrides: true,
           }),
         });
       });
