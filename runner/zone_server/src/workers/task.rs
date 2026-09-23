@@ -426,6 +426,7 @@ const TERMINAL_MARKERS: &[&str] = &[
     "no such model",
     "not supported",
     "permission denied",
+    "sign in again",
     "unauthorized",
     "unsupported",
 ];
@@ -3405,6 +3406,18 @@ mod retry_tests {
                 "{message} must never be retried"
             );
         }
+    }
+
+    #[test]
+    fn a_coding_agent_that_has_to_be_signed_in_again_is_not_retried() {
+        use zone_core::llm::{AgentKind, CliSettings, LlmBackend};
+
+        let signed_out = backend::remedied(
+            &LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
+            "Failed to generate response: claude: Not logged in · Please run /login".to_string(),
+        );
+
+        assert_eq!(classify(&signed_out), Failure::Terminal, "{signed_out}");
     }
 
     #[test]
