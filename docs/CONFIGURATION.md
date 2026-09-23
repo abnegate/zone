@@ -157,13 +157,16 @@ organizations that must not see each other's data.
   longer required at boot, so a host with no LiteLLM at all can start. The CLI
   then always uses the login of the user the server runs as, whatever
   `ZONE_AGENT_HOST_LOGIN` says: Zone never refuses these turns as not signed
-  in, and without a login the CLI fails them in its own words. claude still
-  gets the variables and flags under *How a turn runs*, and codex
-  `ZONE_CODEX_SANDBOX`, but neither gets an organization's home, and both run
-  in the server's own working directory rather than an organization's. In the
-  manager image that directory is the root-owned `/app`, so an agent given its
-  own tools cannot write there. Zone signs no one in for this path; in the
-  compose stack, choose Claude Code or Codex in AI settings instead.
+  in. Without a login the CLI fails them in its own words, and Zone adds that
+  the server's operator has to sign in again on the host, since no
+  organization's sign-in is used here; a task run that fails that way stops
+  without spending its retries. claude still gets the variables and flags
+  under *How a turn runs*, and codex `ZONE_CODEX_SANDBOX`, but neither gets an
+  organization's home, and both run in the server's own working directory
+  rather than an organization's. In the manager image that directory is the
+  root-owned `/app`, so an agent given its own tools cannot write there. Zone
+  signs no one in for this path; in the compose stack, choose Claude Code or
+  Codex in AI settings instead.
 
 ### `ZONE_LLM_BACKEND_EXECUTABLE`
 - **Default**: unset, so the agent's own name is looked up on `PATH`
@@ -256,8 +259,9 @@ organizations that must not see each other's data.
   variable to the manager service's `environment` as well.
 
 ### `ZONE_CHAT_AGENT_CWD`
-- **Default**: the server's working directory. Compose and the Helm chart set
-  `/app/workspace`, and the `dev` profile `/app/runner`.
+- **Default**: the server's working directory. Compose defaults it to
+  `/app/workspace` and the `dev` profile to `/app/runner`, and a value in
+  `.env` overrides both. The Helm chart sets `/app/workspace`.
 - **Description**: Where Zone's own chat tools start: relative paths given to
   `read_file`, `run_shell` and the other host tools resolve against it, and
   background jobs keep their logs in its `.zone/jobs`. Every organization's
@@ -376,17 +380,24 @@ review or summary starts the CLI where the server runs:
   `CLAUDE.md`, skill, agent or command from its home, its working directory or
   any directory above it, and with
   `--settings '{"crossSessionInbound":"refuse"}'`, a setting meant to refuse
-  messages from other claude sessions of the same OS user.
+  messages from other claude sessions of the same OS user;
+- for as long as the turn may take: `ZONE_CHAT_TIMEOUT_SECONDS` for a chat
+  turn, 30 minutes by default, and what is left of its hour for a task
+  attempt. A task attempt whose CLI runs out of time fails without a retry.
 
 An organization that chose Claude Code or Codex without signing in, where the
 host-login fallback is off, gets "The claude CLI is not signed in for this
 organization. An organization admin can sign in under Organization Settings >
 AI Settings." (or the same for codex) instead of an answer.
 
-In the manager image both binaries are pinned by SHA-256 and live in
-`/usr/local/bin`, with codex's bubblewrap at
-`/usr/local/bin/codex-resources/bwrap`. They are root-owned, so a turn cannot
-replace them, and claude's auto-updater is off.
+The manager image pins both CLIs by SHA-256 in `/usr/local/bin`, along with
+two programs codex runs: its bubblewrap, at
+`/usr/local/bin/codex-resources/bwrap`, and its code-mode host, at
+`/usr/local/bin/codex-code-mode-host`. On the models that reach tools only
+through codex's code mode, which are all of its presets but `gpt-5.5`, codex
+makes every tool call through that host, and without it every tool call on
+those models fails. All of these are root-owned, so a turn cannot replace
+them, and claude's auto-updater is off.
 
 ### What the agent can reach
 
@@ -400,11 +411,13 @@ Auto-approve off raises the usual card and waits for you, and a denial refuses
 the call. So retrieval, the workspace tools and citations work on these turns,
 and the console shows what the agent did the way it always does. A task run
 gets its task tools the same way, and approves every call, as task runs
-always do. Its agent is not offered the tools that end Zone's own turn to
-wait, `ask_user`, `wait_for` and `submit_plan`, and a call to one is refused
-as an unknown tool: over MCP such a call returns at once with nothing waiting
-behind it, so the run would finish on a question never asked or a job never
-waited for. A chat turn's agent is offered its whole registry.
+always do. Neither a chat's agent nor a task run's is offered the tools that
+end Zone's own turn to wait, `ask_user`, `wait_for` and a task's
+`submit_plan`, and a call to one is refused as an unknown tool: over MCP such
+a call returns at once with nothing waiting behind it, so the turn would end
+on a question no one sees or a job nothing waits for. The agent's
+instructions leave those tools out, so in a chat it asks its question in its
+reply, and you answer it in your next message.
 
 codex is told to pass every call to Zone without asking, because headless
 codex has no one to ask and Zone applies the approval policy itself; to fail
@@ -415,7 +428,8 @@ leave an approval card open for a call codex had already given up on.
 
 One thing differs from a turn served by the endpoint: the agent runs its own
 loop rather than Zone's, so Zone takes one round and the agent decides for
-itself how many tool calls it makes inside that round. A chat with **Agent
+itself how many tool calls it makes inside that round. A task attempt's agent
+is still held to a cap on its calls to Zone's tools. A chat with **Agent
 mode** off offers no tools: the CLI runs with its own tools withheld and
 without Zone's.
 
@@ -425,9 +439,15 @@ A chat with Agent mode on carries a **Zone tools only** toggle, on by default,
 beside Auto-approve. On, the agent is confined to the tools Zone serves it:
 
 - claude runs with `--tools ""`: none of its built-in tools;
-- codex runs with `--sandbox read-only`, and with its shell and its other
-  built-in tools switched off. The one built-in it cannot switch off,
-  `apply_patch`, is refused by the read-only sandbox.
+- codex runs with `--sandbox read-only`, with its shell off, and with every
+  other built-in tool that has a switch turned off. What remains is
+  `apply_patch`, which the read-only sandbox refuses; the tools that read MCP
+  resources, which reach only Zone's server; and, on the models that reach
+  tools only through code mode, `request_user_input_async`, which returns at
+  once by design and in a headless turn leaves its question in the agent's
+  reply. On those models the agent calls every tool, Zone's included, from
+  JavaScript that codex's `exec` tool runs with no file or network access of
+  its own, and `wait` collects the output of a script still running.
 
 Either way, claude runs with `--strict-mcp-config`, so no MCP server but Zone's
 loads, and codex with `--ignore-user-config`, `--disable apps` and
@@ -459,6 +479,11 @@ agent:
   `gpt-5.6-terra`, `gpt-5.6-luna` and `gpt-5.5`, the presets codex 0.156.1
   ships, in its order. A signed-in ChatGPT account may see a different set.
 
+Choosing Automatic and saving clears a model saved before, and changing the
+provider sets both fields back to Automatic, on the organization's page as on
+a workspace's. Through the API, an empty `model_fast`, `model_reasoning` or
+`model_embedding` clears that model, and a field left out keeps it.
+
 Zone passes a model to the CLI as `--model` only when that agent knows the
 name, and otherwise passes none, so the agent uses its own default. claude
 knows its aliases in any case (`sonnet`, `opus`, `haiku`, `fable`, `best`,
@@ -478,34 +503,40 @@ chooses the same way from the task's own model, so on these providers it
 starts even when no model is installed or configured.
 
 Chat titles, pull request subjects and auto-project summaries use the Fast
-model, so on Claude Code or Codex they need one the agent knows. Without one, a
-chat keeps the title it was created with, a pull request subject is made from
-the task's title, and an auto-project summary is the pull request's first
-paragraph. Search and retrieval keep using the server's own embedding engine
-(`EMBEDDING_ENGINE` and `OLLAMA_MODEL_EMBED`).
+model when the agent knows it, and otherwise let the agent choose, as the Fast
+field's hint says. When the agent gives no usable answer in time, a chat is
+titled with the first words of its first message, a pull request subject is
+made from the task's title, and an auto-project summary is the pull request's
+first paragraph. Search and retrieval keep using the server's own embedding
+engine (`EMBEDDING_ENGINE` and `OLLAMA_MODEL_EMBED`).
 
 ### Reviews, conflict repair and plan approval
 
 - **Auto-project reviews** run on the workspace's CLI without Zone's review
   tools, such as `read_pr_file`. The reviewer judges the task, the pull request
   and the diff in its prompt, and its instructions leave the tools out. When
-  the workspace's CLI cannot be used, because it is signed out for example,
-  the auto project pauses with that message. The reviewer's model is one the
-  agent knows, taken from `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else
-  one of the agent's own models, never an installed Ollama model. A run whose
-  agent chose its own model records no model, so with
-  `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL` on its review pauses unless a
-  review bot answers; set Fast and Reasoning models the agent knows to avoid
-  that.
+  the workspace's CLI cannot be set up (signed out with the host login off, a
+  sign-in that cannot be read, a Claude token that cannot be renewed, or an
+  unwritable state directory), that task pauses with the reason and the
+  project continues. A CLI that starts and then fails is retried on the next
+  tick. The reviewer's model is one the agent knows, taken from
+  `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else one of the agent's own
+  models, never an installed Ollama model. A run whose agent chose its own
+  model records `auto`, which names no model, so Zone counts any review of it
+  as one by the model that wrote the change: the review says so, and with
+  `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL` on the task pauses unless a review
+  bot answers. Set Fast and Reasoning models the agent knows to avoid that.
 - **Conflict repair** runs Zone's own tool loop, which a CLI cannot host, so it
   always runs on the instance's LiteLLM endpoint, whatever the workspace chose.
   With `ZONE_LLM_BACKEND` set to `claude` or `codex` the instance has no such
   endpoint, and repair fails with "Conflict repair needs zone's own tool loop,
   which a coding agent CLI backend does not provide".
 - **Plan approval** is not available. A task run that requires it fails before
-  the CLI starts, without a retry, with "Plan approval is not available when a
-  task runs on a coding agent CLI; turn off Require plan approval or use the
-  Self-Hosted provider." A run an auto project starts is never held for
+  its checkout is prepared, without a retry, with "Plan approval is not
+  available when a task runs on a coding agent CLI; turn off Require plan
+  approval or use the Self-Hosted provider." When `ZONE_LLM_BACKEND` is itself
+  `claude` or `codex`, so that Self-Hosted runs a CLI too, the message does
+  not suggest Self-Hosted. A run an auto project starts is never held for
   approval, so it is unaffected.
 
 ### Running Zone natively: the host login
@@ -633,8 +664,10 @@ once approved, and its file tools read whatever else the server's user can.
   The `dev` profile's image, `manager/Dockerfile.dev`, does not include the
   CLIs.
 - **Helm.** Agent providers need `server.replicaCount: 1` and
-  `server.autoscaling.enabled: false`; see
-  [helm/zone-apps/README.md](../helm/zone-apps/README.md).
+  `server.autoscaling.enabled: false`, and a single replica needs
+  `server.podDisruptionBudget.enabled: false`; see
+  [helm/zone-apps/README.md](../helm/zone-apps/README.md), which also covers
+  the claim that keeps agent state and how to size it.
 - **Backups.** `make backup` and `make restore` include
   `zone_manager_agent_state`, and with it every organization's codex login; see
   [OPERATIONS.md](OPERATIONS.md).
@@ -652,16 +685,10 @@ once approved, and its file tools read whatever else the server's user can.
 
 ### Known gaps
 
-- A workspace whose AI override chooses Self-Hosted and nothing else, with no
-  keys or models of its own, runs on Self-Hosted, but Workspace Settings shows
-  it as inheriting its organization's settings.
 - A chat's model picker lists only installed Ollama models, so the console
   cannot give a chat `opus` or `gpt-6-sol`; set the Fast and Reasoning models
   in AI settings instead. Whether a chat offers Agent mode also follows those
   installed models.
-- A task run on Claude Code or Codex is not offered `ask_user` or `wait_for`,
-  but its instructions still describe them, so its agent may call one and be
-  refused.
 
 ---
 
