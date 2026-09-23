@@ -442,11 +442,13 @@ mod tests {
     /// A stand-in agent, so no test needs a real CLI installed.
     ///
     /// It reads its prompt from stdin exactly as the real agents do, which is
-    /// what keeps the delivery path under test the real one.
+    /// what keeps the delivery path under test the real one. Run without
+    /// arguments, as only [`wait_until_executable`] runs it, it exits at once.
     fn fake(directory: &TempDir, script: &str) -> PathBuf {
         let path = directory.path().join("agent");
         let mut file = std::fs::File::create(&path).expect("the fake agent");
-        write!(file, "#!/bin/sh\n{script}\n").expect("the fake agent body");
+        write!(file, "#!/bin/sh\n[ \"$#\" -gt 0 ] || exit 0\n{script}\n")
+            .expect("the fake agent body");
         drop(file);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("the fake agent to be executable");
@@ -454,28 +456,27 @@ mod tests {
         path
     }
 
+    /// Runs the fake once to completion, before a test's deadlines start.
+    ///
     /// Linux refuses to exec a file any process still holds open for writing.
     /// The descriptor here is closed, but a sibling test forking between its
     /// own open and exec inherits it for that window, so a freshly written
-    /// script can hit ETXTBSY under a parallel run. Production never meets this:
-    /// a provider execs an installed binary, not one it just wrote.
+    /// script can hit ETXTBSY under a parallel run. macOS assesses a new
+    /// executable on its first run, which can take seconds, and a run killed
+    /// at once leaves that to the next run. Production never meets either: a
+    /// provider execs an installed binary, not one it just wrote.
     fn wait_until_executable(path: &std::path::Path) {
         for _ in 0..50 {
             match std::process::Command::new(path)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .spawn()
+                .status()
             {
-                Ok(mut child) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return;
-                }
                 Err(error) if error.raw_os_error() == Some(26) => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(_) => return,
+                _ => return,
             }
         }
     }
@@ -865,9 +866,6 @@ echo '{"type":"result","subtype":"success","is_error":false}'
 
     /// A stand-in agent that writes down how it was started -- its arguments
     /// and its whole environment -- and then finishes the way claude does.
-    ///
-    /// A run without arguments records nothing. That is [`fake`]'s probe for
-    /// an executable file, and its record could land on top of the real one.
     struct Recorder {
         directory: TempDir,
     }
@@ -885,7 +883,6 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         fn settings(&self) -> CliSettings {
             let script = format!(
                 r#"
-[ "$#" -gt 0 ] || exit 0
 cat > /dev/null
 printf '%s\0' "$@" > '{arguments}'
 /usr/bin/env -0 > '{environment}'
