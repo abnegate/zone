@@ -11,8 +11,8 @@ use super::claude;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::state::AppState;
 
-/// How long before expiry a Claude token is renewed.
-const MARGIN: TimeDelta = TimeDelta::minutes(5);
+/// A Claude token is renewed once it would run out within the longest turn it is handed to.
+const MARGIN: TimeDelta = TimeDelta::hours(1);
 
 const UNOPENED: &str = "the stored sign-in could not be opened";
 
@@ -302,13 +302,32 @@ mod tests {
         let server = token_endpoint(renewed(), 0).await;
         let fixture = Fixture::answered_by(&server).await;
         fixture
-            .sign_in(&tokens(Utc::now() + TimeDelta::hours(1), Some(REFRESH)))
+            .sign_in(&tokens(Utc::now() + TimeDelta::hours(2), Some(REFRESH)))
             .await;
 
         let login = fixture.resolve(AgentKind::Claude).await;
         fixture.remove().await;
 
         assert_eq!(token(login), ACCESS);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_claude_login_that_would_expire_during_the_longest_turn_is_renewed_first() {
+        let server = token_endpoint(renewed(), 1).await;
+        let fixture = Fixture::answered_by(&server).await;
+        fixture
+            .sign_in(&tokens(Utc::now() + TimeDelta::minutes(50), Some(REFRESH)))
+            .await;
+
+        let login = fixture.resolve(AgentKind::Claude).await;
+        fixture.remove().await;
+
+        assert_eq!(
+            token(login),
+            RENEWED,
+            "a token with 50 minutes left was handed to a turn that may run an hour"
+        );
         server.verify().await;
     }
 
