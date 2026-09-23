@@ -10,6 +10,7 @@ import { useExpired } from './useExpired';
 import './AgentSignIn.css';
 
 export const POLL_INTERVAL = 3000;
+export const POLL_INTERVAL_LIMIT = 30000;
 
 const names: Record<Agent, string> = { claude: 'Claude Code', codex: 'Codex' };
 const accounts: Record<Agent, string> = { claude: 'Claude', codex: 'ChatGPT' };
@@ -81,15 +82,18 @@ export function AgentSignIn({
   const pending = status?.state === 'pending';
   const waiting = prompt !== null || pending;
   const device = prompt ?? (pending ? (status?.pending ?? null) : null);
+  const codeExpired = useExpired(device?.expires_at ?? null);
 
   useEffect(() => {
     if (!waiting) return;
     let cancelled = false;
+    let failures = 0;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
         const next = await agentsApi.get(organizationId, agent);
         if (cancelled) return;
+        failures = 0;
         setFailure(null);
         onStatusChange(next);
         if (next.state === 'pending') {
@@ -100,7 +104,9 @@ export function AgentSignIn({
       } catch (reason) {
         if (cancelled) return;
         setFailure(reasonOf(reason));
-        timer = setTimeout(poll, POLL_INTERVAL);
+        if (reason instanceof AgentRequestError && !reason.retryable) return;
+        failures += 1;
+        timer = setTimeout(poll, Math.min(POLL_INTERVAL * 2 ** failures, POLL_INTERVAL_LIMIT));
       }
     };
     timer = setTimeout(poll, POLL_INTERVAL);
@@ -201,6 +207,8 @@ export function AgentSignIn({
     detail = 'The link from claude.com expired. Start again to get a new one.';
   } else if (authorization) {
     detail = 'Start again to get a new link from claude.com.';
+  } else if (waiting && codeExpired) {
+    detail = 'The one-time code expired. Cancel, then sign in again.';
   } else if (waiting) {
     detail = 'Waiting for you to finish signing in.';
   } else if (status?.state === 'expired') {
@@ -273,7 +281,7 @@ export function AgentSignIn({
 
       {manageable && waiting && (
         <DeviceSteps
-          prompt={device}
+          prompt={codeExpired ? null : device}
           account={account}
           busy={busy}
           onCancel={() => void signOut()}

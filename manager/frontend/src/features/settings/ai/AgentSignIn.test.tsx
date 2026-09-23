@@ -1,4 +1,15 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, vi } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setSystemTime,
+  vi,
+} from 'bun:test';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { type ComponentProps, useCallback, useState } from 'react';
 import fixture from '../../../../../../runner/zone_server/tests/fixtures/agents.json';
@@ -18,9 +29,10 @@ mock.module('../../../api/agents', () => ({ agentsApi }));
 
 let AgentSignIn: typeof import('./AgentSignIn').AgentSignIn;
 let POLL_INTERVAL: number;
+let POLL_INTERVAL_LIMIT: number;
 
 beforeAll(async () => {
-  ({ AgentSignIn, POLL_INTERVAL } = await import('./AgentSignIn'));
+  ({ AgentSignIn, POLL_INTERVAL, POLL_INTERVAL_LIMIT } = await import('./AgentSignIn'));
 });
 
 afterAll(() => {
@@ -28,6 +40,7 @@ afterAll(() => {
 });
 
 const organization = '00000000-0000-0000-0000-000000000001';
+const beforeTheCodeExpires = new Date('2026-09-23T04:00:00Z');
 const [claudeSignedIn, codexPending] = fixture.agents as AgentStatus[];
 const claudeSignedOut: AgentStatus = {
   ...claudeSignedIn,
@@ -387,8 +400,16 @@ describe('AgentSignIn', () => {
   });
 
   describe('codex', () => {
+    beforeEach(() => {
+      setSystemTime(beforeTheCodeExpires);
+    });
+
+    afterEach(() => {
+      setSystemTime();
+    });
+
     it('shows the link and code, polls every 3 s, and stops once signed in', async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
       agentsApi.start.mockResolvedValue(prompt);
       agentsApi.get.mockResolvedValueOnce(codexPending).mockResolvedValueOnce(codexSignedIn);
       const { onChange } = renderPanel('codex', codexSignedOut);
@@ -434,7 +455,7 @@ describe('AgentSignIn', () => {
     });
 
     it('resumes a sign-in already in progress and stops polling once unmounted', async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
       agentsApi.get.mockResolvedValue(codexPending);
       const { unmount } = render(
         <AgentSignIn
@@ -471,6 +492,95 @@ describe('AgentSignIn', () => {
       await waitFor(() => expect(onChange).toHaveBeenCalledWith(codexSignedOut));
       expect(agentsApi.signOut).toHaveBeenCalledWith(organization, 'codex');
       expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
+    });
+
+    it('backs off while polling fails, up to a limit', async () => {
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
+      agentsApi.get.mockRejectedValue(
+        new AgentRequestError('Failed to load the codex sign-in: 502', 502)
+      );
+      renderPanel('codex', codexPending);
+      const calls = () => agentsApi.get.mock.calls.length;
+      const wait = async (milliseconds: number) => {
+        await act(async () => {
+          vi.advanceTimersByTime(milliseconds);
+        });
+      };
+
+      await wait(POLL_INTERVAL);
+      expect(calls()).toBe(1);
+      expect(screen.getByRole('alert')).toHaveTextContent('Failed to load the codex sign-in: 502');
+
+      for (const delay of [6000, 12000, 24000, POLL_INTERVAL_LIMIT, POLL_INTERVAL_LIMIT]) {
+        const before = calls();
+        await wait(delay - 1);
+        expect(calls()).toBe(before);
+        await wait(1);
+        expect(calls()).toBe(before + 1);
+      }
+      expect(POLL_INTERVAL_LIMIT).toBe(30000);
+    });
+
+    it('starts again at the normal pace once a poll succeeds', async () => {
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
+      agentsApi.get
+        .mockRejectedValueOnce(new AgentRequestError('Failed to load the codex sign-in: 503', 503))
+        .mockRejectedValueOnce(new AgentRequestError('Too many requests', 429))
+        .mockRejectedValueOnce(new AgentRequestError('Request timeout', 408))
+        .mockResolvedValue(codexPending);
+      renderPanel('codex', codexPending);
+      const wait = async (milliseconds: number) => {
+        await act(async () => {
+          vi.advanceTimersByTime(milliseconds);
+        });
+      };
+
+      for (const delay of [POLL_INTERVAL, 6000, 12000, 24000]) {
+        await wait(delay);
+      }
+      expect(agentsApi.get).toHaveBeenCalledTimes(4);
+      expect(screen.queryByRole('alert')).toBeNull();
+
+      await wait(POLL_INTERVAL);
+      expect(agentsApi.get).toHaveBeenCalledTimes(5);
+    });
+
+    it('stops polling on a refusal that asking again cannot change', async () => {
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
+      agentsApi.get.mockRejectedValue(new AgentRequestError('Organization not found', 404));
+      renderPanel('codex', codexPending);
+
+      await act(async () => {
+        vi.advanceTimersByTime(POLL_INTERVAL);
+      });
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('alert')).toHaveTextContent('Organization not found');
+
+      await act(async () => {
+        vi.advanceTimersByTime(POLL_INTERVAL_LIMIT * 10);
+      });
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    });
+
+    it('hides the one-time code once it has expired', async () => {
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
+      agentsApi.get.mockResolvedValue(codexPending);
+      renderPanel('codex', codexPending);
+
+      expect(screen.getByText('ABCD-EFGHI')).toBeInTheDocument();
+      expect(screen.getByText(/Expires at 4:15 AM/)).toBeInTheDocument();
+
+      await act(async () => {
+        vi.advanceTimersByTime(15 * 60_000);
+      });
+
+      expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
+      expect(screen.queryByText(/Expires at/)).toBeNull();
+      expect(
+        screen.getByText('The one-time code expired. Cancel, then sign in again.')
+      ).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
     });
 
     it("shows OpenAI's refusal when the device code is refused", async () => {

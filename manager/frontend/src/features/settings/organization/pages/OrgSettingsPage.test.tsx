@@ -1,4 +1,14 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setSystemTime,
+} from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import type { AiSettings, OrgRole } from '../types';
@@ -233,6 +243,14 @@ describe('OrgSettingsPage', () => {
       model_reasoning: 'opus',
       model_embedding: null,
     };
+
+    beforeEach(() => {
+      setSystemTime(new Date('2026-09-23T04:00:00Z'));
+    });
+
+    afterEach(() => {
+      setSystemTime();
+    });
 
     it('asks for sign-in status only once a coding agent is chosen', async () => {
       render(<OrgSettingsPage />);
