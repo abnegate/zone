@@ -2006,11 +2006,11 @@ async fn attempt_run(
     }
     let mut system_prompt = prompt::task(&tools, &environment);
     system_prompt.push_str(guidance);
-    if plan_held && matches!(llm.config().backend, LlmBackend::Cli { .. }) {
+    if plan_held && matches!(backend, LlmBackend::Cli { .. }) {
         return Err(Fault::plan_approval());
     }
     let mut agent_tools = serve_tools(
-        &llm,
+        backend,
         &mut tools,
         workspace_id,
         run_id,
@@ -2203,14 +2203,14 @@ struct AgentTools {
 /// (see [`crate::mcp::Turn::without_parks`]). `None` for a backend whose tools
 /// zone cannot decide, and then the attempt's tools stay where they were.
 fn serve_tools(
-    llm: &LlmClient,
+    backend: &LlmBackend,
     tools: &mut ChatTools,
     workspace_id: Uuid,
     run_id: Uuid,
     owner: Uuid,
     endpoint: &str,
 ) -> Option<AgentTools> {
-    let LlmBackend::Cli { agent, .. } = &llm.config().backend else {
+    let LlmBackend::Cli { agent, .. } = backend else {
         return None;
     };
     if !agent.accepts_toolset() {
@@ -6004,9 +6004,9 @@ mod cli_tests {
         ChatTools::for_task(state, std::env::temp_dir(), Uuid::new_v4(), None).await
     }
 
-    fn serve(state: &AppState, llm: &LlmClient, tools: &mut ChatTools) -> Option<AgentTools> {
+    fn serve(state: &AppState, backend: &LlmBackend, tools: &mut ChatTools) -> Option<AgentTools> {
         serve_tools(
-            llm,
+            backend,
             tools,
             Uuid::new_v4(),
             Uuid::new_v4(),
@@ -6019,10 +6019,7 @@ mod cli_tests {
     async fn an_attempt_on_an_agent_leaves_zones_own_loop_nothing_to_call() {
         let state = AppState::for_tests();
         for agent in AgentKind::ALL {
-            let llm = LlmClient::new(LlmConfig::default().with_backend(LlmBackend::cli(
-                agent,
-                zone_core::llm::CliSettings::default(),
-            )));
+            let backend = LlmBackend::cli(agent, zone_core::llm::CliSettings::default());
             let mut tools = attempt_tools(&state).await;
             let parks = [question::ASK_USER, wait::WAIT_FOR];
             assert!(parks.iter().all(|name| tools.has(name)));
@@ -6033,7 +6030,7 @@ mod cli_tests {
                 .cloned()
                 .collect();
 
-            let served = serve(&state, &llm, &mut tools)
+            let served = serve(&state, &backend, &mut tools)
                 .unwrap_or_else(|| panic!("{agent} lets zone decide its tools"));
 
             assert!(
@@ -6054,7 +6051,7 @@ mod cli_tests {
         let mut tools = attempt_tools(&state).await;
         let registered = tools.names().to_vec();
 
-        let served = serve(&state, &LlmClient::new(LlmConfig::default()), &mut tools);
+        let served = serve(&state, &LlmBackend::Http, &mut tools);
 
         assert!(served.is_none(), "an HTTP backend spawns nothing to serve");
         assert_eq!(tools.names(), registered);
