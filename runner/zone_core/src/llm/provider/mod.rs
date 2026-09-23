@@ -51,6 +51,6 @@ pub use router::Router;
 pub use selection::{SelectionStrategy, Weighted, choose, sample};
 pub use settings::{
     BuiltinTools, CliSettings, CodexSandbox, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT,
-    DEFAULT_TIMEOUT, Toolset,
+    DEFAULT_TIMEOUT, SignIn, Toolset,
 };
 pub use transcript::render;

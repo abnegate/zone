@@ -62,6 +62,16 @@ impl CodexSandbox {
     }
 }
 
+/// Whose sign-in a spawned agent runs under, which is who can renew it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SignIn {
+    /// The server's own: the host's login, or a key in its environment.
+    #[default]
+    Instance,
+    /// An organization's, renewed from its AI settings.
+    Organization,
+}
+
 /// Zone's tools, served to a spawned agent over MCP.
 ///
 /// A coding agent runs its own tool loop and cannot be handed zone's schemas
@@ -125,6 +135,7 @@ pub struct CliSettings {
     /// Set in the child on top of the little it inherits from this process.
     pub variables: BTreeMap<String, String>,
     pub credential: Credential,
+    pub sign_in: SignIn,
     /// Zone's tools, or `None` for a turn that answers in prose alone.
     ///
     /// Shared rather than owned so that cloning these settings -- which the
@@ -148,6 +159,7 @@ impl Default for CliSettings {
             working_directory: None,
             variables: BTreeMap::new(),
             credential: Credential::Inherited,
+            sign_in: SignIn::default(),
             toolset: None,
             builtin_tools: BuiltinTools::default(),
             sandbox: CodexSandbox::default(),
@@ -176,6 +188,11 @@ impl CliSettings {
 
     pub fn with_credential(mut self, credential: Credential) -> Self {
         self.credential = credential;
+        self
+    }
+
+    pub fn with_sign_in(mut self, sign_in: SignIn) -> Self {
+        self.sign_in = sign_in;
         self
     }
 
@@ -326,6 +343,16 @@ mod tests {
         assert!(settings.toolset.is_none());
         assert_eq!(settings.builtin_tools, BuiltinTools::Withheld);
         assert_eq!(settings.sandbox, CodexSandbox::WorkspaceWrite);
+        assert_eq!(settings.sign_in, SignIn::Instance);
+    }
+
+    #[test]
+    fn an_agent_runs_under_the_servers_own_sign_in_until_told_whose() {
+        assert_eq!(CliSettings::default().sign_in, SignIn::Instance);
+
+        let settings = CliSettings::default().with_sign_in(SignIn::Organization);
+        assert_eq!(settings.sign_in, SignIn::Organization);
+        assert!(matches!(settings.credential, Credential::Inherited));
     }
 
     #[test]
