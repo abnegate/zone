@@ -9,13 +9,14 @@ To learn more about the release, try:
 
 {{- if .Values.ingress.enabled }}
 {{- range .Values.ingress.hosts }}
+{{- $host := .host }}
 
 Application URLs:
   {{- range .paths }}
   {{- if eq .service "server" }}
-  - API: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ .path }}
+  - API: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host }}{{ .path }}
   {{- else if eq .service "manager" }}
-  - Manager UI: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ .path }}
+  - Manager UI: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host }}{{ .path }}
   {{- end }}
   {{- end }}
 {{- end }}
