@@ -1,13 +1,12 @@
 //! Coding agent sign-in endpoints. An organization's admins sign it in to Claude Code and Codex,
 //! and every member sees how it is signed in.
 
-use std::borrow::Cow;
+mod failure;
 
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
-    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
 use futures::future::try_join_all;
@@ -20,18 +19,14 @@ use crate::auth::AuthUser;
 use crate::db::ai_settings::{self, AccessError};
 use crate::db::organization_members::OrgRole;
 use crate::services::login::claude::Scope;
-use crate::services::login::error::Error;
 use crate::services::login::status::{AgentStatus, Viewer};
 use crate::services::login::{devices, oauth};
 use crate::state::AppState;
+use failure::Failure;
 
-use super::common::ErrorResponse;
-
-const ADMINS_ONLY: &str = "Only organization admins can sign in to coding agents";
 const UNKNOWN_AGENT: &str = "No coding agent has that name";
 const NO_CODE: &str = "Codex signs in with a device code; only a Claude sign-in takes a pasted one";
 const INVALID_USER: &str = "Invalid user ID in token";
-const INTERNAL: &str = "Internal server error";
 
 #[derive(Debug, Default, Deserialize)]
 pub struct StartRequest {
@@ -64,13 +59,6 @@ pub enum Login {
         user_code: String,
         expires_at: DateTime<Utc>,
     },
-}
-
-/// Why a request failed, sent as `{"error": "…"}`.
-#[derive(Debug)]
-pub struct Failure {
-    status: StatusCode,
-    message: Cow<'static, str>,
 }
 
 /// GET /api/organizations/{org_id}/agents
@@ -209,58 +197,7 @@ async fn admin(state: &AppState, auth: &AuthUser, organization: Uuid) -> Result<
     if viewer.manages {
         Ok(viewer.user)
     } else {
-        Err(Failure::new(StatusCode::FORBIDDEN, ADMINS_ONLY))
-    }
-}
-
-impl Failure {
-    fn new(status: StatusCode, message: impl Into<Cow<'static, str>>) -> Self {
-        Self {
-            status,
-            message: message.into(),
-        }
-    }
-
-    fn internal(detail: impl std::fmt::Display) -> Self {
-        tracing::error!(%detail, "A coding agent sign-in request failed");
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, INTERNAL)
-    }
-
-    fn database(error: sqlx::Error) -> Self {
-        Self::internal(error)
-    }
-
-    fn unreadable(rejection: JsonRejection) -> Self {
-        Self::new(rejection.status(), rejection.body_text())
-    }
-}
-
-impl From<AccessError> for Failure {
-    fn from(error: AccessError) -> Self {
-        match error {
-            AccessError::Forbidden(_) => Self::new(StatusCode::FORBIDDEN, ADMINS_ONLY),
-            AccessError::NotFound(message) => Self::new(StatusCode::NOT_FOUND, message),
-            AccessError::Invalid(message) => Self::new(StatusCode::BAD_REQUEST, message),
-            AccessError::Database(error) => Self::database(error),
-        }
-    }
-}
-
-impl From<Error> for Failure {
-    fn from(error: Error) -> Self {
-        match error {
-            Error::Invalid(message) => Self::new(StatusCode::BAD_REQUEST, message),
-            Error::Unavailable(_) => Self::new(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
-            Error::Refused(message) => Self::new(StatusCode::BAD_GATEWAY, message),
-            Error::Internal(message) => Self::internal(message),
-            Error::Database(error) => Self::database(error),
-        }
-    }
-}
-
-impl IntoResponse for Failure {
-    fn into_response(self) -> Response {
-        (self.status, Json(ErrorResponse::new(self.message))).into_response()
+        Err(Failure::admins_only())
     }
 }
 
@@ -317,45 +254,5 @@ mod tests {
             assert_eq!(request.scope, scope);
         }
         assert!(serde_json::from_value::<StartRequest>(json!({ "scope": "everything" })).is_err());
-    }
-
-    #[test]
-    fn each_failure_has_the_status_the_sign_in_panel_expects() {
-        for (error, status, message) in [
-            (
-                Error::Invalid("bad paste"),
-                StatusCode::BAD_REQUEST,
-                "bad paste",
-            ),
-            (
-                Error::Unavailable(AgentKind::Codex),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "The codex CLI is not installed on this server",
-            ),
-            (
-                Error::Refused("device code request failed".to_string()),
-                StatusCode::BAD_GATEWAY,
-                "device code request failed",
-            ),
-            (
-                Error::Internal("/app/agent-state is read-only".to_string()),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                INTERNAL,
-            ),
-        ] {
-            let failure = Failure::from(error);
-
-            assert_eq!(
-                (failure.status, failure.message.as_ref()),
-                (status, message)
-            );
-        }
-        let forbidden = Failure::from(AccessError::Forbidden(
-            "Only organization admins can manage AI settings",
-        ));
-        assert_eq!(
-            (forbidden.status, forbidden.message.as_ref()),
-            (StatusCode::FORBIDDEN, ADMINS_ONLY)
-        );
     }
 }
