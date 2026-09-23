@@ -155,15 +155,6 @@ impl AgentKind {
         }
     }
 
-    /// The environment variable this agent reads its key from, when a key is
-    /// configured at all. An agent already signed in on the host needs none.
-    pub fn variable(self) -> &'static str {
-        match self {
-            Self::Claude => "ANTHROPIC_API_KEY",
-            Self::Codex => "OPENAI_API_KEY",
-        }
-    }
-
     /// The agent whose [`AgentKind::as_str`] is `name`.
     pub fn named(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|agent| agent.as_str() == name)
@@ -225,13 +216,8 @@ impl AgentKind {
         }
     }
 
-    /// A non-interactive invocation that streams newline-delimited JSON, run
-    /// with the agent's own tools and none of zone's.
-    pub fn arguments(self, model: Option<&str>) -> Vec<String> {
-        self.arguments_with(model, None, BuiltinTools::Granted, CodexSandbox::default())
-    }
-
-    /// The same invocation, told which tools the turn may call.
+    /// A non-interactive invocation that streams newline-delimited JSON, told
+    /// which tools the turn may call.
     ///
     /// Zone's tools arrive over MCP because an agent runs its own loop and
     /// cannot be handed tool schemas over a completions API. Each agent lets
@@ -297,22 +283,6 @@ impl AgentKind {
         );
 
         arguments
-    }
-
-    /// Whether zone can decide this agent's tools -- serve its own and
-    /// withhold the agent's built-in ones.
-    pub fn accepts_toolset(self) -> bool {
-        match self {
-            Self::Claude | Self::Codex => true,
-        }
-    }
-
-    /// Whether withholding this agent's built-in tools still leaves it a
-    /// shell of its own.
-    pub fn keeps_shell(self) -> bool {
-        match self {
-            Self::Claude | Self::Codex => false,
-        }
     }
 
     /// Translate one output line, appending whatever it means.
@@ -521,6 +491,13 @@ fn lowercase_or_digit(byte: u8) -> bool {
 mod tests {
     use super::*;
 
+    impl AgentKind {
+        /// A turn run with the agent's own tools and none of zone's.
+        fn arguments(self, model: Option<&str>) -> Vec<String> {
+            self.arguments_with(model, None, BuiltinTools::Granted, CodexSandbox::default())
+        }
+    }
+
     #[test]
     fn the_prompt_is_never_placed_on_the_command_line() {
         for agent in [AgentKind::Claude, AgentKind::Codex] {
@@ -529,15 +506,8 @@ mod tests {
     }
 
     #[test]
-    fn every_agent_is_listed_with_the_key_variable_it_reads() {
-        assert!(AgentKind::ALL.contains(&AgentKind::Claude));
-        assert!(AgentKind::ALL.contains(&AgentKind::Codex));
-
-        let variables: Vec<&str> = AgentKind::ALL
-            .iter()
-            .map(|agent| agent.variable())
-            .collect();
-        assert_eq!(variables, ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
+    fn every_agent_is_listed() {
+        assert_eq!(AgentKind::ALL, [AgentKind::Claude, AgentKind::Codex]);
     }
 
     #[test]
@@ -1051,13 +1021,6 @@ mod tests {
     }
 
     #[test]
-    fn every_agent_lets_zone_decide_its_tools() {
-        for agent in AgentKind::ALL {
-            assert!(agent.accepts_toolset(), "{agent}");
-        }
-    }
-
-    #[test]
     fn codex_is_pointed_at_zones_tools_and_stripped_of_its_own() {
         let toolset = toolset();
 
@@ -1204,10 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn no_agent_keeps_a_shell_once_its_own_tools_are_withheld() {
-        for agent in AgentKind::ALL {
-            assert!(!agent.keeps_shell(), "{agent}");
-        }
+    fn codex_keeps_no_shell_once_its_own_tools_are_withheld() {
         assert!(
             values_after(
                 &codex(None, BuiltinTools::Withheld, CodexSandbox::default()),

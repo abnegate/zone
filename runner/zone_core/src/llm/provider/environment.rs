@@ -257,8 +257,7 @@ mod tests {
     fn every_variable_zone_hands_a_credential_in_is_refused() {
         let handed = AgentKind::ALL
             .into_iter()
-            .flat_map(|agent| [Some(agent.variable()), agent.token()])
-            .flatten()
+            .filter_map(AgentKind::token)
             .chain([Toolset::TOKEN_VARIABLE]);
 
         for name in handed {
