@@ -71,15 +71,11 @@ impl AgentStatus {
                 }
             }
             (None, Some(login)) => {
-                let key = state.encryption_key();
-                let now = Utc::now();
-                status.state = if usable(state.config(), key, organization, agent, &login, now) {
-                    State::SignedIn
-                } else {
-                    State::Expired
+                (status.state, status.expires_at) = match agent {
+                    AgentKind::Claude => sealed(state.encryption_key(), &login, Utc::now()),
+                    AgentKind::Codex => (saved(state.config(), organization), None),
                 };
                 status.source = Some(Source::Zone);
-                status.expires_at = login.expires_at.map(|expiry| expiry.trunc_subsecs(0));
                 status.label = login.label;
             }
             (None, None) => {
@@ -108,31 +104,38 @@ impl AgentStatus {
     }
 }
 
-/// Whether the sign-in Zone keeps for the organization can still be used at `now`: a Claude login
-/// until its access token runs out, or after that while it has a refresh token, and a codex login
-/// while codex's own `auth.json` is in the organization's home.
-fn usable(
-    config: &Config,
+/// A Zone-managed Claude login's state at `now`, judged by the credential a turn would run with,
+/// and when its access token runs out. A login Zone cannot open has expired.
+fn sealed(
     key: &[u8; 32],
-    organization: Uuid,
-    agent: AgentKind,
     login: &AgentLoginRow,
     now: DateTime<Utc>,
-) -> bool {
-    match agent {
-        AgentKind::Claude => {
-            login.expires_at.is_some_and(|expiry| expiry > now) || renewable(key, login)
+) -> (State, Option<DateTime<Utc>>) {
+    let tokens = login
+        .credential
+        .as_ref()
+        .and_then(|sealed| Tokens::open(key, sealed.expose()).ok());
+    match tokens {
+        None => (State::Expired, None),
+        Some(tokens) => {
+            let state = if tokens.expires_at > now || tokens.refresh.is_some() {
+                State::SignedIn
+            } else {
+                State::Expired
+            };
+            (state, Some(tokens.expires_at.trunc_subsecs(0)))
         }
-        AgentKind::Codex => codex::signed_in(&config.agents.home(organization, agent)),
     }
 }
 
-fn renewable(key: &[u8; 32], login: &AgentLoginRow) -> bool {
-    login
-        .credential
-        .as_ref()
-        .and_then(|sealed| Tokens::open(key, sealed.expose()).ok())
-        .is_some_and(|tokens| tokens.refresh.is_some())
+/// A Zone-managed codex login is signed in while codex's own `auth.json` is in the organization's
+/// home.
+fn saved(config: &Config, organization: Uuid) -> State {
+    if codex::signed_in(&config.agents.home(organization, AgentKind::Codex)) {
+        State::SignedIn
+    } else {
+        State::Expired
+    }
 }
 
 /// The host's own sign-in, when the server may fall back on it and the host's CLI says it is
@@ -208,11 +211,11 @@ mod tests {
         key
     }
 
-    fn sealed(key: &[u8; 32], refresh: Option<&str>) -> SecretValue {
+    fn seal(key: &[u8; 32], expires_at: DateTime<Utc>, refresh: Option<&str>) -> SecretValue {
         let tokens = Tokens {
             access: SecretValue::new("fake-access-token"),
             refresh: refresh.map(SecretValue::new),
-            expires_at: at(1_790_000_000),
+            expires_at,
             scope: "user:inference".to_string(),
             subscription: None,
         };
@@ -236,6 +239,10 @@ mod tests {
         }
     }
 
+    fn claude(credential: Option<SecretValue>, expires_at: DateTime<Utc>) -> AgentLoginRow {
+        login(AgentKind::Claude, credential, Some(expires_at))
+    }
+
     fn config(state: &TempDir) -> Config {
         Config {
             agents: AgentConfig {
@@ -247,80 +254,95 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_login_is_usable_until_it_expires_and_after_that_while_it_can_renew() {
+    fn a_claude_login_that_renews_itself_is_signed_in_after_its_token_runs_out() {
         let key = key();
-        let state = TempDir::new().expect("a state root");
-        let config = config(&state);
         let now = at(1_790_000_000);
-        let organization = Uuid::new_v4();
-        let renewable = sealed(&key, Some("fake-refresh-token"));
-        let final_token = sealed(&key, None);
-        let claude = |key: &[u8; 32], login: &AgentLoginRow| {
-            usable(&config, key, organization, AgentKind::Claude, login, now)
-        };
+        let expires_at = now - TimeDelta::days(1);
+        let renewable = seal(&key, expires_at, Some("fake-refresh-token"));
 
-        for (credential, expires_at, expected) in [
-            (
-                Some(final_token.clone()),
-                Some(now + TimeDelta::seconds(1)),
-                true,
-            ),
-            (
-                Some(renewable.clone()),
-                Some(now - TimeDelta::days(1)),
-                true,
-            ),
-            (Some(final_token.clone()), Some(now), false),
-            (Some(final_token), None, false),
-            (
-                Some(SecretValue::new("never-sealed")),
-                Some(now - TimeDelta::days(1)),
-                false,
-            ),
-            (None, Some(now - TimeDelta::days(1)), false),
-        ] {
-            let login = login(AgentKind::Claude, credential, expires_at);
-
-            assert_eq!(claude(&key, &login), expected, "expires {expires_at:?}");
-        }
-        let renewable_elsewhere = login(
-            AgentKind::Claude,
-            Some(renewable),
-            Some(now - TimeDelta::days(1)),
-        );
-        assert!(
-            !claude(&[0; 32], &renewable_elsewhere),
-            "a login sealed with another key was taken for one that can renew"
+        assert_eq!(
+            sealed(&key, &claude(Some(renewable), expires_at), now),
+            (State::SignedIn, Some(expires_at))
         );
     }
 
     #[test]
-    fn a_codex_login_is_usable_while_its_auth_file_is_in_the_organizations_home() {
+    fn a_claude_login_that_cannot_renew_shows_when_its_token_runs_out() {
+        let key = key();
+        let now = at(1_790_000_000);
+        let lasting = now + TimeDelta::days(365);
+        let lapsed = now - TimeDelta::seconds(1);
+
+        for (expires_at, state) in [
+            (lasting, State::SignedIn),
+            (now, State::Expired),
+            (lapsed, State::Expired),
+        ] {
+            let final_token = seal(&key, expires_at, None);
+
+            assert_eq!(
+                sealed(&key, &claude(Some(final_token), expires_at), now),
+                (state, Some(expires_at)),
+                "expires {expires_at}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_claude_login_is_judged_by_its_sealed_token_and_not_by_the_row() {
+        let key = key();
+        let now = at(1_790_000_000);
+        let final_token = seal(&key, now - TimeDelta::days(1), None);
+
+        assert_eq!(
+            sealed(
+                &key,
+                &claude(Some(final_token), now + TimeDelta::days(1)),
+                now
+            ),
+            (State::Expired, Some(now - TimeDelta::days(1)))
+        );
+    }
+
+    #[test]
+    fn a_claude_login_zone_cannot_open_has_expired() {
+        let (sealing, reading) = (key(), key());
+        let now = at(1_790_000_000);
+        let lasting = now + TimeDelta::days(365);
+
+        for (credential, reason) in [
+            (
+                Some(seal(&sealing, lasting, Some("fake-refresh-token"))),
+                "sealed with another key",
+            ),
+            (Some(SecretValue::new("never-sealed")), "never sealed"),
+            (None, "holding nothing"),
+        ] {
+            assert_eq!(
+                sealed(&reading, &claude(credential, lasting), now),
+                (State::Expired, None),
+                "a login {reason} was taken for one that can run"
+            );
+        }
+    }
+
+    #[test]
+    fn a_codex_login_is_signed_in_while_its_auth_file_is_in_the_organizations_home() {
         let state = TempDir::new().expect("a state root");
         let config = config(&state);
         let organization = Uuid::new_v4();
-        let login = login(AgentKind::Codex, None, None);
         let home = config
             .agents
             .create_home(organization, AgentKind::Codex)
             .expect("the organization's codex home");
-        let codex = |organization| {
-            usable(
-                &config,
-                &key(),
-                organization,
-                AgentKind::Codex,
-                &login,
-                Utc::now(),
-            )
-        };
 
-        assert!(!codex(organization));
+        assert_eq!(saved(&config, organization), State::Expired);
 
         std::fs::write(home.join("auth.json"), "{}").expect("codex's login");
-        assert!(codex(organization));
-        assert!(
-            !codex(Uuid::new_v4()),
+        assert_eq!(saved(&config, organization), State::SignedIn);
+        assert_eq!(
+            saved(&config, Uuid::new_v4()),
+            State::Expired,
             "another organization's home counted"
         );
     }

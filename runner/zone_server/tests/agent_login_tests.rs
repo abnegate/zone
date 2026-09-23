@@ -27,6 +27,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+use zone_core::SecretValue;
 use zone_core::llm::AgentKind;
 use zone_server::config::{AgentConfig, Config, ModelBackend};
 use zone_server::services::login::claude::{AUTHORIZE_URL, CLIENT_ID, REDIRECT_URL, Tokens};
@@ -957,6 +958,55 @@ async fn a_pasted_callback_url_signs_in_as_well() {
     response.assert_status(StatusCode::OK);
     assert_eq!(response.json_value()["state"], "signed_in");
     assert_eq!(exchanges(&claude).await[0]["code"], CODE);
+}
+
+#[tokio::test]
+async fn a_claude_login_zone_cannot_open_has_expired() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let mut another_key = [0_u8; 32];
+    rand::fill(&mut another_key);
+    let tokens = Tokens {
+        access: SecretValue::new(ACCESS),
+        refresh: Some(SecretValue::new(REFRESH)),
+        expires_at: Utc::now() + TimeDelta::seconds(YEAR),
+        scope: INFERENCE_SCOPE.to_string(),
+        subscription: Some("max".to_string()),
+    };
+    sqlx::query(
+        "INSERT INTO agent_logins (organization_id, agent, credential, label, expires_at) \
+         VALUES ($1, 'claude', $2, 'Claude Max', $3)",
+    )
+    .bind(organization)
+    .bind(
+        tokens
+            .seal(&another_key)
+            .expect("tokens sealed with another key"),
+    )
+    .bind(tokens.expires_at)
+    .execute(stage.pool())
+    .await
+    .expect("a login sealed with another key");
+
+    let status = stage.status(organization, "claude", &owner).await;
+
+    assert_eq!(
+        status,
+        json!({
+            "agent": "claude",
+            "provider": "claude_code",
+            "state": "expired",
+            "source": "zone",
+            "label": "Claude Max",
+            "expires_at": null,
+            "models": models(AgentKind::Claude),
+            "pending": null,
+            "error": null,
+        }),
+        "a login no turn can open was shown as signed in"
+    );
 }
 
 #[tokio::test]
