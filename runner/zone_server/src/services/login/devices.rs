@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, LazyLock};
 
-use chrono::SubsecRound;
+use chrono::{DateTime, SubsecRound, Utc};
 use dashmap::DashMap;
 use futures::future::{BoxFuture, FutureExt, Shared};
 use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
@@ -35,13 +35,17 @@ static DEVICES: LazyLock<Devices> = LazyLock::new(Devices::default);
 /// How a pending sign-in ends: `Err` carries why it failed, in codex's own words.
 type Outcome = Shared<BoxFuture<'static, Result<(), String>>>;
 
+/// Resolves once how an attempt ended has been recorded.
+type Completion = Shared<BoxFuture<'static, ()>>;
+
 struct Attempt {
     id: Uuid,
     initiator: Uuid,
     email: String,
     prompt: Prompt,
-    cancel: oneshot::Sender<()>,
+    cancel: Option<oneshot::Sender<()>>,
     outcome: Outcome,
+    completion: Completion,
 }
 
 #[derive(Default)]
@@ -77,12 +81,14 @@ pub async fn sign_out(
         .await
 }
 
-/// The prompt codex printed for the organization's pending sign-in, and who started it.
-pub fn pending(organization: Uuid) -> Option<(Prompt, Uuid)> {
-    DEVICES
-        .attempts
-        .get(&organization)
-        .map(|attempt| (attempt.prompt.clone(), attempt.initiator))
+/// The organization's codex sign-in in flight: the prompt codex printed, while its code can still
+/// be entered, and who started it.
+pub fn pending(organization: Uuid) -> Option<(Option<Prompt>, Uuid)> {
+    let now = Utc::now();
+    DEVICES.attempts.get(&organization).map(|attempt| {
+        let prompt = attempt.waiting(now).then(|| attempt.prompt.clone());
+        (prompt, attempt.initiator)
+    })
 }
 
 /// Why the organization's last device sign-in failed, until another one starts.
@@ -107,28 +113,48 @@ pub(super) fn variables(agent: AgentKind) -> BTreeMap<String, String> {
     variables
 }
 
+impl Attempt {
+    /// Whether its code can still be entered: codex still waits for it, and it has not expired.
+    fn waiting(&self, now: DateTime<Utc>) -> bool {
+        self.outcome.peek().is_none() && self.prompt.expires_at > now
+    }
+}
+
 impl Devices {
     async fn lock(&self, organization: Uuid) -> OwnedMutexGuard<()> {
         let lock = self.locks.entry(organization).or_default().value().clone();
         lock.lock_owned().await
     }
 
-    /// The prompt, and for a new attempt the task that records how it ends.
+    /// The prompt, and for a new attempt the task that records how it ends. An attempt whose code
+    /// can no longer be entered is ended, and how it ended recorded, before a new one starts.
     async fn start(
         &'static self,
         state: &AppState,
         organization: Uuid,
         user: Uuid,
         email: &str,
-    ) -> Result<(Prompt, Option<JoinHandle<()>>), Error> {
-        let _guard = self.lock(organization).await;
-        let waiting = self
-            .attempts
-            .get(&organization)
-            .map(|attempt| attempt.prompt.clone());
-        if let Some(prompt) = waiting {
-            return Ok((prompt, None));
-        }
+    ) -> Result<(Prompt, Option<Completion>), Error> {
+        let _guard = loop {
+            let guard = self.lock(organization).await;
+            let ending = match self.attempts.get_mut(&organization) {
+                None => None,
+                Some(attempt) if attempt.waiting(Utc::now()) => {
+                    return Ok((attempt.prompt.clone(), None));
+                }
+                Some(mut attempt) => {
+                    if let Some(cancel) = attempt.cancel.take() {
+                        let _ = cancel.send(());
+                    }
+                    Some(attempt.completion.clone())
+                }
+            };
+            let Some(completion) = ending else {
+                break guard;
+            };
+            drop(guard);
+            completion.await;
+        };
         self.failures.remove(&organization);
 
         let config = state.config();
@@ -159,6 +185,11 @@ impl Devices {
             expires_at: prompt.expires_at.trunc_subsecs(0),
             ..prompt
         };
+        let completion =
+            tokio::spawn(self.complete(state.clone(), organization, id, outcome.clone()))
+                .map(|_| ())
+                .boxed()
+                .shared();
         self.attempts.insert(
             organization,
             Attempt {
@@ -166,11 +197,11 @@ impl Devices {
                 initiator: user,
                 email: email.to_string(),
                 prompt: prompt.clone(),
-                cancel,
-                outcome: outcome.clone(),
+                cancel: Some(cancel),
+                outcome,
+                completion: completion.clone(),
             },
         );
-        let completion = tokio::spawn(self.complete(state.clone(), organization, id, outcome));
         Ok((prompt, Some(completion)))
     }
 
@@ -246,7 +277,9 @@ impl Devices {
         let Some((_, attempt)) = self.attempts.remove(&organization) else {
             return;
         };
-        let _ = attempt.cancel.send(());
+        if let Some(cancel) = attempt.cancel {
+            let _ = cancel.send(());
+        }
         let _ = attempt.outcome.await;
     }
 }
@@ -322,7 +355,7 @@ fn said(error: &codex::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use sqlx::PgPool;
@@ -331,6 +364,7 @@ mod tests {
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
+    use crate::db::agent_logins::AgentLoginRow;
     use crate::services::login::codex::testing::{PROMPT, capture, script};
 
     const EMAIL: &str = "admin@example.com";
@@ -341,10 +375,15 @@ mod tests {
     const HOLD: &str = "hold";
     const PROBING: &str = "probing";
     const RELEASE: &str = "release";
+    const STARTED: &str = "started";
+    const LOGOUTS: &str = "logouts";
+    const LASTING: &str = "expires in 15 minutes";
+    const LAPSED: &str = "expires in 0 minutes";
 
-    /// Codex as far as a sign-in needs it. `login --device-auth` prints the recorded prompt and
-    /// saves a login once `approve` appears, consuming it; `login status` marks `probing` and
-    /// holds while `hold` is there without `release`.
+    /// Codex as far as a sign-in needs it. `login --device-auth` counts itself in `started`,
+    /// prints the recorded prompt and saves a login once `approve` appears, consuming it;
+    /// `login status` marks `probing` and holds while `hold` is there without `release`; `logout`
+    /// adds the home it logged out of to `logouts`.
     fn stand_in(control: &Path, prompt: &str) -> String {
         let control = control.display();
         let polls = WAIT.as_millis() / PAUSE.as_millis();
@@ -352,6 +391,7 @@ mod tests {
         format!(
             r#"case "$*" in
 'login --device-auth')
+    echo started >> '{control}/{STARTED}'
     cat '{prompt}'
     waited=0
     while [ ! -e '{control}/{APPROVE}' ] && [ -d '{control}' ] && [ "$waited" -lt {polls} ]; do
@@ -377,6 +417,7 @@ mod tests {
     exit 1
     ;;
 logout)
+    printf '%s\n' "$CODEX_HOME" >> '{control}/{LOGOUTS}'
     rm -f "$CODEX_HOME/{CREDENTIALS}"
     echo 'Successfully logged out' >&2
     exit 0
@@ -388,8 +429,143 @@ esac"#
         )
     }
 
-    fn touch(path: &Path) {
-        std::fs::write(path, b"").expect("a marker for the stand-in codex");
+    /// An organization, its admin, and a server whose codex is the stand-in.
+    struct Scene {
+        pool: PgPool,
+        state: AppState,
+        organization: Uuid,
+        user: Uuid,
+        directory: TempDir,
+    }
+
+    impl Scene {
+        async fn new(prompt: &[u8]) -> Self {
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("isolated test database"),
+            )
+            .await
+            .expect("the test database accepts connections");
+            let organization = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Device sign-ins', $1::text)",
+            )
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization to sign in");
+            let user = crate::db::users::create_user(
+                &pool,
+                &format!("device-{organization}@example.com"),
+                "password_hash",
+                None,
+                false,
+            )
+            .await
+            .expect("an admin to sign it in")
+            .id;
+            let directory = TempDir::new().expect("a temporary directory");
+            let prompt = capture(&directory, "prompt", prompt);
+            let codex = script(&directory, &stand_in(directory.path(), &prompt));
+            let state = AppState::new(
+                Config {
+                    model_backend: ModelBackend::Cli {
+                        agent: AgentKind::Codex,
+                        executable: Some(codex),
+                    },
+                    agents: AgentConfig {
+                        state: directory.path().join("agents"),
+                        host_login: false,
+                        ..AgentConfig::default()
+                    },
+                    ..crate::state::test_config()
+                },
+                pool.clone(),
+                None,
+            );
+            state.disable_mcp();
+            Self {
+                pool,
+                state,
+                organization,
+                user,
+                directory,
+            }
+        }
+
+        fn control(&self, name: &str) -> PathBuf {
+            self.directory.path().join(name)
+        }
+
+        fn touch(&self, name: &str) {
+            std::fs::write(self.control(name), b"").expect("a marker for the stand-in codex");
+        }
+
+        fn lines(&self, name: &str) -> Vec<String> {
+            std::fs::read_to_string(self.control(name))
+                .map(|text| text.lines().map(str::to_string).collect())
+                .unwrap_or_default()
+        }
+
+        fn home(&self) -> PathBuf {
+            self.state
+                .config()
+                .agents
+                .home(self.organization, AgentKind::Codex)
+        }
+
+        async fn start(&self) -> (Prompt, Option<Completion>) {
+            DEVICES
+                .start(&self.state, self.organization, self.user, EMAIL)
+                .await
+                .expect("codex printed its prompt")
+        }
+
+        async fn sign_out(&self) {
+            sign_out(
+                &self.state,
+                self.organization,
+                AgentKind::Codex,
+                self.user,
+                EMAIL,
+            )
+            .await
+            .expect("the sign-out");
+        }
+
+        fn attempt(&self) -> Option<Uuid> {
+            DEVICES
+                .attempts
+                .get(&self.organization)
+                .map(|attempt| attempt.id)
+        }
+
+        /// Whether the organization's pending sign-in shows its prompt, and to whom it belongs.
+        fn shown(&self) -> Option<(bool, Uuid)> {
+            pending(self.organization).map(|(prompt, initiator)| (prompt.is_some(), initiator))
+        }
+
+        async fn login(&self) -> Option<AgentLoginRow> {
+            agent_logins::get(&self.pool, self.organization, AgentKind::Codex.as_str())
+                .await
+                .expect("the logins are readable")
+        }
+
+        async fn delete_organization(&self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .expect("the organization can be deleted");
+        }
+
+        async fn remove(self) {
+            self.delete_organization().await;
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(self.user)
+                .execute(&self.pool)
+                .await
+                .expect("the admin can be deleted");
+        }
     }
 
     async fn appeared(path: &Path) -> bool {
@@ -402,10 +578,13 @@ esac"#
         false
     }
 
-    async fn pool() -> PgPool {
-        PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
-            .await
-            .expect("the test database accepts connections")
+    async fn finished(completion: Option<Completion>) {
+        timeout(
+            WAIT,
+            completion.expect("a new sign-in is watched until it ends"),
+        )
+        .await
+        .expect("how the sign-in ended to be recorded");
     }
 
     #[test]
@@ -431,102 +610,115 @@ esac"#
 
     #[tokio::test]
     async fn a_sign_in_that_lands_after_a_sign_out_is_never_recorded() {
-        let pool = pool().await;
-        let organization = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Device race', $1::text)",
-        )
-        .bind(organization)
-        .execute(&pool)
-        .await
-        .expect("an organization to sign in");
-        let user = crate::db::users::create_user(
-            &pool,
-            &format!("device-race-{organization}@example.com"),
-            "password_hash",
-            None,
-            false,
-        )
-        .await
-        .expect("an admin to sign it in")
-        .id;
-        let directory = TempDir::new().expect("a temporary directory");
-        let control = directory.path();
-        let prompt = capture(&directory, "prompt", PROMPT);
-        let codex = script(&directory, &stand_in(control, &prompt));
-        let state = AppState::new(
-            Config {
-                model_backend: ModelBackend::Cli {
-                    agent: AgentKind::Codex,
-                    executable: Some(codex),
-                },
-                agents: AgentConfig {
-                    state: control.join("agents"),
-                    host_login: false,
-                    ..AgentConfig::default()
-                },
-                ..crate::state::test_config()
-            },
-            pool.clone(),
-            None,
-        );
-        state.disable_mcp();
-        let home = state.config().agents.home(organization, AgentKind::Codex);
-        touch(&control.join(HOLD));
+        let scene = Scene::new(PROMPT).await;
+        scene.touch(HOLD);
 
-        let (_, first) = DEVICES
-            .start(&state, organization, user, EMAIL)
-            .await
-            .expect("codex printed its prompt");
-        let first = first.expect("a new sign-in is watched until it ends");
-        touch(&control.join(APPROVE));
+        let (_, first) = scene.start().await;
+        scene.touch(APPROVE);
         assert!(
-            appeared(&control.join(PROBING)).await,
+            appeared(&scene.control(PROBING)).await,
             "codex never finished the first sign-in"
         );
-        sign_out(&state, organization, AgentKind::Codex, user, EMAIL)
-            .await
-            .expect("the sign-out");
-        DEVICES
-            .start(&state, organization, user, EMAIL)
-            .await
-            .expect("a second sign-in");
-        touch(&control.join(RELEASE));
-        timeout(WAIT, first)
-            .await
-            .expect("the first sign-in's ending to be handled")
-            .expect("the task that handles it not to panic");
+        scene.sign_out().await;
+        let (_, second) = scene.start().await;
+        scene.touch(RELEASE);
+        finished(first).await;
 
-        let login = agent_logins::get(&pool, organization, AgentKind::Codex.as_str())
-            .await
-            .expect("the logins are readable");
         assert!(
-            login.is_none(),
+            scene.login().await.is_none(),
             "a sign-in that ended after the sign-out was recorded"
         );
         assert!(
-            pending(organization).is_some(),
+            pending(scene.organization).is_some(),
             "the first sign-in's ending ended the second one"
         );
-        assert_eq!(failure(organization), None);
+        assert_eq!(failure(scene.organization), None);
         assert!(
-            !home.join(CREDENTIALS).exists(),
+            !scene.home().join(CREDENTIALS).exists(),
             "codex's login outlived the sign-out"
         );
 
-        sign_out(&state, organization, AgentKind::Codex, user, EMAIL)
+        scene.sign_out().await;
+        finished(second).await;
+        assert!(pending(scene.organization).is_none());
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_prompt_past_its_expiry_is_never_handed_out_again() {
+        let lapsed = String::from_utf8_lossy(PROMPT).replace(LASTING, LAPSED);
+        assert_ne!(
+            lapsed.as_bytes(),
+            PROMPT,
+            "the recorded prompt no longer says when it expires"
+        );
+        let scene = Scene::new(lapsed.as_bytes()).await;
+        let (_, first) = scene.start().await;
+        let attempt = scene.attempt();
+
+        let shown = scene.shown();
+        let (_, second) = scene.start().await;
+
+        assert_eq!(
+            shown,
+            Some((false, scene.user)),
+            "a prompt past its expiry was shown"
+        );
+        assert_eq!(
+            scene.lines(STARTED).len(),
+            2,
+            "a prompt past its expiry was handed out again"
+        );
+        assert_ne!(scene.attempt(), attempt);
+        finished(first).await;
+        scene.sign_out().await;
+        finished(second).await;
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_prompt_whose_sign_in_already_succeeded_is_never_handed_out_again() {
+        let scene = Scene::new(PROMPT).await;
+        scene.touch(HOLD);
+        let (_, first) = scene.start().await;
+        let attempt = scene.attempt();
+        scene.touch(APPROVE);
+        assert!(
+            appeared(&scene.control(PROBING)).await,
+            "codex never finished the first sign-in"
+        );
+
+        let shown = scene.shown();
+        let again = tokio::spawn({
+            let state = scene.state.clone();
+            let (organization, user) = (scene.organization, scene.user);
+            async move { DEVICES.start(&state, organization, user, EMAIL).await }
+        });
+        scene.touch(RELEASE);
+        let (_, second) = timeout(WAIT, again)
             .await
-            .expect("the second sign-in to stop");
-        assert!(pending(organization).is_none());
-        sqlx::query("DELETE FROM organizations WHERE id = $1")
-            .bind(organization)
-            .execute(&pool)
-            .await
-            .expect("the organization can be deleted");
-        sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(user)
-            .execute(&pool)
-            .await
-            .expect("the admin can be deleted");
+            .expect("the second start to finish")
+            .expect("the second start not to panic")
+            .expect("codex printed a second prompt");
+
+        assert_eq!(
+            shown,
+            Some((false, scene.user)),
+            "the prompt of a sign-in that already succeeded was shown"
+        );
+        assert_eq!(
+            scene.lines(STARTED).len(),
+            2,
+            "the prompt of a sign-in that already succeeded was handed out again"
+        );
+        assert_ne!(scene.attempt(), attempt);
+        assert!(
+            scene.login().await.is_some(),
+            "the sign-in that succeeded was never recorded"
+        );
+        finished(first).await;
+        scene.sign_out().await;
+        finished(second).await;
+        scene.remove().await;
     }
 }

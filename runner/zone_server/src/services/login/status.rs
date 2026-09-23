@@ -75,7 +75,8 @@ impl AgentStatus {
         match (pending, login) {
             (Some((prompt, initiator)), login) => {
                 status.state = State::Pending;
-                status.pending = Some(Prompt::shown(&prompt, viewer.sees_code(initiator)));
+                status.pending =
+                    prompt.map(|prompt| Prompt::shown(&prompt, viewer.sees_code(initiator)));
                 if let Some(login) = login {
                     status.source = Some(Source::Zone);
                     status.label = login.label;
