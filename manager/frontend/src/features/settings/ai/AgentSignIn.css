@@ -36,6 +36,13 @@
   margin: 0;
 }
 
+.agent-sign-in-state:focus-visible,
+.agent-sign-in-code:focus-visible {
+  outline: none;
+  border-radius: var(--ui-radius-md);
+  box-shadow: 0 0 0 2px var(--ui-border-focus);
+}
+
 .agent-sign-in-detail {
   flex: 1;
   min-width: 0;
