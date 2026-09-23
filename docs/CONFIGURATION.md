@@ -155,11 +155,15 @@ organizations that must not see each other's data.
   - `codex` (runs the `codex` CLI)
 - **Note**: With `claude` or `codex`, `LITELLM_HOST` and `LITELLM_KEY` are no
   longer required at boot, so a host with no LiteLLM at all can start. The CLI
-  then uses the login of the user the server runs as, and runs in the server's
-  own working directory rather than an organization's. In the manager image
-  that directory is the root-owned `/app`, so an agent given its own tools
-  cannot write there. Zone signs no one in for this path; in the compose
-  stack, choose Claude Code or Codex in AI settings instead.
+  then always uses the login of the user the server runs as, whatever
+  `ZONE_AGENT_HOST_LOGIN` says: Zone never refuses these turns as not signed
+  in, and without a login the CLI fails them in its own words. claude still
+  gets the variables and flags under *How a turn runs*, and codex
+  `ZONE_CODEX_SANDBOX`, but neither gets an organization's home, and both run
+  in the server's own working directory rather than an organization's. In the
+  manager image that directory is the root-owned `/app`, so an agent given its
+  own tools cannot write there. Zone signs no one in for this path; in the
+  compose stack, choose Claude Code or Codex in AI settings instead.
 
 ### `ZONE_LLM_BACKEND_EXECUTABLE`
 - **Default**: unset, so the agent's own name is looked up on `PATH`
@@ -196,7 +200,8 @@ organizations that must not see each other's data.
   does the Helm chart, in `server.env`.
 - **Description**: Whether an organization that chose Claude Code or Codex but
   has not signed in may use the login of the user the server runs as. See
-  *Running Zone natively* below.
+  *Running Zone natively* below. It does not apply to `ZONE_LLM_BACKEND`
+  set to `claude` or `codex`, which always runs on that login.
 - **Options**: `true`, `1`, `yes` or `on`, and `false`, `0`, `no` or `off`, in
   any case. Anything else is refused at boot.
 - **Note**: In a container that would be a login made inside the container,
@@ -206,7 +211,8 @@ organizations that must not see each other's data.
 ### `ZONE_CLAUDE_TOKEN_URL`
 - **Default**: `https://platform.claude.com/v1/oauth/token`
 - **Description**: Where Zone exchanges a Claude authorization code for tokens
-  and renews them. Tests point it at a local mock; compose does not pass it.
+  and renews them. Tests point it at a local mock. Compose passes it from
+  `.env`, where an empty value keeps the default.
 - **Note**: Must be an absolute `http` or `https` URL with a host, carrying no
   credentials, query or fragment. Anything else is refused at boot.
 
@@ -263,8 +269,8 @@ organizations that must not see each other's data.
 Each organization signs in to each agent once, in the panel that appears under
 the provider on **Organization Settings > AI Settings**; a workspace's AI
 override shows the same panel. Only organization admins and owners can sign in
-or out. Other members see the status and "Ask an organization admin to sign
-in".
+or out. Other members see the status, with "Ask an organization admin to sign
+in" while the agent is not signed in.
 
 **Claude Code** uses the sign-in `claude setup-token` uses:
 
@@ -275,12 +281,14 @@ in".
    this, within ten minutes.
 3. Zone exchanges the code at `ZONE_CLAUDE_TOKEN_URL` and stores the tokens in
    the database, sealed with a key derived from `ENCRYPTION_KEY`. The panel
-   shows the plan, when the token response names one, and the expiry date.
+   shows the plan, such as Claude Team, when the token response names one,
+   and the expiry date.
 
 Zone asks for inference access only, with a one-year lifetime, as
 `claude setup-token` does. If claude.com refuses that on its page, or the code
-is rejected, **Try again with full access** starts over with the wider set of
-scopes claude's own login asks for, without the one-year lifetime. Zone renews
+is rejected, **Try again with full access**, which the panel shows beside the
+code field, starts over with the wider set of scopes claude's own login asks
+for, without the one-year lifetime. Zone renews
 a Claude token within five minutes of its expiry when a refresh token came with
 it. Concurrent turns renew it once, and a renewal that fails before the token
 expires leaves the current token in use.
@@ -310,6 +318,8 @@ has not expired or can be renewed, and Codex while the organization's
 `auth.json` exists. A login revoked upstream, or one codex can no longer
 renew, shows up on the next turn instead: the turn fails in the CLI's own
 words, followed by "Sign in again under Organization Settings > AI Settings."
+A task run that fails that way stops without spending its retries, since a
+retry signs no one in.
 
 **Signing out** deletes the organization's Claude tokens from Zone; it does not
 revoke them with Anthropic. For Codex it stops a sign-in in progress and runs
@@ -368,7 +378,11 @@ Auto-approve off raises the usual card and waits for you, and a denial refuses
 the call. So retrieval, the workspace tools and citations work on these turns,
 and the console shows what the agent did the way it always does. A task run
 gets its task tools the same way, and approves every call, as task runs
-always do.
+always do. Its agent is not offered the tools that end Zone's own turn to
+wait, `ask_user`, `wait_for` and `submit_plan`, and a call to one is refused
+as an unknown tool: over MCP such a call returns at once with nothing waiting
+behind it, so the run would finish on a question never asked or a job never
+waited for. A chat turn's agent is offered its whole registry.
 
 codex is told to pass every call to Zone without asking, because headless
 codex has no one to ask and Zone applies the approval policy itself; to fail
@@ -437,7 +451,9 @@ a headless turn without that falls back to another model or fails.
 A turn asks for the chat's own model only when the agent knows it. Otherwise
 it asks for the Reasoning model from AI settings when Zone judges the prompt
 needs reasoning, and for the Fast model when not, provided the agent knows the
-name; with no known model to ask for, it lets the agent choose.
+name; with no known model to ask for, it lets the agent choose. A task run
+chooses the same way from the task's own model, so on these providers it
+starts even when no model is installed or configured.
 
 Chat titles, pull request subjects and auto-project summaries use the Fast
 model, so on Claude Code or Codex they need one the agent knows. Without one, a
@@ -452,15 +468,23 @@ paragraph. Search and retrieval keep using the server's own embedding engine
   tools, such as `read_pr_file`. The reviewer judges the task, the pull request
   and the diff in its prompt, and its instructions leave the tools out. When
   the workspace's CLI cannot be used, because it is signed out for example,
-  the auto project pauses with that message.
+  the auto project pauses with that message. The reviewer's model is one the
+  agent knows, taken from `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else
+  one of the agent's own models, never an installed Ollama model. A run whose
+  agent chose its own model records no model, so with
+  `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL` on its review pauses unless a
+  review bot answers; set Fast and Reasoning models the agent knows to avoid
+  that.
 - **Conflict repair** runs Zone's own tool loop, which a CLI cannot host, so it
   always runs on the instance's LiteLLM endpoint, whatever the workspace chose.
   With `ZONE_LLM_BACKEND` set to `claude` or `codex` the instance has no such
   endpoint, and repair fails with "Conflict repair needs zone's own tool loop,
   which a coding agent CLI backend does not provide".
-- **Plan approval** is not available. A task that requires it fails at once
-  with "Plan approval is not available when a task runs on a coding agent CLI;
-  turn off Require plan approval or use the Self-Hosted provider."
+- **Plan approval** is not available. A task run that requires it fails before
+  the CLI starts, without a retry, with "Plan approval is not available when a
+  task runs on a coding agent CLI; turn off Require plan approval or use the
+  Self-Hosted provider." A run an auto project starts is never held for
+  approval, so it is unaffected.
 
 ### Running Zone natively: the host login
 
@@ -469,9 +493,10 @@ is by default, an organization that chose Claude Code or Codex but has not
 signed in falls back to the CLI login of the user the server runs as. The panel
 then says "Using this server's own Claude Code sign-in" (or Codex), with the
 plan or login type the CLI reports; Zone reads it from `claude auth status` or
-`codex login status`. Every organization without a sign-in of its own shares
-that login, which is why a server with several organizations should turn the
-fallback off.
+`codex login status`, and names a Claude plan the way it names a Zone
+sign-in's, such as Claude Team. Every organization without a sign-in of its
+own shares that login, which is why a server with several organizations
+should turn the fallback off.
 
 The fallback runs the CLI without `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, which
 the environment allowlist drops, so each CLI uses its default home under the
@@ -579,10 +604,12 @@ once approved, and its file tools read whatever else the server's user can.
   at `/app/agent-state` and passes `ZONE_AGENT_STATE_DIR`,
   `ZONE_AGENT_HOST_LOGIN` (default `false`), `ZONE_LLM_BACKEND` (default
   `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`),
-  `ZONE_AGENT_ENV_PASSTHROUGH` and `ZONE_CODEX_SANDBOX` (default
-  `danger-full-access`). The image's entrypoint hands `/app/agent-state` to
-  `zone` with mode 0700, then runs the server as `zone`. The `dev` profile's
-  image, `manager/Dockerfile.dev`, does not include the CLIs.
+  `ZONE_AGENT_ENV_PASSTHROUGH`, `ZONE_CODEX_SANDBOX` (default
+  `danger-full-access`) and `ZONE_CLAUDE_TOKEN_URL` (empty by default, which
+  keeps Claude's own endpoint). The image's entrypoint hands
+  `/app/agent-state` to `zone` with mode 0700, then runs the server as `zone`.
+  The `dev` profile's image, `manager/Dockerfile.dev`, does not include the
+  CLIs.
 - **Helm.** Agent providers need `server.replicaCount: 1` and
   `server.autoscaling.enabled: false`; see
   [helm/zone-apps/README.md](../helm/zone-apps/README.md).
@@ -610,6 +637,9 @@ once approved, and its file tools read whatever else the server's user can.
   cannot give a chat `opus` or `gpt-6-sol`; set the Fast and Reasoning models
   in AI settings instead. Whether a chat offers Agent mode also follows those
   installed models.
+- A task run on Claude Code or Codex is not offered `ask_user` or `wait_for`,
+  but its instructions still describe them, so its agent may call one and be
+  refused.
 
 ---
 
