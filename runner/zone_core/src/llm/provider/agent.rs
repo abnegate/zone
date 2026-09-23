@@ -1,12 +1,13 @@
 //! The coding agent CLIs this crate knows how to drive.
 
 use std::fmt;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
 use super::event::AgentEvent;
 use super::parser;
-use super::settings::{BuiltinTools, Toolset};
+use super::settings::{BuiltinTools, CodexSandbox, DEFAULT_TIMEOUT, Toolset};
 
 const MODEL: &str = "--model";
 const SETTING_SOURCES: &str = "--setting-sources";
@@ -80,7 +81,39 @@ const STRICT_MCP_CONFIG: &str = "--strict-mcp-config";
 const MCP_CONFIG: &str = "--mcp-config";
 const ALLOWED_TOOLS: &str = "--allowedTools";
 const BUILTIN_TOOLS: &str = "--tools";
-const MCP_TOOL_PREFIX: &str = "mcp__";
+
+const IGNORE_USER_CONFIG: &str = "--ignore-user-config";
+const DISABLE: &str = "--disable";
+const CONFIG: &str = "-c";
+const SANDBOX: &str = "--sandbox";
+const READ_ONLY: &str = "read-only";
+
+/// Codex features that bring tools from outside both zone and the host:
+/// ChatGPT connectors and plugins.
+const EXTERNAL_TOOL_FEATURES: [&str; 2] = ["apps", "plugins"];
+
+const BUILTIN_TOOL_FEATURES: [&str; 5] = [
+    "shell_tool",
+    "view_image",
+    "goals",
+    "sleep_tool",
+    "image_generation",
+];
+
+/// Built-in codex tools that no feature flag names, as TOML settings.
+const BUILTIN_TOOL_SETTINGS: [&str; 3] = [
+    "agents.enabled=false",
+    r#"web_search="disabled""#,
+    "tools.experimental_request_user_input.enabled=false",
+];
+
+/// Codex lets every call to zone's tools through; zone decides each one.
+const APPROVAL_MODE: &str = "approve";
+
+/// Zone's tools are listed to the model up front rather than behind a search.
+const DEFERRED_EXPOSURE: &str = "deferred";
+
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How a prompt reaches the child process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,7 +238,7 @@ impl AgentKind {
     /// A non-interactive invocation that streams newline-delimited JSON, run
     /// with the agent's own tools and none of zone's.
     pub fn arguments(self, model: Option<&str>) -> Vec<String> {
-        self.arguments_with(model, None, BuiltinTools::Granted)
+        self.arguments_with(model, None, BuiltinTools::Granted, CodexSandbox::default())
     }
 
     /// The same invocation, told which tools the turn may call.
@@ -224,6 +257,7 @@ impl AgentKind {
         model: Option<&str>,
         toolset: Option<&Toolset>,
         builtin_tools: BuiltinTools,
+        sandbox: CodexSandbox,
     ) -> Vec<String> {
         let mut arguments: Vec<String> = match self {
             Self::Claude => ["--verbose", "--output-format", "stream-json"],
@@ -256,9 +290,10 @@ impl AgentKind {
             .map(|argument| (*argument).to_string()),
         );
 
-        if self.accepts_toolset() {
-            arguments.extend(tool_arguments(toolset, builtin_tools));
-        }
+        arguments.extend(match self {
+            Self::Claude => claude_tool_arguments(toolset, builtin_tools),
+            Self::Codex => codex_tool_arguments(toolset, builtin_tools, sandbox),
+        });
 
         arguments.push(
             match self {
@@ -273,17 +308,17 @@ impl AgentKind {
 
     /// Whether zone can decide this agent's tools -- serve its own and
     /// withhold the agent's built-in ones.
-    ///
-    /// Codex cannot. Its `-c mcp_servers.<name>` override adds a server to the
-    /// operator's own rather than replacing them, there is no counterpart to
-    /// `--strict-mcp-config`, and its shell cannot be taken away, only
-    /// sandboxed. Doing half of it is worse than none: the turn would carry
-    /// the operator's servers and an ungated shell alongside zone's gated
-    /// tools, and read as confined while being nothing of the sort.
     pub fn accepts_toolset(self) -> bool {
         match self {
-            Self::Claude => true,
-            Self::Codex => false,
+            Self::Claude | Self::Codex => true,
+        }
+    }
+
+    /// Whether withholding this agent's built-in tools still leaves it a
+    /// shell of its own.
+    pub fn keeps_shell(self) -> bool {
+        match self {
+            Self::Claude | Self::Codex => false,
         }
     }
 
@@ -300,8 +335,8 @@ impl AgentKind {
     }
 }
 
-/// The flags naming a turn's tools, for an agent that lets zone name them.
-fn tool_arguments(toolset: Option<&Toolset>, builtin_tools: BuiltinTools) -> Vec<String> {
+/// Claude's flags naming a turn's tools.
+fn claude_tool_arguments(toolset: Option<&Toolset>, builtin_tools: BuiltinTools) -> Vec<String> {
     let withheld = builtin_tools == BuiltinTools::Withheld;
     if toolset.is_none() && !withheld {
         return Vec::new();
@@ -357,14 +392,101 @@ fn allowed_tools(toolset: &Toolset) -> String {
     toolset
         .tools
         .iter()
-        .map(|tool| {
-            format!(
-                "{MCP_TOOL_PREFIX}{server}__{tool}",
-                server = Toolset::SERVER
-            )
-        })
+        .map(|tool| Toolset::qualified(Toolset::SERVER, tool))
         .collect::<Vec<String>>()
         .join(",")
+}
+
+/// Codex's flags naming a turn's tools.
+fn codex_tool_arguments(
+    toolset: Option<&Toolset>,
+    builtin_tools: BuiltinTools,
+    sandbox: CodexSandbox,
+) -> Vec<String> {
+    let withheld = builtin_tools == BuiltinTools::Withheld;
+    let mut arguments = Vec::new();
+
+    if toolset.is_some() || withheld {
+        arguments.push(IGNORE_USER_CONFIG.to_string());
+        arguments.extend(repeated(DISABLE, EXTERNAL_TOOL_FEATURES));
+    }
+
+    if withheld {
+        arguments.extend(repeated(DISABLE, BUILTIN_TOOL_FEATURES));
+        arguments.extend(repeated(CONFIG, BUILTIN_TOOL_SETTINGS));
+    }
+
+    arguments.push(SANDBOX.to_string());
+    arguments.push(
+        match builtin_tools {
+            BuiltinTools::Withheld => READ_ONLY,
+            BuiltinTools::Granted => sandbox.as_str(),
+        }
+        .to_string(),
+    );
+
+    if let Some(toolset) = toolset {
+        arguments.extend(repeated(CONFIG, server_settings(toolset)));
+    }
+
+    arguments
+}
+
+/// `flag value` for each value, which is how codex takes a repeated flag.
+fn repeated(flag: &str, values: impl IntoIterator<Item = impl Into<String>>) -> Vec<String> {
+    values
+        .into_iter()
+        .flat_map(|value| [flag.to_string(), value.into()])
+        .collect()
+}
+
+/// Zone's MCP server as codex's `-c` settings, whose values are TOML. The
+/// token is named, not spelled, for the reason [`server_definition`] gives.
+fn server_settings(toolset: &Toolset) -> Vec<String> {
+    let server = format!("mcp_servers.{}", Toolset::SERVER);
+    [
+        ("url", toml_string(&toolset.endpoint)),
+        ("bearer_token_env_var", toml_string(Toolset::TOKEN_VARIABLE)),
+        ("enabled_tools", toml_array(&toolset.tools)),
+        ("tool_timeout_sec", DEFAULT_TIMEOUT.as_secs().to_string()),
+        ("startup_timeout_sec", STARTUP_TIMEOUT.as_secs().to_string()),
+        ("default_tools_approval_mode", toml_string(APPROVAL_MODE)),
+        ("required", true.to_string()),
+        ("omit_tools_from", toml_array(&[DEFERRED_EXPOSURE])),
+    ]
+    .into_iter()
+    .map(|(key, value)| format!("{server}.{key}={value}"))
+    .collect()
+}
+
+/// A TOML basic string. Codex reads a `-c` value it cannot parse as a literal
+/// string instead of refusing it, so a quoting mistake would pass silently.
+fn toml_string(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => quoted.push_str(r#"\""#),
+            '\\' => quoted.push_str(r"\\"),
+            '\n' => quoted.push_str(r"\n"),
+            '\r' => quoted.push_str(r"\r"),
+            '\t' => quoted.push_str(r"\t"),
+            control if control.is_control() => {
+                quoted.push_str(&format!(r"\u{:04X}", u32::from(control)));
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn toml_array(values: &[impl AsRef<str>]) -> String {
+    let items: Vec<String> = values
+        .iter()
+        .map(|value| toml_string(value.as_ref()))
+        .collect();
+    format!("[{}]", items.join(","))
 }
 
 impl fmt::Display for AgentKind {
@@ -405,7 +527,6 @@ fn lowercase_or_digit(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::provider::DEFAULT_TIMEOUT;
 
     #[test]
     fn the_prompt_is_never_placed_on_the_command_line() {
@@ -459,6 +580,8 @@ mod tests {
                 "--skip-git-repo-check",
                 "--model",
                 "gpt-6-sol",
+                "--sandbox",
+                "workspace-write",
                 "-"
             ]
         );
@@ -694,7 +817,12 @@ mod tests {
         for model in [Some("opus"), None, Some("llama3.2:3b")] {
             for served in [None, Some(&toolset)] {
                 for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
-                    let arguments = AgentKind::Claude.arguments_with(model, served, builtin_tools);
+                    let arguments = AgentKind::Claude.arguments_with(
+                        model,
+                        served,
+                        builtin_tools,
+                        CodexSandbox::default(),
+                    );
 
                     assert_eq!(
                         value_after(&arguments, SETTING_SOURCES),
@@ -718,8 +846,12 @@ mod tests {
 
         for served in [None, Some(&toolset)] {
             for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
-                let arguments =
-                    AgentKind::Codex.arguments_with(Some("gpt-6-sol"), served, builtin_tools);
+                let arguments = AgentKind::Codex.arguments_with(
+                    Some("gpt-6-sol"),
+                    served,
+                    builtin_tools,
+                    CodexSandbox::default(),
+                );
                 assert!(
                     !arguments
                         .iter()
@@ -762,11 +894,31 @@ mod tests {
         arguments.get(index + 1).map(String::as_str)
     }
 
+    fn values_after<'a>(arguments: &'a [String], flag: &str) -> Vec<&'a str> {
+        arguments
+            .windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| pair[1].as_str())
+            .collect()
+    }
+
+    fn codex(
+        toolset: Option<&Toolset>,
+        builtin_tools: BuiltinTools,
+        sandbox: CodexSandbox,
+    ) -> Vec<String> {
+        AgentKind::Codex.arguments_with(Some("gpt-6-sol"), toolset, builtin_tools, sandbox)
+    }
+
     #[test]
     fn claude_is_pointed_at_zones_tools_and_stripped_of_its_own() {
         let toolset = toolset();
-        let arguments =
-            AgentKind::Claude.arguments_with(Some("opus"), Some(&toolset), BuiltinTools::Withheld);
+        let arguments = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            Some(&toolset),
+            BuiltinTools::Withheld,
+            CodexSandbox::default(),
+        );
 
         assert!(
             arguments.contains(&STRICT_MCP_CONFIG.to_string()),
@@ -795,24 +947,35 @@ mod tests {
     fn the_turns_token_never_reaches_the_command_line() {
         let toolset = toolset();
 
-        for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
-            let arguments = AgentKind::Claude
-                .arguments_with(Some("opus"), Some(&toolset), builtin_tools)
-                .join(" ");
+        for agent in AgentKind::ALL {
+            for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
+                for sandbox in CodexSandbox::ALL {
+                    let arguments = agent
+                        .arguments_with(Some("model"), Some(&toolset), builtin_tools, sandbox)
+                        .join(" ");
 
-            assert!(
-                !arguments.contains("zone-turn-notarealtoken"),
-                "the token reached argv: {arguments}"
-            );
-            assert!(arguments.contains("${ZONE_MCP_TOKEN}"), "{arguments}");
+                    assert!(
+                        !arguments.contains("zone-turn-notarealtoken"),
+                        "{agent} was handed the token in argv: {arguments}"
+                    );
+                    assert!(
+                        arguments.contains(Toolset::TOKEN_VARIABLE),
+                        "{agent} is not told which variable holds the token: {arguments}"
+                    );
+                }
+            }
         }
     }
 
     #[test]
     fn granting_the_agent_its_own_tools_stops_them_being_withheld() {
         let toolset = toolset();
-        let arguments =
-            AgentKind::Claude.arguments_with(Some("opus"), Some(&toolset), BuiltinTools::Granted);
+        let arguments = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            Some(&toolset),
+            BuiltinTools::Granted,
+            CodexSandbox::default(),
+        );
 
         assert!(
             !arguments.contains(&BUILTIN_TOOLS.to_string()),
@@ -824,8 +987,12 @@ mod tests {
 
     #[test]
     fn a_turn_with_no_tools_of_zones_still_withholds_the_agents_own() {
-        let arguments =
-            AgentKind::Claude.arguments_with(Some("opus"), None, BuiltinTools::Withheld);
+        let arguments = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            None,
+            BuiltinTools::Withheld,
+            CodexSandbox::default(),
+        );
 
         assert!(
             arguments.contains(&BUILTIN_TOOLS.to_string()),
@@ -842,17 +1009,236 @@ mod tests {
     }
 
     #[test]
-    fn codex_is_left_without_an_injected_toolset() {
+    fn every_agent_lets_zone_decide_its_tools() {
+        for agent in AgentKind::ALL {
+            assert!(agent.accepts_toolset(), "{agent}");
+        }
+    }
+
+    #[test]
+    fn codex_is_pointed_at_zones_tools_and_stripped_of_its_own() {
         let toolset = toolset();
 
-        assert!(!AgentKind::Codex.accepts_toolset());
         assert_eq!(
-            AgentKind::Codex.arguments_with(
-                Some("gpt-6-sol"),
+            codex(
                 Some(&toolset),
-                BuiltinTools::Withheld
+                BuiltinTools::Withheld,
+                CodexSandbox::default()
             ),
-            AgentKind::Codex.arguments(Some("gpt-6-sol"))
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--model",
+                "gpt-6-sol",
+                "--ignore-user-config",
+                "--disable",
+                "apps",
+                "--disable",
+                "plugins",
+                "--disable",
+                "shell_tool",
+                "--disable",
+                "view_image",
+                "--disable",
+                "goals",
+                "--disable",
+                "sleep_tool",
+                "--disable",
+                "image_generation",
+                "-c",
+                "agents.enabled=false",
+                "-c",
+                r#"web_search="disabled""#,
+                "-c",
+                "tools.experimental_request_user_input.enabled=false",
+                "--sandbox",
+                "read-only",
+                "-c",
+                r#"mcp_servers.zone.url="http://127.0.0.1:8421/mcp""#,
+                "-c",
+                r#"mcp_servers.zone.bearer_token_env_var="ZONE_MCP_TOKEN""#,
+                "-c",
+                r#"mcp_servers.zone.enabled_tools=["read_file","run_command"]"#,
+                "-c",
+                "mcp_servers.zone.tool_timeout_sec=1800",
+                "-c",
+                "mcp_servers.zone.startup_timeout_sec=30",
+                "-c",
+                r#"mcp_servers.zone.default_tools_approval_mode="approve""#,
+                "-c",
+                "mcp_servers.zone.required=true",
+                "-c",
+                r#"mcp_servers.zone.omit_tools_from=["deferred"]"#,
+                "-",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_granted_codex_turn_keeps_its_own_tools_in_the_sandbox_it_was_given() {
+        let toolset = toolset();
+
+        for (sandbox, expected) in [
+            (CodexSandbox::WorkspaceWrite, "workspace-write"),
+            (CodexSandbox::DangerFullAccess, "danger-full-access"),
+        ] {
+            let arguments = codex(Some(&toolset), BuiltinTools::Granted, sandbox);
+
+            assert_eq!(
+                values_after(&arguments, "--sandbox"),
+                [expected],
+                "{arguments:?}"
+            );
+            assert_eq!(
+                values_after(&arguments, "--disable"),
+                ["apps", "plugins"],
+                "a granted turn keeps codex's own tools: {arguments:?}"
+            );
+            assert!(
+                arguments.contains(&"--ignore-user-config".to_string()),
+                "the operator's own MCP servers were left in beside zone's: {arguments:?}"
+            );
+            assert!(
+                values_after(&arguments, "-c")
+                    .contains(&r#"mcp_servers.zone.url="http://127.0.0.1:8421/mcp""#),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_codex_turn_withholding_its_own_tools_is_read_only_whatever_sandbox_was_chosen() {
+        let toolset = toolset();
+
+        for toolset in [None, Some(&toolset)] {
+            for sandbox in CodexSandbox::ALL {
+                let arguments = codex(toolset, BuiltinTools::Withheld, sandbox);
+                assert_eq!(
+                    values_after(&arguments, "--sandbox"),
+                    ["read-only"],
+                    "{arguments:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_codex_turn_with_no_tools_of_zones_still_withholds_its_own() {
+        assert_eq!(
+            codex(None, BuiltinTools::Withheld, CodexSandbox::default()),
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--model",
+                "gpt-6-sol",
+                "--ignore-user-config",
+                "--disable",
+                "apps",
+                "--disable",
+                "plugins",
+                "--disable",
+                "shell_tool",
+                "--disable",
+                "view_image",
+                "--disable",
+                "goals",
+                "--disable",
+                "sleep_tool",
+                "--disable",
+                "image_generation",
+                "-c",
+                "agents.enabled=false",
+                "-c",
+                r#"web_search="disabled""#,
+                "-c",
+                "tools.experimental_request_user_input.enabled=false",
+                "--sandbox",
+                "read-only",
+                "-",
+            ]
+        );
+    }
+
+    #[test]
+    fn no_agent_keeps_a_shell_once_its_own_tools_are_withheld() {
+        for agent in AgentKind::ALL {
+            assert!(!agent.keeps_shell(), "{agent}");
+        }
+        assert!(
+            values_after(
+                &codex(None, BuiltinTools::Withheld, CodexSandbox::default()),
+                "--disable"
+            )
+            .contains(&"shell_tool")
+        );
+    }
+
+    #[test]
+    fn every_codex_turn_reads_its_prompt_from_stdin_and_keeps_its_session() {
+        let toolset = toolset();
+
+        for toolset in [None, Some(&toolset)] {
+            for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
+                for sandbox in CodexSandbox::ALL {
+                    let arguments = codex(toolset, builtin_tools, sandbox);
+                    assert_eq!(
+                        arguments.last().map(String::as_str),
+                        Some("-"),
+                        "{arguments:?}"
+                    );
+                    assert!(
+                        !arguments.contains(&"--ephemeral".to_string()),
+                        "{arguments:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zones_settings_reach_codex_as_toml_it_cannot_misread() {
+        let toolset = Toolset::new(
+            "http://127.0.0.1:8421/mcp\"\\\n\u{7f}",
+            "zone-turn-notarealtoken",
+            ["read_file", "run_command"],
+        );
+
+        let arguments = codex(
+            Some(&toolset),
+            BuiltinTools::Withheld,
+            CodexSandbox::default(),
+        );
+        let settings = values_after(&arguments, "-c");
+
+        assert!(
+            settings.contains(&r#"mcp_servers.zone.url="http://127.0.0.1:8421/mcp\"\\\n\u007F""#),
+            "{settings:?}"
+        );
+        assert!(
+            settings.contains(&r#"mcp_servers.zone.enabled_tools=["read_file","run_command"]"#),
+            "{settings:?}"
+        );
+    }
+
+    #[test]
+    fn a_toolset_naming_no_tools_lets_codex_call_none_of_the_servers() {
+        let toolset = Toolset::new(
+            "http://127.0.0.1:8421/mcp",
+            "zone-turn-notarealtoken",
+            Vec::<String>::new(),
+        );
+
+        let arguments = codex(
+            Some(&toolset),
+            BuiltinTools::Withheld,
+            CodexSandbox::default(),
+        );
+
+        assert!(
+            values_after(&arguments, "-c").contains(&"mcp_servers.zone.enabled_tools=[]"),
+            "codex offers every tool a server lists unless it is told otherwise: {arguments:?}"
         );
     }
 
@@ -862,22 +1248,28 @@ mod tests {
 
         for agent in AgentKind::ALL {
             for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
-                let arguments = agent
-                    .arguments_with(Some("model"), Some(&toolset), builtin_tools)
-                    .join(" ");
-                for bypass in [
-                    "--dangerously-skip-permissions",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--full-auto",
-                    "--always-approve",
-                    "--yolo",
-                    "--permission-mode",
-                    "--permission-prompts",
-                ] {
+                for sandbox in CodexSandbox::ALL {
+                    let arguments = agent
+                        .arguments_with(Some("model"), Some(&toolset), builtin_tools, sandbox)
+                        .join(" ");
                     assert!(
-                        !arguments.contains(bypass),
-                        "{agent} was handed {bypass}: {arguments}"
+                        arguments.contains(&toolset.endpoint),
+                        "{agent} was never served zone's tools, so this proves nothing: {arguments}"
                     );
+                    for bypass in [
+                        "--dangerously-skip-permissions",
+                        "--dangerously-bypass-approvals-and-sandbox",
+                        "--full-auto",
+                        "--always-approve",
+                        "--yolo",
+                        "--permission-mode",
+                        "--permission-prompts",
+                    ] {
+                        assert!(
+                            !arguments.contains(bypass),
+                            "{agent} was handed {bypass}: {arguments}"
+                        );
+                    }
                 }
             }
         }

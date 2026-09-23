@@ -6382,20 +6382,26 @@ mod tests {
             assert!(matches!(llm.config().backend, LlmBackend::Http));
         }
 
-        /// Codex would carry the operator's own MCP servers and an ungated
-        /// shell beside zone's tools, so zone serves it none and the turn is
-        /// the prose-only one it was before any of this.
         #[test]
-        fn a_codex_turn_is_served_no_toolset() {
+        fn a_codex_turn_is_served_zones_tools() {
             let turn = scope(true);
             let mut tools = tools();
             let llm = cli(AgentKind::Codex);
 
-            let served = serve_tools(&turn, &llm, &mut tools);
+            let served =
+                serve_tools(&turn, &llm, &mut tools).expect("codex lets zone decide its tools");
+            let llm = llm.with_toolset(served.lease.toolset(), turn.builtin_tools());
 
-            assert!(served.is_none());
-            assert!(!tools.is_empty());
-            assert!(attached(&llm).is_none());
+            let (endpoint, served_tools, builtin_tools) =
+                attached(&llm).expect("codex is told where zone serves its tools");
+            assert_eq!(endpoint, crate::mcp::endpoint("http://127.0.0.1:8421"));
+            assert_eq!(served_tools, [crate::agent::plan::SUBMIT_PLAN]);
+            assert_eq!(builtin_tools, BuiltinTools::Withheld);
+            assert!(
+                tools.is_empty(),
+                "the registry the endpoint answers from must not also sit in zone's own loop"
+            );
+            drop(served);
         }
 
         #[test]

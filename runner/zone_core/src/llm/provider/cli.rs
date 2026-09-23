@@ -89,6 +89,7 @@ impl CliProvider {
                 Some(model),
                 self.settings.toolset.as_deref(),
                 self.settings.builtin_tools,
+                self.settings.sandbox,
             ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

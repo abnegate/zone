@@ -50,6 +50,7 @@ pub use lines::{Lines, Overlong};
 pub use router::Router;
 pub use selection::{SelectionStrategy, Weighted, choose, sample};
 pub use settings::{
-    BuiltinTools, CliSettings, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, DEFAULT_TIMEOUT, Toolset,
+    BuiltinTools, CliSettings, CodexSandbox, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT,
+    DEFAULT_TIMEOUT, Toolset,
 };
 pub use transcript::render;

@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, BuiltinTools, Toolset};
+use zone_core::llm::{AgentKind, BuiltinTools, CodexSandbox, Toolset};
 use zone_server::agent::{ApprovalGate, ApprovalPolicy, ChatTools, WorkspaceScope};
 use zone_server::mcp::{Lease, Turn, endpoint};
 use zone_server::state::AppState;
@@ -59,7 +59,12 @@ async fn the_host_agent_connects_to_zone_and_is_shown_zones_tools() {
     let toolset = lease.toolset();
 
     let mut child = Command::new("claude")
-        .args(AgentKind::Claude.arguments_with(None, Some(&toolset), BuiltinTools::Withheld))
+        .args(AgentKind::Claude.arguments_with(
+            None,
+            Some(&toolset),
+            BuiltinTools::Withheld,
+            CodexSandbox::default(),
+        ))
         .env(Toolset::TOKEN_VARIABLE, toolset.token.expose())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

@@ -37,6 +37,33 @@ pub enum BuiltinTools {
     Granted,
 }
 
+/// The sandbox codex runs its own tools in on a turn that grants them. A turn
+/// that withholds them runs `read-only` whatever this says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CodexSandbox {
+    #[default]
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl CodexSandbox {
+    pub const ALL: [Self; 2] = [Self::WorkspaceWrite, Self::DangerFullAccess];
+
+    /// The value codex's `--sandbox` takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|sandbox| sandbox.as_str() == name)
+    }
+}
+
 /// Zone's tools, served to a spawned agent over MCP.
 ///
 /// A coding agent runs its own tool loop and cannot be handed zone's schemas
@@ -82,6 +109,11 @@ impl Toolset {
                 .collect(),
         }
     }
+
+    /// The name an agent gives `tool` from MCP server `server` to its model.
+    pub(crate) fn qualified(server: &str, tool: &str) -> String {
+        format!("mcp__{server}__{tool}")
+    }
 }
 
 /// How a [`super::CliProvider`] runs its agent.
@@ -102,6 +134,7 @@ pub struct CliSettings {
     /// nor carries a toolset's bulk into every value that names one.
     pub toolset: Option<Arc<Toolset>>,
     pub builtin_tools: BuiltinTools,
+    pub sandbox: CodexSandbox,
     pub timeout: Duration,
     /// Bytes of stdout and stderr kept before the run is abandoned.
     pub output_limit: usize,
@@ -118,6 +151,7 @@ impl Default for CliSettings {
             credential: Credential::Inherited,
             toolset: None,
             builtin_tools: BuiltinTools::default(),
+            sandbox: CodexSandbox::default(),
             timeout: DEFAULT_TIMEOUT,
             output_limit: DEFAULT_OUTPUT_LIMIT,
             line_limit: DEFAULT_LINE_LIMIT,
@@ -153,6 +187,11 @@ impl CliSettings {
 
     pub fn with_builtin_tools(mut self, tools: BuiltinTools) -> Self {
         self.builtin_tools = tools;
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: CodexSandbox) -> Self {
+        self.sandbox = sandbox;
         self
     }
 
@@ -287,5 +326,30 @@ mod tests {
         assert_eq!(settings.line_limit, DEFAULT_LINE_LIMIT);
         assert!(settings.toolset.is_none());
         assert_eq!(settings.builtin_tools, BuiltinTools::Withheld);
+        assert_eq!(settings.sandbox, CodexSandbox::WorkspaceWrite);
+    }
+
+    #[test]
+    fn a_granted_codex_turn_is_confined_to_its_workspace_until_an_operator_says_otherwise() {
+        assert_eq!(CliSettings::default().sandbox, CodexSandbox::WorkspaceWrite);
+
+        let settings = CliSettings::default().with_sandbox(CodexSandbox::DangerFullAccess);
+        assert_eq!(settings.sandbox, CodexSandbox::DangerFullAccess);
+        assert_eq!(settings.builtin_tools, BuiltinTools::Withheld);
+    }
+
+    #[test]
+    fn a_sandbox_is_named_as_codex_spells_it() {
+        assert_eq!(CodexSandbox::WorkspaceWrite.as_str(), "workspace-write");
+        assert_eq!(
+            CodexSandbox::DangerFullAccess.as_str(),
+            "danger-full-access"
+        );
+        for sandbox in CodexSandbox::ALL {
+            assert_eq!(CodexSandbox::named(sandbox.as_str()), Some(sandbox));
+        }
+        for unknown in ["read-only", "", "Workspace-Write", " workspace-write"] {
+            assert_eq!(CodexSandbox::named(unknown), None, "{unknown:?}");
+        }
     }
 }
