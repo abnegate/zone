@@ -7,6 +7,7 @@ import {
 } from '../features/settings/ai/schemas';
 import { AgentRequestError } from './AgentRequestError';
 import { agentsApi } from './agents';
+import { client } from './client';
 
 const original = globalThis.fetch;
 const organization = '00000000-0000-0000-0000-000000000001';
@@ -31,6 +32,7 @@ function sent(request: ReturnType<typeof respond>) {
 
 afterEach(() => {
   globalThis.fetch = original;
+  client.setAccessToken(null);
 });
 
 describe('agent status contract', () => {
@@ -187,6 +189,22 @@ describe('agentsApi', () => {
       async () => new Response('<html>Bad Gateway</html>', { status: 502 })
     ) as unknown as typeof fetch;
     await expect(agentsApi.list(organization)).rejects.toThrow('502');
+  });
+
+  it("sends the signed-in user's token with every request", async () => {
+    client.setAccessToken('fake-access-token');
+    const request = respond(fixture);
+    await agentsApi.list(organization);
+    const [, init] = request.mock.calls[0];
+    expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer fake-access-token');
+    expect(new Headers(init?.headers).get('Content-Type')).toBe('application/json');
+  });
+
+  it('sends no token once signed out', async () => {
+    const request = respond(fixture);
+    await agentsApi.list(organization);
+    const [, init] = request.mock.calls[0];
+    expect(new Headers(init?.headers).has('Authorization')).toBe(false);
   });
 
   it('encodes the organization in every path', async () => {

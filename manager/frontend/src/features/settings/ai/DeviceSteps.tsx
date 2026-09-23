@@ -1,4 +1,5 @@
 import { Button } from '@zone/ui';
+import { format } from 'date-fns';
 import type { RefObject } from 'react';
 import type { DevicePrompt } from './schemas';
 import type { SignInAction } from './types';
@@ -11,14 +12,8 @@ interface DeviceStepsProps {
   onCancel: () => void;
 }
 
-function formatTime(value: string): string | null {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-}
-
 export function DeviceSteps({ prompt, account, busy, entry, onCancel }: DeviceStepsProps) {
-  const expiresAt = prompt ? formatTime(prompt.expires_at) : null;
+  const expiresAt = prompt ? format(new Date(prompt.expires_at), 'p') : null;
 
   return (
     <>

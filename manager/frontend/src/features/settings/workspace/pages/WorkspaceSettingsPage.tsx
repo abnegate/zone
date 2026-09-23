@@ -86,11 +86,16 @@ function ColorField({
     <div className="form-group">
       <label htmlFor={id}>{label}</label>
       <div className="color-input-wrapper">
-        <input type="color" id={id} value={value} onChange={(e) => onChange(e.target.value)} />
+        <input
+          type="color"
+          id={id}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
         <input
           type="text"
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(event) => onChange(event.target.value)}
           pattern={HEX_PATTERN}
           className="color-text-input"
           aria-label={`${label} hex`}
@@ -325,8 +330,8 @@ export default function WorkspaceSettingsPage() {
     return reloadEffectiveSettings(organization, workspace);
   };
 
-  const handleSave = async (e: FormEvent): Promise<void> => {
-    e.preventDefault();
+  const handleSave = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
     if (!isAuthenticated || !orgId || !workspaceId) return;
 
     setSaving(true);
@@ -363,9 +368,9 @@ export default function WorkspaceSettingsPage() {
       }
 
       flash('Settings saved successfully');
-    } catch (err) {
+    } catch (failure) {
       if (currentScope.current === scope)
-        setError(err instanceof Error ? err.message : 'Failed to save settings');
+        setError(failure instanceof Error ? failure.message : 'Failed to save settings');
     } finally {
       if (currentScope.current === scope) setSaving(false);
     }
@@ -392,9 +397,9 @@ export default function WorkspaceSettingsPage() {
         if (!(await inheritAiSettings(orgId, workspaceId))) return;
       }
       flash('Settings reset to defaults');
-    } catch (err) {
+    } catch (failure) {
       if (currentScope.current === scope)
-        setError(err instanceof Error ? err.message : 'Failed to reset settings');
+        setError(failure instanceof Error ? failure.message : 'Failed to reset settings');
     } finally {
       if (currentScope.current === scope) setSaving(false);
     }
@@ -550,18 +555,18 @@ export default function WorkspaceSettingsPage() {
                 <select
                   id="font-family"
                   value={fontFamily ?? ''}
-                  onChange={(e) => {
+                  onChange={(event) => {
                     touched.current.add('font_family');
-                    setFontFamily(e.target.value as FontFamily);
+                    setFontFamily(event.target.value as FontFamily);
                   }}
                   className="form-select"
                 >
                   <option value="" disabled>
                     App Default
                   </option>
-                  {fontOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
+                  {fontOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
                     </option>
                   ))}
                 </select>
@@ -575,9 +580,9 @@ export default function WorkspaceSettingsPage() {
                     min="12"
                     max="20"
                     value={fontSize}
-                    onChange={(e) => {
+                    onChange={(event) => {
                       touched.current.add('font_size_base');
-                      setFontSize(e.target.value);
+                      setFontSize(event.target.value);
                     }}
                     className="form-slider"
                   />
@@ -593,19 +598,19 @@ export default function WorkspaceSettingsPage() {
                       <span className="radio-label">App Default</span>
                     </label>
                   )}
-                  {radiusOptions.map((opt) => (
-                    <label key={opt.value} className="radio-option">
+                  {radiusOptions.map((option) => (
+                    <label key={option.value} className="radio-option">
                       <input
                         type="radio"
                         name="border-radius"
-                        value={opt.value}
-                        checked={borderRadius === opt.value}
+                        value={option.value}
+                        checked={borderRadius === option.value}
                         onChange={() => {
                           touched.current.add('border_radius');
-                          setBorderRadius(opt.value);
+                          setBorderRadius(option.value);
                         }}
                       />
-                      <span className="radio-label">{opt.label}</span>
+                      <span className="radio-label">{option.label}</span>
                     </label>
                   ))}
                 </div>
@@ -654,7 +659,7 @@ export default function WorkspaceSettingsPage() {
                 id="override-ai-settings"
                 aria-describedby="override-ai-settings-hint"
                 checked={overrideAiSettings}
-                onChange={(e) => setOverrideAiSettings(e.target.checked)}
+                onChange={(event) => setOverrideAiSettings(event.target.checked)}
               />
               <label htmlFor="override-ai-settings" className="toggle-row-label">
                 Override organization AI settings
@@ -670,11 +675,18 @@ export default function WorkspaceSettingsPage() {
                   provider={aiProvider}
                   onProviderChange={(provider) => {
                     setAiProvider(provider);
-                    setModels((prev) => ({ ...prev, fast: '', reasoning: '', embedding: '' }));
+                    setModels((previous) => ({
+                      ...previous,
+                      fast: '',
+                      reasoning: '',
+                      embedding: '',
+                    }));
                   }}
                   credentials={credentials}
                   configured={configured}
-                  onChange={(key, value) => setCredentials((prev) => ({ ...prev, [key]: value }))}
+                  onChange={(key, value) =>
+                    setCredentials((previous) => ({ ...previous, [key]: value }))
+                  }
                 />
                 {agent && (
                   <AgentSignIn
@@ -717,7 +729,7 @@ export default function WorkspaceSettingsPage() {
               <AiModelFields
                 provider={aiProvider}
                 models={models}
-                onChange={(key, value) => setModels((prev) => ({ ...prev, [key]: value }))}
+                onChange={(key, value) => setModels((previous) => ({ ...previous, [key]: value }))}
                 fastOptions={choices.fast}
                 reasoningOptions={choices.reasoning}
                 embeddingOptions={choices.embedding}

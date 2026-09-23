@@ -2,6 +2,7 @@ import { Badge, type BadgeProps, Button } from '@zone/ui';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { AgentRequestError } from '../../../api/AgentRequestError';
 import { agentsApi } from '../../../api/agents';
+import { formatDate } from '../../projects/utils/formatters';
 import { ClaudeSteps } from './ClaudeSteps';
 import { DeviceSteps } from './DeviceSteps';
 import type { Agent, AgentState, AgentStatus, ClaudeScope } from './schemas';
@@ -40,12 +41,6 @@ interface AgentSignInProps {
 
 function reasonOf(failure: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
-}
-
-function formatDate(value: string): string | null {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 function signedInDetail(status: AgentStatus, agent: Agent, lapsed: boolean): string {

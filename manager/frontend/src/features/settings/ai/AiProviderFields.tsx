@@ -57,7 +57,7 @@ export function AiProviderFields({
         <select
           id="ai-provider"
           value={provider}
-          onChange={(e) => onProviderChange(e.target.value as AiProvider)}
+          onChange={(event) => onProviderChange(event.target.value as AiProvider)}
           className="form-select"
         >
           {providerOptions.map((option) => (
@@ -75,7 +75,7 @@ export function AiProviderFields({
               type="text"
               id="litellm-host"
               value={credentials.litellmHost}
-              onChange={(e) => onChange('litellmHost', e.target.value)}
+              onChange={(event) => onChange('litellmHost', event.target.value)}
               placeholder="http://localhost:11434"
               className="form-input"
             />
@@ -85,7 +85,7 @@ export function AiProviderFields({
               type="password"
               id="litellm-key"
               value={credentials.litellmKey}
-              onChange={(e) => onChange('litellmKey', e.target.value)}
+              onChange={(event) => onChange('litellmKey', event.target.value)}
               placeholder={configured.litellm ? MASK : 'Enter API key'}
               className="form-input"
             />
@@ -100,7 +100,7 @@ export function AiProviderFields({
               type="password"
               id="openai-key"
               value={credentials.openaiApiKey}
-              onChange={(e) => onChange('openaiApiKey', e.target.value)}
+              onChange={(event) => onChange('openaiApiKey', event.target.value)}
               placeholder={configured.openai ? MASK : 'sk-...'}
               className="form-input"
             />
@@ -110,7 +110,7 @@ export function AiProviderFields({
               type="text"
               id="openai-base-url"
               value={credentials.openaiBaseUrl}
-              onChange={(e) => onChange('openaiBaseUrl', e.target.value)}
+              onChange={(event) => onChange('openaiBaseUrl', event.target.value)}
               placeholder="https://api.openai.com/v1"
               className="form-input"
             />
@@ -125,7 +125,7 @@ export function AiProviderFields({
               type="password"
               id="anthropic-key"
               value={credentials.anthropicApiKey}
-              onChange={(e) => onChange('anthropicApiKey', e.target.value)}
+              onChange={(event) => onChange('anthropicApiKey', event.target.value)}
               placeholder={configured.anthropic ? MASK : 'sk-ant-...'}
               className="form-input"
             />
@@ -135,7 +135,7 @@ export function AiProviderFields({
               type="text"
               id="anthropic-base-url"
               value={credentials.anthropicBaseUrl}
-              onChange={(e) => onChange('anthropicBaseUrl', e.target.value)}
+              onChange={(event) => onChange('anthropicBaseUrl', event.target.value)}
               placeholder="https://api.anthropic.com"
               className="form-input"
             />
@@ -152,7 +152,7 @@ export function AiProviderFields({
             <select
               id="bedrock-region"
               value={credentials.bedrockRegion}
-              onChange={(e) => onChange('bedrockRegion', e.target.value)}
+              onChange={(event) => onChange('bedrockRegion', event.target.value)}
               className="form-select"
             >
               {awsRegions.map((region) => (
@@ -168,7 +168,7 @@ export function AiProviderFields({
               <input
                 type="checkbox"
                 checked={credentials.bedrockUseIamRole}
-                onChange={(e) => onChange('bedrockUseIamRole', e.target.checked)}
+                onChange={(event) => onChange('bedrockUseIamRole', event.target.checked)}
               />
               Use IAM Role (EC2 instance profile / ECS task role)
             </label>
@@ -180,7 +180,7 @@ export function AiProviderFields({
                   type="password"
                   id="bedrock-access-key"
                   value={credentials.bedrockAccessKey}
-                  onChange={(e) => onChange('bedrockAccessKey', e.target.value)}
+                  onChange={(event) => onChange('bedrockAccessKey', event.target.value)}
                   placeholder={configured.bedrock ? MASK : 'AKIA...'}
                   className="form-input"
                 />
@@ -190,7 +190,7 @@ export function AiProviderFields({
                   type="password"
                   id="bedrock-secret-key"
                   value={credentials.bedrockSecretKey}
-                  onChange={(e) => onChange('bedrockSecretKey', e.target.value)}
+                  onChange={(event) => onChange('bedrockSecretKey', event.target.value)}
                   placeholder={configured.bedrock ? MASK : 'Secret key'}
                   className="form-input"
                 />

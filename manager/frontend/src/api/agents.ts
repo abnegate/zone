@@ -10,9 +10,7 @@ import {
 } from '../features/settings/ai/schemas';
 import { parse } from '../validation';
 import { AgentRequestError } from './AgentRequestError';
-import { client } from './client';
-
-const API_BASE = import.meta.env.VITE_API_URL || '';
+import { API_BASE, client } from './client';
 
 const CODE_AGENT: Agent = 'claude';
 

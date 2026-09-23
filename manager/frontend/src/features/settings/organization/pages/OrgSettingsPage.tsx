@@ -76,8 +76,8 @@ export default function OrgSettingsPage() {
       ]);
       applySettingsToForm(settings);
       setWorkspaces(workspacesData);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load settings');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to load settings');
     } finally {
       setLoading(false);
     }
@@ -92,8 +92,8 @@ export default function OrgSettingsPage() {
     setTimeout(() => setSuccess(null), 3000);
   };
 
-  const handleSave = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleSave = async (event: FormEvent) => {
+    event.preventDefault();
     if (!isAuthenticated || !currentOrganization) return;
 
     setSaving(true);
@@ -107,8 +107,8 @@ export default function OrgSettingsPage() {
       );
       applySettingsToForm(settings);
       flash('Settings saved successfully');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save settings');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to save settings');
     } finally {
       setSaving(false);
     }
@@ -125,8 +125,8 @@ export default function OrgSettingsPage() {
       const settings = await client.resetOrgAiSettings(currentOrganization.id);
       applySettingsToForm(settings);
       flash('Settings reset to defaults');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to reset settings');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to reset settings');
     } finally {
       setSaving(false);
     }
@@ -205,7 +205,9 @@ export default function OrgSettingsPage() {
               }}
               credentials={credentials}
               configured={configured}
-              onChange={(key, value) => setCredentials((prev) => ({ ...prev, [key]: value }))}
+              onChange={(key, value) =>
+                setCredentials((previous) => ({ ...previous, [key]: value }))
+              }
             />
             {agent && (
               <AgentSignIn
@@ -229,7 +231,7 @@ export default function OrgSettingsPage() {
             <AiModelFields
               provider={provider}
               models={models}
-              onChange={(key, value) => setModels((prev) => ({ ...prev, [key]: value }))}
+              onChange={(key, value) => setModels((previous) => ({ ...previous, [key]: value }))}
               fastOptions={choices.fast}
               reasoningOptions={choices.reasoning}
               embeddingOptions={choices.embedding}

@@ -57,7 +57,7 @@ function ModelSelect({
       <select
         id={id}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(event) => onChange(event.target.value)}
         className="form-select"
       >
         <option value="">{blankLabel}</option>
@@ -94,7 +94,7 @@ export function AiModelFields({
     };
   });
 
-  const agent = isAgentProvider(provider);
+  const agentic = isAgentProvider(provider);
 
   return (
     <div className="form-grid">
@@ -106,7 +106,7 @@ export function AiModelFields({
         options={plain(fastOptions)}
         blankLabel="Automatic"
         hint={
-          agent
+          agentic
             ? 'Automatic lets the agent choose; titles, PR subjects and summaries use it too.'
             : 'Short replies, titles and intent classification. Empty picks from the installed models.'
         }
@@ -119,7 +119,7 @@ export function AiModelFields({
         options={plain(reasoningOptions)}
         blankLabel="Automatic"
         hint={
-          agent
+          agentic
             ? 'Harder questions; empty lets the agent choose.'
             : 'Harder questions; empty picks a larger installed model.'
         }
@@ -142,8 +142,8 @@ export function AiModelFields({
             type="text"
             id="model-embedding"
             value={models.embedding}
-            onChange={(e) => onChange('embedding', e.target.value)}
-            placeholder={agent ? 'Server default' : 'text-embedding-3-small'}
+            onChange={(event) => onChange('embedding', event.target.value)}
+            placeholder={agentic ? 'Server default' : 'text-embedding-3-small'}
             className="form-input"
           />
           <p className="form-hint">{embeddingHint(provider, false)}</p>
