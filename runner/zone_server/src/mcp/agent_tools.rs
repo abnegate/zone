@@ -72,6 +72,7 @@ mod tests {
     use crate::agent::wait::WAIT_FOR;
     use uuid::Uuid;
     use zone_core::llm::{AgentKind, CliSettings};
+    use zone_core::tools::WAIT_FOR_CONDITION;
 
     const ENDPOINT: &str = "http://127.0.0.1:8421/mcp";
 
@@ -110,6 +111,29 @@ mod tests {
                 }
                 assert!(offered.has("read_file"), "{:?}", offered.names());
                 assert_eq!(offered.names().len(), every.len() - 2);
+            }
+        }
+    }
+
+    /// What an agent is offered still names `wait_for` where a turn that has
+    /// the tool is told to use it, so each of those says it needs the tool.
+    #[tokio::test]
+    async fn nothing_an_agent_is_offered_sends_it_to_wait_for_regardless() {
+        let backend = LlmBackend::cli(AgentKind::Codex, CliSettings::default());
+        for tools in [chat().await, task().await] {
+            let offered = offered(&backend, tools);
+            let texts = offered
+                .all_definitions()
+                .iter()
+                .map(|definition| serde_json::to_string(definition).expect("a definition"))
+                .chain([crate::db::actions::RUNNER_STARTED.to_string()]);
+
+            for text in texts {
+                assert_eq!(
+                    text.matches(WAIT_FOR).count(),
+                    text.matches(WAIT_FOR_CONDITION).count(),
+                    "{text}"
+                );
             }
         }
     }

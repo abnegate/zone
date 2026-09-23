@@ -14,7 +14,7 @@ use super::file::{confine, resolve};
 use super::job::{self, JobCommand, Jobs};
 use super::{
     ERROR_PREFIX, MAX_PREVIEW_CHARS, MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tier, Tool, ToolContext,
-    ToolError, ToolResult, excerpt, reason_property, trim_middle,
+    ToolError, ToolResult, WAIT_FOR_CONDITION, excerpt, reason_property, trim_middle,
 };
 
 /// Programs [`RunCommandTool`] may spawn, resolved on the child's `PATH`.
@@ -99,8 +99,9 @@ fn background_property() -> Value {
         "type": "boolean",
         "description": format!(
             "Detach and return immediately with a job id and log path. Use for anything \
-             long-running; wait for it with {WAIT_FOR_TOOL} instead of blocking. A background job \
-             ends with the turn that started it, or with the run. Default false."
+             long-running instead of blocking on it, and wait for it with {WAIT_FOR_TOOL} \
+             {WAIT_FOR_CONDITION}. A background job ends with the turn that started it, or with \
+             the run. Default false."
         )
     })
 }
@@ -319,7 +320,7 @@ fn sleep_refusal(seconds: f64, backgrounded: bool) -> String {
                 "Backgrounding does not raise the cap. Start something that finishes on its own \
                  and",
             ),
-            " rather than sleeping.",
+            ", rather than sleeping.",
         )
     } else {
         (
@@ -329,7 +330,7 @@ fn sleep_refusal(seconds: f64, backgrounded: bool) -> String {
     };
     format!(
         "This command sleeps for {seconds} seconds, and a call may block on sleep for at most \
-         {MAX_SLEEP_SECS}. {remedy} wait for it with {WAIT_FOR_TOOL}{tail}"
+         {MAX_SLEEP_SECS}. {remedy} wait for it with {WAIT_FOR_TOOL} {WAIT_FOR_CONDITION}{tail}"
     )
 }
 
@@ -465,7 +466,7 @@ impl Tool for RunShellTool {
                         "Shell command to run, e.g. 'cargo test 2>&1 | tail -40'. It may not \
                          block on sleep for more than {MAX_SLEEP_SECS} seconds: to wait longer, \
                          start it with {BACKGROUND_PARAM}: true and wait for it with \
-                         {WAIT_FOR_TOOL}."
+                         {WAIT_FOR_TOOL} {WAIT_FOR_CONDITION}."
                     )
                 },
                 "cwd": {
@@ -1606,8 +1607,8 @@ mod tests {
         assert_eq!(
             output,
             format!(
-                "Started {id} (pid {pid}). Log: {}\nWait for it with wait_for, or read it with \
-                 tail_job.",
+                "Started {id} (pid {pid}). Log: {}\nWait for it with wait_for when you have that \
+                 tool, or read it with tail_job.",
                 job::log_path(dir.path(), &id).display()
             )
         );
@@ -1681,7 +1682,9 @@ mod tests {
             "{output}"
         );
         assert!(
-            output.ends_with("Wait for it with wait_for, or read it with tail_job."),
+            output.ends_with(
+                "Wait for it with wait_for when you have that tool, or read it with tail_job."
+            ),
             "{output}"
         );
         assert!(job::log_path(dir.path(), &id).exists(), "{output}");
@@ -1953,8 +1956,9 @@ mod tests {
         assert_eq!(
             described,
             "Detach and return immediately with a job id and log path. Use for anything \
-             long-running; wait for it with wait_for instead of blocking. A background job ends \
-             with the turn that started it, or with the run. Default false."
+             long-running instead of blocking on it, and wait for it with wait_for when you have \
+             that tool. A background job ends with the turn that started it, or with the run. \
+             Default false."
         );
         for schema in [&shell, &command] {
             assert!(
@@ -1988,6 +1992,38 @@ mod tests {
         assert!(described.contains(BACKGROUND_PARAM), "{described}");
         assert!(described.contains(WAIT_FOR_TOOL), "{described}");
         assert!(!described.contains("later call"), "{described}");
+    }
+
+    /// A coding agent's turn is never offered wait_for, so every instruction
+    /// to call it says it is for a turn that has it.
+    #[test]
+    fn every_instruction_to_wait_says_it_needs_the_tool() {
+        let receipt = job::started_text(&job::JobStarted {
+            id: "job_9f3c1a7b2e04".to_string(),
+            pid: 48213,
+            log_path: "/tmp/work/.zone/jobs/job_9f3c1a7b2e04.log".to_string(),
+        });
+        let schemas = [
+            RunShellTool.parameters_schema(),
+            RunCommandTool.parameters_schema(),
+        ]
+        .map(|schema| schema.to_string());
+
+        for text in [
+            receipt,
+            sleep_refusal(600.0, false),
+            sleep_refusal(600.0, true),
+        ]
+        .into_iter()
+        .chain(schemas)
+        {
+            assert!(text.contains(WAIT_FOR_TOOL), "{text}");
+            assert_eq!(
+                text.matches(WAIT_FOR_TOOL).count(),
+                text.matches(crate::tools::WAIT_FOR_CONDITION).count(),
+                "{text}"
+            );
+        }
     }
 
     #[tokio::test]

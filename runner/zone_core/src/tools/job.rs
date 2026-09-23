@@ -28,7 +28,7 @@ use tokio::sync::{oneshot, watch};
 use tool_runner::Proxy;
 use uuid::Uuid;
 
-use super::Session;
+use super::{Session, WAIT_FOR_CONDITION};
 use crate::llm::provider::environment;
 
 pub const TAIL_JOB: &str = "tail_job";
@@ -611,7 +611,7 @@ pub fn log_path(checkout: &Path, id: &str) -> PathBuf {
 /// What a backgrounded shell call returns to the model.
 pub fn started_text(job: &JobStarted) -> String {
     format!(
-        "{STARTED_PREFIX}{} (pid {}). Log: {}\nWait for it with {WAIT_FOR_TOOL}, or read it with {TAIL_JOB}.",
+        "{STARTED_PREFIX}{} (pid {}). Log: {}\nWait for it with {WAIT_FOR_TOOL} {WAIT_FOR_CONDITION}, or read it with {TAIL_JOB}.",
         job.id, job.pid, job.log_path
     )
 }
@@ -1415,7 +1415,7 @@ mod tests {
         assert_eq!(
             started_text(&job()),
             "Started job_9f3c1a7b2e04 (pid 48213). Log: /tmp/work/.zone/jobs/job_9f3c1a7b2e04.log\n\
-             Wait for it with wait_for, or read it with tail_job."
+             Wait for it with wait_for when you have that tool, or read it with tail_job."
         );
     }
 

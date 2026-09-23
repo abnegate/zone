@@ -59,6 +59,11 @@ pub(crate) const ERROR_PREFIX: &str = "Error: ";
 /// nobody finishes, and an unfinished preview is worse than none.
 pub const MAX_PREVIEW_CHARS: usize = 400;
 
+/// What every instruction to call `wait_for` is conditioned on. A coding
+/// agent's turn is never offered the tool, and reads the same descriptions and
+/// results as a turn that is.
+pub const WAIT_FOR_CONDITION: &str = "when you have that tool";
+
 const TOOL_TRUNCATION_MARKER: &str = "\n[truncated]";
 
 /// Stands in for a line break that has been collapsed away.

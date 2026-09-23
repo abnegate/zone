@@ -31,7 +31,8 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
      and SECONDLY are refused, not rounded up. Once an hour is the ceiling, measured at the \
      shortest gap the rule produces rather than its average — BYHOUR=0,1 with BYMINUTE=0,30 \
      fires four times a day and three of those gaps are half an hour. A condition that changes \
-     faster than the ceiling wants wait_for on the event itself, not a schedule. A repeating \
+     faster than the ceiling wants wait_for on the event itself when you have that tool, and never \
+     a schedule. A repeating \
      reminder stops after seven days unless it is asked for again. \
      Without a prompt, each firing delivers content as it is written. With one, each firing runs \
      the prompt as a turn of your own in this chat and what you say is the delivery, and content \
@@ -51,7 +52,8 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
      to compare against, and fixed content has nothing to compare. Two limits to state when you \
      offer one. It sees only the state at each firing, so a condition that appears and disappears \
      between two firings is never noticed — for something that raises an event of its own, use \
-     wait_for on the event rather than a watch. And a watch cannot stay silent: running the turn \
+     wait_for on the event when you have that tool, rather than a watch. And a watch cannot stay \
+     silent: running the turn \
      is how it reports at all, so an unchanged firing still answers here, in one short line. That \
      is the one place a watch departs from the say-nothing rule above, so a watch's prompt should \
      not repeat that rule. \
@@ -61,7 +63,7 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
 /// Named because the waiting section counts on them: a description that still
 /// mandates a poll is read at the moment a runner starts, which is closer to
 /// the decision than any prompt section gets.
-pub(crate) const START_TASK_DESCRIPTION: &str = "Create an agentic coding task and start the background runner immediately. Returns task_id and run_id. Does not wait for completion — wait for it with wait_for, then read get_task_run and tail_task_log. Use only when the user asked to run work in the background.";
+pub(crate) const START_TASK_DESCRIPTION: &str = "Create an agentic coding task and start the background runner immediately. Returns task_id and run_id. Does not wait for completion — wait for it with wait_for when you have that tool, then read get_task_run and tail_task_log. Use only when the user asked to run work in the background.";
 
 /// The two surfaces this description is read from. `wait_for` takes
 /// kind=task_run from a chat and refuses it from inside a run, so the guidance
@@ -70,7 +72,7 @@ pub(crate) const START_TASK_DESCRIPTION: &str = "Create an agentic coding task a
 pub(crate) const FROM_CHAT: &str = "from a chat";
 pub(crate) const FROM_RUN: &str = "from inside a run";
 
-pub(crate) const TAIL_TASK_LOG_DESCRIPTION: &str = "Fetch new runner log lines since a previous log ID. Read a run's progress with it once rather than calling it again: from a chat, find out when the run finishes by waiting for it with wait_for kind=task_run; from inside a run, finish and let whoever started it coordinate.";
+pub(crate) const TAIL_TASK_LOG_DESCRIPTION: &str = "Fetch new runner log lines since a previous log ID. Read a run's progress with it once rather than calling it again: from a chat, find out when the run finishes by waiting for it with wait_for kind=task_run when you have that tool; from inside a run, finish and let whoever started it coordinate.";
 
 #[derive(Clone, Copy)]
 enum Action {
