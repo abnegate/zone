@@ -509,6 +509,11 @@ provider sets both fields back to Automatic, on the organization's page as on
 a workspace's. Through the API, an empty `model_fast`, `model_reasoning` or
 `model_embedding` clears that model, and a field left out keeps it.
 
+A workspace that chooses a different provider from its organization's
+inherits none of its Fast, Reasoning or Embedding models. A workspace on its
+organization's provider inherits each of them it leaves unset, and any
+workspace inherits the image, video and audio models it leaves unset.
+
 Zone passes a model to the CLI as `--model` only when that agent knows the
 name, and otherwise passes none, so the agent uses its own default. claude
 knows its aliases in any case (`sonnet`, `opus`, `haiku`, `fable`, `best`,
@@ -522,24 +527,30 @@ a headless turn without that falls back to another model or fails.
 
 A turn asks for the chat's own model only when the agent knows it. Otherwise
 it asks for the Reasoning model from AI settings when Zone judges the prompt
-needs reasoning, and for the Fast model when not, provided the agent knows the
-name; with no known model to ask for, it lets the agent choose. A task run
-chooses the same way from the task's own model, so on these providers it
-starts even when no model is installed or configured.
+needs reasoning, and for the Fast model when not; `OLLAMA_MODEL_REASON` or
+`OLLAMA_MODEL_FAST` stands in for a field left on Automatic. It asks only for
+a name the agent knows, and with no known model to ask for, it lets the agent
+choose. A task run chooses the same way from the task's own model, so on these
+providers it starts even when no model is installed or configured.
 
-Chat titles, pull request subjects and auto-project summaries use the Fast
-model when the agent knows it, and otherwise let the agent choose, as the Fast
-field's hint says. When the agent gives no usable answer in time, a chat is
-titled with the first words of its first message, a pull request subject is
-made from the task's title, and an auto-project summary is the pull request's
-first paragraph. Search and retrieval keep using the server's own embedding
-engine (`EMBEDDING_ENGINE` and `OLLAMA_MODEL_EMBED`).
+Chat titles, pull request subjects and auto-project summaries run on the Fast
+model when the agent knows it. With Fast on Automatic they try
+`COMFYUI_CLASSIFIER_MODEL`, then `OLLAMA_MODEL_FAST`, and run on the first the
+agent knows. Otherwise the agent chooses. When no usable answer arrives in
+time (30 seconds for a title or a subject, 45 for a summary), a chat is titled
+with the first words of its first message, a pull request subject is made
+from the task's title, and an auto-project summary is the pull request's first
+paragraph. Search and retrieval keep using the server's own embedding engine
+(`EMBEDDING_ENGINE` and `OLLAMA_MODEL_EMBED`).
 
 With media generation on, a message the image-intent rules leave unsure, and
-the prompt for an edit of an attached image, go to the agent only when the
-Fast model, or with Fast on Automatic `COMFYUI_CLASSIFIER_MODEL`, is one the
+the prompt for an edit of an attached image, go to the agent on the Fast model
+when the agent knows it. With Fast on Automatic they try
+`COMFYUI_CLASSIFIER_MODEL`, then `OLLAMA_MODEL_FAST`, and use the first the
 agent knows. Otherwise neither starts the agent: the message is answered as
-chat, and the edit keeps the prompt Zone writes from the words alone.
+chat, and the edit keeps the prompt Zone writes from the words alone. The same
+happens when the agent gives no usable answer within
+`COMFYUI_CLASSIFIER_TIMEOUT_SECS` (3 seconds by default).
 
 ### Reviews, conflict repair and plan approval
 
