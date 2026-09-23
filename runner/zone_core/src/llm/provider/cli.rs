@@ -29,6 +29,10 @@ const READ_BUFFER: usize = 8 * 1024;
 /// Bytes of the agent's stderr that a failure it reported carries.
 const DIAGNOSTIC_TAIL: usize = 1024;
 
+/// Stands between an agent's own report of a failure and the end of its
+/// stderr that follows it, so a reader can tell the two apart.
+pub const STDERR_HEADING: &str = "\n\nThe end of the agent's stderr:\n";
+
 /// A coding agent's events, yielded as the child emits them.
 pub type AgentStream = Pin<Box<dyn Stream<Item = Result<AgentEvent, ProviderError>> + Send>>;
 
@@ -429,8 +433,8 @@ fn retained(event: &AgentEvent) -> usize {
     }
 }
 
-/// `message`, then the last whole lines of `diagnostics` that fit in
-/// [`DIAGNOSTIC_TAIL`] bytes.
+/// `message`, then [`STDERR_HEADING`] and the last whole lines of
+/// `diagnostics` that fit in [`DIAGNOSTIC_TAIL`] bytes.
 fn failure(message: &str, diagnostics: &str) -> String {
     let diagnostics = diagnostics.trim();
     if diagnostics.is_empty() {
@@ -444,7 +448,7 @@ fn failure(message: &str, diagnostics: &str) -> String {
         Some((_, whole)) if start > 0 => whole,
         _ => &diagnostics[start..],
     };
-    format!("{message}\n{tail}")
+    format!("{message}{STDERR_HEADING}{tail}")
 }
 
 /// The last `limit` bytes of the agent's stderr, which is read to its end
@@ -855,7 +859,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         let rendered = failure("the turn failed", &lines.join("\n"));
 
         let (message, tail) = rendered
-            .split_once('\n')
+            .split_once(STDERR_HEADING)
             .expect("the agent's words, then its stderr");
         assert_eq!(message, "the turn failed");
         assert!(tail.len() <= DIAGNOSTIC_TAIL, "{} bytes", tail.len());
@@ -872,10 +876,23 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         let rendered = failure("the turn failed", &"—".repeat(1000));
 
         let (_, tail) = rendered
-            .split_once('\n')
+            .split_once(STDERR_HEADING)
             .expect("the agent's words, then its stderr");
         assert!(!tail.is_empty() && tail.len() <= DIAGNOSTIC_TAIL);
         assert!(tail.chars().all(|character| character == '—'), "{tail}");
+    }
+
+    /// An agent's own report can run to several lines. None of them may read
+    /// as stderr, and no line of stderr as the agent's own words.
+    #[test]
+    fn a_failure_of_several_lines_stays_apart_from_the_stderr_after_it() {
+        let words = "tool call error: tool call failed for `zone/echo`\n\nCaused by:\n    \
+                     timed out awaiting tools/call after 2s";
+        let stderr = "2026-09-23T07:43:43Z WARN codex_mcp: docs: 401 Unauthorized";
+
+        let rendered = failure(words, stderr);
+
+        assert_eq!(rendered.split_once(STDERR_HEADING), Some((words, stderr)));
     }
 
     #[test]

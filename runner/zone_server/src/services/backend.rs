@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use uuid::Uuid;
-use zone_core::llm::provider::SignIn;
+use zone_core::llm::provider::{STDERR_HEADING, SignIn};
 use zone_core::llm::{AgentKind, CliSettings, Credential, LlmBackend};
 
 use crate::config::Config;
@@ -193,9 +193,11 @@ pub fn remedy(agent: AgentKind, sign_in: SignIn, message: &str) -> Option<String
 }
 
 /// A coding agent's own words about a failure it reported. zone_core follows
-/// them with the tail of the agent's stderr, from the first line break on.
+/// them with [`STDERR_HEADING`] and the tail of the agent's stderr.
 pub fn own_words(message: &str) -> &str {
-    message.split_once('\n').map_or(message, |(words, _)| words)
+    message
+        .split_once(STDERR_HEADING)
+        .map_or(message, |(words, _)| words)
 }
 
 /// `message`, a failure a client on `backend` reported, followed by its
@@ -765,6 +767,10 @@ mod tests {
     const UNRELATED_STDERR: &str =
         "2026-09-23T07:43:43.341111Z WARN codex_mcp: docs: Not logged in (401 Unauthorized)";
 
+    /// Stderr that names no sign-in at all.
+    const RETRYING_STDERR: &str =
+        "2026-09-23T07:43:43.341111Z WARN codex_api: stream disconnected; retrying";
+
     #[test]
     fn remedy_names_the_fix_for_every_recorded_sign_in_failure() {
         for (agent, failures) in [
@@ -813,7 +819,7 @@ mod tests {
                 SignIn::Organization,
                 &reported(
                     AgentKind::Codex,
-                    &format!("{CODEX_TURN_FAILED}\n{CODEX_STDERR}")
+                    &format!("{CODEX_TURN_FAILED}{STDERR_HEADING}{CODEX_STDERR}")
                 )
             )
             .as_deref(),
@@ -829,7 +835,7 @@ mod tests {
         for agent in AgentKind::ALL {
             let failure = reported(
                 agent,
-                &format!("stream disconnected before completion\n{UNRELATED_STDERR}"),
+                &format!("stream disconnected before completion{STDERR_HEADING}{UNRELATED_STDERR}"),
             );
 
             assert_eq!(
@@ -838,6 +844,25 @@ mod tests {
                 "{agent}: {failure}"
             );
         }
+    }
+
+    /// An agent's own report can run to several lines before its stderr
+    /// begins, and a sign-in failure it names on any of them is its own.
+    #[test]
+    fn a_sign_in_failure_on_a_later_line_of_the_agents_words_is_its_own() {
+        let failure = reported(
+            AgentKind::Claude,
+            &format!(
+                "API Error: the request was rejected.\nNot logged in · Please run /login\
+                 {STDERR_HEADING}{RETRYING_STDERR}"
+            ),
+        );
+
+        assert_eq!(
+            remedy(AgentKind::Claude, SignIn::Organization, &failure).as_deref(),
+            Some(REMEDY),
+            "{failure}"
+        );
     }
 
     #[test]

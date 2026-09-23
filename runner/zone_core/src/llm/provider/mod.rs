@@ -40,7 +40,7 @@ mod transcript;
 mod testing;
 
 pub use agent::{AgentKind, Delivery};
-pub use cli::{AgentStream, CliProvider};
+pub use cli::{AgentStream, CliProvider, STDERR_HEADING};
 pub use completion::{Completion, CompletionProvider, CompletionRequest, ProviderKind};
 pub use credential::Credential;
 pub use error::{ExitStatus, ProviderError};

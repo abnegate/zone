@@ -3656,7 +3656,7 @@ mod retry_tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use zone_core::llm::provider::SignIn;
+    use zone_core::llm::provider::{STDERR_HEADING, SignIn};
 
     fn outcome() -> TaskOutcome {
         TaskOutcome {
@@ -3777,11 +3777,34 @@ mod retry_tests {
         ] {
             let fault = Fault::agent(
                 &agent(AgentKind::Codex, SignIn::Organization),
-                format!("Stream error: codex: stream disconnected before completion\n{stderr}"),
+                format!(
+                    "Stream error: codex: stream disconnected before completion\
+                     {STDERR_HEADING}{stderr}"
+                ),
             );
 
             assert_eq!(fault.failure, Failure::Transient, "{}", fault.message);
         }
+    }
+
+    /// A coding agent's own report can run to several lines, and all of them
+    /// are its verdict on the turn: a request it calls bad on its second line
+    /// is not retried, whatever throttling its stderr logged after it.
+    #[test]
+    fn every_line_of_a_coding_agents_own_words_decides_whether_it_is_retried() {
+        use zone_core::llm::AgentKind;
+
+        let fault = Fault::agent(
+            &agent(AgentKind::Codex, SignIn::Organization),
+            format!(
+                "Stream error: codex: the turn failed\n\
+                 unexpected status 400 Bad Request: the tool schema was rejected\
+                 {STDERR_HEADING}\
+                 2026-09-23T07:43:43Z WARN codex_api: retrying after 429 Too Many Requests"
+            ),
+        );
+
+        assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
     }
 
     /// An attempt's backend is resolved as it starts. Of the ways that fails,
@@ -3823,11 +3846,13 @@ mod retry_tests {
 
         let fault = Fault::agent(
             &agent(AgentKind::Codex, SignIn::Organization),
-            "Stream error: codex: workspace routing discovery unauthorized (401)\n\
-             2026-09-23T07:42:41Z ERROR codex_login::auth::manager: Failed to refresh token: \
-             Your access token could not be refreshed because your refresh token was revoked. \
-             Please log out and sign in again."
-                .to_string(),
+            format!(
+                "Stream error: codex: workspace routing discovery unauthorized (401)\
+                 {STDERR_HEADING}\
+                 2026-09-23T07:42:41Z ERROR codex_login::auth::manager: Failed to refresh token: \
+                 Your access token could not be refreshed because your refresh token was \
+                 revoked. Please log out and sign in again."
+            ),
         );
 
         assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
