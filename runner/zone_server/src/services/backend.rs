@@ -1,8 +1,10 @@
 //! Where a workspace's completions go: the endpoint, or a coding agent CLI.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use uuid::Uuid;
+use zone_core::llm::provider::SignIn;
 use zone_core::llm::{AgentKind, CliSettings, Credential, LlmBackend};
 
 use crate::config::Config;
@@ -22,7 +24,6 @@ const CLAUDE_SIGN_IN_FAILURES: &[&str] = &[
     "login expired",
     "log in again",
     "oauth session expired",
-    "could not be refreshed",
     "invalid api key",
     "invalid auth token",
     "authentication_failed",
@@ -31,12 +32,16 @@ const CLAUDE_SIGN_IN_FAILURES: &[&str] = &[
 const CODEX_SIGN_IN_FAILURES: &[&str] = &[
     "not logged in",
     "sign in again",
-    "could not be refreshed",
     "logging out.",
     "codex login`",
     "401 unauthorized",
     "unauthorized (401)",
 ];
+
+// Either CLI's words for a sign-in it could not renew. Codex prints them only
+// on stderr, which makes them the one failure looked for past the agent's own
+// words.
+const RENEWAL_FAILURES: &[&str] = &["could not be refreshed"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -139,7 +144,9 @@ pub async fn for_settings(
             agent,
             message: format!("{}: {error}", work.display()),
         })?;
-    let mut cli = CliSettings::default().with_working_directory(work);
+    let mut cli = CliSettings::default()
+        .with_working_directory(work)
+        .with_sign_in(SignIn::Organization);
     if let Some(executable) = overridden(config, agent) {
         cli = cli.with_executable(executable);
     }
@@ -154,29 +161,76 @@ pub async fn for_settings(
     Ok(LlmBackend::cli(agent, prepared(config, agent, cli)))
 }
 
-/// What to do about `message`, a failure `agent` reported, when it reads as the
-/// agent's sign-in failing.
-pub fn remedy(agent: AgentKind, message: &str) -> Option<&'static str> {
-    let message = message.to_ascii_lowercase();
+/// A failure a client reported, and whether it was a coding agent's sign-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remedied {
+    /// The failure, followed by how to fix a sign-in that failed.
+    pub message: String,
+    /// Whether the agent's sign-in failed, which no retry fixes.
+    pub signed_out: bool,
+}
+
+/// What to do about `message`, a failure `agent` reported under `sign_in`,
+/// when it reads as the agent's sign-in failing.
+pub fn remedy(agent: AgentKind, sign_in: SignIn, message: &str) -> Option<String> {
     let failures = match agent {
         AgentKind::Claude => CLAUDE_SIGN_IN_FAILURES,
         AgentKind::Codex => CODEX_SIGN_IN_FAILURES,
     };
-    failures
-        .iter()
-        .any(|failure| message.contains(failure))
-        .then_some(REMEDY)
+    let words = own_words(message).to_ascii_lowercase();
+    let whole = message.to_ascii_lowercase();
+    let signed_out = failures.iter().any(|failure| words.contains(failure))
+        || RENEWAL_FAILURES
+            .iter()
+            .any(|failure| whole.contains(failure));
+    signed_out.then(|| match sign_in {
+        SignIn::Organization => REMEDY.to_string(),
+        SignIn::Instance => format!(
+            "The server's own {agent} sign-in failed; the server operator must sign in again \
+             on the host."
+        ),
+    })
 }
 
-/// `message`, a failure a client on `backend` reported, followed by [`REMEDY`]
-/// when a coding agent's sign-in failed.
-pub fn remedied(backend: &LlmBackend, message: String) -> String {
-    let LlmBackend::Cli { agent, .. } = backend else {
-        return message;
+/// A coding agent's own words about a failure it reported. zone_core follows
+/// them with the tail of the agent's stderr, from the first line break on.
+pub fn own_words(message: &str) -> &str {
+    message.split_once('\n').map_or(message, |(words, _)| words)
+}
+
+/// `message`, a failure a client on `backend` reported, followed by its
+/// remedy when a coding agent's sign-in failed.
+pub fn remedied(backend: &LlmBackend, message: String) -> Remedied {
+    let LlmBackend::Cli { agent, settings } = backend else {
+        return Remedied {
+            message,
+            signed_out: false,
+        };
     };
-    match remedy(*agent, &message) {
-        Some(fix) if !message.contains(fix) => format!("{message}\n{fix}"),
-        _ => message,
+    match remedy(*agent, settings.sign_in, &message) {
+        Some(fix) if message.contains(&fix) => Remedied {
+            message,
+            signed_out: true,
+        },
+        Some(fix) => Remedied {
+            message: format!("{message}\n{fix}"),
+            signed_out: true,
+        },
+        None => Remedied {
+            message,
+            signed_out: false,
+        },
+    }
+}
+
+/// `backend` with a coding agent's turn given `timeout`: the budget of what
+/// it runs for, a chat's or a task attempt's, rather than its own default.
+pub fn bounded(backend: LlmBackend, timeout: Duration) -> LlmBackend {
+    match backend {
+        LlmBackend::Cli { agent, settings } => {
+            LlmBackend::cli(agent, settings.with_timeout(timeout))
+        }
+        LlmBackend::Http => LlmBackend::Http,
     }
 }
 
@@ -435,6 +489,11 @@ mod tests {
             matches!(settings.credential, Credential::Inherited),
             "the instance's own agent runs under the host's sign-in, not an organization's"
         );
+        assert_eq!(
+            settings.sign_in,
+            SignIn::Instance,
+            "only the operator can renew the instance's own sign-in"
+        );
         assert_eq!(variable(&settings, CLAUDE_CONFIG_DIR), None);
         assert_defaults(AgentKind::Claude, &settings);
     }
@@ -474,6 +533,7 @@ mod tests {
         assert_eq!(agent, AgentKind::Claude);
         assert_eq!(settings.credential.variable(), Some(CLAUDE_TOKEN));
         assert_eq!(settings.credential.expose(), Some(ACCESS));
+        assert_eq!(settings.sign_in, SignIn::Organization);
         let home = fixture.home(AgentKind::Claude);
         assert_eq!(
             variable(&settings, CLAUDE_CONFIG_DIR).map(PathBuf::from),
@@ -502,6 +562,7 @@ mod tests {
         let (agent, settings) = cli(resolved);
         assert_eq!(agent, AgentKind::Codex);
         assert!(matches!(settings.credential, Credential::Inherited));
+        assert_eq!(settings.sign_in, SignIn::Organization);
         let home = fixture.home(AgentKind::Codex);
         assert_eq!(
             variable(&settings, CODEX_HOME).map(PathBuf::from),
@@ -527,6 +588,11 @@ mod tests {
         let (agent, settings) = cli(resolved);
         assert_eq!(agent, AgentKind::Claude);
         assert!(matches!(settings.credential, Credential::Inherited));
+        assert_eq!(
+            settings.sign_in,
+            SignIn::Organization,
+            "an organization's own sign-in replaces the host's, so its admins can fix it"
+        );
         for home in [CLAUDE_CONFIG_DIR, CODEX_HOME] {
             assert_eq!(
                 variable(&settings, home),
@@ -694,6 +760,11 @@ mod tests {
         "workspace backend must use an HTTPS origin without credentials";
     const CODEX_STDERR: &str = "2026-09-23T07:43:43.341111Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.";
 
+    /// Something other than a sign-in, on stderr beside a failure that is not
+    /// one either: a warning about another server the agent was talking to.
+    const UNRELATED_STDERR: &str =
+        "2026-09-23T07:43:43.341111Z WARN codex_mcp: docs: Not logged in (401 Unauthorized)";
+
     #[test]
     fn remedy_names_the_fix_for_every_recorded_sign_in_failure() {
         for (agent, failures) in [
@@ -702,7 +773,7 @@ mod tests {
         ] {
             for failure in failures {
                 assert_eq!(
-                    remedy(agent, &reported(agent, failure)),
+                    remedy(agent, SignIn::Organization, &reported(agent, failure)).as_deref(),
                     Some(REMEDY),
                     "{agent}: {failure}"
                 );
@@ -713,12 +784,14 @@ mod tests {
     #[test]
     fn remedy_leaves_every_other_failure_alone() {
         for agent in AgentKind::ALL {
-            for failure in OTHER_FAILURES {
-                assert_eq!(
-                    remedy(agent, &reported(agent, failure)),
-                    None,
-                    "{agent}: {failure}"
-                );
+            for sign_in in [SignIn::Instance, SignIn::Organization] {
+                for failure in OTHER_FAILURES {
+                    assert_eq!(
+                        remedy(agent, sign_in, &reported(agent, failure)),
+                        None,
+                        "{agent}: {failure}"
+                    );
+                }
             }
         }
     }
@@ -728,6 +801,7 @@ mod tests {
         assert_eq!(
             remedy(
                 AgentKind::Codex,
+                SignIn::Organization,
                 &reported(AgentKind::Codex, CODEX_TURN_FAILED)
             ),
             None,
@@ -736,28 +810,106 @@ mod tests {
         assert_eq!(
             remedy(
                 AgentKind::Codex,
+                SignIn::Organization,
                 &reported(
                     AgentKind::Codex,
                     &format!("{CODEX_TURN_FAILED}\n{CODEX_STDERR}")
                 )
-            ),
+            )
+            .as_deref(),
             Some(REMEDY)
         );
     }
 
+    /// The stderr tail zone_core appends to an agent's failure is read for a
+    /// renewal the agent reports nowhere else, and for nothing more: a line
+    /// about some other server is not this agent's sign-in failing.
     #[test]
-    fn a_cli_sign_in_failure_is_followed_by_its_remedy_once() {
-        let backend = LlmBackend::cli(AgentKind::Claude, CliSettings::default());
+    fn a_sign_in_phrase_only_on_stderr_is_not_the_agents_sign_in() {
+        for agent in AgentKind::ALL {
+            let failure = reported(
+                agent,
+                &format!("stream disconnected before completion\n{UNRELATED_STDERR}"),
+            );
+
+            assert_eq!(
+                remedy(agent, SignIn::Organization, &failure),
+                None,
+                "{agent}: {failure}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_organizations_sign_in_failure_is_followed_by_its_remedy_once() {
+        let backend = LlmBackend::cli(
+            AgentKind::Claude,
+            CliSettings::default().with_sign_in(SignIn::Organization),
+        );
         let failure = reported(AgentKind::Claude, CLAUDE_SIGN_IN_FAILURES[0]);
 
         let explained = remedied(&backend, failure.clone());
 
-        assert_eq!(explained, format!("{failure}\n{REMEDY}"));
         assert_eq!(
-            remedied(&backend, explained.clone()),
+            explained,
+            Remedied {
+                message: format!("{failure}\n{REMEDY}"),
+                signed_out: true,
+            }
+        );
+        assert_eq!(
+            remedied(&backend, explained.message.clone()),
             explained,
             "the remedy is given once"
         );
+    }
+
+    /// The instance's own agent runs under the host's login or a key in the
+    /// server's environment, and no organization admin can renew either.
+    #[test]
+    fn the_servers_own_sign_in_failing_is_left_to_the_operator() {
+        for agent in AgentKind::ALL {
+            let backend = LlmBackend::cli(agent, CliSettings::default());
+            let failure = reported(agent, "Not logged in");
+
+            let explained = remedied(&backend, failure.clone());
+
+            assert!(explained.signed_out, "{agent}: {}", explained.message);
+            let fix = explained
+                .message
+                .strip_prefix(&failure)
+                .unwrap_or_else(|| panic!("the failure comes first: {}", explained.message))
+                .to_ascii_lowercase();
+            assert!(!fix.contains("organization settings"), "{fix}");
+            assert!(
+                fix.contains("operator") && fix.contains("sign in again"),
+                "{fix}"
+            );
+            assert!(fix.contains(agent.as_str()), "{fix}");
+        }
+    }
+
+    #[test]
+    fn a_bounded_agent_runs_for_the_budget_it_is_given_and_an_endpoint_is_left_alone() {
+        let budget = Duration::from_secs(3600);
+        let organizations = CliSettings::default().with_sign_in(SignIn::Organization);
+
+        let LlmBackend::Cli { settings, .. } =
+            bounded(LlmBackend::cli(AgentKind::Codex, organizations), budget)
+        else {
+            panic!("the agent was moved off its CLI");
+        };
+
+        assert_eq!(settings.timeout, budget);
+        assert_eq!(
+            settings.sign_in,
+            SignIn::Organization,
+            "only the timeout moves"
+        );
+        assert!(matches!(
+            bounded(LlmBackend::Http, budget),
+            LlmBackend::Http
+        ));
     }
 
     #[test]
@@ -765,7 +917,10 @@ mod tests {
         let endpoint = "Failed to generate response: API error (401): invalid api key";
         assert_eq!(
             remedied(&LlmBackend::Http, endpoint.to_string()),
-            endpoint,
+            Remedied {
+                message: endpoint.to_string(),
+                signed_out: false,
+            },
             "an endpoint's rejected key is not the organization's sign-in"
         );
 
@@ -774,6 +929,12 @@ mod tests {
             AgentKind::Codex,
             "exceeded retry limit, last status: 500 Internal Server Error",
         );
-        assert_eq!(remedied(&backend, exhausted.clone()), exhausted);
+        assert_eq!(
+            remedied(&backend, exhausted.clone()),
+            Remedied {
+                message: exhausted,
+                signed_out: false,
+            }
+        );
     }
 }
