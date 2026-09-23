@@ -8,7 +8,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
+use zone_core::llm::{AgentKind, CodexSandbox};
 
 /// Settings live with the clients that consume them.
 pub use zone_comfy::Config as ComfyUiConfig;
@@ -169,6 +169,9 @@ const AGENT_HOST_LOGIN: &str = "ZONE_AGENT_HOST_LOGIN";
 /// Overrides [`DEFAULT_CLAUDE_TOKEN_URL`].
 const CLAUDE_TOKEN_URL: &str = "ZONE_CLAUDE_TOKEN_URL";
 
+/// Where codex runs the tools of a turn that grants them.
+const CODEX_SANDBOX: &str = "ZONE_CODEX_SANDBOX";
+
 /// The XDG base directory for user state.
 const STATE_HOME: &str = "XDG_STATE_HOME";
 
@@ -199,7 +202,8 @@ const TRUE: &[&str] = &["1", "true", "yes", "on"];
 const FALSE: &[&str] = &["0", "false", "no", "off"];
 
 /// The coding agent CLIs organizations sign in to, from
-/// `ZONE_AGENT_STATE_DIR`, `ZONE_AGENT_HOST_LOGIN` and `ZONE_CLAUDE_TOKEN_URL`.
+/// `ZONE_AGENT_STATE_DIR`, `ZONE_AGENT_HOST_LOGIN`, `ZONE_CLAUDE_TOKEN_URL`
+/// and `ZONE_CODEX_SANDBOX`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentConfig {
     /// Root of every organization's agent homes.
@@ -209,6 +213,8 @@ pub struct AgentConfig {
     pub host_login: bool,
     /// Where a Claude authorization code is exchanged and its tokens renewed.
     pub claude_token_url: String,
+    /// Where codex runs the tools of a turn that grants them.
+    pub codex_sandbox: CodexSandbox,
 }
 
 impl Default for AgentConfig {
@@ -219,6 +225,7 @@ impl Default for AgentConfig {
             state: env::temp_dir().join(TEMPORARY_STATE_ROOT),
             host_login: DEFAULT_HOST_LOGIN,
             claude_token_url: DEFAULT_CLAUDE_TOKEN_URL.to_string(),
+            codex_sandbox: CodexSandbox::default(),
         }
     }
 }
@@ -231,6 +238,7 @@ impl AgentConfig {
             state: state_root(env_path(AGENT_STATE), env_path(STATE_HOME), env_path(HOME))?,
             host_login: host_login(env::var(AGENT_HOST_LOGIN).ok())?,
             claude_token_url: claude_token_url(env::var(CLAUDE_TOKEN_URL).ok())?,
+            codex_sandbox: codex_sandbox(env::var(CODEX_SANDBOX).ok())?,
         })
     }
 
@@ -335,6 +343,19 @@ fn host_login(value: Option<String>) -> Result<bool, ConfigError> {
         Err(ConfigError::Invalid(
             "ZONE_AGENT_HOST_LOGIN must be true or false",
         ))
+    }
+}
+
+fn codex_sandbox(value: Option<String>) -> Result<CodexSandbox, ConfigError> {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(CodexSandbox::default()),
+        Some(value) => CodexSandbox::named(value).ok_or(ConfigError::Invalid(
+            "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access",
+        )),
     }
 }
 
@@ -1195,6 +1216,7 @@ mod tests {
             AGENT_STATE,
             AGENT_HOST_LOGIN,
             CLAUDE_TOKEN_URL,
+            CODEX_SANDBOX,
         ];
         let _environment = Environment::isolated(&names);
         Environment::set("JWT_SECRET", "12345678901234567890123456789012");
@@ -1482,6 +1504,7 @@ mod tests {
             AGENT_STATE,
             AGENT_HOST_LOGIN,
             CLAUDE_TOKEN_URL,
+            CODEX_SANDBOX,
         ];
         let _environment = Environment::isolated(&names);
         Environment::set("JWT_SECRET", "12345678901234567890123456789012");
@@ -1603,6 +1626,7 @@ mod tests {
             AGENT_STATE,
             AGENT_HOST_LOGIN,
             CLAUDE_TOKEN_URL,
+            CODEX_SANDBOX,
         ];
         let _environment = Environment::isolated(&names);
 
@@ -1747,7 +1771,12 @@ mod tests {
         );
     }
 
-    const AGENT_SETTINGS: [&str; 3] = [AGENT_STATE, AGENT_HOST_LOGIN, CLAUDE_TOKEN_URL];
+    const AGENT_SETTINGS: [&str; 4] = [
+        AGENT_STATE,
+        AGENT_HOST_LOGIN,
+        CLAUDE_TOKEN_URL,
+        CODEX_SANDBOX,
+    ];
 
     #[test]
     fn agent_settings_default_and_follow_the_environment() {
@@ -1764,19 +1793,32 @@ mod tests {
         assert!(defaults.state.ends_with(STATE_ROOT));
         assert!(defaults.host_login);
         assert_eq!(defaults.claude_token_url, DEFAULT_CLAUDE_TOKEN_URL);
+        assert_eq!(defaults.codex_sandbox, CodexSandbox::WorkspaceWrite);
 
         Environment::set(AGENT_STATE, "  /app/agent-state  ");
         Environment::set(AGENT_HOST_LOGIN, " FALSE ");
         Environment::set(CLAUDE_TOKEN_URL, " http://127.0.0.1:9100/v1/oauth/token ");
+        Environment::set(CODEX_SANDBOX, " danger-full-access ");
         assert_eq!(
             AgentConfig::from_env().expect("every value is valid"),
             AgentConfig {
                 state: PathBuf::from("/app/agent-state"),
                 host_login: false,
                 claude_token_url: "http://127.0.0.1:9100/v1/oauth/token".to_string(),
+                codex_sandbox: CodexSandbox::DangerFullAccess,
             },
             "a loopback token endpoint stays configurable: it is operator configuration"
         );
+
+        for sandbox in CodexSandbox::ALL {
+            Environment::set(CODEX_SANDBOX, sandbox.as_str());
+            assert_eq!(
+                AgentConfig::from_env()
+                    .expect("a sandbox codex has")
+                    .codex_sandbox,
+                sandbox
+            );
+        }
 
         for (value, expected) in [
             ("true", true),
@@ -1831,6 +1873,20 @@ mod tests {
             "a relative root resolves against each agent's own working directory"
         );
         Environment::remove(AGENT_STATE);
+
+        for sandbox in ["read-only", "Danger-Full-Access", "none", "workspace_write"] {
+            Environment::set(CODEX_SANDBOX, sandbox);
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(
+                        "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access"
+                    ))
+                ),
+                "{sandbox} is not a sandbox codex runs granted tools in"
+            );
+        }
+        Environment::remove(CODEX_SANDBOX);
 
         for url in [
             "platform.claude.com/v1/oauth/token",
@@ -2067,6 +2123,7 @@ mod tests {
             AGENT_STATE,
             AGENT_HOST_LOGIN,
             CLAUDE_TOKEN_URL,
+            CODEX_SANDBOX,
         ];
         let _environment = Environment::isolated(&names);
         Environment::set("JWT_SECRET", "12345678901234567890123456789012");
@@ -2077,6 +2134,7 @@ mod tests {
         Environment::set("LITELLM_KEY", "models-key");
         Environment::set(AGENT_STATE, "/app/agent-state");
         Environment::set(AGENT_HOST_LOGIN, "false");
+        Environment::set(CODEX_SANDBOX, "danger-full-access");
 
         let config = Config::from_env().expect("every value is valid");
         assert_eq!(
@@ -2085,15 +2143,28 @@ mod tests {
                 state: PathBuf::from("/app/agent-state"),
                 host_login: false,
                 claude_token_url: DEFAULT_CLAUDE_TOKEN_URL.to_string(),
+                codex_sandbox: CodexSandbox::DangerFullAccess,
             }
         );
         let debug = format!("{config:?}");
         assert!(
             debug.contains(
-                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token" }"#
+                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess }"#
             ),
             "{debug}"
         );
+
+        Environment::set(CODEX_SANDBOX, "read-only");
+        assert!(
+            matches!(
+                Config::from_env(),
+                Err(ConfigError::Invalid(
+                    "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access"
+                ))
+            ),
+            "a sandbox the server cannot give codex must stop it starting"
+        );
+        Environment::remove(CODEX_SANDBOX);
 
         Environment::set(AGENT_HOST_LOGIN, "sometimes");
         assert!(
