@@ -4,21 +4,24 @@ import { client } from '../../../../api/client';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
 import { useModels } from '../../../models';
-import { mergeStageOptions } from '../../../models/utils/stageOptions';
 import {
+  AgentSignIn,
   AiModelFields,
   AiProviderFields,
+  agentOf,
   buildAiSettingsRequest,
+  canManageAgents,
   configuredFromSettings,
   credentialsFromSettings,
   emptyCredentials,
   emptyModels,
   type ModelSelection,
-  modelOptions,
+  modelChoices,
   modelsFromSettings,
   nothingConfigured,
   type ProviderConfigured,
   type ProviderCredentials,
+  useAgentStatuses,
 } from '../../ai';
 import { SettingsPage } from '../../components';
 import {
@@ -49,6 +52,9 @@ export default function OrgSettingsPage() {
   const [credentials, setCredentials] = useState<ProviderCredentials>(emptyCredentials);
   const [configured, setConfigured] = useState<ProviderConfigured>(nothingConfigured);
   const [models, setModels] = useState<ModelSelection>(emptyModels);
+
+  const agent = agentOf(provider);
+  const agents = useAgentStatuses(currentOrganization?.id ?? null, agent !== null);
 
   const applySettingsToForm = useCallback((settings: AiSettings) => {
     setProvider(settings.provider);
@@ -124,19 +130,11 @@ export default function OrgSettingsPage() {
     }
   };
 
-  const stage = modelOptions[provider];
-  const fastOptions = mergeStageOptions(stage.fast, installedModels, models.fast, 'chat');
-  const reasoningOptions = mergeStageOptions(
-    stage.reasoning,
+  const choices = modelChoices(
+    provider,
     installedModels,
-    models.reasoning,
-    'chat'
-  );
-  const embeddingOptions = mergeStageOptions(
-    stage.embedding,
-    installedModels,
-    models.embedding,
-    'embedding'
+    models,
+    agent ? (agents.statuses[agent]?.models ?? []) : []
   );
 
   const tabs = (
@@ -204,6 +202,16 @@ export default function OrgSettingsPage() {
               configured={configured}
               onChange={(key, value) => setCredentials((prev) => ({ ...prev, [key]: value }))}
             />
+            {agent && (
+              <AgentSignIn
+                organizationId={currentOrganization.id}
+                agent={agent}
+                canManage={canManageAgents(currentOrganization.role)}
+                status={agents.statuses[agent]}
+                loadError={agents.error}
+                onStatusChange={agents.update}
+              />
+            )}
           </div>
 
           <div className="settings-card">
@@ -212,9 +220,9 @@ export default function OrgSettingsPage() {
               provider={provider}
               models={models}
               onChange={(key, value) => setModels((prev) => ({ ...prev, [key]: value }))}
-              fastOptions={fastOptions}
-              reasoningOptions={reasoningOptions}
-              embeddingOptions={embeddingOptions}
+              fastOptions={choices.fast}
+              reasoningOptions={choices.reasoning}
+              embeddingOptions={choices.embedding}
               installedModels={installedModels}
               inheritedLabel="Use server default"
             />

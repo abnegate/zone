@@ -70,7 +70,13 @@ export interface WorkspaceThemeResponse {
 }
 
 // AI Provider Types
-export type AiProvider = 'self_hosted' | 'openai' | 'anthropic' | 'bedrock';
+export type AiProvider =
+  | 'self_hosted'
+  | 'openai'
+  | 'anthropic'
+  | 'bedrock'
+  | 'claude_code'
+  | 'codex';
 
 export interface AiSettings {
   provider: AiProvider;

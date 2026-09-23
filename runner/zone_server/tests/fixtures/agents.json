@@ -1,0 +1,4 @@
+{"agents":[
+ {"agent":"claude","provider":"claude_code","state":"signed_in","source":"zone","label":"Claude Max","expires_at":"2027-09-23T04:00:00Z","models":["sonnet","opus","haiku"],"pending":null,"error":null},
+ {"agent":"codex","provider":"codex","state":"pending","source":null,"label":null,"expires_at":null,"models":["gpt-6-astra","gpt-6-sol","gpt-6-luna"],"pending":{"verification_url":"https://auth.openai.com/codex/device","user_code":"ABCD-EFGHI","expires_at":"2026-09-23T04:15:00Z"},"error":null}
+]}

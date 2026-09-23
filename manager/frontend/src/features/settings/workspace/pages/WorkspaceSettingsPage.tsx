@@ -13,23 +13,26 @@ import { useTheme, workspaceThemeProperties } from '../../../../shared/context/T
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
 import { useModels } from '../../../models';
-import { mergeStageOptions } from '../../../models/utils/stageOptions';
 import {
+  AgentSignIn,
   AiModelFields,
   AiProviderFields,
+  agentOf,
   buildAiSettingsRequest,
+  canManageAgents,
   configuredFromSettings,
   credentialsFromSettings,
   emptyCredentials,
   emptyModels,
   hasOverrides,
   type ModelSelection,
-  modelOptions,
+  modelChoices,
   modelsFromSettings,
   nothingConfigured,
   type ProviderConfigured,
   type ProviderCredentials,
   providerOptions,
+  useAgentStatuses,
 } from '../../ai';
 import { SettingsPage } from '../../components';
 import { WorkspaceMembersSection } from '../components';
@@ -139,6 +142,9 @@ export default function WorkspaceSettingsPage() {
   const [configured, setConfigured] = useState<ProviderConfigured>(nothingConfigured);
   const [models, setModels] = useState<ModelSelection>(emptyModels);
   const [effectiveSettings, setEffectiveSettings] = useState<AiSettings | null>(null);
+
+  const agent = overrideAiSettings ? agentOf(aiProvider) : null;
+  const agents = useAgentStatuses(orgId, agent !== null);
 
   const applyAiSettingsToForm = useCallback((settings: AiSettings): void => {
     setOverrideAiSettings(hasOverrides(settings));
@@ -379,19 +385,11 @@ export default function WorkspaceSettingsPage() {
     }
   };
 
-  const stage = modelOptions[aiProvider];
-  const fastOptions = mergeStageOptions(stage.fast, installedModels, models.fast, 'chat');
-  const reasoningOptions = mergeStageOptions(
-    stage.reasoning,
+  const choices = modelChoices(
+    aiProvider,
     installedModels,
-    models.reasoning,
-    'chat'
-  );
-  const embeddingOptions = mergeStageOptions(
-    stage.embedding,
-    installedModels,
-    models.embedding,
-    'embedding'
+    models,
+    agent ? (agents.statuses[agent]?.models ?? []) : []
   );
 
   const colorField = (
@@ -652,16 +650,28 @@ export default function WorkspaceSettingsPage() {
             </div>
 
             {overrideAiSettings ? (
-              <AiProviderFields
-                provider={aiProvider}
-                onProviderChange={(provider) => {
-                  setAiProvider(provider);
-                  setModels((prev) => ({ ...prev, fast: '', reasoning: '', embedding: '' }));
-                }}
-                credentials={credentials}
-                configured={configured}
-                onChange={(key, value) => setCredentials((prev) => ({ ...prev, [key]: value }))}
-              />
+              <>
+                <AiProviderFields
+                  provider={aiProvider}
+                  onProviderChange={(provider) => {
+                    setAiProvider(provider);
+                    setModels((prev) => ({ ...prev, fast: '', reasoning: '', embedding: '' }));
+                  }}
+                  credentials={credentials}
+                  configured={configured}
+                  onChange={(key, value) => setCredentials((prev) => ({ ...prev, [key]: value }))}
+                />
+                {agent && (
+                  <AgentSignIn
+                    organizationId={orgId}
+                    agent={agent}
+                    canManage={canManageAgents(currentOrganization?.role)}
+                    status={agents.statuses[agent]}
+                    loadError={agents.error}
+                    onStatusChange={agents.update}
+                  />
+                )}
+              </>
             ) : (
               <div className="effective-block">
                 <h3 className="settings-eyebrow">Effective Settings (from Organization)</h3>
@@ -688,9 +698,9 @@ export default function WorkspaceSettingsPage() {
                 provider={aiProvider}
                 models={models}
                 onChange={(key, value) => setModels((prev) => ({ ...prev, [key]: value }))}
-                fastOptions={fastOptions}
-                reasoningOptions={reasoningOptions}
-                embeddingOptions={embeddingOptions}
+                fastOptions={choices.fast}
+                reasoningOptions={choices.reasoning}
+                embeddingOptions={choices.embedding}
                 installedModels={installedModels}
                 inheritedLabel="Use organization / server default"
               />

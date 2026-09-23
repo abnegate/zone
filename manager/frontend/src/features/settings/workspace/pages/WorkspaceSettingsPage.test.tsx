@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
+import type { OrgRole } from '../../organization/types';
 import type { AiSettings, WorkspaceTheme } from '../types';
 
 // Mock client
@@ -17,6 +19,16 @@ const mockClient = {
 mock.module('../../../../api/client', () => ({
   client: mockClient,
 }));
+
+const agentsApi = {
+  list: mock(),
+  get: mock(),
+  start: mock(),
+  submitCode: mock(),
+  signOut: mock(),
+};
+
+mock.module('../../../../api/agents', () => ({ agentsApi }));
 
 // Mock useAuth
 const mockUseAuth = mock(() => ({
@@ -61,17 +73,26 @@ mock.module('../../../models', () => ({
   }),
 }));
 
+const organization = {
+  id: '00000000-0000-0000-0000-000000000001',
+  name: 'Test Org',
+  slug: 'test-org',
+  description: null,
+  is_active: true,
+  created_at: '2024-01-01T00:00:00Z',
+  updated_at: '2024-01-01T00:00:00Z',
+};
+const organizations: Record<'unknown' | OrgRole, typeof organization & { role?: OrgRole }> = {
+  unknown: organization,
+  owner: { ...organization, role: 'owner' },
+  admin: { ...organization, role: 'admin' },
+  member: { ...organization, role: 'member' },
+};
+let organizationRole: 'unknown' | OrgRole = 'unknown';
+
 mock.module('../../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: () => ({
-    currentOrganization: {
-      id: '00000000-0000-0000-0000-000000000001',
-      name: 'Test Org',
-      slug: 'test-org',
-      description: null,
-      is_active: true,
-      created_at: '2024-01-01T00:00:00Z',
-      updated_at: '2024-01-01T00:00:00Z',
-    },
+    currentOrganization: organizations[organizationRole],
     currentWorkspace: {
       id: selectedWorkspace,
       organization_id: '00000000-0000-0000-0000-000000000001',
@@ -139,6 +160,8 @@ const mockAiSettings: AiSettings = {
 describe('WorkspaceSettingsPage', () => {
   beforeEach(() => {
     mock.clearAllMocks();
+    organizationRole = 'unknown';
+    agentsApi.list.mockResolvedValue(fixture.agents);
     selectedWorkspace = '00000000-0000-0000-0000-000000000001';
     savedTheme = mockTheme;
     themeLoading = false;
@@ -893,6 +916,86 @@ describe('WorkspaceSettingsPage', () => {
           expect.any(String),
           expect.objectContaining({ model_audio: '' })
         );
+      });
+    });
+
+    describe('coding agent overrides', () => {
+      const codexOnly: AiSettings = {
+        ...mockAiSettings,
+        provider: 'codex',
+        model_fast: null,
+        model_reasoning: null,
+        model_embedding: null,
+        model_image: null,
+        model_video: null,
+        model_audio: null,
+      };
+
+      it('opens with the override on when the workspace only chose a coding agent', async () => {
+        mockClient.getWorkspaceAiSettings.mockResolvedValue(codexOnly);
+        render(<WorkspaceSettingsPage />);
+        await openAiTab(userEvent.setup());
+
+        expect(await screen.findByLabelText('AI Provider')).toHaveValue('codex');
+        expect(
+          screen.getByRole('checkbox', { name: 'Override organization AI settings' })
+        ).toBeChecked();
+        expect(await screen.findByText('Codex sign-in')).toBeInTheDocument();
+        expect(agentsApi.list).toHaveBeenCalledWith('00000000-0000-0000-0000-000000000001');
+        await waitFor(() =>
+          expect(
+            Array.from(
+              (screen.getByLabelText('Fast Model') as HTMLSelectElement).options,
+              (option) => option.value
+            )
+          ).toEqual(['', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'])
+        );
+      });
+
+      it('does not ask for sign-in status while inheriting the organization', async () => {
+        mockClient.getWorkspaceAiSettings.mockResolvedValue({
+          ...codexOnly,
+          provider: 'self_hosted',
+        });
+        mockClient.getEffectiveAiSettings.mockResolvedValue({ ...codexOnly, provider: 'codex' });
+        render(<WorkspaceSettingsPage />);
+        await openAiTab(userEvent.setup());
+
+        expect(await screen.findByText('Codex (ChatGPT subscription)')).toBeInTheDocument();
+        expect(agentsApi.list).not.toHaveBeenCalled();
+      });
+
+      it('shows a member the organization sign-in with no code and no buttons', async () => {
+        organizationRole = 'member';
+        mockClient.getWorkspaceAiSettings.mockResolvedValue(codexOnly);
+        render(<WorkspaceSettingsPage />);
+        await openAiTab(userEvent.setup());
+
+        const panel = (await screen.findByText('Codex sign-in')).closest('section');
+        expect(panel).not.toBeNull();
+        expect(
+          await screen.findByText('Ask an organization admin to sign in.')
+        ).toBeInTheDocument();
+        expect(panel?.querySelectorAll('button')).toHaveLength(0);
+        expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
+      });
+
+      it('saves the override without credentials', async () => {
+        mockClient.getWorkspaceAiSettings.mockResolvedValue(codexOnly);
+        mockClient.updateWorkspaceAiSettings.mockResolvedValue(codexOnly);
+        const user = userEvent.setup();
+        render(<WorkspaceSettingsPage />);
+        await openAiTab(user);
+        await screen.findByText('Codex sign-in');
+
+        await user.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+        await waitFor(() => expect(mockClient.updateWorkspaceAiSettings).toHaveBeenCalled());
+        const [, , request] = mockClient.updateWorkspaceAiSettings.mock.calls[0];
+        expect(request.provider).toBe('codex');
+        expect(Object.keys(request).filter((key) => !key.startsWith('model_'))).toEqual([
+          'provider',
+        ]);
       });
     });
   });

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { AiSettings } from '../types';
+import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
+import type { AiSettings, OrgRole } from '../types';
 
 // Mock client
 const mockClient = {
@@ -14,6 +15,16 @@ const mockClient = {
 mock.module('../../../../api/client', () => ({
   client: mockClient,
 }));
+
+const agentsApi = {
+  list: mock(),
+  get: mock(),
+  start: mock(),
+  submitCode: mock(),
+  signOut: mock(),
+};
+
+mock.module('../../../../api/agents', () => ({ agentsApi }));
 
 // Mock OrgMembersSection, InvitationsSection, BillingSection, and AuditLogsSection components
 mock.module('../components', () => ({
@@ -46,9 +57,11 @@ mock.module('../../../auth', () => ({
   useAuth: mockUseAuth,
 }));
 
+let installedModels: unknown[] = [];
+
 mock.module('../../../models', () => ({
   useModels: () => ({
-    models: [],
+    models: installedModels,
     loading: false,
     error: null,
     refresh: mock(),
@@ -72,7 +85,10 @@ const mockCurrentOrganization = {
   updated_at: '2024-01-01T00:00:00Z',
 };
 
-const mockWorkspaceContext = {
+const mockWorkspaceContext: {
+  currentOrganization: typeof mockCurrentOrganization & { role?: OrgRole };
+  [key: string]: unknown;
+} = {
   currentOrganization: mockCurrentOrganization,
   organizations: [],
   currentWorkspace: null,
@@ -121,8 +137,11 @@ const mockAiSettings: AiSettings = {
 describe('OrgSettingsPage', () => {
   beforeEach(() => {
     mock.clearAllMocks();
+    installedModels = [];
+    mockWorkspaceContext.currentOrganization = mockCurrentOrganization;
     mockClient.getOrgAiSettings.mockResolvedValue(mockAiSettings);
     mockClient.getWorkspaces.mockResolvedValue([]);
+    agentsApi.list.mockResolvedValue(fixture.agents);
   });
 
   describe('Loading State', () => {
@@ -195,7 +214,127 @@ describe('OrgSettingsPage', () => {
 
       const select = screen.getByLabelText('AI Provider');
       const options = select.querySelectorAll('option');
-      expect(options).toHaveLength(4);
+      expect(Array.from(options, (option) => option.value)).toEqual([
+        'self_hosted',
+        'openai',
+        'anthropic',
+        'bedrock',
+        'claude_code',
+        'codex',
+      ]);
+    });
+  });
+
+  describe('Coding Agent Providers', () => {
+    const agentSettings: AiSettings = {
+      ...mockAiSettings,
+      provider: 'claude_code',
+      model_fast: null,
+      model_reasoning: 'opus',
+      model_embedding: null,
+    };
+
+    it('asks for sign-in status only once a coding agent is chosen', async () => {
+      render(<OrgSettingsPage />);
+      const select = await screen.findByLabelText('AI Provider');
+      expect(agentsApi.list).not.toHaveBeenCalled();
+      expect(screen.queryByText('Claude Code sign-in')).toBeNull();
+
+      fireEvent.change(select, { target: { value: 'claude_code' } });
+
+      expect(await screen.findByText('Claude Code sign-in')).toBeInTheDocument();
+      expect(agentsApi.list).toHaveBeenCalledWith(mockCurrentOrganization.id);
+      expect(screen.queryByLabelText(/LiteLLM Host/i)).toBeNull();
+      expect(screen.getByText('Signed in')).toBeInTheDocument();
+
+      fireEvent.change(select, { target: { value: 'codex' } });
+
+      expect(await screen.findByText('Codex sign-in')).toBeInTheDocument();
+      expect(screen.getByText('ABCD-EFGHI')).toBeInTheDocument();
+      expect(agentsApi.list).toHaveBeenCalledTimes(1);
+    });
+
+    it('lists the models the agent offers instead of the installed ones', async () => {
+      installedModels = [
+        { name: 'llama3.2:3b', size: 1, modified_at: '2024-01-01T00:00:00Z' },
+        {
+          name: 'nomic-embed-text:latest',
+          size: 1,
+          modified_at: '2024-01-01T00:00:00Z',
+          capabilities: ['embeddings'],
+        },
+      ];
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      render(<OrgSettingsPage />);
+
+      await waitFor(() =>
+        expect(
+          Array.from(
+            (screen.getByLabelText('Fast Model') as HTMLSelectElement).options,
+            (option) => option.value
+          )
+        ).toEqual(['', 'sonnet', 'opus', 'haiku'])
+      );
+      expect(
+        Array.from(
+          (screen.getByLabelText('Reasoning Model') as HTMLSelectElement).options,
+          (option) => option.value
+        )
+      ).toEqual(['', 'sonnet', 'opus', 'haiku']);
+      expect(screen.getByLabelText('Reasoning Model')).toHaveValue('opus');
+      expect(screen.getByText(/this server's own embedding engine/)).toBeInTheDocument();
+    });
+
+    it('names no other provider as the embedding default when none are installed', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      render(<OrgSettingsPage />);
+
+      const embedding = await screen.findByLabelText('Embedding Model');
+      expect(embedding).toHaveAttribute('placeholder', 'Server default');
+      expect(screen.getByText(/this server's own embedding engine/)).toBeInTheDocument();
+    });
+
+    it('keeps a saved model the agent does not list so the form shows what is stored', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValue({
+        ...agentSettings,
+        model_fast: 'claude-sonnet-4-5',
+      });
+      render(<OrgSettingsPage />);
+
+      await waitFor(() =>
+        expect(screen.getByLabelText('Fast Model')).toHaveValue('claude-sonnet-4-5')
+      );
+    });
+
+    it('saves a coding agent provider without any credentials', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
+      render(<OrgSettingsPage />);
+      const select = await screen.findByLabelText('AI Provider');
+      fireEvent.change(select, { target: { value: 'claude_code' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalled());
+      const [organizationId, request] = mockClient.updateOrgAiSettings.mock.calls[0];
+      expect(organizationId).toBe(mockCurrentOrganization.id);
+      expect(request.provider).toBe('claude_code');
+      expect(Object.keys(request).filter((key) => !key.startsWith('model_'))).toEqual(['provider']);
+    });
+
+    it('lets an owner sign in and shows a member whom to ask', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      agentsApi.list.mockResolvedValue([
+        { ...fixture.agents[0], state: 'signed_out', source: null, label: null, expires_at: null },
+        fixture.agents[1],
+      ]);
+      mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
+      const { unmount } = render(<OrgSettingsPage />);
+      expect(await screen.findByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+      unmount();
+
+      mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'member' };
+      render(<OrgSettingsPage />);
+      expect(await screen.findByText('Ask an organization admin to sign in.')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Sign in with Claude' })).toBeNull();
     });
   });
 

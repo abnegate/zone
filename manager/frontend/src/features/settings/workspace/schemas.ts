@@ -127,7 +127,14 @@ export const WorkspaceThemeResponseSchema = z.object({
 });
 
 // AI Settings Schemas
-export const AiProviderSchema = z.enum(['self_hosted', 'openai', 'anthropic', 'bedrock']);
+export const AiProviderSchema = z.enum([
+  'self_hosted',
+  'openai',
+  'anthropic',
+  'bedrock',
+  'claude_code',
+  'codex',
+]);
 
 export const AiSettingsSchema = z.object({
   provider: AiProviderSchema,
