@@ -7,11 +7,12 @@
 //! [`ApprovalPolicy`] decides each `tools/call` before the registry runs it.
 
 use dashmap::DashMap;
+use futures::{Stream, StreamExt};
 use once_cell::sync::Lazy;
 use rmcp::model::{CallToolResult, ContentBlock};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 use zone_core::llm::Toolset;
 use zone_core::llm::provider::DEFAULT_TIMEOUT;
@@ -197,6 +198,34 @@ impl Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         LIVE.remove(&self.hash);
+    }
+}
+
+/// Everything a round produced, in one stream: zone's own loop, and the calls
+/// a spawned agent made over MCP while that loop was waiting on its answer.
+///
+/// Ends with the loop rather than with the channel. The lease holding the
+/// channel open outlives the round on purpose, so a merge that waited for it
+/// to close would never end the turn.
+pub fn merged<'a>(
+    events: impl Stream<Item = AgentEvent> + Send + 'a,
+    calls: &'a mut UnboundedReceiver<AgentEvent>,
+) -> impl Stream<Item = AgentEvent> + Send + 'a {
+    async_stream::stream! {
+        futures::pin_mut!(events);
+        loop {
+            tokio::select! {
+                biased;
+                Some(call) = calls.recv() => yield call,
+                event = events.next() => match event {
+                    Some(event) => yield event,
+                    None => break,
+                },
+            }
+        }
+        while let Ok(call) = calls.try_recv() {
+            yield call;
+        }
     }
 }
 

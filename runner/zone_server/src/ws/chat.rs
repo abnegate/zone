@@ -2938,52 +2938,6 @@ fn serve_tools(turn: &TurnScope, llm: &LlmClient, tools: &mut ChatTools) -> Opti
     Some(AgentTools { lease, calls })
 }
 
-/// Where a child process of this one reaches this server.
-///
-/// `Config::host` is a bind address: a server bound to every interface is
-/// reached at loopback, and one bound to a single address at that address. The
-/// agent runs on this host, so nothing here has to be routable from anywhere
-/// else -- and the turn's token, which travels this way, had better not be.
-fn own_address(config: &crate::config::Config) -> String {
-    let host = match config.host.trim() {
-        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
-        host => host,
-    };
-    match host.contains(':') && !host.starts_with('[') {
-        true => format!("http://[{host}]:{}", config.port),
-        false => format!("http://{host}:{}", config.port),
-    }
-}
-
-/// Everything the reader has to see this round, in one stream: zone's own
-/// loop, and the calls a spawned agent made over MCP while that loop was
-/// waiting on its answer.
-///
-/// Ends with the loop rather than with the channel. The lease holding the
-/// channel open outlives the round on purpose, so a merge that waited for it
-/// to close would never end the turn.
-fn merged<'a>(
-    events: impl Stream<Item = AgentEvent> + Send + 'a,
-    calls: &'a mut mpsc::UnboundedReceiver<AgentEvent>,
-) -> impl Stream<Item = AgentEvent> + Send + 'a {
-    async_stream::stream! {
-        futures::pin_mut!(events);
-        loop {
-            tokio::select! {
-                biased;
-                Some(call) = calls.recv() => yield call,
-                event = events.next() => match event {
-                    Some(event) => yield event,
-                    None => break,
-                },
-            }
-        }
-        while let Ok(call) = calls.try_recv() {
-            yield call;
-        }
-    }
-}
-
 /// `jobs` collects the background jobs this turn started and has not yet
 /// reported as exited, so the teardown that kills them can say each one is gone.
 async fn handle_chat_generation(
@@ -3021,7 +2975,7 @@ async fn handle_chat_generation(
         user: user_id,
         sandboxed,
         approval: generation.approvals.clone(),
-        endpoint: crate::mcp::endpoint(&own_address(state.config())),
+        endpoint: crate::mcp::local_endpoint(state.config()),
     };
     // Bound for the whole turn on purpose. The token is revoked when the lease
     // drops, and the agent is still calling with it until its last round has
@@ -3090,7 +3044,7 @@ async fn handle_chat_generation(
         );
         let mut events: Pin<Box<dyn Stream<Item = AgentEvent> + Send + '_>> =
             match agent_tools.as_mut() {
-                Some(served) => Box::pin(merged(round, &mut served.calls)),
+                Some(served) => Box::pin(crate::mcp::merged(round, &mut served.calls)),
                 None => Box::pin(round),
             };
         let mut pending_wait: Option<(Waited, Spend)> = None;
@@ -6429,29 +6383,6 @@ mod tests {
                 crate::mcp::Turn::find(&token).is_none(),
                 "a token that outlives its turn is a standing grant on this workspace"
             );
-        }
-
-        /// A child of this process reaches the server over loopback whatever
-        /// interfaces it was bound to, and the token never leaves the host.
-        #[test]
-        fn the_agent_is_pointed_at_this_server_and_no_further() {
-            let mut config = crate::state::test_config();
-            config.port = 8421;
-
-            for (bound, expected) in [
-                ("0.0.0.0", "http://127.0.0.1:8421"),
-                ("::", "http://127.0.0.1:8421"),
-                ("", "http://127.0.0.1:8421"),
-                ("127.0.0.1", "http://127.0.0.1:8421"),
-                ("192.168.1.9", "http://192.168.1.9:8421"),
-                ("::1", "http://[::1]:8421"),
-            ] {
-                config.host = bound.to_string();
-                assert_eq!(own_address(&config), expected, "bound to {bound}");
-            }
-
-            config.host = "0.0.0.0".to_string();
-            assert!(crate::mcp::endpoint(&own_address(&config)).ends_with(crate::mcp::PATH));
         }
     }
 }

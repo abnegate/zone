@@ -14,6 +14,7 @@ use zone_core::llm::{ToolDefinition, Toolset};
 
 use super::protocol::{self, Request, Response};
 use super::turn::Turn;
+use crate::config::Config;
 
 /// Where this endpoint is mounted. The turn's `Toolset` endpoint is this path
 /// against whatever address the server is reachable on.
@@ -36,6 +37,28 @@ const EMPTY_SCHEMA: &str = r#"{"type":"object","properties":{}}"#;
 /// This endpoint's URL on a server reachable at `base`.
 pub fn endpoint(base: &str) -> String {
     format!("{}{PATH}", base.trim_end_matches('/'))
+}
+
+/// This endpoint's URL as a child process of this server reaches it.
+pub fn local_endpoint(config: &Config) -> String {
+    endpoint(&own_address(config))
+}
+
+/// Where a child process of this one reaches this server.
+///
+/// `Config::host` is a bind address: a server bound to every interface is
+/// reached at loopback, and one bound to a single address at that address. The
+/// agent runs on this host, so nothing here has to be routable from anywhere
+/// else -- and the turn's token, which travels this way, had better not be.
+fn own_address(config: &Config) -> String {
+    let host = match config.host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        host => host,
+    };
+    match host.contains(':') && !host.starts_with('[') {
+        true => format!("http://[{host}]:{}", config.port),
+        false => format!("http://{host}:{}", config.port),
+    }
 }
 
 pub async fn serve(headers: HeaderMap, body: Bytes) -> HttpResponse {
@@ -497,6 +520,32 @@ mod tests {
         assert_eq!(
             endpoint("http://127.0.0.1:8080/"),
             format!("http://127.0.0.1:8080{PATH}")
+        );
+    }
+
+    /// A child of this process reaches the server over loopback whatever
+    /// interfaces it was bound to, and the token never leaves the host.
+    #[test]
+    fn the_agent_is_pointed_at_this_server_and_no_further() {
+        let mut config = crate::state::test_config();
+        config.port = 8421;
+
+        for (bound, expected) in [
+            ("0.0.0.0", "http://127.0.0.1:8421"),
+            ("::", "http://127.0.0.1:8421"),
+            ("", "http://127.0.0.1:8421"),
+            ("127.0.0.1", "http://127.0.0.1:8421"),
+            ("192.168.1.9", "http://192.168.1.9:8421"),
+            ("::1", "http://[::1]:8421"),
+        ] {
+            config.host = bound.to_string();
+            assert_eq!(own_address(&config), expected, "bound to {bound}");
+        }
+
+        config.host = "0.0.0.0".to_string();
+        assert_eq!(
+            local_endpoint(&config),
+            format!("http://127.0.0.1:8421{PATH}")
         );
     }
 }

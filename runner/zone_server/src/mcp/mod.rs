@@ -20,5 +20,5 @@ mod turn;
 #[cfg(test)]
 pub(crate) mod testing;
 
-pub use endpoint::{BODY_LIMIT, PATH, endpoint, serve};
-pub use turn::{Lease, Turn};
+pub use endpoint::{BODY_LIMIT, PATH, endpoint, local_endpoint, serve};
+pub use turn::{Lease, Turn, merged};
