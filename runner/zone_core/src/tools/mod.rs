@@ -4,7 +4,9 @@
 
 mod beneath;
 mod command;
+mod denied;
 mod file;
+mod identity;
 pub mod job;
 mod reason;
 mod sanitize;
@@ -251,7 +253,8 @@ pub struct ToolContext {
     /// turn this on where the caller has asked for it and knows what it means.
     pub unrestricted: bool,
     /// Paths no file tool reads, lists, searches or writes beneath, however
-    /// the path it is given reaches them. Every process's `/proc` entry is
+    /// the path it is given reaches them. Every process's `/proc` entry, the
+    /// reader's own descriptors under `/dev/fd` and macOS's `/.vol` are
     /// withheld the same way without being listed here.
     pub denied: Vec<std::path::PathBuf>,
     /// Which chat or task run this tool call belongs to.
