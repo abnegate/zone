@@ -50,6 +50,8 @@ pub struct Turn {
     /// driver owns the receiving half and publishes what arrives into the same
     /// stream the chat's own tool calls are published on.
     events: UnboundedSender<AgentEvent>,
+    /// Whether the tools that end zone's own turn are served.
+    parks: bool,
     expires: Instant,
 }
 
@@ -69,8 +71,18 @@ impl Turn {
             tools,
             approval,
             events,
+            parks: true,
             expires: Instant::now() + LIFETIME,
         }
+    }
+
+    /// Serve none of the tools that end zone's own turn: a question, a wait,
+    /// a plan. Each answers that the turn ends there and that the answer or the
+    /// outcome comes next, which only zone's own loop makes true. Over MCP the
+    /// call returns, nothing parks, and a task run ends on that promise.
+    pub fn without_parks(mut self) -> Self {
+        self.parks = false;
+        self
     }
 
     /// Mint this turn's token and publish it under the given endpoint.
@@ -80,9 +92,15 @@ impl Turn {
     pub fn open(self, endpoint: impl Into<String>) -> Lease {
         let token = generate_token();
         let hash = hash_token(&token);
-        let toolset = Toolset::new(endpoint, token, self.tools.names().to_vec());
+        let served = self.tools.names().iter().filter(|name| self.serves(name));
+        let toolset = Toolset::new(endpoint, token, served);
         LIVE.insert(hash.clone(), Arc::new(self));
         Lease { hash, toolset }
+    }
+
+    /// Whether a call to `name` reaches this turn's registry.
+    pub(crate) fn serves(&self, name: &str) -> bool {
+        self.tools.has(name) && (self.parks || !self.tools.ends_turn(name))
     }
 
     pub(crate) fn find(token: &str) -> Option<Arc<Self>> {
@@ -245,8 +263,13 @@ fn detail(message: &str) -> String {
 mod tests {
     use super::super::testing::{drain, next_card, open, tools, wait_for_card, write};
     use super::*;
-    use crate::agent::ApprovalGate;
+    use crate::agent::wait::{self, WAIT_FOR};
+    use crate::agent::{ASK_USER, ApprovalGate};
+    use serde_json::json;
+    use std::collections::HashMap;
     use tokio::sync::mpsc::unbounded_channel;
+    use zone_core::tools::Session;
+    use zone_core::tools::job::{JobCommand, Jobs};
 
     #[tokio::test]
     async fn a_token_reaches_the_turn_it_was_minted_for() {
@@ -399,6 +422,105 @@ mod tests {
             .expect("the call task");
         assert_eq!(result.is_error, Some(false), "{result:?}");
         ApprovalPolicy::unregister(opened.chat, &opened.approval);
+    }
+
+    /// Parking is zone's own loop acting on the call it made. A call that
+    /// arrives over MCP returns at once and succeeds, and nothing parks behind
+    /// it: no question is registered, and the wait `wait_for` stages is left
+    /// for a loop that never binds it.
+    #[tokio::test]
+    async fn a_call_that_would_end_zones_turn_parks_nothing_over_mcp() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut opened = open(ApprovalPolicy::auto()).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+        let session = Session::Chat(opened.chat);
+        let environment = HashMap::from([(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        )]);
+        let job = Jobs::spawn(
+            session,
+            &JobCommand::shell("sleep 30"),
+            directory.path(),
+            &environment,
+        )
+        .await
+        .expect("the job starts");
+        let question = json!({"questions": [{
+            "header": "Scope",
+            "question": "Which scope?",
+            "options": [
+                {"label": "Backfill", "description": "Do the backfill"},
+                {"label": "Forward only", "description": "Skip the backfill"}
+            ],
+        }]});
+
+        for (name, arguments) in [
+            (ASK_USER, question),
+            (WAIT_FOR, json!({"kind": "job", "id": job.id})),
+        ] {
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                turn.run(name, &arguments.to_string()),
+            )
+            .await
+            .expect("a call that would park zone's loop returns at once over MCP");
+
+            assert_eq!(result.is_error, Some(false), "{name}: {result:?}");
+            assert_eq!(
+                drain(&mut opened.events),
+                ["started", "completed"],
+                "{name}"
+            );
+        }
+        assert!(
+            wait::bind(session, "unbound").is_some(),
+            "the wait was staged, and nothing over MCP binds it to a park"
+        );
+
+        wait::reset_session(session);
+        Jobs::kill_session(session).await;
+    }
+
+    #[tokio::test]
+    async fn a_turn_without_parks_offers_no_tool_that_ends_zones_turn() {
+        let chat = Uuid::new_v4();
+        let registry = tools(chat).await;
+        let (sender, _events) = unbounded_channel();
+        let lease = Turn::new(
+            Uuid::new_v4(),
+            chat,
+            Uuid::new_v4(),
+            Arc::clone(&registry),
+            ApprovalPolicy::auto(),
+            sender,
+        )
+        .without_parks()
+        .open("http://127.0.0.1:8080/mcp");
+        let offered = lease.toolset().tools;
+        let turn = Turn::find(lease.toolset().token.expose()).expect("the turn");
+
+        for name in [ASK_USER, WAIT_FOR] {
+            assert!(registry.has(name), "the registry holds {name}");
+            assert!(
+                !offered.iter().any(|tool| tool == name),
+                "{name} was offered"
+            );
+            assert!(!turn.serves(name), "{name} is served");
+        }
+        assert!(turn.serves("write_file"));
+        assert_eq!(offered.len(), registry.names().len() - 2);
+
+        let parking = open(ApprovalPolicy::auto()).await;
+        assert!(
+            parking
+                .lease
+                .toolset()
+                .tools
+                .iter()
+                .any(|tool| tool == ASK_USER),
+            "a turn that has not withheld them still offers them"
+        );
     }
 
     #[test]

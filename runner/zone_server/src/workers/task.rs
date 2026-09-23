@@ -2199,8 +2199,9 @@ struct AgentTools {
 ///
 /// The agent runs its own tool loop, so the registry moves out of zone's loop,
 /// which under such a backend runs one round and calls nothing, and into the
-/// turn the MCP endpoint answers for. `None` for a backend whose tools zone
-/// cannot decide, and then the attempt's tools stay where they were.
+/// turn the MCP endpoint answers for, less the tools that would park the run
+/// (see [`crate::mcp::Turn::without_parks`]). `None` for a backend whose tools
+/// zone cannot decide, and then the attempt's tools stay where they were.
 fn serve_tools(
     llm: &LlmClient,
     tools: &mut ChatTools,
@@ -2226,6 +2227,7 @@ fn serve_tools(
         ApprovalPolicy::auto(),
         events,
     )
+    .without_parks()
     .open(endpoint);
     Some(AgentTools { lease, calls })
 }
@@ -5869,6 +5871,7 @@ mod cli_tests {
             .tools()
             .names()
             .iter()
+            .filter(|name| turn.serves(name))
             .map(|name| format!("mcp__{}__{name}", Toolset::SERVER))
             .collect();
         let allowed: Vec<String> = flag(&arguments, "--allowedTools")
@@ -5884,12 +5887,19 @@ mod cli_tests {
             "write_file",
             "create_document",
         ] {
-            assert!(turn.tools().has(tool), "the run's own {tool} is served");
+            assert!(turn.serves(tool), "the run's own {tool} is served");
         }
         assert!(
             !turn.tools().has("run_shell"),
             "a run is served its own sandboxed registry, not a chat's"
         );
+        for tool in [question::ASK_USER, wait::WAIT_FOR] {
+            assert!(turn.tools().has(tool), "the run's registry holds {tool}");
+            assert!(
+                !turn.serves(tool),
+                "{tool} would end the run on a park that never comes"
+            );
+        }
 
         let answer = rpc(
             &token,
@@ -5902,6 +5912,13 @@ mod cli_tests {
         )
         .await;
         assert_eq!(answer["result"]["isError"], false, "{answer}");
+        let refused = rpc(
+            &token,
+            "tools/call",
+            json!({"name": question::ASK_USER, "arguments": {}}),
+        )
+        .await;
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
 
         agent.release();
         tokio::time::timeout(SPAWN_TIMEOUT, running)
@@ -6007,7 +6024,14 @@ mod cli_tests {
                 zone_core::llm::CliSettings::default(),
             )));
             let mut tools = attempt_tools(&state).await;
-            let registered = tools.names().to_vec();
+            let parks = [question::ASK_USER, wait::WAIT_FOR];
+            assert!(parks.iter().all(|name| tools.has(name)));
+            let offered: Vec<String> = tools
+                .names()
+                .iter()
+                .filter(|name| !parks.contains(&name.as_str()))
+                .cloned()
+                .collect();
 
             let served = serve(&state, &llm, &mut tools)
                 .unwrap_or_else(|| panic!("{agent} lets zone decide its tools"));
@@ -6016,7 +6040,11 @@ mod cli_tests {
                 tools.is_empty(),
                 "the registry the endpoint answers from must not also sit in zone's own loop"
             );
-            assert_eq!(served.lease.toolset().tools, registered);
+            assert_eq!(
+                served.lease.toolset().tools,
+                offered,
+                "the agent is offered every tool of the run's but those that park it"
+            );
         }
     }
 

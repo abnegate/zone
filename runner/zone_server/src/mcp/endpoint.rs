@@ -142,6 +142,7 @@ fn catalog(turn: &Turn) -> Vec<McpTool> {
     turn.tools()
         .all_definitions()
         .iter()
+        .filter(|definition| turn.serves(&definition.function.name))
         .map(describe)
         .collect()
 }
@@ -166,7 +167,7 @@ async fn call(turn: &Turn, params: Option<Value>) -> Result<Value, ErrorData> {
         })?;
 
     let name = params.name.as_ref();
-    if !turn.tools().has(name) {
+    if !turn.serves(name) {
         return Err(ErrorData::invalid_params(
             format!("Unknown tool '{name}'"),
             None,
@@ -194,14 +195,17 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{open, state, wait_for_card, write};
+    use super::super::testing::{open, state, tools, wait_for_card, write};
     use super::*;
-    use crate::agent::{ApprovalGate, ApprovalPolicy};
+    use crate::agent::wait::WAIT_FOR;
+    use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy};
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use http_body_util::BodyExt;
     use std::time::Duration;
+    use tokio::sync::mpsc::unbounded_channel;
     use tower::ServiceExt;
+    use uuid::Uuid;
 
     async fn post(token: Option<&str>, body: Value) -> (StatusCode, Value) {
         let mut request = HttpRequest::builder()
@@ -371,6 +375,51 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(answer["error"]["code"], -32602, "{answer}");
         assert!(answer.get("result").is_none(), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_without_parks_neither_lists_nor_runs_a_tool_that_ends_zones_turn() {
+        let chat = Uuid::new_v4();
+        let (sender, _events) = unbounded_channel();
+        let lease = Turn::new(
+            Uuid::new_v4(),
+            chat,
+            Uuid::new_v4(),
+            tools(chat).await,
+            ApprovalPolicy::auto(),
+            sender,
+        )
+        .without_parks()
+        .open(endpoint("http://127.0.0.1:8080"));
+        let token = lease.toolset().token.expose().to_string();
+
+        let (_, answer) = post(Some(&token), rpc(13, protocol::TOOLS_LIST, json!({}))).await;
+        let listed: Vec<&str> = answer["result"]["tools"]
+            .as_array()
+            .expect("a tool array")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("a tool name"))
+            .collect();
+        assert!(
+            !listed.contains(&ASK_USER) && !listed.contains(&WAIT_FOR),
+            "{listed:?}"
+        );
+        assert!(listed.contains(&"write_file"), "{listed:?}");
+        assert_eq!(
+            listed.len(),
+            lease.toolset().tools.len(),
+            "the agent is allowed exactly the tools this endpoint lists"
+        );
+
+        for name in [ASK_USER, WAIT_FOR] {
+            let (status, answer) = post(
+                Some(&token),
+                rpc(14, protocol::TOOLS_CALL, call_of(name, json!({}))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(answer["error"]["code"], -32602, "{name}: {answer}");
+        }
     }
 
     #[tokio::test]
