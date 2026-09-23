@@ -3637,8 +3637,9 @@ mod retry_tests {
         }
     }
 
-    #[test]
-    fn semaphore_starts_with_every_permit_available() {
+    #[tokio::test]
+    async fn semaphore_starts_with_every_permit_available() {
+        let _execution = EXECUTION.lock().await;
         assert_eq!(get_semaphore().available_permits(), MAX_CONCURRENT_TASKS);
     }
 
