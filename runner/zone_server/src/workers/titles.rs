@@ -7,7 +7,8 @@ use uuid::Uuid;
 use zone_core::llm::{LlmClient, LlmConfig, Message};
 
 use crate::db::{ai_settings, chats, workspaces};
-use crate::state::{AppState, llm_backend};
+use crate::services::backend;
+use crate::state::AppState;
 
 static UPDATES: Lazy<broadcast::Sender<(Uuid, String)>> = Lazy::new(|| broadcast::channel(256).0);
 
@@ -67,13 +68,17 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
     if crate::services::stages::is_auto(&model) {
         return None;
     }
+    let backend = match chat.workspace_id {
+        Some(workspace) => backend::for_workspace(state, workspace).await.ok()?,
+        None => backend::instance(state.config()),
+    };
     let client = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
         api_key: state.config().litellm_key.clone(),
         default_model: model,
         temperature: 0.2,
         max_tokens: 64,
-        backend: llm_backend(state.config()),
+        backend,
     });
     let messages = [
         Message::system(

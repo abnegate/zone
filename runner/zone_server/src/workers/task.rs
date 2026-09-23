@@ -25,9 +25,10 @@ use crate::agent::question::{self, Question};
 use crate::agent::wait::{self, Waited, Waiting};
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
 use crate::db::{ai_settings, task_tool_calls, tasks, workspaces};
+use crate::services::backend;
 use crate::services::chat::session::{self, RunContext};
 use crate::services::stages;
-use crate::state::{AppState, llm_backend};
+use crate::state::AppState;
 use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
 use crate::workers::instructions;
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
@@ -219,6 +220,14 @@ impl Fault {
             failure: Failure::Terminal,
             status: RUN_FAILED,
             message: ANSWER_WITHDRAWN.to_string(),
+        }
+    }
+
+    fn backend(error: backend::Error) -> Self {
+        Self {
+            failure: Failure::Terminal,
+            status: RUN_FAILED,
+            message: error.to_string(),
         }
     }
 }
@@ -1946,7 +1955,9 @@ async fn attempt_run(
         default_model: model.to_string(),
         temperature: TASK_TEMPERATURE,
         max_tokens: policy.reserved,
-        backend: llm_backend(state.config()),
+        backend: backend::for_workspace(state, workspace_id)
+            .await
+            .map_err(Fault::backend)?,
     });
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(model, limit);
@@ -3575,6 +3586,36 @@ mod retry_tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].decision, Decision::Terminal);
         assert_eq!(recorded[0].level(), LEVEL_ERROR);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_backend_that_cannot_be_resolved_fails_the_run_with_its_message() {
+        let signed_out = || backend::Error::SignedOut {
+            agent: zone_core::llm::AgentKind::Claude,
+        };
+        let runs = Arc::new(AtomicU32::new(0));
+        let stopped = run_with_policy(
+            RetryPolicy::default(),
+            |_| {
+                let runs = Arc::clone(&runs);
+                async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    Err(Fault::backend(signed_out()))
+                }
+            },
+            |_| async {},
+        )
+        .await
+        .expect_err("a run with no backend to run on must stop");
+
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "a retry signs nobody in, so it must not be spent"
+        );
+        assert!(!stopped.exhausted);
+        assert_eq!(stopped.fault.status, RUN_FAILED);
+        assert_eq!(stopped.fault.message, signed_out().to_string());
     }
 
     #[tokio::test(start_paused = true)]

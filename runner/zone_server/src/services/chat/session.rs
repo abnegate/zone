@@ -14,8 +14,9 @@ use crate::db::chats::ChatRow;
 use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
 use crate::services::artifacts::ArtifactStore;
+use crate::services::backend;
 use crate::services::completion_tokens::merge_stops;
-use crate::state::{AppState, llm_backend};
+use crate::state::AppState;
 use zone_chat::{capacity, history};
 use zone_search::client::SearchContext;
 
@@ -447,13 +448,19 @@ pub async fn build(
             .map(|card| card.stop_sequences.as_slice())
             .unwrap_or(&[]),
     );
+    let backend = match mode {
+        Mode::Preview => backend::instance(state.config()),
+        Mode::Generation => backend::for_workspace(state, workspace)
+            .await
+            .map_err(|error| error.to_string())?,
+    };
     let mut llm = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
         api_key: state.config().litellm_key.clone(),
         default_model: chat.model_name.clone(),
         temperature: 0.7,
         max_tokens: policy.reserved,
-        backend: llm_backend(state.config()),
+        backend,
     })
     .with_stop(stop.clone());
     if let Some(limit) = capacity.ollama {

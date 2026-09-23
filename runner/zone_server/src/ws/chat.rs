@@ -1745,7 +1745,7 @@ async fn handle_image_generation(
             image_config.clone(),
             state.config().litellm_host.clone(),
             state.config().litellm_key.clone(),
-            crate::state::llm_backend(state.config()),
+            classifier_backend(state, workspace_id).await,
         )
         .edit_prompt(prompt)
         .await
@@ -2576,7 +2576,7 @@ async fn prepare_message(
         image_config.clone(),
         state.config().litellm_host.clone(),
         state.config().litellm_key.clone(),
-        crate::state::llm_backend(state.config()),
+        classifier_backend(state, workspace_id).await,
     );
     let intent = classifier
         .classify(content, metadata)
@@ -2598,6 +2598,19 @@ async fn prepare_message(
         crate::services::image_intent::GenerationIntent::Upscale => Routing::Upscale(image_config),
         crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat),
     })
+}
+
+async fn classifier_backend(state: &AppState, workspace_id: Uuid) -> LlmBackend {
+    crate::services::backend::for_workspace(state, workspace_id)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                %workspace_id,
+                %error,
+                "Could not resolve the workspace's model backend; classifying on the instance's"
+            );
+            crate::services::backend::instance(state.config())
+        })
 }
 
 async fn load_web_search(

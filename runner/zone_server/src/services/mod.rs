@@ -4,6 +4,7 @@
 
 pub mod artifact_access;
 pub mod artifacts;
+pub mod backend;
 pub mod character;
 pub mod chat;
 pub mod checkout;
