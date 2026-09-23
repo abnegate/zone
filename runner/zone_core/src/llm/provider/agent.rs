@@ -8,6 +8,74 @@ use super::event::AgentEvent;
 use super::parser;
 use super::settings::{BuiltinTools, Toolset};
 
+const MODEL: &str = "--model";
+const SETTING_SOURCES: &str = "--setting-sources";
+const NO_SETTING_SOURCES: &str = "";
+const SETTINGS: &str = "--settings";
+const CROSS_SESSION_REFUSED: &str = r#"{"crossSessionInbound":"refuse"}"#;
+
+/// Passed to every claude turn, whoever decides its tools.
+///
+/// Naming no setting source leaves out claude's settings files, and with them
+/// every hook, `CLAUDE.md`, skill and agent that the host user, the working
+/// directory or any directory above it would add. Settings given as a flag
+/// still apply; these refuse messages from the user's other claude sessions.
+const CLAUDE_ISOLATION: &[&str] = &[
+    SETTING_SOURCES,
+    NO_SETTING_SOURCES,
+    SETTINGS,
+    CROSS_SESSION_REFUSED,
+];
+
+/// Zone's own word for letting the model be chosen. An agent would send it to
+/// its API as a model name, and the turn would fail there.
+const AUTO: &str = "auto";
+
+/// Separates a local model's tag, as in `gpt-oss:20b`. No agent model has one.
+const TAG_SEPARATOR: char = ':';
+
+/// `fable` is known but not offered: a subscriber has to accept its usage
+/// credits interactively first, and a headless turn without that falls back
+/// to another model or fails.
+const CLAUDE_MODELS: &[&str] = &["sonnet", "opus", "haiku"];
+
+/// Claude's names for its latest models, in any case. `default` is left out:
+/// it means what passing no `--model` means.
+const CLAUDE_ALIASES: &[&str] = &[
+    "sonnet",
+    "opus",
+    "haiku",
+    "fable",
+    "best",
+    "sonnet[1m]",
+    "opus[1m]",
+    "fable[1m]",
+    "opusplan",
+];
+const CLAUDE_FAMILY: &str = "claude-";
+const LONG_CONTEXT: &str = "[1m]";
+
+const CODEX_MODELS: &[&str] = &[
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+];
+const CODEX_FAMILY: &str = "gpt-";
+
+/// Both timeouts are [`super::DEFAULT_TIMEOUT`] in milliseconds, because a call
+/// to zone's tools can wait that long on an approval.
+const CLAUDE_DEFAULTS: &[(&str, &str)] = &[
+    ("DISABLE_AUTOUPDATER", "1"),
+    ("MCP_TOOL_TIMEOUT", "1800000"),
+    ("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "1800000"),
+    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+    ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+];
+
 const STRICT_MCP_CONFIG: &str = "--strict-mcp-config";
 const MCP_CONFIG: &str = "--mcp-config";
 const ALLOWED_TOOLS: &str = "--allowedTools";
@@ -38,9 +106,9 @@ pub enum AgentKind {
 impl AgentKind {
     /// Every agent this crate drives.
     ///
-    /// A caller that must act on all of them -- clearing their keys out of a
-    /// child environment, for one -- reads this instead of repeating the list
-    /// and going stale when an agent is added.
+    /// A caller that must act on all of them -- finding one by name, for one --
+    /// reads this instead of repeating the list and going stale when an agent
+    /// is added.
     pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
 
     pub fn as_str(self) -> &'static str {
@@ -70,6 +138,67 @@ impl AgentKind {
         match self {
             Self::Claude => "ANTHROPIC_API_KEY",
             Self::Codex => "OPENAI_API_KEY",
+        }
+    }
+
+    /// The agent whose [`AgentKind::as_str`] is `name`.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|agent| agent.as_str() == name)
+    }
+
+    /// The models offered for this agent, in the order the agent ranks them.
+    pub fn models(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => CLAUDE_MODELS,
+            Self::Codex => CODEX_MODELS,
+        }
+    }
+
+    /// Whether this agent can run `model`.
+    ///
+    /// An agent sends a name it does not recognise to its API unchanged, and
+    /// the turn fails there, so only a name this accepts is ever passed on.
+    pub fn knows(self, model: &str) -> bool {
+        let model = model.trim();
+        if model.is_empty()
+            || model.eq_ignore_ascii_case(AUTO)
+            || model.contains(TAG_SEPARATOR)
+            || model.contains(char::is_whitespace)
+        {
+            return false;
+        }
+
+        match self {
+            Self::Claude => {
+                CLAUDE_ALIASES.contains(&model.to_ascii_lowercase().as_str()) || claude_model(model)
+            }
+            Self::Codex => CODEX_MODELS.contains(&model) || codex_model(model),
+        }
+    }
+
+    /// The variable naming the directory this agent keeps its settings,
+    /// sessions and login in.
+    pub fn home(self) -> &'static str {
+        match self {
+            Self::Claude => "CLAUDE_CONFIG_DIR",
+            Self::Codex => "CODEX_HOME",
+        }
+    }
+
+    /// The variable this agent reads a subscription login's token from. Codex
+    /// has none: its login is a file in its home.
+    pub fn token(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some("CLAUDE_CODE_OAUTH_TOKEN"),
+            Self::Codex => None,
+        }
+    }
+
+    /// The variables every turn of this agent runs with.
+    pub fn defaults(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Claude => CLAUDE_DEFAULTS,
+            Self::Codex => &[],
         }
     }
 
@@ -104,10 +233,28 @@ impl AgentKind {
         .map(|argument| (*argument).to_string())
         .collect();
 
-        if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
-            arguments.push("--model".to_string());
-            arguments.push(model.to_string());
+        match model.map(str::trim).filter(|model| !model.is_empty()) {
+            Some(model) if self.knows(model) => {
+                arguments.extend([MODEL.to_string(), model.to_string()]);
+            }
+            Some(model) => {
+                tracing::debug!(
+                    agent = %self,
+                    model,
+                    "the agent does not know this model, so it chooses its own"
+                );
+            }
+            None => {}
         }
+
+        arguments.extend(
+            match self {
+                Self::Claude => CLAUDE_ISOLATION,
+                Self::Codex => &[],
+            }
+            .iter()
+            .map(|argument| (*argument).to_string()),
+        );
 
         if self.accepts_toolset() {
             arguments.extend(tool_arguments(toolset, builtin_tools));
@@ -226,9 +373,39 @@ impl fmt::Display for AgentKind {
     }
 }
 
+/// A full claude model name: `^claude-[a-z0-9-]+(\[1m\])?$`.
+fn claude_model(model: &str) -> bool {
+    model
+        .strip_suffix(LONG_CONTEXT)
+        .unwrap_or(model)
+        .strip_prefix(CLAUDE_FAMILY)
+        .is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|byte| lowercase_or_digit(byte) || byte == b'-')
+        })
+}
+
+/// A model of codex's family: `^gpt-[a-z0-9][a-z0-9.-]*$`.
+fn codex_model(model: &str) -> bool {
+    let Some(rest) = model.strip_prefix(CODEX_FAMILY) else {
+        return false;
+    };
+    let mut bytes = rest.bytes();
+
+    bytes.next().is_some_and(lowercase_or_digit)
+        && bytes.all(|byte| lowercase_or_digit(byte) || byte == b'.' || byte == b'-')
+}
+
+fn lowercase_or_digit(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::provider::DEFAULT_TIMEOUT;
 
     #[test]
     fn the_prompt_is_never_placed_on_the_command_line() {
@@ -261,6 +438,10 @@ mod tests {
                 "stream-json",
                 "--model",
                 "opus",
+                "--setting-sources",
+                "",
+                "--settings",
+                r#"{"crossSessionInbound":"refuse"}"#,
                 "--print",
             ]
         );
@@ -268,7 +449,7 @@ mod tests {
 
     #[test]
     fn codex_streams_json_and_reads_its_prompt_from_stdin() {
-        let arguments = AgentKind::Codex.arguments(Some("o3"));
+        let arguments = AgentKind::Codex.arguments(Some("gpt-6-sol"));
 
         assert_eq!(
             arguments,
@@ -277,7 +458,7 @@ mod tests {
                 "--json",
                 "--skip-git-repo-check",
                 "--model",
-                "o3",
+                "gpt-6-sol",
                 "-"
             ]
         );
@@ -291,6 +472,261 @@ mod tests {
                 !arguments.contains(&"--model".to_string()),
                 "sent --model for {model:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_model_the_agent_does_not_know_is_left_to_the_agent() {
+        for (agent, model) in [
+            (AgentKind::Claude, "llama3.2:3b"),
+            (AgentKind::Claude, "auto"),
+            (AgentKind::Claude, "gpt-6-sol"),
+            (AgentKind::Claude, "default"),
+            (AgentKind::Codex, "gpt-oss:20b"),
+            (AgentKind::Codex, "AUTO"),
+            (AgentKind::Codex, "o3"),
+            (AgentKind::Codex, "opus"),
+        ] {
+            let arguments = agent.arguments(Some(model));
+            assert!(
+                !arguments.contains(&MODEL.to_string()),
+                "{agent} was handed a model it does not know, {model}: {arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_model_the_agent_knows_is_passed_on_trimmed() {
+        for (agent, model) in [
+            (AgentKind::Claude, "opus"),
+            (AgentKind::Claude, " claude-opus-4-8 "),
+            (AgentKind::Codex, "gpt-6-sol"),
+            (AgentKind::Codex, "gpt-5.5\n"),
+        ] {
+            let arguments = agent.arguments(Some(model));
+            assert_eq!(
+                value_after(&arguments, MODEL),
+                Some(model.trim()),
+                "{agent}: {arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_agent_knows_a_local_model_zones_own_auto_or_a_name_with_spaces() {
+        for agent in AgentKind::ALL {
+            for model in [
+                "gpt-oss:20b",
+                "llama3.2:3b",
+                "",
+                "   ",
+                "auto",
+                "AUTO",
+                "Auto",
+                "gpt-6 sol",
+                "claude-opus 5",
+                "son net",
+                "opus\tplan",
+            ] {
+                assert!(!agent.knows(model), "{agent} claims to know {model:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_model_an_agent_offers_is_one_it_knows() {
+        for agent in AgentKind::ALL {
+            assert!(!agent.models().is_empty(), "{agent} offers no models");
+            for model in agent.models() {
+                assert!(
+                    agent.knows(model),
+                    "{agent} offers {model} without knowing it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_agent_offers_its_models_in_the_order_it_ranks_them() {
+        assert_eq!(AgentKind::Claude.models(), ["sonnet", "opus", "haiku"]);
+        assert_eq!(
+            AgentKind::Codex.models(),
+            [
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_knows_its_aliases_in_any_case_and_its_full_model_names() {
+        for model in [
+            "sonnet",
+            "opus",
+            "haiku",
+            "fable",
+            "best",
+            "sonnet[1m]",
+            "opus[1m]",
+            "fable[1m]",
+            "opusplan",
+            "Opus",
+            "SONNET",
+            "Opus[1M]",
+            " haiku ",
+            "claude-opus-4-8",
+            "claude-sonnet-4-6[1m]",
+            "claude-haiku-4-5-20251001",
+            "claude-opus-6",
+        ] {
+            assert!(AgentKind::Claude.knows(model), "{model:?}");
+        }
+
+        for model in [
+            "default",
+            "Default",
+            "Claude-Opus-5",
+            "claude-",
+            "claude-[1m]",
+            "claude-opus-5[2m]",
+            "claude_opus",
+            "us.anthropic.claude-opus-5",
+            "claude-3-5-haiku-20241022-v1:0",
+            "opus[1m][1m]",
+            "gpt-6-sol",
+            "llama3.2",
+        ] {
+            assert!(!AgentKind::Claude.knows(model), "{model:?}");
+        }
+    }
+
+    #[test]
+    fn claude_knows_fable_without_offering_it() {
+        assert!(AgentKind::Claude.knows("fable"));
+        assert!(!AgentKind::Claude.models().contains(&"fable"));
+    }
+
+    #[test]
+    fn codex_knows_its_presets_and_the_gpt_family() {
+        for model in [
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-7",
+        ] {
+            assert!(AgentKind::Codex.knows(model), "{model:?}");
+        }
+
+        for model in [
+            "o3",
+            "o4-mini",
+            "openai/gpt-oss-20b",
+            "codex-auto-review",
+            "GPT-6-Sol",
+            "gpt-",
+            "gpt-.5",
+            "opus",
+            "claude-opus-4-8",
+        ] {
+            assert!(!AgentKind::Codex.knows(model), "{model:?}");
+        }
+    }
+
+    #[test]
+    fn an_agent_is_found_by_the_name_it_goes_by_and_no_other() {
+        for agent in AgentKind::ALL {
+            assert_eq!(AgentKind::named(agent.as_str()), Some(agent));
+        }
+
+        for name in ["gemini", "", "Claude", "CODEX", " claude", "claude_code"] {
+            assert_eq!(AgentKind::named(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn each_agent_names_where_it_keeps_its_state_and_how_it_takes_a_login() {
+        assert_eq!(AgentKind::Claude.home(), "CLAUDE_CONFIG_DIR");
+        assert_eq!(AgentKind::Codex.home(), "CODEX_HOME");
+        assert_eq!(AgentKind::Claude.token(), Some("CLAUDE_CODE_OAUTH_TOKEN"));
+        assert_eq!(AgentKind::Codex.token(), None);
+    }
+
+    #[test]
+    fn claude_runs_without_updating_itself_phoning_home_or_remembering_across_turns() {
+        assert_eq!(
+            AgentKind::Claude.defaults(),
+            [
+                ("DISABLE_AUTOUPDATER", "1"),
+                ("MCP_TOOL_TIMEOUT", "1800000"),
+                ("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "1800000"),
+                ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+                ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+            ]
+        );
+        assert!(AgentKind::Codex.defaults().is_empty());
+    }
+
+    #[test]
+    fn claude_waits_on_zones_tools_for_as_long_as_a_turn_may_run() {
+        let budget = DEFAULT_TIMEOUT.as_millis().to_string();
+
+        for name in ["MCP_TOOL_TIMEOUT", "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"] {
+            let value = AgentKind::Claude
+                .defaults()
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .map(|(_, value)| *value);
+            assert_eq!(value, Some(budget.as_str()), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_claude_turn_loads_no_settings_file_and_refuses_other_sessions() {
+        let toolset = toolset();
+
+        for model in [Some("opus"), None, Some("llama3.2:3b")] {
+            for served in [None, Some(&toolset)] {
+                for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
+                    let arguments = AgentKind::Claude.arguments_with(model, served, builtin_tools);
+
+                    assert_eq!(
+                        value_after(&arguments, SETTING_SOURCES),
+                        Some(""),
+                        "{arguments:?}"
+                    );
+                    let settings: Value = serde_json::from_str(
+                        value_after(&arguments, SETTINGS).expect("zone's own settings"),
+                    )
+                    .expect("the settings to be JSON");
+                    assert_eq!(settings, json!({ "crossSessionInbound": "refuse" }));
+                    assert_eq!(arguments.last().map(String::as_str), Some("--print"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_is_never_handed_claudes_settings_flags() {
+        let toolset = toolset();
+
+        for served in [None, Some(&toolset)] {
+            for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
+                let arguments =
+                    AgentKind::Codex.arguments_with(Some("gpt-6-sol"), served, builtin_tools);
+                assert!(
+                    !arguments
+                        .iter()
+                        .any(|argument| argument == SETTING_SOURCES || argument == SETTINGS),
+                    "{arguments:?}"
+                );
+            }
         }
     }
 
@@ -411,8 +847,12 @@ mod tests {
 
         assert!(!AgentKind::Codex.accepts_toolset());
         assert_eq!(
-            AgentKind::Codex.arguments_with(Some("o3"), Some(&toolset), BuiltinTools::Withheld),
-            AgentKind::Codex.arguments(Some("o3"))
+            AgentKind::Codex.arguments_with(
+                Some("gpt-6-sol"),
+                Some(&toolset),
+                BuiltinTools::Withheld
+            ),
+            AgentKind::Codex.arguments(Some("gpt-6-sol"))
         );
     }
 
