@@ -671,7 +671,8 @@ impl Tool for ListFilesTool {
         let params: ListFilesParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
 
-        let full_path = context.cwd.join(&params.path);
+        let full_path = resolve(&context.cwd.join(&params.path));
+        confine(&full_path, context)?;
 
         if !full_path.exists() {
             return Err(ToolError::Execution(format!(
@@ -679,9 +680,6 @@ impl Tool for ListFilesTool {
                 params.path
             )));
         }
-
-        let full_path = resolve(&full_path);
-        confine(&full_path, context)?;
 
         let mut files = Vec::new();
         let mut total = 0;
@@ -2979,6 +2977,34 @@ mod tests {
 
         assert!(output.contains("own.rs"), "{output}");
         assert!(!output.contains("auth.json"), "{output}");
+    }
+
+    /// Whether something exists under the agents' state is itself withheld:
+    /// it says which organizations have signed in, and to what. So the refusal
+    /// comes before the answer about existence, not after it.
+    #[tokio::test]
+    async fn list_files_refuses_before_saying_whether_a_path_exists() {
+        let shared = shared();
+
+        let listed = ListFilesTool
+            .execute(
+                serde_json::json!({"path": shared.state.join("an-organization-yet-to-sign-in")}),
+                &chat_context(&shared),
+            )
+            .await;
+        off_limits(listed, "a missing directory in the agent state");
+
+        let escaped = ListFilesTool
+            .execute(
+                serde_json::json!({"path": shared.root.join("nothing-here")}),
+                &create_test_context(&shared.workspace),
+            )
+            .await
+            .expect_err("a missing directory outside cwd");
+        assert!(
+            escaped.to_string().contains("escapes working directory"),
+            "{escaped}"
+        );
     }
 
     #[test]
