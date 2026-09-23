@@ -43,12 +43,12 @@ function formatDate(value: string): string | null {
   return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-function signedInDetail(status: AgentStatus, agent: Agent): string {
+function signedInDetail(status: AgentStatus, agent: Agent, lapsed: boolean): string {
   if (status.source === 'host') {
     const plan = status.label ? ` (${status.label})` : '';
     return `Using this server's own ${names[agent]} sign-in${plan}.`;
   }
-  const expiry = status.expires_at ? formatDate(status.expires_at) : null;
+  const expiry = status.expires_at && !lapsed ? formatDate(status.expires_at) : null;
   const parts = [status.label, expiry && `Expires ${expiry}`].filter(Boolean);
   return parts.length > 0 ? parts.join(' · ') : 'Signed in for this organization.';
 }
@@ -83,6 +83,7 @@ export function AgentSignIn({
   const waiting = prompt !== null || pending;
   const device = prompt ?? (pending ? (status?.pending ?? null) : null);
   const codeExpired = useExpired(device?.expires_at ?? null);
+  const lapsed = useExpired(status?.state === 'signed_in' ? status.expires_at : null);
 
   useEffect(() => {
     if (!waiting) return;
@@ -193,12 +194,13 @@ export function AgentSignIn({
     !waiting &&
     (status.state !== 'signed_in' || status.source === 'host');
   const offerSignOut = manageable && !authorization && !waiting && status.source === 'zone';
-  const error = failure ?? (status ? (signingIn ? null : status.error) : loadError);
+  const quiet = signingIn || status?.state === 'signed_in';
+  const error = failure ?? (status ? (quiet ? null : status.error) : loadError);
   const badge = states[signingIn ? 'pending' : (status?.state ?? 'signed_out')];
 
   let detail: string | null = null;
   if (status?.state === 'signed_in') {
-    detail = signedInDetail(status, agent);
+    detail = signedInDetail(status, agent, lapsed);
   } else if (status && !canManage) {
     detail = 'Ask an organization admin to sign in.';
   } else if (usable) {

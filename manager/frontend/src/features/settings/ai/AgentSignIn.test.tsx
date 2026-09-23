@@ -382,6 +382,21 @@ describe('AgentSignIn', () => {
       expect(await screen.findByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
     });
 
+    it('leaves out an expiry that has passed while the sign-in still holds', () => {
+      renderPanel('claude', { ...claudeSignedIn, expires_at: '2020-01-01T00:00:00Z' });
+
+      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(screen.getByText('Claude Max')).toBeInTheDocument();
+      expect(screen.queryByText(/Expires/)).toBeNull();
+    });
+
+    it('names only the plan of a sign-in that renews itself', () => {
+      renderPanel('claude', { ...claudeSignedIn, expires_at: null });
+
+      expect(screen.getByText('Claude Max')).toBeInTheDocument();
+      expect(screen.queryByText(/Expires/)).toBeNull();
+    });
+
     it("names this server's own sign-in and offers an organization sign-in instead of sign-out", () => {
       renderPanel('claude', { ...claudeSignedIn, source: 'host', label: 'max', expires_at: null });
 
@@ -598,6 +613,13 @@ describe('AgentSignIn', () => {
       renderPanel('codex', { ...codexSignedOut, error: refusal });
 
       expect(screen.getByRole('alert')).toHaveTextContent(refusal);
+    });
+
+    it('hides why an earlier device login failed once the agent is signed in', () => {
+      renderPanel('codex', { ...codexSignedIn, source: 'host', error: refusal });
+
+      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).toBeNull();
     });
   });
 
