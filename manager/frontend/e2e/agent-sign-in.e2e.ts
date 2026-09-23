@@ -31,6 +31,10 @@ const authorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=e2e-fake-challenge&code_challenge_method=S256&state=e2e-fake-state';
 const fullAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge=e2e-fake-challenge-2&code_challenge_method=S256&state=e2e-fake-state-2';
+const restartAuthorize =
+  'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=e2e-fake-challenge-3&code_challenge_method=S256&state=e2e-fake-state-3';
+const unreadable = 'The code could not be read. Paste the whole code claude.com shows.';
+const spent = 'Claude rejected the code: Invalid authorization code. Start again.';
 const callback =
   'https://platform.claude.com/oauth/code/callback?code=e2e-fake-code&state=e2e-fake-state';
 const refusal =
@@ -241,6 +245,8 @@ test.describe('Coding agent sign-in', () => {
     await expect(link).toHaveAttribute('href', authorize);
     await expect(link).toHaveAttribute('target', '_blank');
     await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    await expect(panel.getByText('The link expires at 4:10 AM.')).toBeVisible();
+    await expect(panel.getByLabel('Code from claude.com')).toBeFocused();
     await expect(panel.getByRole('button', { name: 'Try again with full access' })).toBeVisible();
     await expect(panel.getByRole('button', { name: 'Submit code' })).toBeDisabled();
     await expect(panel.locator('ol')).toHaveCSS('list-style-type', 'decimal');
@@ -259,6 +265,7 @@ test.describe('Coding agent sign-in', () => {
     await field.press('Enter');
     await expect(panel.getByText('Signed in', { exact: true })).toBeVisible();
     await expect(panel.getByText('Claude Max · Expires Sep 23, 2027')).toBeVisible();
+    await expect(panel.getByRole('status')).toBeFocused();
     await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
     await expect(field).toHaveCount(0);
     expect(captured.find((request) => request.path.endsWith('/claude/login/code'))?.body).toEqual({
@@ -282,31 +289,44 @@ test.describe('Coding agent sign-in', () => {
     expect(saved.provider).toBe('claude_code');
     expect(saved.model_fast).toBe('sonnet');
     expect(saved.model_reasoning).toBe('opus');
+    expect(saved.model_embedding).toBe('');
     expect(Object.keys(saved).filter((key) => !key.startsWith('model_'))).toEqual(['provider']);
+
+    await panel.getByRole('button', { name: 'Sign out' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign out of Claude Code?' });
+    await expect(dialog).toContainText(
+      'This signs Claude Code out for every workspace in this organization.'
+    );
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible();
+    expect(captured.filter((request) => request.method === 'DELETE')).toHaveLength(0);
   });
 
-  test('a rejected Claude code offers a retry with full access', async ({ page }) => {
-    let starts = 0;
+  test('a Claude sign-in keeps its link for a bad paste and starts again once spent', async ({
+    page,
+  }) => {
+    const links = [authorize, restartAuthorize, fullAuthorize];
+    let exchanges = 0;
     const captured = await mockApi(page, {
       role: 'admin',
       provider: 'claude_code',
       agents: (method, path) => {
         if (method === 'GET' && path === '') return signedOut;
         if (method === 'POST' && path === '/claude/login') {
-          starts += 1;
           return {
             json: {
               agent: 'claude',
-              authorize_url: starts === 1 ? authorize : fullAuthorize,
+              authorize_url: links.shift(),
               expires_at: '2026-09-23T04:10:00Z',
             },
           };
         }
         if (method === 'POST' && path === '/claude/login/code') {
-          return {
-            status: 502,
-            json: { error: 'Claude rejected the code: Invalid authorization code' },
-          };
+          exchanges += 1;
+          return exchanges === 1
+            ? { status: 400, json: { error: unreadable, kind: 'invalid_code' } }
+            : { status: 502, json: { error: spent, kind: 'start_again' } };
         }
         return { status: 404, json: { error: `unexpected ${method} ${path}` } };
       },
@@ -316,13 +336,38 @@ test.describe('Coding agent sign-in', () => {
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await panel.getByRole('button', { name: 'Sign in with Claude' }).click();
-    await panel.getByLabel('Code from claude.com').fill('e2e-fake-code#e2e-fake-state');
+    const field = panel.getByLabel('Code from claude.com');
+    await field.fill('half-a-code');
     await panel.getByRole('button', { name: 'Submit code' }).click();
 
-    await expect(panel.getByRole('alert')).toHaveText(
-      'Claude rejected the code: Invalid authorization code'
+    await expect(panel.getByRole('alert')).toHaveText(unreadable);
+    await expect(field).toHaveAttribute('aria-invalid', 'true');
+    await expect(field).toBeFocused();
+    await expect(panel.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+      'href',
+      authorize
     );
     await capture(page, 'claude-rejected');
+
+    await field.fill('e2e-fake-code#e2e-fake-state');
+    await panel.getByRole('button', { name: 'Submit code' }).click();
+
+    await expect(panel.getByRole('alert')).toHaveText(spent);
+    await expect(panel.getByRole('link', { name: 'Open claude.com' })).toHaveCount(0);
+    await expect(field).toHaveCount(0);
+    await expect(panel.getByText('Not signed in', { exact: true })).toBeVisible();
+    await expect(
+      panel.getByText('Start again to get a new link from claude.com.', { exact: true })
+    ).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Try again with full access' })).toBeVisible();
+    await capture(page, 'start-again');
+
+    await panel.getByRole('button', { name: 'Start again' }).click();
+    await expect(panel.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+      'href',
+      restartAuthorize
+    );
+    await expect(panel.getByRole('alert')).toHaveCount(0);
 
     await panel.getByRole('button', { name: 'Try again with full access' }).click();
     await expect(panel.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
@@ -330,11 +375,13 @@ test.describe('Coding agent sign-in', () => {
       fullAuthorize
     );
     await expect(
-      panel.getByText('This link asks for full access to your Claude account.')
+      panel.getByText(
+        'This link asks for full access to your Claude account. It expires at 4:10 AM.'
+      )
     ).toBeVisible();
-    await expect(panel.getByRole('alert')).toHaveCount(0);
-    const logins = captured.filter((request) => request.path.endsWith('/claude/login'));
-    expect(logins.map((request) => request.body)).toEqual([{}, { scope: 'full' }]);
+    await expect(panel.getByRole('button', { name: 'Try again with full access' })).toHaveCount(0);
+    const starts = captured.filter((request) => request.path.endsWith('/claude/login'));
+    expect(starts.map((request) => request.body)).toEqual([{}, {}, { scope: 'full' }]);
   });
 
   test('an owner signs Codex in with a device code and polling stops once signed in', async ({
@@ -367,6 +414,7 @@ test.describe('Coding agent sign-in', () => {
     const panel = page.getByRole('region', { name: 'Codex sign-in' });
     await panel.getByRole('button', { name: 'Sign in with ChatGPT' }).click();
     await expect(panel.getByText('ABCD-EFGHI')).toBeVisible();
+    await expect(panel.getByText('ABCD-EFGHI')).toBeFocused();
     await expect(panel.getByText('Signing in', { exact: true })).toBeVisible();
     const link = panel.getByRole('link', { name: 'auth.openai.com/codex/device' });
     await expect(link).toHaveAttribute('href', device.verification_url);
@@ -412,7 +460,9 @@ test.describe('Coding agent sign-in', () => {
     await capture(page, 'codex-refused');
   });
 
-  test('a member sees the organization sign-in without a code or any button', async ({ page }) => {
+  test('a member sees a sign-in in progress as not signed in, with no code or button', async ({
+    page,
+  }) => {
     const captured = await mockApi(page, {
       role: 'member',
       provider: 'claude_code',
@@ -444,6 +494,44 @@ test.describe('Coding agent sign-in', () => {
     await expect(panel.getByRole('button')).toHaveCount(0);
     await expect(panel.getByRole('link')).toHaveCount(0);
     await expect(panel.getByText('ABCD-EFGHI')).toHaveCount(0);
+    await capture(page, 'member-neutral');
+    expect(
+      captured.filter((request) => request.method !== 'GET' && request.path.startsWith(agentsPath))
+    ).toHaveLength(0);
+  });
+
+  test('a member sees a working sign-in without a way to end it', async ({ page }) => {
+    const signedIn = status('claude', {
+      state: 'signed_in',
+      source: 'zone',
+      label: 'Claude Max',
+      expires_at: '2027-09-23T12:00:00Z',
+    });
+    const captured = await mockApi(page, {
+      role: 'member',
+      provider: 'codex',
+      workspaceProvider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') {
+          return { json: { agents: [signedIn, status('codex')] } };
+        }
+        return {
+          status: 403,
+          json: { error: 'Only organization admins can sign in to coding agents' },
+        };
+      },
+    });
+    await setupAuth(page);
+    await page.goto('/settings');
+    await page.getByRole('tab', { name: 'AI Settings' }).click();
+
+    await expect(page.getByLabel('AI Provider')).toHaveValue('claude_code');
+    const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
+    await expect(panel.getByRole('heading', { level: 3 })).toHaveText('Claude Code sign-in');
+    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible();
+    await expect(panel.getByText('Claude Max · Expires Sep 23, 2027')).toBeVisible();
+    await expect(panel.getByRole('button')).toHaveCount(0);
+    await expect(panel.getByText('Save Changes to use this provider.')).toHaveCount(0);
     await capture(page, 'member-view');
     expect(
       captured.filter((request) => request.method !== 'GET' && request.path.startsWith(agentsPath))
