@@ -861,26 +861,19 @@ async fn a_pasted_code_signs_the_organization_in_and_only_a_sealed_login_is_kept
     response.assert_status(StatusCode::OK);
     let status = response.json_value();
     assert_eq!(
-        without(&status, "expires_at"),
+        status,
         json!({
             "agent": "claude",
             "provider": "claude_code",
             "state": "signed_in",
             "source": "zone",
             "label": "Claude Max",
+            "expires_at": null,
             "models": models(AgentKind::Claude),
             "pending": null,
             "error": null,
-        })
-    );
-    assert!(
-        lasts(
-            timestamp(&status["expires_at"]),
-            TimeDelta::seconds(YEAR),
-            before,
-            after
-        ),
-        "{status}"
+        }),
+        "a sign-in that renews itself showed when its access token runs out"
     );
     assert_eq!(stage.status(organization, "claude", &owner).await, status);
 
@@ -923,9 +916,11 @@ async fn a_pasted_code_signs_the_organization_in_and_only_a_sealed_login_is_kept
         Some(REFRESH)
     );
     assert_eq!(login.label.as_deref(), Some("Claude Max"));
-    assert_eq!(
-        login.expires_at.map(|time| time.timestamp()),
-        Some(tokens.expires_at.timestamp())
+    let expires_at = login.expires_at.expect("the access token's expiry");
+    assert_eq!(expires_at.timestamp(), tokens.expires_at.timestamp());
+    assert!(
+        lasts(expires_at, TimeDelta::seconds(YEAR), before, after),
+        "{expires_at}"
     );
 
     assert_eq!(
@@ -958,6 +953,36 @@ async fn a_pasted_callback_url_signs_in_as_well() {
     response.assert_status(StatusCode::OK);
     assert_eq!(response.json_value()["state"], "signed_in");
     assert_eq!(exchanges(&claude).await[0]["code"], CODE);
+}
+
+#[tokio::test]
+async fn a_sign_in_without_a_refresh_token_shows_when_its_token_runs_out() {
+    let claude = token_endpoint(200, without(&granted(), "refresh_token")).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let started = stage.start(organization, "claude", json!({}), &owner).await;
+    let state = parameter(started["authorize_url"].as_str().expect("a URL"), "state");
+
+    let before = Utc::now();
+    let response = stage
+        .submit(organization, &format!("{CODE}#{state}"), &owner)
+        .await;
+    let after = Utc::now();
+
+    response.assert_status(StatusCode::OK);
+    let status = response.json_value();
+    assert_eq!(status["state"], "signed_in", "{status}");
+    assert!(
+        lasts(
+            timestamp(&status["expires_at"]),
+            TimeDelta::seconds(YEAR),
+            before,
+            after
+        ),
+        "{status}"
+    );
+    assert_eq!(stage.status(organization, "claude", &owner).await, status);
 }
 
 #[tokio::test]

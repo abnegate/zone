@@ -32,7 +32,7 @@ pub struct AgentStatus {
     pub state: State,
     pub source: Option<Source>,
     pub label: Option<String>,
-    /// When Zone's Claude access token runs out. It renews while a refresh token lasts.
+    /// When Zone's Claude access token runs out, for one with no refresh token to renew it.
     pub expires_at: Option<DateTime<Utc>>,
     pub models: Vec<String>,
     pub pending: Option<Prompt>,
@@ -105,7 +105,8 @@ impl AgentStatus {
 }
 
 /// A Zone-managed Claude login's state at `now`, judged by the credential a turn would run with,
-/// and when its access token runs out. A login Zone cannot open has expired.
+/// and when it runs out. A login that renews itself never shows an expiry, and one Zone cannot
+/// open has expired.
 fn sealed(
     key: &[u8; 32],
     login: &AgentLoginRow,
@@ -117,8 +118,9 @@ fn sealed(
         .and_then(|sealed| Tokens::open(key, sealed.expose()).ok());
     match tokens {
         None => (State::Expired, None),
+        Some(tokens) if tokens.refresh.is_some() => (State::SignedIn, None),
         Some(tokens) => {
-            let state = if tokens.expires_at > now || tokens.refresh.is_some() {
+            let state = if tokens.expires_at > now {
                 State::SignedIn
             } else {
                 State::Expired
@@ -254,16 +256,19 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_login_that_renews_itself_is_signed_in_after_its_token_runs_out() {
+    fn a_claude_login_that_renews_itself_is_signed_in_with_no_expiry_to_show() {
         let key = key();
         let now = at(1_790_000_000);
-        let expires_at = now - TimeDelta::days(1);
-        let renewable = seal(&key, expires_at, Some("fake-refresh-token"));
 
-        assert_eq!(
-            sealed(&key, &claude(Some(renewable), expires_at), now),
-            (State::SignedIn, Some(expires_at))
-        );
+        for expires_at in [now + TimeDelta::hours(8), now - TimeDelta::days(1)] {
+            let renewable = seal(&key, expires_at, Some("fake-refresh-token"));
+
+            assert_eq!(
+                sealed(&key, &claude(Some(renewable), expires_at), now),
+                (State::SignedIn, None),
+                "a login that renews itself showed when its access token runs out"
+            );
+        }
     }
 
     #[test]
