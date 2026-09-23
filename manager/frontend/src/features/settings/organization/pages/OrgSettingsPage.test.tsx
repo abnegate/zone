@@ -306,18 +306,62 @@ describe('OrgSettingsPage', () => {
       );
     });
 
-    it('saves a coding agent provider without any credentials', async () => {
+    it('saves a coding agent provider without any credentials, its models back on Automatic', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
       render(<OrgSettingsPage />);
       const select = await screen.findByLabelText('AI Provider');
+      expect(screen.getByLabelText('Fast Model')).toHaveValue('llama3.1:8b');
       fireEvent.change(select, { target: { value: 'claude_code' } });
+
+      await waitFor(() => expect(screen.getByLabelText('Fast Model')).toHaveValue(''));
+      expect(screen.getByLabelText('Reasoning Model')).toHaveValue('');
+      expect(
+        Array.from(
+          (screen.getByLabelText('Fast Model') as HTMLSelectElement).options,
+          (option) => option.value
+        )
+      ).toEqual(['', 'sonnet', 'opus', 'haiku']);
       fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
 
       await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalled());
       const [organizationId, request] = mockClient.updateOrgAiSettings.mock.calls[0];
       expect(organizationId).toBe(mockCurrentOrganization.id);
-      expect(request.provider).toBe('claude_code');
-      expect(Object.keys(request).filter((key) => !key.startsWith('model_'))).toEqual(['provider']);
+      expect(request).toEqual({
+        provider: 'claude_code',
+        model_fast: '',
+        model_reasoning: '',
+        model_embedding: 'nomic-embed-text',
+        model_image: 'flux1-schnell-fp8.safetensors',
+        model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
+        model_audio: 'ace_step_v1_3.5b.safetensors',
+      });
+    });
+
+    it('sends an empty model to clear one saved before Automatic was picked', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      mockClient.updateOrgAiSettings.mockResolvedValue({ ...agentSettings, model_reasoning: null });
+      render(<OrgSettingsPage />);
+
+      const reasoning = await screen.findByLabelText('Reasoning Model');
+      await waitFor(() => expect(reasoning).toHaveValue('opus'));
+      fireEvent.change(reasoning, { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalled());
+      const [, request] = mockClient.updateOrgAiSettings.mock.calls[0];
+      expect(request.model_fast).toBe('');
+      expect(request.model_reasoning).toBe('');
+      expect(request.model_embedding).toBe('');
+    });
+
+    it('says Automatic lets the agent choose, titles and summaries included', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      render(<OrgSettingsPage />);
+
+      const fast = await screen.findByLabelText('Fast Model');
+      expect(fast.closest('.form-group')?.querySelector('.form-hint')?.textContent).toBe(
+        'Automatic lets the agent choose; titles, PR subjects and summaries use it too.'
+      );
     });
 
     describe('after the provider changes', () => {

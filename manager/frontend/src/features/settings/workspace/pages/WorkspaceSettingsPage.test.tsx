@@ -1070,10 +1070,33 @@ describe('WorkspaceSettingsPage', () => {
 
         await waitFor(() => expect(mockClient.updateWorkspaceAiSettings).toHaveBeenCalled());
         const [, , request] = mockClient.updateWorkspaceAiSettings.mock.calls[0];
+        expect(request).toEqual({
+          provider: 'codex',
+          model_fast: '',
+          model_reasoning: '',
+          model_embedding: '',
+          model_image: '',
+          model_video: '',
+          model_audio: '',
+        });
+      });
+
+      it('clears the models of the provider it switched away from', async () => {
+        mockClient.updateWorkspaceAiSettings.mockResolvedValue(codexOnly);
+        const user = userEvent.setup();
+        render(<WorkspaceSettingsPage />);
+        await openAiTab(user);
+        await waitFor(() => expect(screen.getByLabelText('Fast Model')).toHaveValue('llama3.1:8b'));
+
+        await user.selectOptions(screen.getByLabelText('AI Provider'), 'codex');
+        await user.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+        await waitFor(() => expect(mockClient.updateWorkspaceAiSettings).toHaveBeenCalled());
+        const [, , request] = mockClient.updateWorkspaceAiSettings.mock.calls[0];
         expect(request.provider).toBe('codex');
-        expect(Object.keys(request).filter((key) => !key.startsWith('model_'))).toEqual([
-          'provider',
-        ]);
+        expect(request.model_fast).toBe('');
+        expect(request.model_reasoning).toBe('');
+        expect(request.model_embedding).toBe('');
       });
     });
   });

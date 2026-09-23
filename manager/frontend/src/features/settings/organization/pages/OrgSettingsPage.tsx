@@ -197,7 +197,10 @@ export default function OrgSettingsPage() {
             <h3 className="card-title">Provider</h3>
             <AiProviderFields
               provider={provider}
-              onProviderChange={setProvider}
+              onProviderChange={(next) => {
+                setProvider(next);
+                setModels((previous) => ({ ...previous, fast: '', reasoning: '' }));
+              }}
               credentials={credentials}
               configured={configured}
               onChange={(key, value) => setCredentials((prev) => ({ ...prev, [key]: value }))}

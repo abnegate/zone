@@ -250,9 +250,9 @@ export function buildAiSettingsRequest(
 ): UpdateAiSettingsRequest {
   const request: UpdateAiSettingsRequest = {
     provider,
-    model_fast: models.fast || undefined,
-    model_reasoning: models.reasoning || undefined,
-    model_embedding: models.embedding || undefined,
+    model_fast: models.fast,
+    model_reasoning: models.reasoning,
+    model_embedding: models.embedding,
     model_image: models.image,
     model_video: models.video,
     model_audio: models.audio,

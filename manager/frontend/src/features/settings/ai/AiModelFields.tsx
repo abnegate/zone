@@ -107,7 +107,7 @@ export function AiModelFields({
         blankLabel="Automatic"
         hint={
           agent
-            ? 'Short replies, titles and intent classification, from the models this agent offers.'
+            ? 'Automatic lets the agent choose; titles, PR subjects and summaries use it too.'
             : 'Short replies, titles and intent classification. Empty picks from the installed models.'
         }
       />

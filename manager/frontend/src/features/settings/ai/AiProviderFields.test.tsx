@@ -139,7 +139,7 @@ describe('AiProviderFields', () => {
 });
 
 describe('buildAiSettingsRequest', () => {
-  it('sends only the selected provider credentials and keeps empty media models to clear them', () => {
+  it('sends only the selected provider credentials and an empty model for each Automatic one', () => {
     const request = buildAiSettingsRequest(
       'openai',
       { ...emptyCredentials, openaiApiKey: 'sk-1', litellmKey: 'ignored' },
@@ -148,8 +148,8 @@ describe('buildAiSettingsRequest', () => {
     expect(request).toEqual({
       provider: 'openai',
       model_fast: 'gpt-4o-mini',
-      model_reasoning: undefined,
-      model_embedding: undefined,
+      model_reasoning: '',
+      model_embedding: '',
       model_image: '',
       model_video: '',
       model_audio: '',
@@ -170,7 +170,7 @@ describe('buildAiSettingsRequest', () => {
         provider,
         model_fast: 'sonnet',
         model_reasoning: 'opus',
-        model_embedding: undefined,
+        model_embedding: '',
         model_image: '',
         model_video: '',
         model_audio: '',
