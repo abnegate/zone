@@ -236,7 +236,18 @@ impl Devices {
                         audit::signed_in(state.db(), organization, initiator, &email, &login).await;
                     }
                     Err(error) => {
-                        tracing::error!(%organization, %error, "could not record a finished codex sign-in");
+                        tracing::error!(
+                            %organization,
+                            %error,
+                            "could not record a finished codex sign-in; logging codex out"
+                        );
+                        if let Err(error) = log_out(state.config(), organization).await {
+                            tracing::error!(
+                                %organization,
+                                %error,
+                                "could not log codex out of a sign-in Zone did not record"
+                            );
+                        }
                         self.failures.insert(organization, UNSAVED.to_string());
                         self.attempts.remove(&organization);
                     }
@@ -650,6 +661,25 @@ esac"#
             !DEVICES.locks.kept(scene.organization),
             "an idle organization's lock was kept"
         );
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_finished_sign_in_that_cannot_be_recorded_is_logged_out() {
+        let scene = Scene::new(PROMPT).await;
+        let (_, completion) = scene.start().await;
+
+        scene.delete_organization().await;
+        scene.touch(APPROVE);
+        finished(completion).await;
+
+        assert!(
+            !scene.home().join(CREDENTIALS).exists(),
+            "codex's login outlived a sign-in Zone could not record"
+        );
+        assert_eq!(scene.lines(LOGOUTS), [scene.home().display().to_string()]);
+        assert_eq!(failure(scene.organization).as_deref(), Some(UNSAVED));
+        assert!(pending(scene.organization).is_none());
         scene.remove().await;
     }
 
