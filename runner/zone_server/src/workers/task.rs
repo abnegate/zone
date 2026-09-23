@@ -89,6 +89,9 @@ const LEVEL_ERROR: &str = "error";
 const NO_MODEL: &str =
     "No completion model is installed or configured for this workspace, so the task cannot run";
 
+const PLAN_APPROVAL_UNAVAILABLE: &str = "Plan approval is not available when a task runs on a \
+     coding agent CLI; turn off Require plan approval or use the Self-Hosted provider.";
+
 // Global semaphore to limit concurrent task executions
 static TASK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
@@ -220,6 +223,17 @@ impl Fault {
             failure: Failure::Terminal,
             status: RUN_FAILED,
             message: ANSWER_WITHDRAWN.to_string(),
+        }
+    }
+
+    /// A plan is approved through the card `submit_plan` parks the run on, and
+    /// only zone's own loop parks. Terminal, because every attempt would hold
+    /// its changes for an approval nothing can give.
+    fn plan_approval() -> Self {
+        Self {
+            failure: Failure::Terminal,
+            status: RUN_FAILED,
+            message: PLAN_APPROVAL_UNAVAILABLE.to_string(),
         }
     }
 }
@@ -1992,6 +2006,9 @@ async fn attempt_run(
     }
     let mut system_prompt = prompt::task(&tools, &environment);
     system_prompt.push_str(guidance);
+    if plan_held && matches!(llm.config().backend, LlmBackend::Cli { .. }) {
+        return Err(Fault::plan_approval());
+    }
     let mut agent_tools = serve_tools(
         &llm,
         &mut tools,
@@ -5919,6 +5936,49 @@ mod cli_tests {
             !logs.iter().any(|log| log.message.contains("not offered")),
             "the run said zone's tools went unoffered: {:?}",
             logs.iter().map(|log| &log.message).collect::<Vec<_>>()
+        );
+        fixture.remove().await;
+    }
+
+    /// `submit_plan` parks the run until someone approves the plan, which only
+    /// zone's own loop can do, so the run says so before an agent is spawned.
+    #[tokio::test]
+    async fn a_run_that_needs_its_plan_approved_fails_before_its_agent_is_spawned() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(true).await;
+        let agent = Agent::write();
+        agent.release();
+        let provider = MockServer::start().await;
+        let state = fixture.state(&agent, &provider);
+
+        tokio::time::timeout(
+            SPAWN_TIMEOUT,
+            execute_task_run(&state, fixture.run, fixture.task),
+        )
+        .await
+        .expect("a run that cannot start ends at once");
+
+        let failed = tasks::get_task_run(&fixture.pool, fixture.run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.status, RUN_FAILED, "{:?}", failed.error_message);
+        assert_eq!(
+            failed.error_message.as_deref(),
+            Some(
+                "Plan approval is not available when a task runs on a coding agent CLI; turn \
+                 off Require plan approval or use the Self-Hosted provider."
+            )
+        );
+        let artifacts = failed.artifacts.expect("a failed run's artifacts");
+        assert_eq!(
+            (&artifacts["attempts"], &artifacts["stopped"]),
+            (&json!(1), &json!("terminal")),
+            "a retry can approve nothing, so none may be spent"
+        );
+        assert!(
+            !agent.path(ARGUMENTS).exists(),
+            "the agent was spawned for a run that could never have its plan approved"
         );
         fixture.remove().await;
     }
