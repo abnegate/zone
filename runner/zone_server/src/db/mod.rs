@@ -4,6 +4,7 @@
 //! Queries use compile-time checked SQL via sqlx macros.
 
 pub mod actions;
+pub mod agent_logins;
 pub mod ai_settings;
 pub mod analytics;
 pub mod audit;
