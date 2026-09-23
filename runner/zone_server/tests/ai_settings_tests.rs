@@ -1145,6 +1145,59 @@ async fn test_blank_models_clear_saved_workspace_models() {
 }
 
 #[tokio::test]
+async fn test_workspace_settings_say_whether_the_workspace_overrides() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    client
+        .put_json_auth(&organization, &json!({ "provider": "claude_code" }), &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    let inherited = client.get_auth(&workspace, &token).await;
+    inherited.assert_status(StatusCode::OK);
+    assert_eq!(inherited.json_value()["provider"], "self_hosted");
+    assert_eq!(inherited.json_value()["overrides"], false);
+
+    let saved = client
+        .put_json_auth(&workspace, &json!({ "provider": "self_hosted" }), &token)
+        .await;
+    saved.assert_status(StatusCode::OK);
+    assert_eq!(saved.json_value()["overrides"], true);
+
+    let stored = client.get_auth(&workspace, &token).await;
+    stored.assert_status(StatusCode::OK);
+    assert_eq!(stored.json_value()["provider"], "self_hosted");
+    assert_eq!(
+        stored.json_value()["overrides"],
+        true,
+        "a workspace that saved self_hosted overrides an organization on claude_code"
+    );
+
+    let effective = client
+        .get_auth(&format!("{workspace}/effective"), &token)
+        .await;
+    effective.assert_status(StatusCode::OK);
+    assert_eq!(effective.json_value()["provider"], "self_hosted");
+    assert!(effective.json_value().get("overrides").is_none());
+    let own = client.get_auth(&organization, &token).await;
+    own.assert_status(StatusCode::OK);
+    assert!(own.json_value().get("overrides").is_none());
+
+    client
+        .delete_auth(&workspace, &token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let reset = client.get_auth(&workspace, &token).await;
+    reset.assert_status(StatusCode::OK);
+    assert_eq!(reset.json_value()["overrides"], false);
+}
+
+#[tokio::test]
 async fn test_credentials_not_exposed_in_response() {
     let client = TestClient::with_db().await;
     let token = get_auth_token(&client).await;

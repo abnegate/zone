@@ -52,6 +52,38 @@ pub struct AiSettingsResponse {
     pub model_audio: Option<String>,
 }
 
+impl AiSettingsResponse {
+    fn unsaved() -> Self {
+        Self {
+            provider: PROVIDER_SELF_HOSTED.to_string(),
+            has_litellm_key: false,
+            litellm_host: None,
+            has_openai_api_key: false,
+            openai_base_url: None,
+            has_anthropic_api_key: false,
+            anthropic_base_url: None,
+            bedrock_region: None,
+            bedrock_use_iam_role: false,
+            has_bedrock_credentials: false,
+            model_fast: None,
+            model_reasoning: None,
+            model_embedding: None,
+            model_image: None,
+            model_video: None,
+            model_audio: None,
+        }
+    }
+}
+
+/// A workspace's own AI settings. `overrides` says whether the workspace saved
+/// any, since one that saved `self_hosted` otherwise reads like one that inherits.
+#[derive(Debug, Serialize)]
+pub struct WorkspaceAiSettingsResponse {
+    #[serde(flatten)]
+    pub settings: AiSettingsResponse,
+    pub overrides: bool,
+}
+
 impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
     fn from(row: ai_settings::OrgAiSettingsRow) -> Self {
         Self {
@@ -206,28 +238,9 @@ pub async fn get_org(
         Err(response) => return *response,
     };
     match ai_settings::get_org_authorized(state.db(), org_id, user_id).await {
-        Ok(Some(settings)) => Json(AiSettingsResponse::from(settings)).into_response(),
-        Ok(None) => {
-            // Return default settings if none exist
-            Json(AiSettingsResponse {
-                provider: "self_hosted".to_string(),
-                has_litellm_key: false,
-                litellm_host: None,
-                has_openai_api_key: false,
-                openai_base_url: None,
-                has_anthropic_api_key: false,
-                anthropic_base_url: None,
-                bedrock_region: None,
-                bedrock_use_iam_role: false,
-                has_bedrock_credentials: false,
-                model_fast: None,
-                model_reasoning: None,
-                model_embedding: None,
-                model_image: None,
-                model_video: None,
-                model_audio: None,
-            })
-            .into_response()
+        Ok(settings) => {
+            Json(settings.map_or_else(AiSettingsResponse::unsaved, AiSettingsResponse::from))
+                .into_response()
         }
         Err(error) => *access_error(error),
     }
@@ -324,29 +337,11 @@ pub async fn get_workspace(
     };
     match ai_settings::get_workspace_authorized(state.db(), path.org_id, path.ws_id, user_id).await
     {
-        Ok(Some(settings)) => Json(AiSettingsResponse::from(settings)).into_response(),
-        Ok(None) => {
-            // Return empty response indicating workspace inherits from org
-            Json(AiSettingsResponse {
-                provider: "self_hosted".to_string(),
-                has_litellm_key: false,
-                litellm_host: None,
-                has_openai_api_key: false,
-                openai_base_url: None,
-                has_anthropic_api_key: false,
-                anthropic_base_url: None,
-                bedrock_region: None,
-                bedrock_use_iam_role: false,
-                has_bedrock_credentials: false,
-                model_fast: None,
-                model_reasoning: None,
-                model_embedding: None,
-                model_image: None,
-                model_video: None,
-                model_audio: None,
-            })
-            .into_response()
-        }
+        Ok(settings) => Json(WorkspaceAiSettingsResponse {
+            overrides: settings.is_some(),
+            settings: settings.map_or_else(AiSettingsResponse::unsaved, AiSettingsResponse::from),
+        })
+        .into_response(),
         Err(error) => *access_error(error),
     }
 }
@@ -388,7 +383,11 @@ pub async fn upsert_workspace(
                 },
             )
             .await;
-            Json(response).into_response()
+            Json(WorkspaceAiSettingsResponse {
+                settings: response,
+                overrides: true,
+            })
+            .into_response()
         }
         Err(error) => *access_error(error),
     }
