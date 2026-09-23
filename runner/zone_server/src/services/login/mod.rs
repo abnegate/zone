@@ -4,6 +4,7 @@ pub mod codex;
 pub mod credential;
 pub mod devices;
 pub mod error;
+mod locks;
 pub mod oauth;
 pub mod pending;
 pub mod probe;

@@ -1,6 +1,7 @@
 //! The sign-in Zone keeps for an organization's agent, ready for a turn to run with.
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
@@ -8,6 +9,7 @@ use zone_core::llm::AgentKind;
 use zone_core::secret::SecretValue;
 
 use super::claude;
+use super::locks::Locks;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::state::AppState;
 
@@ -15,6 +17,8 @@ use crate::state::AppState;
 const MARGIN: TimeDelta = TimeDelta::hours(1);
 
 const UNOPENED: &str = "the stored sign-in could not be opened";
+
+static RENEWALS: LazyLock<Locks> = LazyLock::new(Locks::default);
 
 #[derive(Debug)]
 pub enum Login {
@@ -59,7 +63,8 @@ pub async fn resolve(
 /// [`resolve`] for claude, renewing through `client`.
 ///
 /// Only one renewal runs per login, across processes: it holds the row's lock, and a turn
-/// that waited for the lock finds the renewed tokens and runs with those.
+/// that waited for the lock finds the renewed tokens and runs with those. Turns on one server
+/// queue for the renewal before they take a connection.
 pub(crate) async fn resolve_claude(
     state: &AppState,
     organization: Uuid,
@@ -74,6 +79,7 @@ pub(crate) async fn resolve_claude(
         return current(tokens).map(Some);
     }
 
+    let _renewing = RENEWALS.lock(organization).await;
     let mut transaction = state.db().begin().await?;
     let Some(login) = agent_logins::lock(&mut transaction, organization, agent).await? else {
         return Ok(None);
@@ -143,6 +149,7 @@ mod tests {
     use futures::future::join_all;
     use serde_json::json;
     use sqlx::PgPool;
+    use sqlx::postgres::PgPoolOptions;
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -158,6 +165,12 @@ mod tests {
     const RENEWED: &str = "fake-renewed-access-token";
     const LIFETIME: i64 = 28_800;
     const TURNS: usize = 5;
+    /// A pool small enough for turns waiting on one renewal to exhaust it, were each to hold a
+    /// connection while it waits.
+    const CONNECTIONS: u32 = 3;
+    const ACQUIRE: Duration = Duration::from_secs(2);
+    const HUNG: Duration = Duration::from_secs(4);
+    const SETTLE: Duration = Duration::from_secs(1);
 
     struct Fixture {
         state: AppState,
@@ -165,13 +178,19 @@ mod tests {
         _agents: TempDir,
     }
 
+    fn database() -> String {
+        std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL")
+    }
+
     impl Fixture {
         async fn new(token_url: String) -> Self {
-            let pool = PgPool::connect(
-                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
-            )
-            .await
-            .expect("the test database");
+            let pool = PgPool::connect(&database())
+                .await
+                .expect("the test database");
+            Self::on(pool, token_url).await
+        }
+
+        async fn on(pool: PgPool, token_url: String) -> Self {
             let organization = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Agent credentials', $1::text)",
@@ -328,6 +347,38 @@ mod tests {
             RENEWED,
             "a token with 50 minutes left was handed to a turn that may run an hour"
         );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn turns_waiting_on_a_hung_renewal_hold_no_connections_while_they_wait() {
+        let server = token_endpoint(renewed().set_delay(HUNG), 1).await;
+        let pool = PgPoolOptions::new()
+            .max_connections(CONNECTIONS)
+            .acquire_timeout(ACQUIRE)
+            .connect(&database())
+            .await
+            .expect("the test database");
+        let fixture = Fixture::on(pool.clone(), format!("{}{TOKEN_PATH}", server.uri())).await;
+        fixture
+            .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
+            .await;
+
+        let turns = join_all((0..TURNS).map(|_| fixture.resolve(AgentKind::Claude)));
+        let other_work = async {
+            tokio::time::sleep(SETTLE).await;
+            sqlx::query("SELECT 1").execute(&pool).await
+        };
+        let (logins, other_work) = tokio::join!(turns, other_work);
+        fixture.remove().await;
+
+        assert!(
+            other_work.is_ok(),
+            "turns waiting on one renewal took every connection: {other_work:?}"
+        );
+        for login in logins {
+            assert_eq!(token(login), RENEWED);
+        }
         server.verify().await;
     }
 
