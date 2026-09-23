@@ -98,6 +98,8 @@ RUN groupadd --system zone \
     && useradd --system --gid zone --create-home --home-dir /home/zone --shell /bin/bash zone
 
 ENV SHELL=/bin/bash
+# Docker's default seccomp profile blocks the user namespaces bubblewrap needs.
+ENV ZONE_CODEX_SANDBOX=danger-full-access
 
 COPY --from=agents /usr/local/bin/ /usr/local/bin/
 
