@@ -15,6 +15,7 @@ use tool_runner::executor::{GRACE_PERIOD, OutputLimiter, ProcessGroup};
 use super::agent::AgentKind;
 use super::completion::{Completion, CompletionProvider, CompletionRequest, ProviderKind};
 use super::credential::Credential;
+use super::environment;
 use super::error::{ExitStatus, ProviderError};
 use super::event::AgentEvent;
 use super::lines::{Lines, Overlong};
@@ -98,29 +99,16 @@ impl CliProvider {
             command.current_dir(directory);
         }
 
-        match &self.settings.toolset {
-            Some(toolset) => {
-                command.env(Toolset::TOKEN_VARIABLE, toolset.token.expose());
-            }
-            // A turn serving no tools hands out no token, and a token left in
-            // zone's own environment is not this turn's to pass on.
-            None => {
-                command.env_remove(Toolset::TOKEN_VARIABLE);
-            }
+        command
+            .env_clear()
+            .envs(environment::inherited())
+            .envs(&self.settings.variables);
+        if let Some(toolset) = &self.settings.toolset {
+            command.env(Toolset::TOKEN_VARIABLE, toolset.token.expose());
         }
-
-        match &self.settings.credential {
-            Credential::Key { variable, value } => {
-                command.env(variable, value.expose());
-            }
-            // An operator who points zone at the CLI signed in on this host
-            // means to spend that subscription. A key left in the server's own
-            // environment outranks the session silently, and bills the key.
-            Credential::Inherited => {
-                for agent in AgentKind::ALL {
-                    command.env_remove(agent.variable());
-                }
-            }
+        // Last, so that no variable of the same name can replace it.
+        if let Credential::Key { variable, value } = &self.settings.credential {
+            command.env(variable, value.expose());
         }
 
         // A coding agent forks a tree of its own -- language servers, search,
@@ -443,6 +431,7 @@ async fn read_diagnostics(stderr: Option<ChildStderr>, limit: usize) -> String {
 mod tests {
     use super::*;
     use crate::llm::RequestOptions;
+    use std::collections::BTreeMap;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -843,26 +832,6 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         );
     }
 
-    #[test]
-    fn an_inherited_session_clears_the_keys_that_would_outrank_it() {
-        let provider = CliProvider::agent(AgentKind::Claude, CliSettings::default());
-
-        let command = provider.command("sonnet");
-        let cleared: Vec<String> = command
-            .as_std()
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
-            .map(|(name, _)| name.to_string_lossy().into_owned())
-            .collect();
-
-        for variable in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
-            assert!(
-                cleared.contains(&variable.to_string()),
-                "{variable} in the server's environment would be spent instead of the host session: {cleared:?}"
-            );
-        }
-    }
-
     fn toolset() -> Toolset {
         Toolset::new(
             "http://127.0.0.1:8421/mcp",
@@ -871,37 +840,265 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         )
     }
 
-    fn arguments(command: &Command) -> Vec<String> {
-        command
-            .as_std()
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect()
+    /// A stand-in agent that writes down how it was started -- its arguments
+    /// and its whole environment -- and then finishes the way claude does.
+    ///
+    /// A run without arguments records nothing. That is [`fake`]'s probe for
+    /// an executable file, and its record could land on top of the real one.
+    struct Recorder {
+        directory: TempDir,
     }
 
-    #[test]
-    fn the_turns_token_reaches_the_agents_environment_and_never_its_arguments() {
-        let provider = CliProvider::agent(
-            AgentKind::Claude,
-            CliSettings::default().with_toolset(toolset()),
+    impl Recorder {
+        const ARGUMENTS: &'static str = "arguments";
+        const ENVIRONMENT: &'static str = "environment";
+
+        fn new() -> Self {
+            Self {
+                directory: TempDir::new().expect("a temporary directory"),
+            }
+        }
+
+        fn settings(&self) -> CliSettings {
+            let script = format!(
+                r#"
+[ "$#" -gt 0 ] || exit 0
+cat > /dev/null
+printf '%s\0' "$@" > '{arguments}'
+/usr/bin/env -0 > '{environment}'
+echo '{result}'
+"#,
+                arguments = self.path(Self::ARGUMENTS).display(),
+                environment = self.path(Self::ENVIRONMENT).display(),
+                result = r#"{"type":"result","subtype":"success","is_error":false}"#,
+            );
+            settings(&self.directory, &script)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.directory.path().join(name)
+        }
+
+        fn entries(&self, name: &str) -> Vec<String> {
+            let recorded = std::fs::read(self.path(name)).expect("the agent's record");
+            String::from_utf8_lossy(&recorded)
+                .split_terminator('\0')
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn arguments(&self) -> Vec<String> {
+            self.entries(Self::ARGUMENTS)
+        }
+
+        fn environment(&self) -> BTreeMap<String, String> {
+            self.entries(Self::ENVIRONMENT)
+                .iter()
+                .filter_map(|entry| entry.split_once('='))
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect()
+        }
+    }
+
+    async fn answered(settings: CliSettings) {
+        let provider = CliProvider::agent(AgentKind::Claude, settings);
+        run(&provider, &[Message::user("hi")])
+            .await
+            .expect("an answer");
+    }
+
+    /// Cargo sets it in every test process it runs, the way the server's own
+    /// configuration sits in the server's environment.
+    const SERVERS_OWN: &str = "CARGO_MANIFEST_DIR";
+
+    #[tokio::test]
+    async fn a_variable_from_the_servers_own_environment_never_reaches_the_agent() {
+        assert!(
+            std::env::var_os(SERVERS_OWN).is_some(),
+            "cargo sets {SERVERS_OWN} for every test it runs"
+        );
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = r#"
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' "${CARGO_MANIFEST_DIR:-absent}"
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#;
+        let provider = CliProvider::agent(AgentKind::Claude, settings(&directory, script));
+
+        let completion = run(&provider, &[Message::user("hi")])
+            .await
+            .expect("an answer");
+
+        assert_eq!(completion.message.content.as_deref(), Some("absent"));
+    }
+
+    /// Marks the copy of this test binary that runs with a server's secrets.
+    const SERVER_COPY: &str = "ZONE_CORE_TEST_SERVER_COPY";
+
+    /// What a server's environment holds that no agent may be handed. Every
+    /// value says `notreal`, so a leak shows up under any name.
+    const SERVER_SECRETS: [(&str, &str); 11] = [
+        (
+            "DATABASE_URL",
+            "postgres://zone:notrealpassword@postgres/zone",
+        ),
+        ("JWT_SECRET", "notreal-jwt-secret"),
+        ("ENCRYPTION_KEY", "notreal-encryption-key"),
+        ("LITELLM_KEY", "sk-notreal-litellm-key"),
+        ("ANTHROPIC_API_KEY", "sk-ant-notreal-key"),
+        ("OPENAI_API_KEY", "sk-notreal-openai-key"),
+        ("CLAUDE_CONFIG_DIR", "/notreal/server/claude"),
+        ("CODEX_HOME", "/notreal/server/codex"),
+        ("CLAUDECODE", "notreal-session"),
+        ("CLAUDE_CODE_ENTRYPOINT", "notreal-entrypoint"),
+        ("ZONE_MCP_TOKEN", "notreal-leftover-turn-token"),
+    ];
+
+    /// Setting the secrets in this process would race every other test that
+    /// spawns a child, so a copy of the binary runs this test with them set.
+    #[tokio::test]
+    async fn the_servers_secrets_never_reach_the_agent() {
+        if std::env::var_os(SERVER_COPY).is_none() {
+            let output =
+                tokio::process::Command::new(std::env::current_exe().expect("this test binary"))
+                    .args([
+                        "--exact",
+                        "llm::provider::cli::tests::the_servers_secrets_never_reach_the_agent",
+                        "--nocapture",
+                    ])
+                    .env(SERVER_COPY, "1")
+                    .envs(SERVER_SECRETS)
+                    .env(environment::PASSTHROUGH, "CORPORATE_CA")
+                    .env("CORPORATE_CA", "/etc/ssl/corporate.pem")
+                    .output()
+                    .await
+                    .expect("a copy of this test binary");
+            let printed = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            assert!(output.status.success(), "{printed}");
+            assert!(
+                printed.contains("1 passed"),
+                "the copy ran no test: {printed}"
+            );
+            return;
+        }
+
+        let recorder = Recorder::new();
+        answered(recorder.settings()).await;
+
+        let environment = recorder.environment();
+        let leaked: Vec<&str> = SERVER_SECRETS
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| environment.contains_key(*name))
+            .collect();
+        assert!(leaked.is_empty(), "these reached the agent: {leaked:?}");
+        let carrying: Vec<&String> = environment
+            .iter()
+            .filter(|(_, value)| value.contains("notreal"))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            carrying.is_empty(),
+            "these carried a secret's value to the agent: {carrying:?}"
+        );
+        assert_eq!(
+            environment.get("CORPORATE_CA").map(String::as_str),
+            Some("/etc/ssl/corporate.pem"),
+            "the operator's passthrough was not honoured"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_agent_still_finds_its_home_and_its_commands() {
+        let recorder = Recorder::new();
+        answered(recorder.settings()).await;
+
+        let environment = recorder.environment();
+        for name in ["HOME", "PATH"] {
+            assert_eq!(
+                environment.get(name),
+                std::env::var(name).ok().as_ref(),
+                "{name} did not reach the agent as it was"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_variables_zone_sets_reach_the_agent_over_what_it_would_inherit() {
+        let recorder = Recorder::new();
+        answered(
+            recorder
+                .settings()
+                .with_variable("CLAUDE_CONFIG_DIR", "/state/organization/claude")
+                .with_variable("DISABLE_AUTOUPDATER", "1")
+                .with_variable("HOME", "/state/organization/home"),
+        )
+        .await;
+
+        let environment = recorder.environment();
+        for (name, value) in [
+            ("CLAUDE_CONFIG_DIR", "/state/organization/claude"),
+            ("DISABLE_AUTOUPDATER", "1"),
+            ("HOME", "/state/organization/home"),
+        ] {
+            assert_eq!(
+                environment.get(name).map(String::as_str),
+                Some(value),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_credential_outranks_a_variable_of_the_same_name() {
+        let recorder = Recorder::new();
+        answered(
+            recorder
+                .settings()
+                .with_variable("CLAUDE_CODE_OAUTH_TOKEN", "set-as-a-variable")
+                .with_credential(Credential::key(
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    "sk-ant-oat01-the-credential",
+                )),
+        )
+        .await;
+
+        assert_eq!(
+            recorder
+                .environment()
+                .get("CLAUDE_CODE_OAUTH_TOKEN")
+                .map(String::as_str),
+            Some("sk-ant-oat01-the-credential")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_turns_token_reaches_the_agents_environment_and_never_its_arguments() {
+        let recorder = Recorder::new();
+        answered(recorder.settings().with_toolset(toolset())).await;
+
+        assert_eq!(
+            recorder
+                .environment()
+                .get(Toolset::TOKEN_VARIABLE)
+                .map(String::as_str),
+            Some("zone-turn-notarealtoken")
         );
 
-        let command = provider.command("sonnet");
-        let token = command
-            .as_std()
-            .get_envs()
-            .find(|(name, _)| name.to_string_lossy() == Toolset::TOKEN_VARIABLE)
-            .and_then(|(_, value)| value)
-            .map(|value| value.to_string_lossy().into_owned());
-
-        assert_eq!(token.as_deref(), Some("zone-turn-notarealtoken"));
-
-        let arguments = arguments(&command);
-        assert!(arguments.iter().any(|argument| argument == "--mcp-config"));
+        let arguments = recorder.arguments();
+        assert!(
+            arguments.iter().any(|argument| argument == "--mcp-config"),
+            "{arguments:?}"
+        );
         assert!(
             arguments
                 .iter()
-                .any(|argument| argument == "mcp__zone__read_file")
+                .any(|argument| argument == "mcp__zone__read_file"),
+            "{arguments:?}"
         );
         assert!(
             !arguments
@@ -911,44 +1108,19 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         );
     }
 
-    #[test]
-    fn a_turn_serving_no_tools_withholds_the_agents_own_and_clears_the_token() {
-        let provider = CliProvider::agent(AgentKind::Claude, CliSettings::default());
-
-        let command = provider.command("sonnet");
-        let cleared: Vec<String> = command
-            .as_std()
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
-            .map(|(name, _)| name.to_string_lossy().into_owned())
-            .collect();
+    #[tokio::test]
+    async fn a_turn_serving_no_tools_withholds_the_agents_own_and_hands_out_no_token() {
+        let recorder = Recorder::new();
+        answered(recorder.settings()).await;
 
         assert!(
-            cleared.contains(&Toolset::TOKEN_VARIABLE.to_string()),
-            "a token from the server's own environment would have been passed on: {cleared:?}"
+            !recorder.environment().contains_key(Toolset::TOKEN_VARIABLE),
+            "a turn serving no tools was handed a token"
         );
-
-        let arguments = arguments(&command);
+        let arguments = recorder.arguments();
         assert!(
             arguments.iter().any(|argument| argument == "--tools"),
             "the agent kept its own file and shell tools: {arguments:?}"
         );
-    }
-
-    #[test]
-    fn a_configured_key_is_still_handed_to_the_agent() {
-        let settings = CliSettings::default()
-            .with_credential(Credential::key("ANTHROPIC_API_KEY", "sk-ant-present"));
-        let provider = CliProvider::agent(AgentKind::Claude, settings);
-
-        let command = provider.command("sonnet");
-        let value = command
-            .as_std()
-            .get_envs()
-            .find(|(name, _)| name.to_string_lossy() == "ANTHROPIC_API_KEY")
-            .and_then(|(_, value)| value)
-            .map(|value| value.to_string_lossy().into_owned());
-
-        assert_eq!(value.as_deref(), Some("sk-ant-present"));
     }
 }

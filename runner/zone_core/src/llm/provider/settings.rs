@@ -1,5 +1,6 @@
 //! What a spawned coding agent may spend, and which tools it may call.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -91,6 +92,8 @@ pub struct CliSettings {
     pub executable: Option<PathBuf>,
     /// The child's working directory. `None` inherits this process's.
     pub working_directory: Option<PathBuf>,
+    /// Set in the child on top of the little it inherits from this process.
+    pub variables: BTreeMap<String, String>,
     pub credential: Credential,
     /// Zone's tools, or `None` for a turn that answers in prose alone.
     ///
@@ -111,6 +114,7 @@ impl Default for CliSettings {
         Self {
             executable: None,
             working_directory: None,
+            variables: BTreeMap::new(),
             credential: Credential::Inherited,
             toolset: None,
             builtin_tools: BuiltinTools::default(),
@@ -129,6 +133,11 @@ impl CliSettings {
 
     pub fn with_working_directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.working_directory = Some(directory.into());
+        self
+    }
+
+    pub fn with_variable(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.variables.insert(name.into(), value.into());
         self
     }
 
@@ -178,6 +187,32 @@ mod tests {
         assert!(settings.executable.is_none());
         assert!(settings.working_directory.is_none());
         assert_eq!(settings.timeout, DEFAULT_TIMEOUT);
+    }
+
+    #[test]
+    fn variables_accumulate_and_the_last_value_given_for_a_name_wins() {
+        assert!(CliSettings::default().variables.is_empty());
+
+        let settings = CliSettings::default()
+            .with_variable("CLAUDE_CONFIG_DIR", "/state/organization/claude")
+            .with_variable("DISABLE_AUTOUPDATER", "0")
+            .with_variable("DISABLE_AUTOUPDATER", "1");
+
+        assert_eq!(settings.variables.len(), 2);
+        assert_eq!(
+            settings
+                .variables
+                .get("CLAUDE_CONFIG_DIR")
+                .map(String::as_str),
+            Some("/state/organization/claude")
+        );
+        assert_eq!(
+            settings
+                .variables
+                .get("DISABLE_AUTOUPDATER")
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]

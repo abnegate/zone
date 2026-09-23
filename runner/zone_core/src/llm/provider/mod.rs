@@ -25,6 +25,7 @@ mod agent;
 mod cli;
 mod completion;
 mod credential;
+pub mod environment;
 mod error;
 mod event;
 mod http;
