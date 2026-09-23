@@ -25,7 +25,7 @@ impl Staging {
             .and_then(|()| DirBuilder::new().mode(MODE).create(&path))
             .and_then(|()| fs::set_permissions(&path, Permissions::from_mode(MODE)))
             .map_err(|error| {
-                Error::Failed(format!(
+                Error::Filesystem(format!(
                     "Could not prepare {} for codex's sign-in: {error}",
                     path.display()
                 ))
@@ -47,8 +47,13 @@ impl Staging {
                 "codex reported a sign-in but saved no login".to_string(),
             ));
         }
-        fs::rename(self.path.join(CREDENTIALS), self.home.join(CREDENTIALS))
-            .map_err(|error| Error::Failed(format!("Could not save codex's new login: {error}")))
+        let credentials = self.home.join(CREDENTIALS);
+        fs::rename(self.path.join(CREDENTIALS), &credentials).map_err(|error| {
+            Error::Filesystem(format!(
+                "Could not save codex's new login as {}: {error}",
+                credentials.display()
+            ))
+        })
     }
 }
 
@@ -71,5 +76,49 @@ fn remove(path: &Path) -> io::Result<()> {
         Ok(_) => fs::remove_file(path),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    const LOCKED: u32 = 0o500;
+    const UNLOCKED: u32 = 0o700;
+
+    #[test]
+    fn a_staging_directory_that_cannot_be_cleared_is_a_filesystem_failure() {
+        let home = TempDir::new().expect("an organization's home");
+        let leftover = home.path().join(DIRECTORY).join("leftover");
+        fs::create_dir_all(&leftover).expect("a directory an earlier attempt left");
+        fs::write(leftover.join("file"), b"").expect("a file an earlier attempt left");
+        fs::set_permissions(&leftover, Permissions::from_mode(LOCKED))
+            .expect("the leftover locked");
+
+        let staging = Staging::create(home.path());
+        fs::set_permissions(&leftover, Permissions::from_mode(UNLOCKED))
+            .expect("the leftover unlocked");
+
+        let error = staging.err();
+        assert!(matches!(error, Some(Error::Filesystem(_))), "{error:?}");
+    }
+
+    #[test]
+    fn a_login_that_cannot_be_moved_into_the_home_is_a_filesystem_failure() {
+        let home = TempDir::new().expect("an organization's home");
+        let staging = Staging::create(home.path()).expect("a staging directory");
+        fs::write(staging.path().join(CREDENTIALS), b"{}").expect("the login codex saved");
+        let occupied = home.path().join(CREDENTIALS);
+        fs::create_dir(&occupied).expect("a directory where the login goes");
+        fs::write(occupied.join("file"), b"").expect("a file inside it");
+
+        let promoted = staging.promote();
+
+        assert!(
+            matches!(promoted, Err(Error::Filesystem(_))),
+            "{promoted:?}"
+        );
     }
 }

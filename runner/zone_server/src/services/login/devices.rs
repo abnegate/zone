@@ -163,20 +163,23 @@ impl Devices {
                 ))
             })?;
         let executable = config.agent_executable(AgentKind::Codex);
+        let device = codex::device(&executable, &home, &variables(AgentKind::Codex)).await;
         let Device {
             prompt,
             outcome,
             cancel,
-        } = codex::device(&executable, &home, &variables(AgentKind::Codex))
-            .await
-            .map_err(|error| {
+        } = match device {
+            Ok(device) => device,
+            Err(codex::Error::Filesystem(message)) => return Err(Error::Internal(message)),
+            Err(error) => {
                 let error = refusal(error);
                 self.failures.insert(organization, error.to_string());
-                error
-            })?;
+                return Err(error);
+            }
+        };
 
         let id = Uuid::new_v4();
-        let outcome = ending(outcome);
+        let outcome = ending(organization, outcome);
         let prompt = Prompt {
             expires_at: prompt.expires_at.trunc_subsecs(0),
             ..prompt
@@ -319,10 +322,16 @@ async fn describe(config: &Config, organization: Uuid) -> Option<String> {
     }
 }
 
-fn ending(outcome: JoinHandle<Result<(), codex::Error>>) -> Outcome {
+/// How the organization's attempt ends, as its status shows it. Zone's own failure to save the
+/// login is logged, and shows as [`UNSAVED`].
+fn ending(organization: Uuid, outcome: JoinHandle<Result<(), codex::Error>>) -> Outcome {
     outcome
-        .map(|finished| match finished {
+        .map(move |finished| match finished {
             Ok(Ok(())) => Ok(()),
+            Ok(Err(codex::Error::Filesystem(message))) => {
+                tracing::error!(%organization, %message, "could not save codex's new login");
+                Err(UNSAVED.to_string())
+            }
             Ok(Err(error)) => Err(said(&error)),
             Err(_) => Err(STOPPED.to_string()),
         })

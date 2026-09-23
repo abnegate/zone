@@ -63,6 +63,7 @@ const UNKNOWN_SIGN_IN: &str =
 const INVALID_CODE: &str = "invalid_code";
 const START_AGAIN: &str = "start_again";
 const NOT_FOUND: &str = "Organization not found";
+const INTERNAL: &str = "Internal server error";
 const REFUSAL: &str =
     "Error logging in with device code: device code request failed with status 403 Forbidden";
 const POLL_FAILED: &str =
@@ -1555,6 +1556,35 @@ async fn a_codex_login_whose_file_is_gone_has_expired() {
     assert_eq!(status["state"], "expired");
     assert_eq!(status["source"], "zone");
     assert_eq!(status["label"], "ChatGPT");
+}
+
+#[tokio::test]
+async fn a_codex_sign_in_zone_cannot_prepare_names_no_server_path() {
+    let codex = Codex::new();
+    let stage = Stage::codex(&codex.executable).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let leftover = stage.home(organization).join(STAGING).join("leftover");
+    fs::create_dir_all(&leftover).expect("a directory an earlier attempt left");
+    fs::write(leftover.join("file"), b"").expect("a file an earlier attempt left");
+    fs::set_permissions(&leftover, fs::Permissions::from_mode(0o500)).expect("the leftover locked");
+
+    let response = stage
+        .client
+        .post_json_auth(&login_path(organization, "codex"), &json!({}), &owner.token)
+        .await;
+    fs::set_permissions(&leftover, fs::Permissions::from_mode(0o700))
+        .expect("the leftover unlocked");
+
+    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.json_value(), json!({ "error": INTERNAL }));
+    let status = stage.status(organization, "codex", &owner).await;
+    assert_eq!(
+        status["error"],
+        Value::Null,
+        "the server's own failure was kept to show to members"
+    );
+    assert_eq!(codex.starts(), 0);
 }
 
 #[tokio::test]
