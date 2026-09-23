@@ -1,7 +1,10 @@
-import { Badge, type BadgeProps, Button, buttonVariants } from '@zone/ui';
-import { type KeyboardEvent, type ReactNode, useEffect, useId, useState } from 'react';
+import { Badge, type BadgeProps, Button } from '@zone/ui';
+import { type ReactNode, useEffect, useId, useState } from 'react';
 import { agentsApi } from '../../../api/agents';
+import { ClaudeSteps } from './ClaudeSteps';
+import { DeviceSteps } from './DeviceSteps';
 import type { Agent, AgentState, AgentStatus, ClaudeScope, DevicePrompt } from './schemas';
+import type { SignInAction } from './types';
 import './AgentSignIn.css';
 
 export const POLL_INTERVAL = 3000;
@@ -15,8 +18,6 @@ const states: Record<AgentState, { label: string; tint: BadgeProps['variant'] }>
   pending: { label: 'Signing in', tint: 'info' },
   expired: { label: 'Sign-in expired', tint: 'warning' },
 };
-
-type Action = 'start' | 'full' | 'submit' | 'signOut';
 
 interface Authorization {
   url: string;
@@ -42,12 +43,6 @@ function formatDate(value: string): string | null {
   return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-function formatTime(value: string): string | null {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-}
-
 function signedInDetail(status: AgentStatus, agent: Agent): string {
   if (status.source === 'host') {
     const plan = status.label ? ` (${status.label})` : '';
@@ -67,11 +62,10 @@ export function AgentSignIn({
   onStatusChange,
 }: AgentSignInProps) {
   const headingId = useId();
-  const codeId = useId();
   const [authorization, setAuthorization] = useState<Authorization | null>(null);
   const [prompt, setPrompt] = useState<DevicePrompt | null>(null);
   const [code, setCode] = useState('');
-  const [busy, setBusy] = useState<Action | null>(null);
+  const [busy, setBusy] = useState<SignInAction | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [rejected, setRejected] = useState(false);
 
@@ -107,7 +101,7 @@ export function AgentSignIn({
     };
   }, [waiting, organizationId, agent, onStatusChange]);
 
-  const perform = async (action: Action, work: () => Promise<void>): Promise<boolean> => {
+  const perform = async (action: SignInAction, work: () => Promise<void>): Promise<boolean> => {
     setBusy(action);
     setFailure(null);
     try {
@@ -164,12 +158,6 @@ export function AgentSignIn({
     setRejected(false);
   };
 
-  const submitOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key !== 'Enter') return;
-    event.preventDefault();
-    void submit();
-  };
-
   const name = names[agent];
   const account = accounts[agent];
   const signingIn = authorization !== null || waiting;
@@ -177,7 +165,6 @@ export function AgentSignIn({
   const offerSignIn =
     manageable && !signingIn && (status.state !== 'signed_in' || status.source === 'host');
   const offerSignOut = manageable && !signingIn && status.source === 'zone';
-  const expiresAt = device ? formatTime(device.expires_at) : null;
   const error = failure ?? (status ? (signingIn ? null : status.error) : loadError);
   const badge = states[signingIn ? 'pending' : (status?.state ?? 'signed_out')];
 
@@ -242,116 +229,26 @@ export function AgentSignIn({
       )}
 
       {manageable && authorization && (
-        <ol className="agent-sign-in-steps">
-          <li>
-            <div className="agent-sign-in-step">
-              <span>Open claude.com, sign in, and approve access.</span>
-              <a
-                className={buttonVariants({ variant: 'secondary', size: 'sm' })}
-                href={authorization.url}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Open claude.com
-              </a>
-            </div>
-            {authorization.scope === 'full' && (
-              <p className="form-hint">This link asks for full access to your Claude account.</p>
-            )}
-          </li>
-          <li>
-            <div className="form-group">
-              <label htmlFor={codeId}>Code from claude.com</label>
-              <input
-                id={codeId}
-                type="text"
-                className="form-input"
-                value={code}
-                onChange={(event) => setCode(event.target.value)}
-                onKeyDown={submitOnEnter}
-                placeholder="code#state, or the address of the page showing it"
-                autoComplete="off"
-                autoCapitalize="off"
-                spellCheck={false}
-              />
-              <p className="form-hint">
-                Paste the code claude.com shows. If claude.com refuses the request, try again with
-                full access.
-              </p>
-            </div>
-            <div className="agent-sign-in-buttons">
-              <Button
-                size="sm"
-                onClick={() => void submit()}
-                loading={busy === 'submit'}
-                disabled={busy !== null || !code.trim()}
-              >
-                Submit code
-              </Button>
-              <Button
-                size="sm"
-                variant={rejected ? 'secondary' : 'ghost'}
-                onClick={() => void start('full')}
-                loading={busy === 'full'}
-                disabled={busy !== null}
-              >
-                Try again with full access
-              </Button>
-              <Button size="sm" variant="ghost" onClick={abandon} disabled={busy !== null}>
-                Cancel
-              </Button>
-            </div>
-          </li>
-        </ol>
+        <ClaudeSteps
+          url={authorization.url}
+          full={authorization.scope === 'full'}
+          code={code}
+          busy={busy}
+          rejected={rejected}
+          onCodeChange={setCode}
+          onSubmit={() => void submit()}
+          onFullAccess={() => void start('full')}
+          onCancel={abandon}
+        />
       )}
 
       {manageable && waiting && (
-        <>
-          {device && (
-            <ol className="agent-sign-in-steps">
-              <li>
-                <div className="agent-sign-in-step">
-                  <span>
-                    Open{' '}
-                    <a
-                      className="agent-sign-in-link"
-                      href={device.verification_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      {device.verification_url.replace(/^https?:\/\//, '')}
-                    </a>{' '}
-                    and sign in with {account}.
-                  </span>
-                </div>
-              </li>
-              {device.user_code && (
-                <li>
-                  <div className="agent-sign-in-step">
-                    <span>Enter this one-time code:</span>
-                    <code className="agent-sign-in-code">{device.user_code}</code>
-                  </div>
-                  <p className="form-hint">
-                    {expiresAt && `Expires at ${expiresAt}. `}
-                    Only enter it if you started this sign-in here. If a website or someone else
-                    gave you this code, cancel.
-                  </p>
-                </li>
-              )}
-            </ol>
-          )}
-          <div className="agent-sign-in-buttons">
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => void signOut()}
-              loading={busy === 'signOut'}
-              disabled={busy !== null}
-            >
-              Cancel
-            </Button>
-          </div>
-        </>
+        <DeviceSteps
+          prompt={device}
+          account={account}
+          busy={busy}
+          onCancel={() => void signOut()}
+        />
       )}
 
       {error && (
