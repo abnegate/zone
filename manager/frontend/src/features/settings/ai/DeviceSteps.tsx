@@ -1,4 +1,5 @@
 import { Button } from '@zone/ui';
+import type { RefObject } from 'react';
 import type { DevicePrompt } from './schemas';
 import type { SignInAction } from './types';
 
@@ -6,6 +7,7 @@ interface DeviceStepsProps {
   prompt: DevicePrompt | null;
   account: string;
   busy: SignInAction | null;
+  entry: RefObject<HTMLElement | null>;
   onCancel: () => void;
 }
 
@@ -15,7 +17,7 @@ function formatTime(value: string): string | null {
   return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 }
 
-export function DeviceSteps({ prompt, account, busy, onCancel }: DeviceStepsProps) {
+export function DeviceSteps({ prompt, account, busy, entry, onCancel }: DeviceStepsProps) {
   const expiresAt = prompt ? formatTime(prompt.expires_at) : null;
 
   return (
@@ -42,7 +44,9 @@ export function DeviceSteps({ prompt, account, busy, onCancel }: DeviceStepsProp
             <li>
               <div className="agent-sign-in-step">
                 <span>Enter this one-time code:</span>
-                <code className="agent-sign-in-code">{prompt.user_code}</code>
+                <code ref={entry} className="agent-sign-in-code" tabIndex={-1}>
+                  {prompt.user_code}
+                </code>
               </div>
               <p className="form-hint">
                 {expiresAt && `Expires at ${expiresAt}. `}

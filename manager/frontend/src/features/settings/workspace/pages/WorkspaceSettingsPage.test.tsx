@@ -894,7 +894,9 @@ describe('WorkspaceSettingsPage', () => {
         expect(
           screen.getByRole('checkbox', { name: 'Override organization AI settings' })
         ).toBeChecked();
-        expect(await screen.findByText('Codex sign-in')).toBeInTheDocument();
+        expect(
+          await screen.findByRole('heading', { name: 'Codex sign-in', level: 3 })
+        ).toBeInTheDocument();
         expect(agentsApi.list).toHaveBeenCalledWith('00000000-0000-0000-0000-000000000001');
         await waitFor(() =>
           expect(

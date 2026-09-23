@@ -213,6 +213,7 @@ export default function OrgSettingsPage() {
                 organizationId={currentOrganization.id}
                 agent={agent}
                 access={agentAccess(currentOrganization.role, resolvingRole)}
+                heading="h4"
                 unsaved={provider !== savedProvider}
                 status={agents.statuses[agent]}
                 attempt={agents.attempts[agent]}

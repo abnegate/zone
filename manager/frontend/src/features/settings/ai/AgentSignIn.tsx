@@ -23,11 +23,14 @@ const states: Record<AgentState, { label: string; tint: BadgeProps['variant'] }>
   expired: { label: 'Sign-in expired', tint: 'warning' },
 };
 
+type FocusTarget = 'entry' | 'status';
+
 interface AgentSignInProps {
   organizationId: string;
   agent: Agent;
   access: AgentAccess;
   unsaved: boolean;
+  heading: 'h3' | 'h4';
   status: AgentStatus | undefined;
   attempt: Attempt | undefined;
   loadError: string | null;
@@ -60,6 +63,7 @@ export function AgentSignIn({
   agent,
   access,
   unsaved,
+  heading,
   status,
   attempt,
   loadError,
@@ -72,12 +76,28 @@ export function AgentSignIn({
   const [busy, setBusy] = useState<SignInAction | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [focus, setFocus] = useState<FocusTarget | null>(null);
   const shown = useRef(organizationId);
   const runs = useRef(0);
+  const section = useRef<HTMLElement>(null);
+  const statusLine = useRef<HTMLDivElement>(null);
+  const field = useRef<HTMLInputElement>(null);
+  const deviceCode = useRef<HTMLElement>(null);
 
   useEffect(() => {
     shown.current = organizationId;
   }, [organizationId]);
+
+  useEffect(() => {
+    if (focus === null) return;
+    setFocus(null);
+    const active = document.activeElement;
+    const away =
+      active?.isConnected && active !== document.body && !section.current?.contains(active);
+    if (away) return;
+    const target = focus === 'entry' ? (field.current ?? deviceCode.current) : statusLine.current;
+    target?.focus();
+  }, [focus]);
 
   const authorization = attempt?.login.agent === 'claude' ? attempt.login : null;
   const expired = useExpired(authorization?.expires_at ?? null);
@@ -88,6 +108,10 @@ export function AgentSignIn({
   const device = prompt ?? (pending ? (status?.pending ?? null) : null);
   const codeExpired = useExpired(device?.expires_at ?? null);
   const lapsed = useExpired(status?.state === 'signed_in' ? status.expires_at : null);
+
+  useEffect(() => {
+    if (expired || codeExpired) setFocus('status');
+  }, [expired, codeExpired]);
 
   useEffect(() => {
     if (!waiting) return;
@@ -105,6 +129,7 @@ export function AgentSignIn({
           timer = setTimeout(poll, POLL_INTERVAL);
         } else {
           onAttemptChange(agent, null);
+          setFocus('status');
         }
       } catch (reason) {
         if (cancelled) return;
@@ -146,6 +171,7 @@ export function AgentSignIn({
       if (!current()) return;
       onAttemptChange(agent, { login, scope, spent: false });
       setCode('');
+      setFocus('entry');
     });
 
   const submit = () => {
@@ -159,15 +185,20 @@ export function AgentSignIn({
         onAttemptChange(agent, null);
         setCode('');
         onStatusChange(next);
+        setFocus('status');
       },
       (reason) => {
         const kind = reason instanceof AgentRequestError ? reason.kind : undefined;
         if (kind === 'invalid_code') {
           setCodeError(reasonOf(reason));
+          setFocus('entry');
           return;
         }
         setFailure(reasonOf(reason));
-        if (kind === 'start_again') onAttemptChange(agent, { ...attempt, spent: true });
+        if (kind === 'start_again') {
+          onAttemptChange(agent, { ...attempt, spent: true });
+          setFocus('status');
+        }
       }
     );
   };
@@ -178,12 +209,14 @@ export function AgentSignIn({
       if (!current()) return;
       onAttemptChange(agent, null);
       const next = await agentsApi.get(organizationId, agent);
-      if (current()) onStatusChange(next);
+      if (!current()) return;
+      onStatusChange(next);
+      setFocus('status');
     });
 
-  const confirmSignOut = async () => {
-    await signOut();
+  const confirmSignOut = () => {
     setConfirming(false);
+    void signOut();
   };
 
   const abandon = () => {
@@ -191,6 +224,7 @@ export function AgentSignIn({
     setCode('');
     setCodeError(null);
     setFailure(null);
+    setFocus('status');
   };
 
   const name = names[agent];
@@ -259,24 +293,27 @@ export function AgentSignIn({
     );
   }
 
+  const Heading = heading;
+
   return (
-    <section className="agent-sign-in" aria-labelledby={headingId}>
-      <h4 id={headingId} className="settings-eyebrow">
+    <section ref={section} className="agent-sign-in" aria-labelledby={headingId}>
+      <Heading id={headingId} className="settings-eyebrow">
         {name} sign-in
-      </h4>
+      </Heading>
 
       {status ? (
         <div className="agent-sign-in-status">
-          <Badge variant={badge.tint}>{badge.label}</Badge>
-          <p className="agent-sign-in-detail">{detail}</p>
+          <div ref={statusLine} className="agent-sign-in-state" role="status" tabIndex={-1}>
+            <Badge variant={badge.tint}>{badge.label}</Badge>
+            <p className="agent-sign-in-detail">{detail}</p>
+            {status.state === 'signed_in' && unsaved && (
+              <p className="form-hint agent-sign-in-note">Save Changes to use this provider.</p>
+            )}
+          </div>
           {actions}
         </div>
       ) : (
         !loadError && <p className="agent-sign-in-detail">Checking sign-in…</p>
-      )}
-
-      {status?.state === 'signed_in' && unsaved && (
-        <p className="form-hint">Save Changes to use this provider.</p>
       )}
 
       {manageable && authorization && attempt && (
@@ -288,6 +325,7 @@ export function AgentSignIn({
           code={code}
           codeError={codeError}
           busy={busy}
+          entry={field}
           onCodeChange={setCode}
           onSubmit={submit}
           onRestart={() => void start('restart', attempt.scope)}
@@ -301,6 +339,7 @@ export function AgentSignIn({
           prompt={codeExpired ? null : device}
           account={account}
           busy={busy}
+          entry={deviceCode}
           onCancel={() => void signOut()}
         />
       )}
@@ -308,8 +347,7 @@ export function AgentSignIn({
       <SignOutDialog
         open={confirming}
         name={name}
-        busy={busy === 'signOut'}
-        onConfirm={() => void confirmSignOut()}
+        onConfirm={confirmSignOut}
         onClose={() => setConfirming(false)}
       />
 

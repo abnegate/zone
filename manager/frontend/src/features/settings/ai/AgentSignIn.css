@@ -22,6 +22,20 @@
   flex-shrink: 0;
 }
 
+.agent-sign-in-state {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-1) var(--ui-space-2);
+  min-width: 0;
+}
+
+.agent-sign-in-state .agent-sign-in-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
 .agent-sign-in-detail {
   flex: 1;
   min-width: 0;

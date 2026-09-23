@@ -682,6 +682,7 @@ export default function WorkspaceSettingsPage() {
                     organizationId={orgId}
                     agent={agent}
                     access={agentAccess(currentOrganization?.role, resolvingRole)}
+                    heading="h3"
                     unsaved={!savedOverride || aiProvider !== savedProvider}
                     status={agents.statuses[agent]}
                     attempt={agents.attempts[agent]}

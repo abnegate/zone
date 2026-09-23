@@ -1,6 +1,6 @@
 import { Button, buttonVariants } from '@zone/ui';
 import { format } from 'date-fns';
-import { type KeyboardEvent, useId } from 'react';
+import { type KeyboardEvent, type RefObject, useId } from 'react';
 import type { SignInAction } from './types';
 
 interface ClaudeStepsProps {
@@ -11,6 +11,7 @@ interface ClaudeStepsProps {
   code: string;
   codeError: string | null;
   busy: SignInAction | null;
+  entry: RefObject<HTMLInputElement | null>;
   onCodeChange: (code: string) => void;
   onSubmit: () => void;
   onRestart: () => void;
@@ -26,6 +27,7 @@ export function ClaudeSteps({
   code,
   codeError,
   busy,
+  entry,
   onCodeChange,
   onSubmit,
   onRestart,
@@ -33,6 +35,8 @@ export function ClaudeSteps({
   onCancel,
 }: ClaudeStepsProps) {
   const codeId = useId();
+  const hintId = useId();
+  const errorId = useId();
 
   const submitOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== 'Enter') return;
@@ -95,6 +99,7 @@ export function ClaudeSteps({
         <div className="form-group">
           <label htmlFor={codeId}>Code from claude.com</label>
           <input
+            ref={entry}
             id={codeId}
             type="text"
             className="form-input"
@@ -105,13 +110,19 @@ export function ClaudeSteps({
             autoComplete="off"
             autoCapitalize="off"
             spellCheck={false}
+            aria-describedby={codeError ? `${hintId} ${errorId}` : hintId}
+            aria-invalid={codeError ? true : undefined}
           />
-          <p className="form-hint">
+          <p id={hintId} className="form-hint">
             {full
               ? 'Paste the code claude.com shows.'
               : 'Paste the code claude.com shows. If claude.com refuses the request, try again with full access.'}
           </p>
-          {codeError && <p className="field-error">{codeError}</p>}
+          {codeError && (
+            <p id={errorId} className="field-error" role="alert">
+              {codeError}
+            </p>
+          )}
         </div>
         <div className="agent-sign-in-buttons">
           <Button

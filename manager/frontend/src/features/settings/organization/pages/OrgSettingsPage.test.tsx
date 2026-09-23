@@ -261,7 +261,9 @@ describe('OrgSettingsPage', () => {
 
       fireEvent.change(select, { target: { value: 'claude_code' } });
 
-      expect(await screen.findByText('Claude Code sign-in')).toBeInTheDocument();
+      expect(
+        await screen.findByRole('heading', { name: 'Claude Code sign-in', level: 4 })
+      ).toBeInTheDocument();
       expect(agentsApi.list).toHaveBeenCalledWith(mockCurrentOrganization.id);
       expect(screen.queryByLabelText(/LiteLLM Host/i)).toBeNull();
       expect(screen.getByText('Signed in')).toBeInTheDocument();

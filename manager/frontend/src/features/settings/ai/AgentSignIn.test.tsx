@@ -63,6 +63,7 @@ const fullAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=org%3Acreate_api_key+user%3Ainference&state=fake-state-2';
 const restartAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=user%3Ainference&state=fake-state-3';
+const focused = (element: Element) => document.activeElement === element;
 const later = (minutes = 10) => new Date(Date.now() + minutes * 60_000).toISOString();
 const claudeLogin = (url: string) => ({ agent: 'claude', authorize_url: url, expires_at: later() });
 const prompt = {
@@ -124,6 +125,7 @@ function renderPanel(
       agent={agent}
       access={access}
       unsaved={unsaved}
+      heading="h4"
       initial={initial}
       onChange={onChange}
     />
@@ -181,6 +183,7 @@ describe('AgentSignIn', () => {
             agent="claude"
             access="manage"
             unsaved={false}
+            heading="h4"
             initial={claudeSignedOut}
             onChange={mock()}
           />
@@ -513,6 +516,7 @@ describe('AgentSignIn', () => {
           agent="codex"
           access="manage"
           unsaved={false}
+          heading="h4"
           status={codexPending}
           attempt={undefined}
           loadError={null}
@@ -659,6 +663,128 @@ describe('AgentSignIn', () => {
     });
   });
 
+  describe('for assistive technology', () => {
+    it('announces the status and names the panel by its heading', () => {
+      renderPanel('claude', claudeSignedIn);
+
+      expect(
+        screen.getByRole('heading', { name: 'Claude Code sign-in', level: 4 })
+      ).toBeInTheDocument();
+      const status = screen.getByRole('status');
+      expect(status).toHaveTextContent('Signed in');
+      expect(status).toHaveTextContent('Claude Max');
+      expect(screen.getByRole('region', { name: 'Claude Code sign-in' })).toBeInTheDocument();
+    });
+
+    it('moves focus to the paste field once claude.com is ready, and to the status once signed in', async () => {
+      agentsApi.start.mockResolvedValue(claudeLogin(authorize));
+      agentsApi.submitCode.mockResolvedValue(claudeSignedIn);
+      renderPanel('claude', claudeSignedOut);
+
+      const start = screen.getByRole('button', { name: 'Sign in with Claude' });
+      start.focus();
+      fireEvent.click(start);
+
+      const field = await screen.findByLabelText('Code from claude.com');
+      await waitFor(() => expect(focused(field)).toBe(true));
+
+      fireEvent.change(field, { target: { value: 'fake-code#fake-state' } });
+      fireEvent.keyDown(field, { key: 'Enter' });
+
+      await waitFor(() => expect(focused(screen.getByRole('status'))).toBe(true));
+      expect(screen.getByRole('status')).toHaveTextContent('Signed in');
+    });
+
+    it('moves focus to the one-time code once the device sign-in starts', async () => {
+      setSystemTime(beforeTheCodeExpires);
+      agentsApi.start.mockResolvedValue(prompt);
+      renderPanel('codex', codexSignedOut);
+
+      const start = screen.getByRole('button', { name: 'Sign in with ChatGPT' });
+      start.focus();
+      fireEvent.click(start);
+
+      const code = await screen.findByText('ABCD-EFGHI');
+      await waitFor(() => expect(focused(code)).toBe(true));
+      setSystemTime();
+    });
+
+    it('returns focus to the status when a sign-in is cancelled', async () => {
+      agentsApi.start.mockResolvedValue(claudeLogin(authorize));
+      renderPanel('claude', claudeSignedOut);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+      const cancel = await screen.findByRole('button', { name: 'Cancel' });
+      cancel.focus();
+      fireEvent.click(cancel);
+
+      await waitFor(() => expect(focused(screen.getByRole('status'))).toBe(true));
+    });
+
+    it('leaves focus alone when the panel changes while the admin works elsewhere', async () => {
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
+      agentsApi.start.mockResolvedValue(prompt);
+      agentsApi.get.mockResolvedValue(codexSignedIn);
+      render(
+        <>
+          <input aria-label="Elsewhere" />
+          <Harness
+            agent="codex"
+            access="manage"
+            unsaved={false}
+            heading="h4"
+            initial={codexSignedOut}
+            onChange={mock()}
+          />
+        </>
+      );
+      const elsewhere = screen.getByLabelText('Elsewhere');
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
+      });
+      expect(screen.getByText('ABCD-EFGHI')).toBeInTheDocument();
+      elsewhere.focus();
+
+      await act(async () => {
+        vi.advanceTimersByTime(POLL_INTERVAL);
+      });
+      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(focused(elsewhere)).toBe(true);
+    });
+
+    it('describes the paste field by its hint, and by its error once a code cannot be read', async () => {
+      const unreadable = 'The code could not be read.';
+      agentsApi.start.mockResolvedValue(claudeLogin(authorize));
+      agentsApi.submitCode.mockRejectedValue(
+        new AgentRequestError(unreadable, 400, 'invalid_code')
+      );
+      renderPanel('claude', claudeSignedOut);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+      const field = await screen.findByLabelText('Code from claude.com');
+      const described = () =>
+        (field.getAttribute('aria-describedby') ?? '')
+          .split(' ')
+          .map((id) => document.getElementById(id)?.textContent);
+      expect(described()).toEqual([
+        'Paste the code claude.com shows. If claude.com refuses the request, try again with full access.',
+      ]);
+      expect(field.getAttribute('aria-invalid')).toBeNull();
+
+      fireEvent.change(field, { target: { value: 'half-a-code' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
+
+      await waitFor(() => expect(field.getAttribute('aria-invalid')).toBe('true'));
+      expect(described()).toEqual([
+        'Paste the code claude.com shows. If claude.com refuses the request, try again with full access.',
+        unreadable,
+      ]);
+      expect(screen.getByRole('alert')).toHaveTextContent(unreadable);
+      expect(focused(field)).toBe(true);
+    });
+  });
+
   describe('with the provider change not saved yet', () => {
     it('asks to save once the agent is signed in', () => {
       renderPanel('claude', claudeSignedIn, 'manage', true);
@@ -706,6 +832,7 @@ describe('AgentSignIn', () => {
           agent="claude"
           access="manage"
           unsaved={false}
+          heading="h4"
           status={claudeSignedOut}
           attempt={undefined}
           loadError={null}
@@ -738,6 +865,7 @@ describe('AgentSignIn', () => {
           agent="claude"
           access="manage"
           unsaved={false}
+          heading="h4"
           status={claudeSignedIn}
           attempt={undefined}
           loadError={null}
@@ -817,6 +945,7 @@ describe('AgentSignIn', () => {
           agent="claude"
           access="manage"
           unsaved={false}
+          heading="h4"
           status={undefined}
           attempt={undefined}
           loadError="Failed to load coding agent sign-ins: 502"
