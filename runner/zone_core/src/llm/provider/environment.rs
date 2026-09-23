@@ -2,8 +2,8 @@
 //!
 //! The server's own environment holds the database URL, the JWT and encryption
 //! keys, the LiteLLM key and provider API keys. An agent inherits none of it:
-//! it starts from the names below and whatever an operator adds to them, and
-//! everything else it needs arrives through its settings.
+//! it starts from the names below and whatever an operator adds to them, never
+//! a credential, and everything else it needs arrives through its settings.
 
 use std::collections::BTreeMap;
 
@@ -38,6 +38,19 @@ pub const INHERITED_PREFIX: &str = "LC_";
 /// Names an operator adds to [`INHERITED`], comma separated.
 pub const PASSTHROUGH: &str = "ZONE_AGENT_ENV_PASSTHROUGH";
 
+/// Credentials an agent is handed by Zone alone, for the turn it serves, and
+/// never inherits even when an operator names them: a key an operator passed
+/// through for their own scripts would otherwise stand in for every
+/// organization's own sign-in.
+pub const CREDENTIALS: &[&str] = &[
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "ZONE_MCP_TOKEN",
+];
+
 /// The part of `variables` an agent may inherit, given the operator's
 /// comma-separated `passthrough` list.
 pub fn filter(
@@ -53,9 +66,10 @@ pub fn filter(
     variables
         .into_iter()
         .filter(|(name, _)| {
-            INHERITED.contains(&name.as_str())
-                || name.starts_with(INHERITED_PREFIX)
-                || named.contains(&name.as_str())
+            !CREDENTIALS.contains(&name.as_str())
+                && (INHERITED.contains(&name.as_str())
+                    || name.starts_with(INHERITED_PREFIX)
+                    || named.contains(&name.as_str()))
         })
         .collect()
 }
@@ -74,6 +88,7 @@ pub fn inherited() -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::provider::{AgentKind, Toolset};
 
     fn variables(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -185,6 +200,70 @@ mod tests {
             !inherited.contains_key("DATABASE_URL"),
             "a name the operator did not list passed through: {inherited:?}"
         );
+    }
+
+    /// An operator who once named a key for their own scripts would otherwise
+    /// have every organization's turns run on it rather than on their own
+    /// sign-in, with nothing to say so.
+    #[test]
+    fn a_passthrough_naming_a_credential_still_drops_it() {
+        let inherited = filter(
+            CREDENTIALS.iter().map(|name| {
+                (
+                    (*name).to_string(),
+                    "notreal-operator-credential".to_string(),
+                )
+            }),
+            &CREDENTIALS.join(","),
+        );
+
+        assert!(
+            inherited.is_empty(),
+            "a credential was passed through: {:?}",
+            inherited.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The refusal is of those names alone. Whatever else an operator names
+    /// beside them still passes, `CLAUDE_CONFIG_DIR` included, which is how
+    /// an instance points claude at a host login kept somewhere else.
+    #[test]
+    fn a_passthrough_naming_a_harmless_variable_still_passes_it() {
+        let inherited = filter(
+            variables(&[
+                ("ANTHROPIC_BASE_URL", "https://gateway.internal"),
+                ("CLAUDE_CONFIG_DIR", "/home/zone/.claude-host"),
+            ]),
+            &format!(
+                "ANTHROPIC_BASE_URL,CLAUDE_CONFIG_DIR,{}",
+                CREDENTIALS.join(",")
+            ),
+        );
+
+        assert_eq!(
+            inherited.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://gateway.internal")
+        );
+        assert_eq!(
+            inherited.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/home/zone/.claude-host")
+        );
+    }
+
+    /// Every variable Zone hands an agent a credential or a turn's token in is
+    /// on the list, so an agent's credential cannot be passed through from the
+    /// server by naming it.
+    #[test]
+    fn every_variable_zone_hands_a_credential_in_is_refused() {
+        let handed = AgentKind::ALL
+            .into_iter()
+            .flat_map(|agent| [Some(agent.variable()), agent.token()])
+            .flatten()
+            .chain([Toolset::TOKEN_VARIABLE]);
+
+        for name in handed {
+            assert!(CREDENTIALS.contains(&name), "{name} can be passed through");
+        }
     }
 
     #[test]
