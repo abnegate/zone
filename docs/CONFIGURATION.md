@@ -196,7 +196,8 @@ organizations that must not see each other's data.
   hands it to each turn in `CLAUDE_CODE_OAUTH_TOKEN`; it does not write it
   here. Zone does not prune the transcripts. Deleting an organization stops
   any codex sign-in it has in progress, runs `codex logout` in its codex home,
-  and removes `<dir>/<organization id>` with everything in it.
+  and removes `<dir>/<organization id>` with everything in it. The delete
+  request waits for this, up to the 30 seconds `codex logout` is given.
 - **Note**: Must be an absolute path. A relative one is refused at boot, and so
   is an unset one when neither `XDG_STATE_HOME` nor `HOME` is absolute.
 
@@ -306,17 +307,19 @@ lifetime. The panel leaves that button out when the sign-in already asks for
 full access.
 
 A paste Zone cannot read, such as a code with its `#state` cut off, leaves the
-sign-in open, so you can paste again. Any other failure ends it: claude.com
-rejecting the code, or a sign-in that expired or was already used. The panel
-then drops the link and offers **Start again**, which starts over with the same
-access, beside **Try again with full access**. A sign-in in progress survives
-switching to another settings tab and back.
+sign-in open, so you can paste again. So does a pasted callback saying
+claude.com did not approve: open the link, approve, and paste the new code. A
+code claude.com rejects, or a sign-in that expired or was already used, ends
+it. The panel then drops the link and offers **Start again**, which starts
+over with the same access, beside **Try again with full access**. A sign-in in
+progress survives switching to another settings tab and back.
 
 When a refresh token came with it, Zone renews a Claude token before handing
-it to a turn if the token would expire within the hour, the longest a task
-attempt runs. A task run takes the token afresh for each attempt. Concurrent
-turns renew it once, and a renewal that fails before the token expires leaves
-the current token in use.
+it to a turn if the token would expire within the longest turn it may be
+handed to: an hour, the longest a task attempt runs, or
+`ZONE_CHAT_TIMEOUT_SECONDS` when that is longer. A task run takes the token
+afresh for each attempt. Concurrent turns renew it once, and a renewal that
+fails before the token expires leaves the current token in use.
 
 **Codex** uses codex's own device-code sign-in:
 
@@ -336,7 +339,9 @@ OpenAI refuses to issue a code, the panel shows codex's error, such as
 `device code request failed with status 403 Forbidden`: codex reports the HTTP
 status OpenAI answered with, not the body of the answer. A sign-in that fails
 on the server's own disk, such as a state directory it cannot write, shows
-only an internal error; the server's log has the details.
+only an internal error, or, once codex has signed in, "Codex signed in, but
+Zone could not record the sign-in. Start again."; the server's log has the
+details.
 
 **Signed in means the credentials are there.** Neither CLI checks a login when
 asked for its status: `claude auth status` reports one for any token it finds,
@@ -366,7 +371,7 @@ The panel uses these routes, where `{agent}` is `claude` or `codex`:
 | `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models |
 | `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status |
 | `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access |
-| `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}`; a refusal's `kind` is `invalid_code` (paste again) or `start_again` |
+| `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}`; a code that fails carries a `kind`, `invalid_code` (paste again) or `start_again` |
 | `DELETE /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Sign out |
 
 ### How a turn runs
