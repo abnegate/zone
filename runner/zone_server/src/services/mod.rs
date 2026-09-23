@@ -12,6 +12,7 @@ pub mod embedding;
 pub mod github_app;
 pub mod image_intent;
 pub mod knowledge;
+pub mod login;
 pub mod media_source;
 pub mod model;
 pub mod prioritisation;
