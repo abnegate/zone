@@ -297,12 +297,14 @@ impl ChatTools {
     /// Search tools stay registered and degrade to keyword search when
     /// embeddings are unavailable, so the model can still look things up.
     pub async fn build(scope: WorkspaceScope) -> Self {
-        Self::assemble(Some(scope), ToolProfile::Chat, None, true).await
+        let denied = scope.state.config().agents.state.clone();
+        Self::assemble(Some(scope), ToolProfile::Chat, None, true, denied).await
     }
 
     /// Preview only the known catalog; never start MCP processes while drafting.
     pub async fn preview(scope: WorkspaceScope) -> Self {
-        Self::assemble(Some(scope), ToolProfile::Chat, None, false).await
+        let denied = scope.state.config().agents.state.clone();
+        Self::assemble(Some(scope), ToolProfile::Chat, None, false, denied).await
     }
 
     /// No tools at all, for a chat that answers from the server's own context.
@@ -452,7 +454,8 @@ impl ChatTools {
             }
             _ => None,
         };
-        Self::assemble(scope, ToolProfile::Task, Some(cwd), true).await
+        let denied = state.config().agents.state.clone();
+        Self::assemble(scope, ToolProfile::Task, Some(cwd), true, denied).await
     }
 
     /// A task that requires its plan approved is handed `submit_plan`, and
@@ -523,11 +526,14 @@ impl ChatTools {
         self
     }
 
+    /// `denied` is the agents' state root, which every host tool set is
+    /// denied, whether or not a workspace scope came with it.
     async fn assemble(
         scope: Option<WorkspaceScope>,
         profile: ToolProfile,
         task_cwd: Option<std::path::PathBuf>,
         connect: bool,
+        denied: std::path::PathBuf,
     ) -> Self {
         let mut registry = ToolRegistry::new();
         let mut workspace = Vec::new();
@@ -675,11 +681,7 @@ impl ChatTools {
             ToolProfile::Task => task_cwd.unwrap_or_else(host_root),
         };
         let mut context = context(profile, cwd);
-        if let Some(scope) = &scope {
-            context
-                .denied
-                .push(scope.state.config().agents.state.clone());
-        }
+        context.denied.push(denied);
         if let Some(chat_id) = scope.as_ref().and_then(|scope| scope.chat_id) {
             context.session = Session::Chat(chat_id);
         }
@@ -3214,6 +3216,35 @@ mod tests {
         assert!(!planted.exists(), "a file was planted in the agent state");
         assert!(!fresh.exists(), "a directory was made in the agent state");
         assert_eq!(std::fs::read_to_string(&login).unwrap(), signed_in);
+    }
+
+    /// A run whose actor is not a writer gets no workspace scope, and its host
+    /// file tools are the same as any other run's, so the agents' state is
+    /// withheld from it too. Here the state sits inside the run's own
+    /// directory, where confinement to that directory does not keep it out.
+    #[tokio::test]
+    async fn a_run_with_no_workspace_scope_reads_no_organizations_agent_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (scope, home) = another_organizations_home(&directory.path().join("agent-state"));
+        let tools = ChatTools::for_task(
+            &scope.state,
+            directory.path().to_path_buf(),
+            Uuid::new_v4(),
+            None,
+        )
+        .await;
+        let login = home
+            .join("auth.json")
+            .strip_prefix(directory.path())
+            .unwrap()
+            .to_path_buf();
+
+        let read = tools
+            .execute("read_file", &json!({"path": login}).to_string())
+            .await;
+
+        assert!(off_limits(&read), "{} was read: {read:?}", login.display());
+        assert!(!format!("{read:?}").contains(OTHER_LOGIN), "{read:?}");
     }
 
     /// A CLI serving another organization's turn holds that turn's Claude
