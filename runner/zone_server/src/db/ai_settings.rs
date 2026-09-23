@@ -90,7 +90,7 @@ fn validate(update: &Update<'_>) -> AccessResult<()> {
 
 /// The organization's own settings carry its provider credentials, so reading
 /// them takes an administrator, not just a seat; `minimum` says which.
-async fn authorize_organization(
+pub(crate) async fn authorize_organization(
     connection: &mut PgConnection,
     organization_id: Uuid,
     user_id: Uuid,
