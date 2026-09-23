@@ -455,6 +455,22 @@ describe('OrgSettingsPage', () => {
       });
     });
 
+    it('asks to save a provider the organization is signed in to but has not chosen yet', async () => {
+      mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
+      mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
+      render(<OrgSettingsPage />);
+
+      fireEvent.change(await screen.findByLabelText('AI Provider'), {
+        target: { value: 'claude_code' },
+      });
+      expect(await screen.findByText('Save Changes to use this provider.')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText('Settings saved successfully')).toBeInTheDocument();
+      expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
+    });
+
     it('keeps a Claude sign-in in flight while another tab is open', async () => {
       const [claudeStatus, codexStatus] = fixture.agents;
       const link = 'https://claude.com/cai/oauth/authorize?code=true&state=kept-state';

@@ -1042,6 +1042,35 @@ describe('WorkspaceSettingsPage', () => {
         expect(within(panel).queryAllByRole('button')).toHaveLength(0);
       });
 
+      it('asks to save an override the organization is signed in for', async () => {
+        organizationRole = 'owner';
+        mockClient.getWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
+        const user = userEvent.setup();
+        render(<WorkspaceSettingsPage />);
+        await openAiTab(user);
+
+        await user.click(
+          await screen.findByRole('checkbox', { name: 'Override organization AI settings' })
+        );
+        await user.selectOptions(screen.getByLabelText('AI Provider'), 'claude_code');
+
+        expect(await screen.findByText('Save Changes to use this provider.')).toBeInTheDocument();
+      });
+
+      it('asks nothing of an override already saved', async () => {
+        organizationRole = 'owner';
+        mockClient.getWorkspaceAiSettings.mockResolvedValue({
+          ...codexOnly,
+          provider: 'claude_code',
+        });
+        render(<WorkspaceSettingsPage />);
+        await openAiTab(userEvent.setup());
+
+        const panel = await screen.findByRole('region', { name: 'Claude Code sign-in' });
+        expect(await within(panel).findByText('Signed in')).toBeInTheDocument();
+        expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
+      });
+
       it('saves the override without credentials', async () => {
         mockClient.getWorkspaceAiSettings.mockResolvedValue(codexOnly);
         mockClient.updateWorkspaceAiSettings.mockResolvedValue(codexOnly);

@@ -438,7 +438,8 @@ test.describe('Coding agent sign-in', () => {
     await expect(page.getByLabel('Override organization AI settings')).toBeChecked();
     await expect(page.getByLabel('AI Provider')).toHaveValue('codex');
     const panel = page.getByRole('region', { name: 'Codex sign-in' });
-    await expect(panel.getByText('Signing in', { exact: true })).toBeVisible();
+    await expect(panel.getByText('Not signed in', { exact: true })).toBeVisible();
+    await expect(panel.getByText('Signing in', { exact: true })).toHaveCount(0);
     await expect(panel.getByText('Ask an organization admin to sign in.')).toBeVisible();
     await expect(panel.getByRole('button')).toHaveCount(0);
     await expect(panel.getByRole('link')).toHaveCount(0);

@@ -26,6 +26,7 @@ interface AgentSignInProps {
   organizationId: string;
   agent: Agent;
   access: AgentAccess;
+  unsaved: boolean;
   status: AgentStatus | undefined;
   attempt: Attempt | undefined;
   loadError: string | null;
@@ -57,6 +58,7 @@ export function AgentSignIn({
   organizationId,
   agent,
   access,
+  unsaved,
   status,
   attempt,
   loadError,
@@ -197,7 +199,8 @@ export function AgentSignIn({
   const offerSignOut = manageable && !authorization && !waiting && status.source === 'zone';
   const quiet = signingIn || status?.state === 'signed_in';
   const error = failure ?? (status ? (quiet ? null : status.error) : loadError);
-  const badge = states[signingIn ? 'pending' : (status?.state ?? 'signed_out')];
+  const state = signingIn ? 'pending' : (status?.state ?? 'signed_out');
+  const badge = states[state === 'pending' && !manage ? 'signed_out' : state];
 
   let detail: string | null = null;
   if (status?.state === 'signed_in') {
@@ -263,6 +266,10 @@ export function AgentSignIn({
         </div>
       ) : (
         !loadError && <p className="agent-sign-in-detail">Checking sign-in…</p>
+      )}
+
+      {status?.state === 'signed_in' && unsaved && (
+        <p className="form-hint">Save Changes to use this provider.</p>
       )}
 
       {manageable && authorization && attempt && (

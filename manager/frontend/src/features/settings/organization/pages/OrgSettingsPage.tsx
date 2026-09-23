@@ -49,6 +49,7 @@ export default function OrgSettingsPage() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
 
   const [provider, setProvider] = useState<AiProvider>('self_hosted');
+  const [savedProvider, setSavedProvider] = useState<AiProvider>('self_hosted');
   const [credentials, setCredentials] = useState<ProviderCredentials>(emptyCredentials);
   const [configured, setConfigured] = useState<ProviderConfigured>(nothingConfigured);
   const [models, setModels] = useState<ModelSelection>(emptyModels);
@@ -58,6 +59,7 @@ export default function OrgSettingsPage() {
 
   const applySettingsToForm = useCallback((settings: AiSettings) => {
     setProvider(settings.provider);
+    setSavedProvider(settings.provider);
     setCredentials(credentialsFromSettings(settings));
     setConfigured(configuredFromSettings(settings));
     setModels(modelsFromSettings(settings));
@@ -211,6 +213,7 @@ export default function OrgSettingsPage() {
                 organizationId={currentOrganization.id}
                 agent={agent}
                 access={agentAccess(currentOrganization.role, resolvingRole)}
+                unsaved={provider !== savedProvider}
                 status={agents.statuses[agent]}
                 attempt={agents.attempts[agent]}
                 loadError={agents.error}

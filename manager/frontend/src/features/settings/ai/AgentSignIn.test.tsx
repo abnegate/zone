@@ -10,7 +10,7 @@ import {
   setSystemTime,
   vi,
 } from 'bun:test';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { type ComponentProps, useCallback, useState } from 'react';
 import fixture from '../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { AgentRequestError } from '../../../api/AgentRequestError';
@@ -115,10 +115,19 @@ function Harness({
 function renderPanel(
   agent: Props['agent'],
   initial: AgentStatus | undefined,
-  access: AgentAccess = 'manage'
+  access: AgentAccess = 'manage',
+  unsaved = false
 ): { onChange: ReturnType<typeof mock> } {
   const onChange = mock();
-  render(<Harness agent={agent} access={access} initial={initial} onChange={onChange} />);
+  render(
+    <Harness
+      agent={agent}
+      access={access}
+      unsaved={unsaved}
+      initial={initial}
+      onChange={onChange}
+    />
+  );
   return { onChange };
 }
 
@@ -168,7 +177,13 @@ describe('AgentSignIn', () => {
       const save = mock((event: Event) => event.preventDefault());
       render(
         <form onSubmit={save}>
-          <Harness agent="claude" access="manage" initial={claudeSignedOut} onChange={mock()} />
+          <Harness
+            agent="claude"
+            access="manage"
+            unsaved={false}
+            initial={claudeSignedOut}
+            onChange={mock()}
+          />
           <button type="submit">Save Changes</button>
         </form>
       );
@@ -477,6 +492,7 @@ describe('AgentSignIn', () => {
           organizationId={organization}
           agent="codex"
           access="manage"
+          unsaved={false}
           status={codexPending}
           attempt={undefined}
           loadError={null}
@@ -623,6 +639,38 @@ describe('AgentSignIn', () => {
     });
   });
 
+  describe('with the provider change not saved yet', () => {
+    it('asks to save once the agent is signed in', () => {
+      renderPanel('claude', claudeSignedIn, 'manage', true);
+
+      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(screen.getByText('Save Changes to use this provider.')).toBeInTheDocument();
+    });
+
+    it('asks nothing before the agent is signed in, or once the provider is saved', () => {
+      renderPanel('claude', claudeSignedOut, 'manage', true);
+      expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
+      cleanup();
+
+      renderPanel('claude', claudeSignedIn, 'manage', false);
+      expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
+    });
+
+    it('asks to save right after a sign-in succeeds', async () => {
+      agentsApi.start.mockResolvedValue(claudeLogin(authorize));
+      agentsApi.submitCode.mockResolvedValue(claudeSignedIn);
+      renderPanel('claude', claudeSignedOut, 'manage', true);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+      fireEvent.change(await screen.findByLabelText('Code from claude.com'), {
+        target: { value: 'fake-code#fake-state' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
+
+      expect(await screen.findByText('Save Changes to use this provider.')).toBeInTheDocument();
+    });
+  });
+
   describe('when the organization changes or the panel goes away', () => {
     it('shows none of a sign-in that another organization started', async () => {
       let finish!: (login: unknown) => void;
@@ -637,6 +685,7 @@ describe('AgentSignIn', () => {
           organizationId={organizationId}
           agent="claude"
           access="manage"
+          unsaved={false}
           status={claudeSignedOut}
           attempt={undefined}
           loadError={null}
@@ -668,6 +717,7 @@ describe('AgentSignIn', () => {
           organizationId={organization}
           agent="claude"
           access="manage"
+          unsaved={false}
           status={claudeSignedIn}
           attempt={undefined}
           loadError={null}
@@ -685,10 +735,11 @@ describe('AgentSignIn', () => {
   });
 
   describe('members', () => {
-    it('see the status and whom to ask, with no buttons and no code', () => {
+    it('see a neutral status and whom to ask, with no buttons and no code', () => {
       renderPanel('codex', codexPending, 'view');
 
-      expect(screen.getByText('Signing in')).toBeInTheDocument();
+      expect(screen.getByText('Not signed in')).toBeInTheDocument();
+      expect(screen.queryByText('Signing in')).toBeNull();
       expect(screen.getByText('Ask an organization admin to sign in.')).toBeInTheDocument();
       expect(screen.queryAllByRole('button')).toHaveLength(0);
       expect(screen.queryAllByRole('link')).toHaveLength(0);
@@ -723,6 +774,7 @@ describe('AgentSignIn', () => {
     it('shows no device code, even to someone who may turn out to be an admin', () => {
       renderPanel('codex', codexPending, 'resolving');
 
+      expect(screen.getByText('Not signed in')).toBeInTheDocument();
       expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
       expect(screen.queryAllByRole('button')).toHaveLength(0);
     });
@@ -742,6 +794,7 @@ describe('AgentSignIn', () => {
           organizationId={organization}
           agent="claude"
           access="manage"
+          unsaved={false}
           status={undefined}
           attempt={undefined}
           loadError="Failed to load coding agent sign-ins: 502"
