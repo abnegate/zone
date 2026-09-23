@@ -17,6 +17,7 @@ use crate::db::auto_projects::{
     Verdict as Recorded,
 };
 use crate::db::tasks::{self, TaskRow};
+use crate::services::backend;
 use crate::services::stages;
 use crate::workers::conflict::RepairOutcome;
 use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception};
@@ -665,6 +666,11 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 .and_then(|mode| mode.model),
             None => None,
         };
+        let resolved = backend::for_workspace(step.drive.state, step.drive.workspace_id).await;
+        let backend = match resolved {
+            Ok(backend) => backend,
+            Err(error) => return step.pause(&error.to_string()).await,
+        };
         let (prefs, catalog) = model::preferences(step.drive.state, step.drive.workspace_id).await;
         let round = auto_projects::latest_round(pool, step.task.task_id)
             .await
@@ -711,6 +717,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
         let open = auto_projects::open_findings_of(&rows);
         let outcome = review::run(
             step.drive.state.config(),
+            backend,
             pr.clone(),
             ReviewRequest {
                 task: &step.row,
