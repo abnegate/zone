@@ -368,6 +368,7 @@ mod tests {
                 access: SecretValue::new(ACCESS),
                 refresh: None,
                 expires_at: Utc::now() + expires_in,
+                issued_at: None,
                 scope: "user:inference".to_string(),
                 subscription: None,
             };

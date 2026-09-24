@@ -1018,6 +1018,7 @@ async fn a_claude_login_zone_cannot_open_has_expired() {
         access: SecretValue::new(ACCESS),
         refresh: Some(SecretValue::new(REFRESH)),
         expires_at: Utc::now() + TimeDelta::seconds(YEAR),
+        issued_at: None,
         scope: INFERENCE_SCOPE.to_string(),
         subscription: Some("max".to_string()),
     };

@@ -239,6 +239,7 @@ mod tests {
             access: SecretValue::new("fake-access-token"),
             refresh: refresh.map(SecretValue::new),
             expires_at,
+            issued_at: None,
             scope: "user:inference".to_string(),
             subscription: None,
         };

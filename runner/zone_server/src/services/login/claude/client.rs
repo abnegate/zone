@@ -166,6 +166,7 @@ impl Granted {
             access: self.access_token,
             refresh: self.refresh_token.filter(|token| !token.is_empty()),
             expires_at,
+            issued_at: Some(now),
             scope: self.scope.unwrap_or_default(),
             subscription: self.subscription_type.filter(|kind| !kind.is_empty()),
         })
@@ -226,6 +227,7 @@ mod tests {
     const VERIFIER: &str = "fake-code-verifier";
     const ACCESS: &str = "fake-access-token";
     const REFRESH: &str = "fake-refresh-token";
+    const GRANTED: i64 = 28_800;
 
     async fn answering(status: u16, body: Value) -> (MockServer, Client) {
         let server = MockServer::start().await;
@@ -266,6 +268,7 @@ mod tests {
             access: SecretValue::new(ACCESS),
             refresh: Some(SecretValue::new(REFRESH)),
             expires_at: Utc::now(),
+            issued_at: None,
             scope: "user:profile user:inference".to_string(),
             subscription: Some("max".to_string()),
         }
@@ -315,12 +318,13 @@ mod tests {
             "{}",
             tokens.expires_at
         );
+        assert_eq!(tokens.lifetime(), Some(lifetime));
     }
 
     #[tokio::test]
     async fn a_full_exchange_leaves_the_lifetime_to_claude() {
         let (server, client) =
-            answering(200, json!({"access_token": ACCESS, "expires_in": 28_800})).await;
+            answering(200, json!({"access_token": ACCESS, "expires_in": GRANTED})).await;
 
         let tokens = client
             .exchange(&code(), &verifier(), Scope::Full)
@@ -349,13 +353,14 @@ mod tests {
             "a grant that names no scope keeps the scope asked for"
         );
         assert!(tokens.refresh.is_none());
+        assert_eq!(tokens.lifetime(), Some(TimeDelta::seconds(GRANTED)));
     }
 
     #[tokio::test]
     async fn a_refresh_sends_the_scope_and_keeps_a_refresh_token_it_was_not_sent_again() {
         let (server, client) = answering(
             200,
-            json!({"access_token": "fake-renewed-access-token", "expires_in": 28_800}),
+            json!({"access_token": "fake-renewed-access-token", "expires_in": GRANTED}),
         )
         .await;
         let earlier = earlier();
@@ -378,6 +383,11 @@ mod tests {
         );
         assert_eq!(renewed.scope, earlier.scope);
         assert_eq!(renewed.subscription, earlier.subscription);
+        assert_eq!(
+            renewed.lifetime(),
+            Some(TimeDelta::seconds(GRANTED)),
+            "a renewal keeps the lifetime Claude granted it"
+        );
     }
 
     #[tokio::test]
@@ -387,7 +397,7 @@ mod tests {
             json!({
                 "access_token": "fake-renewed-access-token",
                 "refresh_token": "fake-rotated-refresh-token",
-                "expires_in": 28_800,
+                "expires_in": GRANTED,
             }),
         )
         .await;

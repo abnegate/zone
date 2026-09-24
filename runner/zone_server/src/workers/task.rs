@@ -6132,6 +6132,7 @@ mod cli_tests {
                 access: SecretValue::new(access),
                 refresh: None,
                 expires_at: Utc::now() + TimeDelta::hours(8),
+                issued_at: None,
                 scope: "user:inference".to_string(),
                 subscription: None,
             }

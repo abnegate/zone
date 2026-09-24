@@ -11,6 +11,9 @@ pub struct Tokens {
     pub access: SecretValue,
     pub refresh: Option<SecretValue>,
     pub expires_at: DateTime<Utc>,
+    /// When Claude granted `access`; unknown for tokens sealed before Zone recorded it.
+    #[serde(default)]
+    pub issued_at: Option<DateTime<Utc>>,
     pub scope: String,
     pub subscription: Option<String>,
 }
@@ -18,6 +21,11 @@ pub struct Tokens {
 impl Tokens {
     pub fn expiring(&self, now: DateTime<Utc>, margin: TimeDelta) -> bool {
         self.expires_at.signed_duration_since(now) <= margin
+    }
+
+    pub fn lifetime(&self) -> Option<TimeDelta> {
+        self.issued_at
+            .map(|issued_at| self.expires_at.signed_duration_since(issued_at))
     }
 
     pub fn label(&self) -> Option<String> {
@@ -47,6 +55,9 @@ mod tests {
 
     const ACCESS: &str = "fake-access-token-for-tests";
     const REFRESH: &str = "fake-refresh-token-for-tests";
+    const LIFETIME: TimeDelta = TimeDelta::hours(8);
+    /// Tokens as Zone sealed them before it recorded their lifetime.
+    const UNTIMED: &str = r#"{"access":"fake-access-token-for-tests","refresh":"fake-refresh-token-for-tests","expires_at":"2026-09-21T14:13:20Z","scope":"user:inference","subscription":"max"}"#;
 
     fn expiry() -> DateTime<Utc> {
         DateTime::from_timestamp(1_790_000_000, 0).expect("a valid timestamp")
@@ -57,6 +68,7 @@ mod tests {
             access: SecretValue::new(ACCESS),
             refresh: Some(SecretValue::new(REFRESH)),
             expires_at: expiry(),
+            issued_at: Some(expiry() - LIFETIME),
             scope: "user:inference".to_string(),
             subscription: Some("max".to_string()),
         }
@@ -83,6 +95,28 @@ mod tests {
             Tokens::open(&[0; 32], &sealed),
             Err(Error::Sealing)
         ));
+    }
+
+    #[test]
+    fn tokens_sealed_before_their_lifetime_was_recorded_open_with_it_unknown() {
+        let key = key();
+        let sealed = crate::crypto::encrypt(&key, UNTIMED).expect("the earlier form to seal");
+
+        let opened = Tokens::open(&key, &sealed).expect("tokens sealed in the earlier form");
+
+        assert_eq!(
+            opened,
+            Tokens {
+                issued_at: None,
+                ..tokens()
+            }
+        );
+        assert_eq!(opened.lifetime(), None);
+    }
+
+    #[test]
+    fn the_lifetime_runs_from_the_grant_to_the_expiry() {
+        assert_eq!(tokens().lifetime(), Some(LIFETIME));
     }
 
     #[test]
