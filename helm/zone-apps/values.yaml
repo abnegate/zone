@@ -107,11 +107,15 @@ server:
 
   # ZONE_AGENT_CALLBACK stays unset, so Claude codes are pasted. Its loopback
   # sign-in reaches a pod only through kubectl port-forward of the callback
-  # port and the console; see the install notes.
+  # port and the console; see the install notes. ZONE_CONSOLE_ORIGINS lists
+  # the consoles such a sign-in returns to, exactly as the browser opens them,
+  # and stays empty: with the callback set, list the forwarded console, such
+  # as "http://127.0.0.1:3001".
   env:
     PORT: "8000"
     HOST: "0.0.0.0"
     ZONE_AGENT_HOST_LOGIN: "false"
+    ZONE_CONSOLE_ORIGINS: ""
 
   # Per organization: codex's auth.json and the claude and codex homes,
   # transcripts and working directories. Claude tokens are sealed in the

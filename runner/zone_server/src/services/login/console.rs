@@ -1,5 +1,5 @@
-//! The Zone console a loopback sign-in returns to, taken from the `Origin` of the request that
-//! started it.
+//! The Zone console a loopback sign-in returns to: the `Origin` of the request that started it,
+//! when the operator listed that console.
 
 use reqwest::Url;
 use uuid::Uuid;
@@ -23,8 +23,9 @@ pub struct Console {
 
 impl Console {
     /// The console at `origin`, an `http` or `https` origin whose host is a loopback name:
-    /// `localhost`, a subdomain of it, `127.0.0.1` or `[::1]`.
-    pub fn at(origin: &str) -> Option<Self> {
+    /// `localhost`, a subdomain of it, `127.0.0.1` or `[::1]`, when `consoles` lists exactly that
+    /// origin.
+    pub fn at(origin: &str, consoles: &[String]) -> Option<Self> {
         let url = Url::parse(origin).ok()?;
         let host = url.host_str()?;
         let loopback = host == LOCALHOST
@@ -38,9 +39,9 @@ impl Console {
             && url.query().is_none()
             && url.fragment().is_none()
             && !origin.trim_end().ends_with(ROOT_PATH);
-        (SCHEMES.contains(&url.scheme()) && loopback && bare).then(|| Self {
-            origin: url.origin().ascii_serialization(),
-        })
+        let normalised = url.origin().ascii_serialization();
+        (SCHEMES.contains(&url.scheme()) && loopback && bare && consoles.contains(&normalised))
+            .then_some(Self { origin: normalised })
     }
 
     /// Where the callback sends the browser once it has parked the code under `receipt`.
@@ -58,8 +59,12 @@ impl Console {
 mod tests {
     use super::*;
 
+    fn listed(origins: &[&str]) -> Vec<String> {
+        origins.iter().map(|origin| origin.to_string()).collect()
+    }
+
     #[test]
-    fn a_console_on_this_machine_is_where_a_sign_in_returns() {
+    fn a_listed_console_on_this_machine_is_where_a_sign_in_returns() {
         for (origin, kept) in [
             ("http://localhost:3000", "http://localhost:3000"),
             ("http://manager.localhost", "http://manager.localhost"),
@@ -75,7 +80,7 @@ mod tests {
             ("http://[::1]:3000", "http://[::1]:3000"),
         ] {
             assert_eq!(
-                Console::at(origin).map(|console| console.origin),
+                Console::at(origin, &listed(&[kept])).map(|console| console.origin),
                 Some(kept.to_string()),
                 "{origin}"
             );
@@ -83,7 +88,30 @@ mod tests {
     }
 
     #[test]
-    fn a_console_anywhere_else_is_never_where_a_sign_in_returns() {
+    fn a_console_nobody_listed_is_never_where_a_sign_in_returns() {
+        let consoles = listed(&["http://manager.localhost", "http://localhost:3001"]);
+
+        for origin in [
+            "http://localhost:9999",
+            "http://localhost:3000",
+            "http://evil.localhost",
+            "http://manager.localhost:8080",
+            "https://manager.localhost",
+            "http://127.0.0.1:53123",
+            "http://127.0.0.1:3001",
+            "http://[::1]:3001",
+        ] {
+            assert_eq!(Console::at(origin, &consoles), None, "{origin}");
+        }
+        assert_eq!(
+            Console::at("http://manager.localhost", &[]),
+            None,
+            "a server that lists no console sent a sign-in's browser to one"
+        );
+    }
+
+    #[test]
+    fn a_console_anywhere_else_is_never_where_a_sign_in_returns_even_when_listed() {
         for origin in [
             "https://zone.example.com",
             "http://localhost.attacker.example",
@@ -101,7 +129,12 @@ mod tests {
             "null",
             "",
         ] {
-            assert_eq!(Console::at(origin), None, "{origin:?}");
+            let consoles = Url::parse(origin)
+                .map(|url| url.origin().ascii_serialization())
+                .into_iter()
+                .collect::<Vec<_>>();
+
+            assert_eq!(Console::at(origin, &consoles), None, "{origin:?}");
         }
     }
 
@@ -110,9 +143,12 @@ mod tests {
         let organization =
             Uuid::parse_str("7b0e7c9a-2f7a-4a55-9d0e-1c7d8f6a5b4c").expect("a valid UUID");
 
-        let url = Console::at("http://manager.localhost")
-            .expect("a loopback console")
-            .receipt("fake-receipt_1", organization);
+        let url = Console::at(
+            "http://manager.localhost",
+            &listed(&["http://manager.localhost"]),
+        )
+        .expect("a listed loopback console")
+        .receipt("fake-receipt_1", organization);
 
         assert_eq!(
             url,

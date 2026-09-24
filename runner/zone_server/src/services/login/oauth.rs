@@ -30,8 +30,8 @@ const UNKNOWN_RECEIPT: &str =
 const NO_CALLBACK: &str = "This server has no sign-in callback, so a Claude sign-in finishes \
                            with the code claude.com shows";
 const NOT_LOCAL: &str = "claude.com can send a sign-in back to Zone only when this browser runs \
-                         on the machine Zone runs on and opens Zone at a localhost address. Paste \
-                         the code instead.";
+                         on the machine Zone runs on and opens Zone at a localhost address the \
+                         server lists in ZONE_CONSOLE_ORIGINS. Paste the code instead.";
 const ENDED: &str = "This sign-in was cancelled, or another one started after it.";
 const DEMOTED: &str = "Only organization admins can sign in to coding agents, and whoever \
                        started this sign-in no longer is one. Start again.";
@@ -59,14 +59,14 @@ pub struct Started {
 
 /// Where claude.com sends the browser for a sign-in that asks for `flow`, and for one sent to the
 /// server's callback, the console at `origin` the callback then returns the browser to. A sign-in
-/// uses the callback when the server has one and the console runs on this machine, unless the
-/// admin asked to paste the code.
+/// uses the callback when the server has one and was started from a console the operator listed,
+/// on this machine, unless the admin asked to paste the code.
 pub fn redirect(
     config: &Config,
     flow: Option<Flow>,
     origin: Option<&str>,
 ) -> Result<(Redirect, Option<Console>), Error> {
-    let console = origin.and_then(Console::at);
+    let console = origin.and_then(|origin| Console::at(origin, &config.agents.consoles));
     match (flow, config.agents.callback, console) {
         (Some(Flow::Paste), _, _) | (None, None, _) | (None, Some(_), None) => {
             Ok((Redirect::Paste, None))
@@ -397,6 +397,8 @@ mod tests {
     const EMAIL: &str = "admin@example.com";
     const PORT: u16 = 54_545;
     const CONSOLE: &str = "http://localhost:3000";
+    /// A console the operator listed that runs on another machine.
+    const REMOTE: &str = "https://zone.example.com";
 
     fn parameter(url: &str, name: &str) -> String {
         Url::parse(url)
@@ -407,10 +409,11 @@ mod tests {
             .unwrap_or_else(|| panic!("{url} has no {name}"))
     }
 
-    fn configured(callback: Option<Callback>) -> Config {
+    fn configured(callback: Option<Callback>, consoles: &[&str]) -> Config {
         Config {
             agents: AgentConfig {
                 callback,
+                consoles: consoles.iter().map(|console| console.to_string()).collect(),
                 ..AgentConfig::default()
             },
             ..crate::state::test_config()
@@ -433,7 +436,7 @@ mod tests {
     }
 
     fn console() -> Option<Console> {
-        Console::at(CONSOLE)
+        Console::at(CONSOLE, &[CONSOLE.to_string()])
     }
 
     async fn looping(organization: Uuid, caller: &Caller) -> Started {
@@ -484,35 +487,66 @@ mod tests {
     }
 
     #[test]
-    fn a_sign_in_returns_to_the_callback_only_from_a_console_on_this_machine() {
+    fn a_sign_in_returns_to_the_callback_only_from_a_listed_console_on_this_machine() {
         let loopback = Ok((Redirect::Loopback(PORT), console()));
         let paste = Ok((Redirect::Paste, None));
         for (callback, flow, origin, expected) in [
             (callback(), None, Some(CONSOLE), loopback.clone()),
             (callback(), Some(Flow::Loopback), Some(CONSOLE), loopback),
             (callback(), Some(Flow::Paste), Some(CONSOLE), paste.clone()),
+            (callback(), None, Some(REMOTE), paste.clone()),
             (
                 callback(),
                 None,
-                Some("https://zone.example.com"),
+                Some("http://localhost:9999"),
+                paste.clone(),
+            ),
+            (
+                callback(),
+                None,
+                Some("http://evil.localhost"),
+                paste.clone(),
+            ),
+            (
+                callback(),
+                None,
+                Some("http://127.0.0.1:53123"),
                 paste.clone(),
             ),
             (callback(), None, None, paste.clone()),
             (
                 callback(),
                 Some(Flow::Loopback),
-                Some("https://zone.example.com"),
+                Some(REMOTE),
+                Err(NOT_LOCAL),
+            ),
+            (
+                callback(),
+                Some(Flow::Loopback),
+                Some("http://localhost:9999"),
                 Err(NOT_LOCAL),
             ),
             (callback(), Some(Flow::Loopback), None, Err(NOT_LOCAL)),
             (None, None, Some(CONSOLE), paste.clone()),
-            (None, Some(Flow::Paste), None, paste),
+            (None, Some(Flow::Paste), None, paste.clone()),
             (None, Some(Flow::Loopback), Some(CONSOLE), Err(NO_CALLBACK)),
         ] {
-            let chosen = redirect(&configured(callback), flow, origin).map_err(invalid);
+            let chosen =
+                redirect(&configured(callback, &[CONSOLE, REMOTE]), flow, origin).map_err(invalid);
 
             assert_eq!(chosen, expected, "{callback:?} {flow:?} {origin:?}");
         }
+
+        let unlisted = configured(callback(), &[]);
+        assert_eq!(
+            redirect(&unlisted, None, Some(CONSOLE)).map_err(invalid),
+            paste,
+            "a server that lists no console sent a sign-in's browser back to one"
+        );
+        assert_eq!(
+            redirect(&unlisted, Some(Flow::Loopback), Some(CONSOLE)).map_err(invalid),
+            Err(NOT_LOCAL)
+        );
     }
 
     #[tokio::test]

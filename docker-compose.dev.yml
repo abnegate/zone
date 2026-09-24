@@ -56,6 +56,8 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - CORS_ORIGINS=http://localhost:3001,http://console:3001
+      # Traefik's consoles, plus the Vite server published on localhost:3001.
+      - ZONE_CONSOLE_ORIGINS=${ZONE_CONSOLE_ORIGINS-http://localhost:3001,http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
       - SQLX_OFFLINE=true
       - RUST_LOG=zone_server=debug,zone_core=debug,zone_context=debug
       - RUST_BACKTRACE=1

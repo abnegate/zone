@@ -210,7 +210,7 @@ mod tests {
             &caller,
             Scope::Inference,
             Redirect::Loopback(address.port()),
-            Console::at(CONSOLE),
+            Console::at(CONSOLE, &[CONSOLE.to_string()]),
         )
         .await;
         Url::parse(&started.url)

@@ -74,8 +74,8 @@ const NOT_WAITING: &str = "Zone is not waiting for this sign-in: it expired, it 
 const NO_RECEIPT: &str =
     "Zone is not waiting for this sign-in: it expired, or it already finished. Start again.";
 const NOT_LOCAL: &str = "claude.com can send a sign-in back to Zone only when this browser runs \
-                         on the machine Zone runs on and opens Zone at a localhost address. Paste \
-                         the code instead.";
+                         on the machine Zone runs on and opens Zone at a localhost address the \
+                         server lists in ZONE_CONSOLE_ORIGINS. Paste the code instead.";
 const STARTED_ELSEWHERE: &str = "Someone else started this Claude sign-in, or it was started in \
                                  another browser, so Zone did not finish it.";
 const RETURNED_ELSEWHERE: &str = "This sign-in came back to someone else, or to another browser, \
@@ -94,8 +94,15 @@ const UNAVAILABLE: &str =
 const DEMOTED: &str = "Only organization admins can sign in to coding agents, and whoever \
                        started this sign-in no longer is one. Start again.";
 const CLOSE_AND_RETURN: &str = "You can close this tab and return to Zone.";
-/// The console every loopback sign-in here starts from, as its `Origin` names it.
-const CONSOLE: &str = "http://localhost:3000";
+/// The console every loopback sign-in here starts from, as its `Origin` names it and the server
+/// lists it: compose's.
+const CONSOLE: &str = "http://manager.localhost";
+/// The dev stack's Vite server, which a server may list beside [`CONSOLE`].
+const VITE_CONSOLE: &str = "http://localhost:3001";
+/// A console on another machine, which a server may list and which still pastes its codes.
+const REMOTE_CONSOLE: &str = "https://zone.example.com";
+/// Where the desktop and mobile apps serve the console from, on the device they run on.
+const APP_CONSOLE: &str = "http://127.0.0.1:53123";
 /// How long a slow token endpoint takes to grant tokens.
 const SLOW: Duration = Duration::from_secs(2);
 const UNREADABLE_REPLY: &str =
@@ -304,15 +311,20 @@ impl Stage {
     /// Claude's token endpoint is `claude`, and codex cannot be started at all.
     async fn claude(claude: &MockServer) -> Self {
         Self {
-            client: TestClient::with_config(Self::claude_config(claude, None)).await,
+            client: TestClient::with_config(Self::claude_config(claude, None, &[CONSOLE])).await,
             _state: None,
             callback: None,
         }
     }
 
     /// As [`Stage::claude`], with the callback listener running on a loopback port of its own,
-    /// as `ZONE_AGENT_CALLBACK=http://localhost:<port>` starts it.
+    /// as `ZONE_AGENT_CALLBACK=http://localhost:<port>` starts it, and [`CONSOLE`] listed.
     async fn loopback(claude: &MockServer) -> Self {
+        Self::listing(claude, &[CONSOLE]).await
+    }
+
+    /// As [`Stage::loopback`], listing `consoles` in `ZONE_CONSOLE_ORIGINS`.
+    async fn listing(claude: &MockServer, consoles: &[&str]) -> Self {
         let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         let listener = callback::bind(&Callback {
             port: 0,
@@ -325,7 +337,8 @@ impl Stage {
             port,
             bind: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
         };
-        let client = TestClient::with_config(Self::claude_config(claude, Some(listening))).await;
+        let client =
+            TestClient::with_config(Self::claude_config(claude, Some(listening), consoles)).await;
         tokio::spawn(callback::serve(listener, listening));
         Self {
             client,
@@ -334,13 +347,14 @@ impl Stage {
         }
     }
 
-    fn claude_config(claude: &MockServer, callback: Option<Callback>) -> Config {
+    fn claude_config(claude: &MockServer, callback: Option<Callback>, consoles: &[&str]) -> Config {
         Config {
             model_backend: codex_at(PathBuf::from(MISSING_CODEX)),
             agents: AgentConfig {
                 host_login: false,
                 claude_token_url: format!("{}{TOKEN_PATH}", claude.uri()),
                 callback,
+                consoles: consoles.iter().map(|console| console.to_string()).collect(),
                 ..AgentConfig::default()
             },
             ..common::test_config()
@@ -1506,11 +1520,20 @@ async fn claude_refusing_the_code_is_a_bad_gateway_that_carries_its_reason() {
 }
 
 #[tokio::test]
-async fn a_server_with_a_callback_sends_a_browser_back_to_it_only_from_a_console_on_its_machine() {
+async fn a_server_with_a_callback_sends_a_browser_back_to_it_only_from_a_console_it_lists() {
     let claude = token_endpoint(200, granted()).await;
-    let stage = Stage::loopback(&claude).await;
+    let stage = Stage::listing(&claude, &[CONSOLE, VITE_CONSOLE, REMOTE_CONSOLE]).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
+    let pasted = |origin| {
+        (
+            origin,
+            json!({}),
+            "paste",
+            REDIRECT_URL.to_string(),
+            INFERENCE_SCOPE,
+        )
+    };
 
     for (origin, body, flow, redirect, scope) in [
         (
@@ -1521,7 +1544,7 @@ async fn a_server_with_a_callback_sends_a_browser_back_to_it_only_from_a_console
             INFERENCE_SCOPE,
         ),
         (
-            Some("http://manager.localhost"),
+            Some(VITE_CONSOLE),
             json!({ "flow": "loopback", "scope": "full" }),
             "loopback",
             stage.redirect(),
@@ -1534,20 +1557,11 @@ async fn a_server_with_a_callback_sends_a_browser_back_to_it_only_from_a_console
             REDIRECT_URL.to_string(),
             INFERENCE_SCOPE,
         ),
-        (
-            Some("https://zone.example.com"),
-            json!({}),
-            "paste",
-            REDIRECT_URL.to_string(),
-            INFERENCE_SCOPE,
-        ),
-        (
-            None,
-            json!({}),
-            "paste",
-            REDIRECT_URL.to_string(),
-            INFERENCE_SCOPE,
-        ),
+        pasted(Some(REMOTE_CONSOLE)),
+        pasted(Some("http://localhost:9999")),
+        pasted(Some("http://evil.localhost")),
+        pasted(Some("http://localhost:3000")),
+        pasted(None),
     ] {
         let response = stage
             .start_from(origin, organization, "claude", &body, &owner)
@@ -1573,7 +1587,9 @@ async fn a_server_with_a_callback_sends_a_browser_back_to_it_only_from_a_console
         "the loopback redirect names localhost, as the claude CLI's own does"
     );
     for origin in [
-        Some("https://zone.example.com"),
+        Some(REMOTE_CONSOLE),
+        Some("http://localhost:9999"),
+        Some("http://evil.localhost"),
         Some("http://10.0.0.5:3000"),
         Some("http://localhost.attacker.example"),
         None,
@@ -1595,6 +1611,28 @@ async fn a_server_with_a_callback_sends_a_browser_back_to_it_only_from_a_console
             "{origin:?}"
         );
     }
+
+    let unlisted = Stage::listing(&claude, &[]).await;
+    let owner = person(&unlisted.client).await;
+    let organization = self::organization(&unlisted.client, &owner).await;
+    assert_eq!(
+        unlisted
+            .start(organization, "claude", json!({}), &owner)
+            .await["flow"],
+        "paste",
+        "a server that lists no console sent a sign-in's browser back to one"
+    );
+    let refused = unlisted
+        .start_from(
+            Some(CONSOLE),
+            organization,
+            "claude",
+            &json!({ "flow": "loopback" }),
+            &owner,
+        )
+        .await;
+    refused.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(refused.json_value(), json!({ "error": NOT_LOCAL }));
 
     let unconfigured = Stage::claude(&claude).await;
     let owner = person(&unconfigured.client).await;
@@ -1622,6 +1660,38 @@ async fn a_server_with_a_callback_sends_a_browser_back_to_it_only_from_a_console
     refused.assert_status(StatusCode::BAD_REQUEST);
     assert_eq!(refused.json_value(), json!({ "error": NO_CALLBACK }));
     assert!(exchanges(&claude).await.is_empty());
+}
+
+#[tokio::test]
+async fn the_desktop_and_mobile_apps_paste_the_code_wherever_the_server_runs() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::listing(&claude, &[CONSOLE, VITE_CONSOLE]).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+
+    let response = stage
+        .start_from(
+            Some(APP_CONSOLE),
+            organization,
+            "claude",
+            &json!({}),
+            &owner,
+        )
+        .await;
+
+    response.assert_status(StatusCode::OK);
+    let started = response.json_value();
+    assert_eq!(
+        started["flow"], "paste",
+        "the app's own console was sent a sign-in's browser that no session there can finish"
+    );
+    assert_eq!(
+        parameter(
+            started["authorize_url"].as_str().expect("an authorize URL"),
+            "redirect_uri"
+        ),
+        REDIRECT_URL
+    );
 }
 
 #[tokio::test]

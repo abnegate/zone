@@ -114,7 +114,10 @@ mod tests {
     fn looping() -> Pending {
         Pending {
             redirect: LOOPBACK,
-            console: Console::at("http://localhost:3000"),
+            console: Console::at(
+                "http://localhost:3000",
+                &["http://localhost:3000".to_string()],
+            ),
             ..stranger()
         }
     }

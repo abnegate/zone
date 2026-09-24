@@ -326,6 +326,10 @@ services:
       # never to its loopback; the publish below keeps the host side on
       # loopback.
       - ZONE_AGENT_CALLBACK_BIND=0.0.0.0:54545
+      # The consoles the callback sends that browser back to, exactly as the
+      # browser names them: Traefik serves the console over http and https on
+      # both hosts. A list in .env replaces this one; empty turns it off.
+      - ZONE_CONSOLE_ORIGINS=${ZONE_CONSOLE_ORIGINS-http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
       - ZONE_AUTO_ENABLED=${ZONE_AUTO_ENABLED:-true}
       - ZONE_AUTO_TICK_SECS=${ZONE_AUTO_TICK_SECS:-15}
       - ZONE_AUTO_PARALLEL_TASKS=${ZONE_AUTO_PARALLEL_TASKS:-3}

@@ -182,6 +182,9 @@ const AGENT_CALLBACK: &str = "ZONE_AGENT_CALLBACK";
 /// The address, and optionally the port, the callback listener binds.
 const AGENT_CALLBACK_BIND: &str = "ZONE_AGENT_CALLBACK_BIND";
 
+/// The consoles, as exact origins, a sign-in returned to the callback sends its browser on to.
+const CONSOLE_ORIGINS: &str = "ZONE_CONSOLE_ORIGINS";
+
 const DEFAULT_CALLBACK_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
 /// The XDG base directory for user state.
@@ -215,7 +218,8 @@ const FALSE: &[&str] = &["0", "false", "no", "off"];
 
 /// The coding agent CLIs organizations sign in to, from
 /// `ZONE_AGENT_STATE_DIR`, `ZONE_AGENT_HOST_LOGIN`, `ZONE_CLAUDE_TOKEN_URL`,
-/// `ZONE_CODEX_SANDBOX`, `ZONE_AGENT_CALLBACK` and `ZONE_AGENT_CALLBACK_BIND`.
+/// `ZONE_CODEX_SANDBOX`, `ZONE_AGENT_CALLBACK`, `ZONE_AGENT_CALLBACK_BIND` and
+/// `ZONE_CONSOLE_ORIGINS`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentConfig {
     /// Root of every organization's agent homes.
@@ -230,6 +234,10 @@ pub struct AgentConfig {
     /// Where claude.com sends a browser back with a Claude sign-in's code.
     /// Without one, the admin pastes the code claude.com shows.
     pub callback: Option<Callback>,
+    /// The consoles the callback sends a browser on to, each the origin a
+    /// browser names it by. A sign-in uses the callback only when it starts
+    /// from one of them at a loopback address; with none, every one pastes.
+    pub consoles: Vec<String>,
 }
 
 /// The loopback address a browser returns a Claude sign-in to,
@@ -253,6 +261,7 @@ impl Default for AgentConfig {
             claude_token_url: DEFAULT_CLAUDE_TOKEN_URL.to_string(),
             codex_sandbox: CodexSandbox::default(),
             callback: None,
+            consoles: Vec::new(),
         }
     }
 }
@@ -270,6 +279,7 @@ impl AgentConfig {
                 env::var(AGENT_CALLBACK).ok(),
                 env::var(AGENT_CALLBACK_BIND).ok(),
             )?,
+            consoles: consoles(env::var(CONSOLE_ORIGINS).ok())?,
         })
     }
 
@@ -477,6 +487,38 @@ fn callback_bind(value: Option<String>) -> Result<(IpAddr, Option<u16>), ConfigE
     Err(ConfigError::Invalid(
         "ZONE_AGENT_CALLBACK_BIND must be an IP address, or an address and port, such as 127.0.0.1 or 0.0.0.0:54545",
     ))
+}
+
+/// The origins `value` lists, comma separated, each as a browser names it.
+fn consoles(value: Option<String>) -> Result<Vec<String>, ConfigError> {
+    value
+        .iter()
+        .flat_map(|list| list.split(','))
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            console_origin(entry).ok_or(ConfigError::Invalid(
+                "ZONE_CONSOLE_ORIGINS must list http or https origins, such as \
+                 http://manager.localhost, with no credentials, path, query or fragment",
+            ))
+        })
+        .collect()
+}
+
+/// The origin `entry` names, serialised as a browser's `Origin` header names it, when `entry`
+/// is an `http` or `https` origin and nothing more.
+fn console_origin(entry: &str) -> Option<String> {
+    reqwest::Url::parse(entry)
+        .ok()
+        .filter(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == ROOT_PATH
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
+        .map(|url| url.origin().ascii_serialization())
 }
 
 /// Periodic source indexing settings loaded from `SOURCE_RESYNC_*` env vars.
@@ -1865,14 +1907,18 @@ mod tests {
         );
     }
 
-    const AGENT_SETTINGS: [&str; 6] = [
+    const AGENT_SETTINGS: [&str; 7] = [
         AGENT_STATE,
         AGENT_HOST_LOGIN,
         CLAUDE_TOKEN_URL,
         CODEX_SANDBOX,
         AGENT_CALLBACK,
         AGENT_CALLBACK_BIND,
+        CONSOLE_ORIGINS,
     ];
+    const NOT_AN_ORIGIN: &str = "ZONE_CONSOLE_ORIGINS must list http or https origins, such as \
+                                 http://manager.localhost, with no credentials, path, query or \
+                                 fragment";
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
     const UNSPECIFIED: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
@@ -1896,12 +1942,17 @@ mod tests {
             defaults.callback, None,
             "a server that was not told its admins' browsers run beside it keeps the pasted code"
         );
+        assert!(
+            defaults.consoles.is_empty(),
+            "a server that was told no console sends no sign-in's browser anywhere"
+        );
 
         Environment::set(AGENT_STATE, "  /app/agent-state  ");
         Environment::set(AGENT_HOST_LOGIN, " FALSE ");
         Environment::set(CLAUDE_TOKEN_URL, " http://127.0.0.1:9100/v1/oauth/token ");
         Environment::set(CODEX_SANDBOX, " danger-full-access ");
         Environment::set(AGENT_CALLBACK, " http://localhost:54545 ");
+        Environment::set(CONSOLE_ORIGINS, " http://manager.localhost ");
         assert_eq!(
             AgentConfig::from_env().expect("every value is valid"),
             AgentConfig {
@@ -1913,6 +1964,7 @@ mod tests {
                     port: 54_545,
                     bind: SocketAddr::new(LOOPBACK, 54_545),
                 }),
+                consoles: vec!["http://manager.localhost".to_string()],
             },
             "a loopback token endpoint stays configurable: it is operator configuration"
         );
@@ -2134,6 +2186,64 @@ mod tests {
     }
 
     #[test]
+    fn the_consoles_are_the_origins_listed_as_a_browser_names_them() {
+        let _lock = lock();
+        let _environment = Environment::isolated(&AGENT_SETTINGS);
+
+        Environment::set(
+            CONSOLE_ORIGINS,
+            " HTTP://Manager.LocalHost , https://manager.webui.localhost:443/,, \
+             http://localhost:3001 ,http://[::1]:5173, https://zone.example.com:8443 ",
+        );
+
+        assert_eq!(
+            AgentConfig::from_env()
+                .expect("every entry is an origin")
+                .consoles,
+            [
+                "http://manager.localhost",
+                "https://manager.webui.localhost",
+                "http://localhost:3001",
+                "http://[::1]:5173",
+                "https://zone.example.com:8443",
+            ],
+            "each entry is kept as the origin a browser sends, and a blank one is no entry"
+        );
+    }
+
+    #[test]
+    fn a_console_that_is_not_an_origin_stops_the_server_starting() {
+        let _lock = lock();
+        let _environment = Environment::isolated(&AGENT_SETTINGS);
+
+        for entry in [
+            "http://manager.localhost/console",
+            "http://localhost:3001//",
+            "http://localhost:3001?next=elsewhere",
+            "http://localhost:3001#receipt",
+            "http://someone@localhost:3001",
+            "http://someone:secret@localhost:3001",
+            "ftp://manager.localhost",
+            "file:///srv/console",
+            "manager.localhost",
+            "localhost:3001",
+            "*",
+            "http://",
+            "http://manager.localhost, /agent-sign-in",
+        ] {
+            Environment::set(CONSOLE_ORIGINS, entry);
+
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(NOT_AN_ORIGIN))
+                ),
+                "{entry:?} was taken for a console a sign-in's browser is sent to"
+            );
+        }
+    }
+
+    #[test]
     fn the_state_root_follows_the_xdg_base_directories() {
         let home = || Some(PathBuf::from("/home/zone"));
         assert_eq!(
@@ -2337,6 +2447,7 @@ mod tests {
             CODEX_SANDBOX,
             AGENT_CALLBACK,
             AGENT_CALLBACK_BIND,
+            CONSOLE_ORIGINS,
         ];
         let _environment = Environment::isolated(&names);
         Environment::set("JWT_SECRET", "12345678901234567890123456789012");
@@ -2350,6 +2461,10 @@ mod tests {
         Environment::set(CODEX_SANDBOX, "danger-full-access");
         Environment::set(AGENT_CALLBACK, "60000");
         Environment::set(AGENT_CALLBACK_BIND, "0.0.0.0:54545");
+        Environment::set(
+            CONSOLE_ORIGINS,
+            "http://manager.localhost,https://manager.localhost",
+        );
 
         let config = Config::from_env().expect("every value is valid");
         assert_eq!(
@@ -2363,15 +2478,26 @@ mod tests {
                     port: 60_000,
                     bind: SocketAddr::new(UNSPECIFIED, 54_545),
                 }),
+                consoles: vec![
+                    "http://manager.localhost".to_string(),
+                    "https://manager.localhost".to_string(),
+                ],
             }
         );
         let debug = format!("{config:?}");
         assert!(
             debug.contains(
-                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 60000, bind: 0.0.0.0:54545 }) }"#
+                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 60000, bind: 0.0.0.0:54545 }), consoles: ["http://manager.localhost", "https://manager.localhost"] }"#
             ),
             "{debug}"
         );
+
+        Environment::set(CONSOLE_ORIGINS, "http://manager.localhost/agent-sign-in");
+        assert!(
+            matches!(Config::from_env(), Err(ConfigError::Invalid(NOT_AN_ORIGIN))),
+            "a console that is not an origin must stop the server starting"
+        );
+        Environment::remove(CONSOLE_ORIGINS);
 
         Environment::set(AGENT_CALLBACK, "http://0.0.0.0:54545");
         assert!(

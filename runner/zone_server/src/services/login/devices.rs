@@ -915,7 +915,7 @@ esac"#
             },
             Scope::Inference,
             Redirect::Loopback(CALLBACK_PORT),
-            Console::at(CONSOLE),
+            Console::at(CONSOLE, &[CONSOLE.to_string()]),
         )
         .await;
         let claude_state = reqwest::Url::parse(&claude.url)

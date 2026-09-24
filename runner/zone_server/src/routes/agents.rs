@@ -44,8 +44,8 @@ pub struct StartRequest {
     #[serde(default)]
     pub scope: Scope,
     /// How a Claude sign-in's code comes back: the server's callback when it has one and the
-    /// console asking runs on the same machine, unless this asks to paste it. A codex sign-in
-    /// always shows a device code.
+    /// console asking is one the operator listed, at a localhost address, unless this asks to
+    /// paste it. A codex sign-in always shows a device code.
     #[serde(default)]
     pub flow: Option<Flow>,
 }

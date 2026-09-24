@@ -113,8 +113,10 @@ combo=$(mktemp)
 bundled=$(mktemp)
 moved=$(mktemp)
 off=$(mktemp)
-trap 'rm -rf "$directory" "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off"' EXIT HUP INT TERM
-unset ZONE_AGENT_CALLBACK_PORT
+tunnel=$(mktemp)
+closed=$(mktemp)
+trap 'rm -rf "$directory" "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off" "$tunnel" "$closed"' EXIT HUP INT TERM
+unset ZONE_AGENT_CALLBACK_PORT ZONE_CONSOLE_ORIGINS
 
 # shellcheck disable=SC2046
 compose $("$script" flags '') config --format json > "$direct"
@@ -128,8 +130,12 @@ compose $("$script" flags bundled-ollama) config --format json > "$bundled"
 ZONE_AGENT_CALLBACK_PORT=60000 compose $("$script" flags 'dev,vpn') config --format json > "$moved"
 # shellcheck disable=SC2046
 ZONE_AGENT_CALLBACK_PORT='' compose $("$script" flags '') config --format json > "$off"
+# shellcheck disable=SC2046
+ZONE_CONSOLE_ORIGINS=http://manager.localhost:8080 compose $("$script" flags '') config --format json > "$tunnel"
+# shellcheck disable=SC2046
+ZONE_CONSOLE_ORIGINS='' compose $("$script" flags dev) config --format json > "$closed"
 
-python3 - "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off" <<'PY'
+python3 - "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off" "$tunnel" "$closed" <<'PY'
 import json
 import sys
 
@@ -139,6 +145,8 @@ combo = json.load(open(sys.argv[3], encoding="utf-8"))
 bundled = json.load(open(sys.argv[4], encoding="utf-8"))
 moved = json.load(open(sys.argv[5], encoding="utf-8"))
 off = json.load(open(sys.argv[6], encoding="utf-8"))
+tunnel = json.load(open(sys.argv[7], encoding="utf-8"))
+closed = json.load(open(sys.argv[8], encoding="utf-8"))
 
 
 def dockerfile(service):
@@ -274,6 +282,31 @@ if any(
         "with the callback off, the manager must not take port "
         f"{LISTENER}, got {callback_publishes(off_manager)!r}"
     )
+
+# A Claude sign-in returns its browser only to a console the manager lists, so
+# the list names exactly the consoles each stack serves: Traefik's, on both
+# entrypoints and both hosts, plus the Vite server the dev overlay publishes.
+# .env replaces it, and an empty value turns the return off.
+TRAEFIK_CONSOLES = (
+    "http://manager.localhost,https://manager.localhost,"
+    "http://manager.webui.localhost,https://manager.webui.localhost"
+)
+VITE_CONSOLE = "http://localhost:3001"
+for name, config, consoles in (
+    ("core", direct, TRAEFIK_CONSOLES),
+    ("core with the callback off", off, TRAEFIK_CONSOLES),
+    ("dev", dev, f"{VITE_CONSOLE},{TRAEFIK_CONSOLES}"),
+    ("dev+vpn+monitoring", combo, f"{VITE_CONSOLE},{TRAEFIK_CONSOLES}"),
+    ("dev+vpn with ZONE_AGENT_CALLBACK_PORT=60000", moved, f"{VITE_CONSOLE},{TRAEFIK_CONSOLES}"),
+    ("core with an SSH tunnel's console", tunnel, "http://manager.localhost:8080"),
+    ("dev with ZONE_CONSOLE_ORIGINS empty", closed, ""),
+):
+    environment = config["services"]["manager"].get("environment") or {}
+    if environment.get("ZONE_CONSOLE_ORIGINS") != consoles:
+        raise SystemExit(
+            f"{name} manager must set ZONE_CONSOLE_ORIGINS={consoles}, "
+            f"got {environment.get('ZONE_CONSOLE_ORIGINS')!r}"
+        )
 
 print("Compose profile combination checks passed")
 PY
