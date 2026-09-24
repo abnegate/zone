@@ -424,11 +424,13 @@ fn interpret(
     }
 }
 
-/// The bytes of `event` that whoever reads the stream keeps.
+/// The bytes of `event` that whoever reads the stream keeps. A tool call is
+/// kept as its name on a line of its own; what it was made with reaches no
+/// reader.
 fn retained(event: &AgentEvent) -> usize {
     match event {
         AgentEvent::Text(text) | AgentEvent::Failed(text) => text.len(),
-        AgentEvent::Tool(call) => call.function.name.len() + call.function.arguments.len(),
+        AgentEvent::Tool(call) => call.function.name.len() + '\n'.len_utf8(),
         AgentEvent::Usage(_) | AgentEvent::Finished { .. } => 0,
     }
 }
@@ -488,7 +490,7 @@ fn is_continuation(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::llm::RequestOptions;
-    use crate::llm::provider::settings::DEFAULT_LINE_LIMIT;
+    use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::io::Write;
@@ -989,6 +991,49 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             .await
             .expect("an answer after 128 KiB of tool results");
 
+        assert_eq!(
+            completion.message.content.as_deref(),
+            Some("The file is large.")
+        );
+    }
+
+    /// A call codex made through zone's tools, whose arguments hold `bytes`
+    /// of a file it wrote.
+    fn codex_tool_call(id: usize, bytes: usize) -> String {
+        json!({
+            "type": "item.completed",
+            "item": {
+                "id": format!("item_{id}"),
+                "type": "mcp_tool_call",
+                "server": "zone",
+                "tool": "write_file",
+                "arguments": {"path": format!("part_{id}.txt"), "content": "x".repeat(bytes)},
+                "result": {"content": [{"type": "text", "text": "Wrote it."}]},
+                "error": null,
+                "status": "completed",
+            },
+        })
+        .to_string()
+    }
+
+    /// What a call was made with reaches no consumer: the answer keeps none of
+    /// it and zone's loop keeps the tool's name. So a turn whose calls carry
+    /// more than the cap between them, under the default limits, still answers.
+    #[tokio::test]
+    async fn tool_arguments_past_the_output_cap_do_not_end_its_turn() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let bytes = DEFAULT_LINE_LIMIT - 64 * 1024;
+        let calls = DEFAULT_OUTPUT_LIMIT / bytes + 1;
+        let mut lines: Vec<String> = (1..=calls).map(|id| codex_tool_call(id, bytes)).collect();
+        lines.extend([CODEX_ANSWER.to_string(), CODEX_COMPLETED.to_string()]);
+        let script = replaying(&directory, &lines);
+        let provider = CliProvider::agent(AgentKind::Codex, settings(&directory, &script));
+
+        let completion = run(&provider, &[Message::user("Write every part.")])
+            .await
+            .expect("an answer after more tool arguments than the output cap");
+
+        assert!(calls * bytes > DEFAULT_OUTPUT_LIMIT);
         assert_eq!(
             completion.message.content.as_deref(),
             Some("The file is large.")

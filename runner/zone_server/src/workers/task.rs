@@ -102,6 +102,10 @@ const PLAN_APPROVAL_UNAVAILABLE_ANYWHERE: &str = "Plan approval is not available
      on a coding agent CLI, and every provider on this server runs on one; turn off Require plan \
      approval.";
 
+/// What `zone_core` says when it stops a coding agent whose answer outgrew the
+/// output cap.
+const OUTGROWN: &str = "the agent's answer grew past";
+
 // Global semaphore to limit concurrent task executions
 static TASK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
@@ -197,13 +201,17 @@ impl Fault {
     }
 
     /// A failure the loop reported for a client on `backend`. A coding agent
-    /// whose sign-in failed is not retried, since only a sign-in fixes it, and
-    /// any other failure of one is judged by the agent's own words, never by
-    /// the stderr that follows them.
+    /// whose sign-in failed is not retried, since only a sign-in fixes it, nor
+    /// one whose answer outgrew the output cap, which a retry of the same
+    /// prompt outgrows again; any other failure of one is judged by the
+    /// agent's own words, never by the stderr that follows them.
     fn agent(backend: &LlmBackend, error: String) -> Self {
         let remedied = backend::remedied(backend, error);
         let failure = match backend {
             _ if remedied.signed_out => Failure::Terminal,
+            LlmBackend::Cli { .. } if backend::own_words(&remedied.message).contains(OUTGROWN) => {
+                Failure::Terminal
+            }
             LlmBackend::Cli { .. } => classify(backend::own_words(&remedied.message)),
             LlmBackend::Http => classify(&remedied.message),
         };
@@ -3807,6 +3815,26 @@ mod retry_tests {
         assert_eq!(fault.failure, Failure::Transient, "{}", fault.message);
     }
 
+    /// A coding agent stopped at the output cap is not retried. The same words
+    /// from an endpoint are judged the way an endpoint's always were.
+    #[test]
+    fn only_a_coding_agent_stopped_at_the_output_cap_is_not_retried() {
+        let stopped = "Stream error: claude: the agent's answer grew past 4194304 bytes";
+
+        assert_eq!(
+            Fault::agent(
+                &agent(AgentKind::Claude, SignIn::Organization),
+                stopped.to_string()
+            )
+            .failure,
+            Failure::Terminal
+        );
+        assert_eq!(
+            Fault::agent(&LlmBackend::Http, stopped.to_string()).failure,
+            classify(stopped)
+        );
+    }
+
     /// zone_core follows a coding agent's failure with the tail of its stderr,
     /// which is where codex alone reports a renewal it could not make. Nothing
     /// else there is the agent's verdict on its own turn: a retry log, or a
@@ -6788,6 +6816,46 @@ mod cli_tests {
             "{}",
             fault.message
         );
+        fixture.remove().await;
+    }
+
+    /// An answer stopped at the output cap is stopped there again by a retry,
+    /// which hands the same agent the same prompt, so it is not retried.
+    #[tokio::test]
+    async fn an_attempt_whose_answer_outgrows_the_output_cap_is_not_retried() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let owner = fixture.claim().await;
+        let agent = Agent::with(|_| {
+            format!(
+                "while :; do echo '{}'; done",
+                json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "And more."}]},
+                })
+            )
+        });
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let capped = LlmBackend::cli(
+            AgentKind::Claude,
+            CliSettings::default()
+                .with_executable(agent.path(EXECUTABLE))
+                .with_output_limit(4 * 1024),
+        );
+
+        let fault = attempt(
+            &state,
+            &fixture,
+            owner,
+            &capped,
+            tokio::time::Instant::now() + SPAWN_TIMEOUT,
+        )
+        .await
+        .expect_err("an answer that outgrew the cap");
+
+        assert!(fault.message.contains("4096"), "{}", fault.message);
+        assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
         fixture.remove().await;
     }
 
