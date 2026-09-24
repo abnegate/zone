@@ -30,8 +30,10 @@ const authorization: Attempt = {
     agent: 'claude',
     authorize_url: 'https://claude.com/cai/oauth/authorize?code=true&state=fake-state',
     expires_at: '2026-09-23T04:10:00Z',
+    flow: 'loopback',
   },
   scope: 'full',
+  flow: undefined,
   spent: false,
 };
 const device: Attempt = {
@@ -42,6 +44,7 @@ const device: Attempt = {
     expires_at: '2026-09-23T04:15:00Z',
   },
   scope: undefined,
+  flow: undefined,
   spent: false,
 };
 

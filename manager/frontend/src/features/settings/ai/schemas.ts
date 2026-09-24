@@ -9,6 +9,7 @@ export const AgentProviderSchema = AiProviderSchema.extract(['claude_code', 'cod
 export const AgentStateSchema = z.enum(['signed_in', 'signed_out', 'pending', 'expired']);
 export const AgentSourceSchema = z.enum(['zone', 'host']);
 export const ClaudeScopeSchema = z.enum(['inference', 'full']);
+export const SignInFlowSchema = z.enum(['loopback', 'paste']);
 export const CodeFailureSchema = z.enum(['invalid_code', 'start_again']);
 
 export const AgentFailureSchema = z.object({
@@ -42,6 +43,7 @@ export const ClaudeLoginSchema = z.object({
   agent: z.literal('claude'),
   authorize_url: WebUrlSchema,
   expires_at: TimestampSchema,
+  flow: SignInFlowSchema,
 });
 
 export const CodexLoginSchema = z.object({
@@ -60,6 +62,7 @@ export type Agent = z.infer<typeof AgentSchema>;
 export type AgentProvider = z.infer<typeof AgentProviderSchema>;
 export type AgentState = z.infer<typeof AgentStateSchema>;
 export type ClaudeScope = z.infer<typeof ClaudeScopeSchema>;
+export type SignInFlow = z.infer<typeof SignInFlowSchema>;
 export type CodeFailure = z.infer<typeof CodeFailureSchema>;
 export type DevicePrompt = z.infer<typeof DevicePromptSchema>;
 export type AgentStatus = z.infer<typeof AgentStatusSchema>;

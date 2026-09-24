@@ -54,7 +54,12 @@ describe('agent status contract', () => {
   });
 
   it('refuses a sign-in link that is not a web address', () => {
-    const login = { agent: 'claude', authorize_url: authorize, expires_at: '2026-09-23T04:10:00Z' };
+    const login = {
+      agent: 'claude',
+      authorize_url: authorize,
+      expires_at: '2026-09-23T04:10:00Z',
+      flow: 'paste',
+    };
     expect(AgentLoginSchema.safeParse(login).success).toBe(true);
     expect(
       AgentLoginSchema.safeParse({ ...login, authorize_url: 'javascript:alert(1)' }).success
@@ -66,6 +71,19 @@ describe('agent status contract', () => {
       expires_at: '2026-09-23T04:15:00Z',
     };
     expect(AgentLoginSchema.safeParse(device).success).toBe(false);
+  });
+
+  it('reads how a claude sign-in comes back, and refuses one that does not say', () => {
+    const login = {
+      agent: 'claude',
+      authorize_url: authorize,
+      expires_at: '2026-09-23T04:10:00Z',
+    };
+    for (const flow of ['loopback', 'paste']) {
+      expect(AgentLoginSchema.parse({ ...login, flow })).toEqual({ ...login, flow });
+    }
+    expect(AgentLoginSchema.safeParse(login).success).toBe(false);
+    expect(AgentLoginSchema.safeParse({ ...login, flow: 'device' }).success).toBe(false);
   });
 });
 
@@ -84,29 +102,34 @@ describe('agentsApi', () => {
     expect(sent(request).url).toBe(`${agents}/codex`);
   });
 
-  it('starts a claude sign-in at the inference scope by default', async () => {
-    const request = respond({
+  it('starts a claude sign-in at the inference scope, returned however the server says', async () => {
+    const login = {
       agent: 'claude',
       authorize_url: authorize,
       expires_at: '2026-09-23T04:10:00Z',
-    });
-    const login = await agentsApi.start(organization, 'claude');
-    expect(login).toEqual({
-      agent: 'claude',
-      authorize_url: authorize,
-      expires_at: '2026-09-23T04:10:00Z',
-    });
+      flow: 'loopback',
+    };
+    const request = respond(login);
+    expect(await agentsApi.start(organization, 'claude')).toEqual(login);
     expect(sent(request)).toEqual({ url: `${agents}/claude/login`, method: 'POST', body: '{}' });
   });
 
-  it('asks claude for full access when told to', async () => {
-    const request = respond({
+  it('asks claude for full access, or for a code to paste, when told to', async () => {
+    const login = {
       agent: 'claude',
       authorize_url: authorize,
       expires_at: '2026-09-23T04:10:00Z',
-    });
-    await agentsApi.start(organization, 'claude', 'full');
-    expect(sent(request).body).toBe('{"scope":"full"}');
+      flow: 'paste',
+    };
+    for (const [request, body] of [
+      [{ scope: 'full' }, '{"scope":"full"}'],
+      [{ flow: 'paste' }, '{"flow":"paste"}'],
+      [{ scope: 'full', flow: 'paste' }, '{"scope":"full","flow":"paste"}'],
+    ] as const) {
+      const sending = respond(login);
+      await agentsApi.start(organization, 'claude', request);
+      expect(sent(sending).body).toBe(body);
+    }
   });
 
   it('starts a codex device login and returns its code', async () => {

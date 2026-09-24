@@ -33,6 +33,17 @@ const fullAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge=e2e-fake-challenge-2&code_challenge_method=S256&state=e2e-fake-state-2';
 const restartAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=e2e-fake-challenge-3&code_challenge_method=S256&state=e2e-fake-state-3';
+const loopbackAuthorize =
+  'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&scope=user%3Ainference&code_challenge=e2e-fake-challenge-4&code_challenge_method=S256&state=e2e-fake-state-4';
+const approve = 'Approve on claude.com; Zone finishes the sign-in automatically.';
+const scopeRefused =
+  'claude.com would not grant the access Zone asked for. Try again with full access.';
+const claudeSignedIn = {
+  state: 'signed_in',
+  source: 'zone',
+  label: 'Claude Max',
+  expires_at: '2027-09-23T12:00:00Z',
+};
 const unreadable = 'The code could not be read. Paste the whole code claude.com shows.';
 const spent = 'Claude rejected the code: Invalid authorization code. Start again.';
 const callback =
@@ -216,7 +227,12 @@ test.describe('Coding agent sign-in', () => {
         if (method === 'GET' && path === '') return signedOut;
         if (method === 'POST' && path === '/claude/login') {
           return {
-            json: { agent: 'claude', authorize_url: authorize, expires_at: '2026-09-23T04:10:00Z' },
+            json: {
+              agent: 'claude',
+              authorize_url: authorize,
+              expires_at: '2026-09-23T04:10:00Z',
+              flow: 'paste',
+            },
           };
         }
         if (method === 'POST' && path === '/claude/login/code') {
@@ -319,6 +335,7 @@ test.describe('Coding agent sign-in', () => {
               agent: 'claude',
               authorize_url: links.shift(),
               expires_at: '2026-09-23T04:10:00Z',
+              flow: 'paste',
             },
           };
         }
@@ -382,6 +399,121 @@ test.describe('Coding agent sign-in', () => {
     await expect(panel.getByRole('button', { name: 'Try again with full access' })).toHaveCount(0);
     const starts = captured.filter((request) => request.path.endsWith('/claude/login'));
     expect(starts.map((request) => request.body)).toEqual([{}, {}, { scope: 'full' }]);
+  });
+
+  test('an owner signs Claude Code in with nothing pasted once claude.com sends the browser back', async ({
+    page,
+  }) => {
+    let polls = 0;
+    const captured = await mockApi(page, {
+      role: 'owner',
+      provider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') return signedOut;
+        if (method === 'POST' && path === '/claude/login') {
+          return {
+            json: {
+              agent: 'claude',
+              authorize_url: loopbackAuthorize,
+              expires_at: '2026-09-23T04:10:00Z',
+              flow: 'loopback',
+            },
+          };
+        }
+        if (method === 'GET' && path === '/claude') {
+          polls += 1;
+          return { json: polls === 1 ? status('claude') : status('claude', claudeSignedIn) };
+        }
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto('/org-settings');
+
+    const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
+    await panel.getByRole('button', { name: 'Sign in with Claude' }).click();
+    const link = panel.getByRole('link', { name: 'Open claude.com' });
+    await expect(link).toHaveAttribute('href', loopbackAuthorize);
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    await expect(link).toBeFocused();
+    await expect(panel.getByText('Signing in', { exact: true })).toBeVisible();
+    await expect(panel.getByText(approve)).toBeVisible();
+    await expect(panel.getByText('The link expires at 4:10 AM.')).toBeVisible();
+    await expect(panel.getByLabel('Code from claude.com')).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Paste a code instead' })).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Try again with full access' })).toBeVisible();
+    await capture(page, 'claude-loopback');
+
+    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(panel.getByText('Claude Max · Expires Sep 23, 2027')).toBeVisible();
+    await expect(panel.getByRole('status')).toBeFocused();
+    await expect(link).toHaveCount(0);
+    expect(polls).toBe(2);
+    await page.waitForTimeout(4000);
+    expect(polls).toBe(2);
+    expect(captured.find((request) => request.path.endsWith('/claude/login'))?.body).toEqual({});
+    expect(captured.filter((request) => request.path.endsWith('/claude/login/code'))).toHaveLength(
+      0
+    );
+  });
+
+  test('a Claude sign-in returned to Zone falls back to a pasted code, and says why it failed', async ({
+    page,
+  }) => {
+    const logins = [
+      { authorize_url: loopbackAuthorize, flow: 'loopback' },
+      { authorize_url: authorize, flow: 'paste' },
+    ];
+    const captured = await mockApi(page, {
+      role: 'admin',
+      provider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') return signedOut;
+        if (method === 'POST' && path === '/claude/login') {
+          return {
+            json: { agent: 'claude', expires_at: '2026-09-23T04:10:00Z', ...logins.shift() },
+          };
+        }
+        if (method === 'GET' && path === '/claude') {
+          return { json: status('claude', { error: scopeRefused }) };
+        }
+        if (method === 'POST' && path === '/claude/login/code') {
+          return { json: status('claude', claudeSignedIn) };
+        }
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto('/org-settings');
+
+    const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
+    await panel.getByRole('button', { name: 'Sign in with Claude' }).click();
+    await expect(panel.getByText(approve)).toBeVisible();
+
+    await expect(panel.getByRole('alert')).toHaveText(scopeRefused, { timeout: 10000 });
+    await expect(panel.getByRole('link', { name: 'Open claude.com' })).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Start again' })).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Try again with full access' })).toBeVisible();
+    await expect(panel.getByRole('status')).toBeFocused();
+    await capture(page, 'claude-loopback-failed');
+
+    await panel.getByRole('button', { name: 'Paste a code instead' }).click();
+    const field = panel.getByLabel('Code from claude.com');
+    await expect(field).toBeFocused();
+    await expect(panel.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+      'href',
+      authorize
+    );
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Paste a code instead' })).toHaveCount(0);
+    await capture(page, 'claude-paste-instead');
+
+    await field.fill(callback);
+    await field.press('Enter');
+    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible();
+    const starts = captured.filter((request) => request.path.endsWith('/claude/login'));
+    expect(starts.map((request) => request.body)).toEqual([{}, { flow: 'paste' }]);
   });
 
   test('an owner signs Codex in with a device code and polling stops once signed in', async ({

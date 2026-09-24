@@ -438,6 +438,7 @@ describe('OrgSettingsPage', () => {
           agent: 'claude',
           authorize_url: 'https://claude.com/cai/oauth/authorize?code=true&state=fake-state',
           expires_at: later(),
+          flow: 'paste',
         });
         agentsApi.submitCode.mockRejectedValue(
           new Error('Claude rejected the code: Invalid authorization code')
@@ -490,6 +491,7 @@ describe('OrgSettingsPage', () => {
         agent: 'claude',
         authorize_url: link,
         expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+        flow: 'paste',
       });
       render(<OrgSettingsPage />);
 

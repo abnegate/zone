@@ -7,12 +7,18 @@ import {
   AgentStatusesSchema,
   AgentStatusSchema,
   type ClaudeScope,
+  type SignInFlow,
 } from '../features/settings/ai/schemas';
 import { parse } from '../validation';
 import { AgentRequestError } from './AgentRequestError';
 import { API_BASE, client } from './client';
 
 const CODE_AGENT: Agent = 'claude';
+
+export interface StartRequest {
+  scope?: ClaudeScope;
+  flow?: SignInFlow;
+}
 
 function agentsUrl(organizationId: string): string {
   return `${API_BASE}/api/organizations/${encodeURIComponent(organizationId)}/agents`;
@@ -55,10 +61,14 @@ export const agentsApi = {
     return parse(AgentStatusSchema, await response.json());
   },
 
-  async start(organizationId: string, agent: Agent, scope?: ClaudeScope): Promise<AgentLogin> {
+  async start(
+    organizationId: string,
+    agent: Agent,
+    request: StartRequest = {}
+  ): Promise<AgentLogin> {
     const response = await send(
       `${agentsUrl(organizationId)}/${agent}/login`,
-      { method: 'POST', body: JSON.stringify(scope ? { scope } : {}) },
+      { method: 'POST', body: JSON.stringify(request) },
       `Failed to start the ${agent} sign-in`
     );
     return parse(AgentLoginSchema, await response.json());

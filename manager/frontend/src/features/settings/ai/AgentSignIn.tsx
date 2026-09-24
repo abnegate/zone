@@ -1,11 +1,12 @@
 import { Badge, type BadgeProps, Button } from '@zone/ui';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { AgentRequestError } from '../../../api/AgentRequestError';
-import { agentsApi } from '../../../api/agents';
+import { agentsApi, type StartRequest } from '../../../api/agents';
 import { formatDate } from '../../projects/utils/formatters';
 import { ClaudeSteps } from './ClaudeSteps';
 import { DeviceSteps } from './DeviceSteps';
-import type { Agent, AgentState, AgentStatus, ClaudeScope } from './schemas';
+import { LoopbackSteps } from './LoopbackSteps';
+import type { Agent, AgentState, AgentStatus, ClaudeScope, SignInFlow } from './schemas';
 import { SignOutDialog } from './SignOutDialog';
 import type { AgentAccess, Attempt, SignInAction } from './types';
 import { useExpired } from './useExpired';
@@ -13,6 +14,9 @@ import './AgentSignIn.css';
 
 export const POLL_INTERVAL = 3000;
 export const POLL_INTERVAL_LIMIT = 30000;
+
+type Awaiting = 'device' | 'browser';
+type Outcome = 'waiting' | 'finished' | 'failed';
 
 const names: Record<Agent, string> = { claude: 'Claude Code', codex: 'Codex' };
 const accounts: Record<Agent, string> = { claude: 'Claude', codex: 'ChatGPT' };
@@ -41,6 +45,19 @@ interface AgentSignInProps {
 
 function reasonOf(failure: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
+}
+
+function startRequest(scope?: ClaudeScope, flow?: SignInFlow): StartRequest {
+  return { ...(scope && { scope }), ...(flow && { flow }) };
+}
+
+function deviceOutcome(status: AgentStatus): Outcome {
+  return status.state === 'pending' ? 'waiting' : 'finished';
+}
+
+function browserOutcome(status: AgentStatus): Outcome {
+  if (status.state === 'signed_in' && status.source === 'zone') return 'finished';
+  return status.error ? 'failed' : 'waiting';
 }
 
 function signedInDetail(status: AgentStatus, agent: Agent, lapsed: boolean): string {
@@ -78,10 +95,16 @@ export function AgentSignIn({
   const statusLine = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLInputElement>(null);
   const deviceCode = useRef<HTMLElement>(null);
+  const link = useRef<HTMLAnchorElement>(null);
+  const latest = useRef(attempt);
 
   useEffect(() => {
     shown.current = organizationId;
   }, [organizationId]);
+
+  useEffect(() => {
+    latest.current = attempt;
+  }, [attempt]);
 
   useEffect(() => {
     if (focus === null) return;
@@ -90,16 +113,21 @@ export function AgentSignIn({
     const away =
       active?.isConnected && active !== document.body && !section.current?.contains(active);
     if (away) return;
-    const target = focus === 'entry' ? (field.current ?? deviceCode.current) : statusLine.current;
+    const target =
+      focus === 'entry'
+        ? (field.current ?? deviceCode.current ?? link.current)
+        : statusLine.current;
     target?.focus();
   }, [focus]);
 
   const authorization = attempt?.login.agent === 'claude' ? attempt.login : null;
   const expired = useExpired(authorization?.expires_at ?? null);
   const usable = authorization !== null && !attempt?.spent && !expired;
+  const returning = usable && authorization.flow === 'loopback';
   const prompt = attempt?.login.agent === 'codex' ? attempt.login : null;
   const pending = status?.state === 'pending';
   const waiting = prompt !== null || pending;
+  const awaiting: Awaiting | null = waiting ? 'device' : returning ? 'browser' : null;
   const device = pending ? (status?.pending ?? null) : prompt;
   const codeExpired = useExpired(device?.expires_at ?? null);
   const lapsed = useExpired(status?.state === 'signed_in' ? status.expires_at : null);
@@ -113,7 +141,7 @@ export function AgentSignIn({
   }, [outdated]);
 
   useEffect(() => {
-    if (!waiting) return;
+    if (awaiting === null) return;
     let cancelled = false;
     let failures = 0;
     let timer: ReturnType<typeof setTimeout>;
@@ -124,12 +152,19 @@ export function AgentSignIn({
         failures = 0;
         setFailure(null);
         onStatusChange(next);
-        if (next.state === 'pending') {
+        const outcome = awaiting === 'device' ? deviceOutcome(next) : browserOutcome(next);
+        if (outcome === 'waiting') {
           timer = setTimeout(poll, POLL_INTERVAL);
+          return;
+        }
+        if (outcome === 'failed') {
+          setFailure(next.error);
+          const current = latest.current;
+          onAttemptChange(agent, current ? { ...current, spent: true } : null);
         } else {
           onAttemptChange(agent, null);
-          setFocus('status');
         }
+        setFocus('status');
       } catch (reason) {
         if (cancelled) return;
         setFailure(reasonOf(reason));
@@ -143,7 +178,7 @@ export function AgentSignIn({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [waiting, organizationId, agent, onStatusChange, onAttemptChange]);
+  }, [awaiting, organizationId, agent, onStatusChange, onAttemptChange]);
 
   const perform = async (
     action: SignInAction,
@@ -164,11 +199,11 @@ export function AgentSignIn({
     }
   };
 
-  const start = (action: SignInAction, scope?: ClaudeScope) =>
+  const start = (action: SignInAction, scope?: ClaudeScope, flow?: SignInFlow) =>
     perform(action, async (current) => {
-      const login = await agentsApi.start(organizationId, agent, scope);
+      const login = await agentsApi.start(organizationId, agent, startRequest(scope, flow));
       if (!current()) return;
-      onAttemptChange(agent, { login, scope, spent: false });
+      onAttemptChange(agent, { login, scope, flow, spent: false });
       setCode('');
       setFocus('entry');
     });
@@ -243,12 +278,14 @@ export function AgentSignIn({
   const badge = states[state === 'pending' && !manage ? 'signed_out' : state];
 
   let detail: string | null = null;
-  if (status?.state === 'signed_in') {
+  if (manage && returning) {
+    detail = 'Approve on claude.com; Zone finishes the sign-in automatically.';
+  } else if (manage && usable) {
+    detail = 'Waiting for the code from claude.com.';
+  } else if (status?.state === 'signed_in') {
     detail = signedInDetail(status, agent, lapsed);
   } else if (status && !manage) {
     detail = access === 'view' ? 'Ask an organization admin to sign in.' : null;
-  } else if (usable) {
-    detail = 'Waiting for the code from claude.com.';
   } else if (authorization && expired) {
     detail = 'The link from claude.com expired. Start again to get a new one.';
   } else if (authorization) {
@@ -315,23 +352,39 @@ export function AgentSignIn({
         !loadError && <p className="agent-sign-in-detail">Checking sign-in…</p>
       )}
 
-      {manageable && authorization && attempt && (
-        <ClaudeSteps
-          url={authorization.authorize_url}
-          full={attempt.scope === 'full'}
-          expiresAt={authorization.expires_at}
-          usable={usable}
-          code={code}
-          codeError={codeError}
-          busy={busy}
-          entry={field}
-          onCodeChange={setCode}
-          onSubmit={submit}
-          onRestart={() => void start('restart', attempt.scope)}
-          onFullAccess={() => void start('full', 'full')}
-          onCancel={abandon}
-        />
-      )}
+      {manageable &&
+        authorization &&
+        attempt &&
+        (authorization.flow === 'loopback' ? (
+          <LoopbackSteps
+            url={authorization.authorize_url}
+            full={attempt.scope === 'full'}
+            expiresAt={authorization.expires_at}
+            usable={usable}
+            busy={busy}
+            entry={link}
+            onRestart={() => void start('restart', attempt.scope, attempt.flow)}
+            onFullAccess={() => void start('full', 'full', attempt.flow)}
+            onPaste={() => void start('paste', attempt.scope, 'paste')}
+            onCancel={abandon}
+          />
+        ) : (
+          <ClaudeSteps
+            url={authorization.authorize_url}
+            full={attempt.scope === 'full'}
+            expiresAt={authorization.expires_at}
+            usable={usable}
+            code={code}
+            codeError={codeError}
+            busy={busy}
+            entry={field}
+            onCodeChange={setCode}
+            onSubmit={submit}
+            onRestart={() => void start('restart', attempt.scope, attempt.flow)}
+            onFullAccess={() => void start('full', 'full', attempt.flow)}
+            onCancel={abandon}
+          />
+        ))}
 
       {manageable && waiting && (
         <DeviceSteps

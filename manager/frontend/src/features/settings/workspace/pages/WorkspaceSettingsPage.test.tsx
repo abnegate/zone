@@ -1002,6 +1002,7 @@ describe('WorkspaceSettingsPage', () => {
             agent: 'claude',
             authorize_url: 'https://claude.com/cai/oauth/authorize?code=true&state=fake-state',
             expires_at: later(),
+            flow: 'paste',
           });
           agentsApi.submitCode.mockRejectedValue(
             new Error('Claude rejected the code: Invalid authorization code')

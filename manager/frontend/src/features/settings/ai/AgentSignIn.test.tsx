@@ -65,7 +65,13 @@ const restartAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=user%3Ainference&state=fake-state-3';
 const focused = (element: Element) => document.activeElement === element;
 const later = (minutes = 10) => new Date(Date.now() + minutes * 60_000).toISOString();
-const claudeLogin = (url: string) => ({ agent: 'claude', authorize_url: url, expires_at: later() });
+const claudeLogin = (url: string) => ({
+  agent: 'claude',
+  authorize_url: url,
+  expires_at: later(),
+  flow: 'paste',
+});
+const loopbackLogin = (url: string) => ({ ...claudeLogin(url), flow: 'loopback' });
 const prompt = {
   agent: 'codex',
   verification_url: 'https://auth.openai.com/codex/device',
@@ -144,6 +150,7 @@ describe('AgentSignIn', () => {
         agent: 'claude',
         authorize_url: authorize,
         expires_at: later(),
+        flow: 'paste',
       });
       agentsApi.submitCode.mockResolvedValue(claudeSignedIn);
       const { onChange } = renderPanel('claude', claudeSignedOut);
@@ -152,7 +159,7 @@ describe('AgentSignIn', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
 
       const link = await screen.findByRole('link', { name: 'Open claude.com' });
-      expect(agentsApi.start).toHaveBeenCalledWith(organization, 'claude', undefined);
+      expect(agentsApi.start).toHaveBeenCalledWith(organization, 'claude', {});
       expect(link).toHaveAttribute('href', authorize);
       expect(link).toHaveAttribute('target', '_blank');
       expect(link).toHaveAttribute('rel', 'noopener noreferrer');
@@ -220,7 +227,7 @@ describe('AgentSignIn', () => {
           fullAuthorize
         )
       );
-      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', 'full');
+      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', { scope: 'full' });
       expect(screen.getByText(/full access to your Claude account/)).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Try again with full access' })).toBeNull();
       expect(agentsApi.submitCode).not.toHaveBeenCalled();
@@ -253,7 +260,7 @@ describe('AgentSignIn', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Try again with full access' }));
 
       await waitFor(() =>
-        expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', 'full')
+        expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', { scope: 'full' })
       );
       await waitFor(() =>
         expect(screen.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
@@ -323,7 +330,7 @@ describe('AgentSignIn', () => {
           restartAuthorize
         )
       );
-      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', undefined);
+      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', {});
       expect(screen.queryByRole('alert')).toBeNull();
     });
 
@@ -351,7 +358,7 @@ describe('AgentSignIn', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Start again' }));
 
       await waitFor(() => expect(agentsApi.start).toHaveBeenCalledTimes(3));
-      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', 'full');
+      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', { scope: 'full' });
       expect(await screen.findByRole('link', { name: 'Open claude.com' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Try again with full access' })).toBeNull();
     });
@@ -362,6 +369,7 @@ describe('AgentSignIn', () => {
         agent: 'claude',
         authorize_url: authorize,
         expires_at: '2026-09-23T04:10:00Z',
+        flow: 'paste',
       });
       renderPanel('claude', claudeSignedOut);
 
@@ -454,6 +462,219 @@ describe('AgentSignIn', () => {
     });
   });
 
+  describe('claude, returned to Zone by the browser', () => {
+    const approve = 'Approve on claude.com; Zone finishes the sign-in automatically.';
+    const scopeRefused =
+      'claude.com would not grant the access Zone asked for. Try again with full access.';
+    const hostSignedIn: AgentStatus = { ...claudeSignedIn, source: 'host', label: 'team' };
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function begin(initial: AgentStatus = claudeSignedOut) {
+      const rendered = renderPanel('claude', initial);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+      });
+      return rendered;
+    }
+
+    async function wait(milliseconds: number) {
+      await act(async () => {
+        vi.advanceTimersByTime(milliseconds);
+      });
+    }
+
+    it('links to claude.com, asks for no code, and signs in once claude.com sends the browser back', async () => {
+      vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
+      agentsApi.start.mockResolvedValue(loopbackLogin(authorize));
+      agentsApi.get.mockResolvedValueOnce(claudeSignedOut).mockResolvedValueOnce(claudeSignedIn);
+      const { onChange } = await begin();
+
+      expect(agentsApi.start).toHaveBeenCalledWith(organization, 'claude', {});
+      const link = screen.getByRole('link', { name: 'Open claude.com' });
+      expect(link).toHaveAttribute('href', authorize);
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+      expect(screen.getByText('Signing in')).toBeInTheDocument();
+      expect(screen.getByText(approve)).toBeInTheDocument();
+      expect(screen.queryByLabelText('Code from claude.com')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Submit code' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Paste a code instead' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Try again with full access' })).toBeEnabled();
+
+      await wait(POLL_INTERVAL - 1);
+      expect(agentsApi.get).not.toHaveBeenCalled();
+      await wait(1);
+      expect(agentsApi.get).toHaveBeenCalledWith(organization, 'claude');
+      expect(screen.getByText(approve)).toBeInTheDocument();
+
+      await wait(POLL_INTERVAL);
+      expect(agentsApi.get).toHaveBeenCalledTimes(2);
+      expect(onChange).toHaveBeenLastCalledWith(claudeSignedIn);
+      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
+      expect(focused(screen.getByRole('status'))).toBe(true);
+
+      await wait(POLL_INTERVAL * 5);
+      expect(agentsApi.get).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps waiting through the server's own sign-in until the organization's lands", async () => {
+      vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
+      agentsApi.start.mockResolvedValue(loopbackLogin(authorize));
+      agentsApi.get.mockResolvedValueOnce(hostSignedIn).mockResolvedValueOnce(claudeSignedIn);
+      await begin(hostSignedIn);
+
+      await wait(POLL_INTERVAL);
+      expect(screen.getByText(approve)).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'Open claude.com' })).toBeInTheDocument();
+
+      await wait(POLL_INTERVAL);
+      expect(agentsApi.get).toHaveBeenCalledTimes(2);
+      expect(screen.getByText(/^Claude Max/)).toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
+    });
+
+    it('stops waiting and says why when claude.com sent back a sign-in that failed', async () => {
+      vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
+      agentsApi.start
+        .mockResolvedValueOnce(loopbackLogin(authorize))
+        .mockResolvedValueOnce(loopbackLogin(fullAuthorize));
+      agentsApi.get.mockResolvedValue({ ...claudeSignedOut, error: scopeRefused });
+      await begin();
+
+      await wait(POLL_INTERVAL);
+      expect(screen.getByRole('alert')).toHaveTextContent(scopeRefused);
+      expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Start again' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Paste a code instead' })).toBeEnabled();
+      expect(focused(screen.getByRole('status'))).toBe(true);
+
+      await wait(POLL_INTERVAL * 5);
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Try again with full access' }));
+      });
+      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', { scope: 'full' });
+      expect(screen.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+        'href',
+        fullAuthorize
+      );
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('offers to paste a code instead, which starts a sign-in whose code is pasted', async () => {
+      vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
+      agentsApi.start
+        .mockResolvedValueOnce(loopbackLogin(authorize))
+        .mockResolvedValueOnce(claudeLogin(restartAuthorize));
+      agentsApi.submitCode.mockResolvedValue(claudeSignedIn);
+      await begin();
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Paste a code instead' }));
+      });
+
+      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', { flow: 'paste' });
+      expect(screen.getByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
+        'href',
+        restartAuthorize
+      );
+      const field = screen.getByLabelText('Code from claude.com');
+      expect(focused(field)).toBe(true);
+      expect(screen.queryByText(approve)).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Paste a code instead' })).toBeNull();
+
+      await wait(POLL_INTERVAL * 3);
+      expect(agentsApi.get).not.toHaveBeenCalled();
+
+      fireEvent.change(field, { target: { value: 'fake-code#fake-state-3' } });
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
+      });
+      expect(agentsApi.submitCode).toHaveBeenCalledWith(organization, 'fake-code#fake-state-3');
+      expect(screen.getByText('Signed in')).toBeInTheDocument();
+    });
+
+    it('starts a pasted sign-in again as a pasted one', async () => {
+      vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
+      agentsApi.start
+        .mockResolvedValueOnce(loopbackLogin(authorize))
+        .mockResolvedValueOnce(claudeLogin(restartAuthorize))
+        .mockResolvedValueOnce(claudeLogin(fullAuthorize));
+      agentsApi.submitCode.mockRejectedValue(
+        new AgentRequestError('Claude rejected the code. Start again.', 502, 'start_again')
+      );
+      await begin();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Paste a code instead' }));
+      });
+      fireEvent.change(screen.getByLabelText('Code from claude.com'), {
+        target: { value: 'fake-code#fake-state-3' },
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
+      });
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Start again' }));
+      });
+
+      expect(agentsApi.start).toHaveBeenLastCalledWith(organization, 'claude', { flow: 'paste' });
+      expect(screen.getByLabelText('Code from claude.com')).toBeInTheDocument();
+    });
+
+    it('stops waiting once the link has expired', async () => {
+      vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
+      agentsApi.start.mockResolvedValue({
+        ...loopbackLogin(authorize),
+        expires_at: '2026-09-23T04:10:00Z',
+      });
+      agentsApi.get.mockResolvedValue(claudeSignedOut);
+      await begin();
+      expect(screen.getByText('The link expires at 4:10 AM.')).toBeInTheDocument();
+      await wait(POLL_INTERVAL);
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+
+      await wait(10 * 60_000);
+      const polls = agentsApi.get.mock.calls.length;
+      expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
+      expect(screen.getByText(/The link from claude.com expired/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Start again' })).toBeEnabled();
+      await wait(POLL_INTERVAL * 5);
+      expect(agentsApi.get).toHaveBeenCalledTimes(polls);
+    });
+
+    it('stops waiting once the panel goes away', async () => {
+      vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
+      agentsApi.start.mockResolvedValue(loopbackLogin(authorize));
+      agentsApi.get.mockResolvedValue(claudeSignedOut);
+      await begin();
+      await wait(POLL_INTERVAL);
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+
+      cleanup();
+      await wait(POLL_INTERVAL * 5);
+
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+    });
+
+    it('moves focus to the claude.com link once the sign-in starts', async () => {
+      agentsApi.start.mockResolvedValue(loopbackLogin(authorize));
+      renderPanel('claude', claudeSignedOut);
+      const start = screen.getByRole('button', { name: 'Sign in with Claude' });
+      start.focus();
+
+      fireEvent.click(start);
+
+      const link = await screen.findByRole('link', { name: 'Open claude.com' });
+      await waitFor(() => expect(focused(link)).toBe(true));
+    });
+  });
+
   describe('codex', () => {
     beforeEach(() => {
       setSystemTime(beforeTheCodeExpires);
@@ -473,7 +694,7 @@ describe('AgentSignIn', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
       });
 
-      expect(agentsApi.start).toHaveBeenCalledWith(organization, 'codex', undefined);
+      expect(agentsApi.start).toHaveBeenCalledWith(organization, 'codex', {});
       expect(screen.getByText('Signing in')).toBeInTheDocument();
       expect(screen.getByText('ABCD-EFGHI')).toBeInTheDocument();
       const link = screen.getByRole('link', { name: 'auth.openai.com/codex/device' });

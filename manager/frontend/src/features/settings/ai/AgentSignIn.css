@@ -99,6 +99,16 @@
   margin-bottom: var(--ui-space-2);
 }
 
+.agent-sign-in-loopback {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+}
+
+.agent-sign-in-loopback .form-hint {
+  margin: 0;
+}
+
 .agent-sign-in a.ui-btn:hover {
   text-decoration: none;
 }
