@@ -204,7 +204,8 @@ impl Fault {
     /// whose sign-in failed is not retried, since only a sign-in fixes it, nor
     /// one whose answer outgrew the output cap, which a retry of the same
     /// prompt outgrows again; any other failure of one is judged by the
-    /// agent's own words, never by the stderr that follows them.
+    /// agent's own words, never by the stderr that follows them, and backs off
+    /// when those words say its subscription ran out.
     fn agent(backend: &LlmBackend, error: String) -> Self {
         let remedied = backend::remedied(backend, error);
         let failure = match backend {
@@ -212,7 +213,7 @@ impl Fault {
             LlmBackend::Cli { .. } if backend::own_words(&remedied.message).contains(OUTGROWN) => {
                 Failure::Terminal
             }
-            LlmBackend::Cli { .. } => classify(backend::own_words(&remedied.message)),
+            LlmBackend::Cli { .. } => classify_agent(backend::own_words(&remedied.message)),
             LlmBackend::Http => classify(&remedied.message),
         };
         Self {
@@ -441,7 +442,6 @@ struct Stopped {
 }
 
 const RATE_LIMIT_MARKERS: &[&str] = &[
-    "hit your",
     "quota exceeded",
     "rate limit",
     "rate_limit",
@@ -449,11 +449,14 @@ const RATE_LIMIT_MARKERS: &[&str] = &[
     "resource exhausted",
     "retry-after",
     "retry_after",
-    "session limit",
     "too many requests",
-    "usage limit",
-    "weekly limit",
 ];
+
+/// How a coding agent says its subscription ran out. Only a coding agent's
+/// own words are read for these: an endpoint's failure that happens to use
+/// them is judged by [`classify`] alone.
+const SUBSCRIPTION_LIMIT_MARKERS: &[&str] =
+    &["hit your", "session limit", "usage limit", "weekly limit"];
 
 const TERMINAL_MARKERS: &[&str] = &[
     "access denied",
@@ -516,6 +519,21 @@ fn classify(message: &str) -> Failure {
         return Failure::Terminal;
     }
     Failure::Transient
+}
+
+/// [`classify`] for a coding agent's own words, where a subscription that ran
+/// out backs off like any rate limit.
+fn classify_agent(words: &str) -> Failure {
+    let lowered = words.to_ascii_lowercase();
+    if SUBSCRIPTION_LIMIT_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        return Failure::RateLimited {
+            retry_after: retry_after(&lowered),
+        };
+    }
+    classify(words)
 }
 
 /// A status code only counts when it stands alone: not inside a longer number,
@@ -3941,20 +3959,78 @@ mod retry_tests {
     /// fixture, and what each release prints for the rest of its limits.
     #[test]
     fn a_subscription_limit_backs_off_like_any_rate_limit() {
-        for message in [
-            "Stream error: codex: You have hit your usage limit. Try again later.",
-            "Stream error: codex: You've hit your usage limit. Upgrade to Plus to continue \
-             using Codex (https://chatgpt.com/explore/plus), or try again later.",
-            "Stream error: claude: You have hit your weekly limit",
-            "Stream error: claude: You've hit your session limit · resets 3pm",
-            "Stream error: claude: You've hit your Opus limit · resets Mon 9am",
-            "Stream error: claude: Usage limit reached · resets 3pm",
+        for (kind, message) in [
+            (
+                AgentKind::Codex,
+                "Stream error: codex: You have hit your usage limit. Try again later.",
+            ),
+            (
+                AgentKind::Codex,
+                "Stream error: codex: You've hit your usage limit. Upgrade to Plus to continue \
+                 using Codex (https://chatgpt.com/explore/plus), or try again later.",
+            ),
+            (
+                AgentKind::Claude,
+                "Stream error: claude: You have hit your weekly limit",
+            ),
+            (
+                AgentKind::Claude,
+                "Stream error: claude: You've hit your weekly limit",
+            ),
+            (
+                AgentKind::Claude,
+                "Stream error: claude: You've hit your session limit · resets 3pm",
+            ),
+            (
+                AgentKind::Claude,
+                "Stream error: claude: You've hit your Opus limit · resets Mon 9am",
+            ),
+            (
+                AgentKind::Claude,
+                "Stream error: claude: Usage limit reached · resets 3pm",
+            ),
         ] {
+            let fault = Fault::agent(&agent(kind, SignIn::Organization), message.to_string());
+
             assert!(
-                matches!(classify(message), Failure::RateLimited { .. }),
+                matches!(fault.failure, Failure::RateLimited { .. }),
                 "{message} was classified {}",
-                classify(message).label()
+                fault.failure.label()
             );
+        }
+    }
+
+    /// The words a subscription names its limits in are a coding agent's. An
+    /// endpoint's failure that happens to use them is judged by the rest of
+    /// what it says, as every endpoint failure was before coding agents ran
+    /// tasks: a rejection stays terminal, and anything else is retried.
+    #[test]
+    fn an_endpoint_failure_in_a_subscriptions_words_is_judged_as_it_always_was() {
+        for (message, judged) in [
+            (
+                "400 Bad Request: you hit your model's maximum context length",
+                Failure::Terminal,
+            ),
+            (
+                "401 Unauthorized: this key hit your organization's session limit",
+                Failure::Terminal,
+            ),
+            (
+                "invalid_request_error: a usage limit is not supported on this deployment",
+                Failure::Terminal,
+            ),
+            (
+                "model_not_found: no model under your weekly limit is named gpt-9",
+                Failure::Terminal,
+            ),
+            (
+                "upstream closed the stream once you hit your session limit",
+                Failure::Transient,
+            ),
+        ] {
+            let fault = Fault::agent(&LlmBackend::Http, message.to_string());
+
+            assert_eq!(fault.failure, judged, "{message}");
         }
     }
 
