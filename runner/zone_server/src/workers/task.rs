@@ -14,7 +14,7 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc};
 use uuid::Uuid;
 use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
-use zone_core::llm::provider::{OUTGROWN, SignIn};
+use zone_core::llm::provider::{OUTGROWN, SignIn, UNFUNDED};
 use zone_core::llm::{
     AgentKind, BuiltinTools, Credential, LlmBackend, LlmClient, LlmConfig, Message as LlmMessage,
 };
@@ -197,18 +197,13 @@ impl Fault {
     }
 
     /// A failure the loop reported for a client on `backend`. A coding agent
-    /// whose sign-in failed is not retried, since only a sign-in fixes it, nor
-    /// one whose answer outgrew the output cap, which a retry of the same
-    /// prompt outgrows again; any other failure of one is judged by the
-    /// agent's own words, never by the stderr that follows them, and backs off
-    /// when those words say its subscription ran out.
+    /// whose sign-in failed is not retried, since only a sign-in fixes it; any
+    /// other failure of one is judged by the agent's own words, never by the
+    /// stderr that follows them.
     fn agent(backend: &LlmBackend, error: String) -> Self {
         let remedied = backend::remedied(backend, error);
         let failure = match backend {
             _ if remedied.signed_out => Failure::Terminal,
-            LlmBackend::Cli { .. } if backend::own_words(&remedied.message).contains(OUTGROWN) => {
-                Failure::Terminal
-            }
             LlmBackend::Cli { .. } => classify_agent(backend::own_words(&remedied.message)),
             LlmBackend::Http => classify(&remedied.message),
         };
@@ -448,6 +443,11 @@ const RATE_LIMIT_MARKERS: &[&str] = &[
     "too many requests",
 ];
 
+/// How zone_core words a coding agent's failure that a retry of the same
+/// prompt meets again: an answer past the output cap, and a Fable turn the
+/// account has no usage credits for.
+const AGENT_TERMINAL_MARKERS: &[&str] = &[OUTGROWN, UNFUNDED];
+
 /// How a coding agent says its subscription ran out. Only a coding agent's
 /// own words are read for these: an endpoint's failure that happens to use
 /// them is judged by [`classify`] alone.
@@ -517,9 +517,16 @@ fn classify(message: &str) -> Failure {
     Failure::Transient
 }
 
-/// [`classify`] for a coding agent's own words, where a subscription that ran
-/// out backs off like any rate limit.
+/// [`classify`] for a coding agent's own words, where a failure no retry
+/// survives is terminal and a subscription that ran out backs off like any
+/// rate limit.
 fn classify_agent(words: &str) -> Failure {
+    if AGENT_TERMINAL_MARKERS
+        .iter()
+        .any(|marker| words.contains(marker))
+    {
+        return Failure::Terminal;
+    }
     let lowered = words.to_ascii_lowercase();
     if SUBSCRIPTION_LIMIT_MARKERS
         .iter()
@@ -3723,7 +3730,7 @@ mod retry_tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use zone_core::llm::provider::{STDERR_HEADING, SignIn};
+    use zone_core::llm::provider::{STDERR_HEADING, SignIn, UNFUNDED};
 
     fn outcome() -> TaskOutcome {
         TaskOutcome {
@@ -3847,6 +3854,64 @@ mod retry_tests {
             Fault::agent(&LlmBackend::Http, stopped.to_string()).failure,
             classify(stopped)
         );
+    }
+
+    /// A Fable turn the signed-in account has no usage credits for is refused
+    /// again on every retry, whatever throttling the agent's stderr logged
+    /// after it, and no sign-in fixes it.
+    #[test]
+    fn a_coding_agent_refused_fable_for_want_of_usage_credits_is_not_retried() {
+        for sign_in in [SignIn::Organization, SignIn::Instance] {
+            for message in [
+                format!("Stream error: claude: {UNFUNDED}"),
+                format!(
+                    "Stream error: claude: {UNFUNDED}{STDERR_HEADING}\
+                     2026-09-25T03:12:09Z WARN claude: 429 Too Many Requests; retrying"
+                ),
+            ] {
+                let fault = Fault::agent(&agent(AgentKind::Claude, sign_in), message);
+
+                assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+                assert!(
+                    !fault.message.contains(backend::REMEDY),
+                    "{}",
+                    fault.message
+                );
+            }
+        }
+    }
+
+    /// Claude's words for a Fable turn without usage credits, and Zone's, are
+    /// a coding agent's. An endpoint's failure that happens to use them is
+    /// judged exactly as it was before coding agents ran tasks.
+    #[test]
+    fn an_endpoint_failure_in_the_words_of_a_fable_credits_refusal_is_judged_as_it_always_was() {
+        for (message, judged) in [
+            (
+                "Fable 5 requires usage credits. Switch to another model to continue.",
+                Failure::Transient,
+            ),
+            (
+                "You've reached your Fable limit. Switch to another model to continue.",
+                Failure::Transient,
+            ),
+            (
+                "the upstream refused the turn: model_requires_usage_credits",
+                Failure::Transient,
+            ),
+            (
+                "429 credits_required: Fable 5 requires usage credits",
+                Failure::RateLimited { retry_after: None },
+            ),
+            ("400 Bad Request: credits_required", Failure::Terminal),
+            (UNFUNDED, Failure::Transient),
+        ] {
+            let fault = Fault::agent(&LlmBackend::Http, message.to_string());
+
+            assert_eq!(fault.failure, judged, "{message}");
+            assert_eq!(fault.failure, classify(message), "{message}");
+            assert_eq!(fault.message, message);
+        }
     }
 
     /// zone_core follows a coding agent's failure with the tail of its stderr,

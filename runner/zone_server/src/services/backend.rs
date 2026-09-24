@@ -274,6 +274,7 @@ mod tests {
     use tempfile::TempDir;
     use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
     use zone_core::llm::CodexSandbox;
+    use zone_core::llm::provider::UNFUNDED;
     use zone_core::secret::{SecretValue, redact};
 
     use crate::config::{AgentConfig, ModelBackend};
@@ -748,6 +749,7 @@ mod tests {
         "Could not refresh your login because another Claude Code process is refreshing it (or exited mid-refresh) · Try again in a minute",
         "Authentication error · Try again",
         "rate limit reached (five_hour, rejected)",
+        UNFUNDED,
         "You have hit your weekly limit",
         "agent command timed out after 1800 seconds",
         "agent command exited with status 1: the agent produced no diagnostics",

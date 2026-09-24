@@ -14,6 +14,23 @@ const ALLOWED: [&str; 2] = ["allowed", "allowed_warning"];
 /// this phrase is load-bearing and not decoration.
 const THROTTLED: &str = "rate limit reached";
 
+/// The wording a Fable turn is reported with when the account has no usage
+/// credits to spend on it. The task worker never retries a run it reads this
+/// in, so this is load-bearing like [`THROTTLED`].
+pub const UNFUNDED: &str = "The signed-in Claude account needs usage credits for Fable; turn them on at claude.ai/settings/usage or pick another model";
+
+/// Claude's API code for that refusal, and the CLI's own name for it.
+const UNFUNDED_CODES: [&str; 2] = ["credits_required", "model_requires_usage_credits"];
+
+/// Claude's words for that refusal, lowercased, on a result with no code.
+const UNFUNDED_WORDINGS: [&str; 2] = [
+    "requires usage credits. switch to another model",
+    "reached your fable limit",
+];
+
+/// The plan's weekly Fable allowance.
+const FABLE_WINDOW: &str = "seven_day_overage_included";
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Event {
@@ -21,6 +38,10 @@ enum Event {
     Assistant {
         #[serde(default)]
         message: Option<AssistantMessage>,
+        #[serde(default)]
+        api_error: Option<String>,
+        #[serde(default)]
+        api_error_code: Option<String>,
     },
     #[serde(rename = "result")]
     Result {
@@ -32,6 +53,8 @@ enum Event {
         result: Option<String>,
         #[serde(default)]
         usage: Option<TokenCounts>,
+        #[serde(default)]
+        api_error_code: Option<String>,
     },
     #[serde(rename = "rate_limit_event")]
     RateLimit {
@@ -74,6 +97,8 @@ struct Limit {
     kind: Option<String>,
     #[serde(default, rename = "overageStatus")]
     overage: Option<String>,
+    #[serde(default, rename = "errorCode")]
+    code: Option<String>,
 }
 
 impl Limit {
@@ -84,6 +109,23 @@ impl Limit {
             .into_iter()
             .flatten()
             .any(|status| ALLOWED.contains(&status.as_str()))
+    }
+
+    /// What refused the request, in the task worker's words, or nothing when
+    /// it went through.
+    fn refusal(self) -> Option<String> {
+        if unfunded_code(self.code.as_deref()) {
+            return Some(UNFUNDED.to_string());
+        }
+        if self.headroom() {
+            return None;
+        }
+        if self.kind.as_deref() == Some(FABLE_WINDOW) {
+            return Some(UNFUNDED.to_string());
+        }
+        let status = self.status.unwrap_or_default();
+        let kind = self.kind.unwrap_or_else(|| "request".to_string());
+        Some(format!("{THROTTLED} ({kind}, {status})"))
     }
 }
 
@@ -123,7 +165,15 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
 
     match event {
         Event::Assistant {
+            api_error,
+            api_error_code,
+            ..
+        } if unfunded_code(api_error.as_deref()) || unfunded_code(api_error_code.as_deref()) => {
+            events.push(AgentEvent::Failed(UNFUNDED.to_string()));
+        }
+        Event::Assistant {
             message: Some(message),
+            ..
         } => {
             for block in message.content {
                 match block {
@@ -150,6 +200,7 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
             is_error,
             result,
             usage,
+            api_error_code,
         } => {
             if let Some(usage) = usage {
                 events.push(AgentEvent::Usage(usage.into()));
@@ -158,32 +209,46 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
                 || subtype
                     .as_deref()
                     .is_some_and(|subtype| subtype.starts_with("error"));
-            if failed {
+            if !failed {
+                events.push(AgentEvent::Finished {
+                    finish_reason: subtype,
+                });
+            } else if unfunded_code(api_error_code.as_deref())
+                || result.as_deref().is_some_and(unfunded_wording)
+            {
+                events.push(AgentEvent::Failed(UNFUNDED.to_string()));
+            } else {
                 let message = result
                     .filter(|result| !result.trim().is_empty())
                     .or(subtype)
                     .unwrap_or_else(|| "the agent reported a failed run".to_string());
                 events.push(AgentEvent::Failed(message));
-            } else {
-                events.push(AgentEvent::Finished {
-                    finish_reason: subtype,
-                });
             }
         }
         Event::RateLimit {
             rate_limit_info: Some(limit),
         } => {
-            if limit.headroom() {
-                return;
+            if let Some(refusal) = limit.refusal() {
+                events.push(AgentEvent::Failed(refusal));
             }
-            let status = limit.status.unwrap_or_default();
-            let kind = limit.kind.unwrap_or_else(|| "request".to_string());
-            events.push(AgentEvent::Failed(format!(
-                "{THROTTLED} ({kind}, {status})"
-            )));
         }
-        Event::Assistant { message: None } | Event::RateLimit { .. } | Event::Ignored => {}
+        Event::Assistant { message: None, .. }
+        | Event::RateLimit {
+            rate_limit_info: None,
+        }
+        | Event::Ignored => {}
     }
+}
+
+fn unfunded_code(code: Option<&str>) -> bool {
+    code.is_some_and(|code| UNFUNDED_CODES.contains(&code))
+}
+
+fn unfunded_wording(words: &str) -> bool {
+    let words = words.to_ascii_lowercase();
+    UNFUNDED_WORDINGS
+        .iter()
+        .any(|wording| words.contains(wording))
 }
 
 #[cfg(test)]
@@ -310,6 +375,74 @@ mod tests {
                     "{kind} on usage credits ({overage}) was treated as a failure: {events:?}"
                 );
             }
+        }
+    }
+
+    /// What claude 2.1.278 streams for a Fable turn the account has no usage
+    /// credits for, put together from its own code: no signed-in run has
+    /// recorded one.
+    const UNFUNDED_STREAM: &str = include_str!("fixtures/claude/fable-credits-required.jsonl");
+
+    /// The same, once the plan's weekly Fable allowance is spent.
+    const FABLE_LIMIT_STREAM: &str = include_str!("fixtures/claude/fable-limit-reached.jsonl");
+
+    fn failures(events: &[AgentEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Failed(message) => Some(message.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_fable_turn_without_usage_credits_fails_as_that_and_not_as_a_rate_limit() {
+        for stream in [UNFUNDED_STREAM, FABLE_LIMIT_STREAM] {
+            let events = interpret_all(stream);
+
+            let failures = failures(&events);
+            assert!(!failures.is_empty(), "no failure in {events:?}");
+            assert!(
+                failures.iter().all(|message| *message == UNFUNDED),
+                "{failures:?}"
+            );
+            assert_eq!(text(&events), "", "claude's refusal read as an answer");
+        }
+    }
+
+    /// The first failure a turn reports ends it, so each line claude reports
+    /// the refusal on has to name it by itself.
+    #[test]
+    fn every_line_reporting_a_fable_turn_without_usage_credits_names_it_alone() {
+        for stream in [UNFUNDED_STREAM, FABLE_LIMIT_STREAM] {
+            for line in stream
+                .lines()
+                .filter(|line| !line.contains(r#""subtype":"init""#))
+            {
+                let mut events = Vec::new();
+                interpret(line, &mut events);
+                assert_eq!(failures(&events), [UNFUNDED], "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_result_in_claudes_words_for_a_fable_turn_without_usage_credits_names_it() {
+        for wording in [
+            "Fable 5 requires usage credits. Switch to another model to continue.",
+            "You've reached your Fable limit. Switch to another model to continue.",
+        ] {
+            let line = serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": true,
+                "result": wording,
+            })
+            .to_string();
+            let mut events = Vec::new();
+            interpret(&line, &mut events);
+            assert_eq!(failures(&events), [UNFUNDED], "{wording}");
         }
     }
 

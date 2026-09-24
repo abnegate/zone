@@ -494,6 +494,7 @@ fn is_continuation(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::llm::RequestOptions;
+    use crate::llm::provider::UNFUNDED;
     use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT};
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -854,6 +855,31 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
             rendered.contains("Your access token could not be refreshed"),
             "lost the reason codex gave on stderr: {rendered}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_fable_turn_without_usage_credits_fails_naming_them_and_not_a_rate_limit() {
+        for stream in [
+            include_str!("parser/fixtures/claude/fable-credits-required.jsonl"),
+            include_str!("parser/fixtures/claude/fable-limit-reached.jsonl"),
+        ] {
+            let directory = TempDir::new().expect("a temporary directory");
+            let recording = directory.path().join("recording.jsonl");
+            std::fs::write(&recording, stream).expect("the recording");
+            let script = format!("cat '{}'", recording.display());
+            let provider = CliProvider::agent(AgentKind::Claude, settings(&directory, &script));
+
+            let error = run(&provider, &[Message::user("Review the change.")])
+                .await
+                .expect_err("a refused turn");
+
+            let rendered = error.to_string();
+            assert!(rendered.contains(UNFUNDED), "{rendered}");
+            assert!(
+                !rendered.to_ascii_lowercase().contains("rate limit"),
+                "{rendered}"
+            );
+        }
     }
 
     #[test]
