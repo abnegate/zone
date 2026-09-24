@@ -282,6 +282,7 @@ Organizations on the Claude Code or Codex provider need a single server replica 
 zone-server can run the claude and codex CLIs its image ships for organizations that choose the Claude Code or Codex provider, as described under Model Backend in [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md). The chart prepares the server pod for them:
 
 - `server.env.ZONE_AGENT_HOST_LOGIN` is `"false"`, so an organization that has not signed in gets an error rather than a login made inside the pod.
+- `ZONE_AGENT_CALLBACK` stays unset, so admins paste the code claude.com shows. Its loopback sign-in, where claude.com hands the code to `http://localhost:<port>/callback`, reaches only a browser on the machine Zone runs on; in a cluster, `localhost` is the admin's own computer and never a pod. The install notes warn if `server.env` sets it.
 - The server container sets `HOME=/home/zone`, `ZONE_AGENT_STATE_DIR=/app/agent-state` and `ZONE_CHAT_AGENT_CWD=/app/workspace`. The root filesystem is read-only, so `/home/zone`, `/app/workspace` and `/tmp` are emptyDirs.
 - `/app/agent-state` is a ReadWriteOnce claim, set by `server.agentState.persistence`, only when `server.replicaCount` is `1` and `server.autoscaling.enabled` is `false`. The Deployment then uses the `Recreate` strategy. Otherwise it is an emptyDir, and the install notes say what that loses.
 

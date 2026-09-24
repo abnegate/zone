@@ -227,6 +227,43 @@ organizations that must not see each other's data.
 - **Note**: Must be an absolute `http` or `https` URL with a host, carrying no
   credentials, query or fragment. Anything else is refused at boot.
 
+### `ZONE_AGENT_CALLBACK`
+- **Default**: unset, so admins paste the code claude.com shows. Compose sets
+  `http://localhost:54545` unless `.env` sets it; an empty value there turns it
+  off. The Helm chart leaves it unset.
+- **Description**: Where claude.com sends the admin's browser back with a
+  Claude sign-in's code, as it does for claude's own sign-in, so nothing is
+  pasted. Zone listens there, on a port of its own, for
+  `GET /callback?code=…&state=…` and serves nothing else; see *Signing in*.
+- **Use it only where the browser runs on the machine Zone runs on**: a native
+  run, or the compose stack on the admin's own computer. On a remote server,
+  `localhost` is the admin's computer, so the browser never reaches Zone and
+  its tab shows a connection error. Leave it unset there. The panel offers
+  **Paste a code instead** either way.
+- **Why nothing turns it on natively**: Zone cannot tell where the admin's
+  browser runs. A server bound to loopback can still sit behind a reverse proxy
+  or an SSH tunnel, where every sign-in sent back to `localhost` would fail, so
+  only the operator can turn it on.
+- **Note**: Must be exactly `http://localhost:<port>`, the only address
+  claude.com sends a sign-in back to, so `127.0.0.1`, `https`, a path or a
+  missing port is refused at boot. The server also refuses to start when it
+  cannot listen on that port.
+
+### `ZONE_AGENT_CALLBACK_BIND`
+- **Default**: `127.0.0.1`. Compose sets `0.0.0.0`.
+- **Description**: The address the callback listener binds, on the port
+  `ZONE_AGENT_CALLBACK` names. Loopback keeps it to browsers on the server's
+  own machine.
+- **Compose**: Docker hands a published port to the container's own interface,
+  never to its loopback, so the listener inside binds `0.0.0.0`, and the
+  publish, `127.0.0.1:54545:54545`, keeps it to the host's own loopback. Other
+  containers on the compose network can reach it, as they can reach the API.
+  Keep the port at 54545 there, or change the publish to match. Under the
+  `vpn` profile the manager shares Gluetun's network, so Gluetun publishes the
+  port and lets it through its firewall.
+- **Note**: Must be an IP address. Anything else is refused at boot, even with
+  no callback set.
+
 ### `ZONE_CODEX_SANDBOX`
 - **Default**: `workspace-write`. The manager image sets `danger-full-access`,
   which compose and the Helm chart keep.
@@ -290,19 +327,49 @@ override shows the same panel. Only organization admins and owners can sign in
 or out. Other members see the status, with "Ask an organization admin to sign
 in" while the agent is not signed in.
 
-**Claude Code** uses the sign-in `claude setup-token` uses:
+**Claude Code** uses the sign-in `claude setup-token` uses. How the code gets
+back to Zone depends on `ZONE_AGENT_CALLBACK`.
+
+With a callback, as in compose, nothing is pasted:
+
+1. **Sign in with Claude** gives you a link to claude.com. Sign in there and
+   approve access. The panel says "Approve on claude.com; Zone finishes the
+   sign-in automatically."
+2. claude.com sends your browser to `http://localhost:<port>/callback` with the
+   code, and Zone finishes the sign-in there. The tab then says "Signed in to
+   Claude"; you can close it.
+3. The panel checks every three seconds, backing off while checks fail, and
+   shows Signed in once the sign-in is recorded. When it fails at the
+   callback, because claude.com did not approve, would not grant the access
+   Zone asked for, or refused the code, the tab says why, and so does the
+   panel, which then offers **Start again** and **Try again with full access**.
+
+**Paste a code instead**, beside the link, starts a new sign-in whose code
+claude.com shows for pasting. Use it when the browser cannot reach the
+callback, such as when the tab shows a connection error. Without a callback,
+every sign-in works this way:
 
 1. **Sign in with Claude** gives you a link to claude.com. Sign in there and
    approve access.
 2. claude.com shows a code. Paste it, or the address of the page showing it,
-   into **Code from claude.com** and submit it. The admin who started has to do
-   this within ten minutes. The panel shows until when, and drops the link
-   once that time has passed.
-3. Zone exchanges the code at `ZONE_CLAUDE_TOKEN_URL` and stores the tokens in
-   the database, sealed with a key derived from `ENCRYPTION_KEY`. The panel
-   shows the plan, such as Claude Team, when the token response names one. It
-   shows an expiry date only for a sign-in Zone cannot renew, one whose token
-   came without a refresh token.
+   into **Code from claude.com** and submit it.
+
+Either way, the admin who started has to finish within ten minutes. The panel
+shows until when, and drops the link once that time has passed. Zone exchanges
+the code at `ZONE_CLAUDE_TOKEN_URL`, naming the same redirect the link named,
+and stores the tokens in the database, sealed with a key derived from
+`ENCRYPTION_KEY`. The panel shows the plan, such as Claude Team, when the token
+response names one. It shows an expiry date only for a sign-in Zone cannot
+renew, one whose token came without a refresh token.
+
+The callback request carries no Zone session, so its state is its only
+authority. The listener finishes only a state Zone issued for this flow, within
+its ten minutes and once; a state issued for pasting stays for its paste.
+Before it exchanges the code, it checks that the admin who started still
+manages the organization. Its page repeats nothing from the request and never
+redirects, the server logs neither the code nor the state, and the listener
+answers at most eight requests at once. Each admin has at most one sign-in in
+flight per organization: starting another abandons the first.
 
 Zone asks for inference access only, with a one-year lifetime, as
 `claude setup-token` does. If claude.com refuses that on its page, **Try again
@@ -337,6 +404,12 @@ fails before the token expires leaves the current token in use.
    ChatGPT and enter the code. The panel checks every three seconds, backing
    off while checks fail, and shows Signed in once codex has saved the login.
    It stops showing the code once the code has expired.
+
+Codex keeps the device code with `ZONE_AGENT_CALLBACK` set. codex's own browser
+sign-in, `codex login`, listens only on `127.0.0.1:1455`, a port no flag
+changes, so a port published from a container cannot reach it; a second one
+on the same machine cancels the first, which would let organizations cancel
+each other's; and it opens a browser on the server itself.
 
 The one-time code is shown only to organization admins and owners and to
 whoever started the sign-in. codex signs in inside a staging directory, and
@@ -378,9 +451,13 @@ The panel uses these routes, where `{agent}` is `claude` or `codex`:
 |-------|-----|------|
 | `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models |
 | `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status |
-| `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access |
+| `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access, and `{"flow":"paste"}` asks for a code to paste even with a callback. A claude answer's `flow` says how its code comes back: `loopback` or `paste` |
 | `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}`; a code that fails carries a `kind`, `invalid_code` (paste again) or `start_again` |
 | `DELETE /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Sign out |
+
+The callback, `GET /callback`, is served by the callback listener on the port
+`ZONE_AGENT_CALLBACK` names, not by the API. A Claude sign-in that failed there
+shows why in the agent's status `error` until the next sign-in starts.
 
 ### How a turn runs
 
@@ -617,6 +694,10 @@ into those default homes, beside the user's own.
 With the fallback off, as in compose and Helm, such an organization gets the
 not-signed-in error above.
 
+To sign an organization in to Claude natively without pasting a code, set
+`ZONE_AGENT_CALLBACK=http://localhost:54545` (any free port) when the admins'
+browsers run on the same machine as the server.
+
 ### Security: every organization is the same OS user
 
 Every organization's CLI runs as the same operating-system user as the server:
@@ -720,16 +801,21 @@ once approved, and its file tools read whatever else the server's user can.
   `ZONE_AGENT_HOST_LOGIN` (default `false`), `ZONE_LLM_BACKEND` (default
   `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`),
   `ZONE_AGENT_ENV_PASSTHROUGH`, `ZONE_CODEX_SANDBOX` (default
-  `danger-full-access`) and `ZONE_CLAUDE_TOKEN_URL` (empty by default, which
-  keeps Claude's own endpoint). The image's entrypoint hands
-  `/app/agent-state` to `zone` with mode 0700, then runs the server as `zone`.
-  The `dev` profile's image, `manager/Dockerfile.dev`, does not include the
-  CLIs.
+  `danger-full-access`), `ZONE_CLAUDE_TOKEN_URL` (empty by default, which
+  keeps Claude's own endpoint), `ZONE_AGENT_CALLBACK` (default
+  `http://localhost:54545`) and `ZONE_AGENT_CALLBACK_BIND=0.0.0.0`, and
+  publishes the callback as `127.0.0.1:54545:54545`, on the host's loopback
+  only. Set `ZONE_AGENT_CALLBACK=` in `.env` for a stack whose admins' browsers
+  run elsewhere. The image's entrypoint hands `/app/agent-state` to `zone` with
+  mode 0700, then runs the server as `zone`. The `dev` profile's image,
+  `manager/Dockerfile.dev`, does not include the CLIs.
 - **Helm.** Agent providers need `server.replicaCount: 1` and
   `server.autoscaling.enabled: false`, and a single replica needs
   `server.podDisruptionBudget.enabled: false`; see
   [helm/zone-apps/README.md](../helm/zone-apps/README.md), which also covers
-  the claim that keeps agent state and how to size it.
+  the claim that keeps agent state and how to size it. Leave
+  `ZONE_AGENT_CALLBACK` unset: a pod is never the admin's `localhost`, so
+  Claude codes are pasted, and the install notes warn if it is set.
 - **Backups.** `make backup` and `make restore` include
   `zone_manager_agent_state`, and with it every organization's codex login; see
   [OPERATIONS.md](OPERATIONS.md).
@@ -741,9 +827,12 @@ once approved, and its file tools read whatever else the server's user can.
   one of the spellings above; a `ZONE_CLAUDE_TOKEN_URL` that is not an absolute
   `http` or `https` URL with a host, or that carries credentials, a query or a
   fragment; a `ZONE_CODEX_SANDBOX` other than `workspace-write` or
-  `danger-full-access`. Nothing is created in the state directory at boot, so
-  one the server cannot write shows up when a turn first needs it, as "Could
-  not prepare the claude CLI's state directory: …".
+  `danger-full-access`; a `ZONE_AGENT_CALLBACK` that is not exactly
+  `http://localhost:<port>`, or whose port the server cannot listen on; a
+  `ZONE_AGENT_CALLBACK_BIND` that is not an IP address. Nothing is created in
+  the state directory at boot, so one the server cannot write shows up when a
+  turn first needs it, as "Could not prepare the claude CLI's state directory:
+  …".
 
 ### Known gaps
 
@@ -1291,8 +1380,8 @@ Need to find a specific config? Quick lookup:
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED
 - **Model backend and coding agents**: ZONE_LLM_BACKEND,
   ZONE_LLM_BACKEND_EXECUTABLE, ZONE_AGENT_STATE_DIR, ZONE_AGENT_HOST_LOGIN,
-  ZONE_CLAUDE_TOKEN_URL, ZONE_CODEX_SANDBOX, ZONE_AGENT_ENV_PASSTHROUGH,
-  ZONE_CHAT_AGENT_CWD
+  ZONE_CLAUDE_TOKEN_URL, ZONE_AGENT_CALLBACK, ZONE_AGENT_CALLBACK_BIND,
+  ZONE_CODEX_SANDBOX, ZONE_AGENT_ENV_PASSTHROUGH, ZONE_CHAT_AGENT_CWD
 - **Image, video, and audio generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
   COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_VIDEO_WORKFLOW_PATH,
   COMFYUI_VIDEO_UNET, COMFYUI_VIDEO_CLIP, COMFYUI_VIDEO_VAE,

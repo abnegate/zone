@@ -86,6 +86,13 @@ emptyDir and zone-server loses codex logins whenever its pod is replaced (a
 rollout, an eviction or a reschedule). Saved Claude tokens are sealed in the
 database.
 {{- end }}
+{{- if .Values.server.env.ZONE_AGENT_CALLBACK }}
+
+NOTE: server.env.ZONE_AGENT_CALLBACK is set, but claude.com sends the admin's
+browser to localhost, which is the admin's own computer and never a pod: every
+Claude sign-in would fail to come back. Unset it, and admins paste the code
+claude.com shows instead.
+{{- end }}
 {{- end }}
 
 {{- if and .Values.manager.enabled .Values.manager.autoscaling.enabled }}

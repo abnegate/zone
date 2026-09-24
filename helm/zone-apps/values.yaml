@@ -105,6 +105,8 @@ server:
     maxReplicas: 10
     targetCPUUtilization: 70
 
+  # ZONE_AGENT_CALLBACK stays unset: its loopback Claude sign-in reaches only
+  # a browser on the machine Zone runs on, never a pod, so codes are pasted.
   env:
     PORT: "8000"
     HOST: "0.0.0.0"
