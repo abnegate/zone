@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::ffi::OsStr;
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -18,12 +18,26 @@ const LIST_FILES_CAP: usize = 200;
 const PATCH_HUNK_CHARS: usize = 80;
 const SEARCH_MAX_RESULTS: usize = 100;
 
-/// Refuse a resolved path that leaves `context.cwd`.
+/// What a file tool answers for a path in [`ToolContext::denied`] or in a
+/// process's `/proc` entry, however unrestricted its context.
+pub const OFF_LIMITS: &str = "Path is off limits to file tools";
+
+const PROC: &str = "/proc";
+
+/// The links `/proc` keeps to the reader's own entry.
+const OWN_ENTRIES: [&str; 2] = ["self", "thread-self"];
+
+/// Refuse a resolved path a file tool may not reach: one that is withheld from
+/// every file tool, and unless the context is unrestricted, one that leaves
+/// `context.cwd`.
 ///
 /// The comparison is against the *canonical* `cwd`: a caller's `cwd` may itself
 /// contain a symlink (`/var` -> `/private/var` on macOS), and a resolved path
 /// compared against an unresolved root refuses every legitimate path in it.
 pub(super) fn confine(resolved: &Path, context: &ToolContext) -> Result<(), ToolError> {
+    if withheld(resolved, context) {
+        return Err(ToolError::Execution(OFF_LIMITS.to_string()));
+    }
     if context.unrestricted {
         return Ok(());
     }
@@ -40,45 +54,82 @@ pub(super) fn confine(resolved: &Path, context: &ToolContext) -> Result<(), Tool
     }
 }
 
-/// `path` with `.`, `..` and symlinks resolved as far as the filesystem allows.
-///
-/// A path that does not exist cannot be canonicalized, so its deepest existing
-/// ancestor is resolved and the remaining names re-attached. That is what makes
-/// a symlinked ancestor leaving `cwd` visible to [`confine`] *before* the
-/// directories under it are created.
-pub(super) fn resolve(path: &Path) -> PathBuf {
-    let lexical = normalize(path);
-    let mut names: Vec<&OsStr> = Vec::new();
-    let mut cursor = lexical.as_path();
-
-    loop {
-        if let Ok(canonical) = cursor.canonicalize() {
-            let mut resolved = canonical;
-            resolved.extend(names.iter().rev());
-            return resolved;
-        }
-        match (cursor.parent(), cursor.file_name()) {
-            (Some(parent), Some(name)) => {
-                names.push(name);
-                cursor = parent;
-            }
-            _ => return lexical,
-        }
-    }
+/// Whether a resolved path is in a process's `/proc` entry or under a denied
+/// path, which is resolved too, for the reason `cwd` is canonicalized above.
+fn withheld(resolved: &Path, context: &ToolContext) -> bool {
+    per_process(resolved)
+        || context
+            .denied
+            .iter()
+            .any(|denied| resolved.starts_with(resolve(denied)))
 }
 
-fn normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                normalized.pop();
+/// Whether `path` is in one process's `/proc` entry.
+///
+/// Its `environ` holds whatever that process was started with, and the links
+/// under it are magic: they reach a file by identity rather than by the name
+/// they print, so where one leads cannot be judged by resolving it.
+fn per_process(path: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix(PROC) else {
+        return false;
+    };
+    rest.components().next().is_some_and(|entry| {
+        let name = entry.as_os_str();
+        OWN_ENTRIES.iter().any(|own| name == *own)
+            || name.as_encoded_bytes().iter().all(u8::is_ascii_digit)
+    })
+}
+
+/// `path` with `.`, `..` and symlinks resolved the way the kernel resolves
+/// them, as far as the filesystem allows.
+///
+/// Each name is looked up where the names before it really led, so a `..`
+/// after a symlink leaves the link's target rather than the link. A link is
+/// followed whether or not its target exists, since a create through it lands
+/// there, and names past the deepest one that exists are taken as written.
+/// That is what makes a symlinked ancestor leaving `cwd` visible to
+/// [`confine`] *before* the directories under it are created. Nothing past a
+/// process's `/proc` entry is resolved, since [`per_process`] refuses it whole.
+pub(super) fn resolve(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut pending = steps(&absolute);
+    let mut resolved = PathBuf::new();
+    let mut links = beneath::LINKS;
+
+    while let Some(step) = pending.pop_front() {
+        if per_process(&resolved) {
+            resolved.push(step);
+            resolved.extend(pending);
+            break;
+        }
+        match step.components().next() {
+            Some(Component::ParentDir) => {
+                resolved.pop();
             }
-            Component::CurDir => {}
-            other => normalized.push(other),
+            Some(Component::Normal(name)) => {
+                let candidate = resolved.join(name);
+                match fs::read_link(&candidate) {
+                    Ok(target) if links > 0 => {
+                        links -= 1;
+                        for step in steps(&target).into_iter().rev() {
+                            pending.push_front(step);
+                        }
+                    }
+                    _ => resolved = candidate,
+                }
+            }
+            Some(Component::CurDir) | None => {}
+            Some(root) => resolved.push(root),
         }
     }
-    normalized
+    resolved
+}
+
+/// Each component of `path`, owned, so a link's target can be spliced in.
+fn steps(path: &Path) -> VecDeque<PathBuf> {
+    path.components()
+        .map(|component| PathBuf::from(component.as_os_str()))
+        .collect()
 }
 
 /// Whether a directory entry may be descended into.
@@ -601,9 +652,7 @@ impl Tool for ListFilesTool {
             )));
         }
 
-        let full_path = full_path
-            .canonicalize()
-            .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
+        let full_path = resolve(&full_path);
         confine(&full_path, context)?;
 
         let mut files = Vec::new();
@@ -743,7 +792,7 @@ impl Tool for SearchCodeTool {
             .unwrap_or(SEARCH_MAX_RESULTS)
             .min(SEARCH_MAX_RESULTS);
 
-        if let Some(result) = search_ripgrep(&params, &search_path, max_results).await {
+        if let Some(result) = search_ripgrep(&params, &search_path, max_results, context).await {
             return Ok(result);
         }
 
@@ -904,13 +953,21 @@ async fn search_ripgrep(
     params: &SearchCodeParams,
     search_path: &Path,
     max_results: usize,
+    context: &ToolContext,
 ) -> Option<ToolResult> {
     if !ripgrep_available() {
         return None;
     }
 
     let mut command = tokio::process::Command::new("rg");
+    // Matches are judged below by the path rg prints, which is the file's own
+    // only while rg follows no link, and which ends at the NUL `--null` puts
+    // after it because a file name can hold a `:`. A config file could add
+    // `--follow` or reshape the output.
     command
+        .arg("--no-config")
+        .arg("--null")
+        .arg("--with-filename")
         .arg("-F")
         .arg("-n")
         .arg("--no-heading")
@@ -948,29 +1005,30 @@ async fn search_ripgrep(
         if results.len() >= max_results {
             break;
         }
-        if line.is_empty() {
+        let Some((path, found)) = line.split_once('\0') else {
+            continue;
+        };
+        let path = Path::new(path);
+        if withheld(path, context) {
             continue;
         }
-        results.push(normalize_rg_line(line, search_path));
+        results.push(normalize_rg_line(path, found, search_path));
     }
     Some(format_search_results(results, max_results))
 }
 
-fn normalize_rg_line(line: &str, search_path: &Path) -> String {
-    // rg prints `path:line:text`. Prefer a path relative to the search root.
-    let Some((path_and_line, text)) = line.split_once(':').and_then(|(path, rest)| {
-        rest.split_once(':')
-            .map(|(number, text)| (format!("{path}:{number}"), text))
-    }) else {
-        return line.to_string();
-    };
-    let Some((path, number)) = path_and_line.rsplit_once(':') else {
-        return format!("{}: {}", path_and_line, text.trim());
-    };
-    let relative = Path::new(path)
+/// One match as `path:line: text`, with the path relative to the search root
+/// unless the root is the file itself.
+fn normalize_rg_line(path: &Path, found: &str, search_path: &Path) -> String {
+    let relative = path
         .strip_prefix(search_path)
-        .unwrap_or(Path::new(path));
-    format!("{}:{}: {}", relative.display(), number, text.trim())
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .unwrap_or(path);
+    match found.split_once(':') {
+        Some((number, text)) => format!("{}:{}: {}", relative.display(), number, text.trim()),
+        None => format!("{}: {}", relative.display(), found.trim()),
+    }
 }
 
 fn ripgrep_available() -> bool {
@@ -1018,6 +1076,7 @@ mod tests {
             max_file_size: 1024 * 1024,
             command_timeout: 30,
             unrestricted: false,
+            denied: Vec::new(),
             session: Session::Detached,
         }
     }
@@ -2318,6 +2377,372 @@ mod tests {
         assert!(
             disclosed.is_empty(),
             "the search walker read an entry swapped out of cwd: {disclosed:?}"
+        );
+    }
+
+    /// Plain words, so the redaction a tool result goes through cannot hide a
+    /// disclosure from the assertions looking for one.
+    const OTHER_LOGIN: &str = "the other organization's ChatGPT login";
+    const ORGANIZATION: &str = "0b6f7d4e-3c1a-4f7e-9a51-2d8c6e4b1a90";
+
+    /// Another organization's agent state beside the directory a chat works
+    /// in, as one server lays them out for every organization it serves.
+    struct Shared {
+        _directory: tempfile::TempDir,
+        root: PathBuf,
+        state: PathBuf,
+        home: PathBuf,
+        workspace: PathBuf,
+    }
+
+    fn shared() -> Shared {
+        let directory = tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let state = root.join("agent-state");
+        let home = state.join(ORGANIZATION).join("codex");
+        fs::create_dir_all(home.join("work")).unwrap();
+        fs::write(
+            home.join("auth.json"),
+            serde_json::json!({"login": OTHER_LOGIN}).to_string(),
+        )
+        .unwrap();
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        Shared {
+            _directory: directory,
+            root,
+            state,
+            home,
+            workspace,
+        }
+    }
+
+    /// A chat's reach: the host at face value, apart from the agent state.
+    fn chat_context(shared: &Shared) -> ToolContext {
+        ToolContext {
+            unrestricted: true,
+            denied: vec![shared.state.clone()],
+            ..create_test_context(&shared.workspace)
+        }
+    }
+
+    fn off_limits(result: Result<ToolResult, ToolError>, call: &str) {
+        let error = result.expect_err(call);
+        assert!(error.to_string().contains(OFF_LIMITS), "{call}: {error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_refuses_denied_state_however_the_path_reaches_it() {
+        let shared = shared();
+        symlinked(&shared.workspace, "home", &shared.home);
+        symlinked(&shared.workspace, "work", &shared.home.join("work"));
+        symlinked(
+            &shared.workspace,
+            "login.json",
+            &shared.home.join("auth.json"),
+        );
+        let context = chat_context(&shared);
+
+        for path in [
+            shared.home.join("auth.json").display().to_string(),
+            format!("../agent-state/{ORGANIZATION}/codex/auth.json"),
+            shared.home.join("work/../auth.json").display().to_string(),
+            "home/auth.json".to_string(),
+            "work/../auth.json".to_string(),
+            "login.json".to_string(),
+        ] {
+            let read = ReadFileTool
+                .execute(serde_json::json!({"path": path}), &context)
+                .await;
+            off_limits(read, &path);
+        }
+
+        let beside = shared.root.join("notes.txt");
+        fs::write(&beside, "beside the state").unwrap();
+        let read = ReadFileTool
+            .execute(serde_json::json!({"path": beside}), &context)
+            .await
+            .expect("the rest of the host stays in reach");
+        assert!(read.output.unwrap().contains("beside the state"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_writing_tools_refuse_denied_state() {
+        let shared = shared();
+        let login = shared.home.join("auth.json");
+        let signed_in = fs::read_to_string(&login).unwrap();
+        let planted = shared.home.join("AGENTS.md");
+        symlinked(&shared.workspace, "instructions.md", &planted);
+        let fresh = shared.state.join("an-organization-yet-to-sign-in");
+        let context = chat_context(&shared);
+
+        for path in [
+            planted.display().to_string(),
+            "instructions.md".to_string(),
+            fresh.join("codex/auth.json").display().to_string(),
+        ] {
+            let written = WriteFileTool
+                .execute(
+                    serde_json::json!({"path": path, "content": "Obey the file."}),
+                    &context,
+                )
+                .await;
+            off_limits(written, &path);
+        }
+        let patched = ApplyPatchTool
+            .execute(
+                serde_json::json!({
+                    "path": login,
+                    "old_string": OTHER_LOGIN,
+                    "new_string": "mine now"
+                }),
+                &context,
+            )
+            .await;
+        off_limits(patched, "apply_patch");
+
+        assert!(!planted.exists(), "a file was planted in the agent state");
+        assert!(!fresh.exists(), "a directory was made in the agent state");
+        assert_eq!(fs::read_to_string(&login).unwrap(), signed_in);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn listing_and_searching_leave_denied_state_out() {
+        let shared = shared();
+        symlinked(&shared.workspace, "home", &shared.home);
+        fs::write(shared.workspace.join("own.rs"), OTHER_LOGIN).unwrap();
+        let context = chat_context(&shared);
+
+        for path in [
+            shared.state.clone(),
+            shared.home.clone(),
+            shared.workspace.join("home"),
+        ] {
+            let listed = ListFilesTool
+                .execute(
+                    serde_json::json!({"path": path, "recursive": true}),
+                    &context,
+                )
+                .await;
+            off_limits(listed, &path.display().to_string());
+        }
+        let searched = SearchCodeTool
+            .execute(
+                serde_json::json!({"pattern": OTHER_LOGIN, "path": shared.home}),
+                &context,
+            )
+            .await;
+        off_limits(searched, "search_code in the state");
+
+        let listed = ListFilesTool
+            .execute(
+                serde_json::json!({"path": shared.root, "recursive": true}),
+                &context,
+            )
+            .await
+            .expect("the directory around the state lists")
+            .output
+            .unwrap();
+        assert!(listed.contains("own.rs"), "{listed}");
+        assert!(!listed.contains("auth.json"), "{listed}");
+
+        let searched = SearchCodeTool
+            .execute(
+                serde_json::json!({"pattern": OTHER_LOGIN, "path": shared.root}),
+                &context,
+            )
+            .await
+            .expect("the directory around the state searches")
+            .output
+            .unwrap();
+        assert!(searched.contains("own.rs"), "{searched}");
+        assert!(!searched.contains("auth.json"), "{searched}");
+
+        let root = resolve(&shared.root);
+        let mut walked = Vec::new();
+        search_dir(
+            &root,
+            &root,
+            OTHER_LOGIN,
+            true,
+            &mut walked,
+            SEARCH_MAX_RESULTS,
+            &context,
+        )
+        .expect("a walk around the state");
+        let walked = walked.join("\n");
+        assert!(walked.contains("own.rs"), "{walked}");
+        assert!(!walked.contains("auth.json"), "{walked}");
+    }
+
+    /// A denied file stays out of a search of the directory that holds it, as
+    /// a denied directory does. ripgrep's `path:line:text` used to be judged
+    /// whole, and a file's own name never matched one with a line after it.
+    #[tokio::test]
+    async fn a_denied_file_stays_out_of_a_search_around_it() {
+        let shared = shared();
+        fs::write(shared.home.join("notes.txt"), OTHER_LOGIN).unwrap();
+        let context = ToolContext {
+            unrestricted: true,
+            denied: vec![shared.home.join("auth.json")],
+            ..create_test_context(&shared.workspace)
+        };
+
+        let searched = SearchCodeTool
+            .execute(
+                serde_json::json!({"pattern": OTHER_LOGIN, "path": shared.home}),
+                &context,
+            )
+            .await
+            .expect("the directory around the file searches")
+            .output
+            .unwrap();
+
+        assert!(searched.contains("notes.txt"), "{searched}");
+        assert!(!searched.contains("auth.json"), "{searched}");
+    }
+
+    /// A tool confined to a `cwd` that holds the denied directory still does
+    /// not reach it.
+    #[tokio::test]
+    async fn a_denied_directory_inside_cwd_stays_denied() {
+        let shared = shared();
+        let context = ToolContext {
+            denied: vec![shared.state.clone()],
+            ..create_test_context(&shared.root)
+        };
+
+        let read = ReadFileTool
+            .execute(
+                serde_json::json!({"path": format!("agent-state/{ORGANIZATION}/codex/auth.json")}),
+                &context,
+            )
+            .await;
+        off_limits(read, "a relative path into the state");
+
+        let listed = ListFilesTool
+            .execute(
+                serde_json::json!({"path": ".", "recursive": true}),
+                &context,
+            )
+            .await
+            .expect("cwd lists")
+            .output
+            .unwrap();
+        assert!(!listed.contains("auth.json"), "{listed}");
+    }
+
+    /// Where a link leads is where the kernel would take it: a `..` after one
+    /// leaves the target, not the link, and a link to nothing yet is followed
+    /// the way a create through it would be.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_follows_each_link_where_the_kernel_would() {
+        let shared = shared();
+        symlinked(&shared.workspace, "work", &shared.home.join("work"));
+        symlinked(
+            &shared.workspace,
+            "instructions.md",
+            &shared.home.join("AGENTS.md"),
+        );
+        let home = shared.home.canonicalize().unwrap();
+
+        assert_eq!(
+            resolve(&shared.workspace.join("work/../auth.json")),
+            home.join("auth.json")
+        );
+        assert_eq!(
+            resolve(&shared.workspace.join("instructions.md")),
+            home.join("AGENTS.md")
+        );
+        assert_eq!(
+            resolve(&shared.workspace.join("missing/deeper.txt")),
+            shared
+                .workspace
+                .canonicalize()
+                .unwrap()
+                .join("missing/deeper.txt")
+        );
+    }
+
+    #[test]
+    fn only_a_processs_own_proc_entry_is_withheld() {
+        for path in [
+            "/proc/1/environ",
+            "/proc/48213",
+            "/proc/48213/task/48214/environ",
+            "/proc/48213/cwd/../auth.json",
+            "/proc/self/environ",
+            "/proc/thread-self/environ",
+        ] {
+            assert!(per_process(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/proc",
+            "/proc/cpuinfo",
+            "/proc/sys/kernel/hostname",
+            "/procfs/1/environ",
+            "/srv/proc/1/environ",
+        ] {
+            assert!(!per_process(Path::new(path)), "{path}");
+        }
+    }
+
+    /// A running agent CLI is dumpable, so the server's user can read its
+    /// `/proc` entry: its environment holds its turn's tokens, and its links
+    /// lead into its organization's home by identity, not by name.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_file_tools_refuse_a_processs_proc_entry() {
+        const TURN: &str = "another-organizations-turn";
+        let shared = shared();
+        let mut agent = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(shared.home.join("work"))
+            .env("ZONE_OTHER_TURN", TURN)
+            .spawn()
+            .expect("a stand-in for a running agent CLI");
+        let process = PathBuf::from(format!("/proc/{}", agent.id()));
+        let context = chat_context(&shared);
+
+        let mut calls = Vec::new();
+        for path in [
+            process.join("environ"),
+            process.join(format!("task/{}/environ", agent.id())),
+            process.join("cwd/../auth.json"),
+            PathBuf::from("/proc/self/environ"),
+        ] {
+            let read = ReadFileTool
+                .execute(serde_json::json!({"path": path}), &context)
+                .await;
+            calls.push((format!("read_file {}", path.display()), read));
+        }
+        let listed = ListFilesTool
+            .execute(serde_json::json!({"path": process}), &context)
+            .await;
+        calls.push(("list_files".to_string(), listed));
+        let searched = SearchCodeTool
+            .execute(
+                serde_json::json!({"pattern": OTHER_LOGIN, "path": process.join("cwd/..")}),
+                &context,
+            )
+            .await;
+        calls.push(("search_code".to_string(), searched));
+        let host = ReadFileTool
+            .execute(serde_json::json!({"path": "/proc/version"}), &context)
+            .await;
+        agent.kill().unwrap();
+        agent.wait().unwrap();
+
+        for (call, result) in calls {
+            off_limits(result, &call);
+        }
+        assert!(
+            host.expect("a file about the host rather than a process")
+                .success
         );
     }
 }

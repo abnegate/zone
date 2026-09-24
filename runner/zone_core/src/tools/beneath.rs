@@ -17,14 +17,14 @@ use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag, openat, readlinkat};
 use nix::sys::stat::{Mode, SFlag, fstatat, mkdirat};
 
-use super::{ToolContext, ToolError};
+use super::{ToolContext, ToolError, file};
 
 /// `openat2` answers `EXDEV` when `RESOLVE_BENEATH` would be broken, so the
 /// walk answers the same and one mapping covers both resolutions.
 const ESCAPED: Errno = Errno::EXDEV;
 const FILE_MODE: Mode = Mode::from_bits_truncate(0o666);
 const DIRECTORY_MODE: Mode = Mode::from_bits_truncate(0o777);
-const LINKS: usize = 40;
+pub(super) const LINKS: usize = 40;
 
 /// What the caller intends to do with the descriptor it asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,7 +60,11 @@ impl Access {
     }
 }
 
+/// What the context withholds is refused by name before the open, unlike the
+/// confinement below, so it holds against the path a caller names rather than
+/// against a symlink swapped in while the open runs.
 pub(crate) fn open(context: &ToolContext, path: &Path, access: Access) -> Result<File, ToolError> {
+    file::confine(&file::resolve(&context.cwd.join(path)), context)?;
     if context.unrestricted {
         return access
             .options()
@@ -80,6 +84,7 @@ pub(crate) fn open(context: &ToolContext, path: &Path, access: Access) -> Result
 }
 
 pub(crate) fn create_dir_all(context: &ToolContext, path: &Path) -> Result<(), ToolError> {
+    file::confine(&file::resolve(&context.cwd.join(path)), context)?;
     if context.unrestricted {
         return fs::create_dir_all(context.cwd.join(path))
             .map_err(|error| failed("create directory", error));

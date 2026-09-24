@@ -247,9 +247,13 @@ pub struct ToolContext {
     ///
     /// Off by default: file tools stay inside the working directory and
     /// `run_command` is held to its allow-list. On, they address the host
-    /// directly and paths are taken at face value. Only turn this on where
-    /// the caller has asked for it and knows what it means.
+    /// directly, apart from what `denied` withholds from the file tools. Only
+    /// turn this on where the caller has asked for it and knows what it means.
     pub unrestricted: bool,
+    /// Paths no file tool reads, lists, searches or writes beneath, however
+    /// the path it is given reaches them. Every process's `/proc` entry is
+    /// withheld the same way without being listed here.
+    pub denied: Vec<std::path::PathBuf>,
     /// Which chat or task run this tool call belongs to.
     pub session: Session,
 }
@@ -262,6 +266,7 @@ impl Default for ToolContext {
             max_file_size: 10 * 1024 * 1024, // 10MB
             command_timeout: 300,            // 5 minutes
             unrestricted: false,
+            denied: Vec::new(),
             session: Session::Detached,
         }
     }
@@ -716,6 +721,7 @@ mod tests {
         assert!(context.cwd.exists() || context.cwd.as_os_str().is_empty());
         assert_eq!(context.max_file_size, 10 * 1024 * 1024);
         assert_eq!(context.command_timeout, 300);
+        assert!(context.denied.is_empty());
     }
 
     #[test]

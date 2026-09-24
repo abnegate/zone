@@ -601,6 +601,7 @@ mod tests {
             max_file_size: 1024 * 1024,
             command_timeout: 30,
             unrestricted: false,
+            denied: Vec::new(),
             session: Session::Detached,
         }
     }
