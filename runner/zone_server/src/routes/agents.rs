@@ -3,6 +3,8 @@
 
 mod failure;
 mod kind;
+mod receipt_request;
+mod status_query;
 
 use axum::{
     Json,
@@ -26,6 +28,8 @@ use crate::services::login::status::{AgentStatus, Viewer};
 use crate::services::login::{devices, oauth};
 use crate::state::AppState;
 use failure::Failure;
+use receipt_request::ReceiptRequest;
+use status_query::StatusQuery;
 
 const UNKNOWN_AGENT: &str = "No coding agent has that name";
 const NO_CODE: &str = "Codex signs in with a device code; only a Claude sign-in takes a pasted one";
@@ -50,18 +54,6 @@ pub struct StartRequest {
 pub struct CodeRequest {
     /// `code#state` as Claude shows it, or the whole callback URL.
     pub code: SecretValue,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReceiptRequest {
-    /// What the callback listener sent the browser on to the console with.
-    pub receipt: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct StatusQuery {
-    /// The caller's own Claude sign-in, whose failure the status then carries.
-    pub attempt: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

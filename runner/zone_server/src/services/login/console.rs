@@ -4,11 +4,12 @@
 use reqwest::Url;
 use uuid::Uuid;
 
+use super::claude::ROOT_PATH;
+
 const SCHEMES: [&str; 2] = ["http", "https"];
 const LOCALHOST: &str = "localhost";
 const LOCALHOST_SUFFIX: &str = ".localhost";
 const LOOPBACK_ADDRESSES: [&str; 2] = ["127.0.0.1", "[::1]"];
-const ROOT_PATH: &str = "/";
 
 /// Where the browser finishes a sign-in, with the receipt the callback gave it.
 pub const RETURN_PATH: &str = "/agent-sign-in";

@@ -10,6 +10,9 @@ pub const LOOPBACK_SCHEME: &str = "http";
 /// The path of every loopback redirect, and the only one Zone's callback listener serves.
 pub const CALLBACK_PATH: &str = "/callback";
 
+/// The path of a bare origin, which names no path of its own.
+pub const ROOT_PATH: &str = "/";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Redirect {
     /// claude.com's own page, which shows the code to paste.

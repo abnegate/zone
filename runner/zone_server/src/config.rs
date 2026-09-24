@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zone_core::llm::{AgentKind, CodexSandbox};
 
-use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME};
+use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME, ROOT_PATH};
 
 /// Settings live with the clients that consume them.
 pub use zone_comfy::Config as ComfyUiConfig;
@@ -183,9 +183,6 @@ const AGENT_CALLBACK: &str = "ZONE_AGENT_CALLBACK";
 const AGENT_CALLBACK_BIND: &str = "ZONE_AGENT_CALLBACK_BIND";
 
 const DEFAULT_CALLBACK_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
-
-/// The path of a callback base, which names no path of its own.
-const ROOT_PATH: &str = "/";
 
 /// The XDG base directory for user state.
 const STATE_HOME: &str = "XDG_STATE_HOME";

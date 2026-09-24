@@ -21,7 +21,7 @@ pub use code::Code;
 pub use error::Error;
 pub use flow::Flow;
 pub use plan::label;
-pub use redirect::{CALLBACK_PATH, LOOPBACK_HOST, LOOPBACK_SCHEME, Redirect};
+pub use redirect::{CALLBACK_PATH, LOOPBACK_HOST, LOOPBACK_SCHEME, ROOT_PATH, Redirect};
 pub use refusal::Refusal;
 pub use reply::Reply;
 pub use scope::Scope;
