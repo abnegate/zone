@@ -317,7 +317,10 @@ progress survives switching to another settings tab and back.
 When a refresh token came with it, Zone renews a Claude token before handing
 it to a turn if the token would expire within the longest turn it may be
 handed to: an hour, the longest a task attempt runs, or
-`ZONE_CHAT_TIMEOUT_SECONDS` when that is longer. A task run takes the token
+`ZONE_CHAT_TIMEOUT_SECONDS` when that is longer. A renewal lasts no longer
+than the lifetime Claude grants a token, so Zone never renews a token while
+more than half that lifetime is left. A chat allowed to run longer than half a
+token's lifetime can therefore outlive its token. A task run takes the token
 afresh for each attempt. Concurrent turns renew it once, and a renewal that
 fails before the token expires leaves the current token in use.
 
