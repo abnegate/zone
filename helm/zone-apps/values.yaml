@@ -105,8 +105,9 @@ server:
     maxReplicas: 10
     targetCPUUtilization: 70
 
-  # ZONE_AGENT_CALLBACK stays unset: its loopback Claude sign-in reaches only
-  # a browser on the machine Zone runs on, never a pod, so codes are pasted.
+  # ZONE_AGENT_CALLBACK stays unset, so Claude codes are pasted. Its loopback
+  # sign-in reaches a pod only through kubectl port-forward of the callback
+  # port and the console; see the install notes.
   env:
     PORT: "8000"
     HOST: "0.0.0.0"

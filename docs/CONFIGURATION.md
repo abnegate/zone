@@ -229,40 +229,48 @@ organizations that must not see each other's data.
 
 ### `ZONE_AGENT_CALLBACK`
 - **Default**: unset, so admins paste the code claude.com shows. Compose sets
-  `http://localhost:54545` unless `.env` sets it; an empty value there turns it
-  off. The Helm chart leaves it unset.
-- **Description**: Where claude.com sends the admin's browser back with a
-  Claude sign-in's code, as it does for claude's own sign-in, so nothing is
-  pasted. Zone listens there, on a port of its own, for
-  `GET /callback?code=…&state=…` and serves nothing else; see *Signing in*.
-- **Use it only where the browser runs on the machine Zone runs on**: a native
-  run, or the compose stack on the admin's own computer. On a remote server,
-  `localhost` is the admin's computer, so the browser never reaches Zone and
-  its tab shows a connection error. Leave it unset there. The panel offers
-  **Paste a code instead** either way.
+  it to `ZONE_AGENT_CALLBACK_PORT`, 54545 unless `.env` names another port; an
+  empty `ZONE_AGENT_CALLBACK_PORT` turns it off. The Helm chart leaves it
+  unset.
+- **Description**: The port of `http://localhost:<port>/callback`, where
+  claude.com sends the admin's browser back with a Claude sign-in's code, as it
+  does for claude's own sign-in, so nothing is pasted. Zone listens there, on a
+  port of its own, for `GET /callback?code=…&state=…` and serves nothing else;
+  see *Signing in*.
+- **It serves only a browser on the machine Zone runs on**, with the console
+  open at a localhost address such as `http://manager.localhost` or
+  `http://localhost:3000`: a native run, or the compose stack on the admin's
+  own computer. A console open anywhere else asks claude.com for a code to
+  paste instead, so a remote stack keeps working with the callback on. A
+  browser on another machine can use the callback through an SSH tunnel that
+  forwards it and the console, such as
+  `ssh -L 54545:localhost:54545 -L 8080:localhost:80 <zone-host>` with the
+  console opened at `http://manager.localhost:8080`.
 - **Why nothing turns it on natively**: Zone cannot tell where the admin's
-  browser runs. A server bound to loopback can still sit behind a reverse proxy
-  or an SSH tunnel, where every sign-in sent back to `localhost` would fail, so
-  only the operator can turn it on.
-- **Note**: Must be exactly `http://localhost:<port>`, the only address
-  claude.com sends a sign-in back to, so `127.0.0.1`, `https`, a path or a
+  browser runs, so only the operator can turn it on.
+- **Note**: Must be `http://localhost:<port>`, the only address claude.com
+  sends a sign-in back to, or the port alone. `127.0.0.1`, `https`, a path or a
   missing port is refused at boot. The server also refuses to start when it
   cannot listen on that port.
 
 ### `ZONE_AGENT_CALLBACK_BIND`
-- **Default**: `127.0.0.1`. Compose sets `0.0.0.0`.
-- **Description**: The address the callback listener binds, on the port
-  `ZONE_AGENT_CALLBACK` names. Loopback keeps it to browsers on the server's
-  own machine.
+- **Default**: `127.0.0.1`, on the port `ZONE_AGENT_CALLBACK` names. Compose
+  sets `0.0.0.0:54545`.
+- **Description**: The address, and optionally the port, the callback listener
+  binds. Loopback keeps it to browsers on the server's own machine. A port here
+  differs from the callback's only when a port mapping sits between the
+  browser and the listener. Outside a container, the server warns at boot when
+  the listener binds anything but loopback.
 - **Compose**: Docker hands a published port to the container's own interface,
-  never to its loopback, so the listener inside binds `0.0.0.0`, and the
-  publish, `127.0.0.1:54545:54545`, keeps it to the host's own loopback. Other
-  containers on the compose network can reach it, as they can reach the API.
-  Keep the port at 54545 there, or change the publish to match. Under the
-  `vpn` profile the manager shares Gluetun's network, so Gluetun publishes the
-  port and lets it through its firewall.
-- **Note**: Must be an IP address. Anything else is refused at boot, even with
-  no callback set.
+  never to its loopback, so the listener inside binds `0.0.0.0:54545`, and the
+  publish, `127.0.0.1:${ZONE_AGENT_CALLBACK_PORT}:54545`, keeps it to the
+  host's own loopback. Other containers on the compose network can reach it,
+  as they can reach the API. Under the `vpn` profile the manager shares
+  Gluetun's network, so Gluetun publishes the port and lets it through its
+  firewall.
+- **Note**: Must be an IP address, or an IP address and port such as
+  `0.0.0.0:54545`. Anything else is refused at boot, even with no callback
+  set.
 
 ### `ZONE_CODEX_SANDBOX`
 - **Default**: `workspace-write`. The manager image sets `danger-full-access`,
@@ -328,26 +336,31 @@ or out. Other members see the status, with "Ask an organization admin to sign
 in" while the agent is not signed in.
 
 **Claude Code** uses the sign-in `claude setup-token` uses. How the code gets
-back to Zone depends on `ZONE_AGENT_CALLBACK`.
+back to Zone depends on `ZONE_AGENT_CALLBACK` and on where the console is open.
 
-With a callback, as in compose, nothing is pasted:
+With a callback, as in compose, and the console open at a localhost address on
+the machine Zone runs on, nothing is pasted:
 
-1. **Sign in with Claude** gives you a link to claude.com. Sign in there and
-   approve access. The panel says "Approve on claude.com; Zone finishes the
-   sign-in automatically."
-2. claude.com sends your browser to `http://localhost:<port>/callback` with the
-   code, and Zone finishes the sign-in there. The tab then says "Signed in to
+1. **Sign in with Claude** gives you a link to claude.com. Open it in the same
+   browser, sign in there and approve access. The panel says "Approve on
+   claude.com; Zone finishes the sign-in automatically."
+2. claude.com sends that tab to `http://localhost:<port>/callback` with the
+   code. Zone keeps the code under a one-time receipt and sends the tab on to
+   the console's `/agent-sign-in` page, which hands the receipt back with your
+   Zone session. Zone then exchanges the code, and the tab says "Signed in to
    Claude"; you can close it.
 3. The panel checks every three seconds, backing off while checks fail, and
-   shows Signed in once the sign-in is recorded. When it fails at the
-   callback, because claude.com did not approve, would not grant the access
-   Zone asked for, or refused the code, the tab says why, and so does the
-   panel, which then offers **Start again** and **Try again with full access**.
+   shows Signed in once the sign-in is recorded. When it fails, because
+   claude.com did not approve, would not grant the access Zone asked for, put
+   the Claude account on hold, could not answer, or refused the code, the tab
+   says why, and so does the panel, which then offers **Start again** and
+   **Try again with full access**.
 
 **Paste a code instead**, beside the link, starts a new sign-in whose code
 claude.com shows for pasting. Use it when the browser cannot reach the
-callback, such as when the tab shows a connection error. Without a callback,
-every sign-in works this way:
+callback, such as when the tab shows a connection error; the address of that
+tab's page can be pasted as well. A console open anywhere but a localhost
+address, and a server without a callback, start every sign-in this way:
 
 1. **Sign in with Claude** gives you a link to claude.com. Sign in there and
    approve access.
@@ -355,21 +368,36 @@ every sign-in works this way:
    into **Code from claude.com** and submit it.
 
 Either way, the admin who started has to finish within ten minutes. The panel
-shows until when, and drops the link once that time has passed. Zone exchanges
-the code at `ZONE_CLAUDE_TOKEN_URL`, naming the same redirect the link named,
-and stores the tokens in the database, sealed with a key derived from
+shows until when, and drops the link once that time has passed. **Cancel**
+ends the sign-in on the server too, wherever its code is. Zone exchanges the
+code at `ZONE_CLAUDE_TOKEN_URL`, naming the same redirect the link named, and
+stores the tokens in the database, sealed with a key derived from
 `ENCRYPTION_KEY`. The panel shows the plan, such as Claude Team, when the token
 response names one. It shows an expiry date only for a sign-in Zone cannot
 renew, one whose token came without a refresh token.
 
-The callback request carries no Zone session, so its state is its only
-authority. The listener finishes only a state Zone issued for this flow, within
-its ten minutes and once; a state issued for pasting stays for its paste.
-Before it exchanges the code, it checks that the admin who started still
-manages the organization. Its page repeats nothing from the request and never
-redirects, the server logs neither the code nor the state, and the listener
-answers at most eight requests at once. Each admin has at most one sign-in in
-flight per organization: starting another abandons the first.
+The callback request carries no Zone session, so the listener never exchanges
+a code itself. It takes a state only once, within its ten minutes, when Zone
+issued it for this flow, and only at the `localhost:<port>` address the link
+named; a state issued for pasting stays for its paste. It parks the code under
+a one-time receipt and sends the browser to the console that started the
+sign-in, which Zone took from the start request's `Origin`, and only when that
+is a localhost address. Zone exchanges the code only when the receipt comes
+back with the Zone session that started the sign-in, from the admin who
+started it, who still manages the organization. It checks that again, and
+that the session is still signed in, in the transaction that records the
+tokens. A receipt handed back by anyone else, or from another session, discards
+the code and ends the sign-in, so a link someone else started cannot sign
+their organization in with your Claude account. A pasted code finishes only for
+the admin who started its sign-in, with the same checks on their role and on
+the session that started it. The page the
+listener shows repeats nothing from the request, the server logs neither the
+code, the state nor the receipt, and the listener answers at most 16
+connections at once, turns 16 more away with a busy page and closes the rest.
+A connection has ten seconds to send its request and 30 in all. Each admin has
+at most one sign-in in flight per organization: starting another abandons the
+first. A sign-in that finishes after a **Cancel** or a sign-out records
+nothing.
 
 Zone asks for inference access only, with a one-year lifetime, as
 `claude setup-token` does. If claude.com refuses that on its page, **Try again
@@ -437,27 +465,35 @@ Settings > AI Settings." A task run that fails that way stops without spending
 its retries, since a retry signs no one in.
 
 **Signing out** deletes the organization's Claude tokens from Zone; it does not
-revoke them with Anthropic. For Codex it stops a sign-in in progress and runs
-`codex logout`, which asks OpenAI to revoke the login and deletes `auth.json`.
-The panel asks before it signs out, since the sign-out applies to every
-workspace of the organization. Sign-ins and sign-outs are recorded in the
-organization's audit log as `agent.signed_in` and `agent.signed_out`. Deleting
-the organization deletes its Claude tokens with it, drops any Claude sign-in
-still waiting for its code, and signs it out of codex the same way.
+revoke them with Anthropic. For Claude it also ends every sign-in to the
+organization still in flight, and forgets why any failed. For Codex it stops a
+sign-in in progress and runs `codex logout`, which asks OpenAI to revoke the
+login and deletes `auth.json`. The panel asks before it signs out, since the
+sign-out applies to every workspace of the organization. Sign-ins and
+sign-outs are recorded in the organization's audit log as `agent.signed_in`
+and `agent.signed_out`, the sign-in even when the browser that finished it
+went away before Claude answered. Deleting the organization deletes its Claude
+tokens with it, drops every Claude sign-in still in flight, and signs it out of
+codex the same way.
 
 The panel uses these routes, where `{agent}` is `claude` or `codex`:
 
 | Route | Who | What |
 |-------|-----|------|
 | `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models |
-| `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status |
-| `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access, and `{"flow":"paste"}` asks for a code to paste even with a callback. A claude answer's `flow` says how its code comes back: `loopback` or `paste` |
+| `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status. With `?attempt={attempt}`, a Claude status's `error` says why that sign-in failed, to the admin who started it |
+| `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access, and `{"flow":"paste"}` asks for a code to paste even with a callback. A claude answer's `flow` says how its code comes back, `loopback` or `paste`, and its `attempt` names the sign-in. The callback is used only when the request's `Origin` is a localhost address; `{"flow":"loopback"}` from anywhere else is refused |
 | `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}`; a code that fails carries a `kind`, `invalid_code` (paste again) or `start_again` |
+| `POST /api/organizations/{org_id}/agents/claude/login/receipt` | The admin who started, in the session that started it | Finish a Claude sign-in claude.com sent back to the callback, with `{"receipt":"..."}` from the address the callback sent the browser to. Anyone else's spends the receipt and discards the code |
+| `DELETE /api/organizations/{org_id}/agents/claude/login/attempt` | Any member, for their own | End the caller's Claude sign-in, wherever its code is |
 | `DELETE /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Sign out |
 
 The callback, `GET /callback`, is served by the callback listener on the port
-`ZONE_AGENT_CALLBACK` names, not by the API. A Claude sign-in that failed there
-shows why in the agent's status `error` until the next sign-in starts.
+`ZONE_AGENT_CALLBACK` names, not by the API. It answers an approved sign-in
+with a redirect to `/agent-sign-in?receipt=…&organization=…` on the console
+that started it. A Claude sign-in that failed there, or once its receipt came
+back, shows why in the agent's status `error`, to the admin who started it and
+asks with its `attempt`, until they start another.
 
 ### How a turn runs
 
@@ -700,7 +736,8 @@ not-signed-in error above.
 
 To sign an organization in to Claude natively without pasting a code, set
 `ZONE_AGENT_CALLBACK=http://localhost:54545` (any free port) when the admins'
-browsers run on the same machine as the server.
+browsers run on the same machine as the server and open the console at a
+localhost address.
 
 ### Security: every organization is the same OS user
 
@@ -806,20 +843,24 @@ once approved, and its file tools read whatever else the server's user can.
   `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`),
   `ZONE_AGENT_ENV_PASSTHROUGH`, `ZONE_CODEX_SANDBOX` (default
   `danger-full-access`), `ZONE_CLAUDE_TOKEN_URL` (empty by default, which
-  keeps Claude's own endpoint), `ZONE_AGENT_CALLBACK` (default
-  `http://localhost:54545`) and `ZONE_AGENT_CALLBACK_BIND=0.0.0.0`, and
-  publishes the callback as `127.0.0.1:54545:54545`, on the host's loopback
-  only. Set `ZONE_AGENT_CALLBACK=` in `.env` for a stack whose admins' browsers
-  run elsewhere. The image's entrypoint hands `/app/agent-state` to `zone` with
-  mode 0700, then runs the server as `zone`. The `dev` profile's image,
-  `manager/Dockerfile.dev`, does not include the CLIs.
+  keeps Claude's own endpoint), `ZONE_AGENT_CALLBACK` and
+  `ZONE_AGENT_CALLBACK_BIND=0.0.0.0:54545`, and publishes the callback on the
+  host's loopback only, as `127.0.0.1:${ZONE_AGENT_CALLBACK_PORT}:54545`.
+  `ZONE_AGENT_CALLBACK_PORT` in `.env` drives both, 54545 by default; empty, it
+  turns the callback off and leaves the port free. Admins whose browsers run
+  elsewhere paste codes either way. The image's entrypoint hands
+  `/app/agent-state` to `zone` with mode 0700, then runs the server as `zone`.
+  The `dev` profile's image, `manager/Dockerfile.dev`, does not include the
+  CLIs.
 - **Helm.** Agent providers need `server.replicaCount: 1` and
   `server.autoscaling.enabled: false`, and a single replica needs
   `server.podDisruptionBudget.enabled: false`; see
   [helm/zone-apps/README.md](../helm/zone-apps/README.md), which also covers
-  the claim that keeps agent state and how to size it. Leave
-  `ZONE_AGENT_CALLBACK` unset: a pod is never the admin's `localhost`, so
-  Claude codes are pasted, and the install notes warn if it is set.
+  the claim that keeps agent state and how to size it. The chart leaves
+  `ZONE_AGENT_CALLBACK` unset, so Claude codes are pasted. A browser reaches a
+  pod's callback only through `kubectl port-forward` of both the callback port
+  and the console to its own machine; the install notes say how when it is
+  set.
 - **Backups.** `make backup` and `make restore` include
   `zone_manager_agent_state`, and with it every organization's codex login; see
   [OPERATIONS.md](OPERATIONS.md).
@@ -831,9 +872,10 @@ once approved, and its file tools read whatever else the server's user can.
   one of the spellings above; a `ZONE_CLAUDE_TOKEN_URL` that is not an absolute
   `http` or `https` URL with a host, or that carries credentials, a query or a
   fragment; a `ZONE_CODEX_SANDBOX` other than `workspace-write` or
-  `danger-full-access`; a `ZONE_AGENT_CALLBACK` that is not exactly
-  `http://localhost:<port>`, or whose port the server cannot listen on; a
-  `ZONE_AGENT_CALLBACK_BIND` that is not an IP address. Nothing is created in
+  `danger-full-access`; a `ZONE_AGENT_CALLBACK` that is not
+  `http://localhost:<port>` or a port, or whose port the server cannot listen
+  on; a `ZONE_AGENT_CALLBACK_BIND` that is not an IP address, or an IP address
+  and port. Nothing is created in
   the state directory at boot, so one the server cannot write shows up when a
   turn first needs it, as "Could not prepare the claude CLI's state directory:
   …".
@@ -1385,7 +1427,8 @@ Need to find a specific config? Quick lookup:
 - **Model backend and coding agents**: ZONE_LLM_BACKEND,
   ZONE_LLM_BACKEND_EXECUTABLE, ZONE_AGENT_STATE_DIR, ZONE_AGENT_HOST_LOGIN,
   ZONE_CLAUDE_TOKEN_URL, ZONE_AGENT_CALLBACK, ZONE_AGENT_CALLBACK_BIND,
-  ZONE_CODEX_SANDBOX, ZONE_AGENT_ENV_PASSTHROUGH, ZONE_CHAT_AGENT_CWD
+  ZONE_AGENT_CALLBACK_PORT, ZONE_CODEX_SANDBOX, ZONE_AGENT_ENV_PASSTHROUGH,
+  ZONE_CHAT_AGENT_CWD
 - **Image, video, and audio generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
   COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_VIDEO_WORKFLOW_PATH,
   COMFYUI_VIDEO_UNET, COMFYUI_VIDEO_CLIP, COMFYUI_VIDEO_VAE,

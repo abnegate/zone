@@ -88,10 +88,11 @@ database.
 {{- end }}
 {{- if .Values.server.env.ZONE_AGENT_CALLBACK }}
 
-NOTE: server.env.ZONE_AGENT_CALLBACK is set, but claude.com sends the admin's
-browser to localhost, which is the admin's own computer and never a pod: every
-Claude sign-in would fail to come back. Unset it, and admins paste the code
-claude.com shows instead.
+NOTE: server.env.ZONE_AGENT_CALLBACK is set. claude.com sends the admin's
+browser to localhost, which is the admin's own computer, so the sign-in comes
+back only through kubectl port-forward of that port and of the console, with
+the console opened at a localhost address. A console opened any other way asks
+for the code claude.com shows to be pasted instead.
 {{- end }}
 {{- end }}
 
