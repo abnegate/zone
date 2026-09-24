@@ -197,7 +197,12 @@ organizations that must not see each other's data.
   here. Zone does not prune the transcripts. Deleting an organization stops
   any codex sign-in it has in progress, runs `codex logout` in its codex home,
   and removes `<dir>/<organization id>` with everything in it. The delete
-  request waits for this, up to the 30 seconds `codex logout` is given.
+  request waits for any change to the organization's sign-ins already under
+  way, such as a sign-out, and for `codex logout`, which Zone stops after 30
+  seconds; the directory is then removed in the background. If a step fails,
+  the organization is still deleted and the server logs why. A
+  `<dir>/<organization id>` that is a link, or not a directory, is left in
+  place, and codex is not logged out.
 - **Note**: Must be an absolute path. A relative one is refused at boot, and so
   is an unset one when neither `XDG_STATE_HOME` nor `HOME` is absolute.
 
