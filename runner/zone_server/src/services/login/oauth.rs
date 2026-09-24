@@ -261,7 +261,7 @@ async fn complete(state: AppState, pending: Pending, code: Code) -> Result<(), E
 /// The tokens claude.com grants for `code` at the redirect its sign-in started with, asked for
 /// only while whoever started the sign-in manages the organization still.
 async fn grant(state: &AppState, pending: &Pending, code: &Code) -> Result<Tokens, Error> {
-    if !attempts::live(pending.attempt) {
+    if !attempts::claim(pending.attempt) {
         return Err(Error::Invalid(ENDED));
     }
     let mut connection = state.db().acquire().await?;

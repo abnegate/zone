@@ -529,7 +529,9 @@ The callback, `GET /callback`, is served by the callback listener on the port
 with a redirect to `/agent-sign-in#receipt=…&organization=…` on the console
 that started it. A Claude sign-in that failed there, or once its receipt came
 back, shows why in the agent's status `error`, to the admin who started it and
-asks with its `attempt`, until they start another.
+asks with its `attempt`, until they start another, for ten minutes after it
+failed. A sign-in that never finished is forgotten ten minutes after it
+started, or after its code began to be exchanged.
 
 ### How a turn runs
 

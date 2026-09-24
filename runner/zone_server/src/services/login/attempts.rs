@@ -1,13 +1,20 @@
 //! Claude sign-ins that may still finish, and why each one that failed away from its panel
-//! failed. Every change for an organization is made under its lock.
+//! failed. Every change for an organization is made under its lock. Each is kept for a sign-in's
+//! window, and starting a sign-in drops those whose window has closed.
 
 use std::sync::LazyLock;
+use std::time::Instant;
 
 use dashmap::DashMap;
 use uuid::Uuid;
 
-static LIVE: LazyLock<DashMap<Uuid, Attempt>> = LazyLock::new(DashMap::new);
-static FAILED: LazyLock<DashMap<Uuid, (Attempt, String)>> = LazyLock::new(DashMap::new);
+use super::pending::WINDOW;
+
+type Live = DashMap<Uuid, (Attempt, Instant)>;
+type Failed = DashMap<Uuid, (Attempt, String, Instant)>;
+
+static LIVE: LazyLock<Live> = LazyLock::new(DashMap::new);
+static FAILED: LazyLock<Failed> = LazyLock::new(DashMap::new);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Attempt {
@@ -17,10 +24,10 @@ pub struct Attempt {
 }
 
 /// Starts `attempt`, which abandons every earlier attempt of the same admin in the same
-/// organization, and forgets why they failed.
+/// organization, and forgets why they failed. Every attempt and failure whose window has closed
+/// goes too.
 pub fn begin(attempt: Attempt) {
-    cancel(attempt.organization, attempt.user);
-    LIVE.insert(attempt.id, attempt);
+    start(&LIVE, &FAILED, attempt, Instant::now());
 }
 
 /// Whether the attempt may still finish.
@@ -28,15 +35,21 @@ pub fn live(id: Uuid) -> bool {
     LIVE.contains_key(&id)
 }
 
+/// Whether the attempt may still finish, keeping it for another window when it may: its code is
+/// being exchanged, which can outlast the window the code came back in.
+pub fn claim(id: Uuid) -> bool {
+    keep(&LIVE, id, Instant::now())
+}
+
 /// Ends the attempt, which then can never finish.
 pub fn end(id: Uuid) {
     LIVE.remove(&id);
 }
 
-/// Ends the attempt and keeps why it failed, unless it had already ended.
+/// Ends the attempt and keeps why it failed for a window, unless it had already ended.
 pub fn fail(id: Uuid, reason: String) {
-    if let Some((_, attempt)) = LIVE.remove(&id) {
-        FAILED.insert(id, (attempt, reason));
+    if let Some((_, (attempt, _))) = LIVE.remove(&id) {
+        FAILED.insert(id, (attempt, reason, Instant::now() + WINDOW));
     }
 }
 
@@ -51,18 +64,34 @@ pub fn failure(id: Uuid, organization: Uuid, user: Uuid) -> Option<String> {
 /// Ends every attempt of `user` in `organization`, and forgets why they failed.
 pub fn cancel(organization: Uuid, user: Uuid) {
     let mine = |attempt: &Attempt| (attempt.organization, attempt.user) == (organization, user);
-    LIVE.retain(|_, attempt| !mine(attempt));
-    FAILED.retain(|_, (attempt, _)| !mine(attempt));
+    LIVE.retain(|_, (attempt, _)| !mine(attempt));
+    FAILED.retain(|_, (attempt, _, _)| !mine(attempt));
 }
 
 /// Ends every attempt in `organization`, and forgets why they failed.
 pub fn forget(organization: Uuid) {
-    LIVE.retain(|_, attempt| attempt.organization != organization);
-    FAILED.retain(|_, (attempt, _)| attempt.organization != organization);
+    LIVE.retain(|_, (attempt, _)| attempt.organization != organization);
+    FAILED.retain(|_, (attempt, _, _)| attempt.organization != organization);
+}
+
+fn start(live: &Live, failed: &Failed, attempt: Attempt, now: Instant) {
+    let earlier =
+        |held: &Attempt| (held.organization, held.user) == (attempt.organization, attempt.user);
+    live.retain(|_, (held, expires)| *expires > now && !earlier(held));
+    failed.retain(|_, (held, _, expires)| *expires > now && !earlier(held));
+    live.insert(attempt.id, (attempt, now + WINDOW));
+}
+
+fn keep(live: &Live, id: Uuid, now: Instant) -> bool {
+    live.get_mut(&id)
+        .map(|mut kept| kept.1 = now + WINDOW)
+        .is_some()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn attempt(organization: Uuid, user: Uuid) -> Attempt {
@@ -71,6 +100,10 @@ mod tests {
             organization,
             user,
         }
+    }
+
+    fn stranger() -> Attempt {
+        attempt(Uuid::new_v4(), Uuid::new_v4())
     }
 
     #[test]
@@ -90,6 +123,60 @@ mod tests {
         for kept in [second, colleague, elsewhere] {
             assert!(live(kept.id), "{kept:?}");
         }
+    }
+
+    #[test]
+    fn starting_an_attempt_drops_every_attempt_and_failure_whose_window_closed() {
+        let (live, failed) = (Live::new(), Failed::new());
+        let now = Instant::now();
+        let (abandoned, unread, current) = (stranger(), stranger(), stranger());
+        start(&live, &failed, abandoned, now);
+        start(&live, &failed, current, now + WINDOW / 2);
+        failed.insert(
+            unread.id,
+            (unread, "a failure nobody read".to_string(), now + WINDOW),
+        );
+
+        start(&live, &failed, stranger(), now + WINDOW);
+
+        assert!(
+            !live.contains_key(&abandoned.id),
+            "an attempt outlived its window"
+        );
+        assert!(
+            !failed.contains_key(&unread.id),
+            "a failure outlived its window"
+        );
+        assert!(
+            live.contains_key(&current.id),
+            "an attempt was dropped inside its window"
+        );
+    }
+
+    #[test]
+    fn an_attempt_whose_code_is_being_exchanged_outlives_its_window() {
+        let (live, failed) = (Live::new(), Failed::new());
+        let now = Instant::now();
+        let exchanging = stranger();
+        start(&live, &failed, exchanging, now);
+        let claimed = now + WINDOW - Duration::from_secs(1);
+
+        assert!(keep(&live, exchanging.id, claimed));
+        assert_eq!(
+            live.get(&exchanging.id).map(|kept| kept.1),
+            Some(claimed + WINDOW),
+            "a claimed attempt kept the window it started with"
+        );
+        start(&live, &failed, stranger(), now + WINDOW);
+
+        assert!(
+            live.contains_key(&exchanging.id),
+            "a sign-in whose code was being exchanged was dropped when its window closed"
+        );
+        assert!(
+            !keep(&live, Uuid::new_v4(), now),
+            "an attempt nobody started was kept"
+        );
     }
 
     #[test]
