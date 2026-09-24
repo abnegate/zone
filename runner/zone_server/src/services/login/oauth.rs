@@ -130,8 +130,12 @@ pub async fn receive(state: &AppState, reply: Reply) -> Result<Uuid, Error> {
         Ok(()) => {
             FAILURES.remove(&organization);
         }
+        Err(error @ (Error::Internal(_) | Error::Database(_))) => {
+            tracing::error!(%organization, %error, "Zone could not finish a Claude sign-in returned to its callback");
+            FAILURES.insert(organization, shown(error));
+        }
         Err(error) => {
-            tracing::warn!(%organization, %error, "A Claude sign-in returned to Zone did not finish");
+            tracing::info!(%organization, "A Claude sign-in returned to Zone's callback did not finish");
             FAILURES.insert(organization, shown(error));
         }
     }
@@ -144,6 +148,12 @@ pub fn failure(organization: Uuid) -> Option<String> {
     FAILURES
         .get(&organization)
         .map(|failure| failure.value().clone())
+}
+
+/// Drops a deleted organization's Claude sign-ins in flight, and why its last one failed.
+pub fn forget(organization: Uuid) {
+    pending::forget(organization);
+    FAILURES.remove(&organization);
 }
 
 /// Finishes a sign-in the callback listener received, once the admin who started it is found to
@@ -463,6 +473,43 @@ mod tests {
                 "a new sign-in still showed why the last one failed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn forgetting_an_organization_drops_its_sign_ins_and_why_the_last_one_failed() {
+        let (organization, user, colleague) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let loopback = Redirect::Loopback(PORT);
+        let waiting = parameter(
+            &start(organization, colleague, EMAIL, Scope::Inference, loopback).url,
+            "state",
+        );
+        let declined = parameter(
+            &start(organization, user, EMAIL, Scope::Inference, loopback).url,
+            "state",
+        );
+        receive(
+            &AppState::for_tests(),
+            refused(&declined, Refusal::Declined),
+        )
+        .await
+        .expect_err("a sign-in claude.com did not approve");
+        let elsewhere = Uuid::new_v4();
+        let unrelated = parameter(
+            &start(elsewhere, user, EMAIL, Scope::Inference, loopback).url,
+            "state",
+        );
+
+        forget(organization);
+
+        assert_eq!(failure(organization), None);
+        assert!(
+            pending::claim_loopback(&waiting).is_none(),
+            "a deleted organization's sign-in could still finish"
+        );
+        assert!(
+            pending::claim_loopback(&unrelated).is_some(),
+            "another organization's sign-in was dropped"
+        );
     }
 
     #[test]

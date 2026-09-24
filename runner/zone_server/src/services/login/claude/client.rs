@@ -105,7 +105,10 @@ impl Client {
         };
         let now = Utc::now();
         let mut tokens = self
-            .grant(&request, &[code.value.expose(), verifier.expose()])
+            .grant(
+                &request,
+                &[code.value.expose(), verifier.expose(), &code.state],
+            )
             .await?
             .tokens(now)?;
         if tokens.scope.is_empty() {
@@ -486,6 +489,31 @@ mod tests {
             "{message}"
         );
         assert!(!error.to_string().contains(CODE), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_rejection_repeats_nothing_the_exchange_sent() {
+        let (_server, client) = answering(
+            400,
+            json!({
+                "error": "invalid_grant",
+                "error_description": format!(
+                    "Code {CODE} with verifier {VERIFIER} does not answer state {STATE}"
+                ),
+            }),
+        )
+        .await;
+
+        let error = client
+            .exchange(&code(), &verifier(), Scope::Inference, Redirect::Paste)
+            .await
+            .expect_err("rejected");
+
+        let shown = error.to_string();
+        for sent in [CODE, VERIFIER, STATE] {
+            assert!(!shown.contains(sent), "the refusal repeats {sent}: {shown}");
+        }
+        assert!(shown.contains("does not answer state"), "{shown}");
     }
 
     #[tokio::test]

@@ -25,7 +25,7 @@ use zone_core::secret::redact;
 use super::codex::{self, CREDENTIALS, Device, Prompt};
 use super::error::Error;
 use super::locks::Locks;
-use super::{audit, probe};
+use super::{audit, oauth, probe};
 use crate::config::Config;
 use crate::db::agent_logins::{self, Upsert};
 use crate::db::organizations;
@@ -85,10 +85,11 @@ pub async fn sign_out(
         .await
 }
 
-/// Forgets everything this server keeps for a deleted organization's coding agents: a pending
-/// codex sign-in is stopped and codex logs out of the organization's home before it returns, and
-/// the organization's agent state is then removed in the background, which logs a removal that
-/// fails. It runs to the end even when its caller stops waiting for it.
+/// Forgets everything this server keeps for a deleted organization's coding agents: its Claude
+/// sign-ins in flight are dropped, a pending codex sign-in is stopped and codex logs out of the
+/// organization's home before it returns, and the organization's agent state is then removed in
+/// the background, which logs a removal that fails. It runs to the end even when its caller stops
+/// waiting for it.
 pub async fn forget(state: &AppState, organization: Uuid) -> Result<(), Error> {
     forget_with(state, organization, |directory: &Path| {
         fs::remove_dir_all(directory)
@@ -102,6 +103,7 @@ async fn forget_with(
     organization: Uuid,
     remove: impl FnOnce(&Path) -> io::Result<()> + Send + 'static,
 ) -> Result<(), Error> {
+    oauth::forget(organization);
     let state = state.clone();
     tokio::spawn(async move { DEVICES.forget(&state, organization, remove).await })
         .await
@@ -483,9 +485,11 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
     use crate::db::agent_logins::AgentLoginRow;
+    use crate::services::login::claude::{Redirect, Scope};
     use crate::services::login::codex::testing::{PROMPT, capture, script};
 
     const EMAIL: &str = "admin@example.com";
+    const CALLBACK_PORT: u16 = 54_545;
     const WAIT: Duration = Duration::from_secs(20);
     const PAUSE: Duration = Duration::from_millis(50);
     const ATTEMPTS: u128 = WAIT.as_millis() / PAUSE.as_millis();
@@ -890,6 +894,19 @@ esac"#
         DEVICES
             .failures
             .insert(scene.organization, "an earlier sign-in failed".to_string());
+        let claude = oauth::start(
+            scene.organization,
+            scene.user,
+            EMAIL,
+            Scope::Inference,
+            Redirect::Loopback(CALLBACK_PORT),
+        );
+        let claude_state = reqwest::Url::parse(&claude.url)
+            .expect("an authorize URL")
+            .query_pairs()
+            .find(|(name, _)| name == "state")
+            .map(|(_, value)| value.into_owned())
+            .expect("the sign-in's state");
         let organization_state = scene
             .home()
             .parent()
@@ -909,6 +926,10 @@ esac"#
         );
         assert!(pending(scene.organization).is_none());
         assert_eq!(failure(scene.organization), None);
+        assert!(
+            crate::services::login::pending::claim_loopback(&claude_state).is_none(),
+            "a deleted organization's Claude sign-in could still finish"
+        );
         assert!(
             until(|| !DEVICES.locks.kept(scene.organization)).await,
             "a deleted organization's lock was kept"

@@ -442,8 +442,8 @@ revoke them with Anthropic. For Codex it stops a sign-in in progress and runs
 The panel asks before it signs out, since the sign-out applies to every
 workspace of the organization. Sign-ins and sign-outs are recorded in the
 organization's audit log as `agent.signed_in` and `agent.signed_out`. Deleting
-the organization deletes its Claude tokens with it and signs it out of codex
-the same way.
+the organization deletes its Claude tokens with it, drops any Claude sign-in
+still waiting for its code, and signs it out of codex the same way.
 
 The panel uses these routes, where `{agent}` is `claude` or `codex`:
 

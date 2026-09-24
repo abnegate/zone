@@ -52,6 +52,15 @@ pub fn claim_loopback(state: &str) -> Option<Pending> {
     })
 }
 
+/// Drops every sign-in held for a deleted `organization`.
+pub fn forget(organization: Uuid) {
+    discard(&PENDING, organization);
+}
+
+fn discard(logins: &DashMap<String, Held>, organization: Uuid) {
+    logins.retain(|_, held| held.pending.organization != organization);
+}
+
 fn put(logins: &DashMap<String, Held>, state: String, pending: Pending, now: Instant) {
     logins.retain(|_, held| {
         held.expires > now
@@ -230,6 +239,37 @@ mod tests {
         for state in ["second", "colleague", "elsewhere"] {
             assert!(take(&logins, state, now, |_| true).is_some(), "{state}");
         }
+    }
+
+    #[test]
+    fn forgetting_an_organization_drops_its_logins_and_no_one_elses() {
+        let logins = DashMap::new();
+        let now = Instant::now();
+        let organization = Uuid::new_v4();
+        put(
+            &logins,
+            "admin".to_string(),
+            pending(organization, Uuid::new_v4()),
+            now,
+        );
+        put(
+            &logins,
+            "colleague".to_string(),
+            Pending {
+                redirect: LOOPBACK,
+                ..pending(organization, Uuid::new_v4())
+            },
+            now,
+        );
+        put(&logins, "elsewhere".to_string(), stranger(), now);
+
+        discard(&logins, organization);
+
+        assert!(
+            !logins.contains_key("admin") && !logins.contains_key("colleague"),
+            "a deleted organization's sign-in could still finish"
+        );
+        assert!(logins.contains_key("elsewhere"));
     }
 
     #[test]
