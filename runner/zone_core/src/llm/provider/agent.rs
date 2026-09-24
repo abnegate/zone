@@ -29,7 +29,11 @@ const AUTO: &str = "auto";
 /// Separates a local model's tag, as in `gpt-oss:20b`. No agent model has one.
 const TAG_SEPARATOR: char = ':';
 
-const CLAUDE_MODELS: &[&str] = &["sonnet", "opus", "haiku"];
+const CLAUDE_MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
+
+/// Claude's models that a Pro or Max subscription runs headless only once
+/// someone has accepted their usage credits in the interactive claude CLI.
+const CLAUDE_GATED: &[&str] = &["fable"];
 
 /// Claude's names for its latest models, in any case. `default` is left out:
 /// it means what passing no `--model` means.
@@ -165,6 +169,17 @@ impl AgentKind {
         match self {
             Self::Claude => CLAUDE_MODELS,
             Self::Codex => CODEX_MODELS,
+        }
+    }
+
+    /// The offered models a headless turn runs on only once someone has
+    /// accepted their terms in this agent's interactive CLI. Until then a turn
+    /// on one falls back to another model or fails, so Zone runs one only
+    /// when a person names it.
+    pub fn gated(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => CLAUDE_GATED,
+            Self::Codex => &[],
         }
     }
 
@@ -634,7 +649,10 @@ mod tests {
 
     #[test]
     fn each_agent_offers_its_models_in_the_order_it_ranks_them() {
-        assert_eq!(AgentKind::Claude.models(), ["sonnet", "opus", "haiku"]);
+        assert_eq!(
+            AgentKind::Claude.models(),
+            ["sonnet", "opus", "haiku", "fable"]
+        );
         assert_eq!(
             AgentKind::Codex.models(),
             [
@@ -647,6 +665,21 @@ mod tests {
                 "gpt-5.5",
             ]
         );
+    }
+
+    #[test]
+    fn only_claudes_fable_waits_on_consent_and_every_gated_model_is_offered() {
+        assert_eq!(AgentKind::Claude.gated(), ["fable"]);
+        assert!(AgentKind::Codex.gated().is_empty());
+
+        for agent in AgentKind::ALL {
+            for model in agent.gated() {
+                assert!(
+                    agent.models().contains(model),
+                    "{agent} gates {model} without offering it"
+                );
+            }
+        }
     }
 
     #[test]
@@ -689,12 +722,6 @@ mod tests {
         ] {
             assert!(!AgentKind::Claude.knows(model), "{model:?}");
         }
-    }
-
-    #[test]
-    fn claude_knows_fable_without_offering_it() {
-        assert!(AgentKind::Claude.knows("fable"));
-        assert!(!AgentKind::Claude.models().contains(&"fable"));
     }
 
     #[test]

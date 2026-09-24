@@ -575,8 +575,11 @@ With Claude Code or Codex as the provider, the Fast and Reasoning fields in AI
 settings list that agent's own models, and Automatic leaves the choice to the
 agent:
 
-- Claude Code: `sonnet`, `opus` and `haiku`, the aliases claude resolves to its
-  latest models.
+- Claude Code: `sonnet`, `opus`, `haiku` and `fable`, the aliases claude
+  resolves to its latest models. On Pro and Max plans, Fable needs a one-time
+  usage-credits consent in the interactive claude CLI, and until it is given a
+  Zone turn on Fable falls back to another model or fails with "Fable consent
+  dialog was not answered".
 - Codex: `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`,
   `gpt-5.6-terra`, `gpt-5.6-luna` and `gpt-5.5`, the presets codex 0.156.1
   ships, in its order. A signed-in ChatGPT account may see a different set.
@@ -598,9 +601,7 @@ knows its aliases in any case (`sonnet`, `opus`, `haiku`, `fable`, `best`,
 such as `claude-opus-4-8`, optionally ending in `[1m]`. codex knows its presets
 and lowercase names beginning `gpt-`. Neither knows an empty name, `auto`, or
 a name containing a colon or a space, so an Ollama model such as `llama3.2:3b`
-or `gpt-oss:20b` never reaches an agent. `fable` is known but not offered: a
-Pro or Max subscriber has to accept its usage credits interactively first, and
-a headless turn without that falls back to another model or fails.
+or `gpt-oss:20b` never reaches an agent.
 
 A turn asks for the chat's own model only when the agent knows it. Otherwise
 it asks for the Reasoning model from AI settings when Zone judges the prompt
@@ -640,7 +641,10 @@ happens when the agent gives no usable answer within
   project continues. A CLI that starts and then fails is retried on the next
   tick. The reviewer's model is one the agent knows, taken from
   `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else one of the agent's own
-  models, never an installed Ollama model. A run whose agent chose its own
+  models, never an installed Ollama model. Zone does not pick `fable` on its
+  own, because a turn on it may be waiting on the consent described under
+  Naming a model: a review runs on Fable only when `ZONE_AUTO_REVIEW_MODELS`
+  or the Fast or Reasoning model names it. A run whose agent chose its own
   model records `auto`, which names no model, so Zone counts any review of it
   as one by the model that wrote the change: the review says so, and with
   `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL` on the task pauses unless a review

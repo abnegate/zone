@@ -57,8 +57,9 @@ impl Author {
 /// the author reviews itself, and says so.
 ///
 /// On an agent, a candidate is a model the agent knows, and the agent's own
-/// models stand in for what is installed. A change the agent wrote on a model
-/// of its own choosing may have come from any of them.
+/// models stand in for what is installed, less those it gates behind consent,
+/// which review only when named. A change the agent wrote on a model of its
+/// own choosing may have come from any of them.
 pub fn select(
     author: &Author,
     prefs: &Preferences,
@@ -93,7 +94,7 @@ pub fn select(
     if let Some(name) = prefs.fast.as_deref() {
         push(name);
     }
-    let mut installed: Vec<_> = catalog.completions().collect();
+    let mut installed: Vec<_> = catalog.unattended().collect();
     installed.sort_by_key(|model| std::cmp::Reverse(model.bytes));
     for model in installed {
         if catalog.contains(&model.name) {
@@ -248,6 +249,54 @@ mod tests {
             select(&sonnet, &prefs, &claude, &configured, 3).model,
             "opus"
         );
+    }
+
+    #[test]
+    fn with_no_reviewer_named_a_change_written_on_sonnet_never_rotates_onto_fable() {
+        let claude = Catalog::agent(AgentKind::Claude);
+        let sonnet = Author::Model("sonnet".into());
+
+        let rotation: Vec<String> = (1..=4)
+            .map(|round| select(&sonnet, &Preferences::default(), &claude, &[], round).model)
+            .collect();
+
+        assert_eq!(rotation, ["opus", "haiku", "opus", "haiku"]);
+    }
+
+    #[test]
+    fn fable_reviews_when_zone_auto_review_models_or_ai_settings_name_it() {
+        let claude = Catalog::agent(AgentKind::Claude);
+        let sonnet = Author::Model("sonnet".into());
+        let fable = || Some("fable".to_string());
+
+        assert_eq!(
+            select(
+                &sonnet,
+                &Preferences::default(),
+                &claude,
+                &["fable".into()],
+                1
+            )
+            .model,
+            "fable",
+            "ZONE_AUTO_REVIEW_MODELS=fable"
+        );
+        for prefs in [
+            Preferences {
+                reasoning: fable(),
+                ..Preferences::default()
+            },
+            Preferences {
+                fast: fable(),
+                ..Preferences::default()
+            },
+        ] {
+            assert_eq!(
+                select(&sonnet, &prefs, &claude, &[], 1).model,
+                "fable",
+                "{prefs:?}"
+            );
+        }
     }
 
     #[test]

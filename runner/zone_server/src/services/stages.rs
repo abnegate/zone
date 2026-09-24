@@ -165,6 +165,15 @@ impl Catalog {
     pub(crate) fn completions(&self) -> impl Iterator<Item = &Installed> {
         self.models.iter().filter(|model| model.completion())
     }
+
+    /// The completion models Zone may put a run on without anyone naming
+    /// one: all of them, less those the agent gates behind consent.
+    pub(crate) fn unattended(&self) -> impl Iterator<Item = &Installed> {
+        self.completions().filter(|model| {
+            self.agent
+                .is_none_or(|agent| !agent.gated().contains(&model.name.as_str()))
+        })
+    }
 }
 
 /// True when the chat should pick a stage from the message instead of a pin.
