@@ -6,7 +6,7 @@ use reqwest::Url;
 use sha2::{Digest, Sha256};
 use zone_core::secret::SecretValue;
 
-use super::{AUTHORIZE_URL, CLIENT_ID, REDIRECT_URL, Scope};
+use super::{AUTHORIZE_URL, CLIENT_ID, Redirect, Scope};
 
 const VERIFIER_BYTES: usize = 64;
 const STATE_BYTES: usize = 32;
@@ -18,10 +18,11 @@ pub struct Authorization {
     pub state: String,
     pub verifier: SecretValue,
     pub scope: Scope,
+    pub redirect: Redirect,
 }
 
 impl Authorization {
-    pub fn new(scope: Scope) -> Self {
+    pub fn new(scope: Scope, redirect: Redirect) -> Self {
         let verifier = SecretValue::new(random::<VERIFIER_BYTES>());
         let state = random::<STATE_BYTES>();
         let mut url = Url::parse(AUTHORIZE_URL).expect("AUTHORIZE_URL is an absolute URL");
@@ -29,7 +30,7 @@ impl Authorization {
             .append_pair("code", "true")
             .append_pair("client_id", CLIENT_ID)
             .append_pair("response_type", "code")
-            .append_pair("redirect_uri", REDIRECT_URL)
+            .append_pair("redirect_uri", &redirect.uri())
             .append_pair("scope", &scope.parameter())
             .append_pair("code_challenge", &challenge(verifier.expose()))
             .append_pair("code_challenge_method", CHALLENGE_METHOD)
@@ -40,6 +41,7 @@ impl Authorization {
             state,
             verifier,
             scope,
+            redirect,
         }
     }
 }
@@ -61,6 +63,7 @@ fn encode(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::login::claude::{Flow, REDIRECT_URL};
 
     const RFC_7636_VERIFIER_OCTETS: [u8; 32] = [
         116, 24, 223, 180, 151, 153, 224, 37, 79, 250, 96, 125, 216, 173, 187, 186, 22, 212, 37,
@@ -92,7 +95,7 @@ mod tests {
             (Scope::Inference, INFERENCE_SCOPE, INFERENCE_QUERY),
             (Scope::Full, FULL_SCOPE, FULL_QUERY),
         ] {
-            let authorization = Authorization::new(scope);
+            let authorization = Authorization::new(scope, Redirect::Paste);
             let code_challenge = challenge(authorization.verifier.expose());
             let state = authorization.state.as_str();
             let url = Url::parse(&authorization.url).expect("an absolute URL");
@@ -126,9 +129,31 @@ mod tests {
     }
 
     #[test]
+    fn a_loopback_authorization_sends_the_browser_back_to_zones_listener() {
+        let authorization = Authorization::new(Scope::Inference, Redirect::Loopback(54_545));
+        let url = Url::parse(&authorization.url).expect("an absolute URL");
+        let redirect: Vec<String> = url
+            .query_pairs()
+            .filter(|(key, _)| key == "redirect_uri")
+            .map(|(_, value)| value.into_owned())
+            .collect();
+
+        assert_eq!(redirect, ["http://localhost:54545/callback"]);
+        assert_eq!(authorization.redirect, Redirect::Loopback(54_545));
+        assert_eq!(authorization.redirect.flow(), Flow::Loopback);
+        assert!(
+            authorization.url.contains(
+                "&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&scope="
+            ),
+            "{}",
+            authorization.url
+        );
+    }
+
+    #[test]
     fn each_authorization_draws_a_fresh_verifier_and_state() {
-        let first = Authorization::new(Scope::Inference);
-        let second = Authorization::new(Scope::Inference);
+        let first = Authorization::new(Scope::Inference, Redirect::Paste);
+        let second = Authorization::new(Scope::Inference, Redirect::Paste);
         let url_safe = |text: &str| {
             text.bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
@@ -151,7 +176,7 @@ mod tests {
 
     #[test]
     fn debug_of_an_authorization_hides_the_verifier() {
-        let authorization = Authorization::new(Scope::Full);
+        let authorization = Authorization::new(Scope::Full, Redirect::Loopback(54_545));
         let rendered = format!("{authorization:?}");
 
         assert!(

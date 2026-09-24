@@ -1,4 +1,4 @@
-//! Exchanging a pasted code for tokens, and renewing them, at Claude's token endpoint.
+//! Exchanging a sign-in's code for tokens, and renewing them, at Claude's token endpoint.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -9,7 +9,7 @@ use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use zone_core::secret::{REDACTED, SecretValue, redact};
 
-use super::{CLIENT_ID, Code, Error, REDIRECT_URL, Scope, Tokens};
+use super::{CLIENT_ID, Code, Error, Redirect, Scope, Tokens};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "Zone-agent-login";
@@ -38,7 +38,7 @@ pub struct Client {
 struct Exchange<'a> {
     grant_type: &'static str,
     code: &'a str,
-    redirect_uri: &'static str,
+    redirect_uri: &'a str,
     client_id: &'static str,
     code_verifier: &'a str,
     state: &'a str,
@@ -84,16 +84,20 @@ impl Client {
         }
     }
 
+    /// Exchanges `code` for tokens. `redirect` must be the one the sign-in's authorize link
+    /// carried: Claude grants a code only to the redirect it was issued for.
     pub async fn exchange(
         &self,
         code: &Code,
         verifier: &SecretValue,
         scope: Scope,
+        redirect: Redirect,
     ) -> Result<Tokens, Error> {
+        let redirect_uri = redirect.uri();
         let request = Exchange {
             grant_type: AUTHORIZATION_CODE,
             code: code.value.expose(),
-            redirect_uri: REDIRECT_URL,
+            redirect_uri: &redirect_uri,
             client_id: CLIENT_ID,
             code_verifier: verifier.expose(),
             state: &code.state,
@@ -219,7 +223,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::services::login::claude::{LIFETIME, token_endpoint};
+    use crate::services::login::claude::{LIFETIME, REDIRECT_URL, token_endpoint};
 
     const TOKEN_PATH: &str = "/v1/oauth/token";
     const CODE: &str = "fake-authorization-code";
@@ -290,7 +294,7 @@ mod tests {
         let before = Utc::now();
 
         let tokens = client
-            .exchange(&code(), &verifier(), Scope::Inference)
+            .exchange(&code(), &verifier(), Scope::Inference, Redirect::Paste)
             .await
             .expect("exchange");
 
@@ -327,7 +331,7 @@ mod tests {
             answering(200, json!({"access_token": ACCESS, "expires_in": GRANTED})).await;
 
         let tokens = client
-            .exchange(&code(), &verifier(), Scope::Full)
+            .exchange(&code(), &verifier(), Scope::Full, Redirect::Paste)
             .await
             .expect("exchange");
 
@@ -354,6 +358,30 @@ mod tests {
         );
         assert!(tokens.refresh.is_none());
         assert_eq!(tokens.lifetime(), Some(TimeDelta::seconds(GRANTED)));
+    }
+
+    #[tokio::test]
+    async fn a_loopback_exchange_sends_the_redirect_its_authorize_link_carried() {
+        let (server, client) =
+            answering(200, json!({"access_token": ACCESS, "expires_in": GRANTED})).await;
+
+        client
+            .exchange(
+                &code(),
+                &verifier(),
+                Scope::Inference,
+                Redirect::Loopback(54_545),
+            )
+            .await
+            .expect("exchange");
+
+        let body = sent(&server).await;
+        assert_eq!(
+            body["redirect_uri"], "http://localhost:54545/callback",
+            "Claude grants a code only to the redirect it was issued for: {body}"
+        );
+        assert_eq!(body["grant_type"], "authorization_code");
+        assert_eq!(body["code"], CODE);
     }
 
     #[tokio::test]
@@ -445,7 +473,7 @@ mod tests {
         .await;
 
         let error = client
-            .exchange(&code(), &verifier(), Scope::Inference)
+            .exchange(&code(), &verifier(), Scope::Inference, Redirect::Paste)
             .await
             .expect_err("rejected");
 
@@ -492,7 +520,7 @@ mod tests {
             answering(200, json!({"access_token": ACCESS, "token_type": "Bearer"})).await;
 
         let error = client
-            .exchange(&code(), &verifier(), Scope::Inference)
+            .exchange(&code(), &verifier(), Scope::Inference, Redirect::Paste)
             .await
             .expect_err("a grant without an expiry");
 
@@ -506,7 +534,7 @@ mod tests {
             Client::new(token_endpoint("http://127.0.0.1:1/v1/oauth/token").expect("endpoint"));
 
         let error = client
-            .exchange(&code(), &verifier(), Scope::Inference)
+            .exchange(&code(), &verifier(), Scope::Inference, Redirect::Paste)
             .await
             .expect_err("nothing listens on port 1");
 

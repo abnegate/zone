@@ -29,9 +29,9 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::SecretValue;
 use zone_core::llm::AgentKind;
-use zone_server::config::{AgentConfig, Config, ModelBackend};
+use zone_server::config::{AgentConfig, Callback, Config, ModelBackend};
 use zone_server::services::login::claude::{AUTHORIZE_URL, CLIENT_ID, REDIRECT_URL, Tokens};
-use zone_server::services::login::devices;
+use zone_server::services::login::{callback, devices};
 
 use common::{TestClient, test_email, test_password};
 
@@ -65,6 +65,19 @@ const UNKNOWN_SIGN_IN: &str =
     "That code is not from a sign-in you started here, or the sign-in expired. Start again.";
 const INVALID_CODE: &str = "invalid_code";
 const START_AGAIN: &str = "start_again";
+const NO_CALLBACK: &str = "This server has no sign-in callback, so a Claude sign-in finishes \
+                           with the code claude.com shows";
+const NOT_WAITING: &str = "Zone is not waiting for this sign-in: it expired, it already \
+                           finished, or it was started to paste a code. Start again in Zone.";
+const NOT_APPROVED: &str = "Claude did not approve the sign-in. Start again.";
+const SCOPE_REFUSED: &str =
+    "claude.com would not grant the access Zone asked for. Try again with full access.";
+const DEMOTED: &str = "Only organization admins can sign in to coding agents, and whoever \
+                       started this sign-in no longer is one. Start again.";
+const SIGNED_IN_PAGE: &str = "<h1>Signed in to Claude</h1>\n<p>You can close this tab.</p>";
+const CLOSE_AND_RETURN: &str = "You can close this tab and return to Zone.";
+const UNREADABLE_REPLY: &str =
+    "claude.com sent Zone something it could not read. Start the sign-in again in Zone.";
 const NOT_FOUND: &str = "Organization not found";
 const INTERNAL: &str = "Internal server error";
 const REFUSAL: &str =
@@ -254,24 +267,87 @@ struct Stage {
     client: TestClient,
     /// The agent state root, kept for as long as the test runs.
     _state: Option<TempDir>,
+    /// The port of the callback listener, for a server that has one.
+    callback: Option<u16>,
+}
+
+/// What the callback listener answered a browser with.
+struct Answer {
+    status: StatusCode,
+    headers: reqwest::header::HeaderMap,
+    body: String,
 }
 
 impl Stage {
     /// Claude's token endpoint is `claude`, and codex cannot be started at all.
     async fn claude(claude: &MockServer) -> Self {
-        let config = Config {
+        Self {
+            client: TestClient::with_config(Self::claude_config(claude, None)).await,
+            _state: None,
+            callback: None,
+        }
+    }
+
+    /// As [`Stage::claude`], with the callback listener running on a loopback port of its own,
+    /// as `ZONE_AGENT_CALLBACK=http://localhost:<port>` starts it.
+    async fn loopback(claude: &MockServer) -> Self {
+        let listener = callback::bind(&Callback::loopback(0))
+            .await
+            .expect("a loopback port for the callback");
+        let port = listener.local_addr().expect("the bound address").port();
+        let config = Self::claude_config(claude, Some(Callback::loopback(port)));
+        let client = TestClient::with_config(config).await;
+        tokio::spawn(callback::serve(client.state().clone(), listener));
+        Self {
+            client,
+            _state: None,
+            callback: Some(port),
+        }
+    }
+
+    fn claude_config(claude: &MockServer, callback: Option<Callback>) -> Config {
+        Config {
             model_backend: codex_at(PathBuf::from(MISSING_CODEX)),
             agents: AgentConfig {
                 host_login: false,
                 claude_token_url: format!("{}{TOKEN_PATH}", claude.uri()),
+                callback,
                 ..AgentConfig::default()
             },
             ..common::test_config()
-        };
-        Self {
-            client: TestClient::with_config(config).await,
-            _state: None,
         }
+    }
+
+    fn port(&self) -> u16 {
+        self.callback.expect("a server with a callback listener")
+    }
+
+    /// `http://localhost:<port>/callback`, the redirect the authorize link names.
+    fn redirect(&self) -> String {
+        format!("http://localhost:{}/callback", self.port())
+    }
+
+    /// What the callback listener answers a browser claude.com sent back with `query`.
+    async fn returned(&self, query: &[(&str, &str)]) -> Answer {
+        let mut url = Url::parse(&format!("http://127.0.0.1:{}/callback", self.port()))
+            .expect("the callback's URL");
+        url.query_pairs_mut().extend_pairs(query);
+        let response = reqwest::get(url).await.expect("the callback answers");
+        Answer {
+            status: response.status(),
+            headers: response.headers().clone(),
+            body: response.text().await.expect("the callback's page"),
+        }
+    }
+
+    /// What the callback listener answers `method` at `path`.
+    async fn asked(&self, method: reqwest::Method, path: &str) -> StatusCode {
+        reqwest::Client::new()
+            .request(method, format!("http://127.0.0.1:{}{path}", self.port()))
+            .send()
+            .await
+            .expect("the callback answers")
+            .status()
     }
 
     /// Codex runs from `executable`, with its homes under a private state root.
@@ -289,6 +365,7 @@ impl Stage {
         Self {
             client: TestClient::with_config(config).await,
             _state: Some(state),
+            callback: None,
         }
     }
 
@@ -838,6 +915,10 @@ async fn the_authorize_url_carries_the_clis_parameters_in_order_for_each_scope()
             "{url}"
         );
         assert_eq!(started["agent"], "claude");
+        assert_eq!(
+            started["flow"], "paste",
+            "a server with no callback has the code pasted"
+        );
         assert!(
             lasts(
                 timestamp(&started["expires_at"]),
@@ -849,7 +930,7 @@ async fn the_authorize_url_carries_the_clis_parameters_in_order_for_each_scope()
         );
         assert_eq!(
             started.as_object().map(|fields| fields.len()),
-            Some(3),
+            Some(4),
             "{started}"
         );
     }
@@ -1203,6 +1284,442 @@ async fn claude_refusing_the_code_is_a_bad_gateway_that_carries_its_reason() {
     assert_eq!(
         stage.status(organization, "claude", &owner).await,
         signed_out(AgentKind::Claude, "claude_code")
+    );
+}
+
+#[tokio::test]
+async fn a_server_with_a_callback_sends_the_browser_back_to_it_unless_asked_to_paste() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+
+    for (body, flow, redirect, scope) in [
+        (json!({}), "loopback", stage.redirect(), INFERENCE_SCOPE),
+        (
+            json!({ "flow": "loopback", "scope": "full" }),
+            "loopback",
+            stage.redirect(),
+            FULL_SCOPE,
+        ),
+        (
+            json!({ "flow": "paste" }),
+            "paste",
+            REDIRECT_URL.to_string(),
+            INFERENCE_SCOPE,
+        ),
+    ] {
+        let started = stage.start(organization, "claude", body, &owner).await;
+
+        let url = started["authorize_url"].as_str().expect("an authorize URL");
+        let names: Vec<String> = parameters(url).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, AUTHORIZE_PARAMETERS, "{url}");
+        assert_eq!(parameter(url, "redirect_uri"), redirect, "{url}");
+        assert_eq!(parameter(url, "scope"), scope, "{url}");
+        assert_eq!(started["flow"], flow, "{started}");
+    }
+    assert!(
+        stage.start(organization, "claude", json!({}), &owner).await["authorize_url"]
+            .as_str()
+            .is_some_and(|url| url.contains("&redirect_uri=http%3A%2F%2Flocalhost%3A")),
+        "the loopback redirect names localhost, as the claude CLI's own does"
+    );
+
+    let unconfigured = Stage::claude(&claude).await;
+    let owner = person(&unconfigured.client).await;
+    let organization = self::organization(&unconfigured.client, &owner).await;
+    let started = unconfigured
+        .start(organization, "claude", json!({}), &owner)
+        .await;
+    assert_eq!(started["flow"], "paste");
+    assert_eq!(
+        parameter(
+            started["authorize_url"].as_str().expect("a URL"),
+            "redirect_uri"
+        ),
+        REDIRECT_URL
+    );
+    let refused = unconfigured
+        .client
+        .post_json_auth(
+            &login_path(organization, "claude"),
+            &json!({ "flow": "loopback" }),
+            &owner.token,
+        )
+        .await;
+    refused.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(refused.json_value(), json!({ "error": NO_CALLBACK }));
+    assert!(exchanges(&claude).await.is_empty());
+}
+
+#[tokio::test]
+async fn the_callback_signs_the_organization_in_with_nothing_pasted() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let started = stage.start(organization, "claude", json!({}), &owner).await;
+    let url = started["authorize_url"].as_str().expect("an authorize URL");
+    let state = parameter(url, "state");
+    let challenge = parameter(url, "code_challenge");
+
+    let answer = stage.returned(&[("code", CODE), ("state", &state)]).await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(answer.body.contains(SIGNED_IN_PAGE), "{}", answer.body);
+    assert_eq!(
+        answer
+            .headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+    for secret in [CODE, state.as_str()] {
+        assert!(!answer.body.contains(secret), "the page repeats {secret}");
+    }
+
+    let sent = exchanges(&claude).await;
+    assert_eq!(sent.len(), 1);
+    let verifier = sent[0]["code_verifier"].as_str().expect("a verifier");
+    assert_eq!(
+        without(&sent[0], "code_verifier"),
+        json!({
+            "grant_type": "authorization_code",
+            "code": CODE,
+            "redirect_uri": stage.redirect(),
+            "client_id": CLIENT_ID,
+            "state": state,
+            "expires_in": YEAR,
+        }),
+        "the exchange must name the redirect the authorize link carried"
+    );
+    assert_eq!(URL_SAFE_NO_PAD.encode(Sha256::digest(verifier)), challenge);
+
+    let status = stage.status(organization, "claude", &owner).await;
+    assert_eq!(
+        status,
+        json!({
+            "agent": "claude",
+            "provider": "claude_code",
+            "state": "signed_in",
+            "source": "zone",
+            "label": "Claude Max",
+            "expires_at": null,
+            "models": models(AgentKind::Claude),
+            "pending": null,
+            "error": null,
+        })
+    );
+    let credential = stage
+        .login_row(organization, "claude")
+        .await
+        .and_then(|login| login.credential)
+        .expect("a sealed login");
+    for secret in [ACCESS, REFRESH, CODE, verifier] {
+        assert!(
+            !credential.contains(secret),
+            "the stored login shows {secret}"
+        );
+    }
+    assert_eq!(
+        stage.audited(organization).await,
+        [(
+            "agent.signed_in".to_string(),
+            Some(owner.id),
+            Some(json!({ "agent": "claude", "source": "zone" }))
+        )]
+    );
+
+    let replayed = stage.returned(&[("code", CODE), ("state", &state)]).await;
+    assert_eq!(replayed.status, StatusCode::BAD_REQUEST);
+    assert!(
+        replayed
+            .body
+            .contains(&format!("{NOT_WAITING} {CLOSE_AND_RETURN}")),
+        "{}",
+        replayed.body
+    );
+    assert_eq!(
+        exchanges(&claude).await.len(),
+        1,
+        "a replayed callback reached Claude"
+    );
+}
+
+#[tokio::test]
+async fn the_callback_finishes_only_a_sign_in_zone_started_for_it() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let state_of =
+        |started: &Value| parameter(started["authorize_url"].as_str().expect("a URL"), "state");
+
+    let unknown = stage
+        .returned(&[("code", CODE), ("state", "never-issued")])
+        .await;
+    assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+    assert!(unknown.body.contains(NOT_WAITING), "{}", unknown.body);
+
+    let pasting = state_of(
+        &stage
+            .start(organization, "claude", json!({ "flow": "paste" }), &owner)
+            .await,
+    );
+    let answer = stage.returned(&[("code", CODE), ("state", &pasting)]).await;
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+    assert!(answer.body.contains(NOT_WAITING), "{}", answer.body);
+    assert!(exchanges(&claude).await.is_empty());
+    assert_eq!(
+        stage.status(organization, "claude", &owner).await["error"],
+        Value::Null,
+        "a callback refused before any sign-in was found blamed the organization"
+    );
+    stage
+        .submit(organization, &format!("{CODE}#{pasting}"), &owner)
+        .await
+        .assert_status(StatusCode::OK);
+    let sent = exchanges(&claude).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0]["redirect_uri"], REDIRECT_URL,
+        "a pasted code must be exchanged at the redirect its link carried"
+    );
+
+    let looping = state_of(&stage.start(organization, "claude", json!({}), &owner).await);
+    for (method, path, status) in [
+        (
+            reqwest::Method::HEAD,
+            format!("/callback?code={CODE}&state={looping}"),
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/callback?code={CODE}&state={looping}"),
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            reqwest::Method::GET,
+            format!("/other?code={CODE}&state={looping}"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            reqwest::Method::GET,
+            format!("/callback/?code={CODE}&state={looping}"),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            stage.asked(method.clone(), &path).await,
+            status,
+            "{method} {path}"
+        );
+    }
+    for query in [
+        vec![],
+        vec![("code", CODE)],
+        vec![("state", looping.as_str())],
+        vec![
+            ("code", CODE),
+            ("state", looping.as_str()),
+            ("state", "another"),
+        ],
+    ] {
+        let answer = stage.returned(&query).await;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{query:?}");
+        assert!(answer.body.contains(UNREADABLE_REPLY), "{}", answer.body);
+    }
+    assert_eq!(exchanges(&claude).await.len(), 1);
+
+    let answer = stage.returned(&[("code", CODE), ("state", &looping)]).await;
+    assert_eq!(
+        answer.status,
+        StatusCode::OK,
+        "a request that was refused spent the sign-in: {}",
+        answer.body
+    );
+}
+
+#[tokio::test]
+async fn the_callback_page_repeats_nothing_it_was_sent() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::loopback(&claude).await;
+    let hostile = [
+        "<script>alert(1)</script>",
+        "<img src=x onerror=alert(2)>",
+        "\"><svg onload=alert(3)>",
+    ];
+
+    for query in [
+        vec![("code", hostile[0]), ("state", hostile[1])],
+        vec![
+            ("error", hostile[2]),
+            ("error_description", hostile[0]),
+            ("state", hostile[1]),
+        ],
+        vec![("code", hostile[0]), ("next", hostile[2])],
+    ] {
+        let answer = stage.returned(&query).await;
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{query:?}");
+        for text in hostile {
+            for fragment in [text.to_string(), text.replace('<', "&lt;")] {
+                assert!(
+                    !answer.body.contains(&fragment),
+                    "the page repeated {fragment}: {}",
+                    answer.body
+                );
+            }
+        }
+        assert!(!answer.body.contains("alert("), "{}", answer.body);
+        assert_eq!(
+            answer
+                .headers
+                .get("content-security-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some(
+                "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; \
+                 form-action 'none'; frame-ancestors 'none'"
+            )
+        );
+        assert!(answer.headers.get("location").is_none());
+    }
+    assert!(exchanges(&claude).await.is_empty());
+}
+
+#[tokio::test]
+async fn claudes_refusal_of_a_returned_code_shows_escaped_on_the_page_and_in_the_status() {
+    let claude = token_endpoint(
+        400,
+        json!({
+            "error": "invalid_grant",
+            "error_description": "Invalid <b>authorization</b> code",
+        }),
+    )
+    .await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let started = stage.start(organization, "claude", json!({}), &owner).await;
+    let state = parameter(started["authorize_url"].as_str().expect("a URL"), "state");
+
+    let answer = stage.returned(&[("code", CODE), ("state", &state)]).await;
+
+    let refusal = "Claude refused the sign-in (HTTP 400): Invalid <b>authorization</b> code";
+    assert_eq!(answer.status, StatusCode::BAD_GATEWAY);
+    assert!(
+        answer.body.contains(
+            "Claude refused the sign-in (HTTP 400): Invalid &lt;b&gt;authorization&lt;/b&gt; code"
+        ),
+        "{}",
+        answer.body
+    );
+    assert!(!answer.body.contains("<b>"), "{}", answer.body);
+    assert!(stage.login_row(organization, "claude").await.is_none());
+    let status = stage.status(organization, "claude", &owner).await;
+    assert_eq!(status["state"], "signed_out");
+    assert_eq!(
+        status["error"], refusal,
+        "the panel is waiting on the status, not on the tab Claude sent back"
+    );
+
+    stage.start(organization, "claude", json!({}), &owner).await;
+    assert_eq!(
+        stage.status(organization, "claude", &owner).await["error"],
+        Value::Null,
+        "a new sign-in still showed why the last one failed"
+    );
+}
+
+#[tokio::test]
+async fn a_sign_in_claude_did_not_approve_ends_and_the_status_says_why() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+
+    for (error, reason) in [
+        ("access_denied", NOT_APPROVED),
+        ("invalid_scope", SCOPE_REFUSED),
+    ] {
+        let started = stage.start(organization, "claude", json!({}), &owner).await;
+        let state = parameter(started["authorize_url"].as_str().expect("a URL"), "state");
+
+        let answer = stage
+            .returned(&[
+                ("error", error),
+                ("error_description", "The user declined"),
+                ("state", &state),
+            ])
+            .await;
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(
+            answer
+                .body
+                .contains(&format!("{reason} {CLOSE_AND_RETURN}")),
+            "{}",
+            answer.body
+        );
+        assert!(
+            !answer.body.contains("The user declined"),
+            "{}",
+            answer.body
+        );
+        assert_eq!(
+            stage.status(organization, "claude", &owner).await["error"],
+            reason
+        );
+        let again = stage.returned(&[("code", CODE), ("state", &state)]).await;
+        assert_eq!(
+            again.status,
+            StatusCode::BAD_REQUEST,
+            "a sign-in Claude did not approve stayed open"
+        );
+    }
+    assert!(exchanges(&claude).await.is_empty());
+}
+
+#[tokio::test]
+async fn the_callback_refuses_a_sign_in_whose_admin_no_longer_manages_the_organization() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let colleague = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    seat(&stage.client, organization, &owner, &colleague, "admin").await;
+    let started = stage
+        .start(organization, "claude", json!({}), &colleague)
+        .await;
+    let state = parameter(started["authorize_url"].as_str().expect("a URL"), "state");
+    stage
+        .client
+        .patch_json_auth(
+            &format!("/api/organizations/{organization}/members/{}", colleague.id),
+            &json!({ "role": "member" }),
+            &owner.token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let answer = stage.returned(&[("code", CODE), ("state", &state)]).await;
+
+    assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+    assert!(
+        answer
+            .body
+            .contains(&format!("{DEMOTED} {CLOSE_AND_RETURN}")),
+        "{}",
+        answer.body
+    );
+    assert!(
+        exchanges(&claude).await.is_empty(),
+        "a demoted admin's code reached Claude"
+    );
+    assert!(stage.login_row(organization, "claude").await.is_none());
+    assert_eq!(
+        stage.status(organization, "claude", &owner).await["error"],
+        DEMOTED
     );
 }
 

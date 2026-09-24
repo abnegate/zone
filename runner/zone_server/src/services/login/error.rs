@@ -10,6 +10,9 @@ pub enum Error {
     /// What the caller sent cannot finish any sign-in that is waiting.
     #[error("{0}")]
     Invalid(&'static str),
+    /// Whoever started the sign-in may no longer finish it.
+    #[error("{0}")]
+    Forbidden(&'static str),
     #[error("The {0} CLI is not installed on this server")]
     Unavailable(AgentKind),
     /// The organization was deleted while the request waited for its lock.

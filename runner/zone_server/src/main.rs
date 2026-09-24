@@ -18,6 +18,7 @@ use zone_server::routes;
 use zone_server::services::embedding::{
     create_embedding_service, default_embedding_model, embedding_engine_from_env,
 };
+use zone_server::services::login;
 use zone_server::state::{AppState, default_adapter_registry};
 
 #[tokio::main]
@@ -201,6 +202,24 @@ async fn main() {
         zone_server::workers::auto_project::spawn(state.clone());
     }
     let recovery = zone_server::workers::task::spawn_recovery(state.clone());
+    let callback = match state.config().agents.callback {
+        Some(callback) => {
+            let listener = login::callback::bind(&callback)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "Could not listen for Claude sign-ins on {}: {error}. Free the port, or change or unset ZONE_AGENT_CALLBACK",
+                        callback.address()
+                    )
+                });
+            tracing::info!(address = %callback.address(), "Listening for Claude sign-ins");
+            Some(tokio::spawn(login::callback::serve(
+                state.clone(),
+                listener,
+            )))
+        }
+        None => None,
+    };
 
     // Every layer belongs to `create_router`, so what runs here is what the
     // router tests cover. A second CORS layer here answered every preflight
@@ -220,6 +239,10 @@ async fn main() {
     let result = axum::serve(listener, app).await;
     recovery.abort();
     let _ = recovery.await;
+    if let Some(callback) = callback {
+        callback.abort();
+        let _ = callback.await;
+    }
     result.expect("Server error");
 }
 

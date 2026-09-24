@@ -19,7 +19,7 @@ use zone_core::llm::AgentKind;
 use crate::auth::AuthUser;
 use crate::db::ai_settings::{self, AccessError};
 use crate::db::organization_members::OrgRole;
-use crate::services::login::claude::Scope;
+use crate::services::login::claude::{Flow, Scope};
 use crate::services::login::status::{AgentStatus, Viewer};
 use crate::services::login::{devices, oauth};
 use crate::state::AppState;
@@ -34,6 +34,10 @@ pub struct StartRequest {
     /// How much of a Claude account the sign-in asks for. A codex sign-in has no scope.
     #[serde(default)]
     pub scope: Scope,
+    /// How a Claude sign-in's code comes back: the server's callback when it has one, unless
+    /// this asks to paste it. A codex sign-in always shows a device code.
+    #[serde(default)]
+    pub flow: Option<Flow>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +58,7 @@ pub enum Login {
     Claude {
         authorize_url: String,
         expires_at: DateTime<Utc>,
+        flow: Flow,
     },
     Codex {
         verification_url: String,
@@ -106,10 +111,12 @@ pub async fn start(
         .unwrap_or_default();
     let login = match agent {
         AgentKind::Claude => {
-            let started = oauth::start(organization, user, request.scope);
+            let redirect = oauth::redirect(state.config(), request.flow)?;
+            let started = oauth::start(organization, user, &auth.0.email, request.scope, redirect);
             Login::Claude {
                 authorize_url: started.url,
                 expires_at: started.expires_at,
+                flow: started.flow,
             }
         }
         AgentKind::Codex => {
@@ -137,15 +144,9 @@ pub async fn finish(
         return Err(Failure::new(StatusCode::BAD_REQUEST, NO_CODE));
     }
     let Json(request) = request.map_err(Failure::unreadable)?;
-    oauth::finish(
-        &state,
-        organization,
-        user,
-        &auth.0.email,
-        request.code.expose(),
-    )
-    .await
-    .map_err(Failure::exchange)?;
+    oauth::finish(&state, organization, user, request.code.expose())
+        .await
+        .map_err(Failure::exchange)?;
     let viewer = Viewer {
         user,
         manages: true,
@@ -218,6 +219,7 @@ mod tests {
         let claude = Login::Claude {
             authorize_url: "https://claude.com/cai/oauth/authorize?code=true".to_string(),
             expires_at: at(1_790_137_500),
+            flow: Flow::Loopback,
         };
         let codex = Login::Codex {
             verification_url: "https://auth.openai.com/codex/device".to_string(),
@@ -231,6 +233,7 @@ mod tests {
                 "agent": "claude",
                 "authorize_url": "https://claude.com/cai/oauth/authorize?code=true",
                 "expires_at": "2026-09-23T04:25:00Z",
+                "flow": "loopback",
             })
         );
         assert_eq!(
@@ -256,5 +259,22 @@ mod tests {
             assert_eq!(request.scope, scope);
         }
         assert!(serde_json::from_value::<StartRequest>(json!({ "scope": "everything" })).is_err());
+    }
+
+    #[test]
+    fn a_start_leaves_the_flow_to_the_server_unless_it_names_one() {
+        for (body, flow) in [
+            (json!({}), None),
+            (json!({ "flow": "paste" }), Some(Flow::Paste)),
+            (
+                json!({ "flow": "loopback", "scope": "full" }),
+                Some(Flow::Loopback),
+            ),
+        ] {
+            let request: StartRequest = serde_json::from_value(body).expect("a start request");
+
+            assert_eq!(request.flow, flow);
+        }
+        assert!(serde_json::from_value::<StartRequest>(json!({ "flow": "device" })).is_err());
     }
 }

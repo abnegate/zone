@@ -1,10 +1,14 @@
-//! Claude's own headless sign-in, as `claude setup-token` runs it.
+//! Claude's own sign-in, as `claude setup-token` runs it: claude.com either shows the code for
+//! pasting or sends the browser to a loopback listener with it.
 
 mod authorization;
 mod client;
 mod code;
 mod error;
+mod flow;
 mod plan;
+mod redirect;
+mod reply;
 mod scope;
 mod tokens;
 
@@ -14,7 +18,10 @@ pub use authorization::Authorization;
 pub use client::Client;
 pub use code::Code;
 pub use error::Error;
+pub use flow::Flow;
 pub use plan::label;
+pub use redirect::{CALLBACK_PATH, LOOPBACK_HOST, Redirect};
+pub use reply::{Refusal, Reply};
 pub use scope::Scope;
 pub use tokens::Tokens;
 

@@ -23,7 +23,7 @@ pub use viewer::Viewer;
 
 use super::claude::Tokens;
 use super::probe::{self, Probe};
-use super::{codex, devices};
+use super::{codex, devices, oauth};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::db::ai_settings;
@@ -47,7 +47,8 @@ pub struct AgentStatus {
     pub expires_at: Option<DateTime<Utc>>,
     pub models: Vec<String>,
     pub pending: Option<Prompt>,
-    /// Why the last codex device sign-in failed, until the next one starts.
+    /// Why the last sign-in that finished away from the panel failed, until the next one starts:
+    /// a codex device sign-in, or a Claude sign-in claude.com sent back to Zone's callback.
     pub error: Option<String>,
 }
 
@@ -65,7 +66,10 @@ impl AgentStatus {
         let login = agent_logins::get(state.db(), organization, agent.as_str()).await?;
         let mut status = Self::signed_out(agent);
         let pending = match agent {
-            AgentKind::Claude => None,
+            AgentKind::Claude => {
+                status.error = oauth::failure(organization);
+                None
+            }
             AgentKind::Codex => {
                 status.error = devices::failure(organization);
                 devices::pending(organization)

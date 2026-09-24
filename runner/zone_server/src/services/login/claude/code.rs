@@ -31,13 +31,27 @@ impl FromStr for Code {
                 let (value, state) = pasted
                     .split_once(SEPARATOR)
                     .ok_or(Error::Malformed(UNREADABLE))?;
-                Self::from_parts(value, state)
+                Self::new(value, state)
             }
         }
     }
 }
 
 impl Code {
+    /// A code and the state it answers, each non-empty and free of whitespace and `#`.
+    pub fn new(value: &str, state: &str) -> Result<Self, Error> {
+        let clean = |part: &str| {
+            !part.is_empty() && !part.contains(SEPARATOR) && !part.contains(char::is_whitespace)
+        };
+        if !clean(value) || !clean(state) {
+            return Err(Error::Malformed(UNREADABLE));
+        }
+        Ok(Self {
+            value: SecretValue::new(value),
+            state: state.to_string(),
+        })
+    }
+
     fn from_callback(url: &Url) -> Result<Self, Error> {
         let mut callback = url.clone();
         callback.set_query(None);
@@ -55,22 +69,9 @@ impl Code {
             return Err(Error::Malformed(DECLINED));
         }
         match (parameter("code"), parameter("state")) {
-            (Some(value), Some(state)) => Self::from_parts(&value, &state),
+            (Some(value), Some(state)) => Self::new(&value, &state),
             _ => Err(Error::Malformed(INCOMPLETE)),
         }
-    }
-
-    fn from_parts(value: &str, state: &str) -> Result<Self, Error> {
-        let clean = |part: &str| {
-            !part.is_empty() && !part.contains(SEPARATOR) && !part.contains(char::is_whitespace)
-        };
-        if !clean(value) || !clean(state) {
-            return Err(Error::Malformed(UNREADABLE));
-        }
-        Ok(Self {
-            value: SecretValue::new(value),
-            state: state.to_string(),
-        })
     }
 }
 

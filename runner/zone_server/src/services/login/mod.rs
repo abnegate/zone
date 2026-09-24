@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod callback;
 pub mod claude;
 pub mod codex;
 pub mod credential;
