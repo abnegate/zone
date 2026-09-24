@@ -2620,6 +2620,33 @@ mod tests {
         assert!(!walked.contains("auth.json"), "{walked}");
     }
 
+    /// A denied file stays out of a search of the directory that holds it, as
+    /// a denied directory does. ripgrep's `path:line:text` used to be judged
+    /// whole, and a file's own name never matched one with a line after it.
+    #[tokio::test]
+    async fn a_denied_file_stays_out_of_a_search_around_it() {
+        let shared = shared();
+        fs::write(shared.home.join("notes.txt"), OTHER_LOGIN).unwrap();
+        let context = ToolContext {
+            unrestricted: true,
+            denied: vec![shared.home.join("auth.json")],
+            ..create_test_context(&shared.workspace)
+        };
+
+        let searched = SearchCodeTool
+            .execute(
+                serde_json::json!({"pattern": OTHER_LOGIN, "path": shared.home}),
+                &context,
+            )
+            .await
+            .expect("the directory around the file searches")
+            .output
+            .unwrap();
+
+        assert!(searched.contains("notes.txt"), "{searched}");
+        assert!(!searched.contains("auth.json"), "{searched}");
+    }
+
     /// A tool confined to a `cwd` that holds the denied directory still does
     /// not reach it.
     #[tokio::test]

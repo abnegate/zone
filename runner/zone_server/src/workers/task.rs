@@ -4646,6 +4646,148 @@ mod watchdog_tests {
         .unwrap()
     }
 
+    /// How long a test here waits on anything before calling it hung.
+    const HUNG_AFTER: Duration = Duration::from_secs(60);
+
+    /// What `future` resolves to, or `None` once `limit` of wall-clock time
+    /// has passed without it.
+    ///
+    /// A paused clock cannot bound a wait on the database: it jumps to the next
+    /// timer whenever the runtime has only I/O in flight, so a tokio timeout
+    /// around a query elapses in the middle of it. This limit is kept by a
+    /// thread, which the paused clock never reaches.
+    async fn within<T>(limit: Duration, future: impl Future<Output = T>) -> Option<T> {
+        let (expire, expired) = tokio::sync::oneshot::channel::<()>();
+        let (finished, watching) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _ = watching.recv_timeout(limit);
+            let _ = expire.send(());
+        });
+        let outcome = tokio::select! {
+            biased;
+            value = future => Some(value),
+            _ = expired => None,
+        };
+        drop(finished);
+        outcome
+    }
+
+    /// Every execution slot, taken once the parked run has handed back its own.
+    ///
+    /// A park takes a slot again before it unparks the row, so while these are
+    /// held the row reads as parked however far a paused clock runs past the
+    /// window. A run that ends without ever parking comes back as its own
+    /// outcome.
+    async fn pinned<T>(
+        parking: &mut tokio::task::JoinHandle<T>,
+    ) -> Result<OwnedSemaphorePermit, T> {
+        let slots = get_semaphore()
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TASKS as u32);
+        within(HUNG_AFTER, async {
+            tokio::select! {
+                biased;
+                ended = parking => Err(ended.expect("the parked run panicked")),
+                held = slots => Ok(held.expect("the execution semaphore is never closed")),
+            }
+        })
+        .await
+        .expect("the run neither parked nor ended")
+    }
+
+    /// Resolves once the run has parked, without holding it there.
+    async fn parked<T>(parking: &mut tokio::task::JoinHandle<T>) -> Result<(), T> {
+        pinned(parking).await.map(drop)
+    }
+
+    /// The bound every park test leans on. An hour of paused time is the
+    /// runtime idling, not the test hanging, and must not run it out; a wait
+    /// that never ends has to fail on the wall clock all the same.
+    #[tokio::test(start_paused = true)]
+    async fn a_hang_is_measured_on_the_wall_clock_not_the_paused_one() {
+        assert_eq!(
+            within(HUNG_AFTER, tokio::time::sleep(Duration::from_secs(3600))).await,
+            Some(()),
+            "the paused clock ran out a bound it has no part in"
+        );
+        assert_eq!(
+            within(Duration::from_millis(50), std::future::pending::<()>()).await,
+            None,
+            "a wait that never ends hung instead of failing"
+        );
+    }
+
+    /// Waiting for a run to park has to end when the run does. A run that
+    /// never parks never writes 'waiting', and a wait that only watched the
+    /// row for it would hang the test instead of failing it.
+    #[tokio::test]
+    async fn a_run_that_never_parks_ends_the_pin_instead_of_hanging_it() {
+        let _execution = EXECUTION.lock().await;
+        let (_pool, _observed, state, run, _owner) = parked_fixture().await;
+        let questions = vec![asked("Scope", false, &["Backfill", "Forward only"])];
+        let permit = Arc::new(Permit::acquire().await.unwrap());
+
+        tokio::time::pause();
+        let mut parking = {
+            let permit = permit.clone();
+            tokio::spawn(async move {
+                park_for_answer(
+                    &state,
+                    run,
+                    Uuid::new_v4(),
+                    "call-1",
+                    &questions,
+                    &permit,
+                    false,
+                )
+                .await
+            })
+        };
+        let ended = pinned(&mut parking)
+            .await
+            .expect_err("a run another owner holds was pinned as parked")
+            .expect_err("a run another owner holds parked anyway");
+        assert_eq!(ended.message, LOST_LEASE);
+    }
+
+    /// The window runs out before the row is read. A pinned park has no slot
+    /// to resume on, so the row still reads as parked however late the read
+    /// lands, and the run proceeds on its default the moment it is let go.
+    #[tokio::test]
+    async fn a_pinned_park_still_reads_as_parked_after_its_window_runs_out() {
+        let _execution = EXECUTION.lock().await;
+        let (_pool, observed, state, run, owner) = parked_fixture().await;
+        let questions = vec![asked("Scope", false, &["Backfill", "Forward only"])];
+        let permit = Arc::new(Permit::acquire().await.unwrap());
+
+        tokio::time::pause();
+        let mut parking = {
+            let questions = questions.clone();
+            let permit = permit.clone();
+            tokio::spawn(async move {
+                park_for_answer(&state, run, owner, "call-1", &questions, &permit, false).await
+            })
+        };
+        let slots = pinned(&mut parking)
+            .await
+            .expect("the run never parked on its question");
+        tokio::time::advance(OPTIONAL_ANSWER_WINDOW).await;
+        assert_eq!(
+            parked_state(&observed, run).await.0,
+            PHASE_WAITING,
+            "the window ran out and the run resumed without a slot to resume on"
+        );
+        drop(slots);
+        assert_eq!(
+            within(HUNG_AFTER, parking)
+                .await
+                .expect("the run never proceeded on its default")
+                .unwrap()
+                .unwrap(),
+            proceeding_on_defaults(&questions)
+        );
+    }
+
     #[tokio::test]
     async fn an_optional_call_stores_its_envelope_and_proceeds_on_the_default() {
         let _execution = EXECUTION.lock().await;
@@ -4655,33 +4797,39 @@ mod watchdog_tests {
 
         tokio::time::pause();
         let started = tokio::time::Instant::now();
-        let carried = {
+        let mut parking = {
             let state = state.clone();
             let questions = questions.clone();
             let permit = permit.clone();
-            let parking = tokio::spawn(async move {
+            tokio::spawn(async move {
                 park_for_answer(&state, run, owner, "call-1", &questions, &permit, false).await
-            });
-            // The row has to carry the envelope while the run is still waiting
-            // on it: a console that can only read it afterwards reads nothing.
-            loop {
-                let (status, pending, phase) = parked_state(&observed, run).await;
-                if status == PHASE_WAITING {
-                    let pending = pending.expect("a parked run stores what it asked");
-                    assert_eq!(pending["tool_call_id"], "call-1");
-                    assert_eq!(pending["questions"][0]["header"], "Scope");
-                    assert_eq!(pending["questions"][0]["choices"][0]["recommended"], true);
-                    assert_eq!(
-                        phase.as_deref(),
-                        Some(PHASE_WAITING),
-                        "the phase shown beside the badge must say the run is waiting"
-                    );
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-            parking.await.unwrap().unwrap()
+            })
         };
+        // The row has to carry the envelope while the run is still waiting
+        // on it: a console that can only read it afterwards reads nothing.
+        let slots = pinned(&mut parking)
+            .await
+            .expect("the run never parked on its question");
+        let (status, pending, phase) = parked_state(&observed, run).await;
+        assert_eq!(
+            status, PHASE_WAITING,
+            "the run stopped reading as parked while every slot it could resume on was held"
+        );
+        let pending = pending.expect("a parked run stores what it asked");
+        assert_eq!(pending["tool_call_id"], "call-1");
+        assert_eq!(pending["questions"][0]["header"], "Scope");
+        assert_eq!(pending["questions"][0]["choices"][0]["recommended"], true);
+        assert_eq!(
+            phase.as_deref(),
+            Some(PHASE_WAITING),
+            "the phase shown beside the badge must say the run is waiting"
+        );
+        drop(slots);
+        let carried = within(HUNG_AFTER, parking)
+            .await
+            .expect("the run never proceeded on its default")
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             carried,
@@ -4719,7 +4867,7 @@ mod watchdog_tests {
         let state_for_park = state.clone();
         let asked_for_park = questions.clone();
         let permit_for_park = permit.clone();
-        let parking = tokio::spawn(async move {
+        let mut parking = tokio::spawn(async move {
             park_for_answer(
                 &state_for_park,
                 run,
@@ -4731,12 +4879,9 @@ mod watchdog_tests {
             )
             .await
         });
-        loop {
-            if parked_row(&observed, run).await.0 == PHASE_WAITING {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        parked(&mut parking)
+            .await
+            .expect("the run never parked on its question");
 
         tokio::time::advance(Duration::from_secs(60)).await;
         for _ in 0..64 {
@@ -4756,7 +4901,14 @@ mod watchdog_tests {
                 other: None,
             }]
         ));
-        assert_eq!(parking.await.unwrap().unwrap(), "Scope: Forward only");
+        assert_eq!(
+            within(HUNG_AFTER, parking)
+                .await
+                .expect("an answered run never resumed")
+                .unwrap()
+                .unwrap(),
+            "Scope: Forward only"
+        );
         let (status, pending) = parked_row(&pool, run).await;
         assert_eq!(status, "running");
         assert_eq!(pending, None);
@@ -4775,11 +4927,11 @@ mod watchdog_tests {
     #[tokio::test]
     async fn a_withdrawn_claim_unparks_the_row_and_stops_the_run() {
         let _execution = EXECUTION.lock().await;
-        let (pool, observed, state, run, owner) = parked_fixture().await;
+        let (pool, _observed, state, run, owner) = parked_fixture().await;
         let questions = vec![asked("Scope", true, &["Backfill", "Forward only"])];
         let permit = Arc::new(Permit::acquire().await.unwrap());
 
-        let parking = {
+        let mut parking = {
             let state = state.clone();
             let questions = questions.clone();
             let permit = permit.clone();
@@ -4787,16 +4939,14 @@ mod watchdog_tests {
                 park_for_answer(&state, run, owner, "call-1", &questions, &permit, false).await
             })
         };
-        loop {
-            if parked_row(&observed, run).await.0 == PHASE_WAITING {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        parked(&mut parking)
+            .await
+            .expect("the run never parked on its question");
 
         question::forget(run);
-        let fault = parking
+        let fault = within(HUNG_AFTER, parking)
             .await
+            .expect("a withdrawn claim left the run waiting")
             .unwrap()
             .expect_err("a withdrawn claim has no answer to resume on");
 
@@ -5320,11 +5470,6 @@ mod watchdog_tests {
     const POLL: Duration = Duration::from_millis(10);
 
     /// A wait short enough to sit out in real time.
-    ///
-    /// The tests that read the parked row keep the real clock: a paused one
-    /// auto-advances to the next timer whenever the runtime has only pending
-    /// I/O left, which is every moment between asking the row for its state
-    /// and being told, so the deadline could elapse before the park is seen.
     const WAIT_TICK: Duration = Duration::from_secs(3);
 
     /// A wait on a background job, ending `seconds` from now.
@@ -5533,47 +5678,43 @@ mod watchdog_tests {
         let permit = Arc::new(Permit::acquire().await.unwrap());
         let waited = claimed_wait(run, WAIT_TICK.as_secs() as i64);
 
-        let parking = {
+        let mut parking = {
             let state = state.clone();
             let permit = permit.clone();
             let waited = waited.clone();
             tokio::spawn(async move { park_for_wait(&state, run, owner, &waited, &permit).await })
         };
-        // Bounded by the wait's own window: past it there is no park left to
-        // read, and spinning would report a hang instead of what went wrong.
-        tokio::time::timeout(WAIT_TICK, async {
-            loop {
-                let (status, pending_wait, pending_question, phase) =
-                    waiting_state(&observed, run).await;
-                if status == PHASE_WAITING {
-                    assert_eq!(
-                        serde_json::from_value::<Waiting>(
-                            pending_wait.expect("a parked run stores what it waits on")
-                        )
-                        .expect("the stored wait is a wait"),
-                        waited.waiting,
-                        "the card the console draws comes from this column"
-                    );
-                    assert_eq!(
-                        pending_question, None,
-                        "a run waiting on a job has nothing to answer, which is what answer_run \
-                     refuses with a conflict"
-                    );
-                    assert_eq!(
-                        phase.as_deref(),
-                        Some(PHASE_WAITING),
-                        "the phase shown beside the badge must say the run is waiting"
-                    );
-                    break;
-                }
-                tokio::time::sleep(POLL).await;
-            }
-        })
-        .await
-        .expect("the run never read as parked on its wait");
-
-        let outcome = parking
+        let slots = pinned(&mut parking)
             .await
+            .expect("the run never parked on its wait");
+        let (status, pending_wait, pending_question, phase) = waiting_state(&observed, run).await;
+        assert_eq!(
+            status, PHASE_WAITING,
+            "the run stopped reading as parked while every slot it could resume on was held"
+        );
+        assert_eq!(
+            serde_json::from_value::<Waiting>(
+                pending_wait.expect("a parked run stores what it waits on")
+            )
+            .expect("the stored wait is a wait"),
+            waited.waiting,
+            "the card the console draws comes from this column"
+        );
+        assert_eq!(
+            pending_question, None,
+            "a run waiting on a job has nothing to answer, which is what answer_run refuses with \
+             a conflict"
+        );
+        assert_eq!(
+            phase.as_deref(),
+            Some(PHASE_WAITING),
+            "the phase shown beside the badge must say the run is waiting"
+        );
+        drop(slots);
+
+        let outcome = within(HUNG_AFTER, parking)
+            .await
+            .expect("the run never resumed from its wait")
             .unwrap()
             .expect("a wait that ran out still resumes the run");
         assert!(
@@ -5622,29 +5763,18 @@ mod watchdog_tests {
         );
         let waited = claimed_wait(run, WAIT_TICK.as_secs() as i64);
 
-        let parking = {
+        let mut parking = {
             let state = state.clone();
             let permit = permit.clone();
             let waited = waited.clone();
             tokio::spawn(async move { park_for_wait(&state, run, owner, &waited, &permit).await })
         };
-        tokio::time::timeout(WAIT_TICK, async {
-            while waiting_state(&observed, run).await.0 != PHASE_WAITING {
-                tokio::time::sleep(POLL).await;
-            }
-        })
-        .await
-        .expect("the run never read as parked on its wait");
-        // The row is written before the slot is handed back, so the release is
-        // waited for rather than read the instant the row appears -- the same
-        // poll the question park's own slot assertion uses.
-        tokio::time::timeout(WAIT_TICK, async {
-            while get_semaphore().available_permits() != MAX_CONCURRENT_TASKS {
-                tokio::time::sleep(POLL).await;
-            }
-        })
-        .await
-        .expect("a parked run kept the execution slot it is not executing on");
+        // Every slot, the parked run's own among them: taking them all is what
+        // proves it handed that one back.
+        let slots = pinned(&mut parking)
+            .await
+            .expect("a parked run kept the execution slot it is not executing on");
+        assert_eq!(waiting_state(&observed, run).await.0, PHASE_WAITING);
         assert!(
             tasks::heartbeat_task_run(&observed, run, owner)
                 .await
@@ -5652,9 +5782,11 @@ mod watchdog_tests {
             "a parked run still has to prove the process behind it is alive, or the sweeper \
              orphans it mid-wait"
         );
+        drop(slots);
 
-        parking
+        within(HUNG_AFTER, parking)
             .await
+            .expect("the run never resumed from its wait")
             .unwrap()
             .expect("the wait ended and the run owes the pool a slot again");
         assert_eq!(
@@ -5683,9 +5815,13 @@ mod watchdog_tests {
         // window out on its own: the only timer left is the wait's deadline.
         tokio::time::pause();
         let started = tokio::time::Instant::now();
-        let outcome = park_for_wait(&state, run, owner, &waited, &permit)
-            .await
-            .expect("the wait ran out and the run resumed");
+        let outcome = within(
+            HUNG_AFTER,
+            park_for_wait(&state, run, owner, &waited, &permit),
+        )
+        .await
+        .expect("the wait never ran out")
+        .expect("the wait ran out and the run resumed");
 
         assert!(
             tokio::time::Instant::now().duration_since(started) >= STALL_AFTER,
