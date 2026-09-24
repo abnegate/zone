@@ -1,7 +1,7 @@
 //! Organization database queries
 
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -169,6 +169,18 @@ pub async fn update_organization(
         created_at: r.created_at,
         updated_at: r.updated_at,
     }))
+}
+
+/// Whether the organization exists, holding it against deletion until `connection`'s transaction
+/// ends. Deleting an organization locks its row before its members' rows, so a transaction that
+/// goes on to lock a membership holds this first.
+pub async fn hold(connection: &mut PgConnection, id: Uuid) -> DbResult<bool> {
+    let held: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM organizations WHERE id = $1 FOR KEY SHARE")
+            .bind(id)
+            .fetch_optional(connection)
+            .await?;
+    Ok(held.is_some())
 }
 
 /// Delete an organization

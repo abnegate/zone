@@ -293,6 +293,9 @@ async fn record(
         .map_err(|error| Error::Internal(error.to_string()))?;
     let label = tokens.label();
     let mut transaction = state.db().begin().await?;
+    if !organizations::hold(&mut transaction, pending.organization).await? {
+        return Err(Error::Deleted);
+    }
     authorize(state, &mut transaction, pending).await?;
     let login = agent_logins::upsert(
         &mut *transaction,

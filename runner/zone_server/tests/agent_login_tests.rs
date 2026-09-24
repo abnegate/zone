@@ -909,6 +909,24 @@ async fn gone(path: &Path) -> bool {
     until(|| !path.exists()).await
 }
 
+/// Whether some backend waits within [`WAIT`] on a lock the backend `holder` holds.
+async fn blocked_by(pool: &PgPool, holder: i32) -> bool {
+    for _ in 0..ATTEMPTS {
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+        )
+        .bind(holder)
+        .fetch_one(pool)
+        .await
+        .expect("the backends waiting on locks are readable");
+        if blocked {
+            return true;
+        }
+        tokio::time::sleep(PAUSE).await;
+    }
+    false
+}
+
 async fn until(condition: impl Fn() -> bool) -> bool {
     for _ in 0..ATTEMPTS {
         if condition() {
@@ -2269,6 +2287,48 @@ async fn a_returned_sign_in_to_an_organization_deleted_meanwhile_says_so() {
     response.assert_status(StatusCode::NOT_FOUND);
     assert_eq!(response.json_value(), json!({ "error": NOT_FOUND }));
     assert!(exchanges(&claude).await.is_empty());
+}
+
+#[tokio::test]
+async fn deleting_an_organization_while_its_first_claude_login_is_saved_deadlocks_neither() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let (state, _) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
+    let receipt = stage.approved(&state, organization).await;
+    let pool = stage.pool().clone();
+    let mut deleting = pool.begin().await.expect("a transaction to delete in");
+    let deleter: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *deleting)
+        .await
+        .expect("the deleting backend");
+    sqlx::query("SELECT id FROM organizations WHERE id = $1 FOR UPDATE")
+        .bind(organization)
+        .execute(&mut *deleting)
+        .await
+        .expect("the organization's row, locked first as deleting it does");
+
+    let (response, deleted) =
+        tokio::join!(stage.redeem(organization, &receipt, &owner), async move {
+            assert!(
+                blocked_by(&pool, deleter).await,
+                "saving the login never waited on the organization's row"
+            );
+            let deleted = sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(organization)
+                .execute(&mut *deleting)
+                .await;
+            if deleted.is_ok() {
+                deleting.commit().await.expect("the deletion to commit");
+            }
+            deleted
+        });
+
+    deleted.expect("deleting the organization deadlocked with saving its first login");
+    response.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(response.json_value(), json!({ "error": NOT_FOUND }));
+    assert!(stage.login_row(organization, "claude").await.is_none());
 }
 
 #[tokio::test]
