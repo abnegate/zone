@@ -72,6 +72,19 @@ struct Limit {
     status: Option<String>,
     #[serde(default, rename = "rateLimitType")]
     kind: Option<String>,
+    #[serde(default, rename = "overageStatus")]
+    overage: Option<String>,
+}
+
+impl Limit {
+    /// Whether the request went through: inside the plan's window, or past it
+    /// on usage credits the account allows.
+    fn headroom(&self) -> bool {
+        [&self.status, &self.overage]
+            .into_iter()
+            .flatten()
+            .any(|status| ALLOWED.contains(&status.as_str()))
+    }
 }
 
 /// Anthropic reports cache reads and cache writes separately from fresh input.
@@ -160,10 +173,10 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
         Event::RateLimit {
             rate_limit_info: Some(limit),
         } => {
-            let status = limit.status.unwrap_or_default();
-            if ALLOWED.contains(&status.as_str()) {
+            if limit.headroom() {
                 return;
             }
+            let status = limit.status.unwrap_or_default();
             let kind = limit.kind.unwrap_or_else(|| "request".to_string());
             events.push(AgentEvent::Failed(format!(
                 "{THROTTLED} ({kind}, {status})"
@@ -263,18 +276,41 @@ mod tests {
 
     #[test]
     fn a_refused_request_reads_as_a_rate_limit_to_the_worker() {
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}"#;
-        let mut events = Vec::new();
-        interpret(line, &mut events);
+        for line in [
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false}}"#,
+        ] {
+            let mut events = Vec::new();
+            interpret(line, &mut events);
 
-        let [AgentEvent::Failed(message)] = events.as_slice() else {
-            panic!("expected one failure, got {events:?}");
-        };
-        assert!(
-            message.to_ascii_lowercase().contains("rate limit"),
-            "the worker cannot classify {message:?}"
-        );
-        assert!(message.contains("seven_day"));
+            let [AgentEvent::Failed(message)] = events.as_slice() else {
+                panic!("expected one failure, got {events:?}");
+            };
+            assert!(
+                message.to_ascii_lowercase().contains("rate limit"),
+                "the worker cannot classify {message:?}"
+            );
+            assert!(message.contains("seven_day"));
+        }
+    }
+
+    /// claude reports a plan's window as rejected once the account's usage
+    /// credits carry a request past it, and the request goes through.
+    #[test]
+    fn a_request_usage_credits_carry_past_the_plans_window_is_not_a_failure() {
+        for kind in ["five_hour", "seven_day", "seven_day_overage_included"] {
+            for overage in ["allowed", "allowed_warning"] {
+                let line = format!(
+                    r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","resetsAt":1790208000,"rateLimitType":"{kind}","overageStatus":"{overage}","isUsingOverage":true}},"uuid":"3f0e","session_id":"6f1"}}"#
+                );
+                let mut events = Vec::new();
+                interpret(&line, &mut events);
+                assert!(
+                    events.is_empty(),
+                    "{kind} on usage credits ({overage}) was treated as a failure: {events:?}"
+                );
+            }
+        }
     }
 
     #[test]
