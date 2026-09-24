@@ -238,14 +238,16 @@ organizations that must not see each other's data.
   port of its own, for `GET /callback?code=…&state=…` and serves nothing else;
   see *Signing in*.
 - **It serves only a browser on the machine Zone runs on**, with the console
-  open at a localhost address such as `http://manager.localhost` or
-  `http://localhost:3000`: a native run, or the compose stack on the admin's
+  open at a localhost address that `ZONE_CONSOLE_ORIGINS` lists, such as
+  compose's `http://manager.localhost` or the `dev` profile's
+  `http://localhost:3001`: a native run, or the compose stack on the admin's
   own computer. A console open anywhere else asks claude.com for a code to
   paste instead, so a remote stack keeps working with the callback on. A
   browser on another machine can use the callback through an SSH tunnel that
   forwards it and the console, such as
   `ssh -L 54545:localhost:54545 -L 8080:localhost:80 <zone-host>` with the
-  console opened at `http://manager.localhost:8080`.
+  console opened at `http://manager.localhost:8080`, which
+  `ZONE_CONSOLE_ORIGINS` then has to list.
 - **Why nothing turns it on natively**: Zone cannot tell where the admin's
   browser runs, so only the operator can turn it on.
 - **Note**: Must be `http://localhost:<port>`, the only address claude.com
@@ -271,6 +273,33 @@ organizations that must not see each other's data.
 - **Note**: Must be an IP address, or an IP address and port such as
   `0.0.0.0:54545`. Anything else is refused at boot, even with no callback
   set.
+
+### `ZONE_CONSOLE_ORIGINS`
+- **Default**: empty, so no sign-in uses the callback. Compose lists the
+  consoles Traefik serves: `http://manager.localhost`,
+  `https://manager.localhost`, `http://manager.${DOMAIN_HOST_WEBUI}` and
+  `https://manager.${DOMAIN_HOST_WEBUI}`. The `dev` profile adds the Vite
+  server, `http://localhost:3001`. A list in `.env` replaces these, and an
+  empty one turns the callback's return off. The Helm chart leaves it empty.
+- **Description**: The consoles, comma separated, that the callback sends a
+  browser on to with a sign-in's receipt, each written as the browser names
+  it, `scheme://host[:port]`. A Claude sign-in uses the callback only when the
+  `Origin` of the request that starts it is one of them exactly and is a
+  localhost address: `localhost` or a name under it, `127.0.0.1` or `[::1]`.
+  Any other start pastes the code claude.com shows, and one that asks for the
+  callback is refused. A listed console elsewhere, such as
+  `https://manager.example.com`, still pastes.
+- **Why a list**: whoever starts a sign-in chooses the `Origin` of their own
+  request, and the browser that approves it is sent there with the receipt.
+  List only consoles you run, so a link someone else started cannot send your
+  browser, and its receipt, to anything else your machine serves, such as a
+  development server on another port.
+- **Note**: Each entry must be an `http` or `https` origin with no
+  credentials, path, query or fragment; anything else is refused at boot.
+  Entries are compared as browsers send them, so case and a default port make
+  no difference. The desktop and mobile apps serve the console from
+  `http://127.0.0.1` on a port of their own and never pass that origin on, so
+  their sign-ins paste the code wherever the server runs.
 
 ### `ZONE_CODEX_SANDBOX`
 - **Default**: `workspace-write`. The manager image sets `danger-full-access`,
@@ -338,8 +367,8 @@ in" while the agent is not signed in.
 **Claude Code** uses the sign-in `claude setup-token` uses. How the code gets
 back to Zone depends on `ZONE_AGENT_CALLBACK` and on where the console is open.
 
-With a callback, as in compose, and the console open at a localhost address on
-the machine Zone runs on, nothing is pasted:
+With a callback, as in compose, and the console open on the machine Zone runs
+on at a localhost address `ZONE_CONSOLE_ORIGINS` lists, nothing is pasted:
 
 1. **Sign in with Claude** gives you a link to claude.com. Open it in the same
    browser, sign in there and approve access. The panel says "Approve on
@@ -360,7 +389,8 @@ the machine Zone runs on, nothing is pasted:
 claude.com shows for pasting. Use it when the browser cannot reach the
 callback, such as when the tab shows a connection error; the address of that
 tab's page can be pasted as well. A console open anywhere but a localhost
-address, and a server without a callback, start every sign-in this way:
+address `ZONE_CONSOLE_ORIGINS` lists, and a server without a callback, start
+every sign-in this way:
 
 1. **Sign in with Claude** gives you a link to claude.com. Sign in there and
    approve access.
@@ -381,19 +411,25 @@ a code itself. It takes a state only once, within its ten minutes, when Zone
 issued it for this flow, and only at the `localhost:<port>` address the link
 named; a state issued for pasting stays for its paste. It parks the code under
 a one-time receipt and sends the browser to the console that started the
-sign-in, which Zone took from the start request's `Origin`, and only when that
-is a localhost address. Zone exchanges the code only when the receipt comes
-back with the Zone session that started the sign-in, from the admin who
-started it, who still manages the organization. It checks that again, and
-that the session is still signed in, in the transaction that records the
-tokens. A receipt handed back by anyone else, or from another session, discards
-the code and ends the sign-in, so a link someone else started cannot sign
-their organization in with your Claude account. A pasted code finishes only for
-the admin who started its sign-in, with the same checks on their role and on
-the session that started it. The page the
-listener shows repeats nothing from the request, the server logs neither the
-code, the state nor the receipt, and the listener answers at most 16
-connections at once, turns 16 more away with a busy page and closes the rest.
+sign-in, which Zone took from the start request's `Origin`, only when
+`ZONE_CONSOLE_ORIGINS` lists that origin exactly and it is a localhost
+address. The receipt travels in the fragment of that address,
+`/agent-sign-in#receipt=…`, which a browser never sends to a server or in a
+`Referer`; the console reads it, drops it from the address and hands it back
+once. Zone exchanges the code only when the receipt comes back with the Zone
+session that started the sign-in, from the admin who started it, who still
+manages the organization. It checks that again, and that the session is still
+signed in, in the transaction that records the tokens. A receipt handed back
+by anyone else, or from another session, discards the code and ends the
+sign-in. So, as long as the listed consoles are ones you run, a link someone
+else started cannot sign their organization in with your Claude account. A
+pasted code finishes only for the admin who started its sign-in, with the same
+checks on their role and on the session that started it. The page the listener
+shows repeats nothing from the request. Nothing in Zone's stack logs the
+receipt: the server logs neither the code, the state nor the receipt, and
+neither Traefik's access log nor the console's request log ever sees a
+fragment. The listener answers at most 16 connections at once, turns 16 more
+away with a busy page and closes the rest.
 A connection has ten seconds to send its request and 30 in all. Each admin has
 at most one sign-in in flight per organization: starting another abandons the
 first. A sign-in that finishes after a **Cancel** or a sign-out records
@@ -482,15 +518,15 @@ The panel uses these routes, where `{agent}` is `claude` or `codex`:
 |-------|-----|------|
 | `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models |
 | `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status. With `?attempt={attempt}`, a Claude status's `error` says why that sign-in failed, to the admin who started it |
-| `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access, and `{"flow":"paste"}` asks for a code to paste even with a callback. A claude answer's `flow` says how its code comes back, `loopback` or `paste`, and its `attempt` names the sign-in. The callback is used only when the request's `Origin` is a localhost address; `{"flow":"loopback"}` from anywhere else is refused |
+| `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access, and `{"flow":"paste"}` asks for a code to paste even with a callback. A claude answer's `flow` says how its code comes back, `loopback` or `paste`, and its `attempt` names the sign-in. The callback is used only when the request's `Origin` is a localhost address `ZONE_CONSOLE_ORIGINS` lists; `{"flow":"loopback"}` from anywhere else is refused |
 | `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}`; a code that fails carries a `kind`, `invalid_code` (paste again) or `start_again` |
-| `POST /api/organizations/{org_id}/agents/claude/login/receipt` | The admin who started, in the session that started it | Finish a Claude sign-in claude.com sent back to the callback, with `{"receipt":"..."}` from the address the callback sent the browser to. Anyone else's spends the receipt and discards the code |
+| `POST /api/organizations/{org_id}/agents/claude/login/receipt` | The admin who started, in the session that started it | Finish a Claude sign-in claude.com sent back to the callback, with `{"receipt":"..."}` from the fragment of the address the callback sent the browser to. Anyone else's spends the receipt and discards the code |
 | `DELETE /api/organizations/{org_id}/agents/claude/login/attempt` | Any member, for their own | End the caller's Claude sign-in, wherever its code is |
 | `DELETE /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Sign out |
 
 The callback, `GET /callback`, is served by the callback listener on the port
 `ZONE_AGENT_CALLBACK` names, not by the API. It answers an approved sign-in
-with a redirect to `/agent-sign-in?receipt=…&organization=…` on the console
+with a redirect to `/agent-sign-in#receipt=…&organization=…` on the console
 that started it. A Claude sign-in that failed there, or once its receipt came
 back, shows why in the agent's status `error`, to the admin who started it and
 asks with its `attempt`, until they start another.
@@ -744,7 +780,8 @@ not-signed-in error above.
 To sign an organization in to Claude natively without pasting a code, set
 `ZONE_AGENT_CALLBACK=http://localhost:54545` (any free port) when the admins'
 browsers run on the same machine as the server and open the console at a
-localhost address.
+localhost address, and list that address in `ZONE_CONSOLE_ORIGINS`, such as
+`ZONE_CONSOLE_ORIGINS=http://localhost:3001`.
 
 ### Security: every organization is the same OS user
 
@@ -850,13 +887,15 @@ once approved, and its file tools read whatever else the server's user can.
   `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`),
   `ZONE_AGENT_ENV_PASSTHROUGH`, `ZONE_CODEX_SANDBOX` (default
   `danger-full-access`), `ZONE_CLAUDE_TOKEN_URL` (empty by default, which
-  keeps Claude's own endpoint), `ZONE_AGENT_CALLBACK` and
-  `ZONE_AGENT_CALLBACK_BIND=0.0.0.0:54545`, and publishes the callback on the
-  host's loopback only, as `127.0.0.1:${ZONE_AGENT_CALLBACK_PORT}:54545`.
-  `ZONE_AGENT_CALLBACK_PORT` in `.env` drives both, 54545 by default; empty, it
-  turns the callback off and leaves the port free. Admins whose browsers run
-  elsewhere paste codes either way. The image's entrypoint hands
-  `/app/agent-state` to `zone` with mode 0700, then runs the server as `zone`.
+  keeps Claude's own endpoint), `ZONE_AGENT_CALLBACK`,
+  `ZONE_AGENT_CALLBACK_BIND=0.0.0.0:54545` and `ZONE_CONSOLE_ORIGINS` (the
+  consoles Traefik serves, and under `dev` the Vite server too), and publishes
+  the callback on the host's loopback only, as
+  `127.0.0.1:${ZONE_AGENT_CALLBACK_PORT}:54545`. `ZONE_AGENT_CALLBACK_PORT` in
+  `.env` drives both, 54545 by default; empty, it turns the callback off and
+  leaves the port free. Admins whose browsers run elsewhere paste codes either
+  way. The image's entrypoint hands `/app/agent-state` to `zone` with mode
+  0700, then runs the server as `zone`.
   The `dev` profile's image, `manager/Dockerfile.dev`, does not include the
   CLIs.
 - **Helm.** Agent providers need `server.replicaCount: 1` and
@@ -864,10 +903,12 @@ once approved, and its file tools read whatever else the server's user can.
   `server.podDisruptionBudget.enabled: false`; see
   [helm/zone-apps/README.md](../helm/zone-apps/README.md), which also covers
   the claim that keeps agent state and how to size it. The chart leaves
-  `ZONE_AGENT_CALLBACK` unset, so Claude codes are pasted. A browser reaches a
-  pod's callback only through `kubectl port-forward` of both the callback port
-  and the console to its own machine; the install notes say how when it is
-  set.
+  `ZONE_AGENT_CALLBACK` unset and `ZONE_CONSOLE_ORIGINS` empty, so Claude codes
+  are pasted. A browser reaches a pod's callback only through
+  `kubectl port-forward` of both the callback port and the console to its own
+  machine, with the forwarded console listed in `ZONE_CONSOLE_ORIGINS` as the
+  browser opens it, such as `http://127.0.0.1:3001`; the install notes say how
+  when the callback is set.
 - **Backups.** `make backup` and `make restore` include
   `zone_manager_agent_state`, and with it every organization's codex login; see
   [OPERATIONS.md](OPERATIONS.md).
@@ -882,10 +923,11 @@ once approved, and its file tools read whatever else the server's user can.
   `danger-full-access`; a `ZONE_AGENT_CALLBACK` that is not
   `http://localhost:<port>` or a port, or whose port the server cannot listen
   on; a `ZONE_AGENT_CALLBACK_BIND` that is not an IP address, or an IP address
-  and port. Nothing is created in
-  the state directory at boot, so one the server cannot write shows up when a
-  turn first needs it, as "Could not prepare the claude CLI's state directory:
-  …".
+  and port; a `ZONE_CONSOLE_ORIGINS` entry that is not an `http` or `https`
+  origin, or that carries credentials, a path, a query or a fragment. Nothing
+  is created in the state directory at boot, so one the server cannot write
+  shows up when a turn first needs it, as "Could not prepare the claude CLI's
+  state directory: …".
 
 ### Known gaps
 
@@ -1434,8 +1476,8 @@ Need to find a specific config? Quick lookup:
 - **Model backend and coding agents**: ZONE_LLM_BACKEND,
   ZONE_LLM_BACKEND_EXECUTABLE, ZONE_AGENT_STATE_DIR, ZONE_AGENT_HOST_LOGIN,
   ZONE_CLAUDE_TOKEN_URL, ZONE_AGENT_CALLBACK, ZONE_AGENT_CALLBACK_BIND,
-  ZONE_AGENT_CALLBACK_PORT, ZONE_CODEX_SANDBOX, ZONE_AGENT_ENV_PASSTHROUGH,
-  ZONE_CHAT_AGENT_CWD
+  ZONE_AGENT_CALLBACK_PORT, ZONE_CONSOLE_ORIGINS, ZONE_CODEX_SANDBOX,
+  ZONE_AGENT_ENV_PASSTHROUGH, ZONE_CHAT_AGENT_CWD
 - **Image, video, and audio generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
   COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_VIDEO_WORKFLOW_PATH,
   COMFYUI_VIDEO_UNET, COMFYUI_VIDEO_CLIP, COMFYUI_VIDEO_VAE,
