@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use chrono::{DateTime, SubsecRound, Utc};
@@ -86,11 +86,24 @@ pub async fn sign_out(
 }
 
 /// Forgets everything this server keeps for a deleted organization's coding agents: a pending
-/// codex sign-in is stopped, codex logs out of the organization's home, and the organization's
-/// agent state is removed. It runs to the end even when its caller stops waiting for it.
+/// codex sign-in is stopped and codex logs out of the organization's home before it returns, and
+/// the organization's agent state is then removed in the background, which logs a removal that
+/// fails. It runs to the end even when its caller stops waiting for it.
 pub async fn forget(state: &AppState, organization: Uuid) -> Result<(), Error> {
+    forget_with(state, organization, |directory: &Path| {
+        fs::remove_dir_all(directory)
+    })
+    .await
+}
+
+/// [`forget`], removing the organization's agent state with `remove`.
+async fn forget_with(
+    state: &AppState,
+    organization: Uuid,
+    remove: impl FnOnce(&Path) -> io::Result<()> + Send + 'static,
+) -> Result<(), Error> {
     let state = state.clone();
-    tokio::spawn(async move { DEVICES.forget(&state, organization).await })
+    tokio::spawn(async move { DEVICES.forget(&state, organization, remove).await })
         .await
         .unwrap_or_else(|error| {
             Err(Error::Internal(format!(
@@ -304,20 +317,36 @@ impl Devices {
         Ok(())
     }
 
-    async fn forget(&self, state: &AppState, organization: Uuid) -> Result<(), Error> {
-        let _guard = self.locks.lock(organization).await;
+    /// Returns once codex has logged out. The organization's agent state is then removed off the
+    /// async runtime, still under the organization's lock.
+    async fn forget(
+        &'static self,
+        state: &AppState,
+        organization: Uuid,
+        remove: impl FnOnce(&Path) -> io::Result<()> + Send + 'static,
+    ) -> Result<(), Error> {
+        let guard = self.locks.lock(organization).await;
         self.stop(organization).await;
         self.failures.remove(&organization);
         let config = state.config();
-        let Some(directory) = agent_state(config, organization)? else {
+        let Some(directory) = agent_state(config, organization).await? else {
             return Ok(());
         };
         if let Err(error) = log_out(config, organization).await {
             tracing::warn!(%organization, %error, "codex could not log a deleted organization out");
         }
-        fs::remove_dir_all(&directory).map_err(|error| {
-            Error::Internal(format!("Could not remove {}: {error}", directory.display()))
-        })
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            if let Err(error) = remove(&directory) {
+                tracing::error!(
+                    %organization,
+                    %error,
+                    directory = %directory.display(),
+                    "Could not remove a deleted organization's agent state"
+                );
+            }
+        });
+        Ok(())
     }
 
     /// Ends the organization's pending sign-in and waits for codex to exit, so a login codex
@@ -334,15 +363,25 @@ impl Devices {
 }
 
 /// `<state>/<organization>`, which holds every agent home of the organization, when it is a real
-/// directory. Anything else in its place is refused, so nothing done to it reaches outside the
-/// state root.
-fn agent_state(config: &Config, organization: Uuid) -> Result<Option<PathBuf>, Error> {
+/// directory, inspected off the async runtime. Anything else in its place is refused, so nothing
+/// done to it reaches outside the state root.
+async fn agent_state(config: &Config, organization: Uuid) -> Result<Option<PathBuf>, Error> {
     let home = config.agents.home(organization, AgentKind::Codex);
-    let Some(directory) = home.parent() else {
+    let Some(directory) = home.parent().map(Path::to_path_buf) else {
         return Ok(None);
     };
-    match fs::symlink_metadata(directory) {
-        Ok(metadata) if metadata.is_dir() => Ok(Some(directory.to_path_buf())),
+    tokio::task::spawn_blocking(move || inspect(directory))
+        .await
+        .unwrap_or_else(|error| {
+            Err(Error::Internal(format!(
+                "Inspecting organization {organization}'s agent state stopped: {error}"
+            )))
+        })
+}
+
+fn inspect(directory: PathBuf) -> Result<Option<PathBuf>, Error> {
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.is_dir() => Ok(Some(directory)),
         Ok(_) => Err(Error::Internal(format!(
             "{} is not a directory, so it was left in place",
             directory.display()
@@ -434,6 +473,7 @@ fn said(error: &codex::Error) -> String {
 mod tests {
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
     use std::time::Duration;
 
     use sqlx::PgPool;
@@ -647,13 +687,33 @@ esac"#
     }
 
     async fn appeared(path: &Path) -> bool {
+        until(|| path.exists()).await
+    }
+
+    async fn gone(path: &Path) -> bool {
+        until(|| !path.exists()).await
+    }
+
+    async fn until(condition: impl Fn() -> bool) -> bool {
         for _ in 0..ATTEMPTS {
-            if path.exists() {
+            if condition() {
                 return true;
             }
             tokio::time::sleep(PAUSE).await;
         }
         false
+    }
+
+    /// A removal that says when it starts, then waits to be released, for [`WAIT`] at most.
+    fn slow(
+        started: oneshot::Sender<()>,
+        released: mpsc::Receiver<()>,
+    ) -> impl FnOnce(&Path) -> io::Result<()> + Send + 'static {
+        move |directory: &Path| {
+            let _ = started.send(());
+            let _ = released.recv_timeout(WAIT);
+            fs::remove_dir_all(directory)
+        }
     }
 
     async fn finished(completion: Option<Completion>) {
@@ -844,12 +904,82 @@ esac"#
 
         assert_eq!(scene.lines(LOGOUTS), [scene.home().display().to_string()]);
         assert!(
-            !organization_state.exists(),
+            gone(&organization_state).await,
             "the deleted organization's agent state was left"
         );
         assert!(pending(scene.organization).is_none());
         assert_eq!(failure(scene.organization), None);
-        assert!(!DEVICES.locks.kept(scene.organization));
+        assert!(
+            until(|| !DEVICES.locks.kept(scene.organization)).await,
+            "a deleted organization's lock was kept"
+        );
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn forgetting_an_organization_answers_once_codex_logged_out_while_its_state_is_removed() {
+        let scene = Scene::new(PROMPT).await;
+        let (_, completion) = scene.start().await;
+        scene.touch(APPROVE);
+        finished(completion).await;
+        assert!(scene.login().await.is_some(), "codex never signed in");
+        let organization_state = scene
+            .home()
+            .parent()
+            .expect("the codex home is inside the organization's state")
+            .to_path_buf();
+        scene.delete_organization().await;
+        let (started, starting) = oneshot::channel();
+        let (release, released) = mpsc::channel();
+
+        forget_with(&scene.state, scene.organization, slow(started, released))
+            .await
+            .expect("the organization to be forgotten");
+        timeout(WAIT, starting)
+            .await
+            .expect("the removal to start")
+            .expect("the removal to say so");
+
+        assert!(
+            organization_state.exists(),
+            "forgetting the organization waited for its agent state to be removed"
+        );
+        assert_eq!(scene.lines(LOGOUTS), [scene.home().display().to_string()]);
+        assert!(
+            !codex::signed_in(&scene.home()),
+            "the agent state being removed still holds a codex login"
+        );
+        assert!(
+            DEVICES.locks.kept(scene.organization),
+            "the organization's lock was let go before its agent state was removed"
+        );
+        let restart = tokio::spawn({
+            let state = scene.state.clone();
+            let (organization, user) = (scene.organization, scene.user);
+            async move { DEVICES.start(&state, organization, user, EMAIL).await.err() }
+        });
+        release
+            .send(())
+            .expect("the removal to wait for its release");
+        let restarted = timeout(WAIT, restart)
+            .await
+            .expect("the start to finish")
+            .expect("the start not to panic");
+
+        assert!(matches!(restarted, Some(Error::Deleted)), "{restarted:?}");
+        assert_eq!(
+            scene.lines(STARTED).len(),
+            1,
+            "codex ran for a deleted organization"
+        );
+        assert!(
+            gone(&organization_state).await,
+            "the deleted organization's agent state was left"
+        );
+        assert!(
+            until(|| !DEVICES.locks.kept(scene.organization)).await,
+            "a deleted organization's lock was kept"
+        );
         scene.remove().await;
     }
 

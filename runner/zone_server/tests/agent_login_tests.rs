@@ -576,8 +576,18 @@ fn parameter(url: &str, name: &str) -> String {
 }
 
 async fn ended(process: Pid) -> bool {
+    until(|| kill(process, None) == Err(Errno::ESRCH)).await
+}
+
+/// Whether `path` is gone within [`WAIT`]: Zone removes a deleted organization's agent state
+/// after it answers.
+async fn gone(path: &Path) -> bool {
+    until(|| !path.exists()).await
+}
+
+async fn until(condition: impl Fn() -> bool) -> bool {
     for _ in 0..ATTEMPTS {
-        if kill(process, None) == Err(Errno::ESRCH) {
+        if condition() {
             return true;
         }
         tokio::time::sleep(PAUSE).await;
@@ -1644,7 +1654,7 @@ async fn deleting_an_organization_logs_codex_out_and_removes_its_agent_state() {
 
     assert_eq!(codex.logouts(), [home.display().to_string()]);
     assert!(
-        !agent_state.exists(),
+        gone(&agent_state).await,
         "the deleted organization's agent state was left on the server"
     );
     assert_eq!(
@@ -1673,7 +1683,7 @@ async fn deleting_an_organization_mid_sign_in_stops_codex_and_removes_its_agent_
     );
     assert_eq!(codex.logouts(), [home.display().to_string()]);
     assert!(
-        !agent_state.exists(),
+        gone(&agent_state).await,
         "the deleted organization's agent state was left on the server"
     );
     assert!(devices::pending(organization).is_none());
