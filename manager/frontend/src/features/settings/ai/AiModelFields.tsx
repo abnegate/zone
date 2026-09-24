@@ -12,6 +12,16 @@ import {
 const AGENT_EMBEDDING_HINT =
   "Coding agents have no embedding models, so this server's own embedding engine indexes sources and knowledge.";
 
+export interface AgentModelHints {
+  fast: string;
+  reasoning: string;
+}
+
+const ORGANIZATION_AGENT_HINTS: AgentModelHints = {
+  fast: 'Automatic lets the agent choose; titles, PR subjects and summaries use it too.',
+  reasoning: 'Harder questions; empty lets the agent choose.',
+};
+
 function embeddingHint(provider: AiProvider, listed: boolean): string {
   if (isAgentProvider(provider)) return AGENT_EMBEDDING_HINT;
   if (listed) return 'Used to index sources and knowledge for retrieval.';
@@ -30,6 +40,7 @@ interface AiModelFieldsProps {
   embeddingOptions: string[];
   installedModels: InstalledModelOption[];
   inheritedLabel: string;
+  agentHints?: AgentModelHints;
 }
 
 function ModelSelect({
@@ -83,6 +94,7 @@ export function AiModelFields({
   embeddingOptions,
   installedModels,
   inheritedLabel,
+  agentHints = ORGANIZATION_AGENT_HINTS,
 }: AiModelFieldsProps) {
   const imageOptions = comfyImageOptions(installedModels, models.image).map((name) => {
     const row = installedModels.find((item) => item.name === name);
@@ -107,7 +119,7 @@ export function AiModelFields({
         blankLabel="Automatic"
         hint={
           agentic
-            ? 'Automatic lets the agent choose; titles, PR subjects and summaries use it too.'
+            ? agentHints.fast
             : 'Short replies, titles and intent classification. Empty picks from the installed models.'
         }
       />
@@ -119,9 +131,7 @@ export function AiModelFields({
         options={plain(reasoningOptions)}
         blankLabel="Automatic"
         hint={
-          agentic
-            ? 'Harder questions; empty lets the agent choose.'
-            : 'Harder questions; empty picks a larger installed model.'
+          agentic ? agentHints.reasoning : 'Harder questions; empty picks a larger installed model.'
         }
       />
       {embeddingOptions.length > 0 ? (

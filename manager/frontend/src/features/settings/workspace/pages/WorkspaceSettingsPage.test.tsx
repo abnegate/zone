@@ -908,6 +908,23 @@ describe('WorkspaceSettingsPage', () => {
         );
       });
 
+      it("says Automatic uses the organization's models while the workspace keeps its provider", async () => {
+        mockClient.getWorkspaceAiSettings.mockResolvedValue(codexOnly);
+        render(<WorkspaceSettingsPage />);
+        await openAiTab(userEvent.setup());
+
+        const hint = (label: string) =>
+          screen.getByLabelText(label).closest('.form-group')?.querySelector('.form-hint')
+            ?.textContent;
+        await screen.findByLabelText('Fast Model');
+        expect(hint('Fast Model')).toBe(
+          "Automatic uses the organization's Fast model when this workspace keeps its provider, and otherwise lets the agent choose; titles, PR subjects and summaries use it too."
+        );
+        expect(hint('Reasoning Model')).toBe(
+          "Harder questions; Automatic uses the organization's Reasoning model when this workspace keeps its provider, and otherwise lets the agent choose."
+        );
+      });
+
       it('does not ask for sign-in status while inheriting the organization', async () => {
         mockClient.getWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
         mockClient.getEffectiveAiSettings.mockResolvedValue({ ...codexOnly, provider: 'codex' });

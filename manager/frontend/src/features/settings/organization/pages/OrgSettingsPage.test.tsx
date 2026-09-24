@@ -383,6 +383,10 @@ describe('OrgSettingsPage', () => {
       expect(fast.closest('.form-group')?.querySelector('.form-hint')?.textContent).toBe(
         'Automatic lets the agent choose; titles, PR subjects and summaries use it too.'
       );
+      const reasoning = screen.getByLabelText('Reasoning Model');
+      expect(reasoning.closest('.form-group')?.querySelector('.form-hint')?.textContent).toBe(
+        'Harder questions; empty lets the agent choose.'
+      );
     });
 
     describe('after the provider changes', () => {

@@ -14,6 +14,7 @@ import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
 import { useModels } from '../../../models';
 import {
+  type AgentModelHints,
   AgentSignIn,
   AiModelFields,
   AiProviderFields,
@@ -50,6 +51,12 @@ import './WorkspaceSettingsPage.css';
 type Tab = 'theme' | 'ai' | 'members';
 
 const TITLE = 'Workspace Settings';
+
+const AGENT_HINTS: AgentModelHints = {
+  fast: "Automatic uses the organization's Fast model when this workspace keeps its provider, and otherwise lets the agent choose; titles, PR subjects and summaries use it too.",
+  reasoning:
+    "Harder questions; Automatic uses the organization's Reasoning model when this workspace keeps its provider, and otherwise lets the agent choose.",
+};
 
 const fontOptions: { value: FontFamily; label: string }[] = [
   { value: 'system', label: 'System Default' },
@@ -735,6 +742,7 @@ export default function WorkspaceSettingsPage() {
                 embeddingOptions={choices.embedding}
                 installedModels={installedModels}
                 inheritedLabel="Use organization / server default"
+                agentHints={AGENT_HINTS}
               />
             </div>
           )}
