@@ -14,7 +14,10 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc};
 use uuid::Uuid;
 use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
-use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, LlmConfig, Message as LlmMessage};
+use zone_core::llm::provider::SignIn;
+use zone_core::llm::{
+    AgentKind, BuiltinTools, Credential, LlmBackend, LlmClient, LlmConfig, Message as LlmMessage,
+};
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
@@ -28,6 +31,7 @@ use crate::config::ModelBackend;
 use crate::db::{ai_settings, task_tool_calls, tasks, workspaces};
 use crate::services::backend;
 use crate::services::chat::session::{self, RunContext};
+use crate::services::login::credential::{self, Login};
 use crate::services::stages;
 use crate::state::AppState;
 use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
@@ -1259,34 +1263,75 @@ async fn prepare(
     Ok((backend, model))
 }
 
-/// The backend an attempt runs on: the workspace's own, resolved again so a
-/// sign-in renewed since the last attempt is the one this one carries.
+/// The backend an attempt runs on: the one the run was prepared on, with the
+/// organization's Claude sign-in it carries resolved again, so a token renewed
+/// since the last attempt is the one this attempt hands its agent, and a
+/// sign-in the organization has since removed stops the run.
 ///
-/// The run's model was chosen for the backend it was prepared on, so a
-/// workspace moved to another since then finishes the run where it began.
+/// Nothing the run does not use is read: an endpoint run reads nothing, a
+/// sign-in zone does not keep -- the host's, or codex's in its own home -- is
+/// its agent's to renew, and a run whose workspace has moved to another
+/// provider since finishes on the sign-in it began with.
 async fn refreshed(
     state: &AppState,
     workspace: Uuid,
     prepared: &LlmBackend,
 ) -> Result<LlmBackend, Fault> {
-    let current = backend::for_workspace(state, workspace)
-        .await
-        .map_err(Fault::backend)?;
-    let unchanged = match (prepared, &current) {
-        (LlmBackend::Http, LlmBackend::Http) => true,
-        (LlmBackend::Cli { agent: before, .. }, LlmBackend::Cli { agent: now, .. }) => {
-            before == now
-        }
-        _ => false,
+    let LlmBackend::Cli { agent, settings } = prepared else {
+        return Ok(prepared.clone());
     };
-    if unchanged {
-        return Ok(current);
-    }
-    tracing::warn!(
-        %workspace,
-        "The workspace moved to another backend during a run; the run keeps the one it began on"
-    );
-    Ok(prepared.clone())
+    let (SignIn::Organization, Credential::Key { variable, .. }) =
+        (settings.sign_in, &settings.credential)
+    else {
+        return Ok(prepared.clone());
+    };
+    let Some(organization) = organization_on(state, workspace, *agent).await else {
+        tracing::warn!(
+            %workspace,
+            %agent,
+            "The workspace left its run's agent during the run; the run keeps its own sign-in"
+        );
+        return Ok(prepared.clone());
+    };
+    let token = match credential::resolve(state, organization, *agent).await {
+        Ok(Some(Login::Claude { token })) => token,
+        Ok(Some(Login::Codex { .. })) => return Ok(prepared.clone()),
+        Ok(None) => return Err(Fault::backend(backend::Error::SignedOut { agent: *agent })),
+        Err(credential::Error::Database(source)) => {
+            return Err(Fault::backend(backend::Error::Database {
+                agent: *agent,
+                source,
+            }));
+        }
+        Err(error) => {
+            return Err(Fault::backend(backend::Error::Renewal {
+                agent: *agent,
+                message: error.to_string(),
+            }));
+        }
+    };
+    Ok(LlmBackend::cli(
+        *agent,
+        settings
+            .clone()
+            .with_credential(Credential::key(variable.clone(), token)),
+    ))
+}
+
+/// The organization `workspace` belongs to, while the workspace still runs on
+/// `agent`. A workspace or settings that cannot be read say nothing either
+/// way, and the reason is logged.
+async fn organization_on(state: &AppState, workspace: Uuid, agent: AgentKind) -> Option<Uuid> {
+    let organization = workspaces::get_workspace(state.db(), workspace)
+        .await
+        .inspect_err(|error| tracing::warn!(%workspace, %error, "Could not read the workspace"))
+        .ok()??
+        .organization_id;
+    let settings = ai_settings::get_effective_ai_settings(state.db(), organization, workspace)
+        .await
+        .inspect_err(|error| tracing::warn!(%workspace, %error, "Could not read the AI settings"))
+        .ok()?;
+    (settings.agent() == Some(agent)).then_some(organization)
 }
 
 /// Resolves the run's model the way a chat resolves its own: workspace settings
@@ -5800,7 +5845,7 @@ mod cli_tests {
     use super::*;
     use crate::config::{AgentConfig, Config, ModelBackend};
     use crate::db::agent_logins::{self, Upsert};
-    use crate::db::ai_settings::PROVIDER_CLAUDE_CODE;
+    use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, users, workspace_members, workspaces};
     use crate::services::login::claude::Tokens;
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -5822,8 +5867,13 @@ mod cli_tests {
     const INVOCATIONS: &str = "invocations";
     const FAILED: &str = "failed";
     const RELEASE: &str = "release";
+    const COMPLETIONS: &str = "/chat/completions";
     const POLL: Duration = Duration::from_millis(25);
     const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Long enough for a test to change the organization's settings while
+    /// the first attempt waits on the endpoint's answer.
+    const FIRST_ANSWER_DELAY: Duration = Duration::from_millis(500);
 
     /// A stand-in for the host's `claude`, which saves the prompt it was
     /// handed on stdin and then runs a script of the test's.
@@ -6113,10 +6163,12 @@ mod cli_tests {
             state
         }
 
-        /// The organization's workspaces run on `provider`.
+        /// The organization's workspaces run on `provider`, in place of
+        /// whatever they ran on.
         async fn choose(&self, provider: &str) {
             sqlx::query(
-                "INSERT INTO organization_ai_settings (organization_id, provider) VALUES ($1, $2)",
+                "INSERT INTO organization_ai_settings (organization_id, provider) VALUES ($1, $2) \
+                 ON CONFLICT (organization_id) DO UPDATE SET provider = EXCLUDED.provider",
             )
             .bind(self.organization)
             .bind(provider)
@@ -6509,6 +6561,134 @@ mod cli_tests {
             (&json!(2), &json!("terminal"))
         );
         assert_eq!(agent.lines(TOKENS), ["first-access"]);
+        fixture.remove().await;
+    }
+
+    /// A run that began on an organization's agent finishes on it: moving the
+    /// organization to another agent while the run waits to retry neither
+    /// stops the run for the other agent's missing sign-in nor takes away the
+    /// sign-in it runs under.
+    #[tokio::test]
+    async fn a_run_whose_organization_moves_to_another_agent_keeps_its_own_sign_in() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::flaky();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let mut config = homed(config(&agent, &provider), &agents);
+        config.agents.host_login = false;
+        let state = fixture.state(config);
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        fixture.sign_in(&state, "first-access").await;
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+
+        agent.first_attempt().await;
+        fixture.choose(PROVIDER_CODEX).await;
+        agent.release();
+        tokio::time::timeout(SPAWN_TIMEOUT * 2, running)
+            .await
+            .expect("the run finishes once its second attempt does")
+            .unwrap();
+
+        let finished = fixture.finished().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(agent.lines(TOKENS), ["first-access", "first-access"]);
+        fixture.remove().await;
+    }
+
+    /// How many completions `provider` has been asked for.
+    async fn completions(provider: &MockServer) -> usize {
+        provider
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == COMPLETIONS)
+            .count()
+    }
+
+    /// An endpoint run reads nothing between its attempts: an organization
+    /// that picks an agent it has not signed in to while the run waits to
+    /// retry changes nothing about where the next attempt goes.
+    #[tokio::test]
+    async fn an_endpoint_run_finishes_on_the_endpoint_when_its_organization_picks_an_agent() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(COMPLETIONS))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_string("upstream unavailable")
+                    .set_delay(FIRST_ANSWER_DELAY),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&provider)
+            .await;
+        let chunk = json!({"id": "completion", "object": "chat.completion.chunk", "created": 0,
+            "model": "test", "choices": [{"index": 0, "delta": {"content": ANSWER},
+            "finish_reason": null}]});
+        let end = json!({"id": "completion", "object": "chat.completion.chunk", "created": 0,
+            "model": "test", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]});
+        Mock::given(method("POST"))
+            .and(path(COMPLETIONS))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n")),
+            )
+            .mount(&provider)
+            .await;
+        let agents = TempDir::new().expect("an agent state root");
+        let mut config = homed(
+            Config {
+                litellm_host: provider.uri(),
+                ollama_host: provider.uri(),
+                ..crate::state::test_config()
+            },
+            &agents,
+        );
+        config.agents.host_login = false;
+        let state = fixture.state(config);
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+
+        let deadline = tokio::time::Instant::now() + SPAWN_TIMEOUT;
+        while completions(&provider).await == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the first attempt never asked the endpoint"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        tokio::time::timeout(SPAWN_TIMEOUT * 2, running)
+            .await
+            .expect("the run finishes once its second attempt does")
+            .unwrap();
+
+        let finished = fixture.finished().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(completions(&provider).await, 2);
         fixture.remove().await;
     }
 
