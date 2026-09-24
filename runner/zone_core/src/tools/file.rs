@@ -961,10 +961,13 @@ async fn search_ripgrep(
 
     let mut command = tokio::process::Command::new("rg");
     // Matches are judged below by the path rg prints, which is the file's own
-    // only while rg follows no link; a config file could add `--follow` or
-    // reshape the output.
+    // only while rg follows no link, and which ends at the NUL `--null` puts
+    // after it because a file name can hold a `:`. A config file could add
+    // `--follow` or reshape the output.
     command
         .arg("--no-config")
+        .arg("--null")
+        .arg("--with-filename")
         .arg("-F")
         .arg("-n")
         .arg("--no-heading")
@@ -1002,29 +1005,30 @@ async fn search_ripgrep(
         if results.len() >= max_results {
             break;
         }
-        if line.is_empty() || withheld(Path::new(line), context) {
+        let Some((path, found)) = line.split_once('\0') else {
+            continue;
+        };
+        let path = Path::new(path);
+        if withheld(path, context) {
             continue;
         }
-        results.push(normalize_rg_line(line, search_path));
+        results.push(normalize_rg_line(path, found, search_path));
     }
     Some(format_search_results(results, max_results))
 }
 
-fn normalize_rg_line(line: &str, search_path: &Path) -> String {
-    // rg prints `path:line:text`. Prefer a path relative to the search root.
-    let Some((path_and_line, text)) = line.split_once(':').and_then(|(path, rest)| {
-        rest.split_once(':')
-            .map(|(number, text)| (format!("{path}:{number}"), text))
-    }) else {
-        return line.to_string();
-    };
-    let Some((path, number)) = path_and_line.rsplit_once(':') else {
-        return format!("{}: {}", path_and_line, text.trim());
-    };
-    let relative = Path::new(path)
+/// One match as `path:line: text`, with the path relative to the search root
+/// unless the root is the file itself.
+fn normalize_rg_line(path: &Path, found: &str, search_path: &Path) -> String {
+    let relative = path
         .strip_prefix(search_path)
-        .unwrap_or(Path::new(path));
-    format!("{}:{}: {}", relative.display(), number, text.trim())
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .unwrap_or(path);
+    match found.split_once(':') {
+        Some((number, text)) => format!("{}:{}: {}", relative.display(), number, text.trim()),
+        None => format!("{}: {}", relative.display(), found.trim()),
+    }
 }
 
 fn ripgrep_available() -> bool {
@@ -2572,6 +2576,33 @@ mod tests {
         let walked = walked.join("\n");
         assert!(walked.contains("own.rs"), "{walked}");
         assert!(!walked.contains("auth.json"), "{walked}");
+    }
+
+    /// A denied file stays out of a search of the directory that holds it, as
+    /// a denied directory does. ripgrep's `path:line:text` used to be judged
+    /// whole, and a file's own name never matched one with a line after it.
+    #[tokio::test]
+    async fn a_denied_file_stays_out_of_a_search_around_it() {
+        let shared = shared();
+        fs::write(shared.home.join("notes.txt"), OTHER_LOGIN).unwrap();
+        let context = ToolContext {
+            unrestricted: true,
+            denied: vec![shared.home.join("auth.json")],
+            ..create_test_context(&shared.workspace)
+        };
+
+        let searched = SearchCodeTool
+            .execute(
+                serde_json::json!({"pattern": OTHER_LOGIN, "path": shared.home}),
+                &context,
+            )
+            .await
+            .expect("the directory around the file searches")
+            .output
+            .unwrap();
+
+        assert!(searched.contains("notes.txt"), "{searched}");
+        assert!(!searched.contains("auth.json"), "{searched}");
     }
 
     /// A tool confined to a `cwd` that holds the denied directory still does
