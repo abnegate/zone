@@ -612,10 +612,16 @@ settings list that agent's own models, and Automatic leaves the choice to the
 agent:
 
 - Claude Code: `sonnet`, `opus`, `haiku` and `fable`, the aliases claude
-  resolves to its latest models. On Pro and Max plans, Fable needs a one-time
-  usage-credits consent in the interactive claude CLI, and until it is given a
-  Zone turn on Fable falls back to another model or fails with "Fable consent
-  dialog was not answered".
+  resolves to its latest models. On Pro and Max plans, Fable runs on the
+  plan's weekly Fable allowance and then on usage credits, which claude spends
+  without asking, as it does on any model past the plan's own limits. Usage
+  credits are turned on once per account, at claude.ai/settings/usage or with
+  `/usage-credits` in the interactive claude CLI, and every Zone sign-in for
+  that account can then use Fable. Without them claude refuses a Fable turn
+  ("Fable 5 requires usage credits", or "You've reached your Fable limit" once
+  the allowance is spent), and Zone reports "The signed-in Claude account
+  needs usage credits for Fable; turn them on at claude.ai/settings/usage or
+  pick another model". A task run does not retry it.
 - Codex: `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`,
   `gpt-5.6-terra`, `gpt-5.6-luna` and `gpt-5.5`, the presets codex 0.156.1
   ships, in its order. A signed-in ChatGPT account may see a different set.
@@ -678,13 +684,14 @@ happens when the agent gives no usable answer within
   tick. The reviewer's model is one the agent knows, taken from
   `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else one of the agent's own
   models, never an installed Ollama model. Zone does not pick `fable` on its
-  own, because a turn on it may be waiting on the consent described under
-  Naming a model: a review runs on Fable only when `ZONE_AUTO_REVIEW_MODELS`
-  or the Fast or Reasoning model names it. A run whose agent chose its own
-  model records `auto`, which names no model, so Zone counts any review of it
-  as one by the model that wrote the change: the review says so, and with
-  `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL` on the task pauses unless a review
-  bot answers. Set Fast and Reasoning models the agent knows to avoid that.
+  own, because a turn on it can spend usage credits without asking or fail
+  for want of them, as described under Naming a model: a review runs on Fable
+  only when `ZONE_AUTO_REVIEW_MODELS` or the Fast or Reasoning model names it.
+  A run whose agent chose its own model records `auto`, which names no model,
+  so Zone counts any review of it as one by the model that wrote the change:
+  the review says so, and with `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL` on
+  the task pauses unless a review bot answers. Set Fast and Reasoning models
+  the agent knows to avoid that.
 - **Conflict repair** runs Zone's own tool loop, which a CLI cannot host, so it
   always runs on the instance's LiteLLM endpoint, whatever the workspace chose.
   With `ZONE_LLM_BACKEND` set to `claude` or `codex` the instance has no such

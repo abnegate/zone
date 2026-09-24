@@ -30,9 +30,6 @@ const AUTO: &str = "auto";
 const TAG_SEPARATOR: char = ':';
 
 const CLAUDE_MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
-
-/// Claude's models that a Pro or Max subscription runs headless only once
-/// someone has accepted their usage credits in the interactive claude CLI.
 const CLAUDE_GATED: &[&str] = &["fable"];
 
 /// Claude's names for its latest models, in any case. `default` is left out:
@@ -172,10 +169,7 @@ impl AgentKind {
         }
     }
 
-    /// The offered models a headless turn runs on only once someone has
-    /// accepted their terms in this agent's interactive CLI. Until then a turn
-    /// on one falls back to another model or fails, so Zone runs one only
-    /// when a person names it.
+    /// The offered models Zone runs only when a person names one.
     pub fn gated(self) -> &'static [&'static str] {
         match self {
             Self::Claude => CLAUDE_GATED,
@@ -668,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn only_claudes_fable_waits_on_consent_and_every_gated_model_is_offered() {
+    fn only_claudes_fable_is_gated_and_every_gated_model_is_offered() {
         assert_eq!(AgentKind::Claude.gated(), ["fable"]);
         assert!(AgentKind::Codex.gated().is_empty());
 

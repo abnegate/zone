@@ -167,7 +167,7 @@ impl Catalog {
     }
 
     /// The completion models Zone may put a run on without anyone naming
-    /// one: all of them, less those the agent gates behind consent.
+    /// one: all of them, less those the agent gates.
     pub(crate) fn unattended(&self) -> impl Iterator<Item = &Installed> {
         self.completions().filter(|model| {
             self.agent

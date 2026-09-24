@@ -57,9 +57,9 @@ impl Author {
 /// the author reviews itself, and says so.
 ///
 /// On an agent, a candidate is a model the agent knows, and the agent's own
-/// models stand in for what is installed, less those it gates behind consent,
-/// which review only when named. A change the agent wrote on a model of its
-/// own choosing may have come from any of them.
+/// models stand in for what is installed, less those it gates, which review
+/// only when named. A change the agent wrote on a model of its own choosing
+/// may have come from any of them.
 pub fn select(
     author: &Author,
     prefs: &Preferences,
