@@ -210,6 +210,49 @@ init_networks = set(bundled["services"]["ollama-init"].get("networks") or {})
 if not {"internal", "edge"} <= init_networks:
     raise SystemExit(f"ollama-init must join internal and edge, got {sorted(init_networks)!r}")
 
+# claude.com sends the admin's browser to http://localhost:54545/callback, so
+# the published port must answer only the host's own loopback. Docker hands a
+# published port to the container's interface, never to its loopback, which is
+# why the listener inside binds 0.0.0.0.
+CALLBACK = 54545
+
+
+def callback_hosts(service):
+    return [
+        item.get("host_ip")
+        for item in service.get("ports") or []
+        if isinstance(item, dict)
+        and str(item.get("published")) == str(CALLBACK)
+        and int(item.get("target")) == CALLBACK
+    ]
+
+
+for name, config, publisher in (
+    ("core", direct, "manager"),
+    ("dev", dev, "manager"),
+    ("dev+vpn+monitoring", combo, "gluetun"),
+):
+    hosts = callback_hosts(config["services"][publisher])
+    if hosts != ["127.0.0.1"]:
+        raise SystemExit(
+            f"{name} {publisher} must publish the Claude sign-in callback on 127.0.0.1 only, "
+            f"got {hosts!r}"
+        )
+    environment = config["services"]["manager"].get("environment") or {}
+    for variable, value in (
+        ("ZONE_AGENT_CALLBACK", f"http://localhost:{CALLBACK}"),
+        ("ZONE_AGENT_CALLBACK_BIND", "0.0.0.0"),
+    ):
+        if environment.get(variable) != value:
+            raise SystemExit(
+                f"{name} manager must set {variable}={value}, got {environment.get(variable)!r}"
+            )
+if combo["services"]["manager"].get("ports"):
+    raise SystemExit("dev+vpn manager shares gluetun's network, so gluetun publishes its ports")
+firewall = str(combo["services"]["gluetun"]["environment"].get("FIREWALL_INPUT_PORTS", ""))
+if str(CALLBACK) not in firewall.split(","):
+    raise SystemExit(f"gluetun must let the callback in through its firewall, got {firewall!r}")
+
 print("Compose profile combination checks passed")
 PY
 
