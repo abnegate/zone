@@ -15,6 +15,7 @@ interface Captured {
   method: string;
   path: string;
   search: string;
+  referer: string;
   body: unknown;
 }
 
@@ -45,6 +46,7 @@ const startedElsewhere =
   'Someone else started this Claude sign-in, or it was started in another browser, so Zone did not finish it.';
 const attempt = '6f1b1f63-5a3e-4c8e-9d0e-2b7f7c1d9a10';
 const receipt = 'e2e-fake-receipt_0123456789';
+const returned = `/agent-sign-in#receipt=${receipt}&organization=${organizationId}`;
 const claudeSignedIn = {
   state: 'signed_in',
   source: 'zone',
@@ -110,7 +112,8 @@ async function mockApi(page: Page, scenario: Scenario): Promise<Captured[]> {
     const { pathname: path, search } = new URL(request.url());
     const method = request.method();
     const body = request.postData() ? request.postDataJSON() : null;
-    captured.push({ method, path, search, body });
+    const referer = (await request.allHeaders()).referer ?? '';
+    captured.push({ method, path, search, referer, body });
 
     if (path.startsWith(agentsPath)) {
       const reply = scenario.agents(method, path.slice(agentsPath.length), body);
@@ -538,7 +541,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto(`/agent-sign-in?receipt=${receipt}&organization=${organizationId}`);
+    await page.goto(returned);
 
     await expect(page.getByText('Signed in to Claude')).toBeVisible();
     await expect(page.getByText('Claude Code is signed in. You can close this tab.')).toBeVisible();
@@ -548,6 +551,9 @@ test.describe('Coding agent sign-in', () => {
         .filter((request) => request.path.endsWith('/claude/login/receipt'))
         .map((request) => request.body)
     ).toEqual([{ receipt }]);
+    expect(
+      captured.filter((request) => `${request.search}${request.referer}`.includes(receipt))
+    ).toEqual([]);
     await still(page, 'returned');
 
     await page.getByRole('button', { name: 'Go to organization settings' }).click();
@@ -570,13 +576,34 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto(`/agent-sign-in?receipt=${receipt}&organization=${organizationId}`);
+    await page.goto(returned);
 
     await expect(page.getByRole('alert')).toContainText(startedElsewhere);
     await expect(page.getByText('Claude sign-in failed')).toBeVisible();
     await expect(page.getByText('Signed in to Claude')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Go to organization settings' })).toBeVisible();
     await still(page, 'returned-elsewhere');
+  });
+
+  test('a signed-out browser claude.com sent back drops the receipt and hands nothing in', async ({
+    page,
+  }) => {
+    const captured = await mockApi(page, {
+      role: 'owner',
+      provider: 'claude_code',
+      agents: (method, path) => ({ status: 404, json: { error: `unexpected ${method} ${path}` } }),
+    });
+    await page.goto(returned);
+
+    await expect(page).toHaveURL(/\/login$/);
+    await expect(page.getByRole('button', { name: 'Sign In' })).toBeVisible();
+    expect(page.url()).not.toContain(receipt);
+    expect(captured.filter((request) => request.path.startsWith(agentsPath))).toEqual([]);
+    expect(
+      captured.filter((request) =>
+        `${request.search}${request.referer}${JSON.stringify(request.body)}`.includes(receipt)
+      )
+    ).toEqual([]);
   });
 
   test('a Claude sign-in returned to Zone falls back to a pasted code, and says why it failed', async ({

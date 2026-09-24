@@ -169,7 +169,7 @@ mod tests {
     use super::*;
     use crate::services::login::caller::Caller;
     use crate::services::login::claude::{Redirect, Scope};
-    use crate::services::login::console::{Console, RECEIPT};
+    use crate::services::login::console::{Console, RECEIPT, handed};
     use crate::services::login::pending;
 
     const TEST_NET: &str = "192.0.2.1:9";
@@ -330,9 +330,10 @@ mod tests {
         assert_eq!(status, 303, "{response}");
         let onward = location(&response).expect("where the browser goes next");
         assert!(
-            onward.starts_with(&format!("{CONSOLE}/agent-sign-in?")),
+            onward.starts_with(&format!("{CONSOLE}/agent-sign-in#")),
             "{onward}"
         );
+        handed(onward, RECEIPT);
         assert!(
             !onward.contains(CODE) && !onward.contains(&state),
             "the console is sent the code or the state: {onward}"
@@ -375,12 +376,7 @@ mod tests {
             "the sign-in turned away while the listener was busy was spent: {response}"
         );
         let onward = location(&response).expect("where the browser goes next");
-        let receipt = Url::parse(onward)
-            .expect("an absolute URL")
-            .query_pairs()
-            .find(|(name, _)| name == RECEIPT)
-            .map(|(_, value)| value.into_owned())
-            .expect("a receipt");
+        let receipt = handed(onward, RECEIPT);
         let (_, code) = crate::services::login::receipts::take(&receipt).expect("the parked code");
         assert_eq!(code.value.expose(), CODE);
         assert!(pending::claim_loopback(&state).is_none());

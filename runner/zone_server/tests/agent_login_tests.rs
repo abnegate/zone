@@ -415,8 +415,8 @@ impl Stage {
             (CONSOLE.to_string(), "/agent-sign-in"),
             "{onward}"
         );
-        assert_eq!(parameter(onward, "organization"), organization.to_string());
-        parameter(onward, "receipt")
+        assert_eq!(handed(onward, "organization"), organization.to_string());
+        handed(onward, "receipt")
     }
 
     /// What the callback listener answers `method` at `path`.
@@ -876,6 +876,27 @@ fn parameter(url: &str, name: &str) -> String {
         .find(|(key, _)| key == name)
         .map(|(_, value)| value)
         .unwrap_or_else(|| panic!("{url} has no {name}"))
+}
+
+/// What the console reads as `name` from `url`, the address the callback sent a browser to: only
+/// its fragment, so a query, which servers log, fails the test.
+fn handed(url: &str, name: &str) -> String {
+    let url = Url::parse(url).unwrap_or_else(|error| panic!("{url} is not a URL: {error}"));
+    assert_eq!(
+        url.query(),
+        None,
+        "{url} carries a query a server would log"
+    );
+    url.fragment()
+        .into_iter()
+        .flat_map(|fragment| fragment.split('&'))
+        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+        .map(|value| {
+            urlencoding::decode(value)
+                .expect("a UTF-8 value")
+                .into_owned()
+        })
+        .unwrap_or_else(|| panic!("{url} hands the console no {name}"))
 }
 
 async fn ended(process: Pid) -> bool {
@@ -1730,7 +1751,7 @@ async fn the_callback_alone_signs_nothing_in_until_the_console_hands_its_receipt
         .expect("where the browser goes next")
         .to_string();
     assert!(
-        onward.starts_with(&format!("{CONSOLE}/agent-sign-in?receipt=")),
+        onward.starts_with(&format!("{CONSOLE}/agent-sign-in#receipt=")),
         "{onward}"
     );
     for secret in [CODE, state.as_str()] {
@@ -1748,8 +1769,8 @@ async fn the_callback_alone_signs_nothing_in_until_the_console_hands_its_receipt
         signed_out(AgentKind::Claude, "claude_code"),
         "the callback alone signed the organization in"
     );
-    assert_eq!(parameter(&onward, "organization"), organization.to_string());
-    let receipt = parameter(&onward, "receipt");
+    assert_eq!(handed(&onward, "organization"), organization.to_string());
+    let receipt = handed(&onward, "receipt");
 
     let response = stage.redeem(organization, &receipt, &owner).await;
 

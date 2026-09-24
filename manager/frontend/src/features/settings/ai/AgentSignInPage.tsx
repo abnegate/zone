@@ -1,6 +1,6 @@
 import { Button } from '@zone/ui';
 import { useEffect, useState } from 'react';
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { agentsApi } from '../../../api/agents';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { AuthCard, AuthStatus, CheckIcon } from '../../auth/components';
@@ -31,13 +31,12 @@ function redeemOnce(organization: string, receipt: string): Promise<AgentStatus>
 /** Where Zone's callback sends a browser claude.com returned a sign-in to, to finish it. */
 export default function AgentSignInPage() {
   const navigate = useNavigate();
-  const { pathname } = useLocation();
-  const [search] = useSearchParams();
+  const { pathname, hash } = useLocation();
   const { organizations, setCurrentOrganization } = useWorkspace();
-  const [returned] = useState(() => ({
-    receipt: search.get(RECEIPT),
-    organization: search.get(ORGANIZATION),
-  }));
+  const [returned] = useState(() => {
+    const fragment = new URLSearchParams(hash.slice(1));
+    return { receipt: fragment.get(RECEIPT), organization: fragment.get(ORGANIZATION) };
+  });
   const [outcome, setOutcome] = useState<Outcome>({ state: 'finishing' });
 
   useEffect(() => {

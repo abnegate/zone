@@ -392,7 +392,7 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, Callback};
     use crate::services::login::claude::{REDIRECT_URL, Refusal};
-    use crate::services::login::console::{ORGANIZATION, RECEIPT};
+    use crate::services::login::console::{ORGANIZATION, RECEIPT, handed};
 
     const EMAIL: &str = "admin@example.com";
     const PORT: u16 = 54_545;
@@ -617,7 +617,7 @@ mod tests {
         let first = looping(organization, &caller).await;
         let receipt = receive(approved(&state_of(&first)))
             .await
-            .map(|url| parameter(&url, RECEIPT))
+            .map(|url| handed(&url, RECEIPT))
             .expect("a parked code");
 
         let second = looping(organization, &caller).await;
@@ -695,8 +695,8 @@ mod tests {
             (returned.origin().ascii_serialization(), returned.path()),
             (CONSOLE.to_string(), "/agent-sign-in")
         );
-        assert_eq!(parameter(&url, ORGANIZATION), organization.to_string());
-        let (parked, code) = receipts::take(&parameter(&url, RECEIPT)).expect("the parked code");
+        assert_eq!(handed(&url, ORGANIZATION), organization.to_string());
+        let (parked, code) = receipts::take(&handed(&url, RECEIPT)).expect("the parked code");
         assert_eq!(
             (parked.organization, parked.user, parked.session),
             (organization, caller.user, caller.session)
@@ -796,7 +796,7 @@ mod tests {
         let parked = looping(organization, &caller).await;
         let receipt = receive(approved(&state_of(&parked)))
             .await
-            .map(|url| parameter(&url, RECEIPT))
+            .map(|url| handed(&url, RECEIPT))
             .expect("a parked code");
         cancel(organization, caller.user).await;
         let error = redeem(&AppState::for_tests(), organization, &caller, &receipt)
@@ -827,7 +827,7 @@ mod tests {
             let started = looping(organization, &caller).await;
             let receipt = receive(approved(&state_of(&started)))
                 .await
-                .map(|url| parameter(&url, RECEIPT))
+                .map(|url| handed(&url, RECEIPT))
                 .expect("a parked code");
 
             let error = redeem(&AppState::for_tests(), path, &stranger, &receipt)
@@ -871,7 +871,7 @@ mod tests {
         let parked = looping(organization, &caller).await;
         let receipt = receive(approved(&state_of(&parked)))
             .await
-            .map(|url| parameter(&url, RECEIPT))
+            .map(|url| handed(&url, RECEIPT))
             .expect("a parked code");
         let elsewhere = looping(Uuid::new_v4(), &caller).await;
 

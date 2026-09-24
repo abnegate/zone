@@ -41,8 +41,8 @@ const startedElsewhere =
   'Someone else started this Claude sign-in, or it was started in another browser, so Zone did not finish it.';
 
 function Address() {
-  const { pathname, search } = useLocation();
-  return <output aria-label="Address">{`${pathname}${search}`}</output>;
+  const { pathname, search, hash } = useLocation();
+  return <output aria-label="Address">{`${pathname}${search}${hash}`}</output>;
 }
 
 function open(address: string) {
@@ -66,7 +66,7 @@ function open(address: string) {
   );
 }
 
-const returned = `/agent-sign-in?receipt=${receipt}&organization=${organization.id}`;
+const returned = `/agent-sign-in#receipt=${receipt}&organization=${organization.id}`;
 
 describe('AgentSignInPage', () => {
   beforeEach(() => {
@@ -98,7 +98,14 @@ describe('AgentSignInPage', () => {
   });
 
   it('hands nothing in when the address carries no receipt', async () => {
-    open(`/agent-sign-in?organization=${organization.id}`);
+    open(`/agent-sign-in#organization=${organization.id}`);
+
+    expect(await screen.findByText('No sign-in to finish')).toBeInTheDocument();
+    expect(agentsApi.redeem).not.toHaveBeenCalled();
+  });
+
+  it('takes a receipt only from the fragment, which no server or log is sent', async () => {
+    open(`/agent-sign-in?receipt=${receipt}&organization=${organization.id}`);
 
     expect(await screen.findByText('No sign-in to finish')).toBeInTheDocument();
     expect(agentsApi.redeem).not.toHaveBeenCalled();

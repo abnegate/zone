@@ -44,15 +44,39 @@ impl Console {
             .then_some(Self { origin: normalised })
     }
 
-    /// Where the callback sends the browser once it has parked the code under `receipt`.
+    /// Where the callback sends the browser once it has parked the code under `receipt`, which
+    /// travels in the fragment: a browser sends that to no server, and in no `Referer`.
     pub fn receipt(&self, receipt: &str, organization: Uuid) -> String {
         let mut url = Url::parse(&self.origin).expect("a console origin is a URL");
         url.set_path(RETURN_PATH);
-        url.query_pairs_mut()
-            .append_pair(RECEIPT, receipt)
-            .append_pair(ORGANIZATION, &organization.to_string());
+        url.set_fragment(Some(&format!(
+            "{RECEIPT}={}&{ORGANIZATION}={organization}",
+            urlencoding::encode(receipt)
+        )));
         url.into()
     }
+}
+
+/// What the console reads as `name` from `url`, an address the callback sent a browser to: only
+/// its fragment, so a query, which servers log, fails the test.
+#[cfg(test)]
+pub(crate) fn handed(url: &str, name: &str) -> String {
+    let url = Url::parse(url).expect("an absolute URL");
+    assert_eq!(
+        url.query(),
+        None,
+        "{url} carries a query a server would log"
+    );
+    url.fragment()
+        .into_iter()
+        .flat_map(|fragment| fragment.split('&'))
+        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+        .map(|value| {
+            urlencoding::decode(value)
+                .expect("a UTF-8 value")
+                .into_owned()
+        })
+        .unwrap_or_else(|| panic!("{url} hands the console no {name}"))
 }
 
 #[cfg(test)]
@@ -139,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn the_browser_returns_to_the_consoles_own_page_with_the_receipt() {
+    fn the_browser_returns_to_the_consoles_own_page_with_the_receipt_in_its_fragment() {
         let organization =
             Uuid::parse_str("7b0e7c9a-2f7a-4a55-9d0e-1c7d8f6a5b4c").expect("a valid UUID");
 
@@ -152,8 +176,11 @@ mod tests {
 
         assert_eq!(
             url,
-            "http://manager.localhost/agent-sign-in?receipt=fake-receipt_1\
-             &organization=7b0e7c9a-2f7a-4a55-9d0e-1c7d8f6a5b4c"
+            "http://manager.localhost/agent-sign-in#receipt=fake-receipt_1\
+             &organization=7b0e7c9a-2f7a-4a55-9d0e-1c7d8f6a5b4c",
+            "a receipt in the query reaches every access log between the browser and the console"
         );
+        assert_eq!(handed(&url, RECEIPT), "fake-receipt_1");
+        assert_eq!(handed(&url, ORGANIZATION), organization.to_string());
     }
 }
