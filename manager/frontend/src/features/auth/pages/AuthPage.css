@@ -181,7 +181,8 @@
 
 .auth-error-state .btn,
 .auth-error-state .ui-btn,
-.auth-success .btn {
+.auth-success .btn,
+.auth-success .ui-btn {
   margin-top: var(--ui-space-3);
 }
 

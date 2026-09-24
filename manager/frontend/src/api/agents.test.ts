@@ -16,6 +16,7 @@ const authorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=fake-challenge&code_challenge_method=S256&state=fake-state';
 const refusal =
   'Error logging in with device code: device code request failed with status 403 Forbidden';
+const attempt = '6f1b1f63-5a3e-4c8e-9d0e-2b7f7c1d9a10';
 
 function respond(body: unknown, status = 200) {
   const request = mock(async (_url: string, _init?: RequestInit) =>
@@ -59,6 +60,7 @@ describe('agent status contract', () => {
       authorize_url: authorize,
       expires_at: '2026-09-23T04:10:00Z',
       flow: 'paste',
+      attempt,
     };
     expect(AgentLoginSchema.safeParse(login).success).toBe(true);
     expect(
@@ -78,12 +80,25 @@ describe('agent status contract', () => {
       agent: 'claude',
       authorize_url: authorize,
       expires_at: '2026-09-23T04:10:00Z',
+      attempt,
     };
     for (const flow of ['loopback', 'paste']) {
       expect(AgentLoginSchema.parse({ ...login, flow })).toEqual({ ...login, flow });
     }
     expect(AgentLoginSchema.safeParse(login).success).toBe(false);
     expect(AgentLoginSchema.safeParse({ ...login, flow: 'device' }).success).toBe(false);
+  });
+
+  it('refuses a claude sign-in that names no attempt to watch', () => {
+    const login = {
+      agent: 'claude',
+      authorize_url: authorize,
+      expires_at: '2026-09-23T04:10:00Z',
+      flow: 'loopback',
+    };
+    expect(AgentLoginSchema.safeParse({ ...login, attempt }).success).toBe(true);
+    expect(AgentLoginSchema.safeParse(login).success).toBe(false);
+    expect(AgentLoginSchema.safeParse({ ...login, attempt: 'not-an-attempt' }).success).toBe(false);
   });
 });
 
@@ -102,12 +117,40 @@ describe('agentsApi', () => {
     expect(sent(request).url).toBe(`${agents}/codex`);
   });
 
+  it('reads one agent as the sign-in it waits on sees it', async () => {
+    const request = respond(fixture.agents[0]);
+    await agentsApi.get(organization, 'claude', attempt);
+    expect(sent(request).url).toBe(`${agents}/claude?attempt=${attempt}`);
+  });
+
+  it('hands in the receipt a returned claude sign-in left, and reads the status it finished', async () => {
+    const request = respond(fixture.agents[0]);
+    const status = await agentsApi.redeem(organization, 'fake-receipt');
+    expect(status.state).toBe('signed_in');
+    expect(sent(request)).toEqual({
+      url: `${agents}/claude/login/receipt`,
+      method: 'POST',
+      body: JSON.stringify({ receipt: 'fake-receipt' }),
+    });
+  });
+
+  it("cancels the caller's own sign-in", async () => {
+    const request = respond(null, 204);
+    await agentsApi.cancel(organization, 'claude');
+    expect(sent(request)).toEqual({
+      url: `${agents}/claude/login/attempt`,
+      method: 'DELETE',
+      body: undefined,
+    });
+  });
+
   it('starts a claude sign-in at the inference scope, returned however the server says', async () => {
     const login = {
       agent: 'claude',
       authorize_url: authorize,
       expires_at: '2026-09-23T04:10:00Z',
       flow: 'loopback',
+      attempt,
     };
     const request = respond(login);
     expect(await agentsApi.start(organization, 'claude')).toEqual(login);
@@ -120,6 +163,7 @@ describe('agentsApi', () => {
       authorize_url: authorize,
       expires_at: '2026-09-23T04:10:00Z',
       flow: 'paste',
+      attempt,
     };
     for (const [request, body] of [
       [{ scope: 'full' }, '{"scope":"full"}'],

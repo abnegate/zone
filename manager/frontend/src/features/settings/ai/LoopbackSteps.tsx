@@ -1,6 +1,7 @@
-import { Button, buttonVariants } from '@zone/ui';
-import { format } from 'date-fns';
+import { Button } from '@zone/ui';
 import type { RefObject } from 'react';
+import { ClaudeLink } from './ClaudeLink';
+import { SignInButtons } from './SignInButtons';
 import type { SignInAction } from './types';
 
 interface LoopbackStepsProps {
@@ -28,73 +29,38 @@ export function LoopbackSteps({
   onPaste,
   onCancel,
 }: LoopbackStepsProps) {
-  const fullAccess = !full && (
-    <Button
-      size="sm"
-      variant={usable ? 'ghost' : 'secondary'}
-      onClick={onFullAccess}
-      loading={busy === 'full'}
-      disabled={busy !== null}
-    >
-      Try again with full access
-    </Button>
-  );
-  const paste = (
-    <Button
-      size="sm"
-      variant="link"
-      onClick={onPaste}
-      loading={busy === 'paste'}
-      disabled={busy !== null}
-    >
-      Paste a code instead
-    </Button>
-  );
-  const cancel = (
-    <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy !== null}>
-      Cancel
-    </Button>
-  );
-
-  if (!usable) {
-    return (
-      <div className="agent-sign-in-buttons">
-        <Button size="sm" onClick={onRestart} loading={busy === 'restart'} disabled={busy !== null}>
-          Start again
+  const buttons = (
+    <SignInButtons
+      full={full}
+      usable={usable}
+      busy={busy}
+      alternative={
+        <Button
+          size="sm"
+          variant="link"
+          onClick={onPaste}
+          loading={busy === 'paste'}
+          disabled={busy !== null}
+        >
+          Paste a code instead
         </Button>
-        {fullAccess}
-        {paste}
-        {cancel}
-      </div>
-    );
-  }
+      }
+      onRestart={onRestart}
+      onFullAccess={onFullAccess}
+      onCancel={onCancel}
+    />
+  );
 
-  const expiry = format(new Date(expiresAt), 'p');
+  if (!usable) return buttons;
 
   return (
     <div className="agent-sign-in-loopback">
-      <div className="agent-sign-in-step">
-        <span>Open claude.com, sign in, and approve access.</span>
-        <a
-          ref={entry}
-          className={buttonVariants({ variant: 'secondary', size: 'sm' })}
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Open claude.com
-        </a>
-      </div>
+      <ClaudeLink url={url} full={full} expiresAt={expiresAt} entry={entry} />
       <p className="form-hint">
-        {full
-          ? `This link asks for full access to your Claude account. It expires at ${expiry}.`
-          : `The link expires at ${expiry}.`}
+        Approve in this browser, on the machine Zone runs on: claude.com sends it back to Zone at
+        localhost. From any other machine, paste a code instead.
       </p>
-      <div className="agent-sign-in-buttons">
-        {fullAccess}
-        {paste}
-        {cancel}
-      </div>
+      {buttons}
     </div>
   );
 }

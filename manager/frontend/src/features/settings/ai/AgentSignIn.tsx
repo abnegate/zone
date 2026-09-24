@@ -6,6 +6,7 @@ import { formatDate } from '../../projects/utils/formatters';
 import { ClaudeSteps } from './ClaudeSteps';
 import { DeviceSteps } from './DeviceSteps';
 import { LoopbackSteps } from './LoopbackSteps';
+import { onThisMachine } from './onThisMachine';
 import type { Agent, AgentState, AgentStatus, ClaudeScope, SignInFlow } from './schemas';
 import { SignOutDialog } from './SignOutDialog';
 import type { AgentAccess, Attempt, SignInAction } from './types';
@@ -47,8 +48,10 @@ function reasonOf(failure: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
 }
 
-function startRequest(scope?: ClaudeScope, flow?: SignInFlow): StartRequest {
-  return { ...(scope && { scope }), ...(flow && { flow }) };
+function startRequest(agent: Agent, scope?: ClaudeScope, flow?: SignInFlow): StartRequest {
+  const remote = agent === 'claude' && !onThisMachine(window.location.hostname);
+  const chosen = flow ?? (remote ? 'paste' : undefined);
+  return { ...(scope && { scope }), ...(chosen && { flow: chosen }) };
 }
 
 function deviceOutcome(status: AgentStatus): Outcome {
@@ -128,6 +131,7 @@ export function AgentSignIn({
   const pending = status?.state === 'pending';
   const waiting = prompt !== null || pending;
   const awaiting: Awaiting | null = waiting ? 'device' : returning ? 'browser' : null;
+  const watched = awaiting === 'browser' ? authorization?.attempt : undefined;
   const device = pending ? (status?.pending ?? null) : prompt;
   const codeExpired = useExpired(device?.expires_at ?? null);
   const lapsed = useExpired(status?.state === 'signed_in' ? status.expires_at : null);
@@ -147,7 +151,7 @@ export function AgentSignIn({
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        const next = await agentsApi.get(organizationId, agent);
+        const next = await agentsApi.get(organizationId, agent, watched);
         if (cancelled) return;
         failures = 0;
         setFailure(null);
@@ -178,7 +182,7 @@ export function AgentSignIn({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [awaiting, organizationId, agent, onStatusChange, onAttemptChange]);
+  }, [awaiting, watched, organizationId, agent, onStatusChange, onAttemptChange]);
 
   const perform = async (
     action: SignInAction,
@@ -201,7 +205,7 @@ export function AgentSignIn({
 
   const start = (action: SignInAction, scope?: ClaudeScope, flow?: SignInFlow) =>
     perform(action, async (current) => {
-      const login = await agentsApi.start(organizationId, agent, startRequest(scope, flow));
+      const login = await agentsApi.start(organizationId, agent, startRequest(agent, scope, flow));
       if (!current()) return;
       onAttemptChange(agent, { login, scope, flow, spent: false });
       setCode('');
@@ -253,13 +257,14 @@ export function AgentSignIn({
     void signOut();
   };
 
-  const abandon = () => {
-    onAttemptChange(agent, null);
-    setCode('');
-    setCodeError(null);
-    setFailure(null);
-    setFocus('status');
-  };
+  const cancel = () =>
+    perform('cancel', async (current) => {
+      await agentsApi.cancel(organizationId, agent);
+      if (!current()) return;
+      onAttemptChange(agent, null);
+      setCode('');
+      setFocus('status');
+    });
 
   const name = names[agent];
   const account = accounts[agent];
@@ -366,7 +371,7 @@ export function AgentSignIn({
             onRestart={() => void start('restart', attempt.scope, attempt.flow)}
             onFullAccess={() => void start('full', 'full', attempt.flow)}
             onPaste={() => void start('paste', attempt.scope, 'paste')}
-            onCancel={abandon}
+            onCancel={() => void cancel()}
           />
         ) : (
           <ClaudeSteps
@@ -382,7 +387,7 @@ export function AgentSignIn({
             onSubmit={submit}
             onRestart={() => void start('restart', attempt.scope, attempt.flow)}
             onFullAccess={() => void start('full', 'full', attempt.flow)}
-            onCancel={abandon}
+            onCancel={() => void cancel()}
           />
         ))}
 

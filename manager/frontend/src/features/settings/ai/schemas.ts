@@ -44,6 +44,7 @@ export const ClaudeLoginSchema = z.object({
   authorize_url: WebUrlSchema,
   expires_at: TimestampSchema,
   flow: SignInFlowSchema,
+  attempt: z.uuid(),
 });
 
 export const CodexLoginSchema = z.object({

@@ -14,6 +14,7 @@ interface Reply {
 interface Captured {
   method: string;
   path: string;
+  search: string;
   body: unknown;
 }
 
@@ -36,8 +37,14 @@ const restartAuthorize =
 const loopbackAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&scope=user%3Ainference&code_challenge=e2e-fake-challenge-4&code_challenge_method=S256&state=e2e-fake-state-4';
 const approve = 'Approve on claude.com; Zone finishes the sign-in automatically.';
+const onThisMachine =
+  'Approve in this browser, on the machine Zone runs on: claude.com sends it back to Zone at localhost. From any other machine, paste a code instead.';
 const scopeRefused =
   'claude.com would not grant the access Zone asked for. Try again with full access.';
+const startedElsewhere =
+  'Someone else started this Claude sign-in, or it was started in another browser, so Zone did not finish it.';
+const attempt = '6f1b1f63-5a3e-4c8e-9d0e-2b7f7c1d9a10';
+const receipt = 'e2e-fake-receipt_0123456789';
 const claudeSignedIn = {
   state: 'signed_in',
   source: 'zone',
@@ -100,10 +107,10 @@ async function mockApi(page: Page, scenario: Scenario): Promise<Captured[]> {
   const captured: Captured[] = [];
   await routeApi(page, /\/api\//, async (route) => {
     const request = route.request();
-    const path = new URL(request.url()).pathname;
+    const { pathname: path, search } = new URL(request.url());
     const method = request.method();
     const body = request.postData() ? request.postDataJSON() : null;
-    captured.push({ method, path, body });
+    captured.push({ method, path, search, body });
 
     if (path.startsWith(agentsPath)) {
       const reply = scenario.agents(method, path.slice(agentsPath.length), body);
@@ -204,6 +211,13 @@ async function capture(page: Page, name: string): Promise<void> {
     return { escaped, scrollsSideways: root.scrollWidth > root.clientWidth };
   });
   expect(layout).toEqual({ escaped: [], scrollsSideways: false });
+  await still(page, name);
+}
+
+/** Screenshots the page with the pointer on a blank corner, so no control shows its hover. */
+async function still(page: Page, name: string): Promise<void> {
+  const viewport = page.viewportSize();
+  if (viewport) await page.mouse.move(viewport.width - 1, viewport.height - 1);
   await page.screenshot({
     path: `screenshots/agent-sign-in-${name}.png`,
     fullPage: true,
@@ -232,6 +246,7 @@ test.describe('Coding agent sign-in', () => {
               authorize_url: authorize,
               expires_at: '2026-09-23T04:10:00Z',
               flow: 'paste',
+              attempt,
             },
           };
         }
@@ -336,6 +351,7 @@ test.describe('Coding agent sign-in', () => {
               authorize_url: links.shift(),
               expires_at: '2026-09-23T04:10:00Z',
               flow: 'paste',
+              attempt,
             },
           };
         }
@@ -417,6 +433,7 @@ test.describe('Coding agent sign-in', () => {
               authorize_url: loopbackAuthorize,
               expires_at: '2026-09-23T04:10:00Z',
               flow: 'loopback',
+              attempt,
             },
           };
         }
@@ -440,6 +457,7 @@ test.describe('Coding agent sign-in', () => {
     await expect(panel.getByText('Signing in', { exact: true })).toBeVisible();
     await expect(panel.getByText(approve)).toBeVisible();
     await expect(panel.getByText('The link expires at 4:10 AM.')).toBeVisible();
+    await expect(panel.getByText(onThisMachine)).toBeVisible();
     await expect(panel.getByLabel('Code from claude.com')).toHaveCount(0);
     await expect(panel.getByRole('button', { name: 'Paste a code instead' })).toBeVisible();
     await expect(panel.getByRole('button', { name: 'Try again with full access' })).toBeVisible();
@@ -453,9 +471,112 @@ test.describe('Coding agent sign-in', () => {
     await page.waitForTimeout(4000);
     expect(polls).toBe(2);
     expect(captured.find((request) => request.path.endsWith('/claude/login'))?.body).toEqual({});
+    expect(
+      captured
+        .filter((request) => request.method === 'GET' && request.path.endsWith('/claude'))
+        .map((request) => request.search)
+    ).toEqual([`?attempt=${attempt}`, `?attempt=${attempt}`]);
     expect(captured.filter((request) => request.path.endsWith('/claude/login/code'))).toHaveLength(
       0
     );
+  });
+
+  test('cancelling a Claude sign-in ends it on the server too', async ({ page }) => {
+    const captured = await mockApi(page, {
+      role: 'admin',
+      provider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') return signedOut;
+        if (method === 'GET' && path === '/claude') return { json: status('claude') };
+        if (method === 'POST' && path === '/claude/login') {
+          return {
+            json: {
+              agent: 'claude',
+              authorize_url: loopbackAuthorize,
+              expires_at: '2026-09-23T04:10:00Z',
+              flow: 'loopback',
+              attempt,
+            },
+          };
+        }
+        if (method === 'DELETE' && path === '/claude/login/attempt') return {};
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto('/org-settings');
+
+    const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
+    await panel.getByRole('button', { name: 'Sign in with Claude' }).click();
+    await expect(panel.getByRole('link', { name: 'Open claude.com' })).toBeVisible();
+    await panel.getByRole('button', { name: 'Cancel' }).click();
+
+    await expect(panel.getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+    await expect(panel.getByRole('link', { name: 'Open claude.com' })).toHaveCount(0);
+    await expect(panel.getByRole('status')).toBeFocused();
+    expect(
+      captured
+        .filter((request) => request.method === 'DELETE')
+        .map((request) => `${request.method} ${request.path}`)
+    ).toEqual([`DELETE ${agentsPath}/claude/login/attempt`]);
+  });
+
+  test('the browser claude.com sent back finishes the sign-in and drops its receipt', async ({
+    page,
+  }) => {
+    const captured = await mockApi(page, {
+      role: 'owner',
+      provider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') {
+          return { json: { agents: [status('claude', claudeSignedIn), status('codex')] } };
+        }
+        if (method === 'POST' && path === '/claude/login/receipt') {
+          return { json: status('claude', claudeSignedIn) };
+        }
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto(`/agent-sign-in?receipt=${receipt}&organization=${organizationId}`);
+
+    await expect(page.getByText('Signed in to Claude')).toBeVisible();
+    await expect(page.getByText('Claude Code is signed in. You can close this tab.')).toBeVisible();
+    await expect(page).toHaveURL(/\/agent-sign-in$/);
+    expect(
+      captured
+        .filter((request) => request.path.endsWith('/claude/login/receipt'))
+        .map((request) => request.body)
+    ).toEqual([{ receipt }]);
+    await still(page, 'returned');
+
+    await page.getByRole('button', { name: 'Go to organization settings' }).click();
+    await expect(page).toHaveURL(/\/org-settings$/);
+    const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
+    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible();
+  });
+
+  test('a sign-in sent back to a browser that did not start it finishes nothing', async ({
+    page,
+  }) => {
+    await mockApi(page, {
+      role: 'owner',
+      provider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'POST' && path === '/claude/login/receipt') {
+          return { status: 403, json: { error: startedElsewhere, kind: 'start_again' } };
+        }
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto(`/agent-sign-in?receipt=${receipt}&organization=${organizationId}`);
+
+    await expect(page.getByRole('alert')).toContainText(startedElsewhere);
+    await expect(page.getByText('Claude sign-in failed')).toBeVisible();
+    await expect(page.getByText('Signed in to Claude')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Go to organization settings' })).toBeVisible();
+    await still(page, 'returned-elsewhere');
   });
 
   test('a Claude sign-in returned to Zone falls back to a pasted code, and says why it failed', async ({
@@ -472,7 +593,12 @@ test.describe('Coding agent sign-in', () => {
         if (method === 'GET' && path === '') return signedOut;
         if (method === 'POST' && path === '/claude/login') {
           return {
-            json: { agent: 'claude', expires_at: '2026-09-23T04:10:00Z', ...logins.shift() },
+            json: {
+              agent: 'claude',
+              expires_at: '2026-09-23T04:10:00Z',
+              attempt,
+              ...logins.shift(),
+            },
           };
         }
         if (method === 'GET' && path === '/claude') {

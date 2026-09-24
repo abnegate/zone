@@ -11,6 +11,7 @@ import {
   vi,
 } from 'bun:test';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { Window as HappyWindow } from 'happy-dom';
 import { type ComponentProps, useCallback, useState } from 'react';
 import fixture from '../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { AgentRequestError } from '../../../api/AgentRequestError';
@@ -22,6 +23,7 @@ const agentsApi = {
   get: mock(),
   start: mock(),
   submitCode: mock(),
+  cancel: mock(),
   signOut: mock(),
 };
 
@@ -65,12 +67,16 @@ const restartAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=user%3Ainference&state=fake-state-3';
 const focused = (element: Element) => document.activeElement === element;
 const later = (minutes = 10) => new Date(Date.now() + minutes * 60_000).toISOString();
+const attempt = '6f1b1f63-5a3e-4c8e-9d0e-2b7f7c1d9a10';
+const onTheZoneMachine = 'http://localhost:3000';
 const claudeLogin = (url: string) => ({
   agent: 'claude',
   authorize_url: url,
   expires_at: later(),
   flow: 'paste',
+  attempt,
 });
+const openAt = (url: string) => (window as unknown as HappyWindow).happyDOM.setURL(url);
 const loopbackLogin = (url: string) => ({ ...claudeLogin(url), flow: 'loopback' });
 const prompt = {
   agent: 'codex',
@@ -363,6 +369,31 @@ describe('AgentSignIn', () => {
       expect(screen.queryByRole('button', { name: 'Try again with full access' })).toBeNull();
     });
 
+    it('cancels the sign-in on the server, and keeps it while that fails', async () => {
+      const unreachable = 'Failed to cancel the claude sign-in: 502';
+      agentsApi.start.mockResolvedValue(claudeLogin(authorize));
+      agentsApi.cancel
+        .mockRejectedValueOnce(new AgentRequestError(unreachable, 502))
+        .mockResolvedValueOnce(undefined);
+      renderPanel('claude', claudeSignedOut);
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(unreachable);
+      expect(agentsApi.cancel).toHaveBeenCalledWith(organization, 'claude');
+      expect(screen.getByRole('link', { name: 'Open claude.com' })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+      await waitFor(() =>
+        expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull()
+      );
+      expect(agentsApi.cancel).toHaveBeenCalledTimes(2);
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+    });
+
     it('shows when the link expires and drops it once it has', async () => {
       vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
       agentsApi.start.mockResolvedValue({
@@ -499,6 +530,7 @@ describe('AgentSignIn', () => {
       expect(link).toHaveAttribute('rel', 'noopener noreferrer');
       expect(screen.getByText('Signing in')).toBeInTheDocument();
       expect(screen.getByText(approve)).toBeInTheDocument();
+      expect(screen.getByText(/in this browser, on the machine Zone runs on/)).toBeInTheDocument();
       expect(screen.queryByLabelText('Code from claude.com')).toBeNull();
       expect(screen.queryByRole('button', { name: 'Submit code' })).toBeNull();
       expect(screen.getByRole('button', { name: 'Paste a code instead' })).toBeEnabled();
@@ -507,7 +539,7 @@ describe('AgentSignIn', () => {
       await wait(POLL_INTERVAL - 1);
       expect(agentsApi.get).not.toHaveBeenCalled();
       await wait(1);
-      expect(agentsApi.get).toHaveBeenCalledWith(organization, 'claude');
+      expect(agentsApi.get).toHaveBeenCalledWith(organization, 'claude', attempt);
       expect(screen.getByText(approve)).toBeInTheDocument();
 
       await wait(POLL_INTERVAL);
@@ -648,6 +680,26 @@ describe('AgentSignIn', () => {
       expect(agentsApi.get).toHaveBeenCalledTimes(polls);
     });
 
+    it('cancels on the server and stops waiting', async () => {
+      vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
+      agentsApi.start.mockResolvedValue(loopbackLogin(authorize));
+      agentsApi.get.mockResolvedValue(claudeSignedOut);
+      agentsApi.cancel.mockResolvedValue(undefined);
+      await begin();
+      await wait(POLL_INTERVAL);
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      });
+
+      expect(agentsApi.cancel).toHaveBeenCalledWith(organization, 'claude');
+      expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+      await wait(POLL_INTERVAL * 5);
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+    });
+
     it('stops waiting once the panel goes away', async () => {
       vi.useFakeTimers({ now: new Date('2026-09-23T04:00:00Z') });
       agentsApi.start.mockResolvedValue(loopbackLogin(authorize));
@@ -672,6 +724,42 @@ describe('AgentSignIn', () => {
 
       const link = await screen.findByRole('link', { name: 'Open claude.com' });
       await waitFor(() => expect(focused(link)).toBe(true));
+    });
+  });
+
+  describe('from a console on another machine', () => {
+    beforeEach(() => {
+      openAt('https://zone.example.com/org-settings');
+    });
+
+    afterEach(() => {
+      openAt(onTheZoneMachine);
+    });
+
+    it('asks claude.com for a code to paste, at whatever scope', async () => {
+      agentsApi.start
+        .mockResolvedValueOnce(claudeLogin(authorize))
+        .mockResolvedValueOnce(claudeLogin(fullAuthorize));
+      renderPanel('claude', claudeSignedOut);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+      await screen.findByLabelText('Code from claude.com');
+      fireEvent.click(screen.getByRole('button', { name: 'Try again with full access' }));
+
+      await waitFor(() => expect(agentsApi.start).toHaveBeenCalledTimes(2));
+      expect(agentsApi.start.mock.calls).toEqual([
+        [organization, 'claude', { flow: 'paste' }],
+        [organization, 'claude', { scope: 'full', flow: 'paste' }],
+      ]);
+    });
+
+    it('starts codex as it does anywhere', async () => {
+      agentsApi.start.mockResolvedValue(prompt);
+      renderPanel('codex', codexSignedOut);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }));
+
+      await waitFor(() => expect(agentsApi.start).toHaveBeenCalledWith(organization, 'codex', {}));
     });
   });
 
@@ -712,7 +800,7 @@ describe('AgentSignIn', () => {
         vi.advanceTimersByTime(1);
       });
       expect(agentsApi.get).toHaveBeenCalledTimes(1);
-      expect(agentsApi.get).toHaveBeenCalledWith(organization, 'codex');
+      expect(agentsApi.get).toHaveBeenCalledWith(organization, 'codex', undefined);
       expect(onChange).toHaveBeenLastCalledWith(codexPending);
       expect(screen.getByText('ABCD-EFGHI')).toBeInTheDocument();
 

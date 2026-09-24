@@ -1,6 +1,7 @@
-import { Button, buttonVariants } from '@zone/ui';
-import { format } from 'date-fns';
-import { type KeyboardEvent, type RefObject, useId } from 'react';
+import { Button } from '@zone/ui';
+import { type KeyboardEvent, type ReactNode, type RefObject, useId } from 'react';
+import { ClaudeLink } from './ClaudeLink';
+import { SignInButtons } from './SignInButtons';
 import type { SignInAction } from './types';
 
 interface ClaudeStepsProps {
@@ -44,56 +45,24 @@ export function ClaudeSteps({
     onSubmit();
   };
 
-  const fullAccess = !full && (
-    <Button
-      size="sm"
-      variant={usable ? 'ghost' : 'secondary'}
-      onClick={onFullAccess}
-      loading={busy === 'full'}
-      disabled={busy !== null}
-    >
-      Try again with full access
-    </Button>
-  );
-  const cancel = (
-    <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy !== null}>
-      Cancel
-    </Button>
+  const buttons = (next?: ReactNode) => (
+    <SignInButtons
+      full={full}
+      usable={usable}
+      busy={busy}
+      next={next}
+      onRestart={onRestart}
+      onFullAccess={onFullAccess}
+      onCancel={onCancel}
+    />
   );
 
-  if (!usable) {
-    return (
-      <div className="agent-sign-in-buttons">
-        <Button size="sm" onClick={onRestart} loading={busy === 'restart'} disabled={busy !== null}>
-          Start again
-        </Button>
-        {fullAccess}
-        {cancel}
-      </div>
-    );
-  }
-
-  const expiry = format(new Date(expiresAt), 'p');
+  if (!usable) return buttons();
 
   return (
     <ol className="agent-sign-in-steps">
       <li>
-        <div className="agent-sign-in-step">
-          <span>Open claude.com, sign in, and approve access.</span>
-          <a
-            className={buttonVariants({ variant: 'secondary', size: 'sm' })}
-            href={url}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Open claude.com
-          </a>
-        </div>
-        <p className="form-hint">
-          {full
-            ? `This link asks for full access to your Claude account. It expires at ${expiry}.`
-            : `The link expires at ${expiry}.`}
-        </p>
+        <ClaudeLink url={url} full={full} expiresAt={expiresAt} />
       </li>
       <li>
         <div className="form-group">
@@ -124,7 +93,7 @@ export function ClaudeSteps({
             </p>
           )}
         </div>
-        <div className="agent-sign-in-buttons">
+        {buttons(
           <Button
             size="sm"
             onClick={onSubmit}
@@ -133,9 +102,7 @@ export function ClaudeSteps({
           >
             Submit code
           </Button>
-          {fullAccess}
-          {cancel}
-        </div>
+        )}
       </li>
     </ol>
   );
