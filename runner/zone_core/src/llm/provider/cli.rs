@@ -33,6 +33,10 @@ const DIAGNOSTIC_TAIL: usize = 1024;
 /// stderr that follows it, so a reader can tell the two apart.
 pub const STDERR_HEADING: &str = "\n\nThe end of the agent's stderr:\n";
 
+/// How a turn stopped for an answer past its output limit begins its failure,
+/// before it names the limit.
+pub const OUTGROWN: &str = "the agent's answer grew past";
+
 /// A coding agent's events, yielded as the child emits them.
 pub type AgentStream = Pin<Box<dyn Stream<Item = Result<AgentEvent, ProviderError>> + Send>>;
 
@@ -206,7 +210,7 @@ impl CliProvider {
                     if kept > output_limit {
                         Err(session.stop(ProviderError::agent(
                             &name,
-                            &format!("the agent's answer grew past {output_limit} bytes"),
+                            &format!("{OUTGROWN} {output_limit} bytes"),
                         )).await)?;
                     }
                     terminal |= event.terminal();

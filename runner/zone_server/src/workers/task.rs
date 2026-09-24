@@ -14,7 +14,7 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc};
 use uuid::Uuid;
 use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
-use zone_core::llm::provider::SignIn;
+use zone_core::llm::provider::{OUTGROWN, SignIn};
 use zone_core::llm::{
     AgentKind, BuiltinTools, Credential, LlmBackend, LlmClient, LlmConfig, Message as LlmMessage,
 };
@@ -101,10 +101,6 @@ const PLAN_APPROVAL_UNAVAILABLE: &str = "Plan approval is not available when a t
 const PLAN_APPROVAL_UNAVAILABLE_ANYWHERE: &str = "Plan approval is not available when a task runs \
      on a coding agent CLI, and every provider on this server runs on one; turn off Require plan \
      approval.";
-
-/// What `zone_core` says when it stops a coding agent whose answer outgrew the
-/// output cap.
-const OUTGROWN: &str = "the agent's answer grew past";
 
 // Global semaphore to limit concurrent task executions
 static TASK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
