@@ -26,7 +26,7 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
       # The manager's Claude sign-in callback, which it cannot publish itself here.
-      - "127.0.0.1:54545:54545"
+      - "127.0.0.1:${ZONE_AGENT_CALLBACK_PORT-54545}:54545"
     networks:
       internal:
         aliases:

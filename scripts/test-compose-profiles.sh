@@ -111,7 +111,10 @@ direct=$(mktemp)
 devcfg=$(mktemp)
 combo=$(mktemp)
 bundled=$(mktemp)
-trap 'rm -rf "$directory" "$direct" "$devcfg" "$combo" "$bundled"' EXIT HUP INT TERM
+moved=$(mktemp)
+off=$(mktemp)
+trap 'rm -rf "$directory" "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off"' EXIT HUP INT TERM
+unset ZONE_AGENT_CALLBACK_PORT
 
 # shellcheck disable=SC2046
 compose $("$script" flags '') config --format json > "$direct"
@@ -121,8 +124,12 @@ compose $("$script" flags dev) config --format json > "$devcfg"
 compose $("$script" flags 'dev,vpn,monitoring') config --format json > "$combo"
 # shellcheck disable=SC2046
 compose $("$script" flags bundled-ollama) config --format json > "$bundled"
+# shellcheck disable=SC2046
+ZONE_AGENT_CALLBACK_PORT=60000 compose $("$script" flags 'dev,vpn') config --format json > "$moved"
+# shellcheck disable=SC2046
+ZONE_AGENT_CALLBACK_PORT='' compose $("$script" flags '') config --format json > "$off"
 
-python3 - "$direct" "$devcfg" "$combo" "$bundled" <<'PY'
+python3 - "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off" <<'PY'
 import json
 import sys
 
@@ -130,6 +137,8 @@ direct = json.load(open(sys.argv[1], encoding="utf-8"))
 dev = json.load(open(sys.argv[2], encoding="utf-8"))
 combo = json.load(open(sys.argv[3], encoding="utf-8"))
 bundled = json.load(open(sys.argv[4], encoding="utf-8"))
+moved = json.load(open(sys.argv[5], encoding="utf-8"))
+off = json.load(open(sys.argv[6], encoding="utf-8"))
 
 
 def dockerfile(service):
@@ -210,48 +219,61 @@ init_networks = set(bundled["services"]["ollama-init"].get("networks") or {})
 if not {"internal", "edge"} <= init_networks:
     raise SystemExit(f"ollama-init must join internal and edge, got {sorted(init_networks)!r}")
 
-# claude.com sends the admin's browser to http://localhost:54545/callback, so
+# claude.com sends the admin's browser to http://localhost:<port>/callback, so
 # the published port must answer only the host's own loopback. Docker hands a
 # published port to the container's interface, never to its loopback, which is
-# why the listener inside binds 0.0.0.0.
-CALLBACK = 54545
+# why the listener inside binds 0.0.0.0, always on the same port.
+LISTENER = 54545
 
 
-def callback_hosts(service):
+def callback_publishes(service):
     return [
-        item.get("host_ip")
+        (item.get("host_ip"), str(item.get("published") or ""))
         for item in service.get("ports") or []
-        if isinstance(item, dict)
-        and str(item.get("published")) == str(CALLBACK)
-        and int(item.get("target")) == CALLBACK
+        if isinstance(item, dict) and int(item.get("target")) == LISTENER
     ]
 
 
-for name, config, publisher in (
-    ("core", direct, "manager"),
-    ("dev", dev, "manager"),
-    ("dev+vpn+monitoring", combo, "gluetun"),
+for name, config, publisher, port in (
+    ("core", direct, "manager", "54545"),
+    ("dev", dev, "manager", "54545"),
+    ("dev+vpn+monitoring", combo, "gluetun", "54545"),
+    ("dev+vpn with ZONE_AGENT_CALLBACK_PORT=60000", moved, "gluetun", "60000"),
 ):
-    hosts = callback_hosts(config["services"][publisher])
-    if hosts != ["127.0.0.1"]:
+    publishes = callback_publishes(config["services"][publisher])
+    if publishes != [("127.0.0.1", port)]:
         raise SystemExit(
-            f"{name} {publisher} must publish the Claude sign-in callback on 127.0.0.1 only, "
-            f"got {hosts!r}"
+            f"{name} {publisher} must publish the Claude sign-in callback on 127.0.0.1:{port} "
+            f"only, got {publishes!r}"
         )
     environment = config["services"]["manager"].get("environment") or {}
     for variable, value in (
-        ("ZONE_AGENT_CALLBACK", f"http://localhost:{CALLBACK}"),
-        ("ZONE_AGENT_CALLBACK_BIND", "0.0.0.0"),
+        ("ZONE_AGENT_CALLBACK", port),
+        ("ZONE_AGENT_CALLBACK_BIND", f"0.0.0.0:{LISTENER}"),
     ):
         if environment.get(variable) != value:
             raise SystemExit(
                 f"{name} manager must set {variable}={value}, got {environment.get(variable)!r}"
             )
-if combo["services"]["manager"].get("ports"):
-    raise SystemExit("dev+vpn manager shares gluetun's network, so gluetun publishes its ports")
-firewall = str(combo["services"]["gluetun"]["environment"].get("FIREWALL_INPUT_PORTS", ""))
-if str(CALLBACK) not in firewall.split(","):
-    raise SystemExit(f"gluetun must let the callback in through its firewall, got {firewall!r}")
+    if publisher == "gluetun":
+        firewall = str(config["services"]["gluetun"]["environment"].get("FIREWALL_INPUT_PORTS", ""))
+        if str(LISTENER) not in firewall.split(","):
+            raise SystemExit(f"{name} gluetun must let the callback in, got {firewall!r}")
+for name, config in (("dev+vpn+monitoring", combo), ("dev+vpn", moved)):
+    if config["services"]["manager"].get("ports"):
+        raise SystemExit(f"{name} manager shares gluetun's network, so gluetun publishes its ports")
+
+off_manager = off["services"]["manager"]
+if (off_manager.get("environment") or {}).get("ZONE_AGENT_CALLBACK") != "":
+    raise SystemExit("an empty ZONE_AGENT_CALLBACK_PORT must turn the callback off")
+if any(
+    host != "127.0.0.1" or published == str(LISTENER)
+    for host, published in callback_publishes(off_manager)
+):
+    raise SystemExit(
+        "with the callback off, the manager must not take port "
+        f"{LISTENER}, got {callback_publishes(off_manager)!r}"
+    )
 
 print("Compose profile combination checks passed")
 PY

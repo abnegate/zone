@@ -318,14 +318,14 @@ services:
       - ZONE_AGENT_ENV_PASSTHROUGH=${ZONE_AGENT_ENV_PASSTHROUGH:-}
       - ZONE_CODEX_SANDBOX=${ZONE_CODEX_SANDBOX:-danger-full-access}
       - ZONE_CLAUDE_TOKEN_URL=${ZONE_CLAUDE_TOKEN_URL:-}
-      # claude.com sends the admin's browser back to this address with the
-      # sign-in's code, so nothing is pasted. It works only when the browser
-      # runs on this machine; set it empty in .env for a remote server.
-      - ZONE_AGENT_CALLBACK=${ZONE_AGENT_CALLBACK-http://localhost:54545}
+      # claude.com sends a browser on this machine back to
+      # http://localhost:${ZONE_AGENT_CALLBACK_PORT}/callback with a sign-in's
+      # code. Set ZONE_AGENT_CALLBACK_PORT empty in .env to turn it off.
+      - ZONE_AGENT_CALLBACK=${ZONE_AGENT_CALLBACK_PORT-54545}
       # Docker hands the published port to the container's own interface,
       # never to its loopback; the publish below keeps the host side on
       # loopback.
-      - ZONE_AGENT_CALLBACK_BIND=0.0.0.0
+      - ZONE_AGENT_CALLBACK_BIND=0.0.0.0:54545
       - ZONE_AUTO_ENABLED=${ZONE_AUTO_ENABLED:-true}
       - ZONE_AUTO_TICK_SECS=${ZONE_AUTO_TICK_SECS:-15}
       - ZONE_AUTO_PARALLEL_TASKS=${ZONE_AUTO_PARALLEL_TASKS:-3}
@@ -427,8 +427,9 @@ services:
       - ./comfyui/workflows:/app/comfyui/workflows:ro
       - ./comfyui/recipes:/app/comfyui/recipes:ro
     ports:
-      # The Claude sign-in callback, for a browser on this machine only.
-      - "127.0.0.1:54545:54545"
+      # The Claude sign-in callback, for a browser on this machine only. With
+      # the callback off, Docker picks a spare port instead of taking 54545.
+      - "127.0.0.1:${ZONE_AGENT_CALLBACK_PORT-54545}:54545"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
