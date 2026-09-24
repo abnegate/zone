@@ -527,21 +527,29 @@ impl ChatTools {
     }
 
     /// These tools less the ones `names` lists, which leave the catalog, the
-    /// prompt and dispatch alike.
+    /// prompt and dispatch alike. Without `wait_for`, every tool that sends
+    /// the model there is kept in its [`Tool::unwaited`] form.
     pub fn without(mut self, names: &[String]) -> Self {
         let named = |name: &str| names.iter().any(|named| named == name);
+        let unwaited = named(super::wait::WAIT_FOR);
         let kept: Vec<_> = std::mem::replace(&mut self.registry, ToolRegistry::new())
             .into_tools()
             .into_iter()
             .filter(|tool| !named(tool.name()))
+            .map(|tool| {
+                if unwaited {
+                    tool.unwaited().unwrap_or(tool)
+                } else {
+                    tool
+                }
+            })
             .collect();
         for tool in kept {
             self.registry.register(tool);
         }
         self.names.retain(|name| !named(name));
         self.name_set.retain(|name| !named(name));
-        self.definitions
-            .retain(|definition| !named(&definition.function.name));
+        self.definitions = self.registry.definitions();
         self.core.retain(|name| !named(name));
         self.workspace.retain(|name| !named(name));
         self.remote.retain(|name| !named(name));

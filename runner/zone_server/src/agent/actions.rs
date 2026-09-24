@@ -4,10 +4,10 @@ use crate::db::{actions, reminders};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use uuid::Uuid;
 use zone_core::tools::{
-    REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, excerpt,
+    REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, WaitFor, excerpt,
     reason_property,
 };
 
@@ -31,8 +31,7 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
      and SECONDLY are refused, not rounded up. Once an hour is the ceiling, measured at the \
      shortest gap the rule produces rather than its average — BYHOUR=0,1 with BYMINUTE=0,30 \
      fires four times a day and three of those gaps are half an hour. A condition that changes \
-     faster than the ceiling wants wait_for on the event itself when you have that tool, and never \
-     a schedule. A repeating \
+     faster than the ceiling wants wait_for on the event itself, not a schedule. A repeating \
      reminder stops after seven days unless it is asked for again. \
      Without a prompt, each firing delivers content as it is written. With one, each firing runs \
      the prompt as a turn of your own in this chat and what you say is the delivery, and content \
@@ -52,8 +51,7 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
      to compare against, and fixed content has nothing to compare. Two limits to state when you \
      offer one. It sees only the state at each firing, so a condition that appears and disappears \
      between two firings is never noticed — for something that raises an event of its own, use \
-     wait_for on the event when you have that tool, rather than a watch. And a watch cannot stay \
-     silent: running the turn \
+     wait_for on the event rather than a watch. And a watch cannot stay silent: running the turn \
      is how it reports at all, so an unchanged firing still answers here, in one short line. That \
      is the one place a watch departs from the say-nothing rule above, so a watch's prompt should \
      not repeat that rule. \
@@ -63,7 +61,7 @@ const CREATE_REMINDER_DESCRIPTION: &str = "Schedule a durable reminder delivered
 /// Named because the waiting section counts on them: a description that still
 /// mandates a poll is read at the moment a runner starts, which is closer to
 /// the decision than any prompt section gets.
-pub(crate) const START_TASK_DESCRIPTION: &str = "Create an agentic coding task and start the background runner immediately. Returns task_id and run_id. Does not wait for completion — wait for it with wait_for when you have that tool, then read get_task_run and tail_task_log. Use only when the user asked to run work in the background.";
+pub(crate) const START_TASK_DESCRIPTION: &str = "Create an agentic coding task and start the background runner immediately. Returns task_id and run_id. Does not wait for completion — wait for it with wait_for, then read get_task_run and tail_task_log. Use only when the user asked to run work in the background.";
 
 /// The two surfaces this description is read from. `wait_for` takes
 /// kind=task_run from a chat and refuses it from inside a run, so the guidance
@@ -72,7 +70,44 @@ pub(crate) const START_TASK_DESCRIPTION: &str = "Create an agentic coding task a
 pub(crate) const FROM_CHAT: &str = "from a chat";
 pub(crate) const FROM_RUN: &str = "from inside a run";
 
-pub(crate) const TAIL_TASK_LOG_DESCRIPTION: &str = "Fetch new runner log lines since a previous log ID. Read a run's progress with it once rather than calling it again: from a chat, find out when the run finishes by waiting for it with wait_for kind=task_run when you have that tool; from inside a run, finish and let whoever started it coordinate.";
+pub(crate) const TAIL_TASK_LOG_DESCRIPTION: &str = "Fetch new runner log lines since a previous log ID. Read a run's progress with it once rather than calling it again: from a chat, find out when the run finishes by waiting for it with wait_for kind=task_run; from inside a run, finish and let whoever started it coordinate.";
+
+/// Where each text an action hands the model sends it to wait_for: the end of
+/// every instruction in it to call the tool.
+const CREATE_REMINDER_WAITS: [&str; 2] = [
+    "wants wait_for on the event itself",
+    "use wait_for on the event",
+];
+const START_TASK_WAITS: [&str; 1] = ["wait for it with wait_for"];
+const TAIL_TASK_LOG_WAITS: [&str; 1] = ["wait_for kind=task_run"];
+const RUNNER_STARTED_WAITS: [&str; 1] = ["Wait for it with wait_for"];
+
+static CREATE_REMINDER_DESCRIPTION_UNWAITED: LazyLock<String> =
+    LazyLock::new(|| conditioned(CREATE_REMINDER_DESCRIPTION, &CREATE_REMINDER_WAITS));
+static START_TASK_DESCRIPTION_UNWAITED: LazyLock<String> =
+    LazyLock::new(|| conditioned(START_TASK_DESCRIPTION, &START_TASK_WAITS));
+static TAIL_TASK_LOG_DESCRIPTION_UNWAITED: LazyLock<String> =
+    LazyLock::new(|| conditioned(TAIL_TASK_LOG_DESCRIPTION, &TAIL_TASK_LOG_WAITS));
+
+/// What a turn that is not offered wait_for reads in place of
+/// [`actions::RUNNER_STARTED`].
+pub(crate) static RUNNER_STARTED_UNWAITED: LazyLock<String> =
+    LazyLock::new(|| conditioned(actions::RUNNER_STARTED, &RUNNER_STARTED_WAITS));
+
+/// `text` as a turn that is not offered wait_for reads it: each of
+/// `instructions`, the end of an instruction to call the tool, followed by the
+/// condition it holds under.
+fn conditioned(text: &str, instructions: &[&str]) -> String {
+    instructions
+        .iter()
+        .fold(text.to_string(), |text, instruction| {
+            text.replacen(
+                instruction,
+                &format!("{instruction}{}", WaitFor::Withheld.condition()),
+                1,
+            )
+        })
+}
 
 #[derive(Clone, Copy)]
 enum Action {
@@ -120,6 +155,7 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         registry.register(Arc::new(WorkspaceAction {
             scope: scope.clone(),
             action,
+            wait_for: WaitFor::Offered,
         }));
     }
 }
@@ -127,6 +163,7 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
 struct WorkspaceAction {
     scope: WorkspaceScope,
     action: Action,
+    wait_for: WaitFor,
 }
 
 #[derive(Deserialize)]
@@ -182,7 +219,10 @@ impl Tool for WorkspaceAction {
             Action::SendMessage => {
                 "Send a message to a workspace chat on the user's explicit request. Mentions record the intended member IDs in the message; they do not send email or push notifications."
             }
-            Action::CreateReminder => CREATE_REMINDER_DESCRIPTION,
+            Action::CreateReminder => self.told(
+                CREATE_REMINDER_DESCRIPTION,
+                &CREATE_REMINDER_DESCRIPTION_UNWAITED,
+            ),
             Action::ListReminders => {
                 "List the current user's workspace reminders: pending, delivered, cancelled, and \
                  expired — a repeating one that ran out of rule or outlived its week, which is a \
@@ -193,12 +233,31 @@ impl Tool for WorkspaceAction {
                 "Cancel one of the current user's pending reminders. Cancelling a repeating one \
                  stops the whole schedule, not just its next firing."
             }
-            Action::StartTask => START_TASK_DESCRIPTION,
+            Action::StartTask => {
+                self.told(START_TASK_DESCRIPTION, &START_TASK_DESCRIPTION_UNWAITED)
+            }
             Action::GetTaskRun => {
                 "Get status, phase, progress and error for a runner task in this workspace."
             }
-            Action::TailTaskLog => TAIL_TASK_LOG_DESCRIPTION,
+            Action::TailTaskLog => self.told(
+                TAIL_TASK_LOG_DESCRIPTION,
+                &TAIL_TASK_LOG_DESCRIPTION_UNWAITED,
+            ),
         }
+    }
+
+    fn unwaited(&self) -> Option<Arc<dyn Tool>> {
+        let waits = matches!(
+            self.action,
+            Action::CreateReminder | Action::StartTask | Action::TailTaskLog
+        );
+        waits.then(|| {
+            Arc::new(Self {
+                scope: self.scope.clone(),
+                action: self.action,
+                wait_for: WaitFor::Withheld,
+            }) as Arc<dyn Tool>
+        })
     }
 
     fn tier(&self) -> Tier {
@@ -312,6 +371,14 @@ impl Tool for WorkspaceAction {
 }
 
 impl WorkspaceAction {
+    /// `offered` for a turn that has wait_for, `withheld` for one that does not.
+    fn told(&self, offered: &'static str, withheld: &'static str) -> &'static str {
+        match self.wait_for {
+            WaitFor::Offered => offered,
+            WaitFor::Withheld => withheld,
+        }
+    }
+
     async fn run(&self, params: Value) -> Result<Value, sqlx::Error> {
         let scope = &self.scope;
         let pool = scope.state.db();
@@ -370,9 +437,12 @@ impl WorkspaceAction {
                 .await
             }
             Action::StartTask => {
-                let started =
+                let mut started =
                     actions::start_task(pool, scope.workspace_id, scope.user_id, decode(params)?)
                         .await?;
+                if self.wait_for == WaitFor::Withheld {
+                    started[actions::RUNNER_MESSAGE] = json!(RUNNER_STARTED_UNWAITED.as_str());
+                }
                 if let (Some(run_id), Some(task_id)) = (
                     started
                         .get("run_id")
@@ -416,6 +486,7 @@ struct RunLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::wait::WAIT_FOR;
     use crate::state::AppState;
     use zone_core::tools::REASON_DESCRIPTION;
 
@@ -430,7 +501,57 @@ mod tests {
                 user_id: Uuid::new_v4(),
             },
             action,
+            wait_for: WaitFor::Offered,
         }
+    }
+
+    /// A text is told to a turn without wait_for by conditioning each of its
+    /// instructions to call the tool, and by nothing else.
+    fn conditions_every_wait(unwaited: &str, offered: &str) {
+        let condition = WaitFor::Withheld.condition();
+        assert!(unwaited.contains(WAIT_FOR), "{unwaited}");
+        assert_eq!(
+            unwaited.matches(WAIT_FOR).count(),
+            unwaited.matches(condition).count(),
+            "{unwaited}"
+        );
+        assert_eq!(unwaited.replace(condition, ""), offered);
+    }
+
+    /// A turn that is not offered wait_for is served every action that sends
+    /// the model there with each instruction to call it held to a turn that
+    /// has the tool, and every other action as it is.
+    #[tokio::test]
+    async fn an_action_that_sends_the_model_to_wait_for_says_it_needs_the_tool() {
+        for action in [
+            Action::CreateReminder,
+            Action::StartTask,
+            Action::TailTaskLog,
+        ] {
+            let offered = tool(action);
+            let unwaited = offered
+                .unwaited()
+                .unwrap_or_else(|| panic!("{} sends the model to wait_for", offered.name()));
+
+            assert_eq!(unwaited.name(), offered.name());
+            assert_eq!(unwaited.parameters_schema(), offered.parameters_schema());
+            conditions_every_wait(unwaited.description(), offered.description());
+        }
+        for action in [
+            Action::ListTasks,
+            Action::CreateTask,
+            Action::UpdateTask,
+            Action::ListMembers,
+            Action::ListChats,
+            Action::SendMessage,
+            Action::ListReminders,
+            Action::CancelReminder,
+            Action::GetTaskRun,
+        ] {
+            let offered = tool(action);
+            assert!(offered.unwaited().is_none(), "{}", offered.name());
+        }
+        conditions_every_wait(&RUNNER_STARTED_UNWAITED, actions::RUNNER_STARTED);
     }
 
     #[tokio::test]

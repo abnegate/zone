@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tool_runner::Proxy;
@@ -14,7 +15,7 @@ use super::file::{confine, resolve};
 use super::job::{self, JobCommand, Jobs};
 use super::{
     ERROR_PREFIX, MAX_PREVIEW_CHARS, MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tier, Tool, ToolContext,
-    ToolError, ToolResult, WAIT_FOR_CONDITION, excerpt, reason_property, trim_middle,
+    ToolError, ToolResult, WaitFor, excerpt, reason_property, trim_middle,
 };
 
 /// Programs [`RunCommandTool`] may spawn, resolved on the child's `PATH`.
@@ -94,14 +95,14 @@ pub(super) fn max_output_property() -> Value {
     })
 }
 
-fn background_property() -> Value {
+fn background_property(wait_for: WaitFor) -> Value {
     json!({
         "type": "boolean",
         "description": format!(
             "Detach and return immediately with a job id and log path. Use for anything \
-             long-running instead of blocking on it, and wait for it with {WAIT_FOR_TOOL} \
-             {WAIT_FOR_CONDITION}. A background job ends with the turn that started it, or with \
-             the run. Default false."
+             long-running; wait for it with {WAIT_FOR_TOOL}{} instead of blocking. A background job \
+             ends with the turn that started it, or with the run. Default false.",
+            wait_for.condition()
         )
     })
 }
@@ -128,11 +129,68 @@ fn working_directory(context: &ToolContext, directory: Option<&str>) -> Result<P
 /// a command nothing the foreground would have refused it. The job is keyed to
 /// the session's own working tree and the command carries the directory the
 /// child runs in, so where the model pointed the command cannot move the log.
-async fn background(command: &JobCommand, context: &ToolContext) -> Result<ToolResult, ToolError> {
+async fn background(
+    command: &JobCommand,
+    context: &ToolContext,
+    wait_for: WaitFor,
+) -> Result<ToolResult, ToolError> {
     Jobs::spawn(context.session, command, &context.cwd, &context.env)
         .await
-        .map(|started| ToolResult::success(job::started_text(&started)))
+        .map(|started| ToolResult::success(job::receipt(&started, wait_for)))
         .map_err(ToolError::Execution)
+}
+
+/// A shell tool, which tells the model to wait for the jobs it starts, and so
+/// tells a turn that is offered `wait_for` one thing and a turn that is not
+/// another.
+#[async_trait]
+trait Waiting: Tool + Sized + 'static {
+    fn schema(wait_for: WaitFor) -> Value;
+
+    async fn run(
+        &self,
+        params: Value,
+        context: &ToolContext,
+        wait_for: WaitFor,
+    ) -> Result<ToolResult, ToolError>;
+}
+
+/// A shell tool as a turn that is not offered `wait_for` is served it.
+struct Unwaited<T>(T);
+
+#[async_trait]
+impl<T: Waiting> Tool for Unwaited<T> {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn description(&self) -> &str {
+        self.0.description()
+    }
+
+    fn parameters_schema(&self) -> Value {
+        T::schema(WaitFor::Withheld)
+    }
+
+    async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        self.0.run(params, context, WaitFor::Withheld).await
+    }
+
+    fn timeout(&self, context: &ToolContext) -> Duration {
+        self.0.timeout(context)
+    }
+
+    fn tier(&self) -> Tier {
+        self.0.tier()
+    }
+
+    fn ends_turn(&self) -> bool {
+        self.0.ends_turn()
+    }
+
+    fn preview(&self, params: &Value) -> Option<String> {
+        self.0.preview(params)
+    }
 }
 
 #[async_trait]
@@ -164,6 +222,21 @@ impl Tool for RunCommandTool {
     }
 
     fn parameters_schema(&self) -> Value {
+        Self::schema(WaitFor::Offered)
+    }
+
+    async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        self.run(params, context, WaitFor::Offered).await
+    }
+
+    fn unwaited(&self) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Unwaited(Self)))
+    }
+}
+
+#[async_trait]
+impl Waiting for RunCommandTool {
+    fn schema(wait_for: WaitFor) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -184,7 +257,7 @@ impl Tool for RunCommandTool {
                     "type": "integer",
                     "description": "Timeout in seconds (default: 300)"
                 },
-                BACKGROUND_PARAM: background_property(),
+                BACKGROUND_PARAM: background_property(wait_for),
                 MAX_OUTPUT_PARAM: max_output_property(),
                 REASON_PARAM: reason_property()
             },
@@ -192,7 +265,12 @@ impl Tool for RunCommandTool {
         })
     }
 
-    async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn run(
+        &self,
+        params: Value,
+        context: &ToolContext,
+        wait_for: WaitFor,
+    ) -> Result<ToolResult, ToolError> {
         let params: RunCommandParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
 
@@ -230,7 +308,7 @@ impl Tool for RunCommandTool {
 
         if params.background {
             let command = JobCommand::new(&params.command, params.args.clone()).within(&cwd);
-            return background(&command, context).await;
+            return background(&command, context, wait_for).await;
         }
 
         // Build command
@@ -313,14 +391,14 @@ impl Tool for RunCommandTool {
 /// advice it has already taken, and a model handed advice it has already
 /// followed repeats the call until the loop's no-progress detector ends the
 /// turn with nothing to show.
-fn sleep_refusal(seconds: f64, backgrounded: bool) -> String {
+fn sleep_refusal(seconds: f64, backgrounded: bool, wait_for: WaitFor) -> String {
     let (remedy, tail) = if backgrounded {
         (
             Cow::Borrowed(
                 "Backgrounding does not raise the cap. Start something that finishes on its own \
                  and",
             ),
-            ", rather than sleeping.",
+            " rather than sleeping.",
         )
     } else {
         (
@@ -330,7 +408,8 @@ fn sleep_refusal(seconds: f64, backgrounded: bool) -> String {
     };
     format!(
         "This command sleeps for {seconds} seconds, and a call may block on sleep for at most \
-         {MAX_SLEEP_SECS}. {remedy} wait for it with {WAIT_FOR_TOOL} {WAIT_FOR_CONDITION}{tail}"
+         {MAX_SLEEP_SECS}. {remedy} wait for it with {WAIT_FOR_TOOL}{}{tail}",
+        wait_for.condition()
     )
 }
 
@@ -457,6 +536,26 @@ impl Tool for RunShellTool {
     }
 
     fn parameters_schema(&self) -> Value {
+        Self::schema(WaitFor::Offered)
+    }
+
+    fn timeout(&self, _context: &ToolContext) -> Duration {
+        // Loose enough never to pre-empt the per-call limit enforced below.
+        Duration::from_secs(MAX_SHELL_TIMEOUT_SECS + 30)
+    }
+
+    async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        self.run(params, context, WaitFor::Offered).await
+    }
+
+    fn unwaited(&self) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Unwaited(Self)))
+    }
+}
+
+#[async_trait]
+impl Waiting for RunShellTool {
+    fn schema(wait_for: WaitFor) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -466,7 +565,8 @@ impl Tool for RunShellTool {
                         "Shell command to run, e.g. 'cargo test 2>&1 | tail -40'. It may not \
                          block on sleep for more than {MAX_SLEEP_SECS} seconds: to wait longer, \
                          start it with {BACKGROUND_PARAM}: true and wait for it with \
-                         {WAIT_FOR_TOOL} {WAIT_FOR_CONDITION}."
+                         {WAIT_FOR_TOOL}{}.",
+                        wait_for.condition()
                     )
                 },
                 "cwd": {
@@ -477,7 +577,7 @@ impl Tool for RunShellTool {
                     "type": "integer",
                     "description": "Wall-clock limit in seconds. Default 120, maximum 900."
                 },
-                BACKGROUND_PARAM: background_property(),
+                BACKGROUND_PARAM: background_property(wait_for),
                 MAX_OUTPUT_PARAM: max_output_property(),
                 REASON_PARAM: reason_property()
             },
@@ -485,12 +585,12 @@ impl Tool for RunShellTool {
         })
     }
 
-    fn timeout(&self, _context: &ToolContext) -> Duration {
-        // Loose enough never to pre-empt the per-call limit enforced below.
-        Duration::from_secs(MAX_SHELL_TIMEOUT_SECS + 30)
-    }
-
-    async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn run(
+        &self,
+        params: Value,
+        context: &ToolContext,
+        wait_for: WaitFor,
+    ) -> Result<ToolResult, ToolError> {
         let params: RunShellParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
 
@@ -513,6 +613,7 @@ impl Tool for RunShellTool {
             return Err(ToolError::Execution(sleep_refusal(
                 seconds,
                 params.background,
+                wait_for,
             )));
         }
 
@@ -520,7 +621,7 @@ impl Tool for RunShellTool {
 
         if params.background {
             let command = JobCommand::shell(&params.command).within(&cwd);
-            return background(&command, context).await;
+            return background(&command, context, wait_for).await;
         }
 
         let limit = Duration::from_secs(
@@ -1607,8 +1708,8 @@ mod tests {
         assert_eq!(
             output,
             format!(
-                "Started {id} (pid {pid}). Log: {}\nWait for it with wait_for when you have that \
-                 tool, or read it with tail_job.",
+                "Started {id} (pid {pid}). Log: {}\nWait for it with wait_for, or read it with \
+                 tail_job.",
                 job::log_path(dir.path(), &id).display()
             )
         );
@@ -1682,9 +1783,7 @@ mod tests {
             "{output}"
         );
         assert!(
-            output.ends_with(
-                "Wait for it with wait_for when you have that tool, or read it with tail_job."
-            ),
+            output.ends_with("Wait for it with wait_for, or read it with tail_job."),
             "{output}"
         );
         assert!(job::log_path(dir.path(), &id).exists(), "{output}");
@@ -1956,9 +2055,8 @@ mod tests {
         assert_eq!(
             described,
             "Detach and return immediately with a job id and log path. Use for anything \
-             long-running instead of blocking on it, and wait for it with wait_for when you have \
-             that tool. A background job ends with the turn that started it, or with the run. \
-             Default false."
+             long-running; wait for it with wait_for instead of blocking. A background job ends \
+             with the turn that started it, or with the run. Default false."
         );
         for schema in [&shell, &command] {
             assert!(
@@ -1994,34 +2092,121 @@ mod tests {
         assert!(!described.contains("later call"), "{described}");
     }
 
-    /// A coding agent's turn is never offered wait_for, so every instruction
-    /// to call it says it is for a turn that has it.
-    #[test]
-    fn every_instruction_to_wait_says_it_needs_the_tool() {
-        let receipt = job::started_text(&job::JobStarted {
-            id: "job_9f3c1a7b2e04".to_string(),
-            pid: 48213,
-            log_path: "/tmp/work/.zone/jobs/job_9f3c1a7b2e04.log".to_string(),
-        });
-        let schemas = [
-            RunShellTool.parameters_schema(),
-            RunCommandTool.parameters_schema(),
-        ]
-        .map(|schema| schema.to_string());
+    async fn sleep_refused(background: bool) -> String {
+        RunShellTool
+            .execute(
+                json!({
+                    "command": "sleep 600",
+                    "background": background,
+                    "reason": "Wait for the deploy."
+                }),
+                &shell_test_context(),
+            )
+            .await
+            .expect_err("a sleep past the cap is refused")
+            .to_string()
+    }
 
-        for text in [
-            receipt,
-            sleep_refusal(600.0, false),
-            sleep_refusal(600.0, true),
-        ]
-        .into_iter()
-        .chain(schemas)
-        {
+    /// An endpoint's turn is offered wait_for, and is told to use it in the
+    /// words it has always been told, byte for byte.
+    #[tokio::test]
+    async fn an_endpoint_turn_is_told_to_wait_as_it_always_was() {
+        let schema = RunShellTool.parameters_schema();
+
+        assert_eq!(
+            schema["properties"]["command"]["description"].as_str(),
+            Some(
+                "Shell command to run, e.g. 'cargo test 2>&1 | tail -40'. It may not block on \
+                 sleep for more than 60 seconds: to wait longer, start it with background: true \
+                 and wait for it with wait_for."
+            )
+        );
+        assert_eq!(
+            sleep_refused(false).await,
+            "Execution failed: This command sleeps for 600 seconds, and a call may block on sleep \
+             for at most 60. Start it with background: true and wait for it with wait_for."
+        );
+        assert_eq!(
+            sleep_refused(true).await,
+            "Execution failed: This command sleeps for 600 seconds, and a call may block on sleep \
+             for at most 60. Backgrounding does not raise the cap. Start something that finishes \
+             on its own and wait for it with wait_for rather than sleeping."
+        );
+    }
+
+    fn unwaited(tool: impl Tool) -> Arc<dyn Tool> {
+        tool.unwaited()
+            .expect("a shell tool tells the model to wait for its jobs")
+    }
+
+    /// A coding agent's turn is never offered wait_for, so the shell tools it
+    /// is served say that each instruction to call the tool holds only on a
+    /// turn that has it: in their schemas, their receipts and their refusals.
+    #[tokio::test]
+    async fn an_unwaited_shell_tool_says_each_instruction_to_wait_needs_the_tool() {
+        let (_dir, context, session) = background_context();
+        let started = json!({"command": "true", "background": true, "reason": "Start it."});
+        let mut texts = Vec::new();
+
+        for tool in [unwaited(RunShellTool), unwaited(RunCommandTool)] {
+            texts.push(tool.parameters_schema().to_string());
+            let receipt = tool
+                .execute(started.clone(), &context)
+                .await
+                .expect("the job starts");
+            texts.extend(receipt.output);
+        }
+        for background in [false, true] {
+            let refused = unwaited(RunShellTool)
+                .execute(
+                    json!({
+                        "command": "sleep 600",
+                        "background": background,
+                        "reason": "Wait for the deploy."
+                    }),
+                    &context,
+                )
+                .await
+                .expect_err("a sleep past the cap is refused");
+            texts.push(refused.to_string());
+        }
+        Jobs::kill_session(session).await;
+
+        assert_eq!(texts.len(), 6, "{texts:?}");
+        for text in texts {
             assert!(text.contains(WAIT_FOR_TOOL), "{text}");
             assert_eq!(
                 text.matches(WAIT_FOR_TOOL).count(),
-                text.matches(crate::tools::WAIT_FOR_CONDITION).count(),
+                text.matches(WaitFor::Withheld.condition()).count(),
                 "{text}"
+            );
+        }
+    }
+
+    /// What a shell tool says about waiting is all that changes for a turn
+    /// without wait_for: the call it makes, what that costs and how a reader
+    /// is shown it stay what they are.
+    #[test]
+    fn an_unwaited_shell_tool_is_otherwise_the_same_tool() {
+        let context = create_test_context();
+        let call = json!({"command": "cargo", "args": ["test"], "reason": "Run the tests."});
+        let tools: [Arc<dyn Tool>; 2] = [Arc::new(RunShellTool), Arc::new(RunCommandTool)];
+
+        for tool in tools {
+            let unwaited = tool
+                .unwaited()
+                .expect("a shell tool has a form without waits");
+            assert_eq!(unwaited.name(), tool.name());
+            assert_eq!(unwaited.description(), tool.description());
+            assert_eq!(unwaited.tier(), tool.tier());
+            assert_eq!(unwaited.timeout(&context), tool.timeout(&context));
+            assert_eq!(unwaited.preview(&call), tool.preview(&call));
+            assert_eq!(
+                unwaited
+                    .parameters_schema()
+                    .to_string()
+                    .replace(WaitFor::Withheld.condition(), ""),
+                tool.parameters_schema().to_string()
             );
         }
     }

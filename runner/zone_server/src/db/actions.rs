@@ -8,7 +8,10 @@ use uuid::Uuid;
 
 /// The last thing a model reads before it decides what to do while a runner
 /// runs, which is why the waiting section pins this one too.
-pub(crate) const RUNNER_STARTED: &str = "Runner started. Wait for it with wait_for when you have that tool, then read get_task_run and tail_task_log; do not claim the work finished.";
+pub(crate) const RUNNER_STARTED: &str = "Runner started. Wait for it with wait_for, then read get_task_run and tail_task_log; do not claim the work finished.";
+
+/// Where a started task tells the model [`RUNNER_STARTED`].
+pub(crate) const RUNNER_MESSAGE: &str = "message";
 
 static UPDATES: Lazy<broadcast::Sender<(Uuid, Value)>> = Lazy::new(|| broadcast::channel(256).0);
 pub fn subscribe() -> broadcast::Receiver<(Uuid, Value)> {
@@ -340,7 +343,7 @@ pub async fn start_task(
         "title": task.title,
         "is_agentic": true,
         "status": run.status,
-        "message": RUNNER_STARTED
+        RUNNER_MESSAGE: RUNNER_STARTED
     }))
 }
 

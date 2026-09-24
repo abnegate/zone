@@ -28,7 +28,7 @@ use tokio::sync::{oneshot, watch};
 use tool_runner::Proxy;
 use uuid::Uuid;
 
-use super::{Session, WAIT_FOR_CONDITION};
+use super::{Session, WaitFor};
 use crate::llm::provider::environment;
 
 pub const TAIL_JOB: &str = "tail_job";
@@ -608,11 +608,20 @@ pub fn log_path(checkout: &Path, id: &str) -> PathBuf {
         .join(format!("{id}.{JOB_LOG_EXTENSION}"))
 }
 
-/// What a backgrounded shell call returns to the model.
+/// What a backgrounded shell call returns to a turn that is offered
+/// `wait_for`.
 pub fn started_text(job: &JobStarted) -> String {
+    receipt(job, WaitFor::Offered)
+}
+
+/// What a backgrounded shell call returns to the model.
+pub fn receipt(job: &JobStarted, wait_for: WaitFor) -> String {
     format!(
-        "{STARTED_PREFIX}{} (pid {}). Log: {}\nWait for it with {WAIT_FOR_TOOL} {WAIT_FOR_CONDITION}, or read it with {TAIL_JOB}.",
-        job.id, job.pid, job.log_path
+        "{STARTED_PREFIX}{} (pid {}). Log: {}\nWait for it with {WAIT_FOR_TOOL}{}, or read it with {TAIL_JOB}.",
+        job.id,
+        job.pid,
+        job.log_path,
+        wait_for.condition()
     )
 }
 
@@ -637,11 +646,12 @@ const RECEIPT_PID_CLOSING: &str = "). Log: ";
 ///
 /// A caller holding only the tool's own output has nowhere else to look: the
 /// registry keeps no pid and a `ToolResult` has no slot for one. What is read
-/// back is therefore checked by rebuilding the receipt from it, so a change to
-/// [`started_text`] stops this recognising the line rather than reporting a job
-/// with the wrong pid. Reading lives beside writing for the same reason: the
-/// format is this module's, and a reader that re-derived it elsewhere would
-/// drift from the builder in silence.
+/// back is therefore checked by rebuilding the receipt from it, in the form
+/// for a turn that is offered `wait_for` and in the form for one that is not,
+/// so a change to [`receipt`] stops this recognising the line rather than
+/// reporting a job with the wrong pid. Reading lives beside writing for the
+/// same reason: the format is this module's, and a reader that re-derived it
+/// elsewhere would drift from the builder in silence.
 pub fn parse_receipt(output: &str) -> Option<JobStarted> {
     let id = parse_started(output)?;
     let (announced, rest) = output.lines().next()?.split_once(RECEIPT_PID_OPENING)?;
@@ -654,7 +664,10 @@ pub fn parse_receipt(output: &str) -> Option<JobStarted> {
         pid: pid.parse().ok()?,
         log_path: log_path.to_string(),
     };
-    (started_text(&job) == output).then_some(job)
+    WaitFor::ALL
+        .into_iter()
+        .any(|wait_for| receipt(&job, wait_for) == output)
+        .then_some(job)
 }
 
 fn is_job_id(candidate: &str) -> bool {
@@ -1415,8 +1428,32 @@ mod tests {
         assert_eq!(
             started_text(&job()),
             "Started job_9f3c1a7b2e04 (pid 48213). Log: /tmp/work/.zone/jobs/job_9f3c1a7b2e04.log\n\
-             Wait for it with wait_for when you have that tool, or read it with tail_job."
+             Wait for it with wait_for, or read it with tail_job."
         );
+    }
+
+    /// A chat reads its jobs back out of the results its turns were handed, and
+    /// a turn that is offered wait_for and one that is not were handed
+    /// different receipts.
+    #[test]
+    fn a_receipt_reads_back_whether_or_not_its_turn_could_wait() {
+        let first = "Started job_9f3c1a7b2e04 (pid 48213). Log: \
+                     /tmp/work/.zone/jobs/job_9f3c1a7b2e04.log";
+
+        for (wait_for, advice) in [
+            (
+                WaitFor::Offered,
+                "Wait for it with wait_for, or read it with tail_job.",
+            ),
+            (
+                WaitFor::Withheld,
+                "Wait for it with wait_for when you have that tool, or read it with tail_job.",
+            ),
+        ] {
+            let receipt = format!("{first}\n{advice}");
+            assert_eq!(super::receipt(&job(), wait_for), receipt);
+            assert_eq!(parse_receipt(&receipt), Some(job()), "{advice}");
+        }
     }
 
     #[test]

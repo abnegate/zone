@@ -59,10 +59,30 @@ pub(crate) const ERROR_PREFIX: &str = "Error: ";
 /// nobody finishes, and an unfinished preview is worse than none.
 pub const MAX_PREVIEW_CHARS: usize = 400;
 
-/// What every instruction to call `wait_for` is conditioned on. A coding
-/// agent's turn is never offered the tool, and reads the same descriptions and
-/// results as a turn that is.
-pub const WAIT_FOR_CONDITION: &str = "when you have that tool";
+/// Whether the turn a tool serves is offered `wait_for`.
+///
+/// A coding agent's never is: it runs its own loop, and a wait parks only
+/// zone's. It is served the tools every other turn is served, so what one of
+/// them says about waiting is said for one kind of turn or the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitFor {
+    Offered,
+    Withheld,
+}
+
+impl WaitFor {
+    pub const ALL: [Self; 2] = [Self::Offered, Self::Withheld];
+
+    /// What follows each instruction to call `wait_for`: nothing on a turn
+    /// that has the tool, and on one that does not, that the instruction
+    /// holds only where it does.
+    pub fn condition(self) -> &'static str {
+        match self {
+            Self::Offered => "",
+            Self::Withheld => " when you have that tool",
+        }
+    }
+}
 
 const TOOL_TRUNCATION_MARKER: &str = "\n[truncated]";
 
@@ -328,6 +348,12 @@ pub trait Tool: Send + Sync {
     /// rather than the model's account of it. Tools whose tier is never
     /// confirmed have nobody to render for and leave this alone.
     fn preview(&self, _params: &Value) -> Option<String> {
+        None
+    }
+
+    /// This tool as a turn that is not offered `wait_for` is served it, or
+    /// `None` when nothing it says sends the model to that tool.
+    fn unwaited(&self) -> Option<Arc<dyn Tool>> {
         None
     }
 
