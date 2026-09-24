@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zone_core::llm::{AgentKind, CodexSandbox};
 
-use crate::services::login::claude::LOOPBACK_HOST;
+use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME};
 
 /// Settings live with the clients that consume them.
 pub use zone_comfy::Config as ComfyUiConfig;
@@ -175,19 +175,17 @@ const CLAUDE_TOKEN_URL: &str = "ZONE_CLAUDE_TOKEN_URL";
 /// Where codex runs the tools of a turn that grants them.
 const CODEX_SANDBOX: &str = "ZONE_CODEX_SANDBOX";
 
-/// `http://localhost:<port>`, where a browser on the server's own machine hands Zone a Claude
-/// sign-in's code.
+/// `http://localhost:<port>`, or the port alone, where claude.com sends a browser back with a
+/// Claude sign-in's code.
 const AGENT_CALLBACK: &str = "ZONE_AGENT_CALLBACK";
 
-/// The address the callback listener binds.
+/// The address, and optionally the port, the callback listener binds.
 const AGENT_CALLBACK_BIND: &str = "ZONE_AGENT_CALLBACK_BIND";
 
-/// Loopback, so nothing but a browser on the server's own machine reaches the listener.
 const DEFAULT_CALLBACK_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-/// The scheme of a loopback redirect: claude.com sends the browser to plain HTTP on the user's
-/// own machine, where no certificate could be trusted.
-const CALLBACK_SCHEME: &str = "http";
+/// The path of a callback base, which names no path of its own.
+const ROOT_PATH: &str = "/";
 
 /// The XDG base directory for user state.
 const STATE_HOME: &str = "XDG_STATE_HOME";
@@ -232,37 +230,20 @@ pub struct AgentConfig {
     pub claude_token_url: String,
     /// Where codex runs the tools of a turn that grants them.
     pub codex_sandbox: CodexSandbox,
-    /// Where a browser hands Zone a Claude sign-in's code. Without one, the
-    /// admin pastes the code claude.com shows.
+    /// Where claude.com sends a browser back with a Claude sign-in's code.
+    /// Without one, the admin pastes the code claude.com shows.
     pub callback: Option<Callback>,
 }
 
-/// A loopback address the browser returns a Claude sign-in to, as it does
-/// for the claude CLI's own sign-in: `http://localhost:<port>/callback`.
+/// The loopback address a browser returns a Claude sign-in to,
+/// `http://localhost:<port>/callback`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Callback {
     /// The port of `http://localhost:<port>`, where the browser reaches Zone.
     pub port: u16,
-    /// The address Zone's callback listener binds, loopback unless a
-    /// container has to bind its own interface for a published port to
-    /// reach it.
-    pub bind: IpAddr,
-}
-
-impl Callback {
-    /// A callback on `port` whose listener binds loopback, as it does unless
-    /// `ZONE_AGENT_CALLBACK_BIND` says otherwise.
-    pub fn loopback(port: u16) -> Self {
-        Self {
-            port,
-            bind: DEFAULT_CALLBACK_BIND,
-        }
-    }
-
-    /// Where the callback listener listens.
-    pub fn address(&self) -> SocketAddr {
-        SocketAddr::new(self.bind, self.port)
-    }
+    /// Where Zone's callback listener listens. Its port differs from `port`
+    /// only when a port mapping sits between the browser and the listener.
+    pub bind: SocketAddr,
 }
 
 impl Default for AgentConfig {
@@ -439,11 +420,8 @@ fn claude_token_url(value: Option<String>) -> Result<String, ConfigError> {
     Ok(url)
 }
 
-/// The loopback callback `value` names, listening where `bind` says.
-/// claude.com sends a browser back only to `http://localhost:<port>/callback`,
-/// so the value must be exactly `http://localhost:<port>`. The bind address
-/// is checked even with no callback, so one that could never work is refused
-/// before anyone relies on it.
+/// The loopback callback `value` names, listening where `bind` says. The bind
+/// address is checked even with no callback.
 fn callback(value: Option<String>, bind: Option<String>) -> Result<Option<Callback>, ConfigError> {
     let bind = callback_bind(bind)?;
     let Some(value) = value
@@ -452,38 +430,56 @@ fn callback(value: Option<String>, bind: Option<String>) -> Result<Option<Callba
     else {
         return Ok(None);
     };
-    let port = reqwest::Url::parse(&value)
-        .ok()
-        .filter(|url| {
-            url.scheme() == CALLBACK_SCHEME
-                && url.host_str() == Some(LOOPBACK_HOST)
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.path() == "/"
-                && url.query().is_none()
-                && url.fragment().is_none()
-        })
-        .and_then(|url| url.port())
-        .filter(|port| *port != 0)
-        .ok_or(ConfigError::Invalid(
-            "ZONE_AGENT_CALLBACK must be http://localhost:<port>, the only address claude.com sends a sign-in back to",
-        ))?;
-    Ok(Some(Callback { port, bind }))
+    let port = callback_port(&value).ok_or(ConfigError::Invalid(
+        "ZONE_AGENT_CALLBACK must be http://localhost:<port>, or the port alone",
+    ))?;
+    let (address, listen) = bind;
+    Ok(Some(Callback {
+        port,
+        bind: SocketAddr::new(address, listen.unwrap_or(port)),
+    }))
 }
 
-fn callback_bind(value: Option<String>) -> Result<IpAddr, ConfigError> {
-    match value
+/// The port of `http://localhost:<port>`, or of the port alone.
+fn callback_port(value: &str) -> Option<u16> {
+    let port = if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        value.parse().ok()
+    } else {
+        reqwest::Url::parse(value)
+            .ok()
+            .filter(|url| {
+                url.scheme() == LOOPBACK_SCHEME
+                    && url.host_str() == Some(LOOPBACK_HOST)
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path() == ROOT_PATH
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+            })
+            .and_then(|url| url.port())
+    };
+    port.filter(|port| *port != 0)
+}
+
+/// The address the listener binds, and its port when the value names one.
+fn callback_bind(value: Option<String>) -> Result<(IpAddr, Option<u16>), ConfigError> {
+    let Some(value) = value
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        None => Ok(DEFAULT_CALLBACK_BIND),
-        Some(value) => value.parse().map_err(|_| {
-            ConfigError::Invalid(
-                "ZONE_AGENT_CALLBACK_BIND must be an IP address, such as 127.0.0.1",
-            )
-        }),
+    else {
+        return Ok((DEFAULT_CALLBACK_BIND, None));
+    };
+    if let Ok(socket) = value.parse::<SocketAddr>() {
+        if socket.port() != 0 {
+            return Ok((socket.ip(), Some(socket.port())));
+        }
+    } else if let Ok(address) = value.parse::<IpAddr>() {
+        return Ok((address, None));
     }
+    Err(ConfigError::Invalid(
+        "ZONE_AGENT_CALLBACK_BIND must be an IP address, or an address and port, such as 127.0.0.1 or 0.0.0.0:54545",
+    ))
 }
 
 /// Periodic source indexing settings loaded from `SOURCE_RESYNC_*` env vars.
@@ -1918,7 +1914,7 @@ mod tests {
                 codex_sandbox: CodexSandbox::DangerFullAccess,
                 callback: Some(Callback {
                     port: 54_545,
-                    bind: LOOPBACK,
+                    bind: SocketAddr::new(LOOPBACK, 54_545),
                 }),
             },
             "a loopback token endpoint stays configurable: it is operator configuration"
@@ -2045,6 +2041,8 @@ mod tests {
             ("http://localhost:54545", 54_545),
             ("http://localhost:54545/", 54_545),
             ("  HTTP://LOCALHOST:1455  ", 1_455),
+            ("54545", 54_545),
+            (" 60000 ", 60_000),
         ] {
             Environment::set(AGENT_CALLBACK, value);
             assert_eq!(
@@ -2053,25 +2051,35 @@ mod tests {
                     .callback,
                 Some(Callback {
                     port,
-                    bind: LOOPBACK,
+                    bind: SocketAddr::new(LOOPBACK, port),
                 }),
                 "{value}"
             );
         }
 
-        Environment::set(AGENT_CALLBACK, "http://localhost:54545");
-        for (bind, address) in [
-            (" 0.0.0.0 ", UNSPECIFIED),
-            ("::1", IpAddr::V6(Ipv6Addr::LOCALHOST)),
-            ("   ", LOOPBACK),
+        Environment::set(AGENT_CALLBACK, "60000");
+        for (bind, listen) in [
+            (" 0.0.0.0 ", SocketAddr::new(UNSPECIFIED, 60_000)),
+            (
+                "::1",
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 60_000),
+            ),
+            ("   ", SocketAddr::new(LOOPBACK, 60_000)),
+            ("0.0.0.0:54545", SocketAddr::new(UNSPECIFIED, 54_545)),
+            (
+                "[::1]:54545",
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 54_545),
+            ),
         ] {
             Environment::set(AGENT_CALLBACK_BIND, bind);
-            let callback = AgentConfig::from_env()
-                .expect("a bind address")
-                .callback
-                .expect("a callback");
-            assert_eq!(callback.bind, address, "{bind:?}");
-            assert_eq!(callback.address(), SocketAddr::new(address, 54_545));
+            assert_eq!(
+                AgentConfig::from_env().expect("a bind address").callback,
+                Some(Callback {
+                    port: 60_000,
+                    bind: listen,
+                }),
+                "a bind names the listener's port only when a port mapping sits in between: {bind:?}"
+            );
         }
         Environment::remove(AGENT_CALLBACK_BIND);
 
@@ -2088,14 +2096,17 @@ mod tests {
             "http://someone@localhost:54545",
             "http://localhost.example:54545",
             "localhost:54545",
-            "54545",
+            "0",
+            "65536",
+            "-1",
+            "54545/",
         ] {
             Environment::set(AGENT_CALLBACK, value);
             assert!(
                 matches!(
                     AgentConfig::from_env(),
                     Err(ConfigError::Invalid(
-                        "ZONE_AGENT_CALLBACK must be http://localhost:<port>, the only address claude.com sends a sign-in back to"
+                        "ZONE_AGENT_CALLBACK must be http://localhost:<port>, or the port alone"
                     ))
                 ),
                 "{value} was taken for a place claude.com sends a sign-in back to"
@@ -2103,19 +2114,19 @@ mod tests {
         }
 
         Environment::remove(AGENT_CALLBACK);
-        for bind in ["localhost", "0.0.0.0:54545", "everywhere"] {
+        for bind in ["localhost", "0.0.0.0:0", "localhost:54545", "everywhere"] {
             Environment::set(AGENT_CALLBACK_BIND, bind);
             assert!(
                 matches!(
                     AgentConfig::from_env(),
                     Err(ConfigError::Invalid(
-                        "ZONE_AGENT_CALLBACK_BIND must be an IP address, such as 127.0.0.1"
+                        "ZONE_AGENT_CALLBACK_BIND must be an IP address, or an address and port, such as 127.0.0.1 or 0.0.0.0:54545"
                     ))
                 ),
                 "{bind} is not an address a listener binds"
             );
         }
-        Environment::set(AGENT_CALLBACK_BIND, "0.0.0.0");
+        Environment::set(AGENT_CALLBACK_BIND, "0.0.0.0:54545");
         assert_eq!(
             AgentConfig::from_env()
                 .expect("a bind address with nothing to bind")
@@ -2340,8 +2351,8 @@ mod tests {
         Environment::set(AGENT_STATE, "/app/agent-state");
         Environment::set(AGENT_HOST_LOGIN, "false");
         Environment::set(CODEX_SANDBOX, "danger-full-access");
-        Environment::set(AGENT_CALLBACK, "http://localhost:54545");
-        Environment::set(AGENT_CALLBACK_BIND, "0.0.0.0");
+        Environment::set(AGENT_CALLBACK, "60000");
+        Environment::set(AGENT_CALLBACK_BIND, "0.0.0.0:54545");
 
         let config = Config::from_env().expect("every value is valid");
         assert_eq!(
@@ -2352,15 +2363,15 @@ mod tests {
                 claude_token_url: DEFAULT_CLAUDE_TOKEN_URL.to_string(),
                 codex_sandbox: CodexSandbox::DangerFullAccess,
                 callback: Some(Callback {
-                    port: 54_545,
-                    bind: UNSPECIFIED,
+                    port: 60_000,
+                    bind: SocketAddr::new(UNSPECIFIED, 54_545),
                 }),
             }
         );
         let debug = format!("{config:?}");
         assert!(
             debug.contains(
-                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 54545, bind: 0.0.0.0 }) }"#
+                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 60000, bind: 0.0.0.0:54545 }) }"#
             ),
             "{debug}"
         );
@@ -2370,7 +2381,7 @@ mod tests {
             matches!(
                 Config::from_env(),
                 Err(ConfigError::Invalid(
-                    "ZONE_AGENT_CALLBACK must be http://localhost:<port>, the only address claude.com sends a sign-in back to"
+                    "ZONE_AGENT_CALLBACK must be http://localhost:<port>, or the port alone"
                 ))
             ),
             "a callback claude.com would never send a browser to must stop the server starting"

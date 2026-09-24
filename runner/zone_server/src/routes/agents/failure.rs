@@ -49,7 +49,9 @@ impl Failure {
     pub(super) fn exchange(error: Error) -> Self {
         let kind = match &error {
             Error::Unreadable(_) => Some(Kind::InvalidCode),
-            Error::Invalid(_) | Error::Forbidden(_) | Error::Refused(_) => Some(Kind::StartAgain),
+            Error::Invalid(_) | Error::Forbidden(_) | Error::Refused(_) | Error::Unreachable(_) => {
+                Some(Kind::StartAgain)
+            }
             Error::Unavailable(_) | Error::Deleted | Error::Internal(_) | Error::Database(_) => {
                 None
             }
@@ -94,7 +96,9 @@ impl From<Error> for Failure {
             Error::Forbidden(message) => Self::new(StatusCode::FORBIDDEN, message),
             Error::Unavailable(_) => Self::new(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
             Error::Deleted => Self::new(StatusCode::NOT_FOUND, error.to_string()),
-            Error::Refused(message) => Self::new(StatusCode::BAD_GATEWAY, message),
+            Error::Refused(message) | Error::Unreachable(message) => {
+                Self::new(StatusCode::BAD_GATEWAY, message)
+            }
             Error::Internal(message) => Self::internal(message),
             Error::Database(error) => Self::database(error),
         }
@@ -118,7 +122,7 @@ mod tests {
 
     use super::*;
 
-    fn refusals() -> [Error; 7] {
+    fn refusals() -> [Error; 8] {
         [
             Error::Unreadable("bad paste"),
             Error::Invalid("no such sign-in"),
@@ -126,6 +130,7 @@ mod tests {
             Error::Unavailable(AgentKind::Codex),
             Error::Deleted,
             Error::Refused("device code request failed".to_string()),
+            Error::Unreachable("connection refused".to_string()),
             Error::Internal("/app/agent-state is read-only".to_string()),
         ]
     }
@@ -151,6 +156,7 @@ mod tests {
             ),
             (StatusCode::NOT_FOUND, "Organization not found"),
             (StatusCode::BAD_GATEWAY, "device code request failed"),
+            (StatusCode::BAD_GATEWAY, "connection refused"),
             (StatusCode::INTERNAL_SERVER_ERROR, INTERNAL),
         ]) {
             let failure = Failure::from(error);
@@ -177,6 +183,7 @@ mod tests {
             (StatusCode::FORBIDDEN, Some(Kind::StartAgain)),
             (StatusCode::SERVICE_UNAVAILABLE, None),
             (StatusCode::NOT_FOUND, None),
+            (StatusCode::BAD_GATEWAY, Some(Kind::StartAgain)),
             (StatusCode::BAD_GATEWAY, Some(Kind::StartAgain)),
             (StatusCode::INTERNAL_SERVER_ERROR, None),
         ]) {

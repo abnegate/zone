@@ -353,6 +353,14 @@ pub fn create_router(state: AppState) -> Router {
             "/api/organizations/{org_id}/agents/{agent}/login/code",
             post(agents::finish),
         )
+        .route(
+            "/api/organizations/{org_id}/agents/{agent}/login/receipt",
+            post(agents::redeem),
+        )
+        .route(
+            "/api/organizations/{org_id}/agents/{agent}/login/attempt",
+            delete(agents::cancel),
+        )
         // Billing routes
         .route(
             "/api/organizations/{org_id}/subscription",

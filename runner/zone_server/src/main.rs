@@ -209,14 +209,17 @@ async fn main() {
                 .unwrap_or_else(|error| {
                     panic!(
                         "Could not listen for Claude sign-ins on {}: {error}. Free the port, or change or unset ZONE_AGENT_CALLBACK",
-                        callback.address()
+                        callback.bind
                     )
                 });
-            tracing::info!(address = %callback.address(), "Listening for Claude sign-ins");
-            Some(tokio::spawn(login::callback::serve(
-                state.clone(),
-                listener,
-            )))
+            tracing::info!(address = %callback.bind, port = callback.port, "Listening for Claude sign-ins");
+            if login::callback::exposed(&callback) {
+                tracing::warn!(
+                    address = %callback.bind,
+                    "The Claude sign-in callback listens beyond loopback, where other machines can reach it. Set ZONE_AGENT_CALLBACK_BIND to 127.0.0.1 unless a port mapping needs more"
+                );
+            }
+            Some(tokio::spawn(login::callback::serve(listener, callback)))
         }
         None => None,
     };

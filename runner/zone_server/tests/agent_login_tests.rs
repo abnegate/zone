@@ -7,12 +7,14 @@
 mod common;
 
 use std::fs;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -69,13 +71,33 @@ const NO_CALLBACK: &str = "This server has no sign-in callback, so a Claude sign
                            with the code claude.com shows";
 const NOT_WAITING: &str = "Zone is not waiting for this sign-in: it expired, it already \
                            finished, or it was started to paste a code. Start again in Zone.";
+const NO_RECEIPT: &str =
+    "Zone is not waiting for this sign-in: it expired, or it already finished. Start again.";
+const NOT_LOCAL: &str = "claude.com can send a sign-in back to Zone only when this browser runs \
+                         on the machine Zone runs on and opens Zone at a localhost address. Paste \
+                         the code instead.";
+const STARTED_ELSEWHERE: &str = "Someone else started this Claude sign-in, or it was started in \
+                                 another browser, so Zone did not finish it.";
+const RETURNED_ELSEWHERE: &str = "This sign-in came back to someone else, or to another browser, \
+                                  so Zone did not finish it. Start again, and approve it in this \
+                                  browser.";
+const ENDED: &str = "This sign-in was cancelled, or another one started after it.";
+const SESSION_ENDED: &str =
+    "The Zone session that started this sign-in has ended. Sign in to Zone and start again.";
 const NOT_APPROVED: &str = "Claude did not approve the sign-in. Start again.";
 const SCOPE_REFUSED: &str =
     "claude.com would not grant the access Zone asked for. Try again with full access.";
+const ON_HOLD: &str = "Your Claude account is on hold, so it cannot sign in to Claude Code. See \
+                       why, or appeal, at claude.ai/restricted.";
+const UNAVAILABLE: &str =
+    "claude.com could not finish the sign-in just now. Try again in a few minutes.";
 const DEMOTED: &str = "Only organization admins can sign in to coding agents, and whoever \
                        started this sign-in no longer is one. Start again.";
-const SIGNED_IN_PAGE: &str = "<h1>Signed in to Claude</h1>\n<p>You can close this tab.</p>";
 const CLOSE_AND_RETURN: &str = "You can close this tab and return to Zone.";
+/// The console every loopback sign-in here starts from, as its `Origin` names it.
+const CONSOLE: &str = "http://localhost:3000";
+/// How long a slow token endpoint takes to grant tokens.
+const SLOW: Duration = Duration::from_secs(2);
 const UNREADABLE_REPLY: &str =
     "claude.com sent Zone something it could not read. Start the sign-in again in Zone.";
 const NOT_FOUND: &str = "Organization not found";
@@ -291,13 +313,20 @@ impl Stage {
     /// As [`Stage::claude`], with the callback listener running on a loopback port of its own,
     /// as `ZONE_AGENT_CALLBACK=http://localhost:<port>` starts it.
     async fn loopback(claude: &MockServer) -> Self {
-        let listener = callback::bind(&Callback::loopback(0))
-            .await
-            .expect("a loopback port for the callback");
+        let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let listener = callback::bind(&Callback {
+            port: 0,
+            bind: loopback,
+        })
+        .await
+        .expect("a loopback port for the callback");
         let port = listener.local_addr().expect("the bound address").port();
-        let config = Self::claude_config(claude, Some(Callback::loopback(port)));
-        let client = TestClient::with_config(config).await;
-        tokio::spawn(callback::serve(client.state().clone(), listener));
+        let listening = Callback {
+            port,
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        };
+        let client = TestClient::with_config(Self::claude_config(claude, Some(listening))).await;
+        tokio::spawn(callback::serve(listener, listening));
         Self {
             client,
             _state: None,
@@ -327,12 +356,28 @@ impl Stage {
         format!("http://localhost:{}/callback", self.port())
     }
 
+    /// A browser that reaches `localhost` at the callback listener and follows no redirect.
+    fn browser(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(
+                "localhost",
+                SocketAddr::from((Ipv4Addr::LOCALHOST, self.port())),
+            )
+            .build()
+            .expect("a browser")
+    }
+
     /// What the callback listener answers a browser claude.com sent back with `query`.
     async fn returned(&self, query: &[(&str, &str)]) -> Answer {
-        let mut url = Url::parse(&format!("http://127.0.0.1:{}/callback", self.port()))
-            .expect("the callback's URL");
+        let mut url = Url::parse(&self.redirect()).expect("the callback's URL");
         url.query_pairs_mut().extend_pairs(query);
-        let response = reqwest::get(url).await.expect("the callback answers");
+        let response = self
+            .browser()
+            .get(url)
+            .send()
+            .await
+            .expect("the callback answers");
         Answer {
             status: response.status(),
             headers: response.headers().clone(),
@@ -340,10 +385,30 @@ impl Stage {
         }
     }
 
+    /// The receipt the callback listener sends the browser on to the console with, once
+    /// claude.com returned the approved sign-in `state` names.
+    async fn approved(&self, state: &str, organization: Uuid) -> String {
+        let answer = self.returned(&[("code", CODE), ("state", state)]).await;
+        assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+        let onward = answer
+            .headers
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .expect("where the browser goes next");
+        let url = Url::parse(onward).expect("an absolute URL");
+        assert_eq!(
+            (url.origin().ascii_serialization(), url.path()),
+            (CONSOLE.to_string(), "/agent-sign-in"),
+            "{onward}"
+        );
+        assert_eq!(parameter(onward, "organization"), organization.to_string());
+        parameter(onward, "receipt")
+    }
+
     /// What the callback listener answers `method` at `path`.
     async fn asked(&self, method: reqwest::Method, path: &str) -> StatusCode {
-        reqwest::Client::new()
-            .request(method, format!("http://127.0.0.1:{}{path}", self.port()))
+        self.browser()
+            .request(method, format!("http://localhost:{}{path}", self.port()))
             .send()
             .await
             .expect("the callback answers")
@@ -407,13 +472,80 @@ impl Stage {
         response.json_value()
     }
 
-    async fn start(&self, organization: Uuid, agent: &str, body: Value, person: &Person) -> Value {
+    /// The Claude status `person` reads while waiting on the sign-in `attempt`.
+    async fn awaited(&self, organization: Uuid, attempt: &Value, person: &Person) -> Value {
+        let attempt = attempt.as_str().expect("a sign-in attempt");
         let response = self
             .client
-            .post_json_auth(&login_path(organization, agent), &body, &person.token)
+            .get_auth(
+                &format!("{}?attempt={attempt}", agent_path(organization, "claude")),
+                &person.token,
+            )
             .await;
         response.assert_status(StatusCode::OK);
         response.json_value()
+    }
+
+    /// Starts a sign-in from the console at [`CONSOLE`].
+    async fn start(&self, organization: Uuid, agent: &str, body: Value, person: &Person) -> Value {
+        let response = self
+            .start_from(Some(CONSOLE), organization, agent, &body, person)
+            .await;
+        response.assert_status(StatusCode::OK);
+        response.json_value()
+    }
+
+    /// Starts a sign-in from a console at `origin`, or from no browser at all.
+    async fn start_from(
+        &self,
+        origin: Option<&str>,
+        organization: Uuid,
+        agent: &str,
+        body: &Value,
+        person: &Person,
+    ) -> common::TestResponse {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(login_path(organization, agent))
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", person.token));
+        if let Some(origin) = origin {
+            request = request.header("Origin", origin);
+        }
+        self.client
+            .send_request(
+                request
+                    .body(Body::from(body.to_string()))
+                    .expect("a start request"),
+            )
+            .await
+    }
+
+    /// Hands `receipt` back as `person`'s console does.
+    async fn redeem(
+        &self,
+        organization: Uuid,
+        receipt: &str,
+        person: &Person,
+    ) -> common::TestResponse {
+        self.client
+            .post_json_auth(
+                &format!("{}/receipt", login_path(organization, "claude")),
+                &json!({ "receipt": receipt }),
+                &person.token,
+            )
+            .await
+    }
+
+    /// Cancels `person`'s own Claude sign-in, as the panel's Cancel does.
+    async fn cancel(&self, organization: Uuid, person: &Person) {
+        self.client
+            .delete_auth(
+                &format!("{}/attempt", login_path(organization, "claude")),
+                &person.token,
+            )
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
     }
 
     async fn submit(
@@ -460,6 +592,19 @@ impl Stage {
         .fetch_optional(self.pool())
         .await
         .expect("the agent logins are readable")
+    }
+
+    /// Whether the organization's Claude sign-in is recorded and audited within [`WAIT`].
+    async fn recorded(&self, organization: Uuid) -> bool {
+        for _ in 0..ATTEMPTS {
+            if self.login_row(organization, "claude").await.is_some()
+                && !self.audited(organization).await.is_empty()
+            {
+                return true;
+            }
+            tokio::time::sleep(PAUSE).await;
+        }
+        false
     }
 
     async fn audited(&self, organization: Uuid) -> Vec<(String, Option<Uuid>, Option<Value>)> {
@@ -523,13 +668,15 @@ async fn exchanges(server: &MockServer) -> Vec<Value> {
 struct Person {
     token: String,
     id: Uuid,
+    email: String,
 }
 
 async fn person(client: &TestClient) -> Person {
+    let email = test_email();
     let body = client
         .post_json(
             "/api/auth/register",
-            &json!({ "email": test_email(), "password": test_password() }),
+            &json!({ "email": email, "password": test_password() }),
         )
         .await
         .json_value();
@@ -542,7 +689,72 @@ async fn person(client: &TestClient) -> Person {
             .as_str()
             .and_then(|id| id.parse().ok())
             .unwrap_or_else(|| panic!("registration returns the user, got {body}")),
+        email,
     }
+}
+
+/// `person` signed in to Zone again, as from another browser, in a session of its own.
+async fn another_session(client: &TestClient, person: &Person) -> Person {
+    let body = client
+        .post_json(
+            "/api/auth/login",
+            &json!({ "email": person.email, "password": test_password() }),
+        )
+        .await
+        .json_value();
+    Person {
+        token: body["access_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("signing in returns an access token, got {body}"))
+            .to_string(),
+        id: person.id,
+        email: person.email.clone(),
+    }
+}
+
+/// Claude's token endpoint, granting tokens only after [`SLOW`].
+async fn slow_token_endpoint() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(TOKEN_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(granted())
+                .set_delay(SLOW),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+/// Returns once Zone has asked `claude` for tokens `count` times.
+async fn exchanging(claude: &MockServer, count: usize) {
+    for _ in 0..ATTEMPTS {
+        if exchanges(claude).await.len() >= count {
+            return;
+        }
+        tokio::time::sleep(PAUSE).await;
+    }
+    panic!("Zone asked Claude for tokens fewer than {count} times");
+}
+
+/// Makes `admin` a plain member of the organization `owner` owns.
+async fn demote(stage: &Stage, organization: Uuid, owner: &Person, admin: &Person) {
+    stage
+        .client
+        .patch_json_auth(
+            &format!("/api/organizations/{organization}/members/{}", admin.id),
+            &json!({ "role": "member" }),
+            &owner.token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+/// The state and attempt of a sign-in `person` started.
+fn begun(started: &Value) -> (String, Value) {
+    let url = started["authorize_url"].as_str().expect("an authorize URL");
+    (parameter(url, "state"), started["attempt"].clone())
 }
 
 async fn organization(client: &TestClient, owner: &Person) -> Uuid {
@@ -928,9 +1140,15 @@ async fn the_authorize_url_carries_the_clis_parameters_in_order_for_each_scope()
             ),
             "{started}"
         );
+        assert!(
+            started["attempt"]
+                .as_str()
+                .is_some_and(|attempt| attempt.parse::<Uuid>().is_ok()),
+            "{started}"
+        );
         assert_eq!(
             started.as_object().map(|fields| fields.len()),
-            Some(4),
+            Some(5),
             "{started}"
         );
     }
@@ -1288,35 +1506,65 @@ async fn claude_refusing_the_code_is_a_bad_gateway_that_carries_its_reason() {
 }
 
 #[tokio::test]
-async fn a_server_with_a_callback_sends_the_browser_back_to_it_unless_asked_to_paste() {
+async fn a_server_with_a_callback_sends_a_browser_back_to_it_only_from_a_console_on_its_machine() {
     let claude = token_endpoint(200, granted()).await;
     let stage = Stage::loopback(&claude).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
 
-    for (body, flow, redirect, scope) in [
-        (json!({}), "loopback", stage.redirect(), INFERENCE_SCOPE),
+    for (origin, body, flow, redirect, scope) in [
         (
+            Some(CONSOLE),
+            json!({}),
+            "loopback",
+            stage.redirect(),
+            INFERENCE_SCOPE,
+        ),
+        (
+            Some("http://manager.localhost"),
             json!({ "flow": "loopback", "scope": "full" }),
             "loopback",
             stage.redirect(),
             FULL_SCOPE,
         ),
         (
+            Some(CONSOLE),
             json!({ "flow": "paste" }),
             "paste",
             REDIRECT_URL.to_string(),
             INFERENCE_SCOPE,
         ),
+        (
+            Some("https://zone.example.com"),
+            json!({}),
+            "paste",
+            REDIRECT_URL.to_string(),
+            INFERENCE_SCOPE,
+        ),
+        (
+            None,
+            json!({}),
+            "paste",
+            REDIRECT_URL.to_string(),
+            INFERENCE_SCOPE,
+        ),
     ] {
-        let started = stage.start(organization, "claude", body, &owner).await;
+        let response = stage
+            .start_from(origin, organization, "claude", &body, &owner)
+            .await;
 
+        response.assert_status(StatusCode::OK);
+        let started = response.json_value();
         let url = started["authorize_url"].as_str().expect("an authorize URL");
         let names: Vec<String> = parameters(url).into_iter().map(|(name, _)| name).collect();
         assert_eq!(names, AUTHORIZE_PARAMETERS, "{url}");
-        assert_eq!(parameter(url, "redirect_uri"), redirect, "{url}");
+        assert_eq!(
+            parameter(url, "redirect_uri"),
+            redirect,
+            "{origin:?} {body}"
+        );
         assert_eq!(parameter(url, "scope"), scope, "{url}");
-        assert_eq!(started["flow"], flow, "{started}");
+        assert_eq!(started["flow"], flow, "{origin:?} {body}");
     }
     assert!(
         stage.start(organization, "claude", json!({}), &owner).await["authorize_url"]
@@ -1324,6 +1572,29 @@ async fn a_server_with_a_callback_sends_the_browser_back_to_it_unless_asked_to_p
             .is_some_and(|url| url.contains("&redirect_uri=http%3A%2F%2Flocalhost%3A")),
         "the loopback redirect names localhost, as the claude CLI's own does"
     );
+    for origin in [
+        Some("https://zone.example.com"),
+        Some("http://10.0.0.5:3000"),
+        Some("http://localhost.attacker.example"),
+        None,
+    ] {
+        let refused = stage
+            .start_from(
+                origin,
+                organization,
+                "claude",
+                &json!({ "flow": "loopback" }),
+                &owner,
+            )
+            .await;
+
+        refused.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(
+            refused.json_value(),
+            json!({ "error": NOT_LOCAL }),
+            "{origin:?}"
+        );
+    }
 
     let unconfigured = Stage::claude(&claude).await;
     let owner = person(&unconfigured.client).await;
@@ -1340,11 +1611,12 @@ async fn a_server_with_a_callback_sends_the_browser_back_to_it_unless_asked_to_p
         REDIRECT_URL
     );
     let refused = unconfigured
-        .client
-        .post_json_auth(
-            &login_path(organization, "claude"),
+        .start_from(
+            Some(CONSOLE),
+            organization,
+            "claude",
             &json!({ "flow": "loopback" }),
-            &owner.token,
+            &owner,
         )
         .await;
     refused.assert_status(StatusCode::BAD_REQUEST);
@@ -1353,31 +1625,81 @@ async fn a_server_with_a_callback_sends_the_browser_back_to_it_unless_asked_to_p
 }
 
 #[tokio::test]
-async fn the_callback_signs_the_organization_in_with_nothing_pasted() {
+async fn the_callback_alone_signs_nothing_in_until_the_console_hands_its_receipt_back() {
     let claude = token_endpoint(200, granted()).await;
     let stage = Stage::loopback(&claude).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
     let started = stage.start(organization, "claude", json!({}), &owner).await;
-    let url = started["authorize_url"].as_str().expect("an authorize URL");
-    let state = parameter(url, "state");
-    let challenge = parameter(url, "code_challenge");
+    let (state, attempt) = begun(&started);
+    let challenge = parameter(
+        started["authorize_url"].as_str().expect("a URL"),
+        "code_challenge",
+    );
 
     let answer = stage.returned(&[("code", CODE), ("state", &state)]).await;
 
-    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    assert!(answer.body.contains(SIGNED_IN_PAGE), "{}", answer.body);
-    assert_eq!(
-        answer
-            .headers
-            .get("content-type")
-            .and_then(|value| value.to_str().ok()),
-        Some("text/html; charset=utf-8")
+    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+    for (name, value) in [
+        ("cache-control", "no-store"),
+        ("referrer-policy", "no-referrer"),
+    ] {
+        assert_eq!(
+            answer
+                .headers
+                .get(name)
+                .and_then(|value| value.to_str().ok()),
+            Some(value),
+            "{name}"
+        );
+    }
+    let onward = answer
+        .headers
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .expect("where the browser goes next")
+        .to_string();
+    assert!(
+        onward.starts_with(&format!("{CONSOLE}/agent-sign-in?receipt=")),
+        "{onward}"
     );
     for secret in [CODE, state.as_str()] {
-        assert!(!answer.body.contains(secret), "the page repeats {secret}");
+        assert!(
+            !onward.contains(secret),
+            "the console is sent {secret}: {onward}"
+        );
     }
+    assert!(
+        exchanges(&claude).await.is_empty(),
+        "the callback exchanged the code itself"
+    );
+    assert_eq!(
+        stage.status(organization, "claude", &owner).await,
+        signed_out(AgentKind::Claude, "claude_code"),
+        "the callback alone signed the organization in"
+    );
+    assert_eq!(parameter(&onward, "organization"), organization.to_string());
+    let receipt = parameter(&onward, "receipt");
 
+    let response = stage.redeem(organization, &receipt, &owner).await;
+
+    response.assert_status(StatusCode::OK);
+    let signed_in = json!({
+        "agent": "claude",
+        "provider": "claude_code",
+        "state": "signed_in",
+        "source": "zone",
+        "label": "Claude Max",
+        "expires_at": null,
+        "models": models(AgentKind::Claude),
+        "pending": null,
+        "error": null,
+    });
+    assert_eq!(response.json_value(), signed_in);
+    assert_eq!(
+        stage.awaited(organization, &attempt, &owner).await,
+        signed_in
+    );
     let sent = exchanges(&claude).await;
     assert_eq!(sent.len(), 1);
     let verifier = sent[0]["code_verifier"].as_str().expect("a verifier");
@@ -1394,22 +1716,6 @@ async fn the_callback_signs_the_organization_in_with_nothing_pasted() {
         "the exchange must name the redirect the authorize link carried"
     );
     assert_eq!(URL_SAFE_NO_PAD.encode(Sha256::digest(verifier)), challenge);
-
-    let status = stage.status(organization, "claude", &owner).await;
-    assert_eq!(
-        status,
-        json!({
-            "agent": "claude",
-            "provider": "claude_code",
-            "state": "signed_in",
-            "source": "zone",
-            "label": "Claude Max",
-            "expires_at": null,
-            "models": models(AgentKind::Claude),
-            "pending": null,
-            "error": null,
-        })
-    );
     let credential = stage
         .login_row(organization, "claude")
         .await
@@ -1430,6 +1736,13 @@ async fn the_callback_signs_the_organization_in_with_nothing_pasted() {
         )]
     );
 
+    let again = stage.redeem(organization, &receipt, &owner).await;
+    again.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        again.json_value(),
+        json!({ "error": NO_RECEIPT, "kind": START_AGAIN }),
+        "a receipt finished a second sign-in"
+    );
     let replayed = stage.returned(&[("code", CODE), ("state", &state)]).await;
     assert_eq!(replayed.status, StatusCode::BAD_REQUEST);
     assert!(
@@ -1442,8 +1755,70 @@ async fn the_callback_signs_the_organization_in_with_nothing_pasted() {
     assert_eq!(
         exchanges(&claude).await.len(),
         1,
-        "a replayed callback reached Claude"
+        "a spent receipt or a replayed callback reached Claude"
     );
+}
+
+#[tokio::test]
+async fn a_receipt_handed_back_by_anyone_but_the_admin_who_started_it_signs_nothing_in() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::loopback(&claude).await;
+    let attacker = person(&stage.client).await;
+    let operator = person(&stage.client).await;
+    let targeted = organization(&stage.client, &attacker).await;
+    let elsewhere = self::organization(&stage.client, &attacker).await;
+    let another = another_session(&stage.client, &attacker).await;
+
+    let (state, attempt) = begun(&stage.start(targeted, "claude", json!({}), &attacker).await);
+    let receipt = stage.approved(&state, targeted).await;
+    let response = stage.redeem(targeted, &receipt, &operator).await;
+    response.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": STARTED_ELSEWHERE, "kind": START_AGAIN })
+    );
+    assert_eq!(
+        stage.awaited(targeted, &attempt, &attacker).await["error"],
+        RETURNED_ELSEWHERE,
+        "the panel that started the sign-in was left waiting"
+    );
+    let spent = stage.redeem(targeted, &receipt, &attacker).await;
+    spent.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        spent.json_value()["error"],
+        NO_RECEIPT,
+        "a receipt handed back by someone else could still finish the sign-in"
+    );
+
+    for (path, stranger) in [(targeted, &another), (elsewhere, &attacker)] {
+        let (state, _) = begun(&stage.start(targeted, "claude", json!({}), &attacker).await);
+        let receipt = stage.approved(&state, targeted).await;
+
+        let response = stage.redeem(path, &receipt, stranger).await;
+
+        response.assert_status(StatusCode::FORBIDDEN);
+        assert_eq!(response.json_value()["error"], STARTED_ELSEWHERE);
+    }
+
+    let (state, _) = begun(&stage.start(targeted, "claude", json!({}), &attacker).await);
+    let receipt = stage.approved(&state, targeted).await;
+    stage
+        .client
+        .post_json(
+            &format!("{}/receipt", login_path(targeted, "claude")),
+            &json!({ "receipt": receipt }),
+        )
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+
+    assert!(
+        exchanges(&claude).await.is_empty(),
+        "a code that came back to someone else reached Claude"
+    );
+    for organization in [targeted, elsewhere] {
+        assert!(stage.login_row(organization, "claude").await.is_none());
+        assert!(stage.audited(organization).await.is_empty());
+    }
 }
 
 #[tokio::test]
@@ -1470,11 +1845,6 @@ async fn the_callback_finishes_only_a_sign_in_zone_started_for_it() {
     assert_eq!(answer.status, StatusCode::BAD_REQUEST);
     assert!(answer.body.contains(NOT_WAITING), "{}", answer.body);
     assert!(exchanges(&claude).await.is_empty());
-    assert_eq!(
-        stage.status(organization, "claude", &owner).await["error"],
-        Value::Null,
-        "a callback refused before any sign-in was found blamed the organization"
-    );
     stage
         .submit(organization, &format!("{CODE}#{pasting}"), &owner)
         .await
@@ -1534,7 +1904,7 @@ async fn the_callback_finishes_only_a_sign_in_zone_started_for_it() {
     let answer = stage.returned(&[("code", CODE), ("state", &looping)]).await;
     assert_eq!(
         answer.status,
-        StatusCode::OK,
+        StatusCode::SEE_OTHER,
         "a request that was refused spent the sign-in: {}",
         answer.body
     );
@@ -1588,7 +1958,7 @@ async fn the_callback_page_repeats_nothing_it_was_sent() {
 }
 
 #[tokio::test]
-async fn claudes_refusal_of_a_returned_code_shows_escaped_on_the_page_and_in_the_status() {
+async fn claudes_refusal_of_a_returned_code_reaches_the_console_and_its_admins_status() {
     let claude = token_endpoint(
         400,
         json!({
@@ -1600,55 +1970,65 @@ async fn claudes_refusal_of_a_returned_code_shows_escaped_on_the_page_and_in_the
     let stage = Stage::loopback(&claude).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
-    let started = stage.start(organization, "claude", json!({}), &owner).await;
-    let state = parameter(started["authorize_url"].as_str().expect("a URL"), "state");
+    let (state, attempt) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
+    let receipt = stage.approved(&state, organization).await;
 
-    let answer = stage.returned(&[("code", CODE), ("state", &state)]).await;
+    let response = stage.redeem(organization, &receipt, &owner).await;
 
     let refusal = "Claude refused the sign-in (HTTP 400): Invalid <b>authorization</b> code";
-    assert_eq!(answer.status, StatusCode::BAD_GATEWAY);
-    assert!(
-        answer.body.contains(
-            "Claude refused the sign-in (HTTP 400): Invalid &lt;b&gt;authorization&lt;/b&gt; code"
-        ),
-        "{}",
-        answer.body
+    response.assert_status(StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": refusal, "kind": START_AGAIN })
     );
-    assert!(!answer.body.contains("<b>"), "{}", answer.body);
     assert!(stage.login_row(organization, "claude").await.is_none());
-    let status = stage.status(organization, "claude", &owner).await;
+    let status = stage.awaited(organization, &attempt, &owner).await;
     assert_eq!(status["state"], "signed_out");
     assert_eq!(
         status["error"], refusal,
-        "the panel is waiting on the status, not on the tab Claude sent back"
+        "the panel is waiting on the status, not on the tab the console opened"
+    );
+    assert_eq!(
+        stage.status(organization, "claude", &owner).await["error"],
+        Value::Null,
+        "a status naming no sign-in carried why one failed"
     );
 
     stage.start(organization, "claude", json!({}), &owner).await;
     assert_eq!(
-        stage.status(organization, "claude", &owner).await["error"],
+        stage.awaited(organization, &attempt, &owner).await["error"],
         Value::Null,
         "a new sign-in still showed why the last one failed"
     );
 }
 
 #[tokio::test]
-async fn a_sign_in_claude_did_not_approve_ends_and_the_status_says_why() {
+async fn a_sign_in_claude_did_not_approve_ends_and_tells_only_its_admin_why() {
     let claude = token_endpoint(200, granted()).await;
     let stage = Stage::loopback(&claude).await;
     let owner = person(&stage.client).await;
+    let colleague = person(&stage.client).await;
+    let member = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
+    seat(&stage.client, organization, &owner, &colleague, "admin").await;
+    seat(&stage.client, organization, &owner, &member, "member").await;
 
-    for (error, reason) in [
-        ("access_denied", NOT_APPROVED),
-        ("invalid_scope", SCOPE_REFUSED),
+    for (error, description, reason) in [
+        ("access_denied", "The user declined", NOT_APPROVED),
+        (
+            "invalid_scope",
+            "The requested scope is invalid",
+            SCOPE_REFUSED,
+        ),
+        ("access_denied", "account_on_hold", ON_HOLD),
+        ("server_error", "The server is on fire", UNAVAILABLE),
     ] {
-        let started = stage.start(organization, "claude", json!({}), &owner).await;
-        let state = parameter(started["authorize_url"].as_str().expect("a URL"), "state");
+        let (state, attempt) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
 
         let answer = stage
             .returned(&[
                 ("error", error),
-                ("error_description", "The user declined"),
+                ("error_description", description),
                 ("state", &state),
             ])
             .await;
@@ -1661,15 +2041,18 @@ async fn a_sign_in_claude_did_not_approve_ends_and_the_status_says_why() {
             "{}",
             answer.body
         );
-        assert!(
-            !answer.body.contains("The user declined"),
-            "{}",
-            answer.body
-        );
+        assert!(!answer.body.contains(description), "{}", answer.body);
         assert_eq!(
-            stage.status(organization, "claude", &owner).await["error"],
+            stage.awaited(organization, &attempt, &owner).await["error"],
             reason
         );
+        for someone in [&colleague, &member] {
+            assert_eq!(
+                stage.awaited(organization, &attempt, someone).await["error"],
+                Value::Null,
+                "someone else read why the sign-in failed"
+            );
+        }
         let again = stage.returned(&[("code", CODE), ("state", &state)]).await;
         assert_eq!(
             again.status,
@@ -1681,36 +2064,27 @@ async fn a_sign_in_claude_did_not_approve_ends_and_the_status_says_why() {
 }
 
 #[tokio::test]
-async fn the_callback_refuses_a_sign_in_whose_admin_no_longer_manages_the_organization() {
+async fn a_returned_sign_in_whose_admin_was_demoted_signs_nothing_in() {
     let claude = token_endpoint(200, granted()).await;
     let stage = Stage::loopback(&claude).await;
     let owner = person(&stage.client).await;
     let colleague = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
     seat(&stage.client, organization, &owner, &colleague, "admin").await;
-    let started = stage
-        .start(organization, "claude", json!({}), &colleague)
-        .await;
-    let state = parameter(started["authorize_url"].as_str().expect("a URL"), "state");
-    stage
-        .client
-        .patch_json_auth(
-            &format!("/api/organizations/{organization}/members/{}", colleague.id),
-            &json!({ "role": "member" }),
-            &owner.token,
-        )
-        .await
-        .assert_status(StatusCode::OK);
+    let (state, attempt) = begun(
+        &stage
+            .start(organization, "claude", json!({}), &colleague)
+            .await,
+    );
+    demote(&stage, organization, &owner, &colleague).await;
+    let receipt = stage.approved(&state, organization).await;
 
-    let answer = stage.returned(&[("code", CODE), ("state", &state)]).await;
+    let response = stage.redeem(organization, &receipt, &colleague).await;
 
-    assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
-    assert!(
-        answer
-            .body
-            .contains(&format!("{DEMOTED} {CLOSE_AND_RETURN}")),
-        "{}",
-        answer.body
+    response.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": DEMOTED, "kind": START_AGAIN })
     );
     assert!(
         exchanges(&claude).await.is_empty(),
@@ -1718,8 +2092,286 @@ async fn the_callback_refuses_a_sign_in_whose_admin_no_longer_manages_the_organi
     );
     assert!(stage.login_row(organization, "claude").await.is_none());
     assert_eq!(
-        stage.status(organization, "claude", &owner).await["error"],
-        DEMOTED
+        stage.awaited(organization, &attempt, &colleague).await["error"],
+        Value::Null,
+        "a member read why a sign-in failed"
+    );
+}
+
+#[tokio::test]
+async fn an_admin_demoted_while_claude_grants_the_tokens_does_not_sign_the_organization_in() {
+    let claude = slow_token_endpoint().await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let colleague = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    seat(&stage.client, organization, &owner, &colleague, "admin").await;
+    let (state, _) = begun(
+        &stage
+            .start(organization, "claude", json!({}), &colleague)
+            .await,
+    );
+    let receipt = stage.approved(&state, organization).await;
+
+    let (response, ()) = tokio::join!(stage.redeem(organization, &receipt, &colleague), async {
+        exchanging(&claude, 1).await;
+        demote(&stage, organization, &owner, &colleague).await;
+    });
+
+    response.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(response.json_value()["error"], DEMOTED);
+    assert_eq!(exchanges(&claude).await.len(), 1);
+    assert!(
+        stage.login_row(organization, "claude").await.is_none(),
+        "the tokens of an admin demoted while Claude granted them were recorded"
+    );
+    assert!(stage.audited(organization).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_sign_in_whose_zone_session_ended_does_not_finish() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let (state, attempt) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
+    let elsewhere = another_session(&stage.client, &owner).await;
+    stage
+        .client
+        .delete_auth("/api/auth/sessions", &elsewhere.token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    let response = stage
+        .submit(organization, &format!("{CODE}#{state}"), &elsewhere)
+        .await;
+
+    response.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": SESSION_ENDED, "kind": START_AGAIN })
+    );
+    assert!(exchanges(&claude).await.is_empty());
+    assert!(stage.login_row(organization, "claude").await.is_none());
+    assert_eq!(
+        stage.awaited(organization, &attempt, &elsewhere).await["error"],
+        SESSION_ENDED
+    );
+}
+
+#[tokio::test]
+async fn a_returned_sign_in_to_an_organization_deleted_meanwhile_says_so() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let (state, _) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
+    let receipt = stage.approved(&state, organization).await;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(organization)
+        .execute(stage.pool())
+        .await
+        .expect("the organization can be deleted");
+
+    let response = stage.redeem(organization, &receipt, &owner).await;
+
+    response.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(response.json_value(), json!({ "error": NOT_FOUND }));
+    assert!(exchanges(&claude).await.is_empty());
+}
+
+#[tokio::test]
+async fn cancelling_a_sign_in_ends_it_wherever_its_code_is() {
+    let claude = slow_token_endpoint().await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let colleague = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    seat(&stage.client, organization, &owner, &colleague, "admin").await;
+
+    let (waiting, attempt) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
+    let (theirs, _) = begun(
+        &stage
+            .start(organization, "claude", json!({}), &colleague)
+            .await,
+    );
+    stage.cancel(organization, &owner).await;
+    let answer = stage.returned(&[("code", CODE), ("state", &waiting)]).await;
+    assert_eq!(
+        answer.status,
+        StatusCode::BAD_REQUEST,
+        "a cancelled sign-in came back to the callback: {}",
+        answer.body
+    );
+    assert!(answer.body.contains(NOT_WAITING), "{}", answer.body);
+    assert_eq!(
+        stage.awaited(organization, &attempt, &owner).await["error"],
+        Value::Null
+    );
+
+    let (parked, _) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
+    let receipt = stage.approved(&parked, organization).await;
+    stage.cancel(organization, &owner).await;
+    let response = stage.redeem(organization, &receipt, &owner).await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value()["error"],
+        NO_RECEIPT,
+        "a cancelled sign-in's receipt still finished it"
+    );
+    assert!(exchanges(&claude).await.is_empty());
+
+    let (granting, _) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
+    let receipt = stage.approved(&granting, organization).await;
+    let (response, ()) = tokio::join!(stage.redeem(organization, &receipt, &owner), async {
+        exchanging(&claude, 1).await;
+        stage.cancel(organization, &owner).await;
+    });
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": ENDED, "kind": START_AGAIN })
+    );
+    assert!(
+        stage.login_row(organization, "claude").await.is_none(),
+        "a sign-in cancelled while Claude granted its tokens was recorded"
+    );
+    assert!(stage.audited(organization).await.is_empty());
+
+    let receipt = stage.approved(&theirs, organization).await;
+    stage
+        .redeem(organization, &receipt, &colleague)
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+#[tokio::test]
+async fn signing_out_of_claude_ends_every_sign_in_to_the_organization_in_flight() {
+    let claude = slow_token_endpoint().await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let colleague = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    seat(&stage.client, organization, &owner, &colleague, "admin").await;
+    let (declined, failed) = begun(
+        &stage
+            .start(organization, "claude", json!({}), &colleague)
+            .await,
+    );
+    stage
+        .returned(&[("error", "access_denied"), ("state", &declined)])
+        .await;
+    assert_eq!(
+        stage.awaited(organization, &failed, &colleague).await["error"],
+        NOT_APPROVED
+    );
+    let (waiting, _) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
+
+    stage.sign_out(organization, "claude", &owner).await;
+
+    assert_eq!(
+        stage.awaited(organization, &failed, &colleague).await["error"],
+        Value::Null,
+        "a sign-out kept why a sign-in failed"
+    );
+    let answer = stage.returned(&[("code", CODE), ("state", &waiting)]).await;
+    assert_eq!(
+        answer.status,
+        StatusCode::BAD_REQUEST,
+        "a sign-in started before the sign-out came back to the callback: {}",
+        answer.body
+    );
+
+    let (granting, _) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
+    let receipt = stage.approved(&granting, organization).await;
+    let (response, ()) = tokio::join!(stage.redeem(organization, &receipt, &owner), async {
+        exchanging(&claude, 1).await;
+        stage.sign_out(organization, "claude", &owner).await;
+    });
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(response.json_value()["error"], ENDED);
+    assert!(
+        stage.login_row(organization, "claude").await.is_none(),
+        "a sign-in that finished after the sign-out was recorded"
+    );
+    assert!(stage.audited(organization).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_sign_in_whose_browser_goes_away_while_claude_grants_the_tokens_still_finishes() {
+    let claude = slow_token_endpoint().await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let returned = organization(&stage.client, &owner).await;
+    let pasted = self::organization(&stage.client, &owner).await;
+    let (state, _) = begun(&stage.start(returned, "claude", json!({}), &owner).await);
+    let receipt = stage.approved(&state, returned).await;
+
+    tokio::select! {
+        _ = stage.redeem(returned, &receipt, &owner) => {
+            panic!("the sign-in finished before its browser went away")
+        }
+        () = exchanging(&claude, 1) => {}
+    }
+    let (state, _) = begun(
+        &stage
+            .start(pasted, "claude", json!({ "flow": "paste" }), &owner)
+            .await,
+    );
+    let code = format!("{CODE}#{state}");
+    tokio::select! {
+        _ = stage.submit(pasted, &code, &owner) => {
+            panic!("the sign-in finished before its browser went away")
+        }
+        () = exchanging(&claude, 2) => {}
+    }
+
+    for organization in [returned, pasted] {
+        assert!(
+            stage.recorded(organization).await,
+            "a sign-in whose browser went away mid-exchange was never recorded and audited"
+        );
+        assert_eq!(
+            stage.audited(organization).await,
+            [(
+                "agent.signed_in".to_string(),
+                Some(owner.id),
+                Some(json!({ "agent": "claude", "source": "zone" }))
+            )]
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_address_of_a_callback_the_browser_could_not_reach_can_be_pasted() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::loopback(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let (state, _) = begun(&stage.start(organization, "claude", json!({}), &owner).await);
+
+    let response = stage
+        .submit(
+            organization,
+            &format!("{}?code={CODE}&state={state}", stage.redirect()),
+            &owner,
+        )
+        .await;
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(response.json_value()["state"], "signed_in");
+    let sent = exchanges(&claude).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0]["redirect_uri"],
+        stage.redirect(),
+        "a returned code must be exchanged at the redirect its link carried"
+    );
+    let answer = stage.returned(&[("code", CODE), ("state", &state)]).await;
+    assert_eq!(
+        answer.status,
+        StatusCode::BAD_REQUEST,
+        "a pasted sign-in could finish again through the callback"
     );
 }
 

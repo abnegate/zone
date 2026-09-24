@@ -47,13 +47,14 @@ pub struct AgentStatus {
     pub expires_at: Option<DateTime<Utc>>,
     pub models: Vec<String>,
     pub pending: Option<Prompt>,
-    /// Why the last sign-in that finished away from the panel failed, until the next one starts:
-    /// a codex device sign-in, or a Claude sign-in claude.com sent back to Zone's callback.
+    /// Why a sign-in that finished away from the panel failed, until the next one starts: the
+    /// organization's last codex device sign-in, or the viewer's own Claude sign-in `attempt`.
     pub error: Option<String>,
 }
 
 impl AgentStatus {
-    /// `agent`'s status for `organization`, as `viewer` may see it.
+    /// `agent`'s status for `organization`, as `viewer` may see it, with why their Claude sign-in
+    /// `attempt` failed when it has.
     ///
     /// Signed in means Zone holds credentials the agent can use, not that they still work:
     /// neither CLI checks them until a turn needs them.
@@ -62,12 +63,15 @@ impl AgentStatus {
         organization: Uuid,
         agent: AgentKind,
         viewer: Viewer,
+        attempt: Option<Uuid>,
     ) -> Result<Self, sqlx::Error> {
         let login = agent_logins::get(state.db(), organization, agent.as_str()).await?;
         let mut status = Self::signed_out(agent);
         let pending = match agent {
             AgentKind::Claude => {
-                status.error = oauth::failure(organization);
+                status.error = attempt
+                    .filter(|_| viewer.manages)
+                    .and_then(|attempt| oauth::failure(attempt, organization, viewer.user));
                 None
             }
             AgentKind::Codex => {

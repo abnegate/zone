@@ -1,24 +1,21 @@
-//! The page a browser shows once Zone's callback listener has read what claude.com sent it back
-//! with. It repeats nothing from the request: every word is Zone's own, or Claude's answer to the
-//! exchange, and all of it is escaped.
+//! The page a browser shows when Zone's callback listener cannot send it on to the console. It
+//! repeats nothing from the request: every word is Zone's own, or claude.com's, and all of it is
+//! escaped.
 
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use super::super::error::Error;
 
-const SIGNED_IN: &str = "Signed in to Claude";
 const FAILED: &str = "Claude sign-in failed";
 const BUSY: &str = "Zone is busy";
-const CLOSE: &str = "You can close this tab.";
 const RETURN: &str = "You can close this tab and return to Zone.";
 const UNREADABLE: &str = "claude.com sent Zone something it could not read. Start the sign-in \
                           again in Zone.";
+const MISDIRECTED: &str = "Zone takes Claude's sign-in back only at the localhost address the \
+                           sign-in named. Start the sign-in again in Zone.";
 const OCCUPIED: &str = "Zone is finishing other sign-ins. Reload this page in a moment.";
-const UNSAVED: &str = "Zone could not finish the sign-in. Start it again in Zone.";
 const HTML: &str = "text/html; charset=utf-8";
-const NO_STORE: &str = "no-store";
-const NO_REFERRER: &str = "no-referrer";
 const NO_SNIFF: &str = "nosniff";
 const DENY: &str = "DENY";
 const POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; \
@@ -29,6 +26,9 @@ const STYLE: &str = ":root{color-scheme:light dark;font-family:system-ui,-apple-
                      padding:2rem 1rem;text-align:center}h1{margin:0 0 .5rem;font-size:1.25rem}\
                      p{margin:0;line-height:1.5}";
 
+pub const NO_STORE: &str = "no-store";
+pub const NO_REFERRER: &str = "no-referrer";
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Page {
     status: StatusCode,
@@ -37,24 +37,12 @@ pub struct Page {
 }
 
 impl Page {
-    pub fn signed_in() -> Self {
-        Self {
-            status: StatusCode::OK,
-            title: SIGNED_IN,
-            message: CLOSE.to_string(),
-        }
-    }
-
     /// Why the sign-in did not finish. Zone's own failures say only that it failed.
     pub fn failed(error: &Error) -> Self {
-        let reason = match error {
-            Error::Internal(_) | Error::Database(_) => UNSAVED.to_string(),
-            error => error.to_string(),
-        };
         Self {
             status: status(error),
             title: FAILED,
-            message: format!("{reason} {RETURN}"),
+            message: format!("{} {RETURN}", error.shown()),
         }
     }
 
@@ -67,6 +55,15 @@ impl Page {
         }
     }
 
+    /// For a request addressed to any host but the one the sign-in named.
+    pub fn misdirected() -> Self {
+        Self {
+            status: StatusCode::MISDIRECTED_REQUEST,
+            title: FAILED,
+            message: MISDIRECTED.to_string(),
+        }
+    }
+
     /// For a request that came while the listener was answering as many as it may.
     pub fn busy() -> Self {
         Self {
@@ -74,10 +71,6 @@ impl Page {
             title: BUSY,
             message: OCCUPIED.to_string(),
         }
-    }
-
-    pub fn status(&self) -> StatusCode {
-        self.status
     }
 
     fn render(&self) -> String {
@@ -117,7 +110,7 @@ fn status(error: &Error) -> StatusCode {
         Error::Unreadable(_) | Error::Invalid(_) => StatusCode::BAD_REQUEST,
         Error::Forbidden(_) => StatusCode::FORBIDDEN,
         Error::Deleted => StatusCode::NOT_FOUND,
-        Error::Refused(_) => StatusCode::BAD_GATEWAY,
+        Error::Refused(_) | Error::Unreachable(_) => StatusCode::BAD_GATEWAY,
         Error::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         Error::Internal(_) | Error::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -145,6 +138,7 @@ mod tests {
     use zone_core::llm::AgentKind;
 
     use super::*;
+    use crate::services::login::error::UNSAVED;
 
     const HOSTILE: &str = "<script>alert(\"x\")</script> & <img src=x onerror='alert(1)'>";
 
@@ -173,8 +167,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refusal_is_shown_escaped() {
-        let (status, _, body) = sent(Page::failed(&Error::Refused(HOSTILE.to_string()))).await;
+    async fn a_refusal_is_shown_escaped_on_a_page_that_loads_nothing() {
+        let (status, headers, body) =
+            sent(Page::failed(&Error::Refused(HOSTILE.to_string()))).await;
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(
@@ -184,17 +179,8 @@ mod tests {
         for raw in ["<script>", "<img", "onerror='"] {
             assert!(!body.contains(raw), "{raw} reached the page: {body}");
         }
-    }
-
-    #[tokio::test]
-    async fn a_signed_in_page_says_so_and_that_the_tab_can_close() {
-        let (status, headers, body) = sent(Page::signed_in()).await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("<h1>Signed in to Claude</h1>"), "{body}");
-        assert!(body.contains("<p>You can close this tab.</p>"), "{body}");
         assert!(
-            body.contains("<title>Signed in to Claude · Zone</title>"),
+            body.contains("<title>Claude sign-in failed · Zone</title>"),
             "{body}"
         );
         for (name, value) in [
@@ -212,7 +198,7 @@ mod tests {
             );
         }
         assert!(
-            !body.contains("<script") && !body.contains("http"),
+            !body.contains("http"),
             "the page loads or links nothing: {body}"
         );
     }
@@ -241,6 +227,11 @@ mod tests {
                 "Claude refused",
             ),
             (
+                Error::Unreachable("Could not reach Claude".to_string()),
+                StatusCode::BAD_GATEWAY,
+                "Could not reach Claude",
+            ),
+            (
                 Error::Unavailable(AgentKind::Codex),
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The codex CLI is not installed on this server",
@@ -258,9 +249,15 @@ mod tests {
         ] {
             let page = Page::failed(&error);
 
-            assert_eq!(page.status(), status, "{error:?}");
+            assert_eq!(page.status, status, "{error:?}");
             assert_eq!(page.title, FAILED);
             assert_eq!(page.message, format!("{reason} {RETURN}"), "{error:?}");
         }
+    }
+
+    #[test]
+    fn a_request_to_another_host_or_past_the_limit_is_told_so() {
+        assert_eq!(Page::misdirected().status, StatusCode::MISDIRECTED_REQUEST);
+        assert_eq!(Page::busy().status, StatusCode::SERVICE_UNAVAILABLE);
     }
 }

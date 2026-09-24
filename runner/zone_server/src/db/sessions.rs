@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value as JsonValue;
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -310,11 +310,14 @@ pub async fn is_user_session(pool: &PgPool, session_id: Uuid, user_id: Uuid) -> 
 }
 
 /// Check whether a session is currently usable by its bound user.
-pub async fn is_active_user_session(
-    pool: &PgPool,
+pub async fn is_active_user_session<'e, E>(
+    executor: E,
     session_id: Uuid,
     user_id: Uuid,
-) -> DbResult<bool> {
+) -> DbResult<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let result: Option<(i32,)> = sqlx::query_as(
         r#"
         SELECT 1
@@ -327,7 +330,7 @@ pub async fn is_active_user_session(
     )
     .bind(session_id)
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(result.is_some())

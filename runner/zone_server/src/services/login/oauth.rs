@@ -1,45 +1,48 @@
-//! An organization's Claude sign-in. Zone runs the authorization code grant with PKCE itself, as
-//! `claude setup-token` does, and keeps only the sealed tokens it is granted.
-//!
-//! claude.com hands the code back one of two ways. With a callback configured, it sends the
-//! admin's browser to Zone's callback listener, which finishes the sign-in with no session to go
-//! on: the state is its only authority, so the listener finishes only a state issued for that
-//! flow, and only while the admin who started it still manages the organization. Otherwise, or
-//! when the admin asks for it, claude.com shows the code and the admin pastes it.
+//! An organization's Claude sign-in, from its authorize link to the sealed tokens Zone keeps.
 
-use std::sync::LazyLock;
+use std::future::Future;
 
 use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
-use dashmap::DashMap;
+use sqlx::PgConnection;
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
 
-use super::audit;
-use super::claude::{self, Authorization, Client, Code, Flow, Redirect, Refusal, Reply, Scope};
+use super::attempts::{self, Attempt};
+use super::caller::Caller;
+use super::claude::{self, Authorization, Client, Code, Flow, Redirect, Reply, Scope, Tokens};
+use super::console::Console;
 use super::error::Error;
 use super::pending::{self, Pending, WINDOW};
+use super::{audit, devices, receipts};
 use crate::config::Config;
-use crate::db::agent_logins::{self, Upsert};
+use crate::db::agent_logins::{self, AgentLoginRow, Upsert};
 use crate::db::ai_settings::{self, AccessError};
 use crate::db::organization_members::OrgRole;
+use crate::db::{organizations, sessions};
 use crate::state::AppState;
 
 const UNKNOWN: &str =
     "That code is not from a sign-in you started here, or the sign-in expired. Start again.";
 const UNKNOWN_CALLBACK: &str = "Zone is not waiting for this sign-in: it expired, it already \
                                 finished, or it was started to paste a code. Start again in Zone.";
+const UNKNOWN_RECEIPT: &str =
+    "Zone is not waiting for this sign-in: it expired, or it already finished. Start again.";
 const NO_CALLBACK: &str = "This server has no sign-in callback, so a Claude sign-in finishes \
                            with the code claude.com shows";
-const DECLINED: &str = "Claude did not approve the sign-in. Start again.";
-const SCOPE_REFUSED: &str =
-    "claude.com would not grant the access Zone asked for. Try again with full access.";
+const NOT_LOCAL: &str = "claude.com can send a sign-in back to Zone only when this browser runs \
+                         on the machine Zone runs on and opens Zone at a localhost address. Paste \
+                         the code instead.";
+const ENDED: &str = "This sign-in was cancelled, or another one started after it.";
 const DEMOTED: &str = "Only organization admins can sign in to coding agents, and whoever \
                        started this sign-in no longer is one. Start again.";
-const UNSAVED: &str = "Claude approved the sign-in, but Zone could not record it. Start again.";
-
-/// Why an organization's last sign-in through the callback listener failed, until the next one
-/// starts. The admin is watching the sign-in panel, not the tab that request answered.
-static FAILURES: LazyLock<DashMap<Uuid, String>> = LazyLock::new(DashMap::new);
+const SESSION_ENDED: &str =
+    "The Zone session that started this sign-in has ended. Sign in to Zone and start again.";
+const STARTED_ELSEWHERE: &str = "Someone else started this Claude sign-in, or it was started in \
+                                 another browser, so Zone did not finish it.";
+const RETURNED_ELSEWHERE: &str = "This sign-in came back to someone else, or to another browser, \
+                                  so Zone did not finish it. Start again, and approve it in this \
+                                  browser.";
+const STOPPED: &str = "The Claude sign-in stopped before it finished";
 
 /// A Claude sign-in waiting for claude.com to hand back its code.
 #[derive(Debug)]
@@ -50,26 +53,40 @@ pub struct Started {
     pub expires_at: DateTime<Utc>,
     /// How the code comes back to Zone.
     pub flow: Flow,
+    /// Names the sign-in when its panel asks how it went.
+    pub attempt: Uuid,
 }
 
-/// Where claude.com sends the browser for a sign-in that asks for `flow`: the server's callback,
-/// unless the admin asked to paste the code or the server has no callback.
-pub fn redirect(config: &Config, flow: Option<Flow>) -> Result<Redirect, Error> {
-    match (flow, config.agents.callback) {
-        (Some(Flow::Paste), _) | (None, None) => Ok(Redirect::Paste),
-        (Some(Flow::Loopback) | None, Some(callback)) => Ok(Redirect::Loopback(callback.port)),
-        (Some(Flow::Loopback), None) => Err(Error::Invalid(NO_CALLBACK)),
+/// Where claude.com sends the browser for a sign-in that asks for `flow`, and for one sent to the
+/// server's callback, the console at `origin` the callback then returns the browser to. A sign-in
+/// uses the callback when the server has one and the console runs on this machine, unless the
+/// admin asked to paste the code.
+pub fn redirect(
+    config: &Config,
+    flow: Option<Flow>,
+    origin: Option<&str>,
+) -> Result<(Redirect, Option<Console>), Error> {
+    let console = origin.and_then(Console::at);
+    match (flow, config.agents.callback, console) {
+        (Some(Flow::Paste), _, _) | (None, None, _) | (None, Some(_), None) => {
+            Ok((Redirect::Paste, None))
+        }
+        (Some(Flow::Loopback), None, _) => Err(Error::Invalid(NO_CALLBACK)),
+        (Some(Flow::Loopback), Some(_), None) => Err(Error::Invalid(NOT_LOCAL)),
+        (Some(Flow::Loopback) | None, Some(callback), Some(console)) => {
+            Ok((Redirect::Loopback(callback.port), Some(console)))
+        }
     }
 }
 
-/// Starts a sign-in to `organization` that only `user` can finish, whose code claude.com hands
-/// back through `redirect`.
-pub fn start(
+/// Starts a sign-in to `organization` that only `caller` can finish, whose code claude.com hands
+/// back through `redirect`. It ends the caller's earlier sign-in to the organization.
+pub async fn start(
     organization: Uuid,
-    user: Uuid,
-    email: &str,
+    caller: &Caller,
     scope: Scope,
     redirect: Redirect,
+    console: Option<Console>,
 ) -> Started {
     let Authorization {
         url,
@@ -78,16 +95,26 @@ pub fn start(
         scope,
         redirect,
     } = Authorization::new(scope, redirect);
-    FAILURES.remove(&organization);
+    let attempt = Attempt {
+        id: Uuid::new_v4(),
+        organization,
+        user: caller.user,
+    };
+    let _guard = devices::lock(organization).await;
+    attempts::begin(attempt);
+    receipts::cancel(organization, caller.user);
     pending::hold(
         state,
         Pending {
             organization,
-            user,
-            email: email.to_string(),
+            user: caller.user,
+            email: caller.email.clone(),
+            session: caller.session,
+            attempt: attempt.id,
             verifier,
             scope,
             redirect,
+            console,
         },
     );
     let window = TimeDelta::from_std(WINDOW).expect("the sign-in window fits a TimeDelta");
@@ -95,11 +122,12 @@ pub fn start(
         url,
         expires_at: (Utc::now() + window).trunc_subsecs(0),
         flow: redirect.flow(),
+        attempt: attempt.id,
     }
 }
 
-/// Finishes the sign-in `user` started to `organization` with the code Claude showed them, and
-/// records it. A code is spent once it is tried, whoever tried it.
+/// Finishes the sign-in `user` started to `organization` with the code claude.com showed them,
+/// and records it. A code is spent once it is tried, whoever tried it.
 pub async fn finish(
     state: &AppState,
     organization: Uuid,
@@ -107,89 +135,167 @@ pub async fn finish(
     pasted: &str,
 ) -> Result<(), Error> {
     let code: Code = pasted.parse().map_err(unreadable)?;
-    let pending = pending::claim(&code.state)
-        .filter(|pending| pending.organization == organization && pending.user == user)
-        .ok_or(Error::Invalid(UNKNOWN))?;
-    complete(state, pending, &code).await
-}
-
-/// Finishes the sign-in claude.com sent a browser back to Zone's callback listener for, and says
-/// which organization it signed in. Why a sign-in Zone was waiting for failed is kept for that
-/// organization's status.
-pub async fn receive(state: &AppState, reply: Reply) -> Result<Uuid, Error> {
-    let pending = pending::claim_loopback(reply.state()).ok_or(Error::Invalid(UNKNOWN_CALLBACK))?;
-    let organization = pending.organization;
-    let outcome = match reply {
-        Reply::Approved(code) => approve(state, pending, &code).await,
-        Reply::Refused { refusal, .. } => Err(Error::Invalid(match refusal {
-            Refusal::Declined => DECLINED,
-            Refusal::Scope => SCOPE_REFUSED,
-        })),
-    };
-    match &outcome {
-        Ok(()) => {
-            FAILURES.remove(&organization);
-        }
-        Err(error @ (Error::Internal(_) | Error::Database(_))) => {
-            tracing::error!(%organization, %error, "Zone could not finish a Claude sign-in returned to its callback");
-            FAILURES.insert(organization, shown(error));
-        }
-        Err(error) => {
-            tracing::info!(%organization, "A Claude sign-in returned to Zone's callback did not finish");
-            FAILURES.insert(organization, shown(error));
-        }
+    let pending = pending::claim(&code.state).ok_or(Error::Invalid(UNKNOWN))?;
+    if (pending.organization, pending.user) != (organization, user) {
+        let _ = tokio::spawn(abandon(pending.organization, pending.attempt)).await;
+        return Err(Error::Invalid(UNKNOWN));
     }
-    outcome.map(|()| organization)
+    detached(complete(state.clone(), pending, code)).await
 }
 
-/// Why the organization's last sign-in through the callback listener failed, until another one
-/// starts.
-pub fn failure(organization: Uuid) -> Option<String> {
-    FAILURES
-        .get(&organization)
-        .map(|failure| failure.value().clone())
+/// Parks the code claude.com sent a browser back to Zone's callback listener with, and names
+/// where that browser goes next: the console that started the sign-in, which hands the receipt
+/// back. A sign-in claude.com did not approve ends, and says why.
+pub async fn receive(reply: Reply) -> Result<String, Error> {
+    detached(park(reply)).await
 }
 
-/// Drops a deleted organization's Claude sign-ins in flight, and why its last one failed.
+/// Finishes the sign-in parked under `receipt` when `caller` started it to `organization`, in
+/// this session. Anyone else only spends the receipt, and the code is discarded.
+pub async fn redeem(
+    state: &AppState,
+    organization: Uuid,
+    caller: &Caller,
+    receipt: &str,
+) -> Result<(), Error> {
+    let (pending, code) = receipts::take(receipt).ok_or(Error::Invalid(UNKNOWN_RECEIPT))?;
+    let started = (pending.organization, pending.user, pending.session)
+        == (organization, caller.user, caller.session);
+    if !started {
+        drop(code);
+        tracing::warn!(
+            organization = %pending.organization,
+            "A Claude sign-in came back to a browser that did not start it; its code was discarded"
+        );
+        let _ = tokio::spawn(abandon(pending.organization, pending.attempt)).await;
+        return Err(Error::Forbidden(STARTED_ELSEWHERE));
+    }
+    detached(complete(state.clone(), pending, code)).await
+}
+
+/// Ends `user`'s Claude sign-in to `organization`, wherever its code is.
+pub async fn cancel(organization: Uuid, user: Uuid) {
+    let _guard = devices::lock(organization).await;
+    pending::cancel(organization, user);
+    receipts::cancel(organization, user);
+    attempts::cancel(organization, user);
+}
+
+/// Ends every Claude sign-in to `organization`, wherever its code is, and forgets why any failed.
+/// Its caller holds the organization's lock.
 pub fn forget(organization: Uuid) {
     pending::forget(organization);
-    FAILURES.remove(&organization);
+    receipts::forget(organization);
+    attempts::forget(organization);
 }
 
-/// Finishes a sign-in the callback listener received, once the admin who started it is found to
-/// manage the organization still.
-async fn approve(state: &AppState, pending: Pending, code: &Code) -> Result<(), Error> {
-    let mut connection = state.db().acquire().await?;
-    let access = ai_settings::authorize_organization(
-        &mut connection,
-        pending.organization,
-        pending.user,
-        OrgRole::Admin,
-    )
-    .await;
-    drop(connection);
-    match access {
-        Ok(()) => complete(state, pending, code).await,
-        Err(AccessError::Forbidden(_) | AccessError::NotFound(_)) => Err(Error::Forbidden(DEMOTED)),
-        Err(AccessError::Invalid(message)) => Err(Error::Internal(message)),
-        Err(AccessError::Database(error)) => Err(Error::Database(error)),
+/// Why `user`'s sign-in `attempt` to `organization` failed, once it has.
+pub fn failure(attempt: Uuid, organization: Uuid, user: Uuid) -> Option<String> {
+    attempts::failure(attempt, organization, user)
+}
+
+async fn park(reply: Reply) -> Result<String, Error> {
+    let (pending, expires) =
+        pending::claim_loopback(reply.state()).ok_or(Error::Invalid(UNKNOWN_CALLBACK))?;
+    let _guard = devices::lock(pending.organization).await;
+    let Some(console) = pending
+        .console
+        .clone()
+        .filter(|_| attempts::live(pending.attempt))
+    else {
+        return Err(Error::Invalid(UNKNOWN_CALLBACK));
+    };
+    match reply {
+        Reply::Approved(code) => {
+            let organization = pending.organization;
+            let receipt = receipts::park(pending, code, expires);
+            tracing::info!(%organization, "claude.com sent a Claude sign-in back to the callback");
+            Ok(console.receipt(&receipt, organization))
+        }
+        Reply::Refused { refusal, .. } => {
+            tracing::info!(
+                organization = %pending.organization,
+                ?refusal,
+                "claude.com did not approve a Claude sign-in"
+            );
+            attempts::fail(pending.attempt, refusal.explained().to_string());
+            Err(Error::Invalid(refusal.explained()))
+        }
     }
 }
 
-/// Exchanges `code` at the redirect its sign-in started with, and records the sealed tokens.
-async fn complete(state: &AppState, pending: Pending, code: &Code) -> Result<(), Error> {
+/// Exchanges `code` for the tokens of the sign-in it answers and records them, unless the
+/// sign-in ended meanwhile or whoever started it may no longer finish it. Why a sign-in that had
+/// not ended failed is kept for its panel.
+async fn complete(state: AppState, pending: Pending, code: Code) -> Result<(), Error> {
+    let granted = grant(&state, &pending, &code).await;
+    let _guard = devices::lock(pending.organization).await;
+    if !attempts::live(pending.attempt) {
+        return Err(Error::Invalid(ENDED));
+    }
+    let recorded = match granted {
+        Ok(tokens) => record(&state, &pending, &tokens).await,
+        Err(error) => Err(error),
+    };
+    match recorded {
+        Ok(login) => {
+            attempts::end(pending.attempt);
+            audit::signed_in(
+                state.db(),
+                pending.organization,
+                pending.user,
+                &pending.email,
+                &login,
+            )
+            .await;
+            Ok(())
+        }
+        Err(error) => {
+            report(pending.organization, &error);
+            attempts::fail(pending.attempt, error.shown().into_owned());
+            Err(error)
+        }
+    }
+}
+
+/// The tokens claude.com grants for `code` at the redirect its sign-in started with, asked for
+/// only while whoever started the sign-in manages the organization still.
+async fn grant(state: &AppState, pending: &Pending, code: &Code) -> Result<Tokens, Error> {
+    if !attempts::live(pending.attempt) {
+        return Err(Error::Invalid(ENDED));
+    }
+    let mut connection = state.db().acquire().await?;
+    authorize(state, &mut connection, pending).await?;
+    drop(connection);
     let endpoint = claude::token_endpoint(&state.config().agents.claude_token_url)
         .map_err(|error| Error::Internal(error.to_string()))?;
-    let tokens = Client::new(endpoint)
+    Client::new(endpoint)
         .exchange(code, &pending.verifier, pending.scope, pending.redirect)
         .await
-        .map_err(|error| Error::Refused(error.to_string()))?;
+        .map_err(|error| match error {
+            claude::Error::Transport(_) => Error::Unreachable(error.to_string()),
+            claude::Error::Sealing => Error::Internal(error.to_string()),
+            claude::Error::Malformed(_) | claude::Error::Rejected { .. } => {
+                Error::Refused(error.to_string())
+            }
+        })
+}
+
+/// Seals `tokens` as the organization's Claude login, checking again, in the transaction that
+/// records it, that whoever started the sign-in may finish it.
+async fn record(
+    state: &AppState,
+    pending: &Pending,
+    tokens: &Tokens,
+) -> Result<AgentLoginRow, Error> {
     let sealed = tokens
         .seal(state.encryption_key())
         .map_err(|error| Error::Internal(error.to_string()))?;
     let label = tokens.label();
+    let mut transaction = state.db().begin().await?;
+    authorize(state, &mut transaction, pending).await?;
     let login = agent_logins::upsert(
-        state.db(),
+        &mut *transaction,
         &Upsert {
             organization_id: pending.organization,
             agent: AgentKind::Claude.as_str(),
@@ -199,23 +305,70 @@ async fn complete(state: &AppState, pending: Pending, code: &Code) -> Result<(),
         },
     )
     .await?;
-    audit::signed_in(
-        state.db(),
-        pending.organization,
-        pending.user,
-        &pending.email,
-        &login,
-    )
-    .await;
-    Ok(())
+    transaction.commit().await?;
+    Ok(login)
 }
 
-/// What the sign-in panel says about a failure. Zone's own failures name only that it failed; the
-/// server's log has why.
-fn shown(error: &Error) -> String {
+/// Whether whoever started the sign-in still manages the organization, in the session they
+/// started it in. Their role stays locked until `connection`'s transaction ends.
+async fn authorize(
+    state: &AppState,
+    connection: &mut PgConnection,
+    pending: &Pending,
+) -> Result<(), Error> {
+    let access = ai_settings::authorize_organization(
+        &mut *connection,
+        pending.organization,
+        pending.user,
+        OrgRole::Admin,
+    )
+    .await;
+    match access {
+        Ok(()) => {}
+        Err(AccessError::Forbidden(_)) => return Err(Error::Forbidden(DEMOTED)),
+        Err(AccessError::NotFound(_)) => {
+            return match organizations::get_organization(state.db(), pending.organization).await? {
+                Some(_) => Err(Error::Forbidden(DEMOTED)),
+                None => Err(Error::Deleted),
+            };
+        }
+        Err(AccessError::Invalid(message)) => return Err(Error::Internal(message)),
+        Err(AccessError::Database(error)) => return Err(Error::Database(error)),
+    }
+    if sessions::is_active_user_session(&mut *connection, pending.session, pending.user).await? {
+        Ok(())
+    } else {
+        Err(Error::Forbidden(SESSION_ENDED))
+    }
+}
+
+/// Ends the attempt of a sign-in whose code came back to someone else, and keeps that as why.
+async fn abandon(organization: Uuid, attempt: Uuid) {
+    let _guard = devices::lock(organization).await;
+    attempts::fail(attempt, RETURNED_ELSEWHERE.to_string());
+}
+
+/// Runs `work` to its end even when the request waiting on it goes away, so a sign-in whose code
+/// was claimed is always recorded and audited, or why it failed kept.
+async fn detached<T: Send + 'static>(
+    work: impl Future<Output = Result<T, Error>> + Send + 'static,
+) -> Result<T, Error> {
+    tokio::spawn(work)
+        .await
+        .unwrap_or_else(|error| Err(Error::Internal(format!("{STOPPED}: {error}"))))
+}
+
+fn report(organization: Uuid, error: &Error) {
     match error {
-        Error::Internal(_) | Error::Database(_) => UNSAVED.to_string(),
-        error => error.to_string(),
+        Error::Unreachable(reason) => {
+            tracing::warn!(%organization, %reason, "Could not reach claude.com to finish a Claude sign-in");
+        }
+        error if error.internal() => {
+            tracing::error!(%organization, %error, "Zone could not finish a Claude sign-in");
+        }
+        error => {
+            tracing::info!(%organization, reason = %error, "A Claude sign-in did not finish");
+        }
     }
 }
 
@@ -228,7 +381,7 @@ fn unreadable(error: claude::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -238,10 +391,12 @@ mod tests {
 
     use super::*;
     use crate::config::{AgentConfig, Callback};
-    use crate::services::login::claude::REDIRECT_URL;
+    use crate::services::login::claude::{REDIRECT_URL, Refusal};
+    use crate::services::login::console::{ORGANIZATION, RECEIPT};
 
     const EMAIL: &str = "admin@example.com";
     const PORT: u16 = 54_545;
+    const CONSOLE: &str = "http://localhost:3000";
 
     fn parameter(url: &str, name: &str) -> String {
         Url::parse(url)
@@ -265,8 +420,46 @@ mod tests {
     fn callback() -> Option<Callback> {
         Some(Callback {
             port: PORT,
-            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT),
         })
+    }
+
+    fn caller() -> Caller {
+        Caller {
+            user: Uuid::new_v4(),
+            email: EMAIL.to_string(),
+            session: Uuid::new_v4(),
+        }
+    }
+
+    fn console() -> Option<Console> {
+        Console::at(CONSOLE)
+    }
+
+    async fn looping(organization: Uuid, caller: &Caller) -> Started {
+        start(
+            organization,
+            caller,
+            Scope::Inference,
+            Redirect::Loopback(PORT),
+            console(),
+        )
+        .await
+    }
+
+    async fn pasting(organization: Uuid, caller: &Caller) -> Started {
+        start(
+            organization,
+            caller,
+            Scope::Inference,
+            Redirect::Paste,
+            None,
+        )
+        .await
+    }
+
+    fn state_of(started: &Started) -> String {
+        parameter(&started.url, "state")
     }
 
     fn approved(state: &str) -> Reply {
@@ -283,44 +476,73 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_sign_in_returns_to_the_callback_when_there_is_one_and_is_pasted_otherwise() {
-        let loopback = Redirect::Loopback(PORT);
-        for (callback, flow, expected) in [
-            (callback(), None, Ok(loopback)),
-            (callback(), Some(Flow::Loopback), Ok(loopback)),
-            (callback(), Some(Flow::Paste), Ok(Redirect::Paste)),
-            (None, None, Ok(Redirect::Paste)),
-            (None, Some(Flow::Paste), Ok(Redirect::Paste)),
-            (None, Some(Flow::Loopback), Err(NO_CALLBACK)),
-        ] {
-            let chosen = redirect(&configured(callback), flow).map_err(|error| match error {
-                Error::Invalid(message) => message,
-                error => panic!("{error:?}"),
-            });
-
-            assert_eq!(chosen, expected, "{callback:?} {flow:?}");
+    fn invalid(error: Error) -> &'static str {
+        match error {
+            Error::Invalid(message) => message,
+            error => panic!("{error:?}"),
         }
     }
 
     #[test]
-    fn a_started_sign_in_is_held_for_whoever_started_it_with_the_verifier_its_link_challenges() {
-        let (organization, user) = (Uuid::new_v4(), Uuid::new_v4());
+    fn a_sign_in_returns_to_the_callback_only_from_a_console_on_this_machine() {
+        let loopback = Ok((Redirect::Loopback(PORT), console()));
+        let paste = Ok((Redirect::Paste, None));
+        for (callback, flow, origin, expected) in [
+            (callback(), None, Some(CONSOLE), loopback.clone()),
+            (callback(), Some(Flow::Loopback), Some(CONSOLE), loopback),
+            (callback(), Some(Flow::Paste), Some(CONSOLE), paste.clone()),
+            (
+                callback(),
+                None,
+                Some("https://zone.example.com"),
+                paste.clone(),
+            ),
+            (callback(), None, None, paste.clone()),
+            (
+                callback(),
+                Some(Flow::Loopback),
+                Some("https://zone.example.com"),
+                Err(NOT_LOCAL),
+            ),
+            (callback(), Some(Flow::Loopback), None, Err(NOT_LOCAL)),
+            (None, None, Some(CONSOLE), paste.clone()),
+            (None, Some(Flow::Paste), None, paste),
+            (None, Some(Flow::Loopback), Some(CONSOLE), Err(NO_CALLBACK)),
+        ] {
+            let chosen = redirect(&configured(callback), flow, origin).map_err(invalid);
+
+            assert_eq!(chosen, expected, "{callback:?} {flow:?} {origin:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_started_sign_in_is_held_for_whoever_started_it_with_the_verifier_its_link_challenges()
+     {
+        let (organization, caller) = (Uuid::new_v4(), caller());
         let before = Utc::now();
 
-        let started = start(organization, user, EMAIL, Scope::Full, Redirect::Paste);
+        let started = start(organization, &caller, Scope::Full, Redirect::Paste, None).await;
 
-        let held = pending::claim(&parameter(&started.url, "state")).expect("a held sign-in");
+        let held = pending::claim(&state_of(&started)).expect("a held sign-in");
         assert_eq!(
             (
                 held.organization,
                 held.user,
                 held.email.as_str(),
+                held.session,
+                held.attempt,
                 held.scope
             ),
-            (organization, user, EMAIL, Scope::Full)
+            (
+                organization,
+                caller.user,
+                EMAIL,
+                caller.session,
+                started.attempt,
+                Scope::Full
+            )
         );
-        assert_eq!(held.redirect, Redirect::Paste);
+        assert_eq!((held.redirect, held.console), (Redirect::Paste, None));
         assert_eq!(started.flow, Flow::Paste);
         assert_eq!(parameter(&started.url, "redirect_uri"), REDIRECT_URL);
         assert_eq!(
@@ -335,197 +557,301 @@ mod tests {
             started.expires_at
         );
         assert_eq!(started.expires_at.timestamp_subsec_nanos(), 0);
+        assert!(attempts::live(started.attempt));
     }
 
-    #[test]
-    fn a_loopback_sign_in_is_held_with_the_redirect_its_link_carries() {
-        let started = start(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            EMAIL,
-            Scope::Inference,
-            Redirect::Loopback(PORT),
-        );
+    #[tokio::test]
+    async fn a_loopback_sign_in_is_held_with_the_redirect_its_link_carries_and_its_console() {
+        let started = looping(Uuid::new_v4(), &caller()).await;
 
         assert_eq!(started.flow, Flow::Loopback);
         assert_eq!(
             parameter(&started.url, "redirect_uri"),
             "http://localhost:54545/callback"
         );
-        let held = pending::claim_loopback(&parameter(&started.url, "state"))
+        let (held, _) = pending::claim_loopback(&state_of(&started))
             .expect("a loopback sign-in the callback can finish");
-        assert_eq!(held.redirect, Redirect::Loopback(PORT));
+        assert_eq!(
+            (held.redirect, held.console),
+            (Redirect::Loopback(PORT), console())
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_again_ends_the_callers_earlier_sign_in_wherever_its_code_is() {
+        let (organization, caller) = (Uuid::new_v4(), caller());
+        let first = looping(organization, &caller).await;
+        let receipt = receive(approved(&state_of(&first)))
+            .await
+            .map(|url| parameter(&url, RECEIPT))
+            .expect("a parked code");
+
+        let second = looping(organization, &caller).await;
+
+        assert!(
+            !attempts::live(first.attempt),
+            "the earlier sign-in could still finish"
+        );
+        assert!(
+            receipts::take(&receipt).is_none(),
+            "the earlier sign-in's code was kept"
+        );
+        assert!(attempts::live(second.attempt));
     }
 
     #[tokio::test]
     async fn a_paste_that_is_no_code_is_refused_before_any_sign_in_is_spent() {
-        let (organization, user) = (Uuid::new_v4(), Uuid::new_v4());
-        let started = start(organization, user, EMAIL, Scope::Inference, Redirect::Paste);
-        let state = parameter(&started.url, "state");
+        let (organization, caller) = (Uuid::new_v4(), caller());
+        let started = pasting(organization, &caller).await;
 
-        let error = finish(&AppState::for_tests(), organization, user, "no-separator")
-            .await
-            .expect_err("a paste with no state");
+        let error = finish(
+            &AppState::for_tests(),
+            organization,
+            caller.user,
+            "no-separator",
+        )
+        .await
+        .expect_err("a paste with no state");
 
         assert!(matches!(error, Error::Unreadable(_)), "{error:?}");
         assert!(
-            pending::claim(&state).is_some(),
+            pending::claim(&state_of(&started)).is_some(),
             "a malformed paste spent the sign-in"
         );
     }
 
     #[tokio::test]
-    async fn a_code_tried_by_someone_else_is_refused_and_spent() {
-        let (organization, user) = (Uuid::new_v4(), Uuid::new_v4());
-        let state = parameter(
-            &start(organization, user, EMAIL, Scope::Inference, Redirect::Paste).url,
-            "state",
-        );
-        let pasted = format!("fake-code#{state}");
+    async fn a_code_tried_by_someone_else_is_refused_and_ends_the_sign_in() {
+        let (organization, caller) = (Uuid::new_v4(), caller());
+        let started = looping(organization, &caller).await;
+        let pasted = format!("fake-code#{}", state_of(&started));
 
-        for (organization, user) in [(organization, Uuid::new_v4()), (Uuid::new_v4(), user)] {
+        for (organization, user) in [
+            (organization, Uuid::new_v4()),
+            (Uuid::new_v4(), caller.user),
+        ] {
             let error = finish(&AppState::for_tests(), organization, user, &pasted)
                 .await
                 .expect_err("someone else's sign-in");
 
-            assert!(matches!(error, Error::Invalid(UNKNOWN)), "{error:?}");
+            assert_eq!(invalid(error), UNKNOWN);
         }
         assert!(
-            pending::claim(&state).is_none(),
+            pending::claim(&state_of(&started)).is_none(),
             "a code tried by someone else stayed usable"
+        );
+        assert_eq!(
+            failure(started.attempt, organization, caller.user).as_deref(),
+            Some(RETURNED_ELSEWHERE),
+            "the admin's panel was left waiting for a sign-in that can no longer finish"
         );
     }
 
     #[tokio::test]
-    async fn the_callback_refuses_a_state_it_was_never_given_and_blames_no_organization() {
-        let organization = Uuid::new_v4();
-        FAILURES.insert(organization, "an earlier failure".to_string());
+    async fn the_callback_parks_an_approved_code_and_sends_the_browser_to_its_console() {
+        let (organization, caller) = (Uuid::new_v4(), caller());
+        let started = looping(organization, &caller).await;
 
-        let error = receive(&AppState::for_tests(), approved("never-issued"))
+        let url = receive(approved(&state_of(&started)))
+            .await
+            .expect("a parked code");
+
+        let returned = Url::parse(&url).expect("an absolute URL");
+        assert_eq!(
+            (returned.origin().ascii_serialization(), returned.path()),
+            (CONSOLE.to_string(), "/agent-sign-in")
+        );
+        assert_eq!(parameter(&url, ORGANIZATION), organization.to_string());
+        let (parked, code) = receipts::take(&parameter(&url, RECEIPT)).expect("the parked code");
+        assert_eq!(
+            (parked.organization, parked.user, parked.session),
+            (organization, caller.user, caller.session)
+        );
+        assert_eq!(code.value.expose(), "fake-code");
+        assert!(
+            attempts::live(started.attempt),
+            "parking a code ended the sign-in"
+        );
+        assert!(
+            receive(approved(&state_of(&started))).await.is_err(),
+            "a callback replayed a state that was already spent"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_callback_refuses_a_state_it_was_never_given_and_blames_no_sign_in() {
+        let (organization, caller) = (Uuid::new_v4(), caller());
+        let started = looping(organization, &caller).await;
+
+        let error = receive(approved("never-issued"))
             .await
             .expect_err("a state Zone never issued");
 
-        assert!(
-            matches!(error, Error::Invalid(UNKNOWN_CALLBACK)),
-            "{error:?}"
-        );
-        assert_eq!(
-            failure(organization).as_deref(),
-            Some("an earlier failure"),
-            "a stranger's callback changed an organization's status"
-        );
+        assert_eq!(invalid(error), UNKNOWN_CALLBACK);
+        assert!(attempts::live(started.attempt));
+        assert_eq!(failure(started.attempt, organization, caller.user), None);
     }
 
     #[tokio::test]
     async fn the_callback_leaves_a_sign_in_started_for_pasting_to_its_admin() {
-        let (organization, user) = (Uuid::new_v4(), Uuid::new_v4());
-        let state = parameter(
-            &start(organization, user, EMAIL, Scope::Inference, Redirect::Paste).url,
-            "state",
-        );
+        let (organization, caller) = (Uuid::new_v4(), caller());
+        let started = pasting(organization, &caller).await;
 
-        let error = receive(&AppState::for_tests(), approved(&state))
+        let error = receive(approved(&state_of(&started)))
             .await
             .expect_err("a state issued for pasting");
 
+        assert_eq!(invalid(error), UNKNOWN_CALLBACK);
         assert!(
-            matches!(error, Error::Invalid(UNKNOWN_CALLBACK)),
-            "{error:?}"
-        );
-        assert_eq!(failure(organization), None);
-        assert!(
-            pending::claim(&state).is_some(),
+            pending::claim(&state_of(&started)).is_some(),
             "the callback spent a sign-in that was waiting for its pasted code"
         );
     }
 
     #[tokio::test]
-    async fn a_refusal_ends_the_sign_in_and_says_why_until_the_next_one_starts() {
-        for (refusal, reason) in [
-            (Refusal::Declined, DECLINED),
-            (Refusal::Scope, SCOPE_REFUSED),
+    async fn a_refusal_ends_the_sign_in_and_tells_its_own_panel_why() {
+        for refusal in [
+            Refusal::Declined,
+            Refusal::Scope,
+            Refusal::OnHold,
+            Refusal::Unavailable,
         ] {
-            let (organization, user) = (Uuid::new_v4(), Uuid::new_v4());
-            let loopback = Redirect::Loopback(PORT);
-            let state = parameter(
-                &start(organization, user, EMAIL, Scope::Inference, loopback).url,
-                "state",
-            );
+            let (organization, caller) = (Uuid::new_v4(), caller());
+            let started = looping(organization, &caller).await;
 
-            let error = receive(&AppState::for_tests(), refused(&state, refusal))
+            let error = receive(refused(&state_of(&started), refusal))
                 .await
                 .expect_err("a sign-in claude.com did not approve");
 
-            assert!(
-                matches!(error, Error::Invalid(message) if message == reason),
-                "{error:?}"
-            );
-            assert_eq!(failure(organization).as_deref(), Some(reason));
-            assert!(
-                pending::claim(&state).is_none(),
-                "a refused sign-in stayed open"
-            );
-
-            start(organization, user, EMAIL, Scope::Full, loopback);
+            assert_eq!(invalid(error), refusal.explained());
             assert_eq!(
-                failure(organization),
+                failure(started.attempt, organization, caller.user).as_deref(),
+                Some(refusal.explained())
+            );
+            assert_eq!(
+                failure(started.attempt, organization, Uuid::new_v4()),
+                None,
+                "someone else read why the sign-in failed"
+            );
+            assert!(!attempts::live(started.attempt));
+
+            let again = looping(organization, &caller).await;
+            assert_eq!(
+                failure(started.attempt, organization, caller.user),
                 None,
                 "a new sign-in still showed why the last one failed"
+            );
+            assert_eq!(failure(again.attempt, organization, caller.user), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_sign_in_can_no_longer_finish_wherever_its_code_is() {
+        let (organization, caller) = (Uuid::new_v4(), caller());
+        let colleague = self::caller();
+        let waiting = looping(organization, &caller).await;
+        let theirs = looping(organization, &colleague).await;
+
+        cancel(organization, caller.user).await;
+        assert!(
+            receive(approved(&state_of(&waiting))).await.is_err(),
+            "the callback finished a cancelled sign-in"
+        );
+        assert!(!attempts::live(waiting.attempt));
+
+        let parked = looping(organization, &caller).await;
+        let receipt = receive(approved(&state_of(&parked)))
+            .await
+            .map(|url| parameter(&url, RECEIPT))
+            .expect("a parked code");
+        cancel(organization, caller.user).await;
+        let error = redeem(&AppState::for_tests(), organization, &caller, &receipt)
+            .await
+            .expect_err("a cancelled sign-in's receipt");
+        assert_eq!(invalid(error), UNKNOWN_RECEIPT);
+
+        assert!(
+            attempts::live(theirs.attempt),
+            "cancelling ended a colleague's sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_receipt_handed_in_by_anyone_else_spends_it_and_discards_the_code() {
+        let (organization, caller) = (Uuid::new_v4(), caller());
+        for (path, stranger) in [
+            (organization, self::caller()),
+            (
+                organization,
+                Caller {
+                    session: Uuid::new_v4(),
+                    ..caller.clone()
+                },
+            ),
+            (Uuid::new_v4(), caller.clone()),
+        ] {
+            let started = looping(organization, &caller).await;
+            let receipt = receive(approved(&state_of(&started)))
+                .await
+                .map(|url| parameter(&url, RECEIPT))
+                .expect("a parked code");
+
+            let error = redeem(&AppState::for_tests(), path, &stranger, &receipt)
+                .await
+                .expect_err("a receipt handed in by someone else");
+
+            assert!(
+                matches!(error, Error::Forbidden(STARTED_ELSEWHERE)),
+                "{error:?}"
+            );
+            assert!(
+                receipts::take(&receipt).is_none(),
+                "a receipt handed in by someone else stayed usable"
+            );
+            assert_eq!(
+                failure(started.attempt, organization, caller.user).as_deref(),
+                Some(RETURNED_ELSEWHERE),
+                "the admin's panel was left waiting for a sign-in that can no longer finish"
             );
         }
     }
 
     #[tokio::test]
-    async fn forgetting_an_organization_drops_its_sign_ins_and_why_the_last_one_failed() {
-        let (organization, user, colleague) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        let loopback = Redirect::Loopback(PORT);
-        let waiting = parameter(
-            &start(organization, colleague, EMAIL, Scope::Inference, loopback).url,
-            "state",
-        );
-        let declined = parameter(
-            &start(organization, user, EMAIL, Scope::Inference, loopback).url,
-            "state",
-        );
-        receive(
+    async fn a_receipt_zone_never_gave_finishes_nothing() {
+        let error = redeem(
             &AppState::for_tests(),
-            refused(&declined, Refusal::Declined),
+            Uuid::new_v4(),
+            &caller(),
+            "never-issued",
         )
         .await
-        .expect_err("a sign-in claude.com did not approve");
-        let elsewhere = Uuid::new_v4();
-        let unrelated = parameter(
-            &start(elsewhere, user, EMAIL, Scope::Inference, loopback).url,
-            "state",
-        );
+        .expect_err("a receipt Zone never gave");
+
+        assert_eq!(invalid(error), UNKNOWN_RECEIPT);
+    }
+
+    #[tokio::test]
+    async fn forgetting_an_organization_ends_its_sign_ins_wherever_their_codes_are() {
+        let (organization, caller, colleague) = (Uuid::new_v4(), caller(), caller());
+        let waiting = looping(organization, &colleague).await;
+        let parked = looping(organization, &caller).await;
+        let receipt = receive(approved(&state_of(&parked)))
+            .await
+            .map(|url| parameter(&url, RECEIPT))
+            .expect("a parked code");
+        let elsewhere = looping(Uuid::new_v4(), &caller).await;
 
         forget(organization);
 
-        assert_eq!(failure(organization), None);
         assert!(
-            pending::claim_loopback(&waiting).is_none(),
-            "a deleted organization's sign-in could still finish"
+            pending::claim_loopback(&state_of(&waiting)).is_none(),
+            "a forgotten organization's sign-in could still finish"
         );
+        assert!(receipts::take(&receipt).is_none());
+        assert!(!attempts::live(waiting.attempt) && !attempts::live(parked.attempt));
         assert!(
-            pending::claim_loopback(&unrelated).is_some(),
+            pending::claim_loopback(&state_of(&elsewhere)).is_some(),
             "another organization's sign-in was dropped"
         );
-    }
-
-    #[test]
-    fn the_panel_is_told_that_zone_failed_and_not_how() {
-        for error in [
-            Error::Internal("/app/agent-state is read-only".to_string()),
-            Error::Database(sqlx::Error::PoolTimedOut),
-        ] {
-            assert_eq!(shown(&error), UNSAVED, "{error:?}");
-        }
-        assert_eq!(
-            shown(&Error::Refused(
-                "Claude refused the sign-in (HTTP 400): Invalid code".to_string()
-            )),
-            "Claude refused the sign-in (HTTP 400): Invalid code"
-        );
-        assert_eq!(shown(&Error::Forbidden(DEMOTED)), DEMOTED);
     }
 }

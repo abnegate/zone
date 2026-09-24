@@ -1,15 +1,25 @@
 //! Exchanging a sign-in's code for tokens, and renewing them, at Claude's token endpoint.
 
+mod exchange;
+mod failure;
+mod granted;
+mod reason;
+mod refresh;
+
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::Utc;
 use reqwest::header::ACCEPT;
 use reqwest::{StatusCode, Url};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use zone_core::secret::{REDACTED, SecretValue, redact};
 
 use super::{CLIENT_ID, Code, Error, Redirect, Scope, Tokens};
+use exchange::Exchange;
+use failure::Failure;
+use granted::Granted;
+use refresh::Refresh;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "Zone-agent-login";
@@ -32,48 +42,6 @@ static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
 pub struct Client {
     http: reqwest::Client,
     endpoint: Url,
-}
-
-#[derive(Serialize)]
-struct Exchange<'a> {
-    grant_type: &'static str,
-    code: &'a str,
-    redirect_uri: &'a str,
-    client_id: &'static str,
-    code_verifier: &'a str,
-    state: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expires_in: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct Refresh<'a> {
-    grant_type: &'static str,
-    refresh_token: &'a str,
-    client_id: &'static str,
-    scope: &'a str,
-}
-
-#[derive(Deserialize)]
-struct Granted {
-    access_token: SecretValue,
-    refresh_token: Option<SecretValue>,
-    expires_in: u64,
-    scope: Option<String>,
-    subscription_type: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct Refusal {
-    error: Option<Reason>,
-    error_description: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Reason {
-    Code(String),
-    Detail { message: String },
 }
 
 impl Client {
@@ -159,44 +127,10 @@ impl Client {
     }
 }
 
-impl Granted {
-    fn tokens(self, now: DateTime<Utc>) -> Result<Tokens, Error> {
-        let expires_at = i64::try_from(self.expires_in)
-            .ok()
-            .and_then(TimeDelta::try_seconds)
-            .and_then(|lifetime| now.checked_add_signed(lifetime))
-            .ok_or(Error::Malformed(UNREADABLE))?;
-        if self.access_token.is_empty() {
-            return Err(Error::Malformed(UNREADABLE));
-        }
-        Ok(Tokens {
-            access: self.access_token,
-            refresh: self.refresh_token.filter(|token| !token.is_empty()),
-            expires_at,
-            issued_at: Some(now),
-            scope: self.scope.unwrap_or_default(),
-            subscription: self.subscription_type.filter(|kind| !kind.is_empty()),
-        })
-    }
-}
-
-impl Refusal {
-    fn description(self) -> Option<String> {
-        let reason = self.error.map(|reason| match reason {
-            Reason::Code(code) => code,
-            Reason::Detail { message } => message,
-        });
-        [self.error_description, reason]
-            .into_iter()
-            .flatten()
-            .find(|text| !text.trim().is_empty())
-    }
-}
-
 fn rejection(status: StatusCode, body: &str, sent: &[&str]) -> Error {
-    let described = serde_json::from_str::<Refusal>(body)
+    let described = serde_json::from_str::<Failure>(body)
         .ok()
-        .and_then(Refusal::description)
+        .and_then(Failure::description)
         .unwrap_or_else(|| status.canonical_reason().unwrap_or(UNDESCRIBED).to_string());
     let scrubbed = sent
         .iter()
@@ -221,6 +155,7 @@ fn transport(error: reqwest::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeDelta;
     use serde_json::{Value, json};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

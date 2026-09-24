@@ -2,9 +2,10 @@
 
 use super::{Flow, REDIRECT_URL};
 
-/// The only host a loopback redirect names. The claude CLI's own sign-in sends the browser to
-/// `http://localhost:<port>/callback`, never to an address, and claude.com allows any port there.
+/// The only host a loopback redirect names, as the claude CLI's own sign-in does.
 pub const LOOPBACK_HOST: &str = "localhost";
+
+pub const LOOPBACK_SCHEME: &str = "http";
 
 /// The path of every loopback redirect, and the only one Zone's callback listener serves.
 pub const CALLBACK_PATH: &str = "/callback";
@@ -22,7 +23,9 @@ impl Redirect {
     pub fn uri(self) -> String {
         match self {
             Self::Paste => REDIRECT_URL.to_string(),
-            Self::Loopback(port) => format!("http://{LOOPBACK_HOST}:{port}{CALLBACK_PATH}"),
+            Self::Loopback(port) => {
+                format!("{LOOPBACK_SCHEME}://{LOOPBACK_HOST}:{port}{CALLBACK_PATH}")
+            }
         }
     }
 

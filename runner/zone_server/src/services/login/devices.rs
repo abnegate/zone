@@ -24,7 +24,7 @@ use zone_core::secret::redact;
 
 use super::codex::{self, CREDENTIALS, Device, Prompt};
 use super::error::Error;
-use super::locks::Locks;
+use super::locks::{Guard, Locks};
 use super::{audit, oauth, probe};
 use crate::config::Config;
 use crate::db::agent_logins::{self, Upsert};
@@ -71,8 +71,9 @@ pub async fn start(
     Ok(prompt)
 }
 
-/// Signs the organization out of `agent`, and records who did. For codex, a pending sign-in is
-/// stopped first, and codex then logs out of the organization's home.
+/// Signs the organization out of `agent`, and records who did. Every Claude sign-in in flight is
+/// ended first; for codex, a pending sign-in is stopped, and codex then logs out of the
+/// organization's home.
 pub async fn sign_out(
     state: &AppState,
     organization: Uuid,
@@ -83,6 +84,11 @@ pub async fn sign_out(
     DEVICES
         .sign_out(state, organization, agent, user, email)
         .await
+}
+
+/// The lock that orders every change to the organization's agent sign-ins, until it is dropped.
+pub(super) async fn lock(organization: Uuid) -> Guard<'static> {
+    DEVICES.locks.lock(organization).await
 }
 
 /// Forgets everything this server keeps for a deleted organization's coding agents: its Claude
@@ -103,7 +109,6 @@ async fn forget_with(
     organization: Uuid,
     remove: impl FnOnce(&Path) -> io::Result<()> + Send + 'static,
 ) -> Result<(), Error> {
-    oauth::forget(organization);
     let state = state.clone();
     tokio::spawn(async move { DEVICES.forget(&state, organization, remove).await })
         .await
@@ -307,9 +312,12 @@ impl Devices {
         email: &str,
     ) -> Result<(), Error> {
         let _guard = self.locks.lock(organization).await;
-        if agent == AgentKind::Codex {
-            self.stop(organization).await;
-            log_out(state.config(), organization).await?;
+        match agent {
+            AgentKind::Claude => oauth::forget(organization),
+            AgentKind::Codex => {
+                self.stop(organization).await;
+                log_out(state.config(), organization).await?;
+            }
         }
         let Some(login) = agent_logins::get(state.db(), organization, agent.as_str()).await? else {
             return Ok(());
@@ -328,6 +336,7 @@ impl Devices {
         remove: impl FnOnce(&Path) -> io::Result<()> + Send + 'static,
     ) -> Result<(), Error> {
         let guard = self.locks.lock(organization).await;
+        oauth::forget(organization);
         self.stop(organization).await;
         self.failures.remove(&organization);
         let config = state.config();
@@ -485,11 +494,14 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
     use crate::db::agent_logins::AgentLoginRow;
+    use crate::services::login::caller::Caller;
     use crate::services::login::claude::{Redirect, Scope};
     use crate::services::login::codex::testing::{PROMPT, capture, script};
+    use crate::services::login::console::Console;
 
     const EMAIL: &str = "admin@example.com";
     const CALLBACK_PORT: u16 = 54_545;
+    const CONSOLE: &str = "http://localhost:3000";
     const WAIT: Duration = Duration::from_secs(20);
     const PAUSE: Duration = Duration::from_millis(50);
     const ATTEMPTS: u128 = WAIT.as_millis() / PAUSE.as_millis();
@@ -896,11 +908,16 @@ esac"#
             .insert(scene.organization, "an earlier sign-in failed".to_string());
         let claude = oauth::start(
             scene.organization,
-            scene.user,
-            EMAIL,
+            &Caller {
+                user: scene.user,
+                email: EMAIL.to_string(),
+                session: Uuid::new_v4(),
+            },
             Scope::Inference,
             Redirect::Loopback(CALLBACK_PORT),
-        );
+            Console::at(CONSOLE),
+        )
+        .await;
         let claude_state = reqwest::Url::parse(&claude.url)
             .expect("an authorize URL")
             .query_pairs()

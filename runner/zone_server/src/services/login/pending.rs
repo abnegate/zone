@@ -1,8 +1,4 @@
 //! Claude sign-ins that were started and not yet finished, keyed by their OAuth state.
-//!
-//! One admin has at most one sign-in in flight per organization: starting another abandons the
-//! first. That bounds how many are held, and a held state is unguessable, finishes once, and
-//! expires with [`WINDOW`].
 
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -12,78 +8,80 @@ use uuid::Uuid;
 use zone_core::secret::SecretValue;
 
 use super::claude::{Flow, Redirect, Scope};
+use super::console::Console;
 
 pub const WINDOW: Duration = Duration::from_secs(600);
 
-static PENDING: LazyLock<DashMap<String, Held>> = LazyLock::new(DashMap::new);
+static PENDING: LazyLock<DashMap<String, (Pending, Instant)>> = LazyLock::new(DashMap::new);
 
 #[derive(Debug)]
 pub struct Pending {
     pub organization: Uuid,
     pub user: Uuid,
-    /// Whom the audit log names when the sign-in finishes, which may be from a request that
-    /// carries no session to ask.
     pub email: String,
+    /// The session that started the sign-in, which must still be active when it finishes.
+    pub session: Uuid,
+    pub attempt: Uuid,
     pub verifier: SecretValue,
     pub scope: Scope,
     /// Where the authorize link sent the browser, which the exchange has to name again.
     pub redirect: Redirect,
+    /// Where the callback sends the browser to finish a loopback sign-in.
+    pub console: Option<Console>,
 }
 
-struct Held {
-    pending: Pending,
-    expires: Instant,
-}
-
+/// Holds a sign-in under `state`, abandoning the same admin's earlier one in that organization.
 pub fn hold(state: String, pending: Pending) {
     put(&PENDING, state, pending, Instant::now());
 }
 
 /// The sign-in `state` names, whichever way its code came back.
 pub fn claim(state: &str) -> Option<Pending> {
-    take(&PENDING, state, Instant::now(), |_| true)
+    take(&PENDING, state, Instant::now(), |_| true).map(|(pending, _)| pending)
 }
 
-/// The sign-in `state` names, only if claude.com was to send its code to Zone's callback
-/// listener. A state issued for pasting stays held for the admin who will paste it.
-pub fn claim_loopback(state: &str) -> Option<Pending> {
+/// The sign-in `state` names, and when it expires, only if claude.com was to send its code to
+/// Zone's callback listener. A state issued for pasting stays held.
+pub fn claim_loopback(state: &str) -> Option<(Pending, Instant)> {
     take(&PENDING, state, Instant::now(), |pending| {
         pending.redirect.flow() == Flow::Loopback
     })
 }
 
-/// Drops every sign-in held for a deleted `organization`.
+/// Drops the sign-ins `user` started in `organization`.
+pub fn cancel(organization: Uuid, user: Uuid) {
+    PENDING.retain(|_, (pending, _)| (pending.organization, pending.user) != (organization, user));
+}
+
+/// Drops every sign-in started in `organization`.
 pub fn forget(organization: Uuid) {
     discard(&PENDING, organization);
 }
 
-fn discard(logins: &DashMap<String, Held>, organization: Uuid) {
-    logins.retain(|_, held| held.pending.organization != organization);
+fn discard(logins: &DashMap<String, (Pending, Instant)>, organization: Uuid) {
+    logins.retain(|_, (pending, _)| pending.organization != organization);
 }
 
-fn put(logins: &DashMap<String, Held>, state: String, pending: Pending, now: Instant) {
-    logins.retain(|_, held| {
-        held.expires > now
-            && (held.pending.organization, held.pending.user)
-                != (pending.organization, pending.user)
+fn put(
+    logins: &DashMap<String, (Pending, Instant)>,
+    state: String,
+    pending: Pending,
+    now: Instant,
+) {
+    logins.retain(|_, (held, expires)| {
+        *expires > now && (held.organization, held.user) != (pending.organization, pending.user)
     });
-    logins.insert(
-        state,
-        Held {
-            pending,
-            expires: now + WINDOW,
-        },
-    );
+    logins.insert(state, (pending, now + WINDOW));
 }
 
 fn take(
-    logins: &DashMap<String, Held>,
+    logins: &DashMap<String, (Pending, Instant)>,
     state: &str,
     now: Instant,
     eligible: impl FnOnce(&Pending) -> bool,
-) -> Option<Pending> {
-    let (_, held) = logins.remove_if(state, |_, held| eligible(&held.pending))?;
-    (held.expires > now).then_some(held.pending)
+) -> Option<(Pending, Instant)> {
+    let (_, (pending, expires)) = logins.remove_if(state, |_, (pending, _)| eligible(pending))?;
+    (expires > now).then_some((pending, expires))
 }
 
 #[cfg(test)]
@@ -100,9 +98,12 @@ mod tests {
             organization,
             user,
             email: "admin@example.com".to_string(),
+            session: Uuid::new_v4(),
+            attempt: Uuid::new_v4(),
             verifier: SecretValue::new(VERIFIER),
             scope: Scope::Full,
             redirect: Redirect::Paste,
+            console: None,
         }
     }
 
@@ -113,6 +114,7 @@ mod tests {
     fn looping() -> Pending {
         Pending {
             redirect: LOOPBACK,
+            console: Console::at("http://localhost:3000"),
             ..stranger()
         }
     }
@@ -142,13 +144,15 @@ mod tests {
     }
 
     #[test]
-    fn a_loopback_login_is_claimed_by_the_callback_once() {
+    fn a_loopback_login_is_claimed_by_the_callback_once_with_its_expiry() {
         let state = format!("fake-state-{}", Uuid::new_v4());
+        let before = Instant::now();
         hold(state.clone(), looping());
 
-        let claimed = claim_loopback(&state).expect("a held loopback login is claimed");
+        let (claimed, expires) = claim_loopback(&state).expect("a held loopback login is claimed");
 
         assert_eq!(claimed.redirect, LOOPBACK);
+        assert!(expires >= before + WINDOW && expires <= Instant::now() + WINDOW);
         assert!(
             claim_loopback(&state).is_none(),
             "a callback replayed a state that was already spent"
@@ -239,6 +243,33 @@ mod tests {
         for state in ["second", "colleague", "elsewhere"] {
             assert!(take(&logins, state, now, |_| true).is_some(), "{state}");
         }
+    }
+
+    #[test]
+    fn cancelling_drops_only_the_callers_logins_and_forgetting_the_organizations() {
+        let (organization, user) = (Uuid::new_v4(), Uuid::new_v4());
+        let mine = format!("fake-state-{}", Uuid::new_v4());
+        let colleague = format!("fake-state-{}", Uuid::new_v4());
+        let elsewhere = format!("fake-state-{}", Uuid::new_v4());
+        hold(mine.clone(), pending(organization, user));
+        hold(colleague.clone(), pending(organization, Uuid::new_v4()));
+        hold(elsewhere.clone(), pending(Uuid::new_v4(), user));
+
+        cancel(organization, user);
+        assert!(
+            claim(&mine).is_none(),
+            "a cancelled sign-in could still finish"
+        );
+
+        forget(organization);
+        assert!(
+            claim(&colleague).is_none(),
+            "a forgotten organization's sign-in could still finish"
+        );
+        assert!(
+            claim(&elsewhere).is_some(),
+            "another organization's was dropped"
+        );
     }
 
     #[test]

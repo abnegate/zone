@@ -1,11 +1,12 @@
-//! The code a user pastes back from Claude's sign-in page.
+//! The code a user pastes back from Claude's sign-in page, or from the address bar of a
+//! browser claude.com sent to a callback it could not reach.
 
 use std::str::FromStr;
 
 use reqwest::Url;
 use zone_core::secret::SecretValue;
 
-use super::{Error, REDIRECT_URL};
+use super::{CALLBACK_PATH, Error, LOOPBACK_HOST, LOOPBACK_SCHEME, REDIRECT_URL};
 
 const SEPARATOR: char = '#';
 const UNREADABLE: &str = "Paste the code Claude showed, as code#state, or the whole callback URL";
@@ -56,7 +57,13 @@ impl Code {
         let mut callback = url.clone();
         callback.set_query(None);
         callback.set_fragment(None);
-        if callback.as_str() != REDIRECT_URL {
+        let loopback = callback.scheme() == LOOPBACK_SCHEME
+            && callback.host_str() == Some(LOOPBACK_HOST)
+            && callback.port().is_some()
+            && callback.path() == CALLBACK_PATH
+            && callback.username().is_empty()
+            && callback.password().is_none();
+        if callback.as_str() != REDIRECT_URL && !loopback {
             return Err(Error::Malformed(FOREIGN));
         }
 
@@ -149,6 +156,16 @@ mod tests {
     }
 
     #[test]
+    fn the_address_of_a_callback_the_browser_could_not_reach_gives_up_its_code_and_state() {
+        for pasted in [
+            "http://localhost:54545/callback?code=fake-code&state=fake-state",
+            "http://LOCALHOST:1/callback?state=fake-state&code=fake-code#fragment",
+        ] {
+            assert_eq!(pasted.parse::<Code>().expect("parses"), code(), "{pasted}");
+        }
+    }
+
+    #[test]
     fn a_url_other_than_claudes_callback_is_refused() {
         for pasted in [
             "https://attacker.example/oauth/code/callback?code=fake-code&state=fake-state",
@@ -156,6 +173,12 @@ mod tests {
             "https://platform.claude.com.attacker.example/oauth/code/callback?code=fake-code&state=fake-state",
             "https://platform.claude.com/oauth/code/callback/more?code=fake-code&state=fake-state",
             "https://someone@platform.claude.com/oauth/code/callback?code=fake-code&state=fake-state",
+            "https://localhost:54545/callback?code=fake-code&state=fake-state",
+            "http://127.0.0.1:54545/callback?code=fake-code&state=fake-state",
+            "http://localhost/callback?code=fake-code&state=fake-state",
+            "http://localhost:54545/other?code=fake-code&state=fake-state",
+            "http://someone@localhost:54545/callback?code=fake-code&state=fake-state",
+            "http://localhost.attacker.example:54545/callback?code=fake-code&state=fake-state",
         ] {
             assert_eq!(refusal(pasted), FOREIGN, "{pasted}");
         }

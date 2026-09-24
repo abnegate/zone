@@ -1,26 +1,17 @@
 //! What claude.com sends a browser back to Zone's callback listener with: the code and state of
 //! an approved sign-in, or why it was not approved.
 
-use super::Code;
+use super::{Code, Refusal};
 
 const CODE: &str = "code";
 const STATE: &str = "state";
 const ERROR: &str = "error";
-const INVALID_SCOPE: &str = "invalid_scope";
+const DESCRIPTION: &str = "error_description";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Reply {
     Approved(Code),
     Refused { state: String, refusal: Refusal },
-}
-
-/// Why claude.com did not approve a sign-in, as far as Zone tells the reasons apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Refusal {
-    /// The person declined, or claude.com refused for a reason Zone cannot act on.
-    Declined,
-    /// claude.com would not grant the access Zone asked for.
-    Scope,
 }
 
 impl Reply {
@@ -32,11 +23,7 @@ impl Reply {
             (Some(code), None) => Code::new(code, state).ok().map(Self::Approved),
             (None, Some(error)) => Some(Self::Refused {
                 state: state.to_string(),
-                refusal: if error == INVALID_SCOPE {
-                    Refusal::Scope
-                } else {
-                    Refusal::Declined
-                },
+                refusal: Refusal::named(error, single(pairs, DESCRIPTION)),
             }),
             _ => None,
         }
@@ -92,26 +79,35 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_names_its_state_and_whether_the_scope_was_the_reason() {
-        for (error, refusal) in [
-            ("access_denied", Refusal::Declined),
-            ("invalid_scope", Refusal::Scope),
-            ("server_error", Refusal::Declined),
+    fn a_refusal_names_its_state_and_why() {
+        for (mut query, refusal) in [
+            (vec![("error", "access_denied")], Refusal::Declined),
+            (vec![("error", "invalid_scope")], Refusal::Scope),
+            (vec![("error", "server_error")], Refusal::Unavailable),
+            (
+                vec![
+                    ("error", "access_denied"),
+                    ("error_description", "account_on_hold"),
+                ],
+                Refusal::OnHold,
+            ),
+            (
+                vec![
+                    ("error", "access_denied"),
+                    ("error_description", "<b>ignored</b>"),
+                ],
+                Refusal::Declined,
+            ),
         ] {
-            let reply = read(&[
-                ("error", error),
-                ("error_description", "<b>ignored</b>"),
-                ("state", "fake-state"),
-            ])
-            .expect("a refusal");
+            query.push(("state", "fake-state"));
 
             assert_eq!(
-                reply,
-                Reply::Refused {
+                read(&query),
+                Some(Reply::Refused {
                     state: "fake-state".to_string(),
                     refusal,
-                },
-                "{error}"
+                }),
+                "{query:?}"
             );
         }
     }
