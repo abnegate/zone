@@ -176,8 +176,8 @@ fn tool_env() -> HashMap<String, String> {
     )
 }
 
-/// Chat keeps the host's filesystem reach, which the approval gate covers, but
-/// gets the same narrow environment as a task run.
+/// Chat keeps the host's filesystem reach, but gets the same narrow environment
+/// as a task run.
 fn context(profile: ToolProfile, cwd: std::path::PathBuf) -> ToolContext {
     ToolContext {
         cwd,
@@ -185,6 +185,7 @@ fn context(profile: ToolProfile, cwd: std::path::PathBuf) -> ToolContext {
         max_file_size: MAX_TOOL_FILE_BYTES,
         command_timeout: TOOL_COMMAND_TIMEOUT_SECS,
         unrestricted: profile == ToolProfile::Chat,
+        denied: Vec::new(),
         session: Session::Detached,
     }
 }
@@ -1986,6 +1987,51 @@ mod tests {
             .unwrap();
         assert!(!result.contains("CARGO_MANIFEST_DIR"), "{result}");
         assert!(result.contains("PATH="), "{result}");
+    }
+
+    /// The shell's environment is filtered, but a process's `/proc` entry is
+    /// not: the server's own `environ` holds the database URL and every key it
+    /// started with, and an agent CLI's holds its turn's MCP token. A chat's
+    /// file tools raise no approval card, so they refuse both, including
+    /// through a link that leads back into `/proc`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_chat_file_tools_cannot_read_a_process_environment() {
+        const TURN: &str = "another-turns-environment";
+        let mut agent = std::process::Command::new("sleep")
+            .arg("30")
+            .env("ZONE_OTHER_TURN", TURN)
+            .spawn()
+            .expect("a stand-in for a running agent CLI");
+        let process = format!("/proc/{}", agent.id());
+        let tools = ChatTools::build(scope()).await;
+
+        let mut results = Vec::new();
+        for path in [
+            "/proc/self/environ".to_string(),
+            format!("{process}/environ"),
+            format!("{process}/root/proc/self/environ"),
+        ] {
+            let read = tools
+                .execute("read_file", &json!({"path": path}).to_string())
+                .await;
+            results.push((format!("read_file {path}"), read));
+        }
+        let listed = tools
+            .execute("list_files", &json!({"path": process}).to_string())
+            .await;
+        results.push((format!("list_files {process}"), listed));
+        agent.kill().unwrap();
+        agent.wait().unwrap();
+
+        for (call, result) in results {
+            let refused = result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains(zone_core::tools::OFF_LIMITS));
+            assert!(!result.success && refused, "{call}: {result:?}");
+            assert!(!format!("{result:?}").contains(TURN), "{call}: {result:?}");
+        }
     }
 
     #[test]
