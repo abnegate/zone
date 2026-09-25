@@ -384,11 +384,11 @@ describe('AgentSignIn', () => {
       expect(agentsApi.cancel).toHaveBeenCalledWith(organization, 'claude');
       expect(screen.getByRole('link', { name: 'Open claude.com' })).toBeInTheDocument();
 
-      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      });
 
-      await waitFor(() =>
-        expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull()
-      );
+      expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
       expect(agentsApi.cancel).toHaveBeenCalledTimes(2);
       expect(screen.queryByRole('alert')).toBeNull();
       expect(screen.getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
