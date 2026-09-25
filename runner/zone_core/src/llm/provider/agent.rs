@@ -322,6 +322,15 @@ impl Reader {
             Self::Codex => parser::codex::interpret(line, events),
         }
     }
+
+    /// The plan's window usage credits carried this turn past, the first time
+    /// it is asked after the agent said so.
+    pub fn credits(&mut self) -> Option<String> {
+        match self {
+            Self::Claude(reader) => reader.credits(),
+            Self::Codex => None,
+        }
+    }
 }
 
 /// Claude's flags naming a turn's tools.

@@ -214,10 +214,19 @@ impl From<TokenCounts> for Usage {
     }
 }
 
+#[derive(Debug, Default)]
+enum Credits {
+    #[default]
+    Unused,
+    Unreported(String),
+    Reported,
+}
+
 /// One turn of claude's stream, read a line at a time.
 #[derive(Debug, Default)]
 pub struct Reader {
     reason: Option<String>,
+    credits: Credits,
 }
 
 impl Reader {
@@ -246,6 +255,17 @@ impl Reader {
             }
             | Event::Ignored => {}
         }
+    }
+
+    /// The plan's window usage credits carried this turn past, the first time
+    /// it is asked after claude said so.
+    pub fn credits(&mut self) -> Option<String> {
+        let Credits::Unreported(window) = &self.credits else {
+            return None;
+        };
+        let window = window.clone();
+        self.credits = Credits::Reported;
+        Some(window)
     }
 
     fn assistant(
@@ -317,6 +337,10 @@ impl Reader {
 
     fn limit(&mut self, limit: &Limit, events: &mut Vec<AgentEvent>) {
         self.reason.clone_from(&limit.reason);
+        if limit.on_credits && matches!(self.credits, Credits::Unused) {
+            let window = limit.window.as_deref().unwrap_or(UNNAMED_WINDOW);
+            self.credits = Credits::Unreported(window.to_string());
+        }
         if let Some(refusal) = limit.refusal() {
             events.push(AgentEvent::Failed(refusal));
         }
@@ -920,6 +944,58 @@ mod tests {
             "{failures:?}"
         );
         assert_eq!(text(&events), "", "claude's refusal read as an answer");
+    }
+
+    /// A turn usage credits carried past the plan's window says so once, with
+    /// the window, however many events repeat it.
+    #[test]
+    fn a_turn_on_usage_credits_reports_the_window_they_carried_it_past_once() {
+        let mut reader = Reader::default();
+        let mut events = Vec::new();
+        let mut reported = Vec::new();
+        let answer = SESSION.lines().nth(4).expect("the session's answer");
+        let finished = SESSION.lines().last().expect("the session's result");
+        for line in [
+            limit(
+                json!({"status": "allowed", "rateLimitType": "five_hour", "isUsingOverage": false}),
+            ),
+            limit(json!({
+                "status": "rejected",
+                "rateLimitType": "five_hour",
+                "overageStatus": "allowed",
+                "isUsingOverage": true,
+            })),
+            answer.to_string(),
+            limit(json!({
+                "status": "rejected",
+                "rateLimitType": "seven_day",
+                "overageStatus": "allowed_warning",
+                "isUsingOverage": true,
+            })),
+            finished.to_string(),
+        ] {
+            reader.interpret(&line, &mut events);
+            reported.extend(reader.credits());
+        }
+
+        assert_eq!(reported, ["five_hour"]);
+        assert!(failures(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_turn_inside_the_plans_window_reports_no_usage_credits() {
+        let mut reader = Reader::default();
+        let mut events = Vec::new();
+        let headroom = limit(json!({
+            "status": "allowed_warning",
+            "rateLimitType": "five_hour",
+            "overageStatus": "allowed",
+            "isUsingOverage": false,
+        }));
+        for line in std::iter::once(headroom.as_str()).chain(SESSION.lines()) {
+            reader.interpret(line, &mut events);
+            assert_eq!(reader.credits(), None, "{line}");
+        }
     }
 
     #[test]

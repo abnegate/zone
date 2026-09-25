@@ -177,6 +177,8 @@ impl CliProvider {
         let name = self.name.clone();
         let mut reader = self.agent.reader();
         let line_limit = self.settings.line_limit;
+        let sign_in = self.settings.sign_in;
+        let directory = self.settings.working_directory.clone();
 
         Ok(Box::pin(async_stream::try_stream! {
             let mut lines = Lines::new(line_limit);
@@ -198,6 +200,16 @@ impl CliProvider {
                     while let Some(frame) = lines.take() {
                         interpret(&mut reader, &name, line_limit, frame, &mut events);
                     }
+                }
+
+                if let Some(window) = reader.credits() {
+                    tracing::info!(
+                        provider = %name,
+                        sign_in = ?sign_in,
+                        directory = ?directory,
+                        window = %window,
+                        "the turn runs on usage credits past the plan's limit"
+                    );
                 }
 
                 for event in events.drain(..) {
@@ -494,8 +506,9 @@ fn is_continuation(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::llm::RequestOptions;
-    use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT};
+    use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, SignIn};
     use crate::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
+    use crate::tools::test_support::captured_logs;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::io::Write;
@@ -899,6 +912,60 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
                 "{rendered}"
             );
         }
+    }
+
+    /// A turn usage credits carry past the plan's window is logged once, with
+    /// the window and whose sign-in pays for it, and never with its token.
+    #[tokio::test]
+    async fn a_turn_on_usage_credits_is_logged_once_with_its_window_and_sign_in() {
+        const TOKEN: &str = "sk-ant-oat01-notarealtoken";
+        let stream = [
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour", "overageStatus": "allowed", "isUsingOverage": true}}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Reviewed."}]}}),
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour", "overageStatus": "allowed_warning", "isUsingOverage": true}}),
+            json!({"type": "result", "subtype": "success", "is_error": false}),
+        ]
+        .map(|line| line.to_string());
+        let directory = TempDir::new().expect("a temporary directory");
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            settings(&directory, &replaying(&directory, &stream))
+                .with_sign_in(SignIn::Organization)
+                .with_credential(Credential::key("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)),
+        );
+
+        let (completion, logged) =
+            captured_logs(run(&provider, &[Message::user("Review the change.")])).await;
+
+        assert_eq!(
+            completion
+                .expect("a turn on usage credits")
+                .message
+                .content
+                .as_deref(),
+            Some("Reviewed.")
+        );
+        let credited: Vec<&str> = logged
+            .lines()
+            .filter(|line| line.contains("usage credits"))
+            .collect();
+        assert_eq!(credited.len(), 1, "{logged}");
+        assert!(credited[0].contains("INFO"), "{logged}");
+        assert!(credited[0].contains("five_hour"), "{logged}");
+        assert!(credited[0].contains("Organization"), "{logged}");
+        assert!(!logged.contains(TOKEN), "{logged}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_inside_the_plans_window_logs_no_usage_credits() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let provider = CliProvider::agent(AgentKind::Claude, settings(&directory, CLAUDE_SESSION));
+
+        let (completion, logged) =
+            captured_logs(run(&provider, &[Message::user("What does a.rs do?")])).await;
+
+        completion.expect("an answer");
+        assert!(!logged.contains("usage credits"), "{logged}");
     }
 
     #[test]
