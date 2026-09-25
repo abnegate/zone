@@ -82,15 +82,6 @@ export const UpdateWorkspaceRequestSchema = z.object({
 });
 
 export {
-  BrowseModelSchema,
-  BrowseResponseSchema,
-  InstalledModelSchema,
-  ModelSourceSchema,
-  ModelsResponseSchema,
-  PullProgressSchema,
-} from '../features/models/schemas';
-
-export {
   ChatResponseSchema,
   ChatSchema,
   ChatSearchResponseSchema,
@@ -104,7 +95,40 @@ export {
   MessagesResponseSchema,
   SendMessageRequestSchema,
 } from '../features/chats/schemas';
-
+export {
+  BrowseModelSchema,
+  BrowseResponseSchema,
+  InstalledModelSchema,
+  ModelSourceSchema,
+  ModelsResponseSchema,
+  PullProgressSchema,
+} from '../features/models/schemas';
+export {
+  AutomationStageSchema,
+  AutomationTaskSchema,
+  AutoProjectRequestSchema,
+  AutoProjectResponseSchema,
+  CreateProjectRequestSchema,
+  CreateSyncConfigRequestSchema,
+  ProjectAutomationSchema,
+  ProjectResponseSchema,
+  ProjectSchema,
+  ProjectStatusSchema,
+  ProjectsResponseSchema,
+  SyncConfigResponseSchema,
+  SyncConfigSchema,
+  SyncConfigsResponseSchema,
+  SyncDirectionSchema,
+  SyncProviderSchema,
+  UpdateProjectRequestSchema,
+} from '../features/projects/schemas';
+export {
+  BorderRadiusSchema,
+  FontFamilySchema,
+  UpdateWorkspaceThemeRequestSchema,
+  WorkspaceThemeResponseSchema,
+  WorkspaceThemeSchema,
+} from '../features/settings/workspace/schemas';
 export {
   CalendarMetadataSchema,
   ChatMetadataSchema,
@@ -136,34 +160,6 @@ export {
   WebConfigSchema,
   WebMetadataSchema,
 } from '../features/sources/schemas';
-
-export {
-  AutomationStageSchema,
-  AutomationTaskSchema,
-  AutoProjectRequestSchema,
-  AutoProjectResponseSchema,
-  CreateProjectRequestSchema,
-  CreateSyncConfigRequestSchema,
-  ProjectAutomationSchema,
-  ProjectResponseSchema,
-  ProjectSchema,
-  ProjectStatusSchema,
-  ProjectsResponseSchema,
-  SyncConfigResponseSchema,
-  SyncConfigSchema,
-  SyncConfigsResponseSchema,
-  SyncDirectionSchema,
-  SyncProviderSchema,
-  UpdateProjectRequestSchema,
-} from '../features/projects/schemas';
-
-export {
-  BorderRadiusSchema,
-  FontFamilySchema,
-  UpdateWorkspaceThemeRequestSchema,
-  WorkspaceThemeResponseSchema,
-  WorkspaceThemeSchema,
-} from '../features/settings/workspace/schemas';
 export {
   CreateTaskRequestSchema,
   LogLevelSchema,
@@ -235,93 +231,17 @@ export type WorkspaceThemeResponse = z.infer<typeof WorkspaceThemeResponseSchema
 export type SourceVerifyResponse = z.infer<typeof SourceVerifyResponseSchema>;
 
 export type {
-  AiProviderZ,
-  AiSettingsResponse,
-  AiSettingsZ,
-} from '../features/settings/workspace/schemas';
+  InvitationDetailsZ,
+  OrgRoleZ,
+  SessionsResponse,
+  SessionZ,
+  WorkspaceRoleZ,
+} from '../features/auth/schemas';
 export {
-  AiProviderSchema,
-  AiSettingsResponseSchema,
-  AiSettingsSchema,
-  UpdateAiSettingsRequestSchema,
-  WorkspaceAiSettingsResponseSchema,
-} from '../features/settings/workspace/schemas';
-
-export type { SessionsResponse, SessionZ } from '../features/auth/schemas';
-export { SessionSchema, SessionsResponseSchema } from '../features/auth/schemas';
-
-export type { OrgRoleZ } from '../features/auth/schemas';
-export type {
-  OrganizationMemberZ,
-  OrgMembersResponse,
-} from '../features/settings/organization/schemas';
-export {
-  AddOrgMemberRequestSchema,
-  OrganizationMemberSchema,
-  OrgMembersResponseSchema,
-  UpdateOrgMemberRequestSchema,
-} from '../features/settings/organization/schemas';
-
-export type { WorkspaceRoleZ } from '../features/auth/schemas';
-export type {
-  WorkspaceMembersResponse,
-  WorkspaceMemberZ,
-} from '../features/settings/workspace/schemas';
-export {
-  AddWorkspaceMemberRequestSchema,
-  UpdateWorkspaceMemberRequestSchema,
-  WorkspaceMemberSchema,
-  WorkspaceMembersResponseSchema,
-} from '../features/settings/workspace/schemas';
-
-export type { InvitationDetailsZ } from '../features/auth/schemas';
-export { InvitationDetailsSchema } from '../features/auth/schemas';
-export type {
-  InvitationsResponse,
-  InvitationZ,
-} from '../features/settings/organization/schemas';
-export {
-  CreateInvitationRequestSchema,
-  InvitationSchema,
-  InvitationsResponseSchema,
-} from '../features/settings/organization/schemas';
-
-export type {
-  AuditActionZ,
-  AuditLogsResponse,
-  AuditLogZ,
-  AuditResourceTypeZ,
-  LimitsResponse,
-  LimitsZ,
-  PlanResponse,
-  PlansResponse,
-  PlanZ,
-  SubscriptionResponse,
-  SubscriptionZ,
-  UsageResponse,
-  UsageZ,
-} from '../features/settings/organization/schemas';
-export {
-  AUDIT_ACTIONS,
-  AUDIT_RESOURCE_TYPES,
-  AuditActionSchema,
-  AuditLogFiltersSchema,
-  AuditLogSchema,
-  AuditLogsResponseSchema,
-  AuditResourceTypeSchema,
-  LimitsResponseSchema,
-  LimitsSchema,
-  PlanLimitsSchema,
-  PlanResponseSchema,
-  PlanSchema,
-  PlansResponseSchema,
-  SubscriptionResponseSchema,
-  SubscriptionSchema,
-  SubscriptionStatusSchema,
-  UsageResponseSchema,
-  UsageSchema,
-} from '../features/settings/organization/schemas';
-
+  InvitationDetailsSchema,
+  SessionSchema,
+  SessionsResponseSchema,
+} from '../features/auth/schemas';
 export type {
   CreateKnowledgeRequestZ,
   GatherContextRequestZ,
@@ -347,3 +267,67 @@ export {
   SearchResponseSchema,
   SearchResultSchema,
 } from '../features/knowledge/schemas';
+export type {
+  AuditActionZ,
+  AuditLogsResponse,
+  AuditLogZ,
+  AuditResourceTypeZ,
+  InvitationsResponse,
+  InvitationZ,
+  LimitsResponse,
+  LimitsZ,
+  OrganizationMemberZ,
+  OrgMembersResponse,
+  PlanResponse,
+  PlansResponse,
+  PlanZ,
+  SubscriptionResponse,
+  SubscriptionZ,
+  UsageResponse,
+  UsageZ,
+} from '../features/settings/organization/schemas';
+export {
+  AddOrgMemberRequestSchema,
+  AUDIT_ACTIONS,
+  AUDIT_RESOURCE_TYPES,
+  AuditActionSchema,
+  AuditLogFiltersSchema,
+  AuditLogSchema,
+  AuditLogsResponseSchema,
+  AuditResourceTypeSchema,
+  CreateInvitationRequestSchema,
+  InvitationSchema,
+  InvitationsResponseSchema,
+  LimitsResponseSchema,
+  LimitsSchema,
+  OrganizationMemberSchema,
+  OrgMembersResponseSchema,
+  PlanLimitsSchema,
+  PlanResponseSchema,
+  PlanSchema,
+  PlansResponseSchema,
+  SubscriptionResponseSchema,
+  SubscriptionSchema,
+  SubscriptionStatusSchema,
+  UpdateOrgMemberRequestSchema,
+  UsageResponseSchema,
+  UsageSchema,
+} from '../features/settings/organization/schemas';
+export type {
+  AiProviderZ,
+  AiSettingsResponse,
+  AiSettingsZ,
+  WorkspaceMembersResponse,
+  WorkspaceMemberZ,
+} from '../features/settings/workspace/schemas';
+export {
+  AddWorkspaceMemberRequestSchema,
+  AiProviderSchema,
+  AiSettingsResponseSchema,
+  AiSettingsSchema,
+  UpdateAiSettingsRequestSchema,
+  UpdateWorkspaceMemberRequestSchema,
+  WorkspaceAiSettingsResponseSchema,
+  WorkspaceMemberSchema,
+  WorkspaceMembersResponseSchema,
+} from '../features/settings/workspace/schemas';
