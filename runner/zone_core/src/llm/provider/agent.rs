@@ -30,7 +30,7 @@ const AUTO: &str = "auto";
 const TAG_SEPARATOR: char = ':';
 
 const CLAUDE_MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
-const CLAUDE_GATED: &[&str] = &["fable"];
+const CLAUDE_NAMED_ONLY: &[&str] = &["fable"];
 
 /// Claude's names for its latest models, in any case. `default` is left out:
 /// it means what passing no `--model` means.
@@ -170,9 +170,9 @@ impl AgentKind {
     }
 
     /// The offered models Zone runs only when a person names one.
-    pub fn gated(self) -> &'static [&'static str] {
+    pub fn named_only(self) -> &'static [&'static str] {
         match self {
-            Self::Claude => CLAUDE_GATED,
+            Self::Claude => CLAUDE_NAMED_ONLY,
             Self::Codex => &[],
         }
     }
@@ -662,15 +662,15 @@ mod tests {
     }
 
     #[test]
-    fn only_claudes_fable_is_gated_and_every_gated_model_is_offered() {
-        assert_eq!(AgentKind::Claude.gated(), ["fable"]);
-        assert!(AgentKind::Codex.gated().is_empty());
+    fn only_claudes_fable_runs_only_when_named_and_is_still_offered() {
+        assert_eq!(AgentKind::Claude.named_only(), ["fable"]);
+        assert!(AgentKind::Codex.named_only().is_empty());
 
         for agent in AgentKind::ALL {
-            for model in agent.gated() {
+            for model in agent.named_only() {
                 assert!(
                     agent.models().contains(model),
-                    "{agent} gates {model} without offering it"
+                    "{agent} runs {model} only when named without offering it"
                 );
             }
         }

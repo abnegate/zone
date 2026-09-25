@@ -167,11 +167,11 @@ impl Catalog {
     }
 
     /// The completion models Zone may put a run on without anyone naming
-    /// one: all of them, less those the agent gates.
+    /// one: all of them, less those the agent runs only when named.
     pub(crate) fn unattended(&self) -> impl Iterator<Item = &Installed> {
         self.completions().filter(|model| {
             self.agent
-                .is_none_or(|agent| !agent.gated().contains(&model.name.as_str()))
+                .is_none_or(|agent| !agent.named_only().contains(&model.name.as_str()))
         })
     }
 }
