@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use thiserror::Error;
+use zone_core::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
 use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message, ToolDefinition};
 use zone_core::tools::{ToolContext, ToolResult};
 use zone_vcs::pull_request::{ChangedFile, PrService, PullRequestDetail, PullRequestReference};
@@ -23,6 +24,7 @@ use zone_vcs::pull_request::{ChangedFile, PrService, PullRequestDetail, PullRequ
 use crate::config::Config;
 use crate::db::auto_projects::{Finding, ReviewRow};
 use crate::db::tasks::TaskRow;
+use crate::services::backend;
 
 pub use verdict::{Outcome, Verdict};
 
@@ -34,6 +36,10 @@ const REVIEW_TIMEOUT: Duration = Duration::from_secs(600);
 const REVIEW_TOKENS: u32 = 4_096;
 /// A review is a judgement, not a draft.
 const REVIEW_TEMPERATURE: f32 = 0.0;
+/// How zone_core begins a coding agent's refusal of a model or a context the
+/// signed-in account cannot spend usage credits on, which every tick meets
+/// again.
+const UNFUNDED_MARKERS: [&str; 2] = [UNFUNDED, UNFUNDED_CONTEXT];
 
 #[derive(Debug, Error)]
 pub enum ReviewError {
@@ -41,8 +47,33 @@ pub enum ReviewError {
     Unparseable(String),
     #[error("the reviewer model failed: {0}")]
     Model(String),
+    #[error("the reviewer model {reviewer} cannot run: {reason}")]
+    Unfunded { reviewer: String, reason: String },
     #[error("the review did not finish within {} seconds", REVIEW_TIMEOUT.as_secs())]
     TimedOut,
+}
+
+impl ReviewError {
+    /// `message`, what failed the `reviewer` model the review ran on
+    /// `backend`.
+    fn model(backend: &LlmBackend, reviewer: &str, message: String) -> Self {
+        let words = backend::own_words(&message);
+        let unfunded = matches!(backend, LlmBackend::Cli { .. })
+            && UNFUNDED_MARKERS.iter().any(|marker| words.contains(marker));
+        if unfunded {
+            return Self::Unfunded {
+                reviewer: reviewer.to_string(),
+                reason: words.to_string(),
+            };
+        }
+        Self::Model(message)
+    }
+
+    /// Why the task has to wait for a person, when no later tick would get
+    /// past this failure.
+    pub fn stalled(&self) -> Option<String> {
+        matches!(self, Self::Unfunded { .. }).then(|| self.to_string())
+    }
 }
 
 pub struct ReviewRequest<'a> {
@@ -110,7 +141,9 @@ pub async fn run(
             let response = client
                 .chat_with_model(&reviewer, &messages, definitions.as_deref())
                 .await
-                .map_err(|error| ReviewError::Model(error.to_string()))?;
+                .map_err(|error| {
+                    ReviewError::model(&client.config().backend, &reviewer, error.to_string())
+                })?;
             let Some(choice) = response.choices.into_iter().next() else {
                 return Err(ReviewError::Model("the model returned no choices".into()));
             };
@@ -160,6 +193,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -172,27 +206,98 @@ mod tests {
 
     const REPLY: &str = "I read the diff.\n<zone-review>\n{\"verdict\":\"approve\",\"summary\":\"The cart is sound.\",\"findings\":[],\"addressed\":[]}\n</zone-review>";
 
-    fn reviewer(directory: &TempDir, prompt: &Path) -> PathBuf {
+    const REFUSAL: &str = "Fable 5.1 requires usage credits. Switch to another model to continue.";
+
+    /// A stand-in claude that keeps its prompt in `prompt` and answers with
+    /// `stream`.
+    fn agent(directory: &TempDir, prompt: &Path, stream: &[Value]) -> PathBuf {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
         let path = directory.path().join("claude");
         let mut file = std::fs::File::create(&path).expect("the fake agent");
+        let lines: Vec<String> = stream.iter().map(Value::to_string).collect();
         writeln!(
             file,
-            "#!/bin/sh\ncat > '{prompt}'\ncat <<'EOF'\n{assistant}\n{result}\nEOF",
+            "#!/bin/sh\ncat > '{prompt}'\ncat <<'EOF'\n{stream}\nEOF",
             prompt = prompt.display(),
-            assistant = serde_json::json!({
-                "type": "assistant",
-                "message": {"content": [{"type": "text", "text": REPLY}]},
-            }),
-            result = serde_json::json!({"type": "result", "subtype": "success", "is_error": false}),
+            stream = lines.join("\n"),
         )
         .expect("the fake agent body");
         drop(file);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("the fake agent to be executable");
         path
+    }
+
+    fn reviewer(directory: &TempDir, prompt: &Path) -> PathBuf {
+        agent(
+            directory,
+            prompt,
+            &[
+                json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": REPLY}]},
+                }),
+                json!({"type": "result", "subtype": "success", "is_error": false}),
+            ],
+        )
+    }
+
+    /// A stand-in claude that refuses its turn in `words`, typed `kind`.
+    fn refusing(directory: &TempDir, prompt: &Path, words: &str, kind: Option<&str>) -> PathBuf {
+        let mut refusal = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": words}]},
+            "error": "rate_limit",
+            "is_api_error_message": true,
+        });
+        if let Some(kind) = kind {
+            refusal["api_error"] = kind.into();
+        }
+        agent(
+            directory,
+            prompt,
+            &[
+                refusal,
+                json!({"type": "result", "subtype": "success", "is_error": true, "result": words}),
+            ],
+        )
+    }
+
+    fn claude(executable: PathBuf) -> Config {
+        Config {
+            model_backend: ModelBackend::Cli {
+                agent: AgentKind::Claude,
+                executable: Some(executable),
+            },
+            ..crate::state::test_config()
+        }
+    }
+
+    fn request<'a>(
+        task: &'a TaskRow,
+        pull: &'a PullRequestDetail,
+        reviewer: &str,
+    ) -> ReviewRequest<'a> {
+        ReviewRequest {
+            task,
+            brief: None,
+            pull,
+            diff: DIFF.to_string(),
+            files: Vec::new(),
+            open: &[],
+            prior: &[],
+            round: 1,
+            reviewer: reviewer.into(),
+            same_model: false,
+            token: "token".into(),
+            reference: PullRequestReference {
+                owner: "acme".into(),
+                repository: "shop".into(),
+                number: 7,
+            },
+        }
     }
 
     fn task() -> TaskRow {
@@ -253,38 +358,15 @@ mod tests {
     async fn a_coding_agent_reviews_the_change_from_its_inline_diff() {
         let directory = TempDir::new().expect("a temporary directory");
         let prompt = directory.path().join("prompt");
-        let config = Config {
-            model_backend: ModelBackend::Cli {
-                agent: AgentKind::Claude,
-                executable: Some(reviewer(&directory, &prompt)),
-            },
-            ..crate::state::test_config()
-        };
+        let config = claude(reviewer(&directory, &prompt));
         let task = task();
         let pull = pull();
 
         let verdict = run(
             &config,
-            crate::services::backend::instance(&config),
+            backend::instance(&config),
             PrService::new(),
-            ReviewRequest {
-                task: &task,
-                brief: None,
-                pull: &pull,
-                diff: DIFF.to_string(),
-                files: Vec::new(),
-                open: &[],
-                prior: &[],
-                round: 1,
-                reviewer: "sonnet".into(),
-                same_model: false,
-                token: "token".into(),
-                reference: PullRequestReference {
-                    owner: "acme".into(),
-                    repository: "shop".into(),
-                    number: 7,
-                },
-            },
+            request(&task, &pull, "sonnet"),
         )
         .await
         .expect("an agent that answers with a verdict has reviewed the change");
@@ -300,5 +382,107 @@ mod tests {
             !prompt.contains("read_pr_file"),
             "the agent was told of a tool it cannot call: {prompt}"
         );
+    }
+
+    /// claude refuses a reviewer the signed-in account cannot spend usage
+    /// credits on the same way on every tick, so the review says so apart
+    /// from a model that merely failed.
+    #[tokio::test]
+    async fn a_reviewer_the_signed_in_account_cannot_fund_is_unfunded() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let prompt = directory.path().join("prompt");
+        let config = claude(refusing(
+            &directory,
+            &prompt,
+            REFUSAL,
+            Some("model_requires_usage_credits"),
+        ));
+        let task = task();
+        let pull = pull();
+
+        let error = run(
+            &config,
+            backend::instance(&config),
+            PrService::new(),
+            request(&task, &pull, "fable"),
+        )
+        .await
+        .expect_err("a refused review");
+
+        let ReviewError::Unfunded { reviewer, reason } = &error else {
+            panic!("expected an unfunded reviewer, got {error:?}");
+        };
+        assert_eq!(reviewer, "fable");
+        assert_eq!(reason, &format!("claude: {UNFUNDED}: {REFUSAL}"));
+        assert_eq!(
+            error.stalled(),
+            Some(format!(
+                "the reviewer model fable cannot run: claude: {UNFUNDED}: {REFUSAL}"
+            )),
+            "the task pauses with claude's words rather than asking every tick"
+        );
+    }
+
+    /// A model that fails for any other reason may answer on the next tick.
+    #[tokio::test]
+    async fn a_reviewer_that_hit_its_plans_window_is_a_model_failure() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let prompt = directory.path().join("prompt");
+        let config = claude(refusing(
+            &directory,
+            &prompt,
+            "You've hit your session limit · resets 5pm",
+            None,
+        ));
+        let task = task();
+        let pull = pull();
+
+        let error = run(
+            &config,
+            backend::instance(&config),
+            PrService::new(),
+            request(&task, &pull, "sonnet"),
+        )
+        .await
+        .expect_err("a refused review");
+
+        assert!(matches!(error, ReviewError::Model(_)), "{error:?}");
+        assert_eq!(error.stalled(), None, "the next tick asks again");
+    }
+
+    /// An endpoint's failure is never read for a coding agent's wording.
+    #[test]
+    fn an_endpoint_failure_in_the_words_of_an_unfunded_reviewer_is_a_model_failure() {
+        let error =
+            ReviewError::model(&LlmBackend::Http, "fable", format!("{UNFUNDED}: {REFUSAL}"));
+
+        assert!(matches!(error, ReviewError::Model(_)), "{error:?}");
+        assert_eq!(error.stalled(), None);
+    }
+
+    /// Zone's words for a coding agent's failure count only among the
+    /// agent's own words, never in the stderr that follows them.
+    #[test]
+    fn an_unfunded_reviewer_is_read_from_the_agents_own_words() {
+        let agent = LlmBackend::cli(AgentKind::Claude, zone_core::llm::CliSettings::default());
+        let stderr_only = format!(
+            "claude: the agent exited without completing its event stream{}{UNFUNDED}: {REFUSAL}",
+            zone_core::llm::provider::STDERR_HEADING
+        );
+
+        assert!(matches!(
+            ReviewError::model(&agent, "fable", stderr_only),
+            ReviewError::Model(_)
+        ));
+        assert!(matches!(
+            ReviewError::model(
+                &agent,
+                "sonnet[1m]",
+                format!(
+                    "claude: {UNFUNDED_CONTEXT}: API Error: Usage credits required for 1M context"
+                )
+            ),
+            ReviewError::Unfunded { .. }
+        ));
     }
 }
