@@ -144,9 +144,13 @@ pub async fn for_settings(
             agent,
             message: format!("{}: {error}", work.display()),
         })?;
+    let sign_in = match login {
+        Some(_) => SignIn::Organization,
+        None => SignIn::Host,
+    };
     let mut cli = CliSettings::default()
         .with_working_directory(work)
-        .with_sign_in(SignIn::Organization);
+        .with_sign_in(sign_in);
     if let Some(executable) = overridden(config, agent) {
         cli = cli.with_executable(executable);
     }
@@ -184,7 +188,7 @@ pub fn remedy(agent: AgentKind, sign_in: SignIn, message: &str) -> Option<String
             .iter()
             .any(|failure| whole.contains(failure));
     signed_out.then(|| match sign_in {
-        SignIn::Organization => REMEDY.to_string(),
+        SignIn::Organization | SignIn::Host => REMEDY.to_string(),
         SignIn::Instance => format!(
             "The server's own {agent} sign-in failed; the server operator must sign in again \
              on the host."
@@ -594,8 +598,8 @@ mod tests {
         assert!(matches!(settings.credential, Credential::Inherited));
         assert_eq!(
             settings.sign_in,
-            SignIn::Organization,
-            "an organization's own sign-in replaces the host's, so its admins can fix it"
+            SignIn::Host,
+            "the host's account pays for the turn until the organization signs in"
         );
         for home in [CLAUDE_CONFIG_DIR, CODEX_HOME] {
             assert_eq!(
@@ -779,18 +783,23 @@ mod tests {
     const RETRYING_STDERR: &str =
         "2026-09-23T07:43:43.341111Z WARN codex_api: stream disconnected; retrying";
 
+    /// The host's login stands in for an organization that has not signed
+    /// in, and the organization's own sign-in replaces it, so the
+    /// organization's admins are told to sign in either way.
     #[test]
     fn remedy_names_the_fix_for_every_recorded_sign_in_failure() {
         for (agent, failures) in [
             (AgentKind::Claude, CLAUDE_SIGN_IN_FAILURES),
             (AgentKind::Codex, CODEX_SIGN_IN_FAILURES),
         ] {
-            for failure in failures {
-                assert_eq!(
-                    remedy(agent, SignIn::Organization, &reported(agent, failure)).as_deref(),
-                    Some(REMEDY),
-                    "{agent}: {failure}"
-                );
+            for sign_in in [SignIn::Organization, SignIn::Host] {
+                for failure in failures {
+                    assert_eq!(
+                        remedy(agent, sign_in, &reported(agent, failure)).as_deref(),
+                        Some(REMEDY),
+                        "{agent} on {sign_in:?}: {failure}"
+                    );
+                }
             }
         }
     }
@@ -798,7 +807,7 @@ mod tests {
     #[test]
     fn remedy_leaves_every_other_failure_alone() {
         for agent in AgentKind::ALL {
-            for sign_in in [SignIn::Instance, SignIn::Organization] {
+            for sign_in in [SignIn::Instance, SignIn::Organization, SignIn::Host] {
                 for failure in OTHER_FAILURES {
                     assert_eq!(
                         remedy(agent, sign_in, &reported(agent, failure)),

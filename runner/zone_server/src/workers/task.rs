@@ -3799,7 +3799,7 @@ mod retry_tests {
     fn a_coding_agent_that_has_to_be_signed_in_again_is_not_retried() {
         use zone_core::llm::AgentKind;
 
-        for sign_in in [SignIn::Organization, SignIn::Instance] {
+        for sign_in in [SignIn::Organization, SignIn::Host, SignIn::Instance] {
             let fault = Fault::agent(
                 &agent(AgentKind::Claude, sign_in),
                 "Stream error: claude: Not logged in · Please run /login".to_string(),
@@ -3868,7 +3868,7 @@ mod retry_tests {
     /// fixes it.
     #[test]
     fn a_coding_agent_refused_for_want_of_usage_credits_is_not_retried() {
-        for sign_in in [SignIn::Organization, SignIn::Instance] {
+        for sign_in in [SignIn::Organization, SignIn::Host, SignIn::Instance] {
             for message in [
                 format!("Stream error: claude: {UNFUNDED}: {FABLE_REFUSAL}"),
                 format!("Stream error: claude: {UNFUNDED_CONTEXT}: {LONG_CONTEXT_REFUSAL}"),

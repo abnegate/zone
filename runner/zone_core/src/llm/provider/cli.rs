@@ -956,34 +956,39 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
             json!({"type": "result", "subtype": "success", "is_error": false}),
         ]
         .map(|line| line.to_string());
-        let directory = TempDir::new().expect("a temporary directory");
-        let provider = CliProvider::agent(
-            AgentKind::Claude,
-            settings(&directory, &replaying(&directory, &stream))
-                .with_sign_in(SignIn::Organization)
-                .with_credential(Credential::key("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)),
-        );
+        for sign_in in [SignIn::Organization, SignIn::Host, SignIn::Instance] {
+            let directory = TempDir::new().expect("a temporary directory");
+            let provider = CliProvider::agent(
+                AgentKind::Claude,
+                settings(&directory, &replaying(&directory, &stream))
+                    .with_sign_in(sign_in)
+                    .with_credential(Credential::key("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)),
+            );
 
-        let (completion, logged) =
-            captured_logs(run(&provider, &[Message::user("Review the change.")])).await;
+            let (completion, logged) =
+                captured_logs(run(&provider, &[Message::user("Review the change.")])).await;
 
-        assert_eq!(
-            completion
-                .expect("a turn on usage credits")
-                .message
-                .content
-                .as_deref(),
-            Some("Reviewed.")
-        );
-        let credited: Vec<&str> = logged
-            .lines()
-            .filter(|line| line.contains("usage credits"))
-            .collect();
-        assert_eq!(credited.len(), 1, "{logged}");
-        assert!(credited[0].contains("INFO"), "{logged}");
-        assert!(credited[0].contains("five_hour"), "{logged}");
-        assert!(credited[0].contains("Organization"), "{logged}");
-        assert!(!logged.contains(TOKEN), "{logged}");
+            assert_eq!(
+                completion
+                    .expect("a turn on usage credits")
+                    .message
+                    .content
+                    .as_deref(),
+                Some("Reviewed.")
+            );
+            let credited: Vec<&str> = logged
+                .lines()
+                .filter(|line| line.contains("usage credits"))
+                .collect();
+            assert_eq!(credited.len(), 1, "{logged}");
+            assert!(credited[0].contains("INFO"), "{logged}");
+            assert!(credited[0].contains("five_hour"), "{logged}");
+            assert!(
+                credited[0].contains(&format!("sign_in={sign_in:?}")),
+                "{logged}"
+            );
+            assert!(!logged.contains(TOKEN), "{logged}");
+        }
     }
 
     #[tokio::test]

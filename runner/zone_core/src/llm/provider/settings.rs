@@ -62,7 +62,8 @@ impl CodexSandbox {
     }
 }
 
-/// Whose sign-in a spawned agent runs under, which is who can renew it.
+/// Whose sign-in a spawned agent runs under: whose account its turns spend,
+/// and who is told to sign in when it fails.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SignIn {
     /// The server's own: the host's login, or a key in its environment.
@@ -70,6 +71,9 @@ pub enum SignIn {
     Instance,
     /// An organization's, renewed from its AI settings.
     Organization,
+    /// The host's login, standing in for an organization that has not signed
+    /// in. Its account pays, and the organization's own sign-in replaces it.
+    Host,
 }
 
 /// Zone's tools, served to a spawned agent over MCP.
@@ -350,9 +354,11 @@ mod tests {
     fn an_agent_runs_under_the_servers_own_sign_in_until_told_whose() {
         assert_eq!(CliSettings::default().sign_in, SignIn::Instance);
 
-        let settings = CliSettings::default().with_sign_in(SignIn::Organization);
-        assert_eq!(settings.sign_in, SignIn::Organization);
-        assert!(matches!(settings.credential, Credential::Inherited));
+        for sign_in in [SignIn::Organization, SignIn::Host] {
+            let settings = CliSettings::default().with_sign_in(sign_in);
+            assert_eq!(settings.sign_in, sign_in);
+            assert!(matches!(settings.credential, Credential::Inherited));
+        }
     }
 
     #[test]

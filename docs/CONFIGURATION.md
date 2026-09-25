@@ -162,10 +162,19 @@ a task run backs off before it tries again.
 
 Zone logs each turn that runs on usage credits, once per turn, at info level:
 "the turn runs on usage credits past the plan's limit", with the window it
-passed (`window`), whose sign-in it runs under (`sign_in`: `Organization`, or
-`Instance` for the server's own) and the turn's working directory
-(`directory`), which on an organization's sign-in names the organization. It
-never logs the token.
+passed (`window`), whose sign-in it runs under (`sign_in`) and the turn's
+working directory (`directory`). It never logs the token. `sign_in` names the
+account that pays:
+
+- `Organization`: the organization's own Claude sign-in.
+- `Host`: the login of the user the server runs as, standing in for an
+  organization that chose Claude Code but has not signed in, which
+  `ZONE_AGENT_HOST_LOGIN` allows.
+- `Instance`: that same login, running the instance's default, with
+  `ZONE_LLM_BACKEND` set to `claude`.
+
+`directory` names the organization under `Organization` and `Host`, and is
+`None` under `Instance`.
 
 The account's owner stops this by turning usage credits off, or bounds it by
 setting a monthly cap, at claude.ai/settings/usage.
@@ -1238,7 +1247,7 @@ Inside Docker the manager image does not include magents. Install it on the host
 
 An auto project runs itself: every agentic task in it is executed unattended, its pull request waits for checks, is reviewed by a model other than the one that wrote it and by the review bots already installed on the repository (CodeRabbit, Greptile), is fixed until nothing raised is left open, is merged — with administrator privileges when branch protection would otherwise refuse — and is reported with a high-level and a low-level summary. Start one from **Projects → Auto project**, which opens a planner chat that interviews you and creates the project and its tasks, or turn **Auto** on for an existing project. All settings are optional.
 
-On Claude Code, an auto project's runs, reviews and summaries run on the organization's Claude sign-in with no one watching. When that account has usage credits turned on, they keep going on those credits past the plan's limits, through the night, up to the account's monthly cap; Zone logs each such turn, as *Usage credits* under Model Backend describes. The account's owner stops it by turning usage credits off, or bounds it with a monthly cap, at claude.ai/settings/usage. A review whose model, or context, the account cannot spend usage credits on pauses its task with claude's words rather than asking again every tick.
+On Claude Code, an auto project's runs, reviews and summaries run with no one watching, on the organization's Claude sign-in or, when the organization has not signed in and `ZONE_AGENT_HOST_LOGIN` is on, on the login of the user the server runs as. When that account has usage credits turned on, they keep going on those credits past the plan's limits, through the night, up to the account's monthly cap; Zone logs each such turn, and whose account it ran on, as *Usage credits* under Model Backend describes. The account's owner stops it by turning usage credits off, or bounds it with a monthly cap, at claude.ai/settings/usage. A review whose model, or context, the account cannot spend usage credits on pauses its task with claude's words rather than asking again every tick.
 
 ### `ZONE_AUTO_ENABLED`
 - **Default**: `true`
