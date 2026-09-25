@@ -294,14 +294,31 @@ impl AgentKind {
         arguments
     }
 
+    /// A reader for one turn of this agent's output.
+    pub fn reader(self) -> Reader {
+        match self {
+            Self::Claude => Reader::Claude(parser::claude::Reader::default()),
+            Self::Codex => Reader::Codex,
+        }
+    }
+}
+
+/// One turn of an agent's output, read a line at a time.
+#[derive(Debug)]
+pub enum Reader {
+    Claude(parser::claude::Reader),
+    Codex,
+}
+
+impl Reader {
     /// Translate one output line, appending whatever it means.
     ///
     /// A line this agent has no opinion about appends nothing rather than
     /// failing: agents add event types between releases, and a stream that
     /// aborted on the first unrecognised line would lose the whole answer.
-    pub fn interpret(self, line: &str, events: &mut Vec<AgentEvent>) {
+    pub fn interpret(&mut self, line: &str, events: &mut Vec<AgentEvent>) {
         match self {
-            Self::Claude => parser::claude::interpret(line, events),
+            Self::Claude(reader) => reader.interpret(line, events),
             Self::Codex => parser::codex::interpret(line, events),
         }
     }
@@ -1268,10 +1285,11 @@ mod tests {
     #[test]
     fn an_unrecognised_line_is_ignored_rather_than_fatal() {
         for agent in [AgentKind::Claude, AgentKind::Codex] {
+            let mut reader = agent.reader();
             let mut events = Vec::new();
-            agent.interpret(r#"{"type":"something_added_next_release"}"#, &mut events);
-            agent.interpret("not json at all", &mut events);
-            agent.interpret("", &mut events);
+            reader.interpret(r#"{"type":"something_added_next_release"}"#, &mut events);
+            reader.interpret("not json at all", &mut events);
+            reader.interpret("", &mut events);
             assert!(events.is_empty(), "{agent} reacted to noise");
         }
     }

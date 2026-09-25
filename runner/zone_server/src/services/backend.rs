@@ -274,7 +274,7 @@ mod tests {
     use tempfile::TempDir;
     use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
     use zone_core::llm::CodexSandbox;
-    use zone_core::llm::provider::UNFUNDED;
+    use zone_core::llm::provider::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
     use zone_core::secret::{SecretValue, redact};
 
     use crate::config::{AgentConfig, ModelBackend};
@@ -750,6 +750,11 @@ mod tests {
         "Authentication error · Try again",
         "rate limit reached (five_hour, rejected)",
         UNFUNDED,
+        UNFUNDED_CONTEXT,
+        UNCONFIRMED,
+        "Fable 5.1 requires usage credits. Switch to another model to continue.",
+        "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
+        "API Error: Usage credits required for 1M context · turn on usage credits at claude.ai/settings/usage?from=cc_cli_limit_message (they take effect in a new session)",
         "You have hit your weekly limit",
         "agent command timed out after 1800 seconds",
         "agent command exited with status 1: the agent produced no diagnostics",

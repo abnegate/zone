@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 use tool_runner::executor::{GRACE_PERIOD, ProcessGroup};
 
-use super::agent::AgentKind;
+use super::agent::{AgentKind, Reader};
 use super::completion::{Completion, CompletionProvider, CompletionRequest, ProviderKind};
 use super::credential::Credential;
 use super::environment;
@@ -175,7 +175,7 @@ impl CliProvider {
         };
 
         let name = self.name.clone();
-        let agent = self.agent;
+        let mut reader = self.agent.reader();
         let line_limit = self.settings.line_limit;
 
         Ok(Box::pin(async_stream::try_stream! {
@@ -191,12 +191,12 @@ impl CliProvider {
                 if read == 0 {
                     ended = true;
                     if let Some(frame) = lines.flush() {
-                        interpret(agent, &name, line_limit, frame, &mut events);
+                        interpret(&mut reader, &name, line_limit, frame, &mut events);
                     }
                 } else {
                     lines.extend(&buffer[..read]);
                     while let Some(frame) = lines.take() {
-                        interpret(agent, &name, line_limit, frame, &mut events);
+                        interpret(&mut reader, &name, line_limit, frame, &mut events);
                     }
                 }
 
@@ -412,14 +412,14 @@ impl CompletionProvider for CliProvider {
 }
 
 fn interpret(
-    agent: AgentKind,
+    reader: &mut Reader,
     provider: &str,
     limit: usize,
     frame: Frame,
     events: &mut Vec<AgentEvent>,
 ) {
     match frame {
-        Frame::Line(line) => agent.interpret(&line, events),
+        Frame::Line(line) => reader.interpret(&line, events),
         Frame::Dropped => tracing::warn!(
             provider,
             limit,
@@ -494,8 +494,8 @@ fn is_continuation(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::llm::RequestOptions;
-    use crate::llm::provider::UNFUNDED;
     use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT};
+    use crate::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::io::Write;
@@ -857,24 +857,43 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         );
     }
 
+    /// A stand-in agent that replays `stream` as its output.
+    fn replayed(directory: &TempDir, stream: &str) -> CliSettings {
+        let lines: Vec<String> = stream.lines().map(str::to_string).collect();
+        settings(directory, &replaying(directory, &lines))
+    }
+
     #[tokio::test]
-    async fn a_fable_turn_without_usage_credits_fails_naming_them_and_not_a_rate_limit() {
-        for stream in [
-            include_str!("parser/fixtures/claude/fable-credits-required.jsonl"),
-            include_str!("parser/fixtures/claude/fable-limit-reached.jsonl"),
+    async fn a_turn_the_account_cannot_fund_fails_in_claudes_words_and_not_as_a_rate_limit() {
+        for (stream, failure) in [
+            (
+                include_str!("parser/fixtures/claude/fable-credits-required.jsonl"),
+                format!(
+                    "{UNFUNDED}: Fable 5.1 requires usage credits. Switch to another model to continue."
+                ),
+            ),
+            (
+                include_str!("parser/fixtures/claude/fable-limit-reached.jsonl"),
+                format!(
+                    "{UNFUNDED}: You've reached your Fable limit. Switch to another model to continue."
+                ),
+            ),
+            (
+                include_str!("parser/fixtures/claude/long-context-credits-required.jsonl"),
+                format!(
+                    "{UNFUNDED_CONTEXT}: API Error: Usage credits required for 1M context · turn on usage credits at claude.ai/settings/usage?from=cc_cli_limit_message (they take effect in a new session)"
+                ),
+            ),
         ] {
             let directory = TempDir::new().expect("a temporary directory");
-            let recording = directory.path().join("recording.jsonl");
-            std::fs::write(&recording, stream).expect("the recording");
-            let script = format!("cat '{}'", recording.display());
-            let provider = CliProvider::agent(AgentKind::Claude, settings(&directory, &script));
+            let provider = CliProvider::agent(AgentKind::Claude, replayed(&directory, stream));
 
             let error = run(&provider, &[Message::user("Review the change.")])
                 .await
                 .expect_err("a refused turn");
 
             let rendered = error.to_string();
-            assert!(rendered.contains(UNFUNDED), "{rendered}");
+            assert_eq!(rendered, format!("claude: {failure}"));
             assert!(
                 !rendered.to_ascii_lowercase().contains("rate limit"),
                 "{rendered}"
