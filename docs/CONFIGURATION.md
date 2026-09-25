@@ -174,7 +174,9 @@ account that pays:
   `ZONE_LLM_BACKEND` set to `claude`.
 
 `directory` names the organization under `Organization` and `Host`, and is
-`None` under `Instance`.
+`None` under `Instance`. The line comes from `zone_core`, so a `RUST_LOG` that
+keeps only `zone_server`, such as `warn,zone_server=info`, hides it; add
+`zone_core=info`.
 
 The account's owner stops this by turning usage credits off, or bounds it by
 setting a monthly cap, at claude.ai/settings/usage.
