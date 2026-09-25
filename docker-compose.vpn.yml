@@ -20,11 +20,13 @@ services:
       - "valkey:172.30.0.21"
       - "prometheus:172.30.0.22"
     environment:
-      FIREWALL_INPUT_PORTS: 8080,8001,8000,4000,3000,8188,11434,8888
+      FIREWALL_INPUT_PORTS: 8080,8001,8000,4000,3000,8188,11434,8888,54545
       # Default control API is :8000, which collides with manager in this namespace.
       HTTP_CONTROL_SERVER_ADDRESS: 127.0.0.1:8007
     ports:
       - "127.0.0.1:8000:8000"
+      # The manager's Claude sign-in callback, which it cannot publish itself here.
+      - "127.0.0.1:${ZONE_AGENT_CALLBACK_PORT-54545}:54545"
     networks:
       internal:
         aliases:

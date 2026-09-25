@@ -2135,19 +2135,32 @@ mod tests {
             );
         }
 
-        /// Codex is served no toolset at all, so its turn reads exactly as it
-        /// did before zone could serve one.
         #[test]
-        fn a_codex_turn_still_reports_that_zone_tools_went_unused() {
-            let codex = host(AgentKind::Codex, None, BuiltinTools::Granted);
+        fn a_codex_turn_is_described_by_what_it_was_actually_given() {
+            assert_eq!(
+                host(AgentKind::Codex, Some(toolset()), BuiltinTools::Withheld).note(true),
+                None,
+                "codex serving zone's tools alone reads as claude's turn does"
+            );
 
-            let note = codex.note(true).expect("a turn with tools explains them");
+            let granted = host(AgentKind::Codex, Some(toolset()), BuiltinTools::Granted)
+                .note(true)
+                .expect("a turn that kept codex's own tools says so");
+            assert!(
+                granted.contains("codex") && granted.contains("own file and shell"),
+                "{granted}"
+            );
+
+            let unserved = host(AgentKind::Codex, None, BuiltinTools::Granted);
+            let note = unserved
+                .note(true)
+                .expect("a turn with tools explains them");
             assert!(
                 note.contains("codex") && note.contains("not offered"),
                 "{note}"
             );
             assert_eq!(
-                codex.note(false),
+                unserved.note(false),
                 None,
                 "a chat that was never going to call anything has nothing to explain"
             );

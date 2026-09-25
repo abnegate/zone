@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
-import { AuthCard, AuthStatus } from '../components';
+import { AuthCard, AuthStatus, CheckIcon } from '../components';
 import { isValidTokenFormat } from '../utils';
 import './AuthPage.css';
 
@@ -89,18 +89,7 @@ export default function EmailVerificationPage() {
         {status === 'success' && (
           <div className="auth-success" role="alert" aria-live="polite">
             <div className="success-icon" data-testid="success-icon">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                <polyline points="22 4 12 14.01 9 11.01" />
-              </svg>
+              <CheckIcon />
             </div>
             <p className="success-message">{message}</p>
             <p className="redirect-message">Redirecting to login...</p>

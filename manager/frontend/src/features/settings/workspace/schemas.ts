@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { WorkspaceRoleSchema } from '../../auth/schemas';
 
-// Workspace Schemas
 export const WorkspaceSchema = z.object({
   id: z.string(),
   organization_id: z.string(),
@@ -38,7 +37,6 @@ export const WorkspaceResponseSchema = z.object({
   workspace: WorkspaceSchema,
 });
 
-// Workspace Member Schemas
 export const WorkspaceMemberSchema = z
   .object({
     id: z.string().min(1),
@@ -77,7 +75,6 @@ export const WorkspaceMembersResponseSchema = z.object({
   members: z.array(WorkspaceMemberSchema),
 });
 
-// Workspace Theme Schemas
 export const FontFamilySchema = z.enum([
   'system',
   'inter',
@@ -126,8 +123,14 @@ export const WorkspaceThemeResponseSchema = z.object({
   theme: WorkspaceThemeSchema,
 });
 
-// AI Settings Schemas
-export const AiProviderSchema = z.enum(['self_hosted', 'openai', 'anthropic', 'bedrock']);
+export const AiProviderSchema = z.enum([
+  'self_hosted',
+  'openai',
+  'anthropic',
+  'bedrock',
+  'claude_code',
+  'codex',
+]);
 
 export const AiSettingsSchema = z.object({
   provider: AiProviderSchema,
@@ -189,12 +192,16 @@ export const AiSettingsResponseSchema = z.object({
   model_audio: z.string().nullable(),
 });
 
-// Type exports
+export const WorkspaceAiSettingsResponseSchema = AiSettingsResponseSchema.extend({
+  overrides: z.boolean(),
+});
+
 export type WorkspaceZ = z.infer<typeof WorkspaceSchema>;
 export type WorkspaceMemberZ = z.infer<typeof WorkspaceMemberSchema>;
 export type WorkspaceMembersResponse = z.infer<typeof WorkspaceMembersResponseSchema>;
 export type WorkspaceThemeZ = z.infer<typeof WorkspaceThemeSchema>;
 export type WorkspaceThemeResponse = z.infer<typeof WorkspaceThemeResponseSchema>;
+export type AiProviderZ = z.infer<typeof AiProviderSchema>;
 export type AiSettingsZ = z.infer<typeof AiSettingsSchema>;
 export type AiSettingsResponse = z.infer<typeof AiSettingsResponseSchema>;
 export type WorkspacesResponse = z.infer<typeof WorkspacesResponseSchema>;

@@ -26,6 +26,7 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 - **Local LLM Inference**: Run powerful language models locally with Ollama
 - **Intelligent Routing**: Automatic model selection based on query complexity (LiteLLM)
 - **Zone Chat**: Built-in conversations, history, web search, and agent tools
+- **Coding Agent Providers**: An organization can run its chats and tasks on the Claude Code or Codex CLI in the manager image, signed in with its own Claude or ChatGPT subscription (see Model Backend in [docs/CONFIGURATION.md](docs/CONFIGURATION.md))
 - **Private Web Search** (optional): VPN-protected metasearch engine; when the VPN is on, all stack internet traffic uses the same tunnel
 
 ### Platform Management
@@ -41,7 +42,7 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 ### Infrastructure
 - **Reverse Proxy**: Automatic HTTPS with Let's Encrypt (Traefik)
 - **Comprehensive Monitoring**: Prometheus metrics with Grafana dashboards
-- **Security First**: JWT authentication, basic auth, secrets management, no telemetry
+- **Security First**: JWT authentication, basic auth, secrets management, and no telemetry from Zone itself (the Codex CLI still exports its own metrics to OpenAI when an organization uses it)
 
 ## Architecture
 
@@ -477,6 +478,7 @@ zone/
 5. **Review logs** - Monitor for suspicious activity
 6. **Use VPN when you want a full tunnel** - All stack internet traffic through Gluetun
 7. **Enable fail2ban** - On the host system (optional)
+8. **Keep coding agent providers to organizations that trust each other** - Every organization's Claude Code and Codex CLI runs as the same OS user (see Model Backend in [docs/CONFIGURATION.md](docs/CONFIGURATION.md))
 
 ### Authentication
 
@@ -550,7 +552,7 @@ docker compose restart <service-name>
 ## Backup & Recovery
 
 ```bash
-# Backup all volumes
+# Back up the stack's data volumes (docs/OPERATIONS.md lists which)
 make backup
 
 # Restore from backup
@@ -569,8 +571,9 @@ make up
 ```
 
 `make backup` refuses to archive an empty cluster until that is done, and
-archives taken before the move hold no database. See
-[docs/OPERATIONS.md](docs/OPERATIONS.md).
+archives taken before the move hold no database. Archives also carry the
+`zone_manager_agent_state` volume, with every organization's Codex login, so
+keep them private. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## License
 

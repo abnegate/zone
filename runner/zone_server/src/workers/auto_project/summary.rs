@@ -7,8 +7,9 @@ use zone_core::llm::{LlmClient, LlmConfig, Message};
 use zone_vcs::pull_request::PullRequestDetail;
 
 use crate::db::tasks::TaskRow;
+use crate::services::backend;
 use crate::services::stages;
-use crate::state::{AppState, llm_backend};
+use crate::state::AppState;
 
 use super::review::model::preferences;
 
@@ -44,22 +45,22 @@ async fn generate(
     pull: &PullRequestDetail,
     review_summary: &str,
 ) -> Option<String> {
-    let (prefs, catalog) = preferences(state, task.workspace_id).await;
-    let model = stages::classifier_model(
+    let backend = backend::for_workspace(state, task.workspace_id)
+        .await
+        .ok()?;
+    let (prefs, catalog) = preferences(state, task.workspace_id, &backend).await;
+    let model = stages::summary_model(
         &prefs,
         &catalog,
         task.model_name.as_deref().unwrap_or(stages::AUTO),
-    );
-    if stages::is_auto(&model) {
-        return None;
-    }
+    )?;
     let client = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
         api_key: state.config().litellm_key.clone(),
         default_model: model,
         temperature: SUMMARY_TEMPERATURE,
         max_tokens: SUMMARY_TOKENS,
-        backend: llm_backend(state.config()),
+        backend,
     });
     let body = pull.body.as_deref().unwrap_or_default();
     let body: String = body.chars().take(BODY_CHARS).collect();
@@ -97,11 +98,12 @@ pub fn fallback(pull: &PullRequestDetail) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::tasks;
+    use crate::services::stages::testing::AgentWorkspace;
     use zone_vcs::pull_request::Mergeability;
 
-    #[test]
-    fn the_fallback_is_the_first_prose_paragraph_or_the_title() {
-        let pull = PullRequestDetail {
+    fn cart() -> PullRequestDetail {
+        PullRequestDetail {
             node_id: String::new(),
             number: 1,
             title: "(feat): add a cart".into(),
@@ -120,7 +122,42 @@ mod tests {
             deletions: 0,
             commits: 0,
             html_url: String::new(),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_left_to_choose_its_own_model_still_summarises_the_merge() {
+        let agent = AgentWorkspace::answering("Shoppers can now buy several items at once.").await;
+        let task = tasks::create_task(
+            &agent.pool,
+            agent.workspace,
+            &[],
+            "Add a cart",
+            "Shoppers want to buy more than one item.",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .expect("a task");
+
+        let summary = generate(&agent.state, &task, &cart(), "Approved with no findings.").await;
+        agent.remove().await;
+
+        assert_eq!(
+            summary.as_deref(),
+            Some("Shoppers can now buy several items at once.")
+        );
+        assert!(
+            agent.chose_its_own_model(),
+            "claude was not left to choose its model"
+        );
+    }
+
+    #[test]
+    fn the_fallback_is_the_first_prose_paragraph_or_the_title() {
+        let pull = cart();
         assert_eq!(fallback(&pull), "Shoppers cannot buy more than one item.");
         let bare = PullRequestDetail { body: None, ..pull };
         assert_eq!(fallback(&bare), "(feat): add a cart");

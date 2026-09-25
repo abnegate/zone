@@ -7,7 +7,8 @@ use uuid::Uuid;
 use zone_core::llm::{LlmClient, LlmConfig, Message};
 
 use crate::db::{ai_settings, chats, workspaces};
-use crate::state::{AppState, llm_backend};
+use crate::services::backend;
+use crate::state::AppState;
 
 static UPDATES: Lazy<broadcast::Sender<(Uuid, String)>> = Lazy::new(|| broadcast::channel(256).0);
 
@@ -43,7 +44,12 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
         return None;
     }
     let chat = chats::get_chat(state.db(), message.chat_id).await.ok()??;
-    let catalog = crate::services::stages::Catalog::load(&state.config().ollama_host).await;
+    let backend = match chat.workspace_id {
+        Some(workspace) => backend::for_workspace(state, workspace).await.ok()?,
+        None => backend::instance(state.config()),
+    };
+    let catalog =
+        crate::services::stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
     let prefs = if let Some(workspace_id) = chat.workspace_id
         && let Ok(Some(workspace)) = workspaces::get_workspace(state.db(), workspace_id).await
         && let Ok(settings) = ai_settings::get_effective_ai_settings(
@@ -63,17 +69,14 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
             &state.config().comfyui.classifier_model,
         )
     };
-    let model = crate::services::stages::classifier_model(&prefs, &catalog, &chat.model_name);
-    if crate::services::stages::is_auto(&model) {
-        return None;
-    }
+    let model = crate::services::stages::summary_model(&prefs, &catalog, &chat.model_name)?;
     let client = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
         api_key: state.config().litellm_key.clone(),
         default_model: model,
         temperature: 0.2,
         max_tokens: 64,
-        backend: llm_backend(state.config()),
+        backend,
     });
     let messages = [
         Message::system(
@@ -107,6 +110,40 @@ fn fallback(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::stages::testing::{AgentWorkspace, UNKNOWN_TO_AGENTS};
+
+    #[tokio::test]
+    async fn an_agent_left_to_choose_its_own_model_still_titles_the_chat() {
+        let agent = AgentWorkspace::answering("Planning a summer trip to Japan").await;
+        let chat = chats::create_chat(
+            &agent.pool,
+            Some(agent.workspace),
+            "New chat",
+            UNKNOWN_TO_AGENTS,
+            false,
+            false,
+        )
+        .await
+        .expect("a chat");
+        let message = chats::create_message(
+            &agent.pool,
+            chat.id,
+            "user",
+            "Help me plan a trip to Japan next summer",
+            None,
+        )
+        .await
+        .expect("the first message");
+
+        let title = summarize(&agent.state, &message).await;
+        agent.remove().await;
+
+        assert_eq!(title.as_deref(), Some("Planning a summer trip to Japan"));
+        assert!(
+            agent.chose_its_own_model(),
+            "claude was not left to choose its model"
+        );
+    }
 
     #[test]
     fn fallback_is_concise_and_unicode_safe() {

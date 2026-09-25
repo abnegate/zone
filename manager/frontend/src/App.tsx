@@ -13,7 +13,7 @@ import { ChatsPage } from './features/chats';
 import { ContextSearchPage, WikiPage } from './features/knowledge';
 import { ModelsPage, PullProvider } from './features/models';
 import { ProjectsPage } from './features/projects';
-import { OrgSettingsPage, WorkspaceSettingsPage } from './features/settings';
+import { AgentSignInPage, OrgSettingsPage, WorkspaceSettingsPage } from './features/settings';
 import { SourcesPage } from './features/sources';
 import { TasksPage } from './features/tasks';
 import UnauthorizedPage from './pages/UnauthorizedPage';
@@ -32,7 +32,6 @@ function App() {
             <WorkspaceTheme />
             <BrowserRouter>
               <Routes>
-                {/* Public routes */}
                 <Route path="/login" element={<LoginPage />} />
                 <Route path="/register" element={<RegisterPage />} />
                 <Route path="/verify-email" element={<EmailVerificationPage />} />
@@ -41,8 +40,14 @@ function App() {
                 <Route path="/reset-password" element={<ResetPasswordPage />} />
                 <Route path="/invitations" element={<InvitationAcceptPage />} />
                 <Route path="/unauthorized" element={<UnauthorizedPage />} />
-
-                {/* Protected routes */}
+                <Route
+                  path="/agent-sign-in"
+                  element={
+                    <ProtectedRoute>
+                      <AgentSignInPage />
+                    </ProtectedRoute>
+                  }
+                />
                 <Route
                   path="/"
                   element={

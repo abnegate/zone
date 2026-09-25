@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::header::{AUTHORIZATION, ORIGIN};
+use axum::http::{HeaderMap, HeaderName, Request, StatusCode};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -85,6 +86,21 @@ async fn start_upstream() -> (String, tokio::task::JoinHandle<()>) {
         .route(
             "/api/echo",
             axum::routing::post(|body: String| async move { body }),
+        )
+        .route(
+            "/api/headers",
+            axum::routing::post(|headers: HeaderMap| async move {
+                let named = |name: HeaderName| {
+                    headers
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string)
+                };
+                axum::Json(json!({
+                    "origin": named(ORIGIN),
+                    "authorization": named(AUTHORIZATION),
+                }))
+            }),
         );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -203,6 +219,39 @@ async fn android_client_lifecycle() {
 #[tokio::test]
 async fn ios_client_lifecycle() {
     run_lifecycle(Platform::Ios).await;
+}
+
+#[tokio::test]
+async fn proxied_requests_leave_the_apps_own_origin_behind() {
+    let root = tempfile::tempdir().unwrap();
+    let manager = write_manager(root.path());
+    let config_path = root.path().join("home/.zone/config.toml");
+    let (upstream, upstream_task) = start_upstream().await;
+    frontend::write_host_to(&config_path, &upstream).unwrap();
+    let app = desktop_app(manager, config_path, upstream).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/headers")
+                .header(ORIGIN, "http://127.0.0.1:53123")
+                .header(AUTHORIZATION, "Bearer fake-session-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let seen: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        seen,
+        json!({ "origin": null, "authorization": "Bearer fake-session-token" }),
+        "the server was told the app's loopback address is a console it could send a browser to"
+    );
+    upstream_task.abort();
 }
 
 #[tokio::test]

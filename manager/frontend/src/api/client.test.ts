@@ -1517,6 +1517,7 @@ describe('Client', () => {
       model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
       model_audio: 'ace_step_v1_3.5b.safetensors',
     };
+    const mockWorkspaceAiSettings = { ...mockAiSettings, overrides: true };
 
     describe('Organization AI Settings', () => {
       it('getOrgAiSettings fetches org AI settings', async () => {
@@ -1587,15 +1588,16 @@ describe('Client', () => {
     });
 
     describe('Workspace AI Settings', () => {
-      it('getWorkspaceAiSettings fetches workspace AI settings', async () => {
+      it('getWorkspaceAiSettings fetches workspace AI settings and whether they override', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: true,
-          json: async () => mockAiSettings,
+          json: async () => mockWorkspaceAiSettings,
         });
 
         const result = await client.getWorkspaceAiSettings('org-1', 'ws-1');
 
         expect(result.provider).toBe('openai');
+        expect(result.overrides).toBe(true);
         expect(mockFetch).toHaveBeenCalledWith(
           '/api/organizations/org-1/workspaces/ws-1/settings/ai',
           expect.any(Object)
@@ -1605,13 +1607,15 @@ describe('Client', () => {
       it('updateWorkspaceAiSettings updates workspace AI settings', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: true,
-          json: async () => mockAiSettings,
+          json: async () => mockWorkspaceAiSettings,
         });
 
-        await client.updateWorkspaceAiSettings('org-1', 'ws-1', {
+        const result = await client.updateWorkspaceAiSettings('org-1', 'ws-1', {
           provider: 'anthropic',
           anthropic_api_key: 'sk-ant-test',
         });
+
+        expect(result.overrides).toBe(true);
 
         expect(mockFetch).toHaveBeenCalledWith(
           '/api/organizations/org-1/workspaces/ws-1/settings/ai',
@@ -1620,13 +1624,15 @@ describe('Client', () => {
       });
 
       it('resetWorkspaceAiSettings resets workspace AI settings and reads the defaults back', async () => {
-        mockFetch
-          .mockResolvedValueOnce({ ok: true, status: 204 })
-          .mockResolvedValueOnce({ ok: true, json: async () => mockAiSettings });
+        mockFetch.mockResolvedValueOnce({ ok: true, status: 204 }).mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ ...mockAiSettings, overrides: false }),
+        });
 
         const result = await client.resetWorkspaceAiSettings('org-1', 'ws-1');
 
         expect(result.provider).toBe(mockAiSettings.provider);
+        expect(result.overrides).toBe(false);
         expect(mockFetch).toHaveBeenNthCalledWith(
           1,
           '/api/organizations/org-1/workspaces/ws-1/settings/ai',

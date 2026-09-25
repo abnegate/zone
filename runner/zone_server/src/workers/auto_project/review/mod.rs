@@ -16,14 +16,13 @@ use std::time::Duration;
 
 use serde_json::Value;
 use thiserror::Error;
-use zone_core::llm::{LlmClient, LlmConfig, Message, ToolDefinition};
+use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message, ToolDefinition};
 use zone_core::tools::{ToolContext, ToolResult};
 use zone_vcs::pull_request::{ChangedFile, PrService, PullRequestDetail, PullRequestReference};
 
 use crate::config::Config;
 use crate::db::auto_projects::{Finding, ReviewRow};
 use crate::db::tasks::TaskRow;
-use crate::state::llm_backend;
 
 pub use verdict::{Outcome, Verdict};
 
@@ -64,6 +63,7 @@ pub struct ReviewRequest<'a> {
 /// Run one review and return its verdict.
 pub async fn run(
     config: &Config,
+    backend: LlmBackend,
     pr: PrService,
     request: ReviewRequest<'_>,
 ) -> Result<Verdict, ReviewError> {
@@ -73,7 +73,7 @@ pub async fn run(
         default_model: request.reviewer.clone(),
         temperature: REVIEW_TEMPERATURE,
         max_tokens: REVIEW_TOKENS,
-        backend: llm_backend(config),
+        backend,
     });
     let shared = Arc::new(tools::Shared {
         pr,
@@ -84,10 +84,15 @@ pub async fn run(
         files: request.files.clone(),
     });
     let registry = tools::registry(shared);
-    let definitions: Vec<ToolDefinition> = registry.definitions();
+    let definitions: Option<Vec<ToolDefinition>> =
+        matches!(client.config().backend, LlmBackend::Http).then(|| registry.definitions());
     let context = ToolContext::default();
     let mut messages = vec![
-        Message::system(prompt::system(request.round, request.same_model)),
+        Message::system(prompt::system(
+            request.round,
+            request.same_model,
+            definitions.is_some(),
+        )),
         Message::user(prompt::user(
             request.task,
             request.brief,
@@ -103,7 +108,7 @@ pub async fn run(
         let mut corrected = false;
         for _ in 0..MAX_TURNS {
             let response = client
-                .chat_with_model(&reviewer, &messages, Some(&definitions))
+                .chat_with_model(&reviewer, &messages, definitions.as_deref())
                 .await
                 .map_err(|error| ReviewError::Model(error.to_string()))?;
             let Some(choice) = response.choices.into_iter().next() else {
@@ -149,5 +154,151 @@ pub async fn run(
     match tokio::time::timeout(REVIEW_TIMEOUT, session).await {
         Ok(outcome) => outcome,
         Err(_) => Err(ReviewError::TimedOut),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+    use uuid::Uuid;
+    use zone_core::llm::AgentKind;
+    use zone_vcs::pull_request::Mergeability;
+
+    use crate::config::ModelBackend;
+
+    const DIFF: &str = "diff --git a/src/cart.ts b/src/cart.ts\n+export const total = 0;";
+
+    const REPLY: &str = "I read the diff.\n<zone-review>\n{\"verdict\":\"approve\",\"summary\":\"The cart is sound.\",\"findings\":[],\"addressed\":[]}\n</zone-review>";
+
+    fn reviewer(directory: &TempDir, prompt: &Path) -> PathBuf {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = directory.path().join("claude");
+        let mut file = std::fs::File::create(&path).expect("the fake agent");
+        writeln!(
+            file,
+            "#!/bin/sh\ncat > '{prompt}'\ncat <<'EOF'\n{assistant}\n{result}\nEOF",
+            prompt = prompt.display(),
+            assistant = serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": REPLY}]},
+            }),
+            result = serde_json::json!({"type": "result", "subtype": "success", "is_error": false}),
+        )
+        .expect("the fake agent body");
+        drop(file);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the fake agent to be executable");
+        path
+    }
+
+    fn task() -> TaskRow {
+        TaskRow {
+            id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            created_by: None,
+            project_ids: Vec::new(),
+            title: "Add a cart".into(),
+            description: "Shoppers need a cart.".into(),
+            acceptance_criteria: None,
+            status: "completed".into(),
+            priority: None,
+            model_name: None,
+            dependencies: None,
+            is_agentic: true,
+            require_plan_approval: false,
+            github_repo_url: None,
+            source_id: None,
+            source_ids: None,
+            worker_id: None,
+            queued_at: None,
+            started_at: None,
+            completed_at: None,
+            created_at: None,
+            updated_at: None,
+            pr_url: None,
+            branch_name: None,
+            pr_status: None,
+            pr_created_at: None,
+        }
+    }
+
+    fn pull() -> PullRequestDetail {
+        PullRequestDetail {
+            node_id: String::new(),
+            number: 7,
+            title: "(feat): add a cart".into(),
+            body: Some("Adds a cart.".into()),
+            state: "open".into(),
+            draft: false,
+            merged: false,
+            merge_commit_sha: None,
+            head_sha: "abc123".into(),
+            head_ref: "zone/cart".into(),
+            base_ref: "main".into(),
+            mergeable: Mergeability::Unknown,
+            mergeable_state: None,
+            changed_files: 1,
+            additions: 1,
+            deletions: 0,
+            commits: 1,
+            html_url: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_coding_agent_reviews_the_change_from_its_inline_diff() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let prompt = directory.path().join("prompt");
+        let config = Config {
+            model_backend: ModelBackend::Cli {
+                agent: AgentKind::Claude,
+                executable: Some(reviewer(&directory, &prompt)),
+            },
+            ..crate::state::test_config()
+        };
+        let task = task();
+        let pull = pull();
+
+        let verdict = run(
+            &config,
+            crate::services::backend::instance(&config),
+            PrService::new(),
+            ReviewRequest {
+                task: &task,
+                brief: None,
+                pull: &pull,
+                diff: DIFF.to_string(),
+                files: Vec::new(),
+                open: &[],
+                prior: &[],
+                round: 1,
+                reviewer: "sonnet".into(),
+                same_model: false,
+                token: "token".into(),
+                reference: PullRequestReference {
+                    owner: "acme".into(),
+                    repository: "shop".into(),
+                    number: 7,
+                },
+            },
+        )
+        .await
+        .expect("an agent that answers with a verdict has reviewed the change");
+
+        assert_eq!(verdict.outcome, Outcome::Approve);
+        assert_eq!(verdict.summary, "The cart is sound.");
+        let prompt = std::fs::read_to_string(&prompt).expect("the agent was given a prompt");
+        assert!(
+            prompt.contains(DIFF),
+            "the agent reviews from the diff inline: {prompt}"
+        );
+        assert!(
+            !prompt.contains("read_pr_file"),
+            "the agent was told of a tool it cannot call: {prompt}"
+        );
     }
 }

@@ -122,92 +122,823 @@ For production, regenerate secrets for security.
 
 ## 🧑‍💻 Model Backend
 
-Where chat turns, task runs, titles and summaries get their completions. The
-default is the OpenAI-compatible endpoint `LITELLM_HOST` names. A single-user
-self-host can instead run a coding agent CLI that is already signed in on the
-host, and spend that personal subscription rather than a metered API key.
+Where chat turns and task runs get their completions, along with chat titles,
+pull request subjects, and auto-project reviews and summaries. The default is
+the OpenAI-compatible endpoint `LITELLM_HOST` names. An organization can instead
+choose a coding agent CLI as its provider, **Claude Code** or **Codex**, and
+sign it in with its own Claude or ChatGPT subscription. Zone then runs that CLI
+for the organization's completions and serves Zone's tools to it over MCP. The
+manager image ships both CLIs: claude 2.1.278 and codex 0.156.1.
+
+### Choosing a provider
+
+Organization admins and owners choose the provider under **Organization
+Settings > AI Settings**, where *Claude Code (Claude subscription)* and *Codex
+(ChatGPT subscription)* sit beside Self-Hosted, OpenAI, Anthropic and AWS
+Bedrock (`claude_code` and `codex` in the API). A workspace admin can choose
+one for a single workspace under **Workspace Settings > AI Settings**, with
+**Override organization AI settings** on; the workspace then runs on its
+organization's sign-in for that agent. Organizations and workspaces that choose
+neither follow `ZONE_LLM_BACKEND`, the instance-wide default.
+
+No instance-wide setting turns these providers off: any organization admin can
+select them. Read *Security* below before using them on an instance shared by
+organizations that must not see each other's data.
 
 ### `ZONE_LLM_BACKEND`
 - **Default**: `litellm`
-- **Description**: Which backend answers a completion
+- **Description**: The instance-wide default, for organizations and workspaces
+  whose provider is not Claude Code or Codex
 - **Options**:
   - `litellm` (the endpoint `LITELLM_HOST` names)
-  - `claude` (runs the `claude` CLI on this host)
-  - `codex` (runs the `codex` CLI on this host)
+  - `claude` (runs the `claude` CLI)
+  - `codex` (runs the `codex` CLI)
 - **Note**: With `claude` or `codex`, `LITELLM_HOST` and `LITELLM_KEY` are no
-  longer required at boot, so a host with no LiteLLM at all can start.
+  longer required at boot, so a host with no LiteLLM at all can start. The CLI
+  then always uses the login of the user the server runs as, whatever
+  `ZONE_AGENT_HOST_LOGIN` says: Zone never refuses these turns as not signed
+  in. Without a login the CLI fails them in its own words, and Zone adds that
+  the server's operator has to sign in again on the host, since no
+  organization's sign-in is used here; a task run that fails that way stops
+  without spending its retries. claude still gets the variables and flags
+  under *How a turn runs*, and codex `ZONE_CODEX_SANDBOX`, but neither gets an
+  organization's home, and both run in the server's own working directory
+  rather than an organization's. In the manager image that directory is the
+  root-owned `/app`, so an agent given its own tools cannot write there. Zone
+  signs no one in for this path; in the compose stack, choose Claude Code or
+  Codex in AI settings instead.
 
 ### `ZONE_LLM_BACKEND_EXECUTABLE`
 - **Default**: unset, so the agent's own name is looked up on `PATH`
+  (`/usr/local/bin` in the manager image)
 - **Description**: An explicit binary to run instead, for a CLI that is not on
   the server's `PATH` (`/opt/homebrew/bin/codex`, say)
 - **Usage**: Only with `ZONE_LLM_BACKEND` set to `claude` or `codex`; setting it
   otherwise is refused at boot, because it would mean believing a CLI was
-  serving turns while the HTTP endpoint was still being billed.
+  serving turns while the HTTP endpoint was still being billed. It applies to
+  that agent wherever Zone runs it, for organizations that choose it as their
+  provider too; the other agent is still looked up on `PATH`. Compose does not
+  pass it.
+
+### `ZONE_AGENT_STATE_DIR`
+- **Default**: `$XDG_STATE_HOME/zone/agents`, falling back to
+  `$HOME/.local/state/zone/agents`
+- **Compose and Helm**: `/app/agent-state`, on the `zone_manager_agent_state`
+  volume in compose
+- **Description**: Where each organization's CLI keeps its state.
+  `<dir>/<organization id>/claude` is claude's `CLAUDE_CONFIG_DIR` and
+  `<dir>/<organization id>/codex` is codex's `CODEX_HOME`. Each has a `work`
+  directory, where every turn of that agent for that organization runs. Zone
+  creates the organization's directories with mode 0700 and leaves the mode of
+  an existing root alone.
+- **Contents**: codex's login (`auth.json`, which codex renews itself) and both
+  CLIs' session transcripts. Zone keeps the Claude token in the database and
+  hands it to each turn in `CLAUDE_CODE_OAUTH_TOKEN`; it does not write it
+  here. Zone does not prune the transcripts. Deleting an organization stops
+  any codex sign-in it has in progress, runs `codex logout` in its codex home,
+  and removes `<dir>/<organization id>` with everything in it. The delete
+  request waits for any change to the organization's sign-ins already under
+  way, such as a sign-out, and for `codex logout`, which Zone stops after 30
+  seconds; the directory is then removed in the background. If a step fails,
+  the organization is still deleted and the server logs why. A
+  `<dir>/<organization id>` that is a link, or not a directory, is left in
+  place, and codex is not logged out.
+- **Note**: Must be an absolute path. A relative one is refused at boot, and so
+  is an unset one when neither `XDG_STATE_HOME` nor `HOME` is absolute.
+
+### `ZONE_AGENT_HOST_LOGIN`
+- **Default**: `true`. Compose sets `false` unless `.env` says otherwise, and so
+  does the Helm chart, in `server.env`.
+- **Description**: Whether an organization that chose Claude Code or Codex but
+  has not signed in may use the login of the user the server runs as. See
+  *Running Zone natively* below. It does not apply to `ZONE_LLM_BACKEND`
+  set to `claude` or `codex`, which always runs on that login.
+- **Options**: `true`, `1`, `yes` or `on`, and `false`, `0`, `no` or `off`, in
+  any case. Anything else is refused at boot.
+- **Note**: In a container that would be a login made inside the container,
+  answering for every organization, which is why compose and Helm turn it off.
+  Turn it off on a native server shared by several organizations too.
+
+### `ZONE_CLAUDE_TOKEN_URL`
+- **Default**: `https://platform.claude.com/v1/oauth/token`
+- **Description**: Where Zone exchanges a Claude authorization code for tokens
+  and renews them. Tests point it at a local mock. Compose passes it from
+  `.env`, where an empty value keeps the default.
+- **Note**: Must be an absolute `http` or `https` URL with a host, carrying no
+  credentials, query or fragment. Anything else is refused at boot.
+
+### `ZONE_AGENT_CALLBACK`
+- **Default**: unset, so admins paste the code claude.com shows. Compose sets
+  it to `ZONE_AGENT_CALLBACK_PORT`, 54545 unless `.env` names another port; an
+  empty `ZONE_AGENT_CALLBACK_PORT` turns it off. The Helm chart leaves it
+  unset.
+- **Description**: The port of `http://localhost:<port>/callback`, where
+  claude.com sends the admin's browser back with a Claude sign-in's code, as it
+  does for claude's own sign-in, so nothing is pasted. Zone listens there, on a
+  port of its own, for `GET /callback?code=…&state=…` and serves nothing else;
+  see *Signing in*.
+- **It serves only a browser on the machine Zone runs on**, with the console
+  open at a localhost address that `ZONE_CONSOLE_ORIGINS` lists, such as
+  compose's `http://manager.localhost` or the `dev` profile's
+  `http://localhost:3001`: a native run, or the compose stack on the admin's
+  own computer. A console open anywhere else asks claude.com for a code to
+  paste instead, so a remote stack keeps working with the callback on. A
+  browser on another machine can use the callback through an SSH tunnel that
+  forwards it and the console, such as
+  `ssh -L 54545:localhost:54545 -L 8080:localhost:80 <zone-host>` with the
+  console opened at `http://manager.localhost:8080`, which
+  `ZONE_CONSOLE_ORIGINS` then has to list.
+- **Why nothing turns it on natively**: Zone cannot tell where the admin's
+  browser runs, so only the operator can turn it on.
+- **Note**: Must be `http://localhost:<port>`, the only address claude.com
+  sends a sign-in back to, or the port alone. `127.0.0.1`, `https`, a path or a
+  missing port is refused at boot. The server also refuses to start when it
+  cannot listen on that port.
+
+### `ZONE_AGENT_CALLBACK_BIND`
+- **Default**: `127.0.0.1`, on the port `ZONE_AGENT_CALLBACK` names. Compose
+  sets `0.0.0.0:54545`.
+- **Description**: The address, and optionally the port, the callback listener
+  binds. Loopback keeps it to browsers on the server's own machine. A port here
+  differs from the callback's only when a port mapping sits between the
+  browser and the listener. Outside a container, the server warns at boot when
+  the listener binds anything but loopback.
+- **Compose**: Docker hands a published port to the container's own interface,
+  never to its loopback, so the listener inside binds `0.0.0.0:54545`, and the
+  publish, `127.0.0.1:${ZONE_AGENT_CALLBACK_PORT}:54545`, keeps it to the
+  host's own loopback. Other containers on the compose network can reach it,
+  as they can reach the API. Under the `vpn` profile the manager shares
+  Gluetun's network, so Gluetun publishes the port and lets it through its
+  firewall.
+- **Note**: Must be an IP address, or an IP address and port such as
+  `0.0.0.0:54545`. Anything else is refused at boot, even with no callback
+  set.
+
+### `ZONE_CONSOLE_ORIGINS`
+- **Default**: empty, so no sign-in uses the callback. Compose lists the
+  consoles Traefik serves: `http://manager.localhost`,
+  `https://manager.localhost`, `http://manager.${DOMAIN_HOST_WEBUI}` and
+  `https://manager.${DOMAIN_HOST_WEBUI}`. The `dev` profile adds the Vite
+  server, `http://localhost:3001`. A list in `.env` replaces these, and an
+  empty one turns the callback's return off. The Helm chart leaves it empty.
+- **Description**: The consoles, comma separated, that the callback sends a
+  browser on to with a sign-in's receipt, each written as the browser names
+  it, `scheme://host[:port]`. A Claude sign-in uses the callback only when the
+  `Origin` of the request that starts it is one of them exactly and is a
+  localhost address: `localhost` or a name under it, `127.0.0.1` or `[::1]`.
+  Any other start pastes the code claude.com shows, and one that asks for the
+  callback is refused. A listed console elsewhere, such as
+  `https://manager.example.com`, still pastes.
+- **Why a list**: whoever starts a sign-in chooses the `Origin` of their own
+  request, and the browser that approves it is sent there with the receipt.
+  List only consoles you run, so a link someone else started cannot send your
+  browser, and its receipt, to anything else your machine serves, such as a
+  development server on another port.
+- **Note**: Each entry must be an `http` or `https` origin with no
+  credentials, path, query or fragment; anything else is refused at boot.
+  Entries are compared as browsers send them, so case and a default port make
+  no difference. The desktop and mobile apps serve the console from
+  `http://127.0.0.1` on a port of their own and never pass that origin on, so
+  their sign-ins paste the code wherever the server runs.
+
+### `ZONE_CODEX_SANDBOX`
+- **Default**: `workspace-write`. The manager image sets `danger-full-access`,
+  which compose and the Helm chart keep.
+- **Description**: The sandbox codex runs its own tools in on a turn that grants
+  them, that is with **Zone tools only** off. A turn that withholds them runs
+  `read-only` whatever this says.
+- **Options**:
+  - `workspace-write` (codex confines its shell with bubblewrap)
+  - `danger-full-access` (no sandbox: codex's shell runs as the server's user,
+    with all of that user's file and network access)
+- **Note**: bubblewrap needs user namespaces, and Docker's default seccomp
+  profile blocks them, so in a container every sandboxed command fails with
+  `bwrap: No permissions to create a new namespace`. Set `workspace-write`
+  where your container runtime allows user namespaces. Any other value is
+  refused at boot.
+
+### `ZONE_AGENT_ENV_PASSTHROUGH`
+- **Default**: empty
+- **Description**: Extra variables, comma separated, that the claude and codex
+  CLIs, and Zone's own chat and task tools, may inherit from the server's
+  environment
+- **Note**: A CLI starts from an empty environment and inherits only `HOME`,
+  `PATH`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `LC_*`, `TZ`, `TMPDIR`,
+  `XDG_RUNTIME_DIR`, the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`,
+  `NO_PROXY` and `ALL_PROXY`, in upper or lower case), `SSL_CERT_FILE`,
+  `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS` and the names listed here. Unless named
+  here, the database URL, the JWT and encryption keys, `LITELLM_KEY`,
+  `CLAUDE_CONFIG_DIR` and `CODEX_HOME` stay behind. `CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`,
+  `CODEX_API_KEY` and `ZONE_MCP_TOKEN` stay behind even when named here: each
+  would decide whose account a CLI's turn is billed to or whose tools it
+  reaches. Zone then adds what the turn needs; see *How a turn runs*. The
+  `rg` that `search_code` runs, the `git` a background job runs to find its
+  checkout, and `ffmpeg` and `ffprobe` also start from an allowlist rather
+  than the server's environment.
+- **Behaviour change**: A CLI used to inherit the server's whole environment
+  apart from the provider API keys. A setup that relied on that, such as an
+  `ANTHROPIC_BASE_URL` in the server's environment, now has to name the
+  variable here. What is named reaches every organization's CLI and the tools
+  of every chat and task, so name nothing secret. In compose the manager
+  container receives only the variables `docker-compose.yml` lists, so add the
+  variable to the manager service's `environment` as well.
+
+### `ZONE_CHAT_AGENT_CWD`
+- **Default**: the server's working directory. Compose defaults it to
+  `/app/workspace` and the `dev` profile to `/app/runner`, and a value in
+  `.env` overrides both. The Helm chart sets `/app/workspace`.
+- **Description**: Where Zone's own chat tools start: relative paths given to
+  `read_file`, `run_shell` and the other host tools resolve against it, and
+  background jobs keep their logs in its `.zone/jobs`. Every organization's
+  chats share it. It is not where a CLI runs: on Claude Code or Codex, that is
+  the organization's `work` directory.
+- **Note**: `/app` is root-owned in the manager image, so the tools need a
+  directory the `zone` user can write, and `/app/workspace` is one.
+
+### Signing in
+
+Each organization signs in to each agent once, in the panel that appears under
+the provider on **Organization Settings > AI Settings**; a workspace's AI
+override shows the same panel. Only organization admins and owners can sign in
+or out. Other members see the status, with "Ask an organization admin to sign
+in" while the agent is not signed in.
+
+**Claude Code** uses the sign-in `claude setup-token` uses. How the code gets
+back to Zone depends on `ZONE_AGENT_CALLBACK` and on where the console is open.
+
+With a callback, as in compose, and the console open on the machine Zone runs
+on at a localhost address `ZONE_CONSOLE_ORIGINS` lists, nothing is pasted:
+
+1. **Sign in with Claude** gives you a link to claude.com. Open it in the same
+   browser, sign in there and approve access. The panel says "Approve on
+   claude.com; Zone finishes the sign-in automatically."
+2. claude.com sends that tab to `http://localhost:<port>/callback` with the
+   code. Zone keeps the code under a one-time receipt and sends the tab on to
+   the console's `/agent-sign-in` page, which hands the receipt back with your
+   Zone session. Zone then exchanges the code, and the tab says "Signed in to
+   Claude"; you can close it.
+3. The panel checks every three seconds, backing off while checks fail, and
+   shows Signed in once the sign-in is recorded. When it fails, because
+   claude.com did not approve, would not grant the access Zone asked for, put
+   the Claude account on hold, could not answer, or refused the code, the tab
+   says why, and so does the panel, which then offers **Start again** and
+   **Try again with full access**.
+
+**Paste a code instead**, beside the link, starts a new sign-in whose code
+claude.com shows for pasting. Use it when the browser cannot reach the
+callback, such as when the tab shows a connection error; the address of that
+tab's page can be pasted as well. A console open anywhere but a localhost
+address `ZONE_CONSOLE_ORIGINS` lists, and a server without a callback, start
+every sign-in this way:
+
+1. **Sign in with Claude** gives you a link to claude.com. Sign in there and
+   approve access.
+2. claude.com shows a code. Paste it, or the address of the page showing it,
+   into **Code from claude.com** and submit it.
+
+Either way, the admin who started has to finish within ten minutes. The panel
+shows until when, and drops the link once that time has passed. **Cancel**
+ends the sign-in on the server too, wherever its code is. Zone exchanges the
+code at `ZONE_CLAUDE_TOKEN_URL`, naming the same redirect the link named, and
+stores the tokens in the database, sealed with a key derived from
+`ENCRYPTION_KEY`. The panel shows the plan, such as Claude Team, when the token
+response names one. It shows an expiry date only for a sign-in Zone cannot
+renew, one whose token came without a refresh token.
+
+The callback request carries no Zone session, so the listener never exchanges
+a code itself. It takes a state only once, within its ten minutes, when Zone
+issued it for this flow, and only at the `localhost:<port>` address the link
+named; a state issued for pasting stays for its paste. It parks the code under
+a one-time receipt and sends the browser to the console that started the
+sign-in, which Zone took from the start request's `Origin`, only when
+`ZONE_CONSOLE_ORIGINS` lists that origin exactly and it is a localhost
+address. The receipt travels in the fragment of that address,
+`/agent-sign-in#receipt=…`, which a browser never sends to a server or in a
+`Referer`; the console reads it, drops it from the address and hands it back
+once. Zone exchanges the code only when the receipt comes back with the Zone
+session that started the sign-in, from the admin who started it, who still
+manages the organization. It checks that again, and that the session is still
+signed in, in the transaction that records the tokens. A receipt handed back
+by anyone else, or from another session, discards the code and ends the
+sign-in. So, as long as the listed consoles are ones you run, a link someone
+else started cannot sign their organization in with your Claude account. A
+pasted code finishes only for the admin who started its sign-in, with the same
+checks on their role and on the session that started it. The page the listener
+shows repeats nothing from the request. Nothing in Zone's stack logs the
+receipt: the server logs neither the code, the state nor the receipt, and
+neither Traefik's access log nor the console's request log ever sees a
+fragment. The listener answers at most 16 connections at once, turns 16 more
+away with a busy page and closes the rest.
+A connection has ten seconds to send its request and 30 in all. Each admin has
+at most one sign-in in flight per organization: starting another abandons the
+first. A sign-in that finishes after a **Cancel** or a sign-out records
+nothing.
+
+Zone asks for inference access only, with a one-year lifetime, as
+`claude setup-token` does. If claude.com refuses that on its page, **Try again
+with full access**, which the panel shows beside the code field, starts over
+with the wider set of scopes claude's own login asks for, without the one-year
+lifetime. The panel leaves that button out when the sign-in already asks for
+full access.
+
+A paste Zone cannot read, such as a code with its `#state` cut off, leaves the
+sign-in open, so you can paste again. So does a pasted callback saying
+claude.com did not approve: open the link, approve, and paste the new code. A
+code claude.com rejects, or a sign-in that expired or was already used, ends
+it. The panel then drops the link and offers **Start again**, which starts
+over with the same access, beside **Try again with full access**. A sign-in in
+progress survives switching to another settings tab and back.
+
+When a refresh token came with it, Zone renews a Claude token before handing
+it to a turn if the token would expire within the longest turn it may be
+handed to: an hour, the longest a task attempt runs, or
+`ZONE_CHAT_TIMEOUT_SECONDS` when that is longer. A renewal lasts no longer
+than the lifetime Claude grants a token, so Zone never renews a token while
+more than half that lifetime is left. A chat allowed to run longer than half a
+token's lifetime can therefore outlive its token. A task run takes the token
+afresh for each attempt. Concurrent turns renew it once, and a renewal that
+fails before the token expires leaves the current token in use.
+
+**Codex** uses codex's own device-code sign-in:
+
+1. **Sign in with ChatGPT** runs `codex login --device-auth` on the server.
+2. The panel shows OpenAI's link, `https://auth.openai.com/codex/device`, and a
+   one-time code that expires after 15 minutes. Open the link, sign in to
+   ChatGPT and enter the code. The panel checks every three seconds, backing
+   off while checks fail, and shows Signed in once codex has saved the login.
+   It stops showing the code once the code has expired.
+
+Codex keeps the device code with `ZONE_AGENT_CALLBACK` set. codex's own browser
+sign-in, `codex login`, listens only on `127.0.0.1:1455`, a port no flag
+changes, so a port published from a container cannot reach it; a second one
+on the same machine cancels the first, which would let organizations cancel
+each other's; and it opens a browser on the server itself.
+
+The one-time code is shown only to organization admins and owners and to
+whoever started the sign-in. codex signs in inside a staging directory, and
+its new `auth.json` replaces the organization's only when the sign-in
+succeeds, so a refused or expired attempt leaves an existing login as it was.
+**Cancel** stops the sign-in by signing the organization out of codex. If
+OpenAI refuses to issue a code, the panel shows codex's error, such as
+`device code request failed with status 403 Forbidden`: codex reports the HTTP
+status OpenAI answered with, not the body of the answer. A sign-in that fails
+on the server's own disk, such as a state directory it cannot write, shows
+only an internal error, or, once codex has signed in, "Codex signed in, but
+Zone could not record the sign-in. Start again."; the server's log has the
+details.
+
+**Signed in means the credentials are there.** Neither CLI checks a login when
+asked for its status: `claude auth status` reports one for any token it finds,
+and `codex login status` reads `auth.json` without calling OpenAI. Zone does
+not check either. Claude Code shows Signed in while Zone holds a token that it
+can open with the current `ENCRYPTION_KEY` and that has not expired or can be
+renewed; a token sealed under another key shows as expired. Codex shows Signed
+in while the organization's `auth.json` exists. A login revoked upstream, or
+one codex can no longer renew, shows up on the next turn instead: the turn
+fails in the CLI's own words, followed by "Sign in again under Organization
+Settings > AI Settings." A task run that fails that way stops without spending
+its retries, since a retry signs no one in.
+
+**Signing out** deletes the organization's Claude tokens from Zone; it does not
+revoke them with Anthropic. For Claude it also ends every sign-in to the
+organization still in flight, and forgets why any failed. For Codex it stops a
+sign-in in progress and runs `codex logout`, which asks OpenAI to revoke the
+login and deletes `auth.json`. The panel asks before it signs out, since the
+sign-out applies to every workspace of the organization. Sign-ins and
+sign-outs are recorded in the organization's audit log as `agent.signed_in`
+and `agent.signed_out`, the sign-in even when the browser that finished it
+went away before Claude answered. Deleting the organization deletes its Claude
+tokens with it, drops every Claude sign-in still in flight, and signs it out of
+codex the same way.
+
+The panel uses these routes, where `{agent}` is `claude` or `codex`:
+
+| Route | Who | What |
+|-------|-----|------|
+| `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models |
+| `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status. With `?attempt={attempt}`, a Claude status's `error` says why that sign-in failed, to the admin who started it |
+| `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access, and `{"flow":"paste"}` asks for a code to paste even with a callback. A claude answer's `flow` says how its code comes back, `loopback` or `paste`, and its `attempt` names the sign-in. The callback is used only when the request's `Origin` is a localhost address `ZONE_CONSOLE_ORIGINS` lists; `{"flow":"loopback"}` from anywhere else is refused |
+| `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}`; a code that fails carries a `kind`, `invalid_code` (paste again) or `start_again` |
+| `POST /api/organizations/{org_id}/agents/claude/login/receipt` | The admin who started, in the session that started it | Finish a Claude sign-in claude.com sent back to the callback, with `{"receipt":"..."}` from the fragment of the address the callback sent the browser to. Anyone else's spends the receipt and discards the code |
+| `DELETE /api/organizations/{org_id}/agents/claude/login/attempt` | Any member, for their own | End the caller's Claude sign-in, wherever its code is |
+| `DELETE /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Sign out |
+
+The callback, `GET /callback`, is served by the callback listener on the port
+`ZONE_AGENT_CALLBACK` names, not by the API. It answers an approved sign-in
+with a redirect to `/agent-sign-in#receipt=…&organization=…` on the console
+that started it. A Claude sign-in that failed there, or once its receipt came
+back, shows why in the agent's status `error`, to the admin who started it and
+asks with its `attempt`, until they start another, for ten minutes after it
+failed. A sign-in that never finished is forgotten ten minutes after it
+started, or after its code began to be exchanged.
+
+### How a turn runs
+
+For an organization on Claude Code or Codex, each chat turn, task run, title,
+review or summary starts the CLI where the server runs:
+
+- in the organization's `work` directory under `ZONE_AGENT_STATE_DIR`;
+- with the environment described under `ZONE_AGENT_ENV_PASSTHROUGH`, plus the
+  organization's home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`) and, for claude,
+  the token in `CLAUDE_CODE_OAUTH_TOKEN`;
+- for claude, with `DISABLE_AUTOUPDATER=1` and
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (no updates, telemetry or error
+  reports), `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (Zone keeps its own memory),
+  and `MCP_TOOL_TIMEOUT` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` at 30 minutes;
+- for claude, with `--setting-sources ""`, so it loads no settings file, hook,
+  `CLAUDE.md`, skill, agent or command from its home, its working directory or
+  any directory above it, and with
+  `--settings '{"crossSessionInbound":"refuse"}'`, a setting meant to refuse
+  messages from other claude sessions of the same OS user;
+- for as long as the turn may take: `ZONE_CHAT_TIMEOUT_SECONDS` for a chat
+  turn, 30 minutes by default, and what is left of its hour for a task
+  attempt. A task attempt whose CLI runs out of time fails without a retry.
+
+An organization that chose Claude Code or Codex without signing in, where the
+host-login fallback is off, gets "The claude CLI is not signed in for this
+organization. An organization admin can sign in under Organization Settings >
+AI Settings." (or the same for codex) instead of an answer.
+
+The manager image pins both CLIs by SHA-256 in `/usr/local/bin`, along with
+two programs codex runs: its bubblewrap, at
+`/usr/local/bin/codex-resources/bwrap`, and its code-mode host, at
+`/usr/local/bin/codex-code-mode-host`. On the models that reach tools only
+through codex's code mode, which are all of its presets but `gpt-5.5`, codex
+makes every tool call through that host, and without it every tool call on
+those models fails. Unlike bubblewrap, the host starts under Docker's default
+seccomp profile, so those models call tools in the compose stack too. All of
+these are root-owned, so a turn cannot replace them, and claude's
+auto-updater is off.
 
 ### What the agent can reach
 
-Zone's own tools are offered to the agent over MCP: zone serves them from its
-own port for the life of one turn, behind a bearer token minted for that turn
-and revoked when it ends. The agent calls them as `mcp__zone__<name>`, zone
-executes them, and every call goes through the same approval policy a chat tool
-call goes through today — a chat with auto-approve off raises the usual card and
-waits for you, and a denial refuses the call. So retrieval, the workspace tools
-and citations work on these turns, and what the agent did shows up in the
-console the way it always does.
+Zone's own tools are offered to the agent over MCP, to claude and codex alike:
+Zone serves them at `/mcp` on its own port for the life of one turn, behind a
+bearer token minted for that turn and revoked when it ends. The token reaches
+the CLI in the `ZONE_MCP_TOKEN` variable, never on its command line. The agent
+calls the tools as `mcp__zone__<name>`, Zone executes them, and every call goes
+through the approval policy a chat tool call goes through: a chat with
+Auto-approve off raises the usual card and waits for you, and a denial refuses
+the call. So retrieval, the workspace tools and citations work on these turns,
+and the console shows what the agent did the way it always does. A task run
+gets its task tools the same way, and approves every call, as task runs
+always do. Neither a chat's agent nor a task run's is offered the tools that
+end Zone's own turn to wait, `ask_user`, `wait_for` and a task's
+`submit_plan`, and a call to one is refused as an unknown tool: over MCP such
+a call returns at once with nothing waiting behind it, so the turn would end
+on a question no one sees or a job nothing waits for. The agent's prompt
+leaves those tools out, and the tool descriptions and results that mention
+`wait_for` say to use it only when the agent has it, so in a chat the agent
+asks its question in its reply, and you answer it in your next message.
 
-Two things differ from a turn served by the endpoint. The agent runs its own
-loop rather than zone's, so zone takes one round and the agent decides for
-itself how many tool calls it makes inside that round. And `codex` does not
-take a per-invocation MCP configuration the way `claude` does, so a codex turn
-is text-only, with no tools, and says so.
+codex is told to pass every call to Zone without asking, because headless
+codex has no one to ask and Zone applies the approval policy itself; to fail
+the turn at startup when it cannot reach Zone's endpoint; and to list Zone's
+tools to the model up front. Both CLIs wait up to 30 minutes for a tool call.
+codex sends no cancellation when it stops waiting, so a shorter limit would
+leave an approval card open for a call codex had already given up on.
+
+One thing differs from a turn served by the endpoint: the agent runs its own
+loop rather than Zone's, so Zone takes one round and the agent decides for
+itself how many tool calls it makes inside that round. Its calls to Zone's
+tools are still held to the budget Zone's own loop has for the same chat turn
+or task attempt: a call past it is refused without running. A chat with
+**Agent mode** off offers no tools: the CLI runs with its own tools withheld
+and without Zone's.
 
 ### The agent's own tools
 
-Each chat carries a **Zone tools only** toggle, on by default, beside
-Auto-approve. On, the agent is confined to the tools zone serves it. Off, it
-also keeps its own file and shell tools — which run inside the agent process as
-the user the server runs as, outside the sandbox zone confines its own tools
-to, where zone can neither show them to you nor approve them.
+A chat with Agent mode on carries a **Zone tools only** toggle, on by default,
+beside Auto-approve. On, the agent is confined to the tools Zone serves it:
 
-The two toggles are independent on purpose. Auto-approve decides whether zone's
-tools run without asking; the sandbox decides whether there are tools zone never
-sees at all. Turning both off their safe settings on a single-user self-host is
-allowed, and means what it says: a chat message can read, write and run commands
-on the host with nothing standing in between.
+- claude runs with `--tools ""`: none of its built-in tools;
+- codex runs with `--sandbox read-only`, with its shell off, and with every
+  other built-in tool that has a switch turned off. What remains is
+  `apply_patch`, which the read-only sandbox refuses; the tools that read MCP
+  resources, which reach only Zone's server; and, on the models that reach
+  tools only through code mode, `request_user_input_async`. No codex 0.156.1
+  flag switches that one off; only an override of codex's model catalog
+  would, and Zone passes none. When the model calls it, the call returns at
+  once, the question appears in the reply as ordinary text, and the turn
+  completes. On those models the agent calls every tool, Zone's included,
+  from JavaScript that codex's `exec` tool runs, and `wait` collects the
+  output of a script still running.
+
+Either way, claude runs with `--strict-mcp-config`, so no MCP server but Zone's
+loads, and codex with `--ignore-user-config`, `--disable apps` and
+`--disable plugins`, so neither a `config.toml` nor ChatGPT's apps and plugins
+add tools beside Zone's.
+
+Off, the agent also keeps the tools it ships with. They run inside the CLI's
+process as the user the server runs as, where Zone can neither show them to you
+nor approve them. Zone passes neither CLI a flag that skips its permission
+prompts, so claude applies its own rules to them. Headless codex never asks:
+its shell runs whatever `ZONE_CODEX_SANDBOX` allows, which in the manager image
+is everything the server's user can do.
+
+The two toggles are independent on purpose. Auto-approve decides whether Zone's
+tools run without asking; Zone tools only decides whether there are tools Zone
+never sees at all. Turning both off their safe settings on a single-user
+self-host is allowed, and means what it says: a chat message can read, write
+and run commands where the server runs, with nothing standing in between.
 
 ### Naming a model
 
-A chat's model name is passed to the agent as `--model`, so on a CLI backend it
-has to be a name that agent knows — `sonnet`, `opus`, `haiku` for `claude` —
-not one of the Ollama models the console's picker offers, which are resolved
-from the installed catalog and mean nothing to a coding agent. Naming one the
-agent does not have fails the turn in its own words ("There's an issue with the
-selected model... Run --model to pick a different model"), which is clear enough
-to act on but is not yet offered as a choice anywhere in the console. Until the
-picker knows about this backend, set the chat's model to the agent's own name.
+With Claude Code or Codex as the provider, the Fast and Reasoning fields in AI
+settings list that agent's own models, and Automatic leaves the choice to the
+agent:
 
-### Before you switch
+- Claude Code: `sonnet`, `opus`, `haiku` and `fable`, the aliases claude
+  resolves to its latest models. On Pro and Max plans, Fable runs on the
+  plan's weekly Fable allowance and then on usage credits, which claude spends
+  without asking, as it does on any model past the plan's own limits. Usage
+  credits are turned on once per account, at claude.ai/settings/usage or with
+  `/usage-credits` in the interactive claude CLI, and every Zone sign-in for
+  that account can then use Fable. Without them claude refuses a Fable turn
+  ("Fable 5 requires usage credits", or "You've reached your Fable limit" once
+  the allowance is spent), and Zone reports "The signed-in Claude account
+  needs usage credits for Fable; turn them on at claude.ai/settings/usage or
+  pick another model". A task run does not retry it.
+- Codex: `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`,
+  `gpt-5.6-terra`, `gpt-5.6-luna` and `gpt-5.5`, the presets codex 0.156.1
+  ships, in its order. A signed-in ChatGPT account may see a different set.
 
-The CLI has to be signed in **as the user the server runs as** — the child
-process inherits that host session, and any `ANTHROPIC_API_KEY` or
-`OPENAI_API_KEY` in the server's environment is removed from it so a stray key
-cannot quietly bill you instead. Check with `claude auth status` (it prints
-`loggedIn`) or `codex login status`. A signed-out agent fails the turn and says
-so in the agent's own words rather than answering; note that `codex login
-status` can report a session that has since expired.
+Choosing Automatic and saving clears a model saved before, and changing the
+provider sets both fields back to Automatic, on the organization's page as on
+a workspace's. Through the API, an empty `model_fast`, `model_reasoning` or
+`model_embedding` clears that model, and a field left out keeps it.
 
-In a container, both the binary and its credentials have to be inside it — the
-compose images carry neither, so this backend suits a host install or an image
-you have added the CLI to.
+A workspace that chooses a different provider from its organization's
+inherits none of its Fast, Reasoning or Embedding models. A workspace on its
+organization's provider inherits each of them it leaves unset, and any
+workspace inherits the image, video and audio models it leaves unset.
 
-### Why this is not a workspace setting
+Zone passes a model to the CLI as `--model` only when that agent knows the
+name, and otherwise passes none, so the agent uses its own default. claude
+knows its aliases in any case (`sonnet`, `opus`, `haiku`, `fable`, `best`,
+`opusplan`, `sonnet[1m]`, `opus[1m]` and `fable[1m]`) and lowercase full names
+such as `claude-opus-4-8`, optionally ending in `[1m]`. codex knows its presets
+and lowercase names beginning `gpt-`. Neither knows an empty name, `auto`, or
+a name containing a colon or a space, so an Ollama model such as `llama3.2:3b`
+or `gpt-oss:20b` never reaches an agent.
 
-A CLI agent runs as the host user with that user's full file access, outside
-the sandbox Zone confines its own tools to, and every workspace shares the one
-host identity with no per-user separation and no metering. So the choice lives
-in the process environment, where the operator makes it, and there is no route
-or setting through which a workspace admin can turn it on.
+A turn asks for the chat's own model only when the agent knows it. Otherwise
+it asks for the Reasoning model from AI settings when Zone judges the prompt
+needs reasoning, and for the Fast model when not; `OLLAMA_MODEL_REASON` or
+`OLLAMA_MODEL_FAST` stands in for a field left on Automatic. It asks only for
+a name the agent knows, and with no known model to ask for, it lets the agent
+choose. A task run chooses the same way from the task's own model, so on these
+providers it starts even when no model is installed or configured.
+
+Chat titles, pull request subjects and auto-project summaries run on the Fast
+model when the agent knows it. With Fast on Automatic they try
+`COMFYUI_CLASSIFIER_MODEL`, then `OLLAMA_MODEL_FAST`, and run on the first the
+agent knows. Otherwise the agent chooses. When no usable answer arrives in
+time (30 seconds for a title or a subject, 45 for a summary), a chat is titled
+with the first words of its first message, a pull request subject is made
+from the task's title, and an auto-project summary is the pull request's first
+paragraph. Search and retrieval keep using the server's own embedding engine
+(`EMBEDDING_ENGINE` and `OLLAMA_MODEL_EMBED`).
+
+With media generation on, a message the image-intent rules leave unsure, and
+the prompt for an edit of an attached image, go to the agent on the Fast model
+when the agent knows it. With Fast on Automatic they try
+`COMFYUI_CLASSIFIER_MODEL`, then `OLLAMA_MODEL_FAST`, and use the first the
+agent knows. Otherwise neither starts the agent: the message is answered as
+chat, and the edit keeps the prompt Zone writes from the words alone. The same
+happens when the agent gives no usable answer within
+`COMFYUI_CLASSIFIER_TIMEOUT_SECS` (3 seconds by default).
+
+### Reviews, conflict repair and plan approval
+
+- **Auto-project reviews** run on the workspace's CLI without Zone's review
+  tools, such as `read_pr_file`. The reviewer judges the task, the pull request
+  and the diff in its prompt, and its instructions leave the tools out. When
+  the workspace's CLI cannot be set up (signed out with the host login off, a
+  sign-in that cannot be read, a Claude token that cannot be renewed, or an
+  unwritable state directory), that task pauses with the reason and the
+  project continues. A CLI that starts and then fails is retried on the next
+  tick. The reviewer's model is one the agent knows, taken from
+  `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else one of the agent's own
+  models, never an installed Ollama model. Zone does not pick `fable` on its
+  own, because a turn on it can spend usage credits without asking or fail
+  for want of them, as described under Naming a model: a review runs on Fable
+  only when `ZONE_AUTO_REVIEW_MODELS` or the Fast or Reasoning model names it.
+  A run whose agent chose its own model records `auto`, which names no model,
+  so Zone counts any review of it as one by the model that wrote the change:
+  the review says so, and with `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL` on
+  the task pauses unless a review bot answers. Set Fast and Reasoning models
+  the agent knows to avoid that.
+- **Conflict repair** runs Zone's own tool loop, which a CLI cannot host, so it
+  always runs on the instance's LiteLLM endpoint, whatever the workspace chose.
+  With `ZONE_LLM_BACKEND` set to `claude` or `codex` the instance has no such
+  endpoint, and repair fails with "Conflict repair needs zone's own tool loop,
+  which a coding agent CLI backend does not provide".
+- **Plan approval** is not available. A task run that requires it fails before
+  its checkout is prepared, without a retry, with "Plan approval is not
+  available when a task runs on a coding agent CLI; turn off Require plan
+  approval or use the Self-Hosted provider." When `ZONE_LLM_BACKEND` is itself
+  `claude` or `codex`, so that Self-Hosted runs a CLI too, the message is
+  "Plan approval is not available when a task runs on a coding agent CLI, and
+  every provider on this server runs on one; turn off Require plan approval."
+  A run an auto project starts is never held for approval, so it is
+  unaffected.
+
+### Running Zone natively: the host login
+
+When Zone runs as a native process and `ZONE_AGENT_HOST_LOGIN` is on, which it
+is by default, an organization that chose Claude Code or Codex but has not
+signed in falls back to the CLI login of the user the server runs as. The panel
+then says "Using this server's own Claude Code sign-in" (or Codex), with the
+plan or login type the CLI reports; Zone reads it from `claude auth status` or
+`codex login status`, and names a Claude plan the way it names a Zone
+sign-in's, such as Claude Team. Every organization without a sign-in of its
+own shares that login, which is why a server with several organizations
+should turn the fallback off.
+
+The fallback runs the CLI without `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, which
+the environment allowlist drops, so each CLI uses its default home under the
+server user's `HOME`: `~/.claude` and `~/.codex`. The turn still runs in the
+organization's `work` directory, but the CLI writes its session transcripts
+into those default homes, beside the user's own.
+
+- **A login made with `CLAUDE_CONFIG_DIR` set is not found.** On macOS claude
+  keeps such a login in a separate Keychain item keyed to that directory, so a
+  shell whose `claude auth status` reports a login can still leave the
+  fallback with none. Sign in without the variable
+  (`env -u CLAUDE_CONFIG_DIR claude auth login`), or name `CLAUDE_CONFIG_DIR`
+  in `ZONE_AGENT_ENV_PASSTHROUGH` so the fallback uses that directory.
+- **The host's settings are not used.** Every claude turn runs with
+  `--setting-sources ""`, so the fallback takes the host's login but not its
+  `~/.claude/settings.json` (its `env` block, `apiKeyHelper` or model), hooks,
+  `CLAUDE.md` files, skills, agents or commands. codex runs with
+  `--ignore-user-config`, which ignores `~/.codex/config.toml` but still reads
+  the login from `~/.codex`.
+
+With the fallback off, as in compose and Helm, such an organization gets the
+not-signed-in error above.
+
+To sign an organization in to Claude natively without pasting a code, set
+`ZONE_AGENT_CALLBACK=http://localhost:54545` (any free port) when the admins'
+browsers run on the same machine as the server and open the console at a
+localhost address, and list that address in `ZONE_CONSOLE_ORIGINS`, such as
+`ZONE_CONSOLE_ORIGINS=http://localhost:3001`.
+
+### Security: every organization is the same OS user
+
+Every organization's CLI runs as the same operating-system user as the server:
+`zone` in the manager image, and uid 1000 in the Helm chart's pods by default.
+Nothing at the OS level separates one organization's agent state from
+another's, so any process running as that user can:
+
+- read every organization's agent state: codex's `auth.json`, which is a
+  working ChatGPT login, and both CLIs' session transcripts;
+- read the `/proc/<pid>/environ` of any CLI running at the time, which holds
+  that turn's `CLAUDE_CODE_OAUTH_TOKEN` and, when Zone serves it tools, its
+  `ZONE_MCP_TOKEN`. The second lets its holder call that turn's Zone tools, as
+  that turn's user and under its approval policy, until the turn ends. A task
+  run approves every call, so whoever holds a task run's token can use its
+  write tools without anyone approving, and what they write lands in that
+  run's pull request;
+- write into any organization's agent state: replace or delete its codex
+  login, or plant files for its CLI to read; and into the shared home
+  `/home/zone`, whose `.profile` codex's shell loads before the commands it
+  runs for any organization;
+- reach whatever the server can reach on the network. In the compose stack
+  that includes Valkey, which has no password there, Prometheus's API with its
+  lifecycle endpoints when the `monitoring` profile runs, and, through
+  `host.docker.internal`, every port the Docker host offers to containers. On
+  Docker Desktop that includes services bound to the host's loopback, such as
+  a host Ollama or Postgres.
+
+The processes that run as that user are:
+
+- each CLI, and on a turn with **Zone tools only** off, its own shell and file
+  tools;
+- Zone's own chat tools, whatever the provider. With Agent mode on,
+  `read_file`, `list_files` and `search_code` reach any path the server's user
+  can read, other than the agent state and the `/proc` entries described below,
+  without an approval card. `write_file` and `apply_patch` do the same once
+  approved or with Auto-approve on, and `run_shell` and `run_command` then
+  reach everything above;
+- configured stdio MCP servers and `COMFYUI_TRAIN_COMMAND`, which also inherit
+  the server's full environment.
+
+What stands in the way:
+
+- On Linux the server makes itself non-dumpable, so no other process of its
+  user can read the server's own environment, which holds the database URL,
+  the JWT and encryption keys and the LiteLLM key. That protects the server
+  process only: any process of the same user can read a child's environment
+  while the child runs. The CLIs, Zone's shell tools, and the `rg`, `git`,
+  `ffmpeg` and `ffprobe` it runs start from an allowlisted environment,
+  without those secrets. Configured stdio MCP servers and
+  `COMFYUI_TRAIN_COMMAND` start from the server's full environment, so they
+  carry them.
+- Zone's file tools, `read_file`, `list_files`, `search_code`, `write_file`
+  and `apply_patch`, refuse any path under the agent state directory and any
+  process's `/proc/<pid>` entry, `/proc/self` included, whatever the chat's
+  provider or approval setting. They compare paths by file identity, not by
+  spelling: the state directory is known by its device and inode number, and
+  a path is refused when any directory it leads through is that one. So
+  neither `..`, a symlink or a link under a `/proc` entry, nor a name that
+  differs only in case or Unicode normalization, a firmlink such as
+  `/System/Volumes/Data`, or a bind mount gets around the refusal. They also
+  refuse `/dev/fd` and `/.vol` whole, however they are spelled, since both
+  open files by descriptor or by inode number rather than by name. A
+  recursive listing or search leaves those paths out. The check runs just
+  before the file is opened, so a process swapping a symlink into the path in
+  between would get past it, but a process that can do that as the server's
+  user can read the state itself. `run_shell` and `run_command` are not held to
+  it.
+- `--setting-sources ""`, with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, stops claude
+  from loading settings, hooks, `CLAUDE.md` files or memory planted in its
+  home, its working directory or any directory above it, `/app/agent-state`
+  included. It cannot make those files unwritable. codex may read an
+  `AGENTS.md` planted in its `CODEX_HOME`.
+- Each claude session opens a messaging socket under
+  `$XDG_RUNTIME_DIR/cc-socks` or `/tmp/cc-socks`, through which, going by
+  claude's own code, other sessions of the same OS user can reach it. Zone
+  passes every claude turn `--settings '{"crossSessionInbound":"refuse"}'`,
+  which claude 2.1.278 accepts; that it keeps two live sessions apart has not
+  been tested.
+- The environment allowlist, the per-organization homes and working
+  directories, and `ZONE_AGENT_HOST_LOGIN=false` in compose and Helm. `/app`
+  and every binary in the image are root-owned, so neither the server's user
+  nor an agent can replace them. The MCP token travels in a variable, never on
+  a command line, and dies with its turn. The Claude token stays sealed in the
+  database until a turn needs it.
+- The flags under *The agent's own tools*, so no operator configuration,
+  ChatGPT app or plugin adds tools beside Zone's. codex still exports its own
+  metrics to `ab.chatgpt.com`, and nothing in Zone turns that off.
+
+These providers suit an instance whose organizations trust each other, such
+as a personal or single-team compose stack. On an instance shared by
+organizations that must not reach each other's data, leave them unselected:
+per-organization OS users, which would be the fix, do not exist yet, and
+nothing turns the providers off for the whole instance. With or without them,
+a chat's `run_shell` and `run_command` reach every organization's agent state
+once approved, and its file tools read whatever else the server's user can.
+
+### Operations
+
+- **Compose.** The manager service mounts the `zone_manager_agent_state` volume
+  at `/app/agent-state` and passes `ZONE_AGENT_STATE_DIR`,
+  `ZONE_AGENT_HOST_LOGIN` (default `false`), `ZONE_LLM_BACKEND` (default
+  `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`),
+  `ZONE_AGENT_ENV_PASSTHROUGH`, `ZONE_CODEX_SANDBOX` (default
+  `danger-full-access`), `ZONE_CLAUDE_TOKEN_URL` (empty by default, which
+  keeps Claude's own endpoint), `ZONE_AGENT_CALLBACK`,
+  `ZONE_AGENT_CALLBACK_BIND=0.0.0.0:54545` and `ZONE_CONSOLE_ORIGINS` (the
+  consoles Traefik serves, and under `dev` the Vite server too), and publishes
+  the callback on the host's loopback only, as
+  `127.0.0.1:${ZONE_AGENT_CALLBACK_PORT}:54545`. `ZONE_AGENT_CALLBACK_PORT` in
+  `.env` drives both, 54545 by default; empty, it turns the callback off and
+  leaves the port free. Admins whose browsers run elsewhere paste codes either
+  way. The image's entrypoint hands `/app/agent-state` to `zone` with mode
+  0700, then runs the server as `zone`.
+  The `dev` profile's image, `manager/Dockerfile.dev`, does not include the
+  CLIs.
+- **Helm.** Agent providers need `server.replicaCount: 1` and
+  `server.autoscaling.enabled: false`, and a single replica needs
+  `server.podDisruptionBudget.enabled: false`; see
+  [helm/zone-apps/README.md](../helm/zone-apps/README.md), which also covers
+  the claim that keeps agent state and how to size it. The chart leaves
+  `ZONE_AGENT_CALLBACK` unset and `ZONE_CONSOLE_ORIGINS` empty, so Claude codes
+  are pasted. A browser reaches a pod's callback only through
+  `kubectl port-forward` of both the callback port and the console to its own
+  machine, with the forwarded console listed in `ZONE_CONSOLE_ORIGINS` as the
+  browser opens it, such as `http://127.0.0.1:3001`; the install notes say how
+  when the callback is set.
+- **Backups.** `make backup` and `make restore` include
+  `zone_manager_agent_state`, and with it every organization's codex login; see
+  [OPERATIONS.md](OPERATIONS.md).
+- **Upgrading.** This version adds migration 048, after which an older image
+  refuses to start against the database with `VersionMissing(48)`. Back up
+  first; see [OPERATIONS.md](OPERATIONS.md).
+- **Refused at boot**: a relative `ZONE_AGENT_STATE_DIR`, or none when neither
+  `XDG_STATE_HOME` nor `HOME` is absolute; a `ZONE_AGENT_HOST_LOGIN` that is not
+  one of the spellings above; a `ZONE_CLAUDE_TOKEN_URL` that is not an absolute
+  `http` or `https` URL with a host, or that carries credentials, a query or a
+  fragment; a `ZONE_CODEX_SANDBOX` other than `workspace-write` or
+  `danger-full-access`; a `ZONE_AGENT_CALLBACK` that is not
+  `http://localhost:<port>` or a port, or whose port the server cannot listen
+  on; a `ZONE_AGENT_CALLBACK_BIND` that is not an IP address, or an IP address
+  and port; a `ZONE_CONSOLE_ORIGINS` entry that is not an `http` or `https`
+  origin, or that carries credentials, a path, a query or a fragment. Nothing
+  is created in the state directory at boot, so one the server cannot write
+  shows up when a turn first needs it, as "Could not prepare the claude CLI's
+  state directory: …".
+
+### Known gaps
+
+- A chat's model picker lists only installed Ollama models, so the console
+  cannot give a chat `opus` or `gpt-6-sol`; set the Fast and Reasoning models
+  in AI settings instead. Whether a chat offers Agent mode also follows those
+  installed models.
+
+---
 
 ## 🎨 ComfyUI Image, Video, and Audio Generation
 
@@ -701,6 +1432,7 @@ Regenerate secrets for production:
 | Domain | No | ✅ Yes |
 | Security | No* | ✅ Yes (insecure) |
 | Ollama Models | No | ✅ Yes |
+| Model Backend | No | ✅ Yes |
 | Web Search | No | ✅ Yes |
 | VPN (optional) | No | ✅ Yes (empty OK) |
 | Docker Versions | No | ✅ Yes |
@@ -743,6 +1475,11 @@ Need to find a specific config? Quick lookup:
 - **Domains**: DOMAIN_HOST_WEBUI
 - **Email**: ACME_EMAIL
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED
+- **Model backend and coding agents**: ZONE_LLM_BACKEND,
+  ZONE_LLM_BACKEND_EXECUTABLE, ZONE_AGENT_STATE_DIR, ZONE_AGENT_HOST_LOGIN,
+  ZONE_CLAUDE_TOKEN_URL, ZONE_AGENT_CALLBACK, ZONE_AGENT_CALLBACK_BIND,
+  ZONE_AGENT_CALLBACK_PORT, ZONE_CONSOLE_ORIGINS, ZONE_CODEX_SANDBOX,
+  ZONE_AGENT_ENV_PASSTHROUGH, ZONE_CHAT_AGENT_CWD
 - **Image, video, and audio generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
   COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_VIDEO_WORKFLOW_PATH,
   COMFYUI_VIDEO_UNET, COMFYUI_VIDEO_CLIP, COMFYUI_VIDEO_VAE,

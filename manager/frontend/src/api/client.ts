@@ -55,6 +55,7 @@ import type {
   UpdateWorkspaceThemeRequest,
   Usage,
   Workspace,
+  WorkspaceAiSettings,
   WorkspaceMember,
   WorkspaceMembersResponse,
   WorkspaceTheme,
@@ -82,6 +83,7 @@ import {
   SubscriptionResponseSchema,
   UsageResponseSchema,
   VerifyEmailResponseSchema,
+  WorkspaceAiSettingsResponseSchema,
   WorkspaceMemberSchema,
   WorkspaceMembersResponseSchema,
   WorkspaceResponseSchema,
@@ -553,7 +555,7 @@ class Client {
 
   // Workspace AI Settings API
 
-  async getWorkspaceAiSettings(orgId: string, wsId: string): Promise<AiSettings> {
+  async getWorkspaceAiSettings(orgId: string, wsId: string): Promise<WorkspaceAiSettings> {
     const response = await fetch(
       `${API_BASE}/api/organizations/${orgId}/workspaces/${wsId}/settings/ai`,
       { headers: this.getHeaders() }
@@ -561,14 +563,14 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch workspace AI settings: ${response.status}`);
     }
-    return parse(AiSettingsResponseSchema, await response.json());
+    return parse(WorkspaceAiSettingsResponseSchema, await response.json());
   }
 
   async updateWorkspaceAiSettings(
     orgId: string,
     wsId: string,
     request: UpdateAiSettingsRequest
-  ): Promise<AiSettings> {
+  ): Promise<WorkspaceAiSettings> {
     const response = await fetch(
       `${API_BASE}/api/organizations/${orgId}/workspaces/${wsId}/settings/ai`,
       {
@@ -580,10 +582,10 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to update workspace AI settings: ${response.status}`);
     }
-    return parse(AiSettingsResponseSchema, await response.json());
+    return parse(WorkspaceAiSettingsResponseSchema, await response.json());
   }
 
-  async resetWorkspaceAiSettings(orgId: string, wsId: string): Promise<AiSettings> {
+  async resetWorkspaceAiSettings(orgId: string, wsId: string): Promise<WorkspaceAiSettings> {
     const response = await fetch(
       `${API_BASE}/api/organizations/${orgId}/workspaces/${wsId}/settings/ai`,
       {

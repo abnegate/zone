@@ -4,21 +4,24 @@ import { client } from '../../../../api/client';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
 import { useModels } from '../../../models';
-import { mergeStageOptions } from '../../../models/utils/stageOptions';
 import {
+  AgentSignIn,
   AiModelFields,
   AiProviderFields,
+  agentOf,
   buildAiSettingsRequest,
+  agentAccess,
   configuredFromSettings,
   credentialsFromSettings,
   emptyCredentials,
   emptyModels,
   type ModelSelection,
-  modelOptions,
+  modelChoices,
   modelsFromSettings,
   nothingConfigured,
   type ProviderConfigured,
   type ProviderCredentials,
+  useAgentStatuses,
 } from '../../ai';
 import { SettingsPage } from '../../components';
 import {
@@ -35,7 +38,7 @@ const TITLE = 'Organization Settings';
 
 export default function OrgSettingsPage() {
   const { isAuthenticated } = useAuth();
-  const { currentOrganization } = useWorkspace();
+  const { currentOrganization, resolvingRole } = useWorkspace();
   const { models: installedModels } = useModels();
 
   const [activeTab, setActiveTab] = useState<TabType>('ai');
@@ -46,12 +49,17 @@ export default function OrgSettingsPage() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
 
   const [provider, setProvider] = useState<AiProvider>('self_hosted');
+  const [savedProvider, setSavedProvider] = useState<AiProvider>('self_hosted');
   const [credentials, setCredentials] = useState<ProviderCredentials>(emptyCredentials);
   const [configured, setConfigured] = useState<ProviderConfigured>(nothingConfigured);
   const [models, setModels] = useState<ModelSelection>(emptyModels);
 
+  const agent = agentOf(provider);
+  const agents = useAgentStatuses(currentOrganization?.id ?? null, agent !== null);
+
   const applySettingsToForm = useCallback((settings: AiSettings) => {
     setProvider(settings.provider);
+    setSavedProvider(settings.provider);
     setCredentials(credentialsFromSettings(settings));
     setConfigured(configuredFromSettings(settings));
     setModels(modelsFromSettings(settings));
@@ -68,8 +76,8 @@ export default function OrgSettingsPage() {
       ]);
       applySettingsToForm(settings);
       setWorkspaces(workspacesData);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load settings');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to load settings');
     } finally {
       setLoading(false);
     }
@@ -84,8 +92,8 @@ export default function OrgSettingsPage() {
     setTimeout(() => setSuccess(null), 3000);
   };
 
-  const handleSave = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleSave = async (event: FormEvent) => {
+    event.preventDefault();
     if (!isAuthenticated || !currentOrganization) return;
 
     setSaving(true);
@@ -99,8 +107,8 @@ export default function OrgSettingsPage() {
       );
       applySettingsToForm(settings);
       flash('Settings saved successfully');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save settings');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to save settings');
     } finally {
       setSaving(false);
     }
@@ -117,26 +125,18 @@ export default function OrgSettingsPage() {
       const settings = await client.resetOrgAiSettings(currentOrganization.id);
       applySettingsToForm(settings);
       flash('Settings reset to defaults');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to reset settings');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to reset settings');
     } finally {
       setSaving(false);
     }
   };
 
-  const stage = modelOptions[provider];
-  const fastOptions = mergeStageOptions(stage.fast, installedModels, models.fast, 'chat');
-  const reasoningOptions = mergeStageOptions(
-    stage.reasoning,
+  const choices = modelChoices(
+    provider,
     installedModels,
-    models.reasoning,
-    'chat'
-  );
-  const embeddingOptions = mergeStageOptions(
-    stage.embedding,
-    installedModels,
-    models.embedding,
-    'embedding'
+    models,
+    agent ? (agents.statuses[agent]?.models ?? []) : []
   );
 
   const tabs = (
@@ -199,11 +199,31 @@ export default function OrgSettingsPage() {
             <h3 className="card-title">Provider</h3>
             <AiProviderFields
               provider={provider}
-              onProviderChange={setProvider}
+              onProviderChange={(next) => {
+                setProvider(next);
+                setModels((previous) => ({ ...previous, fast: '', reasoning: '' }));
+              }}
               credentials={credentials}
               configured={configured}
-              onChange={(key, value) => setCredentials((prev) => ({ ...prev, [key]: value }))}
+              onChange={(key, value) =>
+                setCredentials((previous) => ({ ...previous, [key]: value }))
+              }
             />
+            {agent && (
+              <AgentSignIn
+                key={`${currentOrganization.id}:${agent}`}
+                organizationId={currentOrganization.id}
+                agent={agent}
+                access={agentAccess(currentOrganization.role, resolvingRole)}
+                heading="h4"
+                unsaved={provider !== savedProvider}
+                status={agents.statuses[agent]}
+                attempt={agents.attempts[agent]}
+                loadError={agents.error}
+                onStatusChange={agents.update}
+                onAttemptChange={agents.setAttempt}
+              />
+            )}
           </div>
 
           <div className="settings-card">
@@ -211,10 +231,10 @@ export default function OrgSettingsPage() {
             <AiModelFields
               provider={provider}
               models={models}
-              onChange={(key, value) => setModels((prev) => ({ ...prev, [key]: value }))}
-              fastOptions={fastOptions}
-              reasoningOptions={reasoningOptions}
-              embeddingOptions={embeddingOptions}
+              onChange={(key, value) => setModels((previous) => ({ ...previous, [key]: value }))}
+              fastOptions={choices.fast}
+              reasoningOptions={choices.reasoning}
+              embeddingOptions={choices.embedding}
               installedModels={installedModels}
               inheritedLabel="Use server default"
             />

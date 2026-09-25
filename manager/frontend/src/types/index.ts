@@ -104,6 +104,7 @@ export type {
   UpdateWorkspaceRequest,
   UpdateWorkspaceThemeRequest,
   Workspace,
+  WorkspaceAiSettings,
   WorkspaceMember,
   WorkspaceMembersResponse,
   WorkspaceResponse,

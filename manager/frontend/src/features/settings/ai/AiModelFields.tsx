@@ -3,10 +3,33 @@ import {
   AUDIO_MODEL_OPTIONS,
   comfyImageOptions,
   type InstalledModelOption,
+  isAgentProvider,
   type ModelSelection,
   VIDEO_MODEL_OPTIONS,
   withCurrent,
 } from './options';
+
+const AGENT_EMBEDDING_HINT =
+  "Coding agents have no embedding models, so this server's own embedding engine indexes sources and knowledge.";
+
+export interface AgentModelHints {
+  fast: string;
+  reasoning: string;
+}
+
+const ORGANIZATION_AGENT_HINTS: AgentModelHints = {
+  fast: 'Automatic lets the agent choose; titles, PR subjects and summaries use it too.',
+  reasoning: 'Harder questions; empty lets the agent choose.',
+};
+
+function embeddingHint(provider: AiProvider, listed: boolean): string {
+  if (isAgentProvider(provider)) return AGENT_EMBEDDING_HINT;
+  if (listed) return 'Used to index sources and knowledge for retrieval.';
+  if (provider === 'anthropic') {
+    return 'Anthropic does not provide embedding models. Name one from another provider, such as OpenAI text-embedding-3-small.';
+  }
+  return 'Enter a custom embedding model name.';
+}
 
 interface AiModelFieldsProps {
   provider: AiProvider;
@@ -17,6 +40,7 @@ interface AiModelFieldsProps {
   embeddingOptions: string[];
   installedModels: InstalledModelOption[];
   inheritedLabel: string;
+  agentHints?: AgentModelHints;
 }
 
 function ModelSelect({
@@ -44,7 +68,7 @@ function ModelSelect({
       <select
         id={id}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(event) => onChange(event.target.value)}
         className="form-select"
       >
         <option value="">{blankLabel}</option>
@@ -70,6 +94,7 @@ export function AiModelFields({
   embeddingOptions,
   installedModels,
   inheritedLabel,
+  agentHints = ORGANIZATION_AGENT_HINTS,
 }: AiModelFieldsProps) {
   const imageOptions = comfyImageOptions(installedModels, models.image).map((name) => {
     const row = installedModels.find((item) => item.name === name);
@@ -81,6 +106,8 @@ export function AiModelFields({
     };
   });
 
+  const agentic = isAgentProvider(provider);
+
   return (
     <div className="form-grid">
       <ModelSelect
@@ -90,7 +117,11 @@ export function AiModelFields({
         onChange={(value) => onChange('fast', value)}
         options={plain(fastOptions)}
         blankLabel="Automatic"
-        hint="Short replies, titles and intent classification. Empty picks from the installed models."
+        hint={
+          agentic
+            ? agentHints.fast
+            : 'Short replies, titles and intent classification. Empty picks from the installed models.'
+        }
       />
       <ModelSelect
         id="model-reasoning"
@@ -99,7 +130,9 @@ export function AiModelFields({
         onChange={(value) => onChange('reasoning', value)}
         options={plain(reasoningOptions)}
         blankLabel="Automatic"
-        hint="Harder questions; empty picks a larger installed model."
+        hint={
+          agentic ? agentHints.reasoning : 'Harder questions; empty picks a larger installed model.'
+        }
       />
       {embeddingOptions.length > 0 ? (
         <ModelSelect
@@ -109,7 +142,7 @@ export function AiModelFields({
           onChange={(value) => onChange('embedding', value)}
           options={plain(embeddingOptions)}
           blankLabel="Automatic"
-          hint="Used to index sources and knowledge for retrieval."
+          hint={embeddingHint(provider, true)}
           full
         />
       ) : (
@@ -119,15 +152,11 @@ export function AiModelFields({
             type="text"
             id="model-embedding"
             value={models.embedding}
-            onChange={(e) => onChange('embedding', e.target.value)}
-            placeholder="text-embedding-3-small"
+            onChange={(event) => onChange('embedding', event.target.value)}
+            placeholder={agentic ? 'Server default' : 'text-embedding-3-small'}
             className="form-input"
           />
-          <p className="form-hint">
-            {provider === 'anthropic'
-              ? 'Anthropic does not provide embedding models. Name one from another provider, such as OpenAI text-embedding-3-small.'
-              : 'Enter a custom embedding model name.'}
-          </p>
+          <p className="form-hint">{embeddingHint(provider, false)}</p>
         </div>
       )}
       <div className="form-grid form-grid--3">

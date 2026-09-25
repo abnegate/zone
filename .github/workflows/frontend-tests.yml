@@ -7,12 +7,20 @@ on:
       - 'manager/frontend/**'
       - 'manager/frontend/e2e/**'
       - 'runner/zone_installer/src/setup.html'
+      - 'runner/zone_server/tests/fixtures/agents.json'
+      - 'runner/zone_server/src/services/login/status/**'
+      - 'runner/zone_server/src/services/login/status.rs'
+      - 'runner/zone_server/src/routes/agents.rs'
       - '.github/workflows/frontend-tests.yml'
   pull_request:
     paths:
       - 'manager/frontend/**'
       - 'manager/frontend/e2e/**'
       - 'runner/zone_installer/src/setup.html'
+      - 'runner/zone_server/tests/fixtures/agents.json'
+      - 'runner/zone_server/src/services/login/status/**'
+      - 'runner/zone_server/src/services/login/status.rs'
+      - 'runner/zone_server/src/routes/agents.rs'
       - '.github/workflows/frontend-tests.yml'
 
 concurrency:

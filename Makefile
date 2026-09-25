@@ -358,7 +358,7 @@ backup: ## Backup volumes to ./backups directory (the postgres cluster lives in 
 		echo "Set ALLOW_EMPTY_POSTGRES=1 to archive the other volumes anyway."; \
 		[ -n "$(ALLOW_EMPTY_POSTGRES)" ] || exit 1; \
 	fi
-	@mkdir -p backups
+	@mkdir -m 700 -p backups
 	@DATE=$$(date +%Y%m%d_%H%M%S); \
 	docker run --rm \
 		-v zone_ollama_data:/data/ollama:ro \
@@ -366,11 +366,12 @@ backup: ## Backup volumes to ./backups directory (the postgres cluster lives in 
 		-v zone_valkey_data:/data/valkey:ro \
 		-v zone_manager_repos:/data/manager_repos:ro \
 		-v zone_manager_artifacts:/data/manager_artifacts:ro \
+		-v zone_manager_agent_state:/data/manager_agent_state:ro \
 		-v zone_prometheus_data:/data/prometheus:ro \
 		-v zone_grafana_data:/data/grafana:ro \
 		-v zone_traefik_letsencrypt:/data/traefik:ro \
 		-v $$(pwd)/backups:/backup \
-		alpine tar czf /backup/zone_backup_$$DATE.tar.gz -C /data .; \
+		alpine sh -c "umask 077 && tar czf /backup/zone_backup_$$DATE.tar.gz -C /data ." && \
 	echo "$(GREEN)Backup created: backups/zone_backup_$$DATE.tar.gz$(NC)"
 
 restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_YYYYMMDD_HHMMSS.tar.gz)
@@ -386,6 +387,7 @@ restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_
 		-v zone_valkey_data:/data/valkey \
 		-v zone_manager_repos:/data/manager_repos \
 		-v zone_manager_artifacts:/data/manager_artifacts \
+		-v zone_manager_agent_state:/data/manager_agent_state \
 		-v zone_prometheus_data:/data/prometheus \
 		-v zone_grafana_data:/data/grafana \
 		-v zone_traefik_letsencrypt:/data/traefik \

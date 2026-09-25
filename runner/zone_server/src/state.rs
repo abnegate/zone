@@ -41,10 +41,14 @@ pub fn default_adapter_registry() -> AdapterRegistry {
     registry
 }
 
-/// The backend every model client in this process is built on.
+/// The instance-wide default backend, as the environment selects it.
 ///
-/// A CLI-only self-host leaves `litellm_host` empty, so a client left on HTTP
-/// has nowhere to send its turn rather than somewhere slower to send it.
+/// Model clients take their backend from [`crate::services::backend`], which
+/// starts from this default. A workspace whose provider is `claude_code` or
+/// `codex` runs that agent instead, under its organization's own sign-in, or
+/// the host's when the instance allows that. A CLI-only self-host leaves
+/// `litellm_host` empty, so a client left on HTTP has nowhere to send its turn
+/// rather than somewhere slower to send it.
 pub fn llm_backend(config: &Config) -> LlmBackend {
     match config.model_backend() {
         ModelBackend::LiteLlm => LlmBackend::Http,
@@ -355,6 +359,7 @@ pub(crate) fn test_config() -> Config {
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
         model_backend: Default::default(),
+        agents: Default::default(),
         litellm_host: "http://localhost:4000".to_string(),
         litellm_key: "test-key".to_string(),
         ollama_host: "http://localhost:11434".to_string(),
@@ -394,6 +399,7 @@ mod tests {
             jwt_access_lifetime: 900,
             jwt_refresh_lifetime: 604800,
             model_backend: Default::default(),
+            agents: Default::default(),
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),

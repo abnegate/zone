@@ -12,9 +12,9 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, BuiltinTools, Toolset};
-use zone_server::agent::{ApprovalGate, ApprovalPolicy, ChatTools, WorkspaceScope};
-use zone_server::mcp::{Lease, Turn, endpoint};
+use zone_core::llm::{AgentKind, BuiltinTools, CodexSandbox, Toolset};
+use zone_server::agent::{ApprovalGate, ApprovalPolicy, ChatTools, LoopBudget, WorkspaceScope};
+use zone_server::mcp::{Lease, Scope, Turn, endpoint};
 use zone_server::state::AppState;
 
 /// The agent prints its `system`/`init` line as soon as its servers are up,
@@ -38,11 +38,14 @@ async fn lease(harness: &Harness) -> (Lease, Console) {
     );
     let (events, received) = tokio::sync::mpsc::unbounded_channel();
     let turn = Turn::new(
-        harness.workspace,
-        harness.chat,
-        Uuid::new_v4(),
+        Scope {
+            workspace: harness.workspace,
+            chat: harness.chat,
+            user: Some(Uuid::new_v4()),
+            approval: ApprovalPolicy::required(ApprovalGate::new()),
+            calls: LoopBudget::chat().max_tool_calls,
+        },
         tools,
-        ApprovalPolicy::required(ApprovalGate::new()),
         events,
     );
     (
@@ -59,7 +62,12 @@ async fn the_host_agent_connects_to_zone_and_is_shown_zones_tools() {
     let toolset = lease.toolset();
 
     let mut child = Command::new("claude")
-        .args(AgentKind::Claude.arguments_with(None, Some(&toolset), BuiltinTools::Withheld))
+        .args(AgentKind::Claude.arguments_with(
+            None,
+            Some(&toolset),
+            BuiltinTools::Withheld,
+            CodexSandbox::default(),
+        ))
         .env(Toolset::TOKEN_VARIABLE, toolset.token.expose())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

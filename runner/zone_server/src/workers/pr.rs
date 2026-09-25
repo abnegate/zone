@@ -11,13 +11,14 @@ use uuid::Uuid;
 use serde_json::{Value, json};
 
 use crate::db::{ai_settings, projects, tasks, workspaces};
+use crate::services::backend;
 use crate::services::checkout::{Baseline, Repository};
 use crate::services::stages;
-use crate::state::{AppState, llm_backend};
+use crate::state::AppState;
 use crate::workers::conflict::agent::ModelRepairAgent;
 use crate::workers::conflict::{RepairOutcome, RepairRequest, repair};
 use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
-use zone_core::llm::{LlmClient, LlmConfig, Message};
+use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message};
 use zone_vcs::conflict::{BranchName, ConflictService};
 use zone_vcs::git::GitService;
 use zone_vcs::pull_request::{Description, PrService, PullRequestReception};
@@ -28,6 +29,9 @@ const REPAIR_TEMPERATURE: f32 = 0.0;
 
 /// Tokens a repair turn may spend on its reply.
 const REPAIR_TOKENS: u32 = 8_192;
+
+const NO_REPAIR_BACKEND: &str =
+    "Conflict repair needs zone's own tool loop, which a coding agent CLI backend does not provide";
 
 /// Temperature for a subject: naming a finished change is a classification,
 /// not a draft.
@@ -567,7 +571,13 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         _ => return RepairOutcome::Failed("Branch names are not repairable".to_string()),
     };
 
-    let model = repair_model(state, &task).await;
+    let Some(backend) = repair_backend(
+        backend::for_workspace(state, task.workspace_id).await,
+        backend::instance(state.config()),
+    ) else {
+        return RepairOutcome::Failed(NO_REPAIR_BACKEND.to_string());
+    };
+    let model = repair_model(state, &task, &backend).await;
     let repairer = ModelRepairAgent::new(
         LlmClient::new(LlmConfig {
             base_url: state.config().litellm_host.clone(),
@@ -575,7 +585,7 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
             default_model: model.clone(),
             temperature: REPAIR_TEMPERATURE,
             max_tokens: REPAIR_TOKENS,
-            backend: llm_backend(state.config()),
+            backend,
         }),
         model,
     );
@@ -663,7 +673,10 @@ async fn subject(state: &AppState, task: &tasks::TaskRow, report: &str) -> Subje
 }
 
 async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Option<Subject> {
-    let catalog = stages::Catalog::load(&state.config().ollama_host).await;
+    let backend = backend::for_workspace(state, task.workspace_id)
+        .await
+        .ok()?;
+    let catalog = stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
     let settings = match workspaces::get_workspace(state.db(), task.workspace_id).await {
         Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
             state.db(),
@@ -678,14 +691,11 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
         settings.as_ref(),
         &state.config().comfyui.classifier_model,
     );
-    let model = stages::classifier_model(
+    let model = stages::summary_model(
         &preferences,
         &catalog,
         task.model_name.as_deref().unwrap_or(stages::AUTO),
-    );
-    if stages::is_auto(&model) {
-        return None;
-    }
+    )?;
 
     let client = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
@@ -693,7 +703,7 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
         default_model: model,
         temperature: SUBJECT_TEMPERATURE,
         max_tokens: SUBJECT_TOKENS,
-        backend: llm_backend(state.config()),
+        backend,
     });
     let messages = [
         Message::system(SUBJECT_INSTRUCTIONS),
@@ -706,10 +716,22 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
     Subject::parse(response.choices.first()?.message.content.as_deref()?)
 }
 
+fn repair_backend(
+    resolved: Result<LlmBackend, backend::Error>,
+    instance: LlmBackend,
+) -> Option<LlmBackend> {
+    match resolved {
+        Ok(LlmBackend::Http) => Some(LlmBackend::Http),
+        Ok(LlmBackend::Cli { .. }) | Err(_) => {
+            matches!(instance, LlmBackend::Http).then_some(instance)
+        }
+    }
+}
+
 /// The model a repair runs on: the one the task itself ran on, resolved the same
 /// way, because the branch being repaired is that run's own work.
-async fn repair_model(state: &AppState, task: &tasks::TaskRow) -> String {
-    let catalog = stages::Catalog::load(&state.config().ollama_host).await;
+async fn repair_model(state: &AppState, task: &tasks::TaskRow, backend: &LlmBackend) -> String {
+    let catalog = stages::Catalog::for_backend(&state.config().ollama_host, backend).await;
     let settings = match workspaces::get_workspace(state.db(), task.workspace_id).await {
         Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
             state.db(),
@@ -777,6 +799,70 @@ mod tests {
         let result = PrCreationResult::NoChanges;
         let debug = format!("{:?}", result);
         assert!(debug.contains("NoChanges"));
+    }
+
+    #[tokio::test]
+    async fn an_agent_left_to_choose_its_own_model_still_names_the_change() {
+        let agent = crate::services::stages::testing::AgentWorkspace::answering(
+            "(feat): add a shopping cart",
+        )
+        .await;
+        let task = tasks::create_task(
+            &agent.pool,
+            agent.workspace,
+            &[],
+            "Add a cart",
+            "Shoppers want to buy more than one item.",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .expect("a task");
+
+        let subject = classify(&agent.state, &task, "Added a cart to the shop.").await;
+        agent.remove().await;
+
+        assert_eq!(
+            subject.map(|subject| subject.to_string()).as_deref(),
+            Some("(feat): add a shopping cart")
+        );
+        assert!(
+            agent.chose_its_own_model(),
+            "claude was not left to choose its model"
+        );
+    }
+
+    #[test]
+    fn a_repair_runs_over_the_instances_endpoint_or_not_at_all() {
+        fn claude() -> LlmBackend {
+            LlmBackend::cli(
+                zone_core::llm::AgentKind::Claude,
+                zone_core::llm::CliSettings::default(),
+            )
+        }
+        fn signed_out() -> Result<LlmBackend, backend::Error> {
+            Err(backend::Error::SignedOut {
+                agent: zone_core::llm::AgentKind::Claude,
+            })
+        }
+
+        for resolved in [Ok(LlmBackend::Http), Ok(claude()), signed_out()] {
+            assert!(
+                matches!(
+                    repair_backend(resolved, LlmBackend::Http),
+                    Some(LlmBackend::Http)
+                ),
+                "the instance has an endpoint, so a repair runs on it whatever the workspace chose"
+            );
+        }
+        for resolved in [Ok(claude()), signed_out()] {
+            assert!(
+                repair_backend(resolved, claude()).is_none(),
+                "a repair was handed to a coding agent CLI, which cannot run its tool loop"
+            );
+        }
     }
     use crate::db::{organizations, projects, users, workspace_members, workspaces};
     use sqlx::PgPool;

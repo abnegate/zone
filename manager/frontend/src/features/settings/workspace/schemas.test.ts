@@ -1,5 +1,38 @@
 import { describe, expect, it } from 'bun:test';
-import { WorkspaceMemberSchema, WorkspaceMembersResponseSchema } from './schemas';
+import {
+  AiSettingsResponseSchema,
+  AiSettingsSchema,
+  UpdateAiSettingsRequestSchema,
+  WorkspaceMemberSchema,
+  WorkspaceMembersResponseSchema,
+} from './schemas';
+
+describe('workspace AI settings schemas', () => {
+  const inherited = {
+    provider: 'self_hosted',
+    has_litellm_key: false,
+    litellm_host: null,
+    has_openai_api_key: false,
+    openai_base_url: null,
+    has_anthropic_api_key: false,
+    anthropic_base_url: null,
+    bedrock_region: null,
+    bedrock_use_iam_role: false,
+    has_bedrock_credentials: false,
+    model_fast: null,
+    model_reasoning: null,
+    model_embedding: null,
+    model_image: null,
+    model_video: null,
+    model_audio: null,
+  };
+
+  it.each(['claude_code', 'codex'])('accepts a %s workspace override', (provider) => {
+    expect(AiSettingsSchema.parse({ ...inherited, provider }).provider).toBe(provider);
+    expect(AiSettingsResponseSchema.parse({ ...inherited, provider }).provider).toBe(provider);
+    expect(UpdateAiSettingsRequestSchema.parse({ provider }).provider).toBe(provider);
+  });
+});
 
 describe('workspace member API schemas', () => {
   it('accepts members without email or display name', () => {

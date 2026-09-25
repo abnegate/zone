@@ -9,13 +9,14 @@ To learn more about the release, try:
 
 {{- if .Values.ingress.enabled }}
 {{- range .Values.ingress.hosts }}
+{{- $host := .host }}
 
 Application URLs:
   {{- range .paths }}
   {{- if eq .service "server" }}
-  - API: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ .path }}
+  - API: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host }}{{ .path }}
   {{- else if eq .service "manager" }}
-  - Manager UI: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ .path }}
+  - Manager UI: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host }}{{ .path }}
   {{- end }}
   {{- end }}
 {{- end }}
@@ -65,6 +66,40 @@ Monitor your deployment:
 
 Horizontal Pod Autoscaler is enabled for the server:
   kubectl get hpa --namespace {{ .Release.Namespace }} {{ include "zone-apps.fullname" . }}-server
+{{- end }}
+
+{{- if .Values.server.enabled }}
+{{- if or .Values.server.autoscaling.enabled (gt (int .Values.server.replicaCount) 1) }}
+
+NOTE: zone-server can run more than one replica, so the coding agent providers
+will not work reliably. A sign-in in progress lives in one pod's memory and
+fails when its next request reaches another pod. A codex login exists only on
+the pod that made it, in an emptyDir that is lost when that pod is replaced.
+Saved Claude tokens are sealed in the database. To use either provider, set
+server.replicaCount=1 and server.autoscaling.enabled=false, and set
+server.podDisruptionBudget.enabled=false so that a node drain can still evict
+the one pod.
+{{- else if not (include "zone-apps.server.agentStateClaim" .) }}
+
+NOTE: server.agentState.persistence.enabled is false, so /app/agent-state is an
+emptyDir and zone-server loses codex logins whenever its pod is replaced (a
+rollout, an eviction or a reschedule). Saved Claude tokens are sealed in the
+database.
+{{- end }}
+{{- if .Values.server.env.ZONE_AGENT_CALLBACK }}
+
+NOTE: server.env.ZONE_AGENT_CALLBACK is set. claude.com sends the admin's
+browser to localhost, which is the admin's own computer, so the sign-in comes
+back only through kubectl port-forward of that port and of the console, with
+the console opened at a localhost address that server.env.ZONE_CONSOLE_ORIGINS
+lists exactly as the browser opens it, such as http://127.0.0.1:3001 for the
+port-forward above. A console opened any other way asks for the code
+claude.com shows to be pasted instead.
+{{- if not .Values.server.env.ZONE_CONSOLE_ORIGINS }}
+server.env.ZONE_CONSOLE_ORIGINS is empty, so every sign-in still pastes its
+code.
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{- if and .Values.manager.enabled .Values.manager.autoscaling.enabled }}

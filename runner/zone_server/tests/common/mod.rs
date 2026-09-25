@@ -49,6 +49,7 @@ pub fn test_config() -> Config {
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
         model_backend: Default::default(),
+        agents: Default::default(),
         litellm_host: std::env::var("LITELLM_HOST")
             .unwrap_or_else(|_| "http://localhost:4000".to_string()),
         litellm_key: std::env::var("LITELLM_KEY").unwrap_or_else(|_| "test-key".to_string()),
@@ -400,6 +401,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
         model_backend: Default::default(),
+        agents: Default::default(),
         litellm_host: ollama_host.to_string(),
         litellm_key: "test-key".to_string(),
         ollama_host: ollama_host.to_string(),

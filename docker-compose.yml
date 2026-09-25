@@ -311,6 +311,25 @@ services:
       - ZONE_CHAT_TIMEOUT_SECONDS=${ZONE_CHAT_TIMEOUT_SECONDS:-1800}
       - ZONE_CHAT_OUTPUT_TOKENS=${ZONE_CHAT_OUTPUT_TOKENS:-4096}
       - ZONE_CHAT_CONTEXT_TOKENS=${ZONE_CHAT_CONTEXT_TOKENS:-32768}
+      - ZONE_CHAT_AGENT_CWD=${ZONE_CHAT_AGENT_CWD:-/app/workspace}
+      - ZONE_LLM_BACKEND=${ZONE_LLM_BACKEND:-litellm}
+      - ZONE_AGENT_STATE_DIR=/app/agent-state
+      - ZONE_AGENT_HOST_LOGIN=${ZONE_AGENT_HOST_LOGIN:-false}
+      - ZONE_AGENT_ENV_PASSTHROUGH=${ZONE_AGENT_ENV_PASSTHROUGH:-}
+      - ZONE_CODEX_SANDBOX=${ZONE_CODEX_SANDBOX:-danger-full-access}
+      - ZONE_CLAUDE_TOKEN_URL=${ZONE_CLAUDE_TOKEN_URL:-}
+      # claude.com sends a browser on this machine back to
+      # http://localhost:${ZONE_AGENT_CALLBACK_PORT}/callback with a sign-in's
+      # code. Set ZONE_AGENT_CALLBACK_PORT empty in .env to turn it off.
+      - ZONE_AGENT_CALLBACK=${ZONE_AGENT_CALLBACK_PORT-54545}
+      # Docker hands the published port to the container's own interface,
+      # never to its loopback; the publish below keeps the host side on
+      # loopback.
+      - ZONE_AGENT_CALLBACK_BIND=0.0.0.0:54545
+      # The consoles the callback sends that browser back to, exactly as the
+      # browser names them: Traefik serves the console over http and https on
+      # both hosts. A list in .env replaces this one; empty turns it off.
+      - ZONE_CONSOLE_ORIGINS=${ZONE_CONSOLE_ORIGINS-http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
       - ZONE_AUTO_ENABLED=${ZONE_AUTO_ENABLED:-true}
       - ZONE_AUTO_TICK_SECS=${ZONE_AUTO_TICK_SECS:-15}
       - ZONE_AUTO_PARALLEL_TASKS=${ZONE_AUTO_PARALLEL_TASKS:-3}
@@ -407,9 +426,14 @@ services:
       - manager_repos:/tmp/repos
       - manager_artifacts:/app/artifacts
       - manager_embed_cache:/app/embed-cache
+      - manager_agent_state:/app/agent-state
       - comfyui_models:/app/comfyui/models
       - ./comfyui/workflows:/app/comfyui/workflows:ro
       - ./comfyui/recipes:/app/comfyui/recipes:ro
+    ports:
+      # The Claude sign-in callback, for a browser on this machine only. With
+      # the callback off, Docker picks a spare port instead of taking 54545.
+      - "127.0.0.1:${ZONE_AGENT_CALLBACK_PORT-54545}:54545"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -775,6 +799,8 @@ volumes:
     name: zone_manager_artifacts
   manager_embed_cache:
     name: zone_manager_embed_cache
+  manager_agent_state:
+    name: zone_manager_agent_state
   prometheus_data:
     name: zone_prometheus_data
   grafana_data:

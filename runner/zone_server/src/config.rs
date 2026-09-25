@@ -1,9 +1,17 @@
 //! Server configuration
 
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
-use zone_core::llm::AgentKind;
+use uuid::Uuid;
+use zone_core::llm::{AgentKind, CodexSandbox};
+
+use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME, ROOT_PATH};
 
 /// Settings live with the clients that consume them.
 pub use zone_comfy::Config as ComfyUiConfig;
@@ -20,6 +28,9 @@ pub const DEFAULT_HUGGINGFACE_MODELS_URL: &str = "https://huggingface.co/api/mod
 /// Enterprise. The origin answers only for repositories on the host it names,
 /// so pointing it elsewhere does not redirect github.com repositories to it.
 pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
+
+/// Where a Claude authorization code is exchanged and its tokens renewed.
+pub const DEFAULT_CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 
 /// Server configuration loaded from environment variables
 #[derive(Clone)]
@@ -38,8 +49,10 @@ pub struct Config {
     pub jwt_access_lifetime: u64,
     /// JWT refresh token lifetime in seconds (default: 604800 = 7 days)
     pub jwt_refresh_lifetime: u64,
-    /// Which backend serves completions.
+    /// The instance-wide default backend.
     pub model_backend: ModelBackend,
+    /// Coding agent CLIs that organizations sign in to.
+    pub agents: AgentConfig,
     /// LiteLLM host URL. Empty when a CLI backend serves completions.
     pub litellm_host: String,
     /// LiteLLM API key. Empty when a CLI backend serves completions.
@@ -83,26 +96,24 @@ pub struct Config {
     pub auto: AutoProjectConfig,
 }
 
-/// Which backend serves completions.
+/// The instance-wide default backend.
 const MODEL_BACKEND: &str = "ZONE_LLM_BACKEND";
 
 /// The binary a host agent backend runs, for one that is not on `PATH`.
 const MODEL_BACKEND_EXECUTABLE: &str = "ZONE_LLM_BACKEND_EXECUTABLE";
 
-/// Where a completion comes from.
+/// Where a completion comes from by default.
 ///
-/// A coding agent CLI runs as the host user, with that user's whole file
-/// system and outside `tool_runner`'s sandbox, under a single host identity
-/// that no workspace or organization divides and nothing meters. The choice
-/// therefore belongs to whoever runs the process, which is why it is read from
-/// the environment and never from a row a workspace administrator can write.
+/// The environment sets this default for the whole instance. Organizations
+/// choose their own provider in AI settings, and one that chooses the
+/// `claude_code` or `codex` provider runs that agent's CLI instead, under the
+/// organization's own sign-in.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ModelBackend {
     /// The OpenAI-compatible HTTP endpoint `LITELLM_HOST` names.
     #[default]
     LiteLlm,
-    /// A coding agent CLI already signed in on the host, run as a child
-    /// process against the operator's own subscription.
+    /// A coding agent CLI, run as a child process.
     Cli {
         agent: AgentKind,
         /// Overrides the agent's own executable name.
@@ -150,6 +161,364 @@ impl ModelBackend {
     pub fn requires_litellm(&self) -> bool {
         matches!(self, Self::LiteLlm)
     }
+}
+
+/// Root of every organization's agent homes.
+const AGENT_STATE: &str = "ZONE_AGENT_STATE_DIR";
+
+/// Whether an organization with no sign-in of its own may use the host's.
+const AGENT_HOST_LOGIN: &str = "ZONE_AGENT_HOST_LOGIN";
+
+/// Overrides [`DEFAULT_CLAUDE_TOKEN_URL`].
+const CLAUDE_TOKEN_URL: &str = "ZONE_CLAUDE_TOKEN_URL";
+
+/// Where codex runs the tools of a turn that grants them.
+const CODEX_SANDBOX: &str = "ZONE_CODEX_SANDBOX";
+
+/// `http://localhost:<port>`, or the port alone, where claude.com sends a browser back with a
+/// Claude sign-in's code.
+const AGENT_CALLBACK: &str = "ZONE_AGENT_CALLBACK";
+
+/// The address, and optionally the port, the callback listener binds.
+const AGENT_CALLBACK_BIND: &str = "ZONE_AGENT_CALLBACK_BIND";
+
+/// The consoles, as exact origins, a sign-in returned to the callback sends its browser on to.
+const CONSOLE_ORIGINS: &str = "ZONE_CONSOLE_ORIGINS";
+
+const DEFAULT_CALLBACK_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+/// The XDG base directory for user state.
+const STATE_HOME: &str = "XDG_STATE_HOME";
+
+const HOME: &str = "HOME";
+
+/// Where the XDG base directory specification puts user state when
+/// `XDG_STATE_HOME` is unset, relative to `HOME`.
+const DEFAULT_STATE_HOME: &str = ".local/state";
+
+/// The agent state root inside a user state directory.
+const STATE_ROOT: &str = "zone/agents";
+
+/// The state root [`AgentConfig::default`] keeps in the temporary directory.
+const TEMPORARY_STATE_ROOT: &str = "zone-agents";
+
+/// Each agent home's working directory, where every turn it serves runs.
+const WORK: &str = "work";
+
+const DEFAULT_HOST_LOGIN: bool = true;
+
+/// Owner-only access, for directories holding an agent's credentials and
+/// transcripts.
+#[cfg(unix)]
+const PRIVATE: u32 = 0o700;
+
+/// Spellings a boolean setting accepts.
+const TRUE: &[&str] = &["1", "true", "yes", "on"];
+const FALSE: &[&str] = &["0", "false", "no", "off"];
+
+/// The coding agent CLIs organizations sign in to, from
+/// `ZONE_AGENT_STATE_DIR`, `ZONE_AGENT_HOST_LOGIN`, `ZONE_CLAUDE_TOKEN_URL`,
+/// `ZONE_CODEX_SANDBOX`, `ZONE_AGENT_CALLBACK`, `ZONE_AGENT_CALLBACK_BIND` and
+/// `ZONE_CONSOLE_ORIGINS`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentConfig {
+    /// Root of every organization's agent homes.
+    pub state: PathBuf,
+    /// Whether an organization with no sign-in of its own falls back to the
+    /// one the server's user has on the host.
+    pub host_login: bool,
+    /// Where a Claude authorization code is exchanged and its tokens renewed.
+    pub claude_token_url: String,
+    /// Where codex runs the tools of a turn that grants them.
+    pub codex_sandbox: CodexSandbox,
+    /// Where claude.com sends a browser back with a Claude sign-in's code.
+    /// Without one, the admin pastes the code claude.com shows.
+    pub callback: Option<Callback>,
+    /// The consoles the callback sends a browser on to, each the origin a
+    /// browser names it by. A sign-in uses the callback only when it starts
+    /// from one of them at a loopback address; with none, every one pastes.
+    pub consoles: Vec<String>,
+}
+
+/// The loopback address a browser returns a Claude sign-in to,
+/// `http://localhost:<port>/callback`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Callback {
+    /// The port of `http://localhost:<port>`, where the browser reaches Zone.
+    pub port: u16,
+    /// Where Zone's callback listener listens. Its port differs from `port`
+    /// only when a port mapping sits between the browser and the listener.
+    pub bind: SocketAddr,
+}
+
+impl Default for AgentConfig {
+    /// A state root in the temporary directory, so a config that never read
+    /// the environment writes into no one's home.
+    fn default() -> Self {
+        Self {
+            state: env::temp_dir().join(TEMPORARY_STATE_ROOT),
+            host_login: DEFAULT_HOST_LOGIN,
+            claude_token_url: DEFAULT_CLAUDE_TOKEN_URL.to_string(),
+            codex_sandbox: CodexSandbox::default(),
+            callback: None,
+            consoles: Vec::new(),
+        }
+    }
+}
+
+impl AgentConfig {
+    /// Read the settings from the environment. The state root defaults to
+    /// `$XDG_STATE_HOME/zone/agents`, then `$HOME/.local/state/zone/agents`.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Ok(Self {
+            state: state_root(env_path(AGENT_STATE), env_path(STATE_HOME), env_path(HOME))?,
+            host_login: host_login(env::var(AGENT_HOST_LOGIN).ok())?,
+            claude_token_url: claude_token_url(env::var(CLAUDE_TOKEN_URL).ok())?,
+            codex_sandbox: codex_sandbox(env::var(CODEX_SANDBOX).ok())?,
+            callback: callback(
+                env::var(AGENT_CALLBACK).ok(),
+                env::var(AGENT_CALLBACK_BIND).ok(),
+            )?,
+            consoles: consoles(env::var(CONSOLE_ORIGINS).ok())?,
+        })
+    }
+
+    /// `<state>/<organization>/<agent>`: the agent's own home for one
+    /// organization.
+    pub fn home(&self, organization: Uuid, agent: AgentKind) -> PathBuf {
+        agent_home(&self.state, organization, agent)
+    }
+
+    /// `<state>/<organization>/<agent>/work`: where the agent's turns for one
+    /// organization run.
+    pub fn work(&self, organization: Uuid, agent: AgentKind) -> PathBuf {
+        agent_work(&self.state, organization, agent)
+    }
+
+    /// Create the agent's home and its working directory, and return the home.
+    ///
+    /// Every directory this creates, the state root included, is private to
+    /// the server's user, and the organization's own directories are made
+    /// private again when they already exist. An existing state root keeps
+    /// its mode, because it is the operator's directory and may be shared.
+    pub fn create_home(&self, organization: Uuid, agent: AgentKind) -> io::Result<PathBuf> {
+        let work = self.work(organization, agent);
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        builder.mode(PRIVATE);
+        builder.create(&work)?;
+        #[cfg(unix)]
+        for directory in work
+            .ancestors()
+            .take_while(|directory| *directory != self.state.as_path())
+        {
+            fs::set_permissions(directory, fs::Permissions::from_mode(PRIVATE))?;
+        }
+        Ok(self.home(organization, agent))
+    }
+}
+
+/// `<state>/<organization>/<agent>`. Below the operator's root every component
+/// is a UUID or an agent's fixed name, so the path cannot leave that root.
+pub fn agent_home(state: &Path, organization: Uuid, agent: AgentKind) -> PathBuf {
+    state
+        .join(organization.as_hyphenated().to_string())
+        .join(agent.as_str())
+}
+
+/// `<state>/<organization>/<agent>/work`, confined the same way as
+/// [`agent_home`].
+pub fn agent_work(state: &Path, organization: Uuid, agent: AgentKind) -> PathBuf {
+    agent_home(state, organization, agent).join(WORK)
+}
+
+/// The configured root, else the XDG state directory's, else the one under
+/// `HOME`. A relative root would resolve against each agent's own working
+/// directory, so none is accepted.
+fn state_root(
+    configured: Option<PathBuf>,
+    state_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, ConfigError> {
+    if let Some(configured) = configured {
+        return if configured.is_absolute() {
+            Ok(configured)
+        } else {
+            Err(ConfigError::Invalid(
+                "ZONE_AGENT_STATE_DIR must be an absolute path",
+            ))
+        };
+    }
+    state_home
+        .filter(|directory| directory.is_absolute())
+        .or_else(|| {
+            home.filter(|directory| directory.is_absolute())
+                .map(|home| home.join(DEFAULT_STATE_HOME))
+        })
+        .map(|directory| directory.join(STATE_ROOT))
+        .ok_or(ConfigError::Missing(AGENT_STATE))
+}
+
+/// A path from the environment, trimmed, with blank meaning unset.
+fn env_path(name: &str) -> Option<PathBuf> {
+    let path = match env::var_os(name)?.into_string() {
+        Ok(text) => PathBuf::from(text.trim()),
+        Err(raw) => PathBuf::from(raw),
+    };
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+
+fn host_login(value: Option<String>) -> Result<bool, ConfigError> {
+    let Some(value) = value
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(DEFAULT_HOST_LOGIN);
+    };
+    if TRUE.contains(&value.as_str()) {
+        Ok(true)
+    } else if FALSE.contains(&value.as_str()) {
+        Ok(false)
+    } else {
+        Err(ConfigError::Invalid(
+            "ZONE_AGENT_HOST_LOGIN must be true or false",
+        ))
+    }
+}
+
+fn codex_sandbox(value: Option<String>) -> Result<CodexSandbox, ConfigError> {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(CodexSandbox::default()),
+        Some(value) => CodexSandbox::named(value).ok_or(ConfigError::Invalid(
+            "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access",
+        )),
+    }
+}
+
+/// The configured token endpoint, else Anthropic's.
+fn claude_token_url(value: Option<String>) -> Result<String, ConfigError> {
+    let url = value
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| DEFAULT_CLAUDE_TOKEN_URL.to_string());
+    let parsed = reqwest::Url::parse(&url)
+        .ok()
+        .filter(|parsed| {
+            matches!(parsed.scheme(), "http" | "https")
+                && parsed.host_str().is_some_and(|host| !host.is_empty())
+        })
+        .ok_or(ConfigError::Invalid(
+            "ZONE_CLAUDE_TOKEN_URL must be an absolute http or https URL with a host",
+        ))?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ConfigError::Invalid(
+            "ZONE_CLAUDE_TOKEN_URL must not carry credentials, a query or a fragment",
+        ));
+    }
+    Ok(url)
+}
+
+/// The loopback callback `value` names, listening where `bind` says. The bind
+/// address is checked even with no callback.
+fn callback(value: Option<String>, bind: Option<String>) -> Result<Option<Callback>, ConfigError> {
+    let bind = callback_bind(bind)?;
+    let Some(value) = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let port = callback_port(&value).ok_or(ConfigError::Invalid(
+        "ZONE_AGENT_CALLBACK must be http://localhost:<port>, or the port alone",
+    ))?;
+    let (address, listen) = bind;
+    Ok(Some(Callback {
+        port,
+        bind: SocketAddr::new(address, listen.unwrap_or(port)),
+    }))
+}
+
+/// The port of `http://localhost:<port>`, or of the port alone.
+fn callback_port(value: &str) -> Option<u16> {
+    let port = if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        value.parse().ok()
+    } else {
+        reqwest::Url::parse(value)
+            .ok()
+            .filter(|url| {
+                url.scheme() == LOOPBACK_SCHEME
+                    && url.host_str() == Some(LOOPBACK_HOST)
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path() == ROOT_PATH
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+            })
+            .and_then(|url| url.port())
+    };
+    port.filter(|port| *port != 0)
+}
+
+/// The address the listener binds, and its port when the value names one.
+fn callback_bind(value: Option<String>) -> Result<(IpAddr, Option<u16>), ConfigError> {
+    let Some(value) = value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok((DEFAULT_CALLBACK_BIND, None));
+    };
+    if let Ok(socket) = value.parse::<SocketAddr>() {
+        if socket.port() != 0 {
+            return Ok((socket.ip(), Some(socket.port())));
+        }
+    } else if let Ok(address) = value.parse::<IpAddr>() {
+        return Ok((address, None));
+    }
+    Err(ConfigError::Invalid(
+        "ZONE_AGENT_CALLBACK_BIND must be an IP address, or an address and port, such as 127.0.0.1 or 0.0.0.0:54545",
+    ))
+}
+
+/// The origins `value` lists, comma separated, each as a browser names it.
+fn consoles(value: Option<String>) -> Result<Vec<String>, ConfigError> {
+    value
+        .iter()
+        .flat_map(|list| list.split(','))
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            console_origin(entry).ok_or(ConfigError::Invalid(
+                "ZONE_CONSOLE_ORIGINS must list http or https origins, such as \
+                 http://manager.localhost, with no credentials, path, query or fragment",
+            ))
+        })
+        .collect()
+}
+
+/// The origin `entry` names, serialised as a browser's `Origin` header names it, when `entry`
+/// is an `http` or `https` origin and nothing more.
+fn console_origin(entry: &str) -> Option<String> {
+    reqwest::Url::parse(entry)
+        .ok()
+        .filter(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == ROOT_PATH
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
+        .map(|url| url.origin().ascii_serialization())
 }
 
 /// Periodic source indexing settings loaded from `SOURCE_RESYNC_*` env vars.
@@ -489,7 +858,7 @@ fn within(host: &str, allowed: &str) -> bool {
 
 fn env_truthy(name: &str, default: bool) -> bool {
     match env::var(name) {
-        Ok(s) => matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Ok(value) => TRUE.contains(&value.to_ascii_lowercase().as_str()),
         Err(_) => default,
     }
 }
@@ -526,6 +895,19 @@ impl Config {
     /// Which backend serves completions
     pub fn model_backend(&self) -> &ModelBackend {
         &self.model_backend
+    }
+
+    /// The binary `agent` runs from: the one `ZONE_LLM_BACKEND_EXECUTABLE`
+    /// names when the environment selected this same agent, else the agent's
+    /// own name, looked up on `PATH`.
+    pub fn agent_executable(&self, agent: AgentKind) -> PathBuf {
+        match &self.model_backend {
+            ModelBackend::Cli {
+                agent: selected,
+                executable: Some(executable),
+            } if *selected == agent => executable.clone(),
+            _ => PathBuf::from(agent.executable()),
+        }
     }
 
     /// Load configuration from environment variables
@@ -629,6 +1011,7 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(604_800),
             model_backend,
+            agents: AgentConfig::from_env()?,
             litellm_host: litellm_host.unwrap_or_default(),
             litellm_key: litellm_key.unwrap_or_default(),
             ollama_host: env::var("OLLAMA_HOST")
@@ -673,6 +1056,7 @@ impl std::fmt::Debug for Config {
             .field("jwt_access_lifetime", &self.jwt_access_lifetime)
             .field("jwt_refresh_lifetime", &self.jwt_refresh_lifetime)
             .field("model_backend", &self.model_backend)
+            .field("agents", &self.agents)
             .field("litellm_host", &self.litellm_host)
             .field("litellm_key", &"[REDACTED]")
             .field("ollama_host", &self.ollama_host)
@@ -709,9 +1093,17 @@ pub enum ConfigError {
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::sync::{LazyLock, Mutex};
+    use std::net::Ipv6Addr;
+    use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
     static ENVIRONMENT: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// Serialises the tests that change the process environment. A test that
+    /// panics holding it has already had its variables restored, because its
+    /// `Environment` is declared after the guard and so dropped first.
+    fn lock() -> MutexGuard<'static, ()> {
+        ENVIRONMENT.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     struct Environment(Vec<(&'static str, Option<OsString>)>);
 
@@ -767,6 +1159,7 @@ mod tests {
             jwt_access_lifetime: 900,
             jwt_refresh_lifetime: 604800,
             model_backend: ModelBackend::default(),
+            agents: AgentConfig::default(),
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),
@@ -945,7 +1338,7 @@ mod tests {
     /// impossible to exercise against anything but the real API.
     #[test]
     fn the_github_origin_is_configurable_and_must_be_absolute() {
-        let _lock = ENVIRONMENT.lock().expect("environment lock");
+        let _lock = lock();
         let names = [
             "DATABASE_URL",
             "ENCRYPTION_KEY",
@@ -956,6 +1349,10 @@ mod tests {
             "REDIS_URL",
             MODEL_BACKEND,
             MODEL_BACKEND_EXECUTABLE,
+            AGENT_STATE,
+            AGENT_HOST_LOGIN,
+            CLAUDE_TOKEN_URL,
+            CODEX_SANDBOX,
         ];
         let _environment = Environment::isolated(&names);
         Environment::set("JWT_SECRET", "12345678901234567890123456789012");
@@ -1145,12 +1542,11 @@ mod tests {
         }
     }
 
-    /// A coding agent CLI runs on the host as the operator, outside the tool
-    /// sandbox and under one identity for every workspace, so the selection is
-    /// process configuration that no workspace administrator can reach.
+    /// The environment picks the default every organization without an agent
+    /// provider of its own falls back to.
     #[test]
     fn the_model_backend_is_selected_by_the_environment() {
-        let _lock = ENVIRONMENT.lock().expect("environment lock");
+        let _lock = lock();
         let _environment = Environment::isolated(&[MODEL_BACKEND, MODEL_BACKEND_EXECUTABLE]);
 
         assert_eq!(
@@ -1230,7 +1626,7 @@ mod tests {
     /// that deployment impossible.
     #[test]
     fn litellm_is_required_only_by_the_http_backend() {
-        let _lock = ENVIRONMENT.lock().expect("environment lock");
+        let _lock = lock();
         let names = [
             "DATABASE_URL",
             "ENCRYPTION_KEY",
@@ -1241,6 +1637,10 @@ mod tests {
             "REDIS_URL",
             MODEL_BACKEND,
             MODEL_BACKEND_EXECUTABLE,
+            AGENT_STATE,
+            AGENT_HOST_LOGIN,
+            CLAUDE_TOKEN_URL,
+            CODEX_SANDBOX,
         ];
         let _environment = Environment::isolated(&names);
         Environment::set("JWT_SECRET", "12345678901234567890123456789012");
@@ -1326,7 +1726,7 @@ mod tests {
 
     #[test]
     fn environment_matrix_validates_secrets_and_loads_server_settings() {
-        let _lock = ENVIRONMENT.lock().expect("environment lock");
+        let _lock = lock();
         let names = [
             "APP_BASE_URL",
             "GITHUB_API_URL",
@@ -1359,6 +1759,10 @@ mod tests {
             "TRAIN_UPLOAD_LIMIT_MB",
             MODEL_BACKEND,
             MODEL_BACKEND_EXECUTABLE,
+            AGENT_STATE,
+            AGENT_HOST_LOGIN,
+            CLAUDE_TOKEN_URL,
+            CODEX_SANDBOX,
         ];
         let _environment = Environment::isolated(&names);
 
@@ -1500,6 +1904,634 @@ mod tests {
         assert_eq!(
             fallbacks.monitoring.prometheus_url,
             "http://legacy-prometheus"
+        );
+    }
+
+    const AGENT_SETTINGS: [&str; 7] = [
+        AGENT_STATE,
+        AGENT_HOST_LOGIN,
+        CLAUDE_TOKEN_URL,
+        CODEX_SANDBOX,
+        AGENT_CALLBACK,
+        AGENT_CALLBACK_BIND,
+        CONSOLE_ORIGINS,
+    ];
+    const NOT_AN_ORIGIN: &str = "ZONE_CONSOLE_ORIGINS must list http or https origins, such as \
+                                 http://manager.localhost, with no credentials, path, query or \
+                                 fragment";
+    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    const UNSPECIFIED: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+
+    #[test]
+    fn agent_settings_default_and_follow_the_environment() {
+        let _lock = lock();
+        let _environment = Environment::isolated(&AGENT_SETTINGS);
+
+        let defaults = AgentConfig::from_env().expect("unset falls back");
+        assert_eq!(
+            defaults.state,
+            state_root(None, env_path(STATE_HOME), env_path(HOME))
+                .expect("the test process has a home"),
+            "a native instance keeps agent homes in its user's own state directory"
+        );
+        assert!(defaults.state.ends_with(STATE_ROOT));
+        assert!(defaults.host_login);
+        assert_eq!(defaults.claude_token_url, DEFAULT_CLAUDE_TOKEN_URL);
+        assert_eq!(defaults.codex_sandbox, CodexSandbox::WorkspaceWrite);
+        assert_eq!(
+            defaults.callback, None,
+            "a server that was not told its admins' browsers run beside it keeps the pasted code"
+        );
+        assert!(
+            defaults.consoles.is_empty(),
+            "a server that was told no console sends no sign-in's browser anywhere"
+        );
+
+        Environment::set(AGENT_STATE, "  /app/agent-state  ");
+        Environment::set(AGENT_HOST_LOGIN, " FALSE ");
+        Environment::set(CLAUDE_TOKEN_URL, " http://127.0.0.1:9100/v1/oauth/token ");
+        Environment::set(CODEX_SANDBOX, " danger-full-access ");
+        Environment::set(AGENT_CALLBACK, " http://localhost:54545 ");
+        Environment::set(CONSOLE_ORIGINS, " http://manager.localhost ");
+        assert_eq!(
+            AgentConfig::from_env().expect("every value is valid"),
+            AgentConfig {
+                state: PathBuf::from("/app/agent-state"),
+                host_login: false,
+                claude_token_url: "http://127.0.0.1:9100/v1/oauth/token".to_string(),
+                codex_sandbox: CodexSandbox::DangerFullAccess,
+                callback: Some(Callback {
+                    port: 54_545,
+                    bind: SocketAddr::new(LOOPBACK, 54_545),
+                }),
+                consoles: vec!["http://manager.localhost".to_string()],
+            },
+            "a loopback token endpoint stays configurable: it is operator configuration"
+        );
+
+        for sandbox in CodexSandbox::ALL {
+            Environment::set(CODEX_SANDBOX, sandbox.as_str());
+            assert_eq!(
+                AgentConfig::from_env()
+                    .expect("a sandbox codex has")
+                    .codex_sandbox,
+                sandbox
+            );
+        }
+
+        for (value, expected) in [
+            ("true", true),
+            ("1", true),
+            ("On", true),
+            ("0", false),
+            ("no", false),
+            ("off", false),
+        ] {
+            Environment::set(AGENT_HOST_LOGIN, value);
+            assert_eq!(
+                AgentConfig::from_env().expect("a boolean").host_login,
+                expected,
+                "{value}"
+            );
+        }
+
+        for name in AGENT_SETTINGS {
+            Environment::set(name, "   ");
+        }
+        assert_eq!(
+            AgentConfig::from_env().expect("blank is not a setting"),
+            defaults
+        );
+    }
+
+    #[test]
+    fn unreadable_agent_settings_are_refused() {
+        let _lock = lock();
+        let _environment = Environment::isolated(&AGENT_SETTINGS);
+
+        Environment::set(AGENT_HOST_LOGIN, "sometimes");
+        assert!(
+            matches!(
+                AgentConfig::from_env(),
+                Err(ConfigError::Invalid(
+                    "ZONE_AGENT_HOST_LOGIN must be true or false"
+                ))
+            ),
+            "a value that is neither must not silently let organizations use the host's sign-in"
+        );
+        Environment::remove(AGENT_HOST_LOGIN);
+
+        Environment::set(AGENT_STATE, "agent-state");
+        assert!(
+            matches!(
+                AgentConfig::from_env(),
+                Err(ConfigError::Invalid(
+                    "ZONE_AGENT_STATE_DIR must be an absolute path"
+                ))
+            ),
+            "a relative root resolves against each agent's own working directory"
+        );
+        Environment::remove(AGENT_STATE);
+
+        for sandbox in ["read-only", "Danger-Full-Access", "none", "workspace_write"] {
+            Environment::set(CODEX_SANDBOX, sandbox);
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(
+                        "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access"
+                    ))
+                ),
+                "{sandbox} is not a sandbox codex runs granted tools in"
+            );
+        }
+        Environment::remove(CODEX_SANDBOX);
+
+        for url in [
+            "platform.claude.com/v1/oauth/token",
+            "ftp://platform.claude.com/v1/oauth/token",
+            "https://",
+        ] {
+            Environment::set(CLAUDE_TOKEN_URL, url);
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(
+                        "ZONE_CLAUDE_TOKEN_URL must be an absolute http or https URL with a host"
+                    ))
+                ),
+                "{url} is not an endpoint a code can be exchanged at"
+            );
+        }
+        for url in [
+            "https://someone:secret@platform.claude.com/v1/oauth/token",
+            "https://platform.claude.com/v1/oauth/token?key=secret",
+            "https://platform.claude.com/v1/oauth/token#secret",
+        ] {
+            Environment::set(CLAUDE_TOKEN_URL, url);
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(
+                        "ZONE_CLAUDE_TOKEN_URL must not carry credentials, a query or a fragment"
+                    ))
+                ),
+                "{url} would reach every log that prints the config"
+            );
+        }
+    }
+
+    #[test]
+    fn the_callback_is_the_loopback_address_claude_sends_a_browser_back_to() {
+        let _lock = lock();
+        let _environment = Environment::isolated(&AGENT_SETTINGS);
+
+        for (value, port) in [
+            ("http://localhost:54545", 54_545),
+            ("http://localhost:54545/", 54_545),
+            ("  HTTP://LOCALHOST:1455  ", 1_455),
+            ("54545", 54_545),
+            (" 60000 ", 60_000),
+        ] {
+            Environment::set(AGENT_CALLBACK, value);
+            assert_eq!(
+                AgentConfig::from_env()
+                    .expect("a loopback callback")
+                    .callback,
+                Some(Callback {
+                    port,
+                    bind: SocketAddr::new(LOOPBACK, port),
+                }),
+                "{value}"
+            );
+        }
+
+        Environment::set(AGENT_CALLBACK, "60000");
+        for (bind, listen) in [
+            (" 0.0.0.0 ", SocketAddr::new(UNSPECIFIED, 60_000)),
+            (
+                "::1",
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 60_000),
+            ),
+            ("   ", SocketAddr::new(LOOPBACK, 60_000)),
+            ("0.0.0.0:54545", SocketAddr::new(UNSPECIFIED, 54_545)),
+            (
+                "[::1]:54545",
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 54_545),
+            ),
+        ] {
+            Environment::set(AGENT_CALLBACK_BIND, bind);
+            assert_eq!(
+                AgentConfig::from_env().expect("a bind address").callback,
+                Some(Callback {
+                    port: 60_000,
+                    bind: listen,
+                }),
+                "a bind names the listener's port only when a port mapping sits in between: {bind:?}"
+            );
+        }
+        Environment::remove(AGENT_CALLBACK_BIND);
+
+        for value in [
+            "http://127.0.0.1:54545",
+            "http://[::1]:54545",
+            "https://localhost:54545",
+            "http://localhost",
+            "http://localhost:80",
+            "http://localhost:0",
+            "http://localhost:54545/callback",
+            "http://localhost:54545/?next=elsewhere",
+            "http://localhost:54545/#fragment",
+            "http://someone@localhost:54545",
+            "http://localhost.example:54545",
+            "localhost:54545",
+            "0",
+            "65536",
+            "-1",
+            "54545/",
+        ] {
+            Environment::set(AGENT_CALLBACK, value);
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(
+                        "ZONE_AGENT_CALLBACK must be http://localhost:<port>, or the port alone"
+                    ))
+                ),
+                "{value} was taken for a place claude.com sends a sign-in back to"
+            );
+        }
+
+        Environment::remove(AGENT_CALLBACK);
+        for bind in ["localhost", "0.0.0.0:0", "localhost:54545", "everywhere"] {
+            Environment::set(AGENT_CALLBACK_BIND, bind);
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(
+                        "ZONE_AGENT_CALLBACK_BIND must be an IP address, or an address and port, such as 127.0.0.1 or 0.0.0.0:54545"
+                    ))
+                ),
+                "{bind} is not an address a listener binds"
+            );
+        }
+        Environment::set(AGENT_CALLBACK_BIND, "0.0.0.0:54545");
+        assert_eq!(
+            AgentConfig::from_env()
+                .expect("a bind address with nothing to bind")
+                .callback,
+            None,
+            "a bind address alone starts no listener"
+        );
+    }
+
+    #[test]
+    fn the_consoles_are_the_origins_listed_as_a_browser_names_them() {
+        let _lock = lock();
+        let _environment = Environment::isolated(&AGENT_SETTINGS);
+
+        Environment::set(
+            CONSOLE_ORIGINS,
+            " HTTP://Manager.LocalHost , https://manager.webui.localhost:443/,, \
+             http://localhost:3001 ,http://[::1]:5173, https://zone.example.com:8443 ",
+        );
+
+        assert_eq!(
+            AgentConfig::from_env()
+                .expect("every entry is an origin")
+                .consoles,
+            [
+                "http://manager.localhost",
+                "https://manager.webui.localhost",
+                "http://localhost:3001",
+                "http://[::1]:5173",
+                "https://zone.example.com:8443",
+            ],
+            "each entry is kept as the origin a browser sends, and a blank one is no entry"
+        );
+    }
+
+    #[test]
+    fn a_console_that_is_not_an_origin_stops_the_server_starting() {
+        let _lock = lock();
+        let _environment = Environment::isolated(&AGENT_SETTINGS);
+
+        for entry in [
+            "http://manager.localhost/console",
+            "http://localhost:3001//",
+            "http://localhost:3001?next=elsewhere",
+            "http://localhost:3001#receipt",
+            "http://someone@localhost:3001",
+            "http://someone:secret@localhost:3001",
+            "ftp://manager.localhost",
+            "file:///srv/console",
+            "manager.localhost",
+            "localhost:3001",
+            "*",
+            "http://",
+            "http://manager.localhost, /agent-sign-in",
+        ] {
+            Environment::set(CONSOLE_ORIGINS, entry);
+
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(NOT_AN_ORIGIN))
+                ),
+                "{entry:?} was taken for a console a sign-in's browser is sent to"
+            );
+        }
+    }
+
+    #[test]
+    fn the_state_root_follows_the_xdg_base_directories() {
+        let home = || Some(PathBuf::from("/home/zone"));
+        assert_eq!(
+            state_root(None, Some(PathBuf::from("/var/state")), home())
+                .expect("an XDG state directory"),
+            PathBuf::from("/var/state/zone/agents")
+        );
+        assert_eq!(
+            state_root(None, None, home()).expect("a home"),
+            PathBuf::from("/home/zone/.local/state/zone/agents")
+        );
+        assert_eq!(
+            state_root(None, Some(PathBuf::from("state")), home()).expect("a home"),
+            PathBuf::from("/home/zone/.local/state/zone/agents"),
+            "the XDG specification has a relative XDG_STATE_HOME ignored"
+        );
+        assert_eq!(
+            state_root(
+                Some(PathBuf::from("/app/agent-state")),
+                Some(PathBuf::from("/var/state")),
+                home()
+            )
+            .expect("a configured root"),
+            PathBuf::from("/app/agent-state"),
+            "the configured root wins"
+        );
+        for home in [None, Some(PathBuf::from("zone"))] {
+            assert!(
+                matches!(
+                    state_root(None, None, home),
+                    Err(ConfigError::Missing("ZONE_AGENT_STATE_DIR"))
+                ),
+                "with no absolute home there is nowhere private to default to"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_homes_follow_the_state_layout() {
+        let agents = AgentConfig {
+            state: PathBuf::from("/app/agent-state"),
+            ..AgentConfig::default()
+        };
+        let organization =
+            Uuid::parse_str("7b0e7c9a-2f7a-4a55-9d0e-1c7d8f6a5b4c").expect("a valid UUID");
+        for (agent, home) in [
+            (
+                AgentKind::Claude,
+                "/app/agent-state/7b0e7c9a-2f7a-4a55-9d0e-1c7d8f6a5b4c/claude",
+            ),
+            (
+                AgentKind::Codex,
+                "/app/agent-state/7b0e7c9a-2f7a-4a55-9d0e-1c7d8f6a5b4c/codex",
+            ),
+        ] {
+            let home = PathBuf::from(home);
+            assert_eq!(agents.home(organization, agent), home);
+            assert_eq!(agent_home(&agents.state, organization, agent), home);
+            assert_eq!(agents.work(organization, agent), home.join("work"));
+            assert_eq!(
+                agent_work(&agents.state, organization, agent),
+                home.join("work")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path)
+            .expect("the directory exists")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_home_makes_the_home_private_from_the_state_root_down() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let agents = AgentConfig {
+            state: scratch.path().join("agents"),
+            ..AgentConfig::default()
+        };
+        let organization = Uuid::new_v4();
+        let organization_root = agents.state.join(organization.to_string());
+
+        let home = agents
+            .create_home(organization, AgentKind::Codex)
+            .expect("the home is created");
+        let work = agents.work(organization, AgentKind::Codex);
+        assert_eq!(home, agents.home(organization, AgentKind::Codex));
+        for directory in [&agents.state, &organization_root, &home, &work] {
+            assert_eq!(
+                mode(directory),
+                PRIVATE,
+                "{} is open to other users",
+                directory.display()
+            );
+        }
+
+        for directory in [&organization_root, &home, &work] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).expect("widened");
+        }
+        assert_eq!(
+            agents
+                .create_home(organization, AgentKind::Codex)
+                .expect("an existing home is reused"),
+            home
+        );
+        for directory in [&organization_root, &home, &work] {
+            assert_eq!(
+                mode(directory),
+                PRIVATE,
+                "{} stayed open to other users",
+                directory.display()
+            );
+        }
+
+        let claude = agents
+            .create_home(organization, AgentKind::Claude)
+            .expect("a second agent's home");
+        assert_eq!(mode(&claude), PRIVATE);
+        assert_eq!(mode(&agents.work(organization, AgentKind::Claude)), PRIVATE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_home_leaves_an_existing_state_root_as_the_operator_made_it() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let state = scratch.path().join("agents");
+        fs::create_dir(&state).expect("the operator's directory");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).expect("shared");
+        let agents = AgentConfig {
+            state: state.clone(),
+            ..AgentConfig::default()
+        };
+        let organization = Uuid::new_v4();
+
+        agents
+            .create_home(organization, AgentKind::Claude)
+            .expect("the home is created");
+
+        assert_eq!(
+            mode(&state),
+            0o755,
+            "a chmod here would lock every other user out of a shared directory such as /var/lib"
+        );
+        assert_eq!(mode(&state.join(organization.to_string())), PRIVATE);
+    }
+
+    #[test]
+    fn a_configured_binary_runs_only_the_agent_it_was_configured_for() {
+        let mut config = create_test_config();
+        for agent in AgentKind::ALL {
+            assert_eq!(
+                config.agent_executable(agent),
+                PathBuf::from(agent.executable())
+            );
+        }
+
+        config.model_backend = ModelBackend::Cli {
+            agent: AgentKind::Claude,
+            executable: None,
+        };
+        assert_eq!(
+            config.agent_executable(AgentKind::Claude),
+            PathBuf::from("claude")
+        );
+
+        config.model_backend = ModelBackend::Cli {
+            agent: AgentKind::Claude,
+            executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+        };
+        assert_eq!(
+            config.agent_executable(AgentKind::Claude),
+            PathBuf::from("/opt/homebrew/bin/claude")
+        );
+        assert_eq!(
+            config.agent_executable(AgentKind::Codex),
+            PathBuf::from("codex"),
+            "an organization choosing codex must not be run through the operator's claude binary"
+        );
+    }
+
+    #[test]
+    fn the_server_config_carries_and_shows_the_agent_settings() {
+        let _lock = lock();
+        let names = [
+            "DATABASE_URL",
+            "ENCRYPTION_KEY",
+            "GITHUB_API_URL",
+            "JWT_SECRET",
+            "LITELLM_HOST",
+            "LITELLM_KEY",
+            "REDIS_URL",
+            MODEL_BACKEND,
+            MODEL_BACKEND_EXECUTABLE,
+            AGENT_STATE,
+            AGENT_HOST_LOGIN,
+            CLAUDE_TOKEN_URL,
+            CODEX_SANDBOX,
+            AGENT_CALLBACK,
+            AGENT_CALLBACK_BIND,
+            CONSOLE_ORIGINS,
+        ];
+        let _environment = Environment::isolated(&names);
+        Environment::set("JWT_SECRET", "12345678901234567890123456789012");
+        Environment::set("ENCRYPTION_KEY", "12345678901234567890123456789012");
+        Environment::set("DATABASE_URL", "postgres://database/zone");
+        Environment::set("REDIS_URL", "redis://cache:6379");
+        Environment::set("LITELLM_HOST", "http://models:4000");
+        Environment::set("LITELLM_KEY", "models-key");
+        Environment::set(AGENT_STATE, "/app/agent-state");
+        Environment::set(AGENT_HOST_LOGIN, "false");
+        Environment::set(CODEX_SANDBOX, "danger-full-access");
+        Environment::set(AGENT_CALLBACK, "60000");
+        Environment::set(AGENT_CALLBACK_BIND, "0.0.0.0:54545");
+        Environment::set(
+            CONSOLE_ORIGINS,
+            "http://manager.localhost,https://manager.localhost",
+        );
+
+        let config = Config::from_env().expect("every value is valid");
+        assert_eq!(
+            config.agents,
+            AgentConfig {
+                state: PathBuf::from("/app/agent-state"),
+                host_login: false,
+                claude_token_url: DEFAULT_CLAUDE_TOKEN_URL.to_string(),
+                codex_sandbox: CodexSandbox::DangerFullAccess,
+                callback: Some(Callback {
+                    port: 60_000,
+                    bind: SocketAddr::new(UNSPECIFIED, 54_545),
+                }),
+                consoles: vec![
+                    "http://manager.localhost".to_string(),
+                    "https://manager.localhost".to_string(),
+                ],
+            }
+        );
+        let debug = format!("{config:?}");
+        assert!(
+            debug.contains(
+                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 60000, bind: 0.0.0.0:54545 }), consoles: ["http://manager.localhost", "https://manager.localhost"] }"#
+            ),
+            "{debug}"
+        );
+
+        Environment::set(CONSOLE_ORIGINS, "http://manager.localhost/agent-sign-in");
+        assert!(
+            matches!(Config::from_env(), Err(ConfigError::Invalid(NOT_AN_ORIGIN))),
+            "a console that is not an origin must stop the server starting"
+        );
+        Environment::remove(CONSOLE_ORIGINS);
+
+        Environment::set(AGENT_CALLBACK, "http://0.0.0.0:54545");
+        assert!(
+            matches!(
+                Config::from_env(),
+                Err(ConfigError::Invalid(
+                    "ZONE_AGENT_CALLBACK must be http://localhost:<port>, or the port alone"
+                ))
+            ),
+            "a callback claude.com would never send a browser to must stop the server starting"
+        );
+        Environment::remove(AGENT_CALLBACK);
+
+        Environment::set(CODEX_SANDBOX, "read-only");
+        assert!(
+            matches!(
+                Config::from_env(),
+                Err(ConfigError::Invalid(
+                    "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access"
+                ))
+            ),
+            "a sandbox the server cannot give codex must stop it starting"
+        );
+        Environment::remove(CODEX_SANDBOX);
+
+        Environment::set(AGENT_HOST_LOGIN, "sometimes");
+        assert!(
+            matches!(
+                Config::from_env(),
+                Err(ConfigError::Invalid(
+                    "ZONE_AGENT_HOST_LOGIN must be true or false"
+                ))
+            ),
+            "an agent setting the server cannot read must stop it starting"
         );
     }
 }

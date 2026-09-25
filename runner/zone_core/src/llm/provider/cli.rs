@@ -1,5 +1,6 @@
 //! A provider backed by a coding agent CLI run as a child process.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::time::Duration;
@@ -10,19 +11,31 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
-use tool_runner::executor::{GRACE_PERIOD, OutputLimiter, ProcessGroup};
+use tool_runner::executor::{GRACE_PERIOD, ProcessGroup};
 
 use super::agent::AgentKind;
 use super::completion::{Completion, CompletionProvider, CompletionRequest, ProviderKind};
 use super::credential::Credential;
+use super::environment;
 use super::error::{ExitStatus, ProviderError};
 use super::event::AgentEvent;
-use super::lines::{Lines, Overlong};
+use super::lines::{Frame, Lines};
 use super::settings::{CliSettings, Toolset};
 use super::transcript;
 use crate::llm::{Message, Usage};
 
 const READ_BUFFER: usize = 8 * 1024;
+
+/// Bytes of the agent's stderr that a failure it reported carries.
+const DIAGNOSTIC_TAIL: usize = 1024;
+
+/// Stands between an agent's own report of a failure and the end of its
+/// stderr that follows it, so a reader can tell the two apart.
+pub const STDERR_HEADING: &str = "\n\nThe end of the agent's stderr:\n";
+
+/// How a turn stopped for an answer past its output limit begins its failure,
+/// before it names the limit.
+pub const OUTGROWN: &str = "the agent's answer grew past";
 
 /// A coding agent's events, yielded as the child emits them.
 pub type AgentStream = Pin<Box<dyn Stream<Item = Result<AgentEvent, ProviderError>> + Send>>;
@@ -88,6 +101,7 @@ impl CliProvider {
                 Some(model),
                 self.settings.toolset.as_deref(),
                 self.settings.builtin_tools,
+                self.settings.sandbox,
             ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -98,29 +112,16 @@ impl CliProvider {
             command.current_dir(directory);
         }
 
-        match &self.settings.toolset {
-            Some(toolset) => {
-                command.env(Toolset::TOKEN_VARIABLE, toolset.token.expose());
-            }
-            // A turn serving no tools hands out no token, and a token left in
-            // zone's own environment is not this turn's to pass on.
-            None => {
-                command.env_remove(Toolset::TOKEN_VARIABLE);
-            }
+        command
+            .env_clear()
+            .envs(environment::inherited())
+            .envs(&self.settings.variables);
+        if let Some(toolset) = &self.settings.toolset {
+            command.env(Toolset::TOKEN_VARIABLE, toolset.token.expose());
         }
-
-        match &self.settings.credential {
-            Credential::Key { variable, value } => {
-                command.env(variable, value.expose());
-            }
-            // An operator who points zone at the CLI signed in on this host
-            // means to spend that subscription. A key left in the server's own
-            // environment outranks the session silently, and bills the key.
-            Credential::Inherited => {
-                for agent in AgentKind::ALL {
-                    command.env_remove(agent.variable());
-                }
-            }
+        // Last, so that no variable of the same name can replace it.
+        if let Credential::Key { variable, value } = &self.settings.credential {
+            command.env(variable, value.expose());
         }
 
         // A coding agent forks a tree of its own -- language servers, search,
@@ -179,9 +180,9 @@ impl CliProvider {
 
         Ok(Box::pin(async_stream::try_stream! {
             let mut lines = Lines::new(line_limit);
-            let mut limiter = OutputLimiter::new(output_limit);
             let mut buffer = [0_u8; READ_BUFFER];
             let mut events = Vec::new();
+            let mut kept = 0_usize;
             let mut ended = false;
             let mut terminal = false;
 
@@ -189,26 +190,13 @@ impl CliProvider {
                 let read = session.read(&mut buffer).await?;
                 if read == 0 {
                     ended = true;
-                    match lines.flush() {
-                        Ok(Some(line)) => agent.interpret(&line, &mut events),
-                        Ok(None) => {}
-                        Err(overlong) => Err(session.stop(unframed(&name, overlong)).await)?,
+                    if let Some(frame) = lines.flush() {
+                        interpret(agent, &name, line_limit, frame, &mut events);
                     }
                 } else {
-                    let (accepted, count, _) = limiter.check(read);
-                    if !accepted || count < read {
-                        Err(session.stop(ProviderError::agent(
-                            &name,
-                            &format!("the agent produced more than {output_limit} bytes of output"),
-                        )).await)?;
-                    }
-                    lines.extend(&buffer[..count]);
-                    loop {
-                        match lines.take() {
-                            Ok(Some(line)) => agent.interpret(&line, &mut events),
-                            Ok(None) => break,
-                            Err(overlong) => Err(session.stop(unframed(&name, overlong)).await)?,
-                        }
+                    lines.extend(&buffer[..read]);
+                    while let Some(frame) = lines.take() {
+                        interpret(agent, &name, line_limit, frame, &mut events);
                     }
                 }
 
@@ -216,7 +204,14 @@ impl CliProvider {
                     // The agent's own report of what went wrong beats an exit
                     // code, which says only that something did.
                     if let AgentEvent::Failed(message) = &event {
-                        Err(session.stop(ProviderError::agent(&name, message)).await)?;
+                        Err(session.fail(message).await)?;
+                    }
+                    kept = kept.saturating_add(retained(&event));
+                    if kept > output_limit {
+                        Err(session.stop(ProviderError::agent(
+                            &name,
+                            &format!("{OUTGROWN} {output_limit} bytes"),
+                        )).await)?;
                     }
                     terminal |= event.terminal();
                     yield event;
@@ -331,10 +326,22 @@ impl Session {
     }
 
     /// Stop the agent, then report why.
-    ///
+    async fn stop(&mut self, error: ProviderError) -> ProviderError {
+        self.halt().await;
+        error
+    }
+
+    /// Stop the agent, then report the failure it named, followed by the end
+    /// of its stderr: codex reports a sign-in it could not renew only there.
+    async fn fail(&mut self, message: &str) -> ProviderError {
+        self.halt().await;
+        let diagnostics = self.diagnostics().await;
+        ProviderError::agent(&self.name, &failure(message, &diagnostics))
+    }
+
     /// Every abnormal end goes through here: a child left running writes into
     /// a pipe nobody is reading and blocks there until it is killed anyway.
-    async fn stop(&mut self, error: ProviderError) -> ProviderError {
+    async fn halt(&mut self) {
         self.writer.abort();
         if let Some(group) = &self.group {
             let _ = group.terminate();
@@ -347,8 +354,6 @@ impl Session {
             let _ = self.child.wait().await;
         }
         self.reaped = true;
-
-        error
     }
 
     /// Whatever the agent wrote to stderr, given a bounded wait.
@@ -406,43 +411,93 @@ impl CompletionProvider for CliProvider {
     }
 }
 
-fn unframed(provider: &str, overlong: Overlong) -> ProviderError {
-    ProviderError::malformed(
-        provider,
-        format!("one event exceeded {} bytes", overlong.limit),
-    )
+fn interpret(
+    agent: AgentKind,
+    provider: &str,
+    limit: usize,
+    frame: Frame,
+    events: &mut Vec<AgentEvent>,
+) {
+    match frame {
+        Frame::Line(line) => agent.interpret(&line, events),
+        Frame::Dropped => tracing::warn!(
+            provider,
+            limit,
+            "dropped an agent event longer than the line limit; the turn goes on without it"
+        ),
+    }
 }
 
-/// Stderr is drained whether or not it is ever read back. An agent run with a
-/// piped-but-unread stderr blocks the moment it fills the pipe buffer, which
-/// on a verbose agent happens long before it reaches its answer.
+/// The bytes of `event` that whoever reads the stream keeps. A tool call is
+/// kept as its name on a line of its own; what it was made with reaches no
+/// reader.
+fn retained(event: &AgentEvent) -> usize {
+    match event {
+        AgentEvent::Text(text) | AgentEvent::Failed(text) => text.len(),
+        AgentEvent::Tool(call) => call.function.name.len() + '\n'.len_utf8(),
+        AgentEvent::Usage(_) | AgentEvent::Finished { .. } => 0,
+    }
+}
+
+/// `message`, then [`STDERR_HEADING`] and the last whole lines of
+/// `diagnostics` that fit in [`DIAGNOSTIC_TAIL`] bytes.
+fn failure(message: &str, diagnostics: &str) -> String {
+    let diagnostics = diagnostics.trim();
+    if diagnostics.is_empty() {
+        return message.to_string();
+    }
+    let mut start = diagnostics.len().saturating_sub(DIAGNOSTIC_TAIL);
+    while !diagnostics.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = match diagnostics[start..].split_once('\n') {
+        Some((_, whole)) if start > 0 => whole,
+        _ => &diagnostics[start..],
+    };
+    format!("{message}{STDERR_HEADING}{tail}")
+}
+
+/// The last `limit` bytes of the agent's stderr, which is read to its end
+/// whether or not it is ever read back: an agent writing into a pipe nobody
+/// reads blocks once the pipe is full, and one whose pipe was closed dies of
+/// the next write.
 async fn read_diagnostics(stderr: Option<ChildStderr>, limit: usize) -> String {
     let Some(mut stderr) = stderr else {
         return String::new();
     };
 
-    let mut collected = Vec::new();
-    let mut limiter = OutputLimiter::new(limit);
+    let mut kept = VecDeque::new();
     let mut buffer = [0_u8; READ_BUFFER];
 
     while let Ok(read) = stderr.read(&mut buffer).await {
         if read == 0 {
             break;
         }
-        let (accepted, count, _) = limiter.check(read);
-        if !accepted {
-            break;
-        }
-        collected.extend_from_slice(&buffer[..count]);
+        kept.extend(&buffer[..read]);
+        kept.drain(..kept.len().saturating_sub(limit));
     }
 
-    String::from_utf8_lossy(&collected).into_owned()
+    let kept = Vec::from(kept);
+    let start = kept
+        .iter()
+        .position(|byte| !is_continuation(*byte))
+        .unwrap_or(kept.len());
+    String::from_utf8_lossy(&kept[start..]).into_owned()
+}
+
+/// Whether `byte` continues a UTF-8 character rather than starting one.
+fn is_continuation(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::llm::RequestOptions;
+    use crate::llm::provider::UNFUNDED;
+    use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT};
+    use serde_json::json;
+    use std::collections::BTreeMap;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -452,11 +507,13 @@ mod tests {
     /// A stand-in agent, so no test needs a real CLI installed.
     ///
     /// It reads its prompt from stdin exactly as the real agents do, which is
-    /// what keeps the delivery path under test the real one.
+    /// what keeps the delivery path under test the real one. Run without
+    /// arguments, as only [`wait_until_executable`] runs it, it exits at once.
     fn fake(directory: &TempDir, script: &str) -> PathBuf {
         let path = directory.path().join("agent");
         let mut file = std::fs::File::create(&path).expect("the fake agent");
-        write!(file, "#!/bin/sh\n{script}\n").expect("the fake agent body");
+        write!(file, "#!/bin/sh\n[ \"$#\" -gt 0 ] || exit 0\n{script}\n")
+            .expect("the fake agent body");
         drop(file);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("the fake agent to be executable");
@@ -464,28 +521,27 @@ mod tests {
         path
     }
 
+    /// Runs the fake once to completion, before a test's deadlines start.
+    ///
     /// Linux refuses to exec a file any process still holds open for writing.
     /// The descriptor here is closed, but a sibling test forking between its
     /// own open and exec inherits it for that window, so a freshly written
-    /// script can hit ETXTBSY under a parallel run. Production never meets this:
-    /// a provider execs an installed binary, not one it just wrote.
+    /// script can hit ETXTBSY under a parallel run. macOS assesses a new
+    /// executable on its first run, which can take seconds, and a run killed
+    /// at once leaves that to the next run. Production never meets either: a
+    /// provider execs an installed binary, not one it just wrote.
     fn wait_until_executable(path: &std::path::Path) {
         for _ in 0..50 {
             match std::process::Command::new(path)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .spawn()
+                .status()
             {
-                Ok(mut child) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return;
-                }
                 Err(error) if error.raw_os_error() == Some(26) => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(_) => return,
+                _ => return,
             }
         }
     }
@@ -743,20 +799,332 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
     }
 
     #[tokio::test]
-    async fn a_single_oversized_event_is_reported_as_malformed_output() {
+    async fn a_codex_turn_that_recovers_from_an_error_still_answers() {
         let directory = TempDir::new().expect("a temporary directory");
-        let mut settings = settings(&directory, "head -c 5000 /dev/zero | tr '\\0' 'x'; echo");
+        let recording = directory.path().join("recording.jsonl");
+        std::fs::write(
+            &recording,
+            include_str!("parser/fixtures/codex/rung3-mock-reconnect-then-complete.jsonl"),
+        )
+        .expect("the recording");
+        let script = format!("cat '{}'", recording.display());
+        let provider = CliProvider::agent(AgentKind::Codex, settings(&directory, &script));
+
+        let completion = run(&provider, &[Message::user("Echo the nonce.")])
+            .await
+            .expect("the answer codex reached after reconnecting");
+
+        assert_eq!(
+            completion.message.content.as_deref(),
+            Some("The echo tool returned: Wall time: 0.0012 seconds\nOutput: r6-rung3-nonce-9b2d")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_codex_turn_carries_the_renewal_failure_codex_wrote_only_to_stderr() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let recording = directory.path().join("recording.jsonl");
+        std::fs::write(
+            &recording,
+            include_str!("parser/fixtures/codex/refresh-invalidated.jsonl"),
+        )
+        .expect("the recording");
+        let diagnostics = directory.path().join("diagnostics.stderr");
+        std::fs::write(
+            &diagnostics,
+            include_str!("parser/fixtures/codex/refresh-invalidated-errors.stderr"),
+        )
+        .expect("the diagnostics");
+        let script = format!(
+            "cat '{}' >&2\ncat '{}'\nexit 1",
+            diagnostics.display(),
+            recording.display()
+        );
+        let provider = CliProvider::agent(AgentKind::Codex, settings(&directory, &script));
+
+        let error = run(&provider, &[Message::user("Echo the nonce.")])
+            .await
+            .expect_err("a failed turn");
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("workspace routing discovery unauthorized (401)"),
+            "lost codex's own wording: {rendered}"
+        );
+        assert!(
+            rendered.contains("Your access token could not be refreshed"),
+            "lost the reason codex gave on stderr: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fable_turn_without_usage_credits_fails_naming_them_and_not_a_rate_limit() {
+        for stream in [
+            include_str!("parser/fixtures/claude/fable-credits-required.jsonl"),
+            include_str!("parser/fixtures/claude/fable-limit-reached.jsonl"),
+        ] {
+            let directory = TempDir::new().expect("a temporary directory");
+            let recording = directory.path().join("recording.jsonl");
+            std::fs::write(&recording, stream).expect("the recording");
+            let script = format!("cat '{}'", recording.display());
+            let provider = CliProvider::agent(AgentKind::Claude, settings(&directory, &script));
+
+            let error = run(&provider, &[Message::user("Review the change.")])
+                .await
+                .expect_err("a refused turn");
+
+            let rendered = error.to_string();
+            assert!(rendered.contains(UNFUNDED), "{rendered}");
+            assert!(
+                !rendered.to_ascii_lowercase().contains("rate limit"),
+                "{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_keeps_only_the_last_whole_lines_of_stderr() {
+        let lines: Vec<String> = (0..500)
+            .map(|number| format!("diagnostic line {number}"))
+            .collect();
+
+        let rendered = failure("the turn failed", &lines.join("\n"));
+
+        let (message, tail) = rendered
+            .split_once(STDERR_HEADING)
+            .expect("the agent's words, then its stderr");
+        assert_eq!(message, "the turn failed");
+        assert!(tail.len() <= DIAGNOSTIC_TAIL, "{} bytes", tail.len());
+        assert!(tail.ends_with("diagnostic line 499"), "{tail}");
+        assert!(
+            tail.lines()
+                .all(|line| lines.iter().any(|whole| whole == line)),
+            "a line was cut short: {tail}"
+        );
+    }
+
+    #[test]
+    fn a_failure_cuts_one_long_stderr_line_between_characters() {
+        let rendered = failure("the turn failed", &"—".repeat(1000));
+
+        let (_, tail) = rendered
+            .split_once(STDERR_HEADING)
+            .expect("the agent's words, then its stderr");
+        assert!(!tail.is_empty() && tail.len() <= DIAGNOSTIC_TAIL);
+        assert!(tail.chars().all(|character| character == '—'), "{tail}");
+    }
+
+    /// An agent's own report can run to several lines. None of them may read
+    /// as stderr, and no line of stderr as the agent's own words.
+    #[test]
+    fn a_failure_of_several_lines_stays_apart_from_the_stderr_after_it() {
+        let words = "tool call error: tool call failed for `zone/echo`\n\nCaused by:\n    \
+                     timed out awaiting tools/call after 2s";
+        let stderr = "2026-09-23T07:43:43Z WARN codex_mcp: docs: 401 Unauthorized";
+
+        let rendered = failure(words, stderr);
+
+        assert_eq!(rendered.split_once(STDERR_HEADING), Some((words, stderr)));
+    }
+
+    #[test]
+    fn a_failure_with_nothing_on_stderr_is_the_agents_words_alone() {
+        assert_eq!(failure("the turn failed", " \n\t"), "the turn failed");
+    }
+
+    /// Codex echoes what each of zone's tools returned, so a file the agent
+    /// read can make one event longer than any answer.
+    fn codex_tool_result(id: usize, bytes: usize) -> String {
+        json!({
+            "type": "item.completed",
+            "item": {
+                "id": format!("item_{id}"),
+                "type": "mcp_tool_call",
+                "server": "zone",
+                "tool": "read_file",
+                "arguments": {"path": "a.rs"},
+                "result": {"content": [{"type": "text", "text": "x".repeat(bytes)}]},
+                "error": null,
+                "status": "completed",
+            },
+        })
+        .to_string()
+    }
+
+    const CODEX_ANSWER: &str = r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"The file is large."}}"#;
+    const CODEX_COMPLETED: &str =
+        r#"{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}"#;
+
+    fn replaying(directory: &TempDir, lines: &[String]) -> String {
+        let recording = directory.path().join("recording.jsonl");
+        std::fs::write(&recording, format!("{}\n", lines.join("\n"))).expect("the recording");
+        format!("cat '{}'", recording.display())
+    }
+
+    #[tokio::test]
+    async fn an_event_past_the_line_limit_is_dropped_and_the_turn_still_answers() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = replaying(
+            &directory,
+            &[
+                codex_tool_result(1, DEFAULT_LINE_LIMIT + 1),
+                CODEX_ANSWER.to_string(),
+                CODEX_COMPLETED.to_string(),
+            ],
+        );
+        let provider = CliProvider::agent(AgentKind::Codex, settings(&directory, &script));
+
+        let completion = run(&provider, &[Message::user("Read a.rs.")])
+            .await
+            .expect("the answer that followed the dropped event");
+
+        assert_eq!(
+            completion.message.content.as_deref(),
+            Some("The file is large.")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unterminated_event_past_the_line_limit_is_skipped_to_its_end() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = r#"
+head -c 5000 /dev/zero | tr '\0' 'x'
+sleep 0.2
+head -c 5000 /dev/zero | tr '\0' 'y'
+echo
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Still here."}]}}'
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#;
+        let mut settings = settings(&directory, script);
         settings.line_limit = 256;
         let provider = CliProvider::agent(AgentKind::Claude, settings);
+
+        let completion = run(&provider, &[Message::user("hi")])
+            .await
+            .expect("the answer after the skipped event");
+
+        assert_eq!(completion.message.content.as_deref(), Some("Still here."));
+    }
+
+    #[tokio::test]
+    async fn tool_results_the_agent_reads_past_the_output_cap_do_not_end_its_turn() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let mut lines: Vec<String> = (1..=32).map(|id| codex_tool_result(id, 4 * 1024)).collect();
+        lines.extend([CODEX_ANSWER.to_string(), CODEX_COMPLETED.to_string()]);
+        let script = replaying(&directory, &lines);
+        let provider = CliProvider::agent(
+            AgentKind::Codex,
+            settings(&directory, &script).with_output_limit(4 * 1024),
+        );
+
+        let completion = run(&provider, &[Message::user("Read every file.")])
+            .await
+            .expect("an answer after 128 KiB of tool results");
+
+        assert_eq!(
+            completion.message.content.as_deref(),
+            Some("The file is large.")
+        );
+    }
+
+    /// A call codex made through zone's tools, whose arguments hold `bytes`
+    /// of a file it wrote.
+    fn codex_tool_call(id: usize, bytes: usize) -> String {
+        json!({
+            "type": "item.completed",
+            "item": {
+                "id": format!("item_{id}"),
+                "type": "mcp_tool_call",
+                "server": "zone",
+                "tool": "write_file",
+                "arguments": {"path": format!("part_{id}.txt"), "content": "x".repeat(bytes)},
+                "result": {"content": [{"type": "text", "text": "Wrote it."}]},
+                "error": null,
+                "status": "completed",
+            },
+        })
+        .to_string()
+    }
+
+    /// What a call was made with reaches no consumer: the answer keeps none of
+    /// it and zone's loop keeps the tool's name. So a turn whose calls carry
+    /// more than the cap between them, under the default limits, still answers.
+    #[tokio::test]
+    async fn tool_arguments_past_the_output_cap_do_not_end_its_turn() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let bytes = DEFAULT_LINE_LIMIT - 64 * 1024;
+        let calls = DEFAULT_OUTPUT_LIMIT / bytes + 1;
+        let mut lines: Vec<String> = (1..=calls).map(|id| codex_tool_call(id, bytes)).collect();
+        lines.extend([CODEX_ANSWER.to_string(), CODEX_COMPLETED.to_string()]);
+        let script = replaying(&directory, &lines);
+        let provider = CliProvider::agent(AgentKind::Codex, settings(&directory, &script));
+
+        let completion = run(&provider, &[Message::user("Write every part.")])
+            .await
+            .expect("an answer after more tool arguments than the output cap");
+
+        assert!(calls * bytes > DEFAULT_OUTPUT_LIMIT);
+        assert_eq!(
+            completion.message.content.as_deref(),
+            Some("The file is large.")
+        );
+    }
+
+    #[tokio::test]
+    async fn stderr_past_the_output_cap_is_still_drained() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = r#"
+head -c 262144 /dev/zero | tr '\0' 'e' >&2
+echo 'still logging' >&2
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}'
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#;
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            settings(&directory, script)
+                .with_output_limit(4 * 1024)
+                .with_timeout(Duration::from_secs(5)),
+        );
+
+        let completion = run(&provider, &[Message::user("hi")])
+            .await
+            .expect("an answer from an agent that wrote 256 KiB to stderr");
+
+        assert_eq!(completion.message.content.as_deref(), Some("Done."));
+    }
+
+    #[tokio::test]
+    async fn a_failure_past_the_output_cap_reports_the_end_of_stderr() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = r#"
+head -c 262144 /dev/zero | tr '\0' 'e' >&2
+echo 'error: the real reason' >&2
+exit 3
+"#;
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            settings(&directory, script)
+                .with_output_limit(4 * 1024)
+                .with_timeout(Duration::from_secs(5)),
+        );
 
         let error = run(&provider, &[Message::user("hi")])
             .await
             .expect_err("a failure");
 
+        let ProviderError::Exit {
+            status, message, ..
+        } = &error
+        else {
+            panic!("expected an exit failure, got {error:?}");
+        };
+        assert_eq!(*status, ExitStatus::Code(3));
         assert!(
-            matches!(error, ProviderError::Malformed { .. }),
-            "expected malformed output, got {error:?}"
+            message.trim_end().ends_with("error: the real reason"),
+            "lost the end of stderr: {}",
+            &message[message.len().saturating_sub(200)..]
         );
+        assert!(message.len() <= 4 * 1024 + 256, "{} bytes", message.len());
     }
 
     /// Recorded from claude 2.1.269 with no session on the host. The subtype
@@ -823,9 +1191,14 @@ echo '{"type":"result","subtype":"success","is_error":false}'
     }
 
     #[tokio::test]
-    async fn output_past_the_cap_stops_the_run_instead_of_waiting_for_the_timeout() {
+    async fn an_answer_past_the_output_cap_stops_the_run_instead_of_waiting_for_the_timeout() {
         let directory = TempDir::new().expect("a temporary directory");
-        let settings = settings(&directory, "yes 'xxxxxxxxxxxxxxxx'").with_output_limit(4 * 1024);
+        let script = r#"
+while :; do
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"xxxxxxxxxxxxxxxx"}]}}'
+done
+"#;
+        let settings = settings(&directory, script).with_output_limit(4 * 1024);
         let provider = CliProvider::agent(AgentKind::Claude, settings);
 
         let started = std::time::Instant::now();
@@ -843,26 +1216,6 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         );
     }
 
-    #[test]
-    fn an_inherited_session_clears_the_keys_that_would_outrank_it() {
-        let provider = CliProvider::agent(AgentKind::Claude, CliSettings::default());
-
-        let command = provider.command("sonnet");
-        let cleared: Vec<String> = command
-            .as_std()
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
-            .map(|(name, _)| name.to_string_lossy().into_owned())
-            .collect();
-
-        for variable in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
-            assert!(
-                cleared.contains(&variable.to_string()),
-                "{variable} in the server's environment would be spent instead of the host session: {cleared:?}"
-            );
-        }
-    }
-
     fn toolset() -> Toolset {
         Toolset::new(
             "http://127.0.0.1:8421/mcp",
@@ -871,37 +1224,261 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         )
     }
 
-    fn arguments(command: &Command) -> Vec<String> {
-        command
-            .as_std()
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect()
+    /// A stand-in agent that writes down how it was started -- its arguments
+    /// and its whole environment -- and then finishes the way claude does.
+    struct Recorder {
+        directory: TempDir,
     }
 
-    #[test]
-    fn the_turns_token_reaches_the_agents_environment_and_never_its_arguments() {
-        let provider = CliProvider::agent(
-            AgentKind::Claude,
-            CliSettings::default().with_toolset(toolset()),
+    impl Recorder {
+        const ARGUMENTS: &'static str = "arguments";
+        const ENVIRONMENT: &'static str = "environment";
+
+        fn new() -> Self {
+            Self {
+                directory: TempDir::new().expect("a temporary directory"),
+            }
+        }
+
+        fn settings(&self) -> CliSettings {
+            let script = format!(
+                r#"
+cat > /dev/null
+printf '%s\0' "$@" > '{arguments}'
+/usr/bin/env -0 > '{environment}'
+echo '{result}'
+"#,
+                arguments = self.path(Self::ARGUMENTS).display(),
+                environment = self.path(Self::ENVIRONMENT).display(),
+                result = r#"{"type":"result","subtype":"success","is_error":false}"#,
+            );
+            settings(&self.directory, &script)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.directory.path().join(name)
+        }
+
+        fn entries(&self, name: &str) -> Vec<String> {
+            let recorded = std::fs::read(self.path(name)).expect("the agent's record");
+            String::from_utf8_lossy(&recorded)
+                .split_terminator('\0')
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn arguments(&self) -> Vec<String> {
+            self.entries(Self::ARGUMENTS)
+        }
+
+        fn environment(&self) -> BTreeMap<String, String> {
+            self.entries(Self::ENVIRONMENT)
+                .iter()
+                .filter_map(|entry| entry.split_once('='))
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect()
+        }
+    }
+
+    async fn answered(settings: CliSettings) {
+        let provider = CliProvider::agent(AgentKind::Claude, settings);
+        run(&provider, &[Message::user("hi")])
+            .await
+            .expect("an answer");
+    }
+
+    /// Cargo sets it in every test process it runs, the way the server's own
+    /// configuration sits in the server's environment.
+    const SERVERS_OWN: &str = "CARGO_MANIFEST_DIR";
+
+    #[tokio::test]
+    async fn a_variable_from_the_servers_own_environment_never_reaches_the_agent() {
+        assert!(
+            std::env::var_os(SERVERS_OWN).is_some(),
+            "cargo sets {SERVERS_OWN} for every test it runs"
+        );
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = r#"
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' "${CARGO_MANIFEST_DIR:-absent}"
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#;
+        let provider = CliProvider::agent(AgentKind::Claude, settings(&directory, script));
+
+        let completion = run(&provider, &[Message::user("hi")])
+            .await
+            .expect("an answer");
+
+        assert_eq!(completion.message.content.as_deref(), Some("absent"));
+    }
+
+    /// Marks the copy of this test binary that runs with a server's secrets.
+    const SERVER_COPY: &str = "ZONE_CORE_TEST_SERVER_COPY";
+
+    /// What a server's environment holds that no agent may be handed. Every
+    /// value says `notreal`, so a leak shows up under any name.
+    const SERVER_SECRETS: [(&str, &str); 11] = [
+        (
+            "DATABASE_URL",
+            "postgres://zone:notrealpassword@postgres/zone",
+        ),
+        ("JWT_SECRET", "notreal-jwt-secret"),
+        ("ENCRYPTION_KEY", "notreal-encryption-key"),
+        ("LITELLM_KEY", "sk-notreal-litellm-key"),
+        ("ANTHROPIC_API_KEY", "sk-ant-notreal-key"),
+        ("OPENAI_API_KEY", "sk-notreal-openai-key"),
+        ("CLAUDE_CONFIG_DIR", "/notreal/server/claude"),
+        ("CODEX_HOME", "/notreal/server/codex"),
+        ("CLAUDECODE", "notreal-session"),
+        ("CLAUDE_CODE_ENTRYPOINT", "notreal-entrypoint"),
+        ("ZONE_MCP_TOKEN", "notreal-leftover-turn-token"),
+    ];
+
+    /// Setting the secrets in this process would race every other test that
+    /// spawns a child, so a copy of the binary runs this test with them set.
+    #[tokio::test]
+    async fn the_servers_secrets_never_reach_the_agent() {
+        if std::env::var_os(SERVER_COPY).is_none() {
+            let output =
+                tokio::process::Command::new(std::env::current_exe().expect("this test binary"))
+                    .args([
+                        "--exact",
+                        "llm::provider::cli::tests::the_servers_secrets_never_reach_the_agent",
+                        "--nocapture",
+                    ])
+                    .env(SERVER_COPY, "1")
+                    .envs(SERVER_SECRETS)
+                    .env(environment::PASSTHROUGH, "CORPORATE_CA")
+                    .env("CORPORATE_CA", "/etc/ssl/corporate.pem")
+                    .output()
+                    .await
+                    .expect("a copy of this test binary");
+            let printed = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            assert!(output.status.success(), "{printed}");
+            assert!(
+                printed.contains("1 passed"),
+                "the copy ran no test: {printed}"
+            );
+            return;
+        }
+
+        let recorder = Recorder::new();
+        answered(recorder.settings()).await;
+
+        let environment = recorder.environment();
+        let leaked: Vec<&str> = SERVER_SECRETS
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| environment.contains_key(*name))
+            .collect();
+        assert!(leaked.is_empty(), "these reached the agent: {leaked:?}");
+        let carrying: Vec<&String> = environment
+            .iter()
+            .filter(|(_, value)| value.contains("notreal"))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            carrying.is_empty(),
+            "these carried a secret's value to the agent: {carrying:?}"
+        );
+        assert_eq!(
+            environment.get("CORPORATE_CA").map(String::as_str),
+            Some("/etc/ssl/corporate.pem"),
+            "the operator's passthrough was not honoured"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_agent_still_finds_its_home_and_its_commands() {
+        let recorder = Recorder::new();
+        answered(recorder.settings()).await;
+
+        let environment = recorder.environment();
+        for name in ["HOME", "PATH"] {
+            assert_eq!(
+                environment.get(name),
+                std::env::var(name).ok().as_ref(),
+                "{name} did not reach the agent as it was"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_variables_zone_sets_reach_the_agent_over_what_it_would_inherit() {
+        let recorder = Recorder::new();
+        answered(
+            recorder
+                .settings()
+                .with_variable("CLAUDE_CONFIG_DIR", "/state/organization/claude")
+                .with_variable("DISABLE_AUTOUPDATER", "1")
+                .with_variable("HOME", "/state/organization/home"),
+        )
+        .await;
+
+        let environment = recorder.environment();
+        for (name, value) in [
+            ("CLAUDE_CONFIG_DIR", "/state/organization/claude"),
+            ("DISABLE_AUTOUPDATER", "1"),
+            ("HOME", "/state/organization/home"),
+        ] {
+            assert_eq!(
+                environment.get(name).map(String::as_str),
+                Some(value),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_credential_outranks_a_variable_of_the_same_name() {
+        let recorder = Recorder::new();
+        answered(
+            recorder
+                .settings()
+                .with_variable("CLAUDE_CODE_OAUTH_TOKEN", "set-as-a-variable")
+                .with_credential(Credential::key(
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    "sk-ant-oat01-the-credential",
+                )),
+        )
+        .await;
+
+        assert_eq!(
+            recorder
+                .environment()
+                .get("CLAUDE_CODE_OAUTH_TOKEN")
+                .map(String::as_str),
+            Some("sk-ant-oat01-the-credential")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_turns_token_reaches_the_agents_environment_and_never_its_arguments() {
+        let recorder = Recorder::new();
+        answered(recorder.settings().with_toolset(toolset())).await;
+
+        assert_eq!(
+            recorder
+                .environment()
+                .get(Toolset::TOKEN_VARIABLE)
+                .map(String::as_str),
+            Some("zone-turn-notarealtoken")
         );
 
-        let command = provider.command("sonnet");
-        let token = command
-            .as_std()
-            .get_envs()
-            .find(|(name, _)| name.to_string_lossy() == Toolset::TOKEN_VARIABLE)
-            .and_then(|(_, value)| value)
-            .map(|value| value.to_string_lossy().into_owned());
-
-        assert_eq!(token.as_deref(), Some("zone-turn-notarealtoken"));
-
-        let arguments = arguments(&command);
-        assert!(arguments.iter().any(|argument| argument == "--mcp-config"));
+        let arguments = recorder.arguments();
+        assert!(
+            arguments.iter().any(|argument| argument == "--mcp-config"),
+            "{arguments:?}"
+        );
         assert!(
             arguments
                 .iter()
-                .any(|argument| argument == "mcp__zone__read_file")
+                .any(|argument| argument == "mcp__zone__read_file"),
+            "{arguments:?}"
         );
         assert!(
             !arguments
@@ -911,44 +1488,19 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         );
     }
 
-    #[test]
-    fn a_turn_serving_no_tools_withholds_the_agents_own_and_clears_the_token() {
-        let provider = CliProvider::agent(AgentKind::Claude, CliSettings::default());
-
-        let command = provider.command("sonnet");
-        let cleared: Vec<String> = command
-            .as_std()
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
-            .map(|(name, _)| name.to_string_lossy().into_owned())
-            .collect();
+    #[tokio::test]
+    async fn a_turn_serving_no_tools_withholds_the_agents_own_and_hands_out_no_token() {
+        let recorder = Recorder::new();
+        answered(recorder.settings()).await;
 
         assert!(
-            cleared.contains(&Toolset::TOKEN_VARIABLE.to_string()),
-            "a token from the server's own environment would have been passed on: {cleared:?}"
+            !recorder.environment().contains_key(Toolset::TOKEN_VARIABLE),
+            "a turn serving no tools was handed a token"
         );
-
-        let arguments = arguments(&command);
+        let arguments = recorder.arguments();
         assert!(
             arguments.iter().any(|argument| argument == "--tools"),
             "the agent kept its own file and shell tools: {arguments:?}"
         );
-    }
-
-    #[test]
-    fn a_configured_key_is_still_handed_to_the_agent() {
-        let settings = CliSettings::default()
-            .with_credential(Credential::key("ANTHROPIC_API_KEY", "sk-ant-present"));
-        let provider = CliProvider::agent(AgentKind::Claude, settings);
-
-        let command = provider.command("sonnet");
-        let value = command
-            .as_std()
-            .get_envs()
-            .find(|(name, _)| name.to_string_lossy() == "ANTHROPIC_API_KEY")
-            .and_then(|(_, value)| value)
-            .map(|value| value.to_string_lossy().into_owned());
-
-        assert_eq!(value.as_deref(), Some("sk-ant-present"));
     }
 }

@@ -1,4 +1,5 @@
 {{- if .Values.server.enabled }}
+{{- $agentStateClaim := include "zone-apps.server.agentStateClaim" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,6 +10,15 @@ spec:
   {{- if not .Values.server.autoscaling.enabled }}
   replicas: {{ .Values.server.replicaCount }}
   {{- end }}
+  strategy:
+    {{- if $agentStateClaim }}
+    type: Recreate
+    {{- else }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    {{- end }}
   selector:
     matchLabels:
       {{- include "zone-apps.server.selectorLabels" . | nindent 6 }}
@@ -78,6 +88,12 @@ spec:
               protocol: TCP
           env:
             {{- include "zone-apps.commonEnv" . | nindent 12 }}
+            - name: HOME
+              value: /home/zone
+            - name: ZONE_AGENT_STATE_DIR
+              value: /app/agent-state
+            - name: ZONE_CHAT_AGENT_CWD
+              value: /app/workspace
             {{- range $key, $value := .Values.server.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
@@ -146,6 +162,12 @@ spec:
               mountPath: /app/artifacts
             - name: embed-cache
               mountPath: /app/embed-cache
+            - name: home
+              mountPath: /home/zone
+            - name: workspace
+              mountPath: /app/workspace
+            - name: agent-state
+              mountPath: /app/agent-state
       volumes:
         - name: tmp
           emptyDir: {}
@@ -153,6 +175,17 @@ spec:
           emptyDir: {}
         - name: embed-cache
           emptyDir: {}
+        - name: home
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}
+        - name: agent-state
+          {{- if $agentStateClaim }}
+          persistentVolumeClaim:
+            claimName: {{ $agentStateClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

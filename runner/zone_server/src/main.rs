@@ -18,6 +18,7 @@ use zone_server::routes;
 use zone_server::services::embedding::{
     create_embedding_service, default_embedding_model, embedding_engine_from_env,
 };
+use zone_server::services::login;
 use zone_server::state::{AppState, default_adapter_registry};
 
 #[tokio::main]
@@ -31,6 +32,9 @@ async fn main() {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    #[cfg(target_os = "linux")]
+    forbid_dumping();
 
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let migrate = migration_mode(&arguments).expect("Usage: zone-server [--migrate-only]");
@@ -198,6 +202,27 @@ async fn main() {
         zone_server::workers::auto_project::spawn(state.clone());
     }
     let recovery = zone_server::workers::task::spawn_recovery(state.clone());
+    let callback = match state.config().agents.callback {
+        Some(callback) => {
+            let listener = login::callback::bind(&callback)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "Could not listen for Claude sign-ins on {}: {error}. Free the port, or change or unset ZONE_AGENT_CALLBACK",
+                        callback.bind
+                    )
+                });
+            tracing::info!(address = %callback.bind, port = callback.port, "Listening for Claude sign-ins");
+            if login::callback::exposed(&callback) {
+                tracing::warn!(
+                    address = %callback.bind,
+                    "The Claude sign-in callback listens beyond loopback, where other machines can reach it. Set ZONE_AGENT_CALLBACK_BIND to 127.0.0.1 unless a port mapping needs more"
+                );
+            }
+            Some(tokio::spawn(login::callback::serve(listener, callback)))
+        }
+        None => None,
+    };
 
     // Every layer belongs to `create_router`, so what runs here is what the
     // router tests cover. A second CORS layer here answered every preflight
@@ -217,6 +242,10 @@ async fn main() {
     let result = axum::serve(listener, app).await;
     recovery.abort();
     let _ = recovery.await;
+    if let Some(callback) = callback {
+        callback.abort();
+        let _ = callback.await;
+    }
     result.expect("Server error");
 }
 
@@ -225,6 +254,19 @@ fn migration_mode(arguments: &[String]) -> Result<bool, &'static str> {
         [] => Ok(false),
         [argument] if argument == "--migrate-only" => Ok(true),
         _ => Err("Unknown server arguments"),
+    }
+}
+
+/// Make the server non-dumpable. The files under its `/proc/<pid>` then
+/// belong to root, so the agent CLIs it runs as its own user cannot read its
+/// environment.
+#[cfg(target_os = "linux")]
+fn forbid_dumping() {
+    if let Err(error) = nix::sys::prctl::set_dumpable(false) {
+        tracing::warn!(
+            %error,
+            "Could not make the server non-dumpable; processes running as its user can read its environment"
+        );
     }
 }
 
@@ -238,5 +280,12 @@ mod tests {
         assert_eq!(migration_mode(&["--migrate-only".into()]), Ok(true));
         assert!(migration_mode(&["--migrate-only".into(), "extra".into()]).is_err());
         assert!(migration_mode(&["--migrate".into()]).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_server_cannot_be_dumped() {
+        super::forbid_dumping();
+        assert_eq!(nix::sys::prctl::get_dumpable(), Ok(false));
     }
 }

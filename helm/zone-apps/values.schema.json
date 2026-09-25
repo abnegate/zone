@@ -94,6 +94,19 @@
             "maxReplicas": { "type": "integer", "minimum": 1 },
             "targetCPUUtilization": { "type": "integer", "minimum": 1, "maximum": 100 }
           }
+        },
+        "agentState": {
+          "type": "object",
+          "properties": {
+            "persistence": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "size": { "type": "string" },
+                "storageClass": { "type": "string" }
+              }
+            }
+          }
         }
       }
     },

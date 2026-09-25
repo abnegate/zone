@@ -1,12 +1,74 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
+import { AiProviderSchema } from '../workspace/schemas';
 import { AiProviderFields } from './AiProviderFields';
 import {
+  agentAccess,
+  agentOf,
   buildAiSettingsRequest,
   emptyCredentials,
   emptyModels,
+  isAgentProvider,
   nothingConfigured,
+  providerOptions,
 } from './options';
+
+const everyCredential = {
+  ...emptyCredentials,
+  litellmHost: 'http://litellm:4000',
+  litellmKey: 'sk-litellm',
+  openaiApiKey: 'sk-openai',
+  openaiBaseUrl: 'https://api.openai.com/v1',
+  anthropicApiKey: 'sk-ant',
+  anthropicBaseUrl: 'https://api.anthropic.com',
+  bedrockAccessKey: 'AKIA1',
+  bedrockSecretKey: 'bedrock-secret',
+};
+
+describe('coding agent providers', () => {
+  it('offers Claude Code and Codex by their subscriptions', () => {
+    expect(providerOptions).toContainEqual({
+      value: 'claude_code',
+      label: 'Claude Code (Claude subscription)',
+    });
+    expect(providerOptions).toContainEqual({
+      value: 'codex',
+      label: 'Codex (ChatGPT subscription)',
+    });
+  });
+
+  it('labels every provider the schema knows, in its order', () => {
+    expect(providerOptions.map((option) => option.value)).toEqual(AiProviderSchema.options);
+    expect(providerOptions.every((option) => option.label.length > 0)).toBe(true);
+  });
+
+  it('maps each agent provider to the agent that serves it and every other provider to none', () => {
+    expect(agentOf('claude_code')).toBe('claude');
+    expect(agentOf('codex')).toBe('codex');
+    expect(isAgentProvider('claude_code')).toBe(true);
+    expect(isAgentProvider('codex')).toBe(true);
+    for (const provider of ['self_hosted', 'openai', 'anthropic', 'bedrock'] as const) {
+      expect(agentOf(provider)).toBeNull();
+      expect(isAgentProvider(provider)).toBe(false);
+    }
+  });
+});
+
+describe('agentAccess', () => {
+  it('lets owners and admins manage the organization sign-ins', () => {
+    expect(agentAccess('owner', false)).toBe('manage');
+    expect(agentAccess('admin', false)).toBe('manage');
+  });
+
+  it('shows only the status while the role is still resolving', () => {
+    expect(agentAccess(undefined, true)).toBe('resolving');
+  });
+
+  it('fails closed for a member and for a role that never resolved', () => {
+    expect(agentAccess('member', false)).toBe('view');
+    expect(agentAccess(undefined, false)).toBe('view');
+  });
+});
 
 describe('AiProviderFields', () => {
   it('renders the provider select and its credentials on one two-column grid', () => {
@@ -61,7 +123,7 @@ describe('AiProviderFields', () => {
 });
 
 describe('buildAiSettingsRequest', () => {
-  it('sends only the selected provider credentials and keeps empty media models to clear them', () => {
+  it('sends only the selected provider credentials and an empty model for each Automatic one', () => {
     const request = buildAiSettingsRequest(
       'openai',
       { ...emptyCredentials, openaiApiKey: 'sk-1', litellmKey: 'ignored' },
@@ -70,8 +132,8 @@ describe('buildAiSettingsRequest', () => {
     expect(request).toEqual({
       provider: 'openai',
       model_fast: 'gpt-4o-mini',
-      model_reasoning: undefined,
-      model_embedding: undefined,
+      model_reasoning: '',
+      model_embedding: '',
       model_image: '',
       model_video: '',
       model_audio: '',
@@ -79,4 +141,24 @@ describe('buildAiSettingsRequest', () => {
       openai_api_key: 'sk-1',
     });
   });
+
+  it.each(['claude_code', 'codex'] as const)(
+    'sends no credentials for the %s provider, whose sign-in lives on the server',
+    (provider) => {
+      const request = buildAiSettingsRequest(provider, everyCredential, {
+        ...emptyModels,
+        fast: 'sonnet',
+        reasoning: 'opus',
+      });
+      expect(request).toEqual({
+        provider,
+        model_fast: 'sonnet',
+        model_reasoning: 'opus',
+        model_embedding: '',
+        model_image: '',
+        model_video: '',
+        model_audio: '',
+      });
+    }
+  );
 });

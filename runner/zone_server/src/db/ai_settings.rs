@@ -7,6 +7,7 @@ use zone_context::embeddings::providers::{
     PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
 };
 use zone_core::SecretValue;
+use zone_core::llm::AgentKind;
 
 use super::{
     DbResult,
@@ -15,6 +16,32 @@ use super::{
 };
 
 const PROVIDER_ANTHROPIC: &str = "anthropic";
+pub const PROVIDER_CLAUDE_CODE: &str = "claude_code";
+pub const PROVIDER_CODEX: &str = "codex";
+
+const PROVIDERS: [&str; 6] = [
+    PROVIDER_SELF_HOSTED,
+    PROVIDER_OPENAI,
+    PROVIDER_ANTHROPIC,
+    PROVIDER_BEDROCK,
+    PROVIDER_CLAUDE_CODE,
+    PROVIDER_CODEX,
+];
+
+pub fn agent(provider: &str) -> Option<AgentKind> {
+    match provider {
+        PROVIDER_CLAUDE_CODE => Some(AgentKind::Claude),
+        PROVIDER_CODEX => Some(AgentKind::Codex),
+        _ => None,
+    }
+}
+
+pub fn provider(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Claude => PROVIDER_CLAUDE_CODE,
+        AgentKind::Codex => PROVIDER_CODEX,
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AccessError {
@@ -30,6 +57,7 @@ pub enum AccessError {
 
 type AccessResult<T> = Result<T, AccessError>;
 
+#[derive(Default)]
 pub struct Update<'a> {
     pub provider: Option<&'a str>,
     pub litellm_host: Option<&'a str>,
@@ -51,25 +79,18 @@ pub struct Update<'a> {
 }
 
 fn validate(update: &Update<'_>) -> AccessResult<()> {
-    if update.provider.is_some_and(|provider| {
-        ![
-            PROVIDER_SELF_HOSTED,
-            PROVIDER_OPENAI,
-            PROVIDER_ANTHROPIC,
-            PROVIDER_BEDROCK,
-        ]
-        .contains(&provider)
-    }) {
-        return Err(AccessError::Invalid(format!(
-            "Invalid provider. Must be one of: {PROVIDER_SELF_HOSTED}, {PROVIDER_OPENAI}, {PROVIDER_ANTHROPIC}, {PROVIDER_BEDROCK}"
-        )));
+    match update.provider {
+        Some(provider) if !PROVIDERS.contains(&provider) => Err(AccessError::Invalid(format!(
+            "Invalid provider. Must be one of: {}",
+            PROVIDERS.join(", ")
+        ))),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// The organization's own settings carry its provider credentials, so reading
 /// them takes an administrator, not just a seat; `minimum` says which.
-async fn authorize_organization(
+pub(crate) async fn authorize_organization(
     connection: &mut PgConnection,
     organization_id: Uuid,
     user_id: Uuid,
@@ -203,6 +224,10 @@ pub struct EffectiveAiSettings {
 }
 
 impl EffectiveAiSettings {
+    pub fn agent(&self) -> Option<AgentKind> {
+        agent(&self.provider)
+    }
+
     /// Overlay workspace/org image settings onto the process ComfyUI defaults.
     ///
     /// `model_fast` classifies image intent when rules are unsure, including
@@ -289,7 +314,8 @@ where
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
             model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio
         ) VALUES (
-            $1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            $1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), '')
         )
         ON CONFLICT (organization_id) DO UPDATE SET
@@ -304,10 +330,22 @@ where
             bedrock_access_key = COALESCE($10, organization_ai_settings.bedrock_access_key),
             bedrock_secret_key = COALESCE($11, organization_ai_settings.bedrock_secret_key),
             bedrock_use_iam_role = COALESCE($12, organization_ai_settings.bedrock_use_iam_role),
-            model_fast = COALESCE($13, organization_ai_settings.model_fast),
-            model_reasoning = COALESCE($14, organization_ai_settings.model_reasoning),
-            model_embedding = COALESCE($15, organization_ai_settings.model_embedding),
-            -- NULL keeps the previous filename; empty string clears to NULL (server default).
+            -- NULL keeps the saved model; an empty string clears it to NULL.
+            model_fast = CASE
+                WHEN $13 IS NULL THEN organization_ai_settings.model_fast
+                WHEN BTRIM($13) = '' THEN NULL
+                ELSE $13
+            END,
+            model_reasoning = CASE
+                WHEN $14 IS NULL THEN organization_ai_settings.model_reasoning
+                WHEN BTRIM($14) = '' THEN NULL
+                ELSE $14
+            END,
+            model_embedding = CASE
+                WHEN $15 IS NULL THEN organization_ai_settings.model_embedding
+                WHEN BTRIM($15) = '' THEN NULL
+                ELSE $15
+            END,
             model_image = CASE
                 WHEN $16 IS NULL THEN organization_ai_settings.model_image
                 WHEN BTRIM($16) = '' THEN NULL
@@ -463,7 +501,8 @@ where
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
             model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), '')
         )
         ON CONFLICT (workspace_id) DO UPDATE SET
@@ -478,10 +517,22 @@ where
             bedrock_access_key = COALESCE($10, workspace_ai_settings.bedrock_access_key),
             bedrock_secret_key = COALESCE($11, workspace_ai_settings.bedrock_secret_key),
             bedrock_use_iam_role = COALESCE($12, workspace_ai_settings.bedrock_use_iam_role),
-            model_fast = COALESCE($13, workspace_ai_settings.model_fast),
-            model_reasoning = COALESCE($14, workspace_ai_settings.model_reasoning),
-            model_embedding = COALESCE($15, workspace_ai_settings.model_embedding),
-            -- NULL keeps the previous filename; empty string clears to NULL (inherit).
+            -- NULL keeps the saved model; an empty string clears it to NULL.
+            model_fast = CASE
+                WHEN $13 IS NULL THEN workspace_ai_settings.model_fast
+                WHEN BTRIM($13) = '' THEN NULL
+                ELSE $13
+            END,
+            model_reasoning = CASE
+                WHEN $14 IS NULL THEN workspace_ai_settings.model_reasoning
+                WHEN BTRIM($14) = '' THEN NULL
+                ELSE $14
+            END,
+            model_embedding = CASE
+                WHEN $15 IS NULL THEN workspace_ai_settings.model_embedding
+                WHEN BTRIM($15) = '' THEN NULL
+                ELSE $15
+            END,
             model_image = CASE
                 WHEN $16 IS NULL THEN workspace_ai_settings.model_image
                 WHEN BTRIM($16) = '' THEN NULL
@@ -630,6 +681,11 @@ fn effective(
 
     if let Some(ws) = workspace {
         if let Some(provider) = ws.provider {
+            if provider != effective.provider {
+                effective.model_fast = None;
+                effective.model_reasoning = None;
+                effective.model_embedding = None;
+            }
             effective.provider = provider;
         }
         if ws.litellm_host.is_some() {
@@ -774,6 +830,62 @@ mod tests {
             model_video: None,
             model_audio: None,
         }
+    }
+
+    #[test]
+    fn each_agent_provider_selects_its_agent_and_back() {
+        assert_eq!(agent(PROVIDER_CLAUDE_CODE), Some(AgentKind::Claude));
+        assert_eq!(agent(PROVIDER_CODEX), Some(AgentKind::Codex));
+        for kind in AgentKind::ALL {
+            assert_eq!(agent(provider(kind)), Some(kind));
+        }
+    }
+
+    #[test]
+    fn a_provider_that_is_no_agent_selects_none() {
+        for name in [
+            PROVIDER_SELF_HOSTED,
+            PROVIDER_OPENAI,
+            PROVIDER_ANTHROPIC,
+            PROVIDER_BEDROCK,
+            AgentKind::Claude.as_str(),
+            "",
+            "gemini",
+        ] {
+            assert_eq!(agent(name), None, "{name:?} must not select an agent");
+        }
+    }
+
+    #[test]
+    fn effective_settings_select_the_agent_their_provider_names() {
+        let mut settings = settings(None, None);
+        assert_eq!(settings.agent(), None);
+        settings.provider = PROVIDER_CLAUDE_CODE.to_string();
+        assert_eq!(settings.agent(), Some(AgentKind::Claude));
+        settings.provider = PROVIDER_CODEX.to_string();
+        assert_eq!(settings.agent(), Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn validate_accepts_every_provider_and_lists_them_all_when_it_refuses() {
+        for provider in PROVIDERS {
+            let update = Update {
+                provider: Some(provider),
+                ..Update::default()
+            };
+            assert!(validate(&update).is_ok(), "{provider} must be accepted");
+        }
+        assert!(validate(&Update::default()).is_ok());
+
+        let refused = validate(&Update {
+            provider: Some("gemini"),
+            ..Update::default()
+        })
+        .expect_err("gemini is not a provider");
+        assert_eq!(
+            refused.to_string(),
+            "Invalid provider. Must be one of: self_hosted, openai, anthropic, bedrock, claude_code, codex"
+        );
     }
 
     #[test]

@@ -61,6 +61,9 @@ The following table lists the configurable parameters and their default values.
 | `server.autoscaling.minReplicas` | Minimum number of replicas | `2` |
 | `server.autoscaling.maxReplicas` | Maximum number of replicas | `10` |
 | `server.autoscaling.targetCPUUtilization` | Target CPU utilization percentage | `70` |
+| `server.agentState.persistence.enabled` | Keep agent state (codex sign-ins, CLI homes and transcripts) on a claim; applies only with one replica and autoscaling off. Claude tokens are in the database either way | `true` |
+| `server.agentState.persistence.size` | Size of the agent-state claim, which grows with every CLI turn; see [Coding Agent Sign-ins](#coding-agent-sign-ins) | `1Gi` |
+| `server.agentState.persistence.storageClass` | Storage class of the agent-state claim; empty uses the cluster default | `""` |
 
 ### Manager Configuration
 
@@ -177,10 +180,14 @@ server:
   replicaCount: 1
   autoscaling:
     enabled: false
+  podDisruptionBudget:
+    enabled: false
 
 manager:
   replicaCount: 1
   autoscaling:
+    enabled: false
+  podDisruptionBudget:
     enabled: false
 
 ingress:
@@ -267,6 +274,45 @@ The chart is configured for high availability by default:
 - **Topology Spread Constraints**: Ensures even distribution across the cluster
 - **Horizontal Pod Autoscaler**: Automatically scales based on CPU utilization
 - **Health Checks**: Liveness and readiness probes ensure traffic only goes to healthy pods
+
+Organizations on the Claude Code or Codex provider need a single server replica instead; see [Coding Agent Sign-ins](#coding-agent-sign-ins).
+
+## Coding Agent Sign-ins
+
+zone-server can run the claude and codex CLIs its image ships for organizations that choose the Claude Code or Codex provider, as described under Model Backend in [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md). The chart prepares the server pod for them:
+
+- `server.env.ZONE_AGENT_HOST_LOGIN` is `"false"`, so an organization that has not signed in gets an error rather than a login made inside the pod.
+- `ZONE_AGENT_CALLBACK` stays unset, so admins paste the code claude.com shows. Its loopback sign-in, where claude.com hands the code to `http://localhost:<port>/callback` on the admin's own computer, reaches a pod only through `kubectl port-forward` of that port and of the console, with the console opened at a localhost address. The install notes say so when `server.env` sets it.
+- `server.env.ZONE_CONSOLE_ORIGINS` is empty, so no sign-in returns to the callback even when it is set. It lists the consoles a returned sign-in goes on to, comma separated, each exactly as the browser opens it. With the callback set and the console forwarded as the install notes show, list the forwarded console, `ZONE_CONSOLE_ORIGINS: "http://127.0.0.1:3001"`, or `http://localhost:3001` if that is the address you open. List only consoles you run: the callback sends the approving browser, with its sign-in's receipt, to whichever listed console started the sign-in.
+- The server container sets `HOME=/home/zone`, `ZONE_AGENT_STATE_DIR=/app/agent-state` and `ZONE_CHAT_AGENT_CWD=/app/workspace`. The root filesystem is read-only, so `/home/zone`, `/app/workspace` and `/tmp` are emptyDirs.
+- `/app/agent-state` is a ReadWriteOnce claim, set by `server.agentState.persistence`, only when `server.replicaCount` is `1` and `server.autoscaling.enabled` is `false`. The Deployment then uses the `Recreate` strategy. Otherwise it is an emptyDir, and the install notes say what that loses.
+
+The claim holds codex's logins and both CLIs' state; Claude sign-ins are kept in the database. With an emptyDir, zone-server loses codex logins whenever the pod is replaced (a rollout, an eviction or a reschedule).
+
+Agent providers need a single server replica. A Claude sign-in waiting for its code and a codex sign-in in progress live in one server process's memory, and a codex login lives on the pod that made it. With several replicas a sign-in can start on one pod and fail on another, and a turn on another pod finds no codex login. The chart's defaults run two replicas with autoscaling, so set:
+
+```yaml
+server:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  podDisruptionBudget:
+    enabled: false
+```
+
+The disruption budget has to go as well: with one replica, its `minAvailable: 1` would stop a node drain from ever evicting the pod.
+
+Helm 4 upgrades a release it installed server-side, and server-side apply cannot remove the `rollingUpdate` settings Kubernetes filled in for a Deployment an earlier version of this chart created. If the upgrade that moves such a release to one replica fails with `spec.strategy.rollingUpdate: Forbidden`, run it again with `--server-side=false`.
+
+The claim carries `helm.sh/resource-policy: keep`. Neither `helm uninstall` nor an upgrade that stops using it, such as one to a second replica, deletes it, and a release of the same name mounts it again once it is back to one replica. The claim holds working ChatGPT logins, so delete it by hand once they should go: for a release named `zone`, `kubectl delete pvc zone-zone-apps-agent-state`.
+
+Size the claim for transcripts. Every claude and codex turn, whether a chat message, a task attempt, a title or a review, writes a transcript of its own under its organization's directory, and Zone prunes none of them, so the claim grows with use. Check it with `kubectl exec deploy/zone-zone-apps-server -- du -sh /app/agent-state`. Before it fills, raise `server.agentState.persistence.size`, where the claim's storage class allows volume expansion, or delete old transcripts from each organization's `claude/projects` and `codex/sessions` directories. On a full claim neither CLI can write its transcript, and codex cannot save a login it has renewed.
+
+The image sets `ZONE_CODEX_SANDBOX=danger-full-access`: codex sandboxes its own shell with bubblewrap, which needs user namespaces, and Docker's default seccomp profile blocks them. Whether the pods' `RuntimeDefault` profile allows them has not been tested; set `server.env.ZONE_CODEX_SANDBOX: workspace-write` only where it does.
+
+With `networkPolicy.enabled`, the server's egress policy admits DNS, the database, Valkey and LiteLLM only, so neither the CLIs nor zone-server's own Claude token exchange can reach Anthropic or OpenAI.
+
+Every organization's CLI runs as the pod's user, uid 1000 with the chart's default security context. Read the security notes under Model Backend in [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) before enabling these providers on a shared instance.
 
 ## Monitoring
 

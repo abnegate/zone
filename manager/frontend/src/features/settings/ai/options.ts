@@ -1,11 +1,41 @@
+import type { InstalledModel } from '../../models/types';
+import { mergeStageOptions } from '../../models/utils/stageOptions';
+import type { OrgRole } from '../organization/types';
+import { AiProviderSchema } from '../workspace/schemas';
 import type { AiProvider, AiSettings, UpdateAiSettingsRequest } from '../workspace/types';
+import { type Agent, type AgentProvider, AgentProviderSchema } from './schemas';
+import type { AgentAccess } from './types';
 
-export const providerOptions: { value: AiProvider; label: string }[] = [
-  { value: 'self_hosted', label: 'Self-Hosted (Ollama via LiteLLM)' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'bedrock', label: 'AWS Bedrock' },
-];
+const providerLabels: Record<AiProvider, string> = {
+  self_hosted: 'Self-Hosted (Ollama via LiteLLM)',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  bedrock: 'AWS Bedrock',
+  claude_code: 'Claude Code (Claude subscription)',
+  codex: 'Codex (ChatGPT subscription)',
+};
+
+export const providerOptions: { value: AiProvider; label: string }[] = AiProviderSchema.options.map(
+  (value) => ({ value, label: providerLabels[value] })
+);
+
+const agents: Record<AgentProvider, Agent> = {
+  claude_code: 'claude',
+  codex: 'codex',
+};
+
+export function isAgentProvider(provider: AiProvider): provider is AgentProvider {
+  return AgentProviderSchema.safeParse(provider).success;
+}
+
+export function agentOf(provider: AiProvider): Agent | null {
+  return isAgentProvider(provider) ? agents[provider] : null;
+}
+
+export function agentAccess(role: OrgRole | undefined, resolving: boolean): AgentAccess {
+  if (role === 'owner' || role === 'admin') return 'manage';
+  return resolving ? 'resolving' : 'view';
+}
 
 export const modelOptions: Record<
   AiProvider,
@@ -39,7 +69,37 @@ export const modelOptions: Record<
     ],
     embedding: ['amazon.titan-embed-text-v2:0', 'amazon.titan-embed-text-v1'],
   },
+  claude_code: { fast: [], reasoning: [], embedding: [] },
+  codex: { fast: [], reasoning: [], embedding: [] },
 };
+
+export interface ModelChoices {
+  fast: string[];
+  reasoning: string[];
+  embedding: string[];
+}
+
+export function modelChoices(
+  provider: AiProvider,
+  installed: InstalledModel[],
+  models: ModelSelection,
+  agentModels: string[]
+): ModelChoices {
+  const stage = modelOptions[provider];
+  const embedding = mergeStageOptions(stage.embedding, installed, models.embedding, 'embedding');
+  if (isAgentProvider(provider)) {
+    return {
+      fast: withCurrent(agentModels, models.fast),
+      reasoning: withCurrent(agentModels, models.reasoning),
+      embedding,
+    };
+  }
+  return {
+    fast: mergeStageOptions(stage.fast, installed, models.fast, 'chat'),
+    reasoning: mergeStageOptions(stage.reasoning, installed, models.reasoning, 'chat'),
+    embedding,
+  };
+}
 
 export const IMAGE_MODEL_OPTIONS = ['flux1-schnell-fp8.safetensors'];
 export const VIDEO_MODEL_OPTIONS = ['wan2.2_ti2v_5B_fp16.safetensors'];
@@ -165,25 +225,6 @@ export function modelsFromSettings(settings: AiSettings): ModelSelection {
   };
 }
 
-export function hasOverrides(settings: AiSettings): boolean {
-  return Boolean(
-    settings.has_litellm_key ||
-      settings.has_openai_api_key ||
-      settings.has_anthropic_api_key ||
-      settings.has_bedrock_credentials ||
-      settings.model_fast ||
-      settings.model_reasoning ||
-      settings.model_embedding ||
-      settings.model_image ||
-      settings.model_video ||
-      settings.model_audio ||
-      settings.litellm_host ||
-      settings.openai_base_url ||
-      settings.anthropic_base_url ||
-      settings.bedrock_region
-  );
-}
-
 export function buildAiSettingsRequest(
   provider: AiProvider,
   credentials: ProviderCredentials,
@@ -191,13 +232,16 @@ export function buildAiSettingsRequest(
 ): UpdateAiSettingsRequest {
   const request: UpdateAiSettingsRequest = {
     provider,
-    model_fast: models.fast || undefined,
-    model_reasoning: models.reasoning || undefined,
-    model_embedding: models.embedding || undefined,
+    model_fast: models.fast,
+    model_reasoning: models.reasoning,
+    model_embedding: models.embedding,
     model_image: models.image,
     model_video: models.video,
     model_audio: models.audio,
   };
+  if (isAgentProvider(provider)) {
+    return request;
+  }
   if (provider === 'self_hosted') {
     request.litellm_host = credentials.litellmHost || undefined;
     if (credentials.litellmKey) request.litellm_key = credentials.litellmKey;

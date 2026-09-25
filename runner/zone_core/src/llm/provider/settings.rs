@@ -1,5 +1,6 @@
 //! What a spawned coding agent may spend, and which tools it may call.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,12 +15,10 @@ use crate::secret::SecretValue;
 /// was still going well.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 
-/// A coding agent's stream is structured JSON, not build output, so the cap
-/// that matters is far below `tool_runner`'s ten megabytes for arbitrary
-/// commands.
+/// The most of a turn's answer that is kept, and of the end of its stderr.
 pub const DEFAULT_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 
-/// One event is a JSON object holding at most a turn's worth of text.
+/// An event longer than this is dropped, and the turn goes on without it.
 pub const DEFAULT_LINE_LIMIT: usize = 1024 * 1024;
 
 /// Whether a spawned agent keeps the tools it ships with.
@@ -34,6 +33,43 @@ pub enum BuiltinTools {
     #[default]
     Withheld,
     Granted,
+}
+
+/// The sandbox codex runs its own tools in on a turn that grants them. A turn
+/// that withholds them runs `read-only` whatever this says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CodexSandbox {
+    #[default]
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl CodexSandbox {
+    pub const ALL: [Self; 2] = [Self::WorkspaceWrite, Self::DangerFullAccess];
+
+    /// The value codex's `--sandbox` takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|sandbox| sandbox.as_str() == name)
+    }
+}
+
+/// Whose sign-in a spawned agent runs under, which is who can renew it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SignIn {
+    /// The server's own: the host's login, or a key in its environment.
+    #[default]
+    Instance,
+    /// An organization's, renewed from its AI settings.
+    Organization,
 }
 
 /// Zone's tools, served to a spawned agent over MCP.
@@ -81,6 +117,11 @@ impl Toolset {
                 .collect(),
         }
     }
+
+    /// The name an agent gives `tool` from MCP server `server` to its model.
+    pub(crate) fn qualified(server: &str, tool: &str) -> String {
+        format!("mcp__{server}__{tool}")
+    }
 }
 
 /// How a [`super::CliProvider`] runs its agent.
@@ -91,7 +132,10 @@ pub struct CliSettings {
     pub executable: Option<PathBuf>,
     /// The child's working directory. `None` inherits this process's.
     pub working_directory: Option<PathBuf>,
+    /// Set in the child on top of the little it inherits from this process.
+    pub variables: BTreeMap<String, String>,
     pub credential: Credential,
+    pub sign_in: SignIn,
     /// Zone's tools, or `None` for a turn that answers in prose alone.
     ///
     /// Shared rather than owned so that cloning these settings -- which the
@@ -99,10 +143,12 @@ pub struct CliSettings {
     /// nor carries a toolset's bulk into every value that names one.
     pub toolset: Option<Arc<Toolset>>,
     pub builtin_tools: BuiltinTools,
+    pub sandbox: CodexSandbox,
     pub timeout: Duration,
-    /// Bytes of stdout and stderr kept before the run is abandoned.
+    /// Bytes of the answer kept before the run is abandoned, and of the end
+    /// of stderr kept for a failure to report.
     pub output_limit: usize,
-    /// Bytes one event may occupy before the stream is treated as malformed.
+    /// Bytes one event may occupy before it is dropped.
     pub line_limit: usize,
 }
 
@@ -111,9 +157,12 @@ impl Default for CliSettings {
         Self {
             executable: None,
             working_directory: None,
+            variables: BTreeMap::new(),
             credential: Credential::Inherited,
+            sign_in: SignIn::default(),
             toolset: None,
             builtin_tools: BuiltinTools::default(),
+            sandbox: CodexSandbox::default(),
             timeout: DEFAULT_TIMEOUT,
             output_limit: DEFAULT_OUTPUT_LIMIT,
             line_limit: DEFAULT_LINE_LIMIT,
@@ -132,8 +181,18 @@ impl CliSettings {
         self
     }
 
+    pub fn with_variable(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.variables.insert(name.into(), value.into());
+        self
+    }
+
     pub fn with_credential(mut self, credential: Credential) -> Self {
         self.credential = credential;
+        self
+    }
+
+    pub fn with_sign_in(mut self, sign_in: SignIn) -> Self {
+        self.sign_in = sign_in;
         self
     }
 
@@ -144,6 +203,11 @@ impl CliSettings {
 
     pub fn with_builtin_tools(mut self, tools: BuiltinTools) -> Self {
         self.builtin_tools = tools;
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: CodexSandbox) -> Self {
+        self.sandbox = sandbox;
         self
     }
 
@@ -178,6 +242,32 @@ mod tests {
         assert!(settings.executable.is_none());
         assert!(settings.working_directory.is_none());
         assert_eq!(settings.timeout, DEFAULT_TIMEOUT);
+    }
+
+    #[test]
+    fn variables_accumulate_and_the_last_value_given_for_a_name_wins() {
+        assert!(CliSettings::default().variables.is_empty());
+
+        let settings = CliSettings::default()
+            .with_variable("CLAUDE_CONFIG_DIR", "/state/organization/claude")
+            .with_variable("DISABLE_AUTOUPDATER", "0")
+            .with_variable("DISABLE_AUTOUPDATER", "1");
+
+        assert_eq!(settings.variables.len(), 2);
+        assert_eq!(
+            settings
+                .variables
+                .get("CLAUDE_CONFIG_DIR")
+                .map(String::as_str),
+            Some("/state/organization/claude")
+        );
+        assert_eq!(
+            settings
+                .variables
+                .get("DISABLE_AUTOUPDATER")
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]
@@ -252,5 +342,40 @@ mod tests {
         assert_eq!(settings.line_limit, DEFAULT_LINE_LIMIT);
         assert!(settings.toolset.is_none());
         assert_eq!(settings.builtin_tools, BuiltinTools::Withheld);
+        assert_eq!(settings.sandbox, CodexSandbox::WorkspaceWrite);
+        assert_eq!(settings.sign_in, SignIn::Instance);
+    }
+
+    #[test]
+    fn an_agent_runs_under_the_servers_own_sign_in_until_told_whose() {
+        assert_eq!(CliSettings::default().sign_in, SignIn::Instance);
+
+        let settings = CliSettings::default().with_sign_in(SignIn::Organization);
+        assert_eq!(settings.sign_in, SignIn::Organization);
+        assert!(matches!(settings.credential, Credential::Inherited));
+    }
+
+    #[test]
+    fn a_granted_codex_turn_is_confined_to_its_workspace_until_an_operator_says_otherwise() {
+        assert_eq!(CliSettings::default().sandbox, CodexSandbox::WorkspaceWrite);
+
+        let settings = CliSettings::default().with_sandbox(CodexSandbox::DangerFullAccess);
+        assert_eq!(settings.sandbox, CodexSandbox::DangerFullAccess);
+        assert_eq!(settings.builtin_tools, BuiltinTools::Withheld);
+    }
+
+    #[test]
+    fn a_sandbox_is_named_as_codex_spells_it() {
+        assert_eq!(CodexSandbox::WorkspaceWrite.as_str(), "workspace-write");
+        assert_eq!(
+            CodexSandbox::DangerFullAccess.as_str(),
+            "danger-full-access"
+        );
+        for sandbox in CodexSandbox::ALL {
+            assert_eq!(CodexSandbox::named(sandbox.as_str()), Some(sandbox));
+        }
+        for unknown in ["read-only", "", "Workspace-Write", " workspace-write"] {
+            assert_eq!(CodexSandbox::named(unknown), None, "{unknown:?}");
+        }
     }
 }

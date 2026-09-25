@@ -297,12 +297,14 @@ impl ChatTools {
     /// Search tools stay registered and degrade to keyword search when
     /// embeddings are unavailable, so the model can still look things up.
     pub async fn build(scope: WorkspaceScope) -> Self {
-        Self::assemble(Some(scope), ToolProfile::Chat, None, true).await
+        let denied = scope.state.config().agents.state.clone();
+        Self::assemble(Some(scope), ToolProfile::Chat, None, true, denied).await
     }
 
     /// Preview only the known catalog; never start MCP processes while drafting.
     pub async fn preview(scope: WorkspaceScope) -> Self {
-        Self::assemble(Some(scope), ToolProfile::Chat, None, false).await
+        let denied = scope.state.config().agents.state.clone();
+        Self::assemble(Some(scope), ToolProfile::Chat, None, false, denied).await
     }
 
     /// No tools at all, for a chat that answers from the server's own context.
@@ -452,7 +454,8 @@ impl ChatTools {
             }
             _ => None,
         };
-        Self::assemble(scope, ToolProfile::Task, Some(cwd), true).await
+        let denied = state.config().agents.state.clone();
+        Self::assemble(scope, ToolProfile::Task, Some(cwd), true, denied).await
     }
 
     /// A task that requires its plan approved is handed `submit_plan`, and
@@ -523,11 +526,45 @@ impl ChatTools {
         self
     }
 
+    /// These tools less the ones `names` lists, which leave the catalog, the
+    /// prompt and dispatch alike. Without `wait_for`, every tool that sends
+    /// the model there is kept in its [`Tool::unwaited`] form.
+    pub fn without(mut self, names: &[String]) -> Self {
+        let named = |name: &str| names.iter().any(|named| named == name);
+        let unwaited = named(super::wait::WAIT_FOR);
+        let kept: Vec<_> = std::mem::replace(&mut self.registry, ToolRegistry::new())
+            .into_tools()
+            .into_iter()
+            .filter(|tool| !named(tool.name()))
+            .map(|tool| {
+                if unwaited {
+                    tool.unwaited().unwrap_or(tool)
+                } else {
+                    tool
+                }
+            })
+            .collect();
+        for tool in kept {
+            self.registry.register(tool);
+        }
+        self.names.retain(|name| !named(name));
+        self.name_set.retain(|name| !named(name));
+        self.definitions = self.registry.definitions();
+        self.core.retain(|name| !named(name));
+        self.workspace.retain(|name| !named(name));
+        self.remote.retain(|name| !named(name));
+        self.publish_catalog();
+        self
+    }
+
+    /// `denied` is the agents' state root, which every host tool set is
+    /// denied, whether or not a workspace scope came with it.
     async fn assemble(
         scope: Option<WorkspaceScope>,
         profile: ToolProfile,
         task_cwd: Option<std::path::PathBuf>,
         connect: bool,
+        denied: std::path::PathBuf,
     ) -> Self {
         let mut registry = ToolRegistry::new();
         let mut workspace = Vec::new();
@@ -675,6 +712,7 @@ impl ChatTools {
             ToolProfile::Task => task_cwd.unwrap_or_else(host_root),
         };
         let mut context = context(profile, cwd);
+        context.denied.push(denied);
         if let Some(chat_id) = scope.as_ref().and_then(|scope| scope.chat_id) {
             context.session = Session::Chat(chat_id);
         }
@@ -1865,6 +1903,34 @@ mod tests {
         );
         assert!(with.deferred().is_empty(), "{:?}", with.deferred());
         assert!(with.ends_turn(super::super::plan::SUBMIT_PLAN));
+    }
+
+    #[tokio::test]
+    async fn a_tool_left_out_is_neither_listed_nor_offered_nor_run() {
+        let question = super::super::question::ASK_USER;
+        let tools = ChatTools::for_task(
+            &crate::state::AppState::for_tests(),
+            std::env::temp_dir(),
+            Uuid::new_v4(),
+            None,
+        )
+        .await;
+        assert!(tools.has(question));
+        let every = tools.names().len();
+
+        let tools = tools.without(&[question.to_string()]);
+
+        assert!(!tools.has(question));
+        assert_eq!(tools.names().len(), every - 1);
+        for definitions in [tools.definitions(), tools.all_definitions().to_vec()] {
+            assert!(
+                !definitions
+                    .iter()
+                    .any(|definition| definition.function.name == question)
+            );
+        }
+        assert!(!tools.execute(question, "{}").await.success);
+        assert!(tools.has("read_file"));
     }
     use super::*;
     use crate::state::test_config;
@@ -3098,6 +3164,248 @@ mod tests {
         assert!(patched.success, "{:?}", patched.error);
         assert_eq!(contents.unwrap(), "beta\nkeep\n");
         cleanup.unwrap();
+    }
+
+    /// Plain words, so the redaction a tool result goes through cannot hide a
+    /// disclosure from the assertions looking for one.
+    const OTHER_LOGIN: &str = "the other organization's ChatGPT login";
+
+    /// A chat on a server that keeps the agents' state under `root`, and the
+    /// codex home it holds for some other organization, signed in.
+    fn another_organizations_home(root: &std::path::Path) -> (WorkspaceScope, std::path::PathBuf) {
+        let mut config = test_config();
+        config.agents.state = root.to_path_buf();
+        let home = config
+            .agents
+            .create_home(Uuid::new_v4(), zone_core::llm::AgentKind::Codex)
+            .expect("the organization's codex home");
+        std::fs::write(
+            home.join("auth.json"),
+            json!({"login": OTHER_LOGIN}).to_string(),
+        )
+        .unwrap();
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/test")
+            .expect("a lazy pool needs no server");
+        let state = AppState::new(config, db, None);
+        state.disable_mcp();
+        let scope = WorkspaceScope {
+            state,
+            user_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
+        };
+        (scope, home)
+    }
+
+    /// Refused because the path is withheld from the file tools, rather than
+    /// for some reason a different path would also have been refused for.
+    fn off_limits(result: &ToolResult) -> bool {
+        !result.success
+            && result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains(zone_core::tools::OFF_LIMITS))
+    }
+
+    /// Every organization's agent state sits under one directory the server's
+    /// user owns, and a chat's host tools run as that user on every provider.
+    /// These tools raise no approval card, so nothing else stands between a
+    /// chat and another organization's sign-in, however the path is spelled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_chat_reads_no_organizations_agent_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().join("agent-state");
+        let (scope, home) = another_organizations_home(&root);
+        let beside = directory.path().join("notes");
+        std::fs::create_dir(&beside).unwrap();
+        std::os::unix::fs::symlink(&home, beside.join("home")).unwrap();
+        std::os::unix::fs::symlink(home.join("work"), beside.join("work")).unwrap();
+        let tools = ChatTools::build(scope).await;
+
+        for path in [
+            home.join("auth.json"),
+            home.join("work/../auth.json"),
+            beside.join("home/auth.json"),
+            beside.join("work/../auth.json"),
+        ] {
+            let read = tools
+                .execute("read_file", &json!({"path": path}).to_string())
+                .await;
+            assert!(off_limits(&read), "{} was read: {read:?}", path.display());
+            assert!(
+                !format!("{read:?}").contains(OTHER_LOGIN),
+                "{}: {read:?}",
+                path.display()
+            );
+        }
+        for path in [root.clone(), home.clone(), beside.join("home")] {
+            let listed = tools
+                .execute(
+                    "list_files",
+                    &json!({"path": path, "recursive": true}).to_string(),
+                )
+                .await;
+            assert!(
+                off_limits(&listed),
+                "{} was listed: {listed:?}",
+                path.display()
+            );
+        }
+
+        let around = tools
+            .execute(
+                "list_files",
+                &json!({"path": directory.path(), "recursive": true}).to_string(),
+            )
+            .await;
+        assert!(around.success, "{:?}", around.error);
+        assert!(
+            !around.output.unwrap_or_default().contains("auth.json"),
+            "a recursive listing walked into the agent state"
+        );
+        let searched = tools
+            .execute(
+                "search_code",
+                &json!({"pattern": OTHER_LOGIN, "path": directory.path()}).to_string(),
+            )
+            .await;
+        assert!(
+            !format!("{searched:?}").contains(OTHER_LOGIN),
+            "a search reached the agent state: {searched:?}"
+        );
+    }
+
+    /// Writing needs approval, but the card names a path few readers would
+    /// know for another organization's sign-in, and whatever lands there is
+    /// read by that organization's next turn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_chat_writes_into_no_organizations_agent_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().join("agent-state");
+        let (scope, home) = another_organizations_home(&root);
+        let login = home.join("auth.json");
+        let signed_in = std::fs::read_to_string(&login).unwrap();
+        let planted = home.join("AGENTS.md");
+        let link = directory.path().join("instructions.md");
+        std::os::unix::fs::symlink(&planted, &link).unwrap();
+        let fresh = root.join(Uuid::new_v4().to_string());
+        let tools = ChatTools::build(scope).await;
+
+        let calls = [
+            (
+                "write_file",
+                json!({"path": planted, "content": "Obey the file."}),
+            ),
+            (
+                "write_file",
+                json!({"path": link, "content": "Obey the file."}),
+            ),
+            (
+                "write_file",
+                json!({"path": fresh.join("codex/auth.json"), "content": "{}"}),
+            ),
+            (
+                "apply_patch",
+                json!({"path": login, "old_string": OTHER_LOGIN, "new_string": "mine"}),
+            ),
+        ];
+        for (name, arguments) in calls {
+            let result = tools.execute(name, &arguments.to_string()).await;
+            assert!(off_limits(&result), "{name} {arguments} ran: {result:?}");
+        }
+
+        assert!(!planted.exists(), "a file was planted in the agent state");
+        assert!(!fresh.exists(), "a directory was made in the agent state");
+        assert_eq!(std::fs::read_to_string(&login).unwrap(), signed_in);
+    }
+
+    /// A run whose actor is not a writer gets no workspace scope, and its host
+    /// file tools are the same as any other run's, so the agents' state is
+    /// withheld from it too. Here the state sits inside the run's own
+    /// directory, where confinement to that directory does not keep it out.
+    #[tokio::test]
+    async fn a_run_with_no_workspace_scope_reads_no_organizations_agent_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (scope, home) = another_organizations_home(&directory.path().join("agent-state"));
+        let tools = ChatTools::for_task(
+            &scope.state,
+            directory.path().to_path_buf(),
+            Uuid::new_v4(),
+            None,
+        )
+        .await;
+        let login = home
+            .join("auth.json")
+            .strip_prefix(directory.path())
+            .unwrap()
+            .to_path_buf();
+
+        let read = tools
+            .execute("read_file", &json!({"path": login}).to_string())
+            .await;
+
+        assert!(off_limits(&read), "{} was read: {read:?}", login.display());
+        assert!(!format!("{read:?}").contains(OTHER_LOGIN), "{read:?}");
+    }
+
+    /// A CLI serving another organization's turn holds that turn's Claude
+    /// token and Zone MCP token in its environment, and unlike the server it
+    /// is dumpable, so the server's user can read its `/proc` entry. The links
+    /// there lead into its organization's home too.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_chat_reads_no_running_agents_process() {
+        const TURN: &str = "another-organizations-turn";
+        let directory = tempfile::TempDir::new().unwrap();
+        let (scope, home) = another_organizations_home(&directory.path().join("agent-state"));
+        let mut agent = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(home.join("work"))
+            .env("ZONE_OTHER_TURN", TURN)
+            .spawn()
+            .expect("a stand-in for a running agent CLI");
+        let process = std::path::PathBuf::from(format!("/proc/{}", agent.id()));
+        let tools = ChatTools::build(scope).await;
+
+        let mut results = Vec::new();
+        for path in [
+            process.join("environ"),
+            process.join(format!("task/{}/environ", agent.id())),
+            process.join("cwd/../auth.json"),
+            std::path::PathBuf::from("/proc/self/environ"),
+        ] {
+            let read = tools
+                .execute("read_file", &json!({"path": path}).to_string())
+                .await;
+            results.push((format!("read_file {}", path.display()), read));
+        }
+        for path in [process.clone(), process.join("cwd/..")] {
+            let listed = tools
+                .execute("list_files", &json!({"path": path}).to_string())
+                .await;
+            results.push((format!("list_files {}", path.display()), listed));
+        }
+        let searched = tools
+            .execute(
+                "search_code",
+                &json!({"pattern": OTHER_LOGIN, "path": process.join("cwd/..")}).to_string(),
+            )
+            .await;
+        results.push(("search_code".to_string(), searched));
+        agent.kill().unwrap();
+        agent.wait().unwrap();
+
+        for (call, result) in results {
+            assert!(off_limits(&result), "{call} ran: {result:?}");
+            let shown = format!("{result:?}");
+            assert!(
+                !shown.contains(TURN) && !shown.contains(OTHER_LOGIN),
+                "{call}: {shown}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -1,0 +1,12 @@
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/Users/jakebarnby/.claude/projects",
+  "configDirectory": "/Users/jakebarnby/.claude",
+  "email": "<email>",
+  "orgId": "00000000-0000-0000-0000-000000000000",
+  "orgName": "<org-name>",
+  "subscriptionType": "team"
+}

@@ -111,7 +111,12 @@ direct=$(mktemp)
 devcfg=$(mktemp)
 combo=$(mktemp)
 bundled=$(mktemp)
-trap 'rm -rf "$directory" "$direct" "$devcfg" "$combo" "$bundled"' EXIT HUP INT TERM
+moved=$(mktemp)
+off=$(mktemp)
+tunnel=$(mktemp)
+closed=$(mktemp)
+trap 'rm -rf "$directory" "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off" "$tunnel" "$closed"' EXIT HUP INT TERM
+unset ZONE_AGENT_CALLBACK_PORT ZONE_CONSOLE_ORIGINS
 
 # shellcheck disable=SC2046
 compose $("$script" flags '') config --format json > "$direct"
@@ -121,8 +126,16 @@ compose $("$script" flags dev) config --format json > "$devcfg"
 compose $("$script" flags 'dev,vpn,monitoring') config --format json > "$combo"
 # shellcheck disable=SC2046
 compose $("$script" flags bundled-ollama) config --format json > "$bundled"
+# shellcheck disable=SC2046
+ZONE_AGENT_CALLBACK_PORT=60000 compose $("$script" flags 'dev,vpn') config --format json > "$moved"
+# shellcheck disable=SC2046
+ZONE_AGENT_CALLBACK_PORT='' compose $("$script" flags '') config --format json > "$off"
+# shellcheck disable=SC2046
+ZONE_CONSOLE_ORIGINS=http://manager.localhost:8080 compose $("$script" flags '') config --format json > "$tunnel"
+# shellcheck disable=SC2046
+ZONE_CONSOLE_ORIGINS='' compose $("$script" flags dev) config --format json > "$closed"
 
-python3 - "$direct" "$devcfg" "$combo" "$bundled" <<'PY'
+python3 - "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off" "$tunnel" "$closed" <<'PY'
 import json
 import sys
 
@@ -130,6 +143,10 @@ direct = json.load(open(sys.argv[1], encoding="utf-8"))
 dev = json.load(open(sys.argv[2], encoding="utf-8"))
 combo = json.load(open(sys.argv[3], encoding="utf-8"))
 bundled = json.load(open(sys.argv[4], encoding="utf-8"))
+moved = json.load(open(sys.argv[5], encoding="utf-8"))
+off = json.load(open(sys.argv[6], encoding="utf-8"))
+tunnel = json.load(open(sys.argv[7], encoding="utf-8"))
+closed = json.load(open(sys.argv[8], encoding="utf-8"))
 
 
 def dockerfile(service):
@@ -209,6 +226,87 @@ for name, config in (("core", direct), ("dev", dev), ("dev+vpn+monitoring", comb
 init_networks = set(bundled["services"]["ollama-init"].get("networks") or {})
 if not {"internal", "edge"} <= init_networks:
     raise SystemExit(f"ollama-init must join internal and edge, got {sorted(init_networks)!r}")
+
+# claude.com sends the admin's browser to http://localhost:<port>/callback, so
+# the published port must answer only the host's own loopback. Docker hands a
+# published port to the container's interface, never to its loopback, which is
+# why the listener inside binds 0.0.0.0, always on the same port.
+LISTENER = 54545
+
+
+def callback_publishes(service):
+    return [
+        (item.get("host_ip"), str(item.get("published") or ""))
+        for item in service.get("ports") or []
+        if isinstance(item, dict) and int(item.get("target")) == LISTENER
+    ]
+
+
+for name, config, publisher, port in (
+    ("core", direct, "manager", "54545"),
+    ("dev", dev, "manager", "54545"),
+    ("dev+vpn+monitoring", combo, "gluetun", "54545"),
+    ("dev+vpn with ZONE_AGENT_CALLBACK_PORT=60000", moved, "gluetun", "60000"),
+):
+    publishes = callback_publishes(config["services"][publisher])
+    if publishes != [("127.0.0.1", port)]:
+        raise SystemExit(
+            f"{name} {publisher} must publish the Claude sign-in callback on 127.0.0.1:{port} "
+            f"only, got {publishes!r}"
+        )
+    environment = config["services"]["manager"].get("environment") or {}
+    for variable, value in (
+        ("ZONE_AGENT_CALLBACK", port),
+        ("ZONE_AGENT_CALLBACK_BIND", f"0.0.0.0:{LISTENER}"),
+    ):
+        if environment.get(variable) != value:
+            raise SystemExit(
+                f"{name} manager must set {variable}={value}, got {environment.get(variable)!r}"
+            )
+    if publisher == "gluetun":
+        firewall = str(config["services"]["gluetun"]["environment"].get("FIREWALL_INPUT_PORTS", ""))
+        if str(LISTENER) not in firewall.split(","):
+            raise SystemExit(f"{name} gluetun must let the callback in, got {firewall!r}")
+for name, config in (("dev+vpn+monitoring", combo), ("dev+vpn", moved)):
+    if config["services"]["manager"].get("ports"):
+        raise SystemExit(f"{name} manager shares gluetun's network, so gluetun publishes its ports")
+
+off_manager = off["services"]["manager"]
+if (off_manager.get("environment") or {}).get("ZONE_AGENT_CALLBACK") != "":
+    raise SystemExit("an empty ZONE_AGENT_CALLBACK_PORT must turn the callback off")
+if any(
+    host != "127.0.0.1" or published == str(LISTENER)
+    for host, published in callback_publishes(off_manager)
+):
+    raise SystemExit(
+        "with the callback off, the manager must not take port "
+        f"{LISTENER}, got {callback_publishes(off_manager)!r}"
+    )
+
+# A Claude sign-in returns its browser only to a console the manager lists, so
+# the list names exactly the consoles each stack serves: Traefik's, on both
+# entrypoints and both hosts, plus the Vite server the dev overlay publishes.
+# .env replaces it, and an empty value turns the return off.
+TRAEFIK_CONSOLES = (
+    "http://manager.localhost,https://manager.localhost,"
+    "http://manager.webui.localhost,https://manager.webui.localhost"
+)
+VITE_CONSOLE = "http://localhost:3001"
+for name, config, consoles in (
+    ("core", direct, TRAEFIK_CONSOLES),
+    ("core with the callback off", off, TRAEFIK_CONSOLES),
+    ("dev", dev, f"{VITE_CONSOLE},{TRAEFIK_CONSOLES}"),
+    ("dev+vpn+monitoring", combo, f"{VITE_CONSOLE},{TRAEFIK_CONSOLES}"),
+    ("dev+vpn with ZONE_AGENT_CALLBACK_PORT=60000", moved, f"{VITE_CONSOLE},{TRAEFIK_CONSOLES}"),
+    ("core with an SSH tunnel's console", tunnel, "http://manager.localhost:8080"),
+    ("dev with ZONE_CONSOLE_ORIGINS empty", closed, ""),
+):
+    environment = config["services"]["manager"].get("environment") or {}
+    if environment.get("ZONE_CONSOLE_ORIGINS") != consoles:
+        raise SystemExit(
+            f"{name} manager must set ZONE_CONSOLE_ORIGINS={consoles}, "
+            f"got {environment.get('ZONE_CONSOLE_ORIGINS')!r}"
+        )
 
 print("Compose profile combination checks passed")
 PY

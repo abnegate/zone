@@ -1,5 +1,8 @@
 import type { Page } from '@playwright/test';
-import type { AiSettings } from '../src/features/settings/workspace/types';
+import type {
+  AiSettings,
+  WorkspaceAiSettings,
+} from '../src/features/settings/workspace/types';
 import {
   adminPermissions,
   createMockJwt,
@@ -45,6 +48,11 @@ const mockAiSettings: AiSettings = {
   model_image: null,
   model_video: null,
   model_audio: null,
+};
+
+const mockWorkspaceAiSettings: WorkspaceAiSettings = {
+  ...mockAiSettings,
+  overrides: false,
 };
 
 const mockMembers = [
@@ -353,7 +361,11 @@ export async function setupCommonRoutes(
     else if (/\/organizations\/[^/]+\/settings\/ai$/.test(path))
       body = mockAiSettings;
     else if (
-      /\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/ai(?:\/effective)?$/.test(path)
+      /\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/ai$/.test(path)
+    )
+      body = mockWorkspaceAiSettings;
+    else if (
+      /\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/ai\/effective$/.test(path)
     )
       body = mockAiSettings;
     else if (path === '/api/organizations')

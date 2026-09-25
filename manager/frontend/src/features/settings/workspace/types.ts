@@ -1,11 +1,8 @@
-// Workspace Member Types - import from auth for consistency
 import type { WorkspaceRole } from '../../auth/types';
 import type { ApiResponse, OrganizationMember } from '../organization/types';
 
-// Re-export OrganizationMember for WorkspaceMembersSection
 export type { ApiResponse, OrganizationMember, WorkspaceRole };
 
-// Workspace Types
 export interface Workspace {
   id: string;
   organization_id: string;
@@ -53,7 +50,6 @@ export interface WorkspaceMembersResponse {
   members: WorkspaceMember[];
 }
 
-// Workspace Theme Types
 export type FontFamily = 'system' | 'inter' | 'roboto' | 'open-sans' | 'lato' | 'nunito';
 export type BorderRadius = 'none' | 'small' | 'medium' | 'large';
 
@@ -69,8 +65,7 @@ export interface WorkspaceThemeResponse {
   theme: WorkspaceTheme;
 }
 
-// AI Provider Types
-export type AiProvider = 'self_hosted' | 'openai' | 'anthropic' | 'bedrock';
+export type AiProvider = import('./schemas').AiProviderZ;
 
 export interface AiSettings {
   provider: AiProvider;
@@ -89,6 +84,10 @@ export interface AiSettings {
   model_image: string | null;
   model_video: string | null;
   model_audio: string | null;
+}
+
+export interface WorkspaceAiSettings extends AiSettings {
+  overrides: boolean;
 }
 
 export interface UpdateAiSettingsRequest {
@@ -117,7 +116,6 @@ export interface AiSettingsResponse {
   settings: AiSettings;
 }
 
-// API Response wrappers
 export interface WorkspacesResponse extends ApiResponse {
   workspaces: Workspace[];
 }

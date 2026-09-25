@@ -31,8 +31,6 @@ import type {
   TasksResponseSchema,
 } from '../features/tasks/schemas';
 
-// Auth Schemas - now re-exported from features/auth
-
 export {
   AuthResponseSchema,
   ForgotPasswordResponseSchema,
@@ -51,8 +49,6 @@ export {
   WorkspaceRoleSchema,
 } from '../features/auth/schemas';
 
-// Organization Schemas - re-exported from features/settings/organization
-
 export {
   CreateOrganizationRequestSchema,
   OrganizationResponseSchema,
@@ -60,8 +56,6 @@ export {
   OrganizationsResponseSchema,
   UpdateOrganizationRequestSchema,
 } from '../features/settings/organization/schemas';
-
-// Workspace Schemas
 
 export const WorkspaceSchema = z.object({
   id: z.string(),
@@ -87,8 +81,6 @@ export const UpdateWorkspaceRequestSchema = z.object({
   is_active: z.boolean().optional(),
 });
 
-// Model Schemas
-
 export {
   BrowseModelSchema,
   BrowseResponseSchema,
@@ -97,8 +89,6 @@ export {
   ModelsResponseSchema,
   PullProgressSchema,
 } from '../features/models/schemas';
-
-// Chat Schemas
 
 export {
   ChatResponseSchema,
@@ -114,8 +104,6 @@ export {
   MessagesResponseSchema,
   SendMessageRequestSchema,
 } from '../features/chats/schemas';
-
-// Source Schemas - re-exported from features/sources
 
 export {
   CalendarMetadataSchema,
@@ -149,8 +137,6 @@ export {
   WebMetadataSchema,
 } from '../features/sources/schemas';
 
-// Project Schemas
-
 export {
   AutomationStageSchema,
   AutomationTaskSchema,
@@ -170,8 +156,6 @@ export {
   SyncProviderSchema,
   UpdateProjectRequestSchema,
 } from '../features/projects/schemas';
-
-// Task Schemas - now re-exported from features/tasks
 
 export {
   BorderRadiusSchema,
@@ -203,8 +187,6 @@ import type {
   WorkspaceThemeSchema,
 } from '../features/settings/workspace/schemas';
 
-// Workspaces Response Schemas
-
 export const WorkspacesResponseSchema = z.object({
   success: z.boolean().optional(),
   error: z.string().optional(),
@@ -216,11 +198,6 @@ export const WorkspaceResponseSchema = z.object({
   error: z.string().optional(),
   workspace: WorkspaceSchema,
 });
-
-// Content Schemas
-// (Content schemas re-exported from features/sources above)
-
-// Type Exports (inferred from schemas)
 
 export type UserZ = z.infer<typeof UserSchema>;
 export type AuthResponseZ = z.infer<typeof AuthResponseSchema>;
@@ -236,7 +213,6 @@ export type TaskZ = z.infer<typeof TaskSchema>;
 export type TaskRunZ = z.infer<typeof TaskRunSchema>;
 export type WorkspaceThemeZ = z.infer<typeof WorkspaceThemeSchema>;
 
-// Response type exports for API client
 export type ChatsResponse = z.infer<typeof ChatsResponseSchema>;
 export type ChatResponse = z.infer<typeof ChatResponseSchema>;
 export type MessagesResponse = z.infer<typeof MessagesResponseSchema>;
@@ -258,79 +234,21 @@ export type WorkspaceResponse = z.infer<typeof WorkspaceResponseSchema>;
 export type WorkspaceThemeResponse = z.infer<typeof WorkspaceThemeResponseSchema>;
 export type SourceVerifyResponse = z.infer<typeof SourceVerifyResponseSchema>;
 
-// AI Settings Schemas
-
-export const AiProviderSchema = z.enum(['self_hosted', 'openai', 'anthropic', 'bedrock']);
-
-export const AiSettingsSchema = z.object({
-  provider: AiProviderSchema,
-  has_litellm_key: z.boolean(),
-  litellm_host: z.string().nullable(),
-  has_openai_api_key: z.boolean(),
-  openai_base_url: z.string().nullable(),
-  has_anthropic_api_key: z.boolean(),
-  anthropic_base_url: z.string().nullable(),
-  bedrock_region: z.string().nullable(),
-  bedrock_use_iam_role: z.boolean(),
-  has_bedrock_credentials: z.boolean(),
-  model_fast: z.string().nullable(),
-  model_reasoning: z.string().nullable(),
-  model_embedding: z.string().nullable(),
-  model_image: z.string().nullable(),
-  model_video: z.string().nullable(),
-  model_audio: z.string().nullable(),
-});
-
-export const UpdateAiSettingsRequestSchema = z.object({
-  provider: AiProviderSchema.optional(),
-  litellm_host: z.string().optional(),
-  litellm_key: z.string().optional(),
-  openai_api_key: z.string().optional(),
-  openai_base_url: z.string().optional(),
-  anthropic_api_key: z.string().optional(),
-  anthropic_base_url: z.string().optional(),
-  bedrock_region: z.string().optional(),
-  bedrock_access_key: z.string().optional(),
-  bedrock_secret_key: z.string().optional(),
-  bedrock_use_iam_role: z.boolean().optional(),
-  model_fast: z.string().optional(),
-  model_reasoning: z.string().optional(),
-  model_embedding: z.string().optional(),
-  model_image: z.string().optional(),
-  model_video: z.string().optional(),
-  model_audio: z.string().optional(),
-});
-
-export const AiSettingsResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  provider: AiProviderSchema,
-  has_litellm_key: z.boolean(),
-  litellm_host: z.string().nullable(),
-  has_openai_api_key: z.boolean(),
-  openai_base_url: z.string().nullable(),
-  has_anthropic_api_key: z.boolean(),
-  anthropic_base_url: z.string().nullable(),
-  bedrock_region: z.string().nullable(),
-  bedrock_use_iam_role: z.boolean(),
-  has_bedrock_credentials: z.boolean(),
-  model_fast: z.string().nullable(),
-  model_reasoning: z.string().nullable(),
-  model_embedding: z.string().nullable(),
-  model_image: z.string().nullable(),
-  model_video: z.string().nullable(),
-  model_audio: z.string().nullable(),
-});
-
-export type AiSettingsZ = z.infer<typeof AiSettingsSchema>;
-export type AiSettingsResponse = z.infer<typeof AiSettingsResponseSchema>;
-
-// Session Schemas
+export type {
+  AiProviderZ,
+  AiSettingsResponse,
+  AiSettingsZ,
+} from '../features/settings/workspace/schemas';
+export {
+  AiProviderSchema,
+  AiSettingsResponseSchema,
+  AiSettingsSchema,
+  UpdateAiSettingsRequestSchema,
+  WorkspaceAiSettingsResponseSchema,
+} from '../features/settings/workspace/schemas';
 
 export type { SessionsResponse, SessionZ } from '../features/auth/schemas';
 export { SessionSchema, SessionsResponseSchema } from '../features/auth/schemas';
-
-// Organization Member Schemas
 
 export type { OrgRoleZ } from '../features/auth/schemas';
 export type {
@@ -344,8 +262,6 @@ export {
   UpdateOrgMemberRequestSchema,
 } from '../features/settings/organization/schemas';
 
-// Workspace Member Schemas
-
 export type { WorkspaceRoleZ } from '../features/auth/schemas';
 export type {
   WorkspaceMembersResponse,
@@ -358,8 +274,6 @@ export {
   WorkspaceMembersResponseSchema,
 } from '../features/settings/workspace/schemas';
 
-// Invitation Schemas - now re-exported from features/settings
-
 export type { InvitationDetailsZ } from '../features/auth/schemas';
 export { InvitationDetailsSchema } from '../features/auth/schemas';
 export type {
@@ -371,8 +285,6 @@ export {
   InvitationSchema,
   InvitationsResponseSchema,
 } from '../features/settings/organization/schemas';
-
-// Billing, Usage & Audit Log Schemas - re-exported from features/settings/organization
 
 export type {
   AuditActionZ,
@@ -409,8 +321,6 @@ export {
   UsageResponseSchema,
   UsageSchema,
 } from '../features/settings/organization/schemas';
-
-// Knowledge Base & Context Search Schemas - re-exported from features/knowledge
 
 export type {
   CreateKnowledgeRequestZ,

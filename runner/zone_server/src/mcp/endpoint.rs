@@ -14,6 +14,7 @@ use zone_core::llm::{ToolDefinition, Toolset};
 
 use super::protocol::{self, Request, Response};
 use super::turn::Turn;
+use crate::config::Config;
 
 /// Where this endpoint is mounted. The turn's `Toolset` endpoint is this path
 /// against whatever address the server is reachable on.
@@ -36,6 +37,28 @@ const EMPTY_SCHEMA: &str = r#"{"type":"object","properties":{}}"#;
 /// This endpoint's URL on a server reachable at `base`.
 pub fn endpoint(base: &str) -> String {
     format!("{}{PATH}", base.trim_end_matches('/'))
+}
+
+/// This endpoint's URL as a child process of this server reaches it.
+pub fn local_endpoint(config: &Config) -> String {
+    endpoint(&own_address(config))
+}
+
+/// Where a child process of this one reaches this server.
+///
+/// `Config::host` is a bind address: a server bound to every interface is
+/// reached at loopback, and one bound to a single address at that address. The
+/// agent runs on this host, so nothing here has to be routable from anywhere
+/// else -- and the turn's token, which travels this way, had better not be.
+fn own_address(config: &Config) -> String {
+    let host = match config.host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        host => host,
+    };
+    match host.contains(':') && !host.starts_with('[') {
+        true => format!("http://[{host}]:{}", config.port),
+        false => format!("http://{host}:{}", config.port),
+    }
 }
 
 pub async fn serve(headers: HeaderMap, body: Bytes) -> HttpResponse {
@@ -119,6 +142,7 @@ fn catalog(turn: &Turn) -> Vec<McpTool> {
     turn.tools()
         .all_definitions()
         .iter()
+        .filter(|definition| turn.serves(&definition.function.name))
         .map(describe)
         .collect()
 }
@@ -143,7 +167,7 @@ async fn call(turn: &Turn, params: Option<Value>) -> Result<Value, ErrorData> {
         })?;
 
     let name = params.name.as_ref();
-    if !turn.tools().has(name) {
+    if !turn.serves(name) {
         return Err(ErrorData::invalid_params(
             format!("Unknown tool '{name}'"),
             None,
@@ -171,14 +195,17 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{open, state, wait_for_card, write};
+    use super::super::testing::{open, scope, state, tools, wait_for_card, write};
     use super::*;
-    use crate::agent::{ApprovalGate, ApprovalPolicy};
+    use crate::agent::wait::WAIT_FOR;
+    use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy};
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use http_body_util::BodyExt;
     use std::time::Duration;
+    use tokio::sync::mpsc::unbounded_channel;
     use tower::ServiceExt;
+    use uuid::Uuid;
 
     async fn post(token: Option<&str>, body: Value) -> (StatusCode, Value) {
         let mut request = HttpRequest::builder()
@@ -271,6 +298,7 @@ mod tests {
             .all_definitions()
             .iter()
             .map(|definition| definition.function.name.as_str())
+            .filter(|name| !opened.tools.ends_turn(name))
             .collect();
         assert_eq!(served, registered);
         assert!(!served.is_empty());
@@ -348,6 +376,43 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(answer["error"]["code"], -32602, "{answer}");
         assert!(answer.get("result").is_none(), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_neither_lists_nor_runs_a_tool_that_ends_zones_turn() {
+        let chat = Uuid::new_v4();
+        let (sender, _events) = unbounded_channel();
+        let lease = Turn::new(scope(chat), tools(chat).await, sender)
+            .open(endpoint("http://127.0.0.1:8080"));
+        let token = lease.toolset().token.expose().to_string();
+
+        let (_, answer) = post(Some(&token), rpc(13, protocol::TOOLS_LIST, json!({}))).await;
+        let listed: Vec<&str> = answer["result"]["tools"]
+            .as_array()
+            .expect("a tool array")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("a tool name"))
+            .collect();
+        assert!(
+            !listed.contains(&ASK_USER) && !listed.contains(&WAIT_FOR),
+            "{listed:?}"
+        );
+        assert!(listed.contains(&"write_file"), "{listed:?}");
+        assert_eq!(
+            listed.len(),
+            lease.toolset().tools.len(),
+            "the agent is allowed exactly the tools this endpoint lists"
+        );
+
+        for name in [ASK_USER, WAIT_FOR] {
+            let (status, answer) = post(
+                Some(&token),
+                rpc(14, protocol::TOOLS_CALL, call_of(name, json!({}))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(answer["error"]["code"], -32602, "{name}: {answer}");
+        }
     }
 
     #[tokio::test]
@@ -497,6 +562,32 @@ mod tests {
         assert_eq!(
             endpoint("http://127.0.0.1:8080/"),
             format!("http://127.0.0.1:8080{PATH}")
+        );
+    }
+
+    /// A child of this process reaches the server over loopback whatever
+    /// interfaces it was bound to, and the token never leaves the host.
+    #[test]
+    fn the_agent_is_pointed_at_this_server_and_no_further() {
+        let mut config = crate::state::test_config();
+        config.port = 8421;
+
+        for (bound, expected) in [
+            ("0.0.0.0", "http://127.0.0.1:8421"),
+            ("::", "http://127.0.0.1:8421"),
+            ("", "http://127.0.0.1:8421"),
+            ("127.0.0.1", "http://127.0.0.1:8421"),
+            ("192.168.1.9", "http://192.168.1.9:8421"),
+            ("::1", "http://[::1]:8421"),
+        ] {
+            config.host = bound.to_string();
+            assert_eq!(own_address(&config), expected, "bound to {bound}");
+        }
+
+        config.host = "0.0.0.0".to_string();
+        assert_eq!(
+            local_endpoint(&config),
+            format!("http://127.0.0.1:8421{PATH}")
         );
     }
 }

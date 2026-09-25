@@ -1,0 +1,20 @@
+{{- $claim := include "zone-apps.server.agentStateClaim" . }}
+{{- if $claim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $claim }}
+  labels:
+    {{- include "zone-apps.server.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.server.agentState.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.server.agentState.persistence.size | quote }}
+{{- end }}

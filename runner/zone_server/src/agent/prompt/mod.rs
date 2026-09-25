@@ -831,7 +831,7 @@ mod tests {
     /// Both sections go quiet for a catalog without `wait_for` and neither
     /// failure is visible from anywhere else: the waiting rules render nothing,
     /// and the runner bullet, which names the tool among the ones it requires,
-    /// drops out of the workspace list.
+    /// gives way to one that does not name it.
     #[test]
     fn both_assembled_prompts_carry_the_waiting_rules_and_the_runner_bullet() {
         let environment = environment();

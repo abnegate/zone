@@ -4,10 +4,20 @@ mod common;
 
 use axum::http::StatusCode;
 use serde_json::json;
+use zone_server::db::ai_settings;
 
 use common::{TestClient, test_email, test_password};
 
-/// Helper to get an auth token
+const AGENT_PROVIDERS: [&str; 2] = ["claude_code", "codex"];
+const MODEL_FIELDS: [&str; 3] = ["model_fast", "model_reasoning", "model_embedding"];
+const COMFYUI_MODELS: [(&str, &str); 3] = [
+    ("model_image", "organization-image.safetensors"),
+    ("model_video", "organization-video.safetensors"),
+    ("model_audio", "organization-audio.safetensors"),
+];
+const INVALID_PROVIDER: &str =
+    "Invalid provider. Must be one of: self_hosted, openai, anthropic, bedrock, claude_code, codex";
+
 async fn get_auth_token(client: &TestClient) -> String {
     let email = test_email();
     let password = test_password();
@@ -28,7 +38,6 @@ async fn get_auth_token(client: &TestClient) -> String {
         .to_string()
 }
 
-/// Helper to create an organization
 async fn create_org(client: &TestClient, token: &str) -> String {
     let slug = format!(
         "ai-test-org-{}",
@@ -51,7 +60,6 @@ async fn create_org(client: &TestClient, token: &str) -> String {
         .to_string()
 }
 
-/// Helper to create a workspace
 async fn create_workspace(client: &TestClient, token: &str, org_id: &str) -> String {
     let slug = format!(
         "ai-test-ws-{}",
@@ -73,10 +81,6 @@ async fn create_workspace(client: &TestClient, token: &str, org_id: &str) -> Str
         .unwrap()
         .to_string()
 }
-
-// =============================================================================
-// Organization AI Settings Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_get_org_ai_settings_default() {
@@ -261,8 +265,31 @@ async fn test_upsert_org_ai_settings_invalid_provider() {
         .await;
 
     response.assert_status(StatusCode::BAD_REQUEST);
-    let body = response.json_value();
-    assert!(body["error"].as_str().unwrap().contains("Invalid provider"));
+    assert_eq!(response.json_value()["error"], INVALID_PROVIDER);
+}
+
+#[tokio::test]
+async fn test_upsert_org_ai_settings_agent_providers() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let path = format!("/api/organizations/{org_id}/settings/ai");
+
+    for provider in AGENT_PROVIDERS {
+        let response = client
+            .put_json_auth(&path, &json!({ "provider": provider }), &token)
+            .await;
+        response.assert_status(StatusCode::OK);
+        assert_eq!(response.json_value()["provider"], provider);
+
+        let stored = client.get_auth(&path, &token).await;
+        stored.assert_status(StatusCode::OK);
+        assert_eq!(
+            stored.json_value()["provider"],
+            provider,
+            "the organization must keep {provider} once it is saved"
+        );
+    }
 }
 
 #[tokio::test]
@@ -271,7 +298,6 @@ async fn test_upsert_org_ai_settings_update_existing() {
     let token = get_auth_token(&client).await;
     let org_id = create_org(&client, &token).await;
 
-    // Create initial settings
     let response = client
         .put_json_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -284,7 +310,6 @@ async fn test_upsert_org_ai_settings_update_existing() {
         .await;
     response.assert_status(StatusCode::OK);
 
-    // Update settings
     let response = client
         .put_json_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -297,11 +322,8 @@ async fn test_upsert_org_ai_settings_update_existing() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    // Provider should be preserved
     assert_eq!(body["provider"], "openai");
-    // Key should be preserved
     assert_eq!(body["has_openai_api_key"], true);
-    // New field should be set
     assert_eq!(body["model_fast"], "gpt-4o-mini");
 }
 
@@ -311,7 +333,6 @@ async fn test_delete_org_ai_settings() {
     let token = get_auth_token(&client).await;
     let org_id = create_org(&client, &token).await;
 
-    // Create settings first
     client
         .put_json_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -323,7 +344,6 @@ async fn test_delete_org_ai_settings() {
         )
         .await;
 
-    // Delete
     let response = client
         .delete_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -332,7 +352,6 @@ async fn test_delete_org_ai_settings() {
         .await;
     response.assert_status(StatusCode::NO_CONTENT);
 
-    // Verify deleted - should get defaults
     let response = client
         .get_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -351,7 +370,6 @@ async fn test_delete_org_ai_settings_not_found() {
     let token = get_auth_token(&client).await;
     let org_id = create_org(&client, &token).await;
 
-    // Delete without creating first
     let response = client
         .delete_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -360,10 +378,6 @@ async fn test_delete_org_ai_settings_not_found() {
         .await;
     response.assert_status(StatusCode::NOT_FOUND);
 }
-
-// =============================================================================
-// Workspace AI Settings Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_get_workspace_ai_settings_default() {
@@ -437,6 +451,32 @@ async fn test_upsert_workspace_ai_settings_invalid_provider() {
         .await;
 
     response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(response.json_value()["error"], INVALID_PROVIDER);
+}
+
+#[tokio::test]
+async fn test_upsert_workspace_ai_settings_agent_providers() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let path = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    for provider in AGENT_PROVIDERS {
+        let response = client
+            .put_json_auth(&path, &json!({ "provider": provider }), &token)
+            .await;
+        response.assert_status(StatusCode::OK);
+        assert_eq!(response.json_value()["provider"], provider);
+
+        let effective = client.get_auth(&format!("{path}/effective"), &token).await;
+        effective.assert_status(StatusCode::OK);
+        assert_eq!(
+            effective.json_value()["provider"],
+            provider,
+            "a workspace override to {provider} must win over the organization's self_hosted"
+        );
+    }
 }
 
 #[tokio::test]
@@ -446,7 +486,6 @@ async fn test_delete_workspace_ai_settings() {
     let org_id = create_org(&client, &token).await;
     let ws_id = create_workspace(&client, &token, &org_id).await;
 
-    // Create settings
     client
         .put_json_auth(
             &format!(
@@ -461,7 +500,6 @@ async fn test_delete_workspace_ai_settings() {
         )
         .await;
 
-    // Delete
     let response = client
         .delete_auth(
             &format!(
@@ -493,10 +531,6 @@ async fn test_delete_workspace_ai_settings_not_found() {
     response.assert_status(StatusCode::NOT_FOUND);
 }
 
-// =============================================================================
-// Effective Settings Tests
-// =============================================================================
-
 #[tokio::test]
 async fn test_get_effective_settings_defaults() {
     let client = TestClient::with_db().await;
@@ -526,7 +560,6 @@ async fn test_get_effective_settings_org_only() {
     let org_id = create_org(&client, &token).await;
     let ws_id = create_workspace(&client, &token, &org_id).await;
 
-    // Set org settings
     client
         .put_json_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -539,7 +572,6 @@ async fn test_get_effective_settings_org_only() {
         )
         .await;
 
-    // Get effective settings
     let response = client
         .get_auth(
             &format!(
@@ -564,7 +596,6 @@ async fn test_get_effective_settings_workspace_override() {
     let org_id = create_org(&client, &token).await;
     let ws_id = create_workspace(&client, &token, &org_id).await;
 
-    // Set org settings
     client
         .put_json_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -578,7 +609,6 @@ async fn test_get_effective_settings_workspace_override() {
         )
         .await;
 
-    // Set workspace settings to override provider and model_fast
     client
         .put_json_auth(
             &format!(
@@ -594,7 +624,6 @@ async fn test_get_effective_settings_workspace_override() {
         )
         .await;
 
-    // Get effective settings
     let response = client
         .get_auth(
             &format!(
@@ -607,12 +636,14 @@ async fn test_get_effective_settings_workspace_override() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    // Workspace overrides
     assert_eq!(body["provider"], "anthropic");
     assert_eq!(body["has_anthropic_api_key"], true);
     assert_eq!(body["model_fast"], "claude-3-haiku-20240307");
-    // Org settings still preserved where workspace doesn't override
-    // Note: model_reasoning from org should still be present unless workspace explicitly sets it
+    assert!(
+        body["model_reasoning"].is_null(),
+        "an anthropic workspace must not inherit the openai organization's reasoning model, got {}",
+        body["model_reasoning"]
+    );
 }
 
 #[tokio::test]
@@ -622,7 +653,6 @@ async fn test_get_effective_settings_partial_workspace_override() {
     let org_id = create_org(&client, &token).await;
     let ws_id = create_workspace(&client, &token, &org_id).await;
 
-    // Set org settings with all models
     client
         .put_json_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -637,7 +667,6 @@ async fn test_get_effective_settings_partial_workspace_override() {
         )
         .await;
 
-    // Set workspace to override only the reasoning model
     client
         .put_json_auth(
             &format!(
@@ -651,7 +680,6 @@ async fn test_get_effective_settings_partial_workspace_override() {
         )
         .await;
 
-    // Get effective settings
     let response = client
         .get_auth(
             &format!(
@@ -664,32 +692,22 @@ async fn test_get_effective_settings_partial_workspace_override() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    // Org settings preserved
     assert_eq!(body["provider"], "openai");
     assert_eq!(body["has_openai_api_key"], true);
     assert_eq!(body["model_fast"], "gpt-4o-mini");
     assert_eq!(body["model_embedding"], "text-embedding-3-small");
-    // Workspace override
     assert_eq!(body["model_reasoning"], "o1-preview");
 }
-
-// =============================================================================
-// Authorization Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_org_ai_settings_unauthorized() {
     let client = TestClient::with_db().await;
     let org_id = uuid::Uuid::new_v4();
 
-    // GET
     let response = client
         .get(&format!("/api/organizations/{}/settings/ai", org_id))
         .await;
     response.assert_status(StatusCode::UNAUTHORIZED);
-
-    // PUT - need to use raw request since put_json_auth requires a token
-    // The unauthorized response will be caught by the middleware
 }
 
 #[tokio::test]
@@ -721,10 +739,6 @@ async fn test_effective_settings_unauthorized() {
         .await;
     response.assert_status(StatusCode::UNAUTHORIZED);
 }
-
-// =============================================================================
-// Model Configuration Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_ai_settings_with_all_models() {
@@ -982,12 +996,397 @@ async fn test_workspace_model_audio_overrides_organization() {
 }
 
 #[tokio::test]
+async fn test_blank_models_clear_saved_organization_models() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let path = format!("/api/organizations/{org_id}/settings/ai");
+
+    let first = client
+        .put_json_auth(
+            &path,
+            &json!({
+                "provider": "claude_code",
+                "model_fast": "",
+                "model_reasoning": "",
+                "model_embedding": ""
+            }),
+            &token,
+        )
+        .await;
+    first.assert_status(StatusCode::OK);
+    for field in MODEL_FIELDS {
+        assert!(
+            first.json_value()[field].is_null(),
+            "the first save must store a blank {field} as no model"
+        );
+    }
+
+    for field in MODEL_FIELDS {
+        client
+            .put_json_auth(&path, &json!({ field: "saved-model" }), &token)
+            .await
+            .assert_status(StatusCode::OK);
+
+        let omitted = client
+            .put_json_auth(&path, &json!({ "provider": "claude_code" }), &token)
+            .await;
+        omitted.assert_status(StatusCode::OK);
+        assert_eq!(
+            omitted.json_value()[field],
+            "saved-model",
+            "leaving {field} out must keep the saved model"
+        );
+
+        let cleared = client
+            .put_json_auth(
+                &path,
+                &json!({ "provider": "claude_code", field: "" }),
+                &token,
+            )
+            .await;
+        cleared.assert_status(StatusCode::OK);
+        assert!(
+            cleared.json_value()[field].is_null(),
+            "a blank {field} must clear the saved model"
+        );
+
+        let stored = client.get_auth(&path, &token).await;
+        stored.assert_status(StatusCode::OK);
+        assert!(
+            stored.json_value()[field].is_null(),
+            "the cleared {field} must stay cleared"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_blank_models_clear_saved_workspace_models() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let effective = format!("{workspace}/effective");
+
+    client
+        .put_json_auth(
+            &organization,
+            &json!({
+                "provider": "codex",
+                "model_fast": "organization-model",
+                "model_reasoning": "organization-model",
+                "model_embedding": "organization-model"
+            }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let first = client
+        .put_json_auth(
+            &workspace,
+            &json!({
+                "provider": "codex",
+                "model_fast": "",
+                "model_reasoning": "",
+                "model_embedding": ""
+            }),
+            &token,
+        )
+        .await;
+    first.assert_status(StatusCode::OK);
+    let inherited = client.get_auth(&effective, &token).await;
+    inherited.assert_status(StatusCode::OK);
+    for field in MODEL_FIELDS {
+        assert!(
+            first.json_value()[field].is_null(),
+            "the first save must store a blank {field} as no model"
+        );
+        assert_eq!(
+            inherited.json_value()[field],
+            "organization-model",
+            "a blank {field} must leave the organization's model in effect"
+        );
+    }
+
+    for field in MODEL_FIELDS {
+        client
+            .put_json_auth(
+                &workspace,
+                &json!({ "provider": "codex", field: "workspace-model" }),
+                &token,
+            )
+            .await
+            .assert_status(StatusCode::OK);
+
+        let omitted = client
+            .put_json_auth(&workspace, &json!({ "provider": "codex" }), &token)
+            .await;
+        omitted.assert_status(StatusCode::OK);
+        assert_eq!(
+            omitted.json_value()[field],
+            "workspace-model",
+            "leaving {field} out must keep the workspace's model"
+        );
+
+        let cleared = client
+            .put_json_auth(
+                &workspace,
+                &json!({ "provider": "codex", field: "" }),
+                &token,
+            )
+            .await;
+        cleared.assert_status(StatusCode::OK);
+        assert!(
+            cleared.json_value()[field].is_null(),
+            "a blank {field} must clear the workspace's model"
+        );
+
+        let reinherited = client.get_auth(&effective, &token).await;
+        reinherited.assert_status(StatusCode::OK);
+        assert_eq!(
+            reinherited.json_value()[field],
+            "organization-model",
+            "clearing the workspace's {field} must fall back to the organization's"
+        );
+    }
+}
+
+fn organization_models(provider: &str, models: [&str; 3]) -> serde_json::Value {
+    let mut body = json!({ "provider": provider });
+    for (field, model) in MODEL_FIELDS.into_iter().zip(models) {
+        body[field] = json!(model);
+    }
+    for (field, model) in COMFYUI_MODELS {
+        body[field] = json!(model);
+    }
+    body
+}
+
+fn blank_models(provider: &str) -> serde_json::Value {
+    let mut body = json!({ "provider": provider });
+    for field in MODEL_FIELDS {
+        body[field] = json!("");
+    }
+    body
+}
+
+#[tokio::test]
+async fn test_a_workspace_on_another_provider_inherits_none_of_its_organizations_models() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace_id = uuid::Uuid::parse_str(&ws_id).unwrap();
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let effective = format!("{workspace}/effective");
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &organization_models("openai", ["gpt-4o", "o1-preview", "text-embedding-3-small"]),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    for provider in [
+        "codex",
+        "claude_code",
+        "anthropic",
+        "bedrock",
+        "self_hosted",
+    ] {
+        client
+            .put_json_auth(&workspace, &blank_models(provider), &token)
+            .await
+            .assert_status(StatusCode::OK);
+
+        let running = ai_settings::for_workspace(client.state().db(), workspace_id)
+            .await
+            .expect("the workspace's settings to be readable");
+        assert_eq!(running.provider, provider);
+        assert_eq!(
+            [
+                running.model_fast,
+                running.model_reasoning,
+                running.model_embedding
+            ],
+            [None, None, None],
+            "a {provider} workspace must run without the openai organization's models"
+        );
+
+        let response = client.get_auth(&effective, &token).await;
+        response.assert_status(StatusCode::OK);
+        let body = response.json_value();
+        assert_eq!(body["provider"], provider);
+        for field in MODEL_FIELDS {
+            assert!(
+                body[field].is_null(),
+                "a {provider} workspace must not inherit the openai organization's {field}, got {}",
+                body[field]
+            );
+        }
+        for (field, model) in COMFYUI_MODELS {
+            assert_eq!(
+                body[field], model,
+                "a {provider} workspace still inherits the organization's {field}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_a_workspace_on_its_organizations_provider_inherits_its_models() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let models = ["gpt-5.5", "gpt-6-sol", "organization-embedding"];
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &organization_models("codex", models),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    client
+        .put_json_auth(&workspace, &blank_models("codex"), &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    let response = client
+        .get_auth(&format!("{workspace}/effective"), &token)
+        .await;
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["provider"], "codex");
+    for (field, model) in MODEL_FIELDS.into_iter().zip(models) {
+        assert_eq!(
+            body[field], model,
+            "a codex workspace in a codex organization inherits its {field}"
+        );
+    }
+    for (field, model) in COMFYUI_MODELS {
+        assert_eq!(body[field], model, "the workspace inherits the {field}");
+    }
+}
+
+#[tokio::test]
+async fn test_a_self_hosted_workspace_under_a_self_hosted_organization_is_unchanged() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let effective = format!("{workspace}/effective");
+    let models = ["llama3.1:8b", "deepseek-r1:7b", "nomic-embed-text"];
+    let mut organization = organization_models("self_hosted", models);
+    organization["litellm_host"] = json!("http://litellm:4000");
+    organization["litellm_key"] = json!("sk-organization-litellm");
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &organization,
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    let inherited = client.get_auth(&effective, &token).await;
+    inherited.assert_status(StatusCode::OK);
+
+    client
+        .put_json_auth(&workspace, &blank_models("self_hosted"), &token)
+        .await
+        .assert_status(StatusCode::OK);
+    let overridden = client.get_auth(&effective, &token).await;
+    overridden.assert_status(StatusCode::OK);
+
+    assert_eq!(
+        overridden.json_value(),
+        inherited.json_value(),
+        "a self_hosted workspace with blank models runs exactly as its self_hosted organization"
+    );
+    let body = overridden.json_value();
+    assert_eq!(body["provider"], "self_hosted");
+    assert_eq!(body["litellm_host"], "http://litellm:4000");
+    assert_eq!(body["has_litellm_key"], true);
+    for (field, model) in MODEL_FIELDS.into_iter().zip(models) {
+        assert_eq!(
+            body[field], model,
+            "the workspace inherits the organization's {field}"
+        );
+    }
+    for (field, model) in COMFYUI_MODELS {
+        assert_eq!(body[field], model, "the workspace inherits the {field}");
+    }
+}
+
+#[tokio::test]
+async fn test_workspace_settings_say_whether_the_workspace_overrides() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    client
+        .put_json_auth(&organization, &json!({ "provider": "claude_code" }), &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    let inherited = client.get_auth(&workspace, &token).await;
+    inherited.assert_status(StatusCode::OK);
+    assert_eq!(inherited.json_value()["provider"], "self_hosted");
+    assert_eq!(inherited.json_value()["overrides"], false);
+
+    let saved = client
+        .put_json_auth(&workspace, &json!({ "provider": "self_hosted" }), &token)
+        .await;
+    saved.assert_status(StatusCode::OK);
+    assert_eq!(saved.json_value()["overrides"], true);
+
+    let stored = client.get_auth(&workspace, &token).await;
+    stored.assert_status(StatusCode::OK);
+    assert_eq!(stored.json_value()["provider"], "self_hosted");
+    assert_eq!(
+        stored.json_value()["overrides"],
+        true,
+        "a workspace that saved self_hosted overrides an organization on claude_code"
+    );
+
+    let effective = client
+        .get_auth(&format!("{workspace}/effective"), &token)
+        .await;
+    effective.assert_status(StatusCode::OK);
+    assert_eq!(effective.json_value()["provider"], "self_hosted");
+    assert!(effective.json_value().get("overrides").is_none());
+    let own = client.get_auth(&organization, &token).await;
+    own.assert_status(StatusCode::OK);
+    assert!(own.json_value().get("overrides").is_none());
+
+    client
+        .delete_auth(&workspace, &token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let reset = client.get_auth(&workspace, &token).await;
+    reset.assert_status(StatusCode::OK);
+    assert_eq!(reset.json_value()["overrides"], false);
+}
+
+#[tokio::test]
 async fn test_credentials_not_exposed_in_response() {
     let client = TestClient::with_db().await;
     let token = get_auth_token(&client).await;
     let org_id = create_org(&client, &token).await;
 
-    // Set settings with sensitive credentials
     client
         .put_json_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -1000,7 +1399,6 @@ async fn test_credentials_not_exposed_in_response() {
         )
         .await;
 
-    // Get settings - credentials should not be exposed
     let response = client
         .get_auth(
             &format!("/api/organizations/{}/settings/ai", org_id),
@@ -1011,11 +1409,9 @@ async fn test_credentials_not_exposed_in_response() {
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
 
-    // Should show has_*_key flags but not actual keys
     assert_eq!(body["has_openai_api_key"], true);
     assert_eq!(body["has_litellm_key"], true);
 
-    // Should NOT contain actual key values
     assert!(body.get("openai_api_key").is_none());
     assert!(body.get("litellm_key").is_none());
 }

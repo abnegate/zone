@@ -12,6 +12,7 @@ compose() {
     docker compose --env-file "$envfile" "$@"
 }
 
+unset ZONE_CONSOLE_ORIGINS
 direct=$(mktemp)
 vpn=$(mktemp)
 trap 'rm -f "$direct" "$vpn"' EXIT HUP INT TERM
@@ -154,6 +155,18 @@ if manager_env.get("MODEL_SEARCH_PROXY_URL") != "http://127.0.0.1:8888":
     raise SystemExit("VPN manager MODEL_SEARCH_PROXY_URL must be loopback")
 if manager_env.get("TOOL_RUNNER_PROXY_URL") != "http://127.0.0.1:8888":
     raise SystemExit("VPN manager TOOL_RUNNER_PROXY_URL must be loopback")
+# Traefik still serves the console when the manager joins Gluetun, so a Claude
+# sign-in returns to the same consoles as without the VPN.
+consoles = (
+    "http://manager.localhost,https://manager.localhost,"
+    "http://manager.webui.localhost,https://manager.webui.localhost"
+)
+for name, config in (("default", direct), ("VPN", vpn)):
+    listed = service_env(config["services"]["manager"]).get("ZONE_CONSOLE_ORIGINS")
+    if listed != consoles:
+        raise SystemExit(
+            f"{name} manager must list the consoles Traefik serves, got {listed!r}"
+        )
 
 grafana_env = service_env(vpn["services"]["grafana"])
 if grafana_env.get("PROMETHEUS_URL") != f"http://{pinned['prometheus']}:9090":

@@ -34,6 +34,7 @@ services:
       - cargo-git:/usr/local/cargo/git
       - cargo-target:/app/runner/target
       - embed-cache:/app/embed-cache
+      - agent-state:/app/agent-state
     environment:
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD_URLENCODED}@postgres:5432/${MANAGER_POSTGRES_DB:-manager}
       - REDIS_URL=redis://valkey:6379
@@ -43,6 +44,7 @@ services:
       - ZONE_CHAT_TIMEOUT_SECONDS=${ZONE_CHAT_TIMEOUT_SECONDS:-1800}
       - ZONE_CHAT_OUTPUT_TOKENS=${ZONE_CHAT_OUTPUT_TOKENS:-4096}
       - ZONE_CHAT_CONTEXT_TOKENS=${ZONE_CHAT_CONTEXT_TOKENS:-32768}
+      - ZONE_CHAT_AGENT_CWD=${ZONE_CHAT_AGENT_CWD:-/app/runner}
       - LITELLM_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - OLLAMA_MODEL_FAST=${OLLAMA_MODEL_FAST:-}
@@ -54,6 +56,8 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - CORS_ORIGINS=http://localhost:3001,http://console:3001
+      # Traefik's consoles, plus the Vite server published on localhost:3001.
+      - ZONE_CONSOLE_ORIGINS=${ZONE_CONSOLE_ORIGINS-http://localhost:3001,http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
       - SQLX_OFFLINE=true
       - RUST_LOG=zone_server=debug,zone_core=debug,zone_context=debug
       - RUST_BACKTRACE=1
@@ -132,5 +136,7 @@ volumes:
     name: zone_dev_cargo_target
   embed-cache:
     name: zone_dev_embed_cache
+  agent-state:
+    name: zone_dev_agent_state
   console-workspace-modules:
     name: zone_dev_console_workspace_modules

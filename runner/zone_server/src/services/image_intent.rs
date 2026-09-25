@@ -3,8 +3,8 @@
 //! High-confidence rules route immediately. Anything leftover — including
 //! informal edits of an attached photo that the word lists miss — is decided
 //! by a short LiteLLM call (workspace Fast, the current chat model, or a small
-//! installed completion model) with a small token budget. Timeouts and empty
-//! hosts fall back to chat.
+//! installed completion model) with a small token budget. Timeouts, empty
+//! hosts and an agent with no model named for it fall back to chat.
 
 use serde_json::Value;
 use std::time::Duration;
@@ -74,6 +74,22 @@ impl GenerationIntent {
     }
 }
 
+/// What the message's flags and the word rules make of it, before any model
+/// is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    Settled(GenerationIntent),
+    /// Only a model can tell; these are the lanes it may still choose.
+    Unsettled(Lanes),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lanes {
+    has_source_image: bool,
+    image: bool,
+    audio: bool,
+}
+
 #[derive(Clone)]
 pub struct ImageIntentClassifier {
     config: ComfyUiConfig,
@@ -93,6 +109,50 @@ fn is_automation_turn(metadata: Option<&Value>) -> bool {
         .is_some_and(|source| source == "reminder")
 }
 
+/// What `config`, the message's flags and the word rules decide on their own.
+pub fn reading(config: &ComfyUiConfig, content: &str, metadata: Option<&Value>) -> Reading {
+    if !config.enabled || is_automation_turn(metadata) {
+        return Reading::Settled(GenerationIntent::Chat);
+    }
+    let flag = |name: &str| metadata.and_then(|m| m.get(name)).and_then(Value::as_bool);
+    if flag("upscale") == Some(true) {
+        return Reading::Settled(GenerationIntent::Upscale);
+    }
+    if flag("video_generation") == Some(true) {
+        return Reading::Settled(GenerationIntent::Video);
+    }
+    if flag("audio_generation") == Some(true) {
+        return Reading::Settled(GenerationIntent::Audio);
+    }
+    if flag("image_generation") == Some(true) {
+        return Reading::Settled(GenerationIntent::Image);
+    }
+    let skip_video = flag("video_generation") == Some(false);
+    let skip_audio = flag("audio_generation") == Some(false);
+    let skip_image = flag("image_generation") == Some(false);
+    let skip_upscale = flag("upscale") == Some(false);
+    // Turning every generator off means "produce no media", which upscaling
+    // would violate; `upscale: false` on its own only suppresses this path.
+    if skip_video && skip_audio && skip_image {
+        return Reading::Settled(GenerationIntent::Chat);
+    }
+
+    let has_source_image = crate::services::media_source::has_image_attachment(metadata);
+    let has_source_media = crate::services::media_source::has_media_attachment(metadata);
+    match deterministic_decision(content, has_source_image, has_source_media) {
+        RuleDecision::Upscale if !skip_upscale => Reading::Settled(GenerationIntent::Upscale),
+        RuleDecision::Video if !skip_video => Reading::Settled(GenerationIntent::Video),
+        RuleDecision::Audio if !skip_audio => Reading::Settled(GenerationIntent::Audio),
+        RuleDecision::Image if !skip_image => Reading::Settled(GenerationIntent::Image),
+        RuleDecision::Ambiguous if !skip_image || !skip_audio => Reading::Unsettled(Lanes {
+            has_source_image,
+            image: !skip_image,
+            audio: !skip_audio,
+        }),
+        _ => Reading::Settled(GenerationIntent::Chat),
+    }
+}
+
 impl ImageIntentClassifier {
     pub fn new(
         config: ComfyUiConfig,
@@ -108,59 +168,34 @@ impl ImageIntentClassifier {
         }
     }
 
-    /// Whether there is a model to ask at all. An empty host disqualifies only
-    /// the endpoint: a CLI backend runs an agent on this host, and a self-host
-    /// that serves completions that way has no LiteLLM to name.
+    /// Whether there is a model to ask at all: the endpoint needs a host, and
+    /// an agent a model named for it.
     fn reachable(&self) -> bool {
         match self.backend {
             LlmBackend::Http => !self.litellm_host.trim().is_empty(),
-            LlmBackend::Cli { .. } => true,
+            LlmBackend::Cli { .. } => {
+                !crate::services::stages::is_auto(&self.config.classifier_model)
+            }
         }
     }
 
     /// Classify a message. Any unavailable, timed-out, or malformed model result
     /// safely falls back to normal chat.
     pub async fn classify(&self, content: &str, metadata: Option<&Value>) -> GenerationIntent {
-        if !self.config.enabled || is_automation_turn(metadata) {
-            return GenerationIntent::Chat;
+        match reading(&self.config, content, metadata) {
+            Reading::Settled(intent) => intent,
+            Reading::Unsettled(lanes) => self.settle(content, lanes).await,
         }
-        let flag = |name: &str| metadata.and_then(|m| m.get(name)).and_then(Value::as_bool);
-        if flag("upscale") == Some(true) {
-            return GenerationIntent::Upscale;
-        }
-        if flag("video_generation") == Some(true) {
-            return GenerationIntent::Video;
-        }
-        if flag("audio_generation") == Some(true) {
-            return GenerationIntent::Audio;
-        }
-        if flag("image_generation") == Some(true) {
-            return GenerationIntent::Image;
-        }
-        let skip_video = flag("video_generation") == Some(false);
-        let skip_audio = flag("audio_generation") == Some(false);
-        let skip_image = flag("image_generation") == Some(false);
-        let skip_upscale = flag("upscale") == Some(false);
-        // Turning every generator off means "produce no media", which upscaling
-        // would violate; `upscale: false` on its own only suppresses this path.
-        if skip_video && skip_audio && skip_image {
-            return GenerationIntent::Chat;
-        }
+    }
 
-        let has_source_image = crate::services::media_source::has_image_attachment(metadata);
-        let has_source_media = crate::services::media_source::has_media_attachment(metadata);
-        match deterministic_decision(content, has_source_image, has_source_media) {
-            RuleDecision::Upscale if !skip_upscale => GenerationIntent::Upscale,
-            RuleDecision::Video if !skip_video => GenerationIntent::Video,
-            RuleDecision::Audio if !skip_audio => GenerationIntent::Audio,
-            RuleDecision::Image if !skip_image => GenerationIntent::Image,
-            RuleDecision::Ambiguous if !skip_image || !skip_audio => {
-                match self.classify_ambiguous(content, has_source_image).await {
-                    AmbiguousVerdict::Image if !skip_image => GenerationIntent::Image,
-                    AmbiguousVerdict::Audio if !skip_audio => GenerationIntent::Audio,
-                    _ => GenerationIntent::Chat,
-                }
-            }
+    /// What the model makes of a message the rules left unsettled.
+    pub async fn settle(&self, content: &str, lanes: Lanes) -> GenerationIntent {
+        match self
+            .classify_ambiguous(content, lanes.has_source_image)
+            .await
+        {
+            AmbiguousVerdict::Image if lanes.image => GenerationIntent::Image,
+            AmbiguousVerdict::Audio if lanes.audio => GenerationIntent::Audio,
             _ => GenerationIntent::Chat,
         }
     }
@@ -1738,6 +1773,38 @@ mod tests {
             agent.classify(SOFT_AUDIO, None).await,
             GenerationIntent::Image,
             "the configured agent was never asked, so the empty host decided the turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_left_to_choose_its_own_model_is_asked_neither_to_classify_nor_to_rewrite() {
+        const SOFT_AUDIO: &str = "generate ambient rain sounds";
+        const EDIT: &str = "Remove this object from an image";
+        let directory = TempDir::new().expect("a temporary directory");
+        let agent = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                classifier_model: crate::services::stages::AUTO.to_string(),
+                classifier_timeout_secs: 20,
+                ..Default::default()
+            },
+            String::new(),
+            String::new(),
+            LlmBackend::cli(
+                AgentKind::Claude,
+                CliSettings::default().with_executable(fake_agent(&directory, "IMAGE")),
+            ),
+        );
+
+        assert_eq!(
+            agent.classify(SOFT_AUDIO, None).await,
+            GenerationIntent::Chat,
+            "an agent with no model named for it was asked to classify"
+        );
+        assert_eq!(
+            agent.edit_prompt(EDIT).await,
+            heuristic_edit_prompt(EDIT),
+            "an agent with no model named for it was asked to rewrite the edit"
         );
     }
 

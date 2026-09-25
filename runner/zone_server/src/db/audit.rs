@@ -82,6 +82,9 @@ pub mod actions {
     pub const INVITATION_REVOKED: &str = "invitation.revoked";
 
     pub const SUBSCRIPTION_CHANGED: &str = "subscription.changed";
+
+    pub const AGENT_SIGNED_IN: &str = "agent.signed_in";
+    pub const AGENT_SIGNED_OUT: &str = "agent.signed_out";
 }
 
 pub mod resources {
@@ -90,6 +93,7 @@ pub mod resources {
     pub const MEMBER: &str = "member";
     pub const INVITATION: &str = "invitation";
     pub const AI_SETTINGS: &str = "ai_settings";
+    pub const AGENT_LOGIN: &str = "agent_login";
 }
 
 /// Log an action to the audit trail

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
+use zone_core::llm::provider::environment;
 use zone_vision::crop::{self, Region, Rendered, Target};
 use zone_vision::gravity::{self, Point};
 use zone_vision::{Raster, decode};
@@ -198,6 +199,8 @@ fn build(
 /// Seconds of video, as ffprobe reports them.
 async fn duration(config: &Config, clip: &Path) -> Option<f64> {
     let output = Command::new(program(&config.ffprobe)?)
+        .env_clear()
+        .envs(environment::inherited())
         .args([
             "-v",
             "error",
@@ -222,6 +225,8 @@ async fn sample(config: &Config, clip: &Path, stills: &Path, fps: f64) -> Result
          force_original_aspect_ratio=decrease:force_divisible_by=2"
     );
     let output = Command::new(program(&config.ffmpeg).ok_or(TrainError::Disabled)?)
+        .env_clear()
+        .envs(environment::inherited())
         .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i"])
         .arg(clip)
         .args(["-map", "0:v:0", "-vf", &filter])
@@ -1121,6 +1126,144 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(error, TrainError::Disabled), "{error}");
+    }
+
+    /// What a server's environment holds that no decoder may be handed. Every
+    /// value says `notreal`, so a leak shows under any name.
+    const SERVER_SECRETS: [(&str, &str); 3] = [
+        (
+            "DATABASE_URL",
+            "postgres://zone:notrealpassword@postgres/zone",
+        ),
+        ("JWT_SECRET", "notreal-jwt-secret"),
+        ("ENCRYPTION_KEY", "notreal-encryption-key"),
+    ];
+
+    /// A name an operator adds to the allowlist for a decoder that needs it.
+    const PASSED_THROUGH: (&str, &str) = ("FONTCONFIG_FILE", "/etc/fonts/zone.conf");
+
+    /// What `sh` sets for itself while it runs a stand-in's script.
+    const SHELL_OWN: [&str; 3] = ["PWD", "SHLVL", "_"];
+
+    /// Set on the copy of this binary the decoder test runs in.
+    const COPY: &str = "ZONE_COMFY_TEST_COPY";
+
+    const DECODERS: [&str; 2] = ["ffprobe", "ffmpeg"];
+
+    /// A stand-in for `decoder` that records the environment it was started
+    /// with beside itself.
+    fn stand_in(directory: &Path, decoder: &str) {
+        let script = directory.join(decoder);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n/usr/bin/env -0 > '{}'\n",
+                record(directory, decoder).display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn record(directory: &Path, decoder: &str) -> PathBuf {
+        directory.join(format!("{decoder}.environment"))
+    }
+
+    /// Every variable the stand-in for `decoder` was started with.
+    fn recorded(directory: &Path, decoder: &str) -> Vec<(String, String)> {
+        let recorded = std::fs::read(record(directory, decoder))
+            .unwrap_or_else(|_| panic!("the stand-in for {decoder} never ran"));
+        String::from_utf8_lossy(&recorded)
+            .split_terminator('\0')
+            .filter_map(|entry| entry.split_once('='))
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// The server makes itself non-dumpable, and the children it starts are
+    /// not, so a decoder handed the server's environment shows it to anything
+    /// able to read `/proc/<pid>/environ` as the server's user.
+    ///
+    /// Setting the secrets in this process would race every other test that
+    /// starts a child, so a copy of the binary runs the extraction with them
+    /// set, and finds a stand-in for each decoder first on its `PATH`.
+    #[tokio::test]
+    async fn the_decoders_start_from_the_allowlisted_environment() {
+        if std::env::var_os(COPY).is_some() {
+            let _ = extract(
+                &Config::default(),
+                b"not a clip",
+                "clip.mp4",
+                Options {
+                    fps: 4,
+                    resolution: 128,
+                    mirror: false,
+                    limit: 48,
+                },
+            )
+            .await;
+            return;
+        }
+
+        let stand_ins = tempfile::tempdir().unwrap();
+        for decoder in DECODERS {
+            stand_in(stand_ins.path(), decoder);
+        }
+        let path = std::env::join_paths(std::iter::once(stand_ins.path().to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "video::tests::the_decoders_start_from_the_allowlisted_environment",
+                "--nocapture",
+            ])
+            .env(COPY, "1")
+            .envs(SERVER_SECRETS)
+            .env(environment::PASSTHROUGH, PASSED_THROUGH.0)
+            .env(PASSED_THROUGH.0, PASSED_THROUGH.1)
+            .env("PATH", path)
+            .output()
+            .await
+            .unwrap();
+        let printed = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{printed}");
+        assert!(
+            printed.contains("1 passed"),
+            "the copy ran no test: {printed}"
+        );
+
+        for decoder in DECODERS {
+            let variables = recorded(stand_ins.path(), decoder);
+            let allowed = environment::filter(variables.clone(), PASSED_THROUGH.0);
+            let handed: Vec<&str> = variables
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .filter(|name| !allowed.contains_key(*name) && !SHELL_OWN.contains(name))
+                .collect();
+            assert!(
+                handed.is_empty(),
+                "{decoder} was handed what the allowlist refuses: {handed:?}"
+            );
+            assert!(
+                allowed.contains_key("PATH"),
+                "{decoder} was not handed the allowlist: {variables:?}"
+            );
+            assert_eq!(
+                allowed.get(PASSED_THROUGH.0).map(String::as_str),
+                Some(PASSED_THROUGH.1),
+                "the operator's passthrough did not reach {decoder}"
+            );
+        }
     }
 
     #[tokio::test]

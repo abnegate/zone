@@ -13,23 +13,26 @@ import { useTheme, workspaceThemeProperties } from '../../../../shared/context/T
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
 import { useModels } from '../../../models';
-import { mergeStageOptions } from '../../../models/utils/stageOptions';
 import {
+  type AgentModelHints,
+  AgentSignIn,
   AiModelFields,
   AiProviderFields,
+  agentOf,
   buildAiSettingsRequest,
+  agentAccess,
   configuredFromSettings,
   credentialsFromSettings,
   emptyCredentials,
   emptyModels,
-  hasOverrides,
   type ModelSelection,
-  modelOptions,
+  modelChoices,
   modelsFromSettings,
   nothingConfigured,
   type ProviderConfigured,
   type ProviderCredentials,
   providerOptions,
+  useAgentStatuses,
 } from '../../ai';
 import { SettingsPage } from '../../components';
 import { WorkspaceMembersSection } from '../components';
@@ -40,6 +43,7 @@ import type {
   BorderRadius,
   FontFamily,
   UpdateWorkspaceThemeRequest,
+  WorkspaceAiSettings,
   WorkspaceTheme,
 } from '../types';
 import './WorkspaceSettingsPage.css';
@@ -47,6 +51,12 @@ import './WorkspaceSettingsPage.css';
 type Tab = 'theme' | 'ai' | 'members';
 
 const TITLE = 'Workspace Settings';
+
+const AGENT_HINTS: AgentModelHints = {
+  fast: "Automatic uses the organization's Fast model when this workspace keeps its provider, and otherwise lets the agent choose; titles, PR subjects and summaries use it too.",
+  reasoning:
+    "Harder questions; Automatic uses the organization's Reasoning model when this workspace keeps its provider, and otherwise lets the agent choose.",
+};
 
 const fontOptions: { value: FontFamily; label: string }[] = [
   { value: 'system', label: 'System Default' },
@@ -83,11 +93,16 @@ function ColorField({
     <div className="form-group">
       <label htmlFor={id}>{label}</label>
       <div className="color-input-wrapper">
-        <input type="color" id={id} value={value} onChange={(e) => onChange(e.target.value)} />
+        <input
+          type="color"
+          id={id}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
         <input
           type="text"
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(event) => onChange(event.target.value)}
           pattern={HEX_PATTERN}
           className="color-text-input"
           aria-label={`${label} hex`}
@@ -108,7 +123,7 @@ export default function WorkspaceSettingsPage() {
     setWorkspaceTheme,
     previewWorkspaceTheme,
   } = useTheme();
-  const { currentOrganization, currentWorkspace } = useWorkspace();
+  const { currentOrganization, currentWorkspace, resolvingRole } = useWorkspace();
   const orgId = currentOrganization?.id ?? null;
   const workspaceId = currentWorkspace?.id ?? null;
 
@@ -134,15 +149,22 @@ export default function WorkspaceSettingsPage() {
   const [borderRadius, setBorderRadius] = useState<BorderRadius | null>(null);
 
   const [overrideAiSettings, setOverrideAiSettings] = useState(false);
+  const [savedOverride, setSavedOverride] = useState(false);
   const [aiProvider, setAiProvider] = useState<AiProvider>('self_hosted');
+  const [savedProvider, setSavedProvider] = useState<AiProvider>('self_hosted');
   const [credentials, setCredentials] = useState<ProviderCredentials>(emptyCredentials);
   const [configured, setConfigured] = useState<ProviderConfigured>(nothingConfigured);
   const [models, setModels] = useState<ModelSelection>(emptyModels);
   const [effectiveSettings, setEffectiveSettings] = useState<AiSettings | null>(null);
 
-  const applyAiSettingsToForm = useCallback((settings: AiSettings): void => {
-    setOverrideAiSettings(hasOverrides(settings));
+  const agent = overrideAiSettings ? agentOf(aiProvider) : null;
+  const agents = useAgentStatuses(orgId, agent !== null);
+
+  const applyAiSettingsToForm = useCallback((settings: WorkspaceAiSettings): void => {
+    setOverrideAiSettings(settings.overrides);
+    setSavedOverride(settings.overrides);
     setAiProvider(settings.provider);
+    setSavedProvider(settings.provider);
     setCredentials(credentialsFromSettings(settings));
     setConfigured(configuredFromSettings(settings));
     setModels(modelsFromSettings(settings));
@@ -298,8 +320,25 @@ export default function WorkspaceSettingsPage() {
     }, 3000);
   };
 
-  const handleSave = async (e: FormEvent): Promise<void> => {
-    e.preventDefault();
+  const reloadEffectiveSettings = async (
+    organization: string,
+    workspace: string
+  ): Promise<boolean> => {
+    const effective = await client.getEffectiveAiSettings(organization, workspace);
+    if (currentScope.current !== scope) return false;
+    setEffectiveSettings(effective);
+    return true;
+  };
+
+  const inheritAiSettings = async (organization: string, workspace: string): Promise<boolean> => {
+    const settings = await client.resetWorkspaceAiSettings(organization, workspace);
+    if (currentScope.current !== scope) return false;
+    applyAiSettingsToForm(settings);
+    return reloadEffectiveSettings(organization, workspace);
+  };
+
+  const handleSave = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
     if (!isAuthenticated || !orgId || !workspaceId) return;
 
     setSaving(true);
@@ -330,15 +369,15 @@ export default function WorkspaceSettingsPage() {
         );
         if (currentScope.current !== scope) return;
         applyAiSettingsToForm(aiSettings);
-        const effective = await client.getEffectiveAiSettings(orgId, workspaceId);
-        if (currentScope.current !== scope) return;
-        setEffectiveSettings(effective);
+        if (!(await reloadEffectiveSettings(orgId, workspaceId))) return;
+      } else if (activeTab === 'ai' && savedOverride) {
+        if (!(await inheritAiSettings(orgId, workspaceId))) return;
       }
 
       flash('Settings saved successfully');
-    } catch (err) {
+    } catch (failure) {
       if (currentScope.current === scope)
-        setError(err instanceof Error ? err.message : 'Failed to save settings');
+        setError(failure instanceof Error ? failure.message : 'Failed to save settings');
     } finally {
       if (currentScope.current === scope) setSaving(false);
     }
@@ -362,36 +401,22 @@ export default function WorkspaceSettingsPage() {
         setDirty(false);
         previewWorkspaceTheme(null);
       } else if (activeTab === 'ai') {
-        const settings = await client.resetWorkspaceAiSettings(orgId, workspaceId);
-        if (currentScope.current !== scope) return;
-        applyAiSettingsToForm(settings);
-        setOverrideAiSettings(false);
-        const effective = await client.getEffectiveAiSettings(orgId, workspaceId);
-        if (currentScope.current !== scope) return;
-        setEffectiveSettings(effective);
+        if (!(await inheritAiSettings(orgId, workspaceId))) return;
       }
       flash('Settings reset to defaults');
-    } catch (err) {
+    } catch (failure) {
       if (currentScope.current === scope)
-        setError(err instanceof Error ? err.message : 'Failed to reset settings');
+        setError(failure instanceof Error ? failure.message : 'Failed to reset settings');
     } finally {
       if (currentScope.current === scope) setSaving(false);
     }
   };
 
-  const stage = modelOptions[aiProvider];
-  const fastOptions = mergeStageOptions(stage.fast, installedModels, models.fast, 'chat');
-  const reasoningOptions = mergeStageOptions(
-    stage.reasoning,
+  const choices = modelChoices(
+    aiProvider,
     installedModels,
-    models.reasoning,
-    'chat'
-  );
-  const embeddingOptions = mergeStageOptions(
-    stage.embedding,
-    installedModels,
-    models.embedding,
-    'embedding'
+    models,
+    agent ? (agents.statuses[agent]?.models ?? []) : []
   );
 
   const colorField = (
@@ -537,18 +562,18 @@ export default function WorkspaceSettingsPage() {
                 <select
                   id="font-family"
                   value={fontFamily ?? ''}
-                  onChange={(e) => {
+                  onChange={(event) => {
                     touched.current.add('font_family');
-                    setFontFamily(e.target.value as FontFamily);
+                    setFontFamily(event.target.value as FontFamily);
                   }}
                   className="form-select"
                 >
                   <option value="" disabled>
                     App Default
                   </option>
-                  {fontOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
+                  {fontOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
                     </option>
                   ))}
                 </select>
@@ -562,9 +587,9 @@ export default function WorkspaceSettingsPage() {
                     min="12"
                     max="20"
                     value={fontSize}
-                    onChange={(e) => {
+                    onChange={(event) => {
                       touched.current.add('font_size_base');
-                      setFontSize(e.target.value);
+                      setFontSize(event.target.value);
                     }}
                     className="form-slider"
                   />
@@ -580,19 +605,19 @@ export default function WorkspaceSettingsPage() {
                       <span className="radio-label">App Default</span>
                     </label>
                   )}
-                  {radiusOptions.map((opt) => (
-                    <label key={opt.value} className="radio-option">
+                  {radiusOptions.map((option) => (
+                    <label key={option.value} className="radio-option">
                       <input
                         type="radio"
                         name="border-radius"
-                        value={opt.value}
-                        checked={borderRadius === opt.value}
+                        value={option.value}
+                        checked={borderRadius === option.value}
                         onChange={() => {
                           touched.current.add('border_radius');
-                          setBorderRadius(opt.value);
+                          setBorderRadius(option.value);
                         }}
                       />
-                      <span className="radio-label">{opt.label}</span>
+                      <span className="radio-label">{option.label}</span>
                     </label>
                   ))}
                 </div>
@@ -641,7 +666,7 @@ export default function WorkspaceSettingsPage() {
                 id="override-ai-settings"
                 aria-describedby="override-ai-settings-hint"
                 checked={overrideAiSettings}
-                onChange={(e) => setOverrideAiSettings(e.target.checked)}
+                onChange={(event) => setOverrideAiSettings(event.target.checked)}
               />
               <label htmlFor="override-ai-settings" className="toggle-row-label">
                 Override organization AI settings
@@ -652,16 +677,40 @@ export default function WorkspaceSettingsPage() {
             </div>
 
             {overrideAiSettings ? (
-              <AiProviderFields
-                provider={aiProvider}
-                onProviderChange={(provider) => {
-                  setAiProvider(provider);
-                  setModels((prev) => ({ ...prev, fast: '', reasoning: '', embedding: '' }));
-                }}
-                credentials={credentials}
-                configured={configured}
-                onChange={(key, value) => setCredentials((prev) => ({ ...prev, [key]: value }))}
-              />
+              <>
+                <AiProviderFields
+                  provider={aiProvider}
+                  onProviderChange={(provider) => {
+                    setAiProvider(provider);
+                    setModels((previous) => ({
+                      ...previous,
+                      fast: '',
+                      reasoning: '',
+                      embedding: '',
+                    }));
+                  }}
+                  credentials={credentials}
+                  configured={configured}
+                  onChange={(key, value) =>
+                    setCredentials((previous) => ({ ...previous, [key]: value }))
+                  }
+                />
+                {agent && (
+                  <AgentSignIn
+                    key={`${orgId}:${agent}`}
+                    organizationId={orgId}
+                    agent={agent}
+                    access={agentAccess(currentOrganization?.role, resolvingRole)}
+                    heading="h3"
+                    unsaved={!savedOverride || aiProvider !== savedProvider}
+                    status={agents.statuses[agent]}
+                    attempt={agents.attempts[agent]}
+                    loadError={agents.error}
+                    onStatusChange={agents.update}
+                    onAttemptChange={agents.setAttempt}
+                  />
+                )}
+              </>
             ) : (
               <div className="effective-block">
                 <h3 className="settings-eyebrow">Effective Settings (from Organization)</h3>
@@ -687,12 +736,13 @@ export default function WorkspaceSettingsPage() {
               <AiModelFields
                 provider={aiProvider}
                 models={models}
-                onChange={(key, value) => setModels((prev) => ({ ...prev, [key]: value }))}
-                fastOptions={fastOptions}
-                reasoningOptions={reasoningOptions}
-                embeddingOptions={embeddingOptions}
+                onChange={(key, value) => setModels((previous) => ({ ...previous, [key]: value }))}
+                fastOptions={choices.fast}
+                reasoningOptions={choices.reasoning}
+                embeddingOptions={choices.embedding}
                 installedModels={installedModels}
                 inheritedLabel="Use organization / server default"
+                agentHints={AGENT_HINTS}
               />
             </div>
           )}

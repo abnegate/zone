@@ -7,7 +7,7 @@ use axum::{
         State, WebSocketUpgrade,
         ws::{Message as AxumMessage, WebSocket},
     },
-    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header::ORIGIN},
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
@@ -131,9 +131,10 @@ pub async fn proxy_http(
 
     let mut request = state.http.request(method, &url).body(bytes);
     for (name, value) in headers.iter() {
-        if HOP_BY_HOP
-            .iter()
-            .any(|h| name.as_str().eq_ignore_ascii_case(h))
+        if *name == ORIGIN
+            || HOP_BY_HOP
+                .iter()
+                .any(|h| name.as_str().eq_ignore_ascii_case(h))
         {
             continue;
         }

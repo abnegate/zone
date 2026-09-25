@@ -5,16 +5,19 @@
 
 use futures::StreamExt;
 use sqlx::PgPool;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc};
 use uuid::Uuid;
-use zone_core::agent::{AgentCallback, AgentPhase};
+use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
-use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage};
+use zone_core::llm::provider::{OUTGROWN, SignIn, UNFUNDED};
+use zone_core::llm::{
+    AgentKind, BuiltinTools, Credential, LlmBackend, LlmClient, LlmConfig, Message as LlmMessage,
+};
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
@@ -24,10 +27,13 @@ use crate::agent::prompt::{self, Environment, Vcs};
 use crate::agent::question::{self, Question};
 use crate::agent::wait::{self, Waited, Waiting};
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
+use crate::config::ModelBackend;
 use crate::db::{ai_settings, task_tool_calls, tasks, workspaces};
+use crate::services::backend;
 use crate::services::chat::session::{self, RunContext};
+use crate::services::login::credential::{self, Login};
 use crate::services::stages;
-use crate::state::{AppState, llm_backend};
+use crate::state::AppState;
 use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
 use crate::workers::instructions;
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
@@ -87,6 +93,14 @@ const LEVEL_ERROR: &str = "error";
 
 const NO_MODEL: &str =
     "No completion model is installed or configured for this workspace, so the task cannot run";
+
+const PLAN_APPROVAL_UNAVAILABLE: &str = "Plan approval is not available when a task runs on a \
+     coding agent CLI; turn off Require plan approval or use the Self-Hosted provider.";
+
+/// On an instance whose own provider is a coding agent, every provider is one.
+const PLAN_APPROVAL_UNAVAILABLE_ANYWHERE: &str = "Plan approval is not available when a task runs \
+     on a coding agent CLI, and every provider on this server runs on one; turn off Require plan \
+     approval.";
 
 // Global semaphore to limit concurrent task executions
 static TASK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -173,11 +187,47 @@ struct Fault {
 }
 
 impl Fault {
-    fn agent(message: String) -> Self {
+    /// A failure judged by what it says.
+    fn reported(message: String) -> Self {
         Self {
             failure: classify(&message),
             status: RUN_FAILED,
             message,
+        }
+    }
+
+    /// A failure the loop reported for a client on `backend`. A coding agent
+    /// whose sign-in failed is not retried, since only a sign-in fixes it; any
+    /// other failure of one is judged by the agent's own words, never by the
+    /// stderr that follows them.
+    fn agent(backend: &LlmBackend, error: String) -> Self {
+        let remedied = backend::remedied(backend, error);
+        let failure = match backend {
+            _ if remedied.signed_out => Failure::Terminal,
+            LlmBackend::Cli { .. } => classify_agent(backend::own_words(&remedied.message)),
+            LlmBackend::Http => classify(&remedied.message),
+        };
+        Self {
+            failure,
+            status: RUN_FAILED,
+            message: remedied.message,
+        }
+    }
+
+    /// The backend an attempt was to run on could not be resolved. Only a
+    /// database read can succeed on a later attempt: a sign-in that failed
+    /// needs an admin, and a state directory that cannot be made, an operator.
+    fn backend(error: backend::Error) -> Self {
+        let failure = match error {
+            backend::Error::Database { .. } => Failure::Transient,
+            backend::Error::SignedOut { .. }
+            | backend::Error::Renewal { .. }
+            | backend::Error::Home { .. } => Failure::Terminal,
+        };
+        Self {
+            failure,
+            status: RUN_FAILED,
+            message: error.to_string(),
         }
     }
 
@@ -393,6 +443,17 @@ const RATE_LIMIT_MARKERS: &[&str] = &[
     "too many requests",
 ];
 
+/// How zone_core words a coding agent's failure that a retry of the same
+/// prompt meets again: an answer past the output cap, and a Fable turn the
+/// account has no usage credits for.
+const AGENT_TERMINAL_MARKERS: &[&str] = &[OUTGROWN, UNFUNDED];
+
+/// How a coding agent says its subscription ran out. Only a coding agent's
+/// own words are read for these: an endpoint's failure that happens to use
+/// them is judged by [`classify`] alone.
+const SUBSCRIPTION_LIMIT_MARKERS: &[&str] =
+    &["hit your", "session limit", "usage limit", "weekly limit"];
+
 const TERMINAL_MARKERS: &[&str] = &[
     "access denied",
     "authentication",
@@ -454,6 +515,28 @@ fn classify(message: &str) -> Failure {
         return Failure::Terminal;
     }
     Failure::Transient
+}
+
+/// [`classify`] for a coding agent's own words, where a failure no retry
+/// survives is terminal and a subscription that ran out backs off like any
+/// rate limit.
+fn classify_agent(words: &str) -> Failure {
+    if AGENT_TERMINAL_MARKERS
+        .iter()
+        .any(|marker| words.contains(marker))
+    {
+        return Failure::Terminal;
+    }
+    let lowered = words.to_ascii_lowercase();
+    if SUBSCRIPTION_LIMIT_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        return Failure::RateLimited {
+            retry_after: retry_after(&lowered),
+        };
+    }
+    classify(words)
 }
 
 /// A status code only counts when it stands alone: not inside a longer number,
@@ -519,16 +602,11 @@ pub struct DatabaseTaskCallback {
     pool: PgPool,
     run_id: Uuid,
     owner: Option<Uuid>,
-    /// Calls started and not yet finished, per tool, oldest first.
-    ///
-    /// The loop reports a start and a finish with no shared id, but it reports
-    /// them in the same order per tool, so the oldest open call of a tool is
-    /// the one its next result belongs to.
-    open_calls: Arc<Mutex<OpenCalls>>,
+    /// Calls started and not yet finished, by the id the loop gave each one:
+    /// a coding agent makes its calls over MCP several at a time, so two calls
+    /// to one tool can finish in either order.
+    open_calls: Arc<Mutex<HashMap<String, (Uuid, serde_json::Value)>>>,
 }
-
-/// Per tool, the calls started and not yet finished, oldest first.
-type OpenCalls = HashMap<String, VecDeque<(Uuid, serde_json::Value)>>;
 
 impl DatabaseTaskCallback {
     /// Create a new database task callback
@@ -541,27 +619,22 @@ impl DatabaseTaskCallback {
         }
     }
 
-    fn open_call(&self, name: &str, arguments: &str) -> (Uuid, serde_json::Value) {
-        let id = Uuid::new_v4();
+    fn open_call(&self, id: &str, arguments: &str) -> (Uuid, serde_json::Value) {
+        let record = Uuid::new_v4();
         let input = serde_json::from_str(arguments)
             .unwrap_or_else(|_| serde_json::json!({ "raw": arguments }));
-        let mut open = self
-            .open_calls
+        self.open_calls
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        open.entry(name.to_string())
-            .or_default()
-            .push_back((id, input.clone()));
-        (id, input)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.to_string(), (record, input.clone()));
+        (record, input)
     }
 
-    fn close_call(&self, name: &str) -> (Uuid, serde_json::Value) {
-        let mut open = self
-            .open_calls
+    fn close_call(&self, id: &str) -> (Uuid, serde_json::Value) {
+        self.open_calls
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        open.get_mut(name)
-            .and_then(VecDeque::pop_front)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id)
             .unwrap_or_else(|| (Uuid::new_v4(), serde_json::json!({})))
     }
     async fn log(
@@ -591,7 +664,7 @@ impl DatabaseTaskCallback {
     }
 }
 
-impl AgentCallback for DatabaseTaskCallback {
+impl DatabaseTaskCallback {
     fn on_phase_change(&self, phase: AgentPhase, message: Option<&str>) {
         let callback = self.clone();
         let phase = phase.to_string();
@@ -615,11 +688,11 @@ impl AgentCallback for DatabaseTaskCallback {
         });
     }
 
-    fn on_tool_call(&self, name: &str, arguments: &str) {
+    fn on_tool_call(&self, id: &str, name: &str, arguments: &str) {
         let callback = self.clone();
         let name = name.to_string();
         let arguments = arguments.to_string();
-        let (call_id, input) = self.open_call(&name, &arguments);
+        let (call_id, input) = self.open_call(id, &arguments);
         tokio::spawn(async move {
             if let Err(error) =
                 task_tool_calls::start(&callback.pool, call_id, callback.run_id, &name, &input)
@@ -639,11 +712,11 @@ impl AgentCallback for DatabaseTaskCallback {
         });
     }
 
-    fn on_tool_result(&self, name: &str, result: &ToolResult) {
+    fn on_tool_result(&self, id: &str, name: &str, result: &ToolResult) {
         let callback = self.clone();
         let name = name.to_string();
         let result = result.clone();
-        let (call_id, input) = self.close_call(&name);
+        let (call_id, input) = self.close_call(id);
         tokio::spawn(async move {
             if let Err(error) = task_tool_calls::finish(
                 &callback.pool,
@@ -916,6 +989,42 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
         return;
     }
 
+    // A run automation started answers its own questions. Nobody watches it
+    // either, so it would approve its own plan after the window, which is no
+    // approval at all, and it is not asked for one.
+    let unattended = tasks::run_mode(state.db(), run_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|mode| mode.unattended);
+    let plan_approval = task.require_plan_approval && !unattended;
+    let workspace_id = task.workspace_id;
+    let resolved = backend::for_workspace(state, workspace_id).await;
+    let (backend, model) = match prepare(state, &task, resolved, plan_approval).await {
+        Ok(prepared) => prepared,
+        Err(message) => {
+            obs.set_status(RUN_FAILED);
+            tracing::error!("Task {} cannot start: {}", task_id, message);
+            if let Err(error) = tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                RUN_FAILED,
+                Some(&message),
+                None,
+            )
+            .await
+            {
+                tracing::error!(
+                    "CRITICAL: Failed to update run {} status: {}",
+                    run_id,
+                    error
+                );
+            }
+            return;
+        }
+    };
+
     let checkout = match crate::services::checkout::Checkout::prepare(
         state.db(),
         state.encryption_key(),
@@ -952,37 +1061,9 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     // validates `triggered_by` against active membership, and a task whose
     // author has since been cleared must not cost its initiator their memory.
     let actor = run.triggered_by;
-    let workspace_id = task.workspace_id;
-    let model = resolve_model(state, &task).await;
-    if stages::is_auto(&model) {
-        obs.set_status(RUN_FAILED);
-        tracing::error!("Task {} has no resolvable completion model", task_id);
-        if let Err(error) = tasks::complete_owned_task_run(
-            state.db(),
-            run_id,
-            Some(owner),
-            RUN_FAILED,
-            Some(NO_MODEL),
-            None,
-        )
-        .await
-        {
-            tracing::error!(
-                "CRITICAL: Failed to update run {} status: {}",
-                run_id,
-                error
-            );
-        }
-        return;
-    }
 
-    // A run automation started answers its own questions; the model it runs
-    // on is written down so the reviewer can be chosen against it.
-    let unattended = tasks::run_mode(state.db(), run_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|mode| mode.unattended);
+    // The model the run runs on is written down so the reviewer can be chosen
+    // against it.
     if !matches!(
         tasks::record_run_model(state.db(), run_id, owner, &model).await,
         Ok(true)
@@ -1027,14 +1108,12 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let policy = RetryPolicy::default();
     let pool = state.db();
     let workspace = workspace_path.as_path();
+    let backend = &backend;
     let model = model.as_str();
     let task_prompt = task_prompt.as_str();
     let guidance = guidance.as_str();
     let environment = &environment;
     let permit = &permit;
-    // A run nobody is watching would approve its own plan after the window,
-    // which is no approval at all, so an unattended run is not asked for one.
-    let plan_approval = task.require_plan_approval && !unattended;
     // Approval is given to the run, once: an attempt retried after a fault
     // starts from it rather than asking the person again.
     let approval = plan::Approval::default();
@@ -1042,13 +1121,15 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
 
     let result = run_with_policy(
         policy,
-        move |_| {
+        move |_| async move {
+            let backend = refreshed(state, workspace_id, backend).await?;
             attempt_run(
                 state,
                 run_id,
                 owner,
                 workspace_id,
                 actor,
+                &backend,
                 model,
                 task_prompt,
                 guidance,
@@ -1058,7 +1139,9 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 plan_approval,
                 unattended,
                 approval,
+                tokio::time::Instant::now() + TASK_TIMEOUT,
             )
+            .await
         },
         move |attempt| record_attempt(pool, run_id, policy, attempt),
     )
@@ -1183,10 +1266,113 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     }
 }
 
+/// Where a run's turns go and the model they run on, or why the run cannot
+/// start. Both come from one resolution, so the model is always one that
+/// backend can run.
+///
+/// A plan waits for approval on a card only zone's own loop raises, so a run
+/// that needs one cannot start on a coding agent at all.
+async fn prepare(
+    state: &AppState,
+    task: &tasks::TaskRow,
+    resolved: Result<LlmBackend, backend::Error>,
+    plan_approval: bool,
+) -> Result<(LlmBackend, String), String> {
+    let backend = resolved.map_err(|error| error.to_string())?;
+    if plan_approval && matches!(backend, LlmBackend::Cli { .. }) {
+        return Err(match state.config().model_backend() {
+            ModelBackend::LiteLlm => PLAN_APPROVAL_UNAVAILABLE,
+            ModelBackend::Cli { .. } => PLAN_APPROVAL_UNAVAILABLE_ANYWHERE,
+        }
+        .to_string());
+    }
+    let model = resolve_model(state, task, &backend)
+        .await
+        .ok_or_else(|| NO_MODEL.to_string())?;
+    Ok((backend, model))
+}
+
+/// The backend an attempt runs on: the one the run was prepared on, with the
+/// organization's Claude sign-in it carries resolved again, so a token renewed
+/// since the last attempt is the one this attempt hands its agent, and a
+/// sign-in the organization has since removed stops the run.
+///
+/// Nothing the run does not use is read: an endpoint run reads nothing, a
+/// sign-in zone does not keep -- the host's, or codex's in its own home -- is
+/// its agent's to renew, and a run whose workspace has moved to another
+/// provider since finishes on the sign-in it began with.
+async fn refreshed(
+    state: &AppState,
+    workspace: Uuid,
+    prepared: &LlmBackend,
+) -> Result<LlmBackend, Fault> {
+    let LlmBackend::Cli { agent, settings } = prepared else {
+        return Ok(prepared.clone());
+    };
+    let (SignIn::Organization, Credential::Key { variable, .. }) =
+        (settings.sign_in, &settings.credential)
+    else {
+        return Ok(prepared.clone());
+    };
+    let Some(organization) = organization_on(state, workspace, *agent).await else {
+        tracing::warn!(
+            %workspace,
+            %agent,
+            "The workspace left its run's agent during the run; the run keeps its own sign-in"
+        );
+        return Ok(prepared.clone());
+    };
+    let token = match credential::resolve(state, organization, *agent).await {
+        Ok(Some(Login::Claude { token })) => token,
+        Ok(Some(Login::Codex { .. })) => return Ok(prepared.clone()),
+        Ok(None) => return Err(Fault::backend(backend::Error::SignedOut { agent: *agent })),
+        Err(credential::Error::Database(source)) => {
+            return Err(Fault::backend(backend::Error::Database {
+                agent: *agent,
+                source,
+            }));
+        }
+        Err(error) => {
+            return Err(Fault::backend(backend::Error::Renewal {
+                agent: *agent,
+                message: error.to_string(),
+            }));
+        }
+    };
+    Ok(LlmBackend::cli(
+        *agent,
+        settings
+            .clone()
+            .with_credential(Credential::key(variable.clone(), token)),
+    ))
+}
+
+/// The organization `workspace` belongs to, while the workspace still runs on
+/// `agent`. A workspace or settings that cannot be read say nothing either
+/// way, and the reason is logged.
+async fn organization_on(state: &AppState, workspace: Uuid, agent: AgentKind) -> Option<Uuid> {
+    let organization = workspaces::get_workspace(state.db(), workspace)
+        .await
+        .inspect_err(|error| tracing::warn!(%workspace, %error, "Could not read the workspace"))
+        .ok()??
+        .organization_id;
+    let settings = ai_settings::get_effective_ai_settings(state.db(), organization, workspace)
+        .await
+        .inspect_err(|error| tracing::warn!(%workspace, %error, "Could not read the AI settings"))
+        .ok()?;
+    (settings.agent() == Some(agent)).then_some(organization)
+}
+
 /// Resolves the run's model the way a chat resolves its own: workspace settings
-/// over org settings, then the installed catalogue, never a hardcoded name.
-async fn resolve_model(state: &AppState, task: &tasks::TaskRow) -> String {
-    let catalog = stages::Catalog::load(&state.config().ollama_host).await;
+/// over org settings, then what the backend can run, never a hardcoded name.
+/// `None` when nothing is left to run: an agent chooses its own model when
+/// given none, the endpoint cannot.
+async fn resolve_model(
+    state: &AppState,
+    task: &tasks::TaskRow,
+    backend: &LlmBackend,
+) -> Option<String> {
+    let catalog = stages::Catalog::for_backend(&state.config().ollama_host, backend).await;
     let settings = match workspaces::get_workspace(state.db(), task.workspace_id).await {
         Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
             state.db(),
@@ -1201,7 +1387,7 @@ async fn resolve_model(state: &AppState, task: &tasks::TaskRow) -> String {
             None
         }
     };
-    stages::chat_model(
+    let model = stages::chat_model(
         task.model_name.as_deref().unwrap_or(stages::AUTO),
         &stages::Preferences::from_optional_settings(
             settings.as_ref(),
@@ -1211,7 +1397,8 @@ async fn resolve_model(state: &AppState, task: &tasks::TaskRow) -> String {
         &format!("{}\n\n{}", task.title, task.description),
         false,
         true,
-    )
+    );
+    (!stages::is_auto(&model) || catalog.chooses()).then_some(model)
 }
 
 /// What a run appends after `prompt::task`, once each source has been read.
@@ -1902,6 +2089,7 @@ async fn attempt_run(
     owner: Uuid,
     workspace_id: Uuid,
     actor: Option<Uuid>,
+    backend: &LlmBackend,
     model: &str,
     task_prompt: &str,
     guidance: &str,
@@ -1911,6 +2099,7 @@ async fn attempt_run(
     plan_approval: bool,
     unattended: bool,
     approval: &plan::Approval,
+    deadline: tokio::time::Instant,
 ) -> Result<TaskOutcome, Fault> {
     // A task that requires its plan approved changes nothing until it is:
     // every tool that would is refused, turn after turn, until the answer
@@ -1919,17 +2108,24 @@ async fn attempt_run(
     // with the approved plan in hand and no plan phase to go through again.
     let approved = approval.approved();
     let mut plan_held = plan_approval && approved.is_none();
-    let tools = task_tools(
-        state,
-        run_id,
-        owner,
-        workspace_id,
-        actor,
-        workspace,
-        plan_held,
-        unattended,
-    )
-    .await;
+    let backend = &backend::bounded(
+        backend.clone(),
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
+    );
+    let mut tools = crate::mcp::offered(
+        backend,
+        task_tools(
+            state,
+            run_id,
+            owner,
+            workspace_id,
+            actor,
+            workspace,
+            plan_held,
+            unattended,
+        )
+        .await,
+    );
 
     let capacity = Resolver::with_context(
         &state.config().litellm_host,
@@ -1946,7 +2142,7 @@ async fn attempt_run(
         default_model: model.to_string(),
         temperature: TASK_TEMPERATURE,
         max_tokens: policy.reserved,
-        backend: llm_backend(state.config()),
+        backend: backend.clone(),
     });
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(model, limit);
@@ -1962,6 +2158,21 @@ async fn attempt_run(
     }
     let mut system_prompt = prompt::task(&tools, &environment);
     system_prompt.push_str(guidance);
+    let mut agent_tools = crate::mcp::AgentTools::serve(
+        backend,
+        &mut tools,
+        crate::mcp::Scope {
+            workspace: workspace_id,
+            chat: run_id,
+            user: actor,
+            approval: ApprovalPolicy::auto(),
+            calls: LoopBudget::task().max_tool_calls,
+        },
+        &crate::mcp::local_endpoint(state.config()),
+    );
+    if let Some(served) = &agent_tools {
+        llm = llm.with_toolset(served.lease.toolset(), BuiltinTools::Withheld);
+    }
 
     let callback = DatabaseTaskCallback {
         pool: state.db().clone(),
@@ -2005,10 +2216,13 @@ async fn attempt_run(
                 context,
                 budget,
                 &callback,
+                agent_tools.as_mut().map(|served| &mut served.calls),
             )
             .await
             {
-                Err(error) => return Err(Fault::agent(error)),
+                Err(error) => {
+                    return Err(Fault::agent(&llm.config().backend, error));
+                }
                 Ok(TurnOutcome::Finished(outcome)) => {
                     carried.absorb(outcome);
                     return Ok(carried);
@@ -2083,7 +2297,7 @@ async fn attempt_run(
         }
     };
 
-    match tokio::time::timeout(TASK_TIMEOUT, turns).await {
+    match tokio::time::timeout_at(deadline, turns).await {
         Ok(outcome) => outcome,
         Err(_) => Err(Fault::timeout()),
     }
@@ -2226,7 +2440,7 @@ async fn park_for_answer(
     let resumed = match (waited, window) {
         (Ok(Some(answers)), _) => question::render(questions, &answers)
             .map(|answer| (answer, true))
-            .map_err(Fault::agent),
+            .map_err(Fault::reported),
         (Ok(None), Some(_)) => Ok((proceeding_on_defaults(questions), false)),
         (Ok(None), None) => Err(Fault::withdrawn()),
         (Err(_), _) => Err(Fault::overloaded()),
@@ -2628,13 +2842,14 @@ async fn run_task_loop(
     context: RunContext,
     budget: LoopBudget,
     callback: &DatabaseTaskCallback,
+    calls: Option<&mut mpsc::UnboundedReceiver<AgentEvent>>,
 ) -> Result<TurnOutcome, String> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
     let mut tool_calls = 0usize;
     let mut parked: Option<Park> = None;
     let mut replay = context.clone();
-    let mut events = std::pin::pin!(agent::run_with_context(
+    let round = agent::run_with_context(
         AgentRun {
             llm,
             model,
@@ -2644,8 +2859,12 @@ async fn run_task_loop(
             approval: ApprovalPolicy::auto(),
         },
         context,
-        true
-    ));
+        true,
+    );
+    let mut events = std::pin::pin!(match calls {
+        Some(calls) => futures::future::Either::Left(crate::mcp::merged(round, calls)),
+        None => futures::future::Either::Right(round),
+    });
     while let Some(event) = next_or_stall(&mut events, |silent| async move {
         let seconds = silent.as_secs();
         callback
@@ -2665,12 +2884,15 @@ async fn run_task_loop(
         match event {
             AgentEvent::Chunk(text) => summary.push_str(&text),
             AgentEvent::ToolCallStarted {
-                name, arguments, ..
+                id,
+                name,
+                arguments,
             } => {
                 callback.on_phase_change(AgentPhase::Acting, None);
-                callback.on_tool_call(&name, &arguments);
+                callback.on_tool_call(&id, &name, &arguments);
             }
             AgentEvent::ToolCallCompleted {
+                id,
                 name,
                 success,
                 detail,
@@ -2695,7 +2917,7 @@ async fn run_task_loop(
                 } else {
                     ToolResult::error(detail)
                 };
-                callback.on_tool_result(&name, &result);
+                callback.on_tool_result(&id, &name, &result);
                 callback.on_phase_change(AgentPhase::Observing, None);
             }
             AgentEvent::Canonical(entry) => {
@@ -2779,6 +3001,171 @@ mod tests {
         let run_id = Uuid::new_v4();
         let callback = DatabaseTaskCallback::new(pool, run_id);
         assert_eq!(callback.run_id, run_id);
+    }
+
+    /// A task in a `claude_code` organization, on an instance whose Ollama
+    /// has models installed.
+    struct AgentTask {
+        pool: PgPool,
+        organization: Uuid,
+        task: tasks::TaskRow,
+        state: AppState,
+        ollama: wiremock::MockServer,
+    }
+
+    impl AgentTask {
+        async fn new(fast: &str, reasoning: &str, title: &str) -> Self {
+            use crate::db::organizations;
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .unwrap();
+            let organization = organizations::create_organization(
+                &pool,
+                "Agent models",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            let workspace = workspaces::create_workspace(
+                &pool,
+                organization.id,
+                "Agent models",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO organization_ai_settings \
+                 (organization_id, provider, model_fast, model_reasoning) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(organization.id)
+            .bind(ai_settings::PROVIDER_CLAUDE_CODE)
+            .bind(fast)
+            .bind(reasoning)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let task = tasks::create_task(
+                &pool,
+                workspace.id,
+                &[],
+                title,
+                "Keep every existing behaviour.",
+                None,
+                None,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            let ollama = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/tags"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "models": [
+                        {"name": "llama3.2:3b", "size": 2_000_000_000_u64, "details": {"parameter_size": "3.2B"}},
+                        {"name": "qwen3.8:27b", "size": 17_000_000_000_u64, "details": {"parameter_size": "27B"}},
+                    ]
+                })))
+                .mount(&ollama)
+                .await;
+            let state = AppState::new(
+                crate::config::Config {
+                    ollama_host: ollama.uri(),
+                    ..crate::state::test_config()
+                },
+                pool.clone(),
+                None,
+            );
+            Self {
+                pool,
+                organization: organization.id,
+                task,
+                state,
+                ollama,
+            }
+        }
+
+        async fn remove(self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    fn claude() -> LlmBackend {
+        LlmBackend::cli(
+            zone_core::llm::AgentKind::Claude,
+            zone_core::llm::CliSettings::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_agent_task_runs_on_the_model_its_organization_chose_not_an_installed_one() {
+        let fixture =
+            AgentTask::new("haiku", "opus", "Find the root cause of the flaky login").await;
+
+        let agent = resolve_model(&fixture.state, &fixture.task, &claude()).await;
+        let consulted = fixture
+            .ollama
+            .received_requests()
+            .await
+            .map(|requests| requests.len());
+        let endpoint = resolve_model(&fixture.state, &fixture.task, &LlmBackend::Http).await;
+        fixture.remove().await;
+
+        assert_eq!(agent.as_deref(), Some("opus"));
+        assert_eq!(
+            consulted,
+            Some(0),
+            "an agent's model is not looked up in Ollama"
+        );
+        assert_eq!(
+            endpoint.as_deref(),
+            Some("qwen3.8:27b"),
+            "the endpoint still runs on what is installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_task_naming_no_model_the_agent_knows_leaves_the_choice_to_the_agent() {
+        let fixture =
+            AgentTask::new("llama3.2:3b", "qwen3.8:27b", "Rename the settings page").await;
+
+        let prepared = prepare(&fixture.state, &fixture.task, Ok(claude()), false).await;
+        fixture.remove().await;
+
+        let (backend, model) = prepared.expect("an agent chooses its own model, so the run starts");
+        assert_eq!(model, stages::AUTO);
+        assert!(matches!(
+            backend,
+            LlmBackend::Cli {
+                agent: zone_core::llm::AgentKind::Claude,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_backend_cannot_be_resolved_does_not_start() {
+        let fixture = AgentTask::new("haiku", "opus", "Rename the settings page").await;
+        let signed_out = || backend::Error::SignedOut {
+            agent: zone_core::llm::AgentKind::Claude,
+        };
+
+        let prepared = prepare(&fixture.state, &fixture.task, Err(signed_out()), false).await;
+        fixture.remove().await;
+
+        assert_eq!(prepared.err(), Some(signed_out().to_string()));
     }
 
     #[tokio::test]
@@ -2972,6 +3359,7 @@ mod tests {
                 )]),
                 LoopBudget::task(),
                 &callback,
+                None,
             ),
         )
         .await
@@ -3342,6 +3730,7 @@ mod retry_tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use zone_core::llm::provider::{STDERR_HEADING, SignIn, UNFUNDED};
 
     fn outcome() -> TaskOutcome {
         TaskOutcome {
@@ -3357,8 +3746,9 @@ mod retry_tests {
         }
     }
 
-    #[test]
-    fn semaphore_starts_with_every_permit_available() {
+    #[tokio::test]
+    async fn semaphore_starts_with_every_permit_available() {
+        let _execution = EXECUTION.lock().await;
         assert_eq!(get_semaphore().available_permits(), MAX_CONCURRENT_TASKS);
     }
 
@@ -3388,6 +3778,320 @@ mod retry_tests {
                 Failure::Terminal,
                 "{message} must never be retried"
             );
+        }
+    }
+
+    fn agent(agent: zone_core::llm::AgentKind, sign_in: SignIn) -> LlmBackend {
+        LlmBackend::cli(
+            agent,
+            zone_core::llm::CliSettings::default().with_sign_in(sign_in),
+        )
+    }
+
+    #[test]
+    fn a_coding_agent_that_has_to_be_signed_in_again_is_not_retried() {
+        use zone_core::llm::AgentKind;
+
+        for sign_in in [SignIn::Organization, SignIn::Instance] {
+            let fault = Fault::agent(
+                &agent(AgentKind::Claude, sign_in),
+                "Stream error: claude: Not logged in · Please run /login".to_string(),
+            );
+
+            assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+        }
+    }
+
+    /// Whose sign-in failed decides who is told to fix it. The server's own
+    /// is the operator's, and no organization setting can renew it.
+    #[test]
+    fn the_servers_own_sign_in_failing_is_not_sent_to_the_organizations_settings() {
+        use zone_core::llm::AgentKind;
+
+        let fault = Fault::agent(
+            &agent(AgentKind::Claude, SignIn::Instance),
+            "Stream error: claude: Not logged in · Please run /login".to_string(),
+        );
+
+        assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+        assert!(
+            !fault.message.contains("Organization Settings"),
+            "{}",
+            fault.message
+        );
+    }
+
+    /// An endpoint's own words are only ever read for what they say about
+    /// retrying. A phrase zone happens to use in its sign-in remedy is not a
+    /// sign-in, and a rejection that asks for one says so in its status.
+    #[test]
+    fn an_endpoint_failure_that_mentions_signing_in_again_is_retried() {
+        let fault = Fault::agent(
+            &LlmBackend::Http,
+            "Failed to generate response: API error: 503 - the gateway lost its upstream \
+             session; sign in again once it recovers"
+                .to_string(),
+        );
+
+        assert_eq!(fault.failure, Failure::Transient, "{}", fault.message);
+    }
+
+    /// A coding agent stopped at the output cap is not retried. The same words
+    /// from an endpoint are judged the way an endpoint's always were.
+    #[test]
+    fn only_a_coding_agent_stopped_at_the_output_cap_is_not_retried() {
+        let stopped = "Stream error: claude: the agent's answer grew past 4194304 bytes";
+
+        assert_eq!(
+            Fault::agent(
+                &agent(AgentKind::Claude, SignIn::Organization),
+                stopped.to_string()
+            )
+            .failure,
+            Failure::Terminal
+        );
+        assert_eq!(
+            Fault::agent(&LlmBackend::Http, stopped.to_string()).failure,
+            classify(stopped)
+        );
+    }
+
+    /// A Fable turn the signed-in account has no usage credits for is refused
+    /// again on every retry, whatever throttling the agent's stderr logged
+    /// after it, and no sign-in fixes it.
+    #[test]
+    fn a_coding_agent_refused_fable_for_want_of_usage_credits_is_not_retried() {
+        for sign_in in [SignIn::Organization, SignIn::Instance] {
+            for message in [
+                format!("Stream error: claude: {UNFUNDED}"),
+                format!(
+                    "Stream error: claude: {UNFUNDED}{STDERR_HEADING}\
+                     2026-09-25T03:12:09Z WARN claude: 429 Too Many Requests; retrying"
+                ),
+            ] {
+                let fault = Fault::agent(&agent(AgentKind::Claude, sign_in), message);
+
+                assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+                assert!(
+                    !fault.message.contains(backend::REMEDY),
+                    "{}",
+                    fault.message
+                );
+            }
+        }
+    }
+
+    /// Claude's words for a Fable turn without usage credits, and Zone's, are
+    /// a coding agent's. An endpoint's failure that happens to use them is
+    /// judged exactly as it was before coding agents ran tasks.
+    #[test]
+    fn an_endpoint_failure_in_the_words_of_a_fable_credits_refusal_is_judged_as_it_always_was() {
+        for (message, judged) in [
+            (
+                "Fable 5 requires usage credits. Switch to another model to continue.",
+                Failure::Transient,
+            ),
+            (
+                "You've reached your Fable limit. Switch to another model to continue.",
+                Failure::Transient,
+            ),
+            (
+                "the upstream refused the turn: model_requires_usage_credits",
+                Failure::Transient,
+            ),
+            (
+                "429 credits_required: Fable 5 requires usage credits",
+                Failure::RateLimited { retry_after: None },
+            ),
+            ("400 Bad Request: credits_required", Failure::Terminal),
+            (UNFUNDED, Failure::Transient),
+        ] {
+            let fault = Fault::agent(&LlmBackend::Http, message.to_string());
+
+            assert_eq!(fault.failure, judged, "{message}");
+            assert_eq!(fault.failure, classify(message), "{message}");
+            assert_eq!(fault.message, message);
+        }
+    }
+
+    /// zone_core follows a coding agent's failure with the tail of its stderr,
+    /// which is where codex alone reports a renewal it could not make. Nothing
+    /// else there is the agent's verdict on its own turn: a retry log, or a
+    /// warning about some other server, must not decide whether it retries.
+    #[test]
+    fn a_coding_agents_stderr_does_not_decide_whether_its_turn_is_retried() {
+        use zone_core::llm::AgentKind;
+
+        for stderr in [
+            "2026-09-23T07:43:43Z WARN codex_api: retrying after 429 Too Many Requests",
+            "2026-09-23T07:43:43Z WARN codex_mcp: docs: 401 Unauthorized",
+            "2026-09-23T07:43:43Z ERROR codex_core: invalid request to the docs server",
+        ] {
+            let fault = Fault::agent(
+                &agent(AgentKind::Codex, SignIn::Organization),
+                format!(
+                    "Stream error: codex: stream disconnected before completion\
+                     {STDERR_HEADING}{stderr}"
+                ),
+            );
+
+            assert_eq!(fault.failure, Failure::Transient, "{}", fault.message);
+        }
+    }
+
+    /// A coding agent's own report can run to several lines, and all of them
+    /// are its verdict on the turn: a request it calls bad on its second line
+    /// is not retried, whatever throttling its stderr logged after it.
+    #[test]
+    fn every_line_of_a_coding_agents_own_words_decides_whether_it_is_retried() {
+        use zone_core::llm::AgentKind;
+
+        let fault = Fault::agent(
+            &agent(AgentKind::Codex, SignIn::Organization),
+            format!(
+                "Stream error: codex: the turn failed\n\
+                 unexpected status 400 Bad Request: the tool schema was rejected\
+                 {STDERR_HEADING}\
+                 2026-09-23T07:43:43Z WARN codex_api: retrying after 429 Too Many Requests"
+            ),
+        );
+
+        assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+    }
+
+    /// An attempt's backend is resolved as it starts. Of the ways that fails,
+    /// only a database read may succeed on the next attempt.
+    #[test]
+    fn a_backend_that_cannot_be_resolved_is_retried_only_for_a_database_read() {
+        use zone_core::llm::AgentKind;
+
+        let agent = AgentKind::Claude;
+        assert_eq!(
+            Fault::backend(backend::Error::Database {
+                agent,
+                source: sqlx::Error::PoolTimedOut,
+            })
+            .failure,
+            Failure::Transient
+        );
+        for error in [
+            backend::Error::SignedOut { agent },
+            backend::Error::Renewal {
+                agent,
+                message: "the refresh token was revoked".to_string(),
+            },
+            backend::Error::Home {
+                agent,
+                message: "permission denied".to_string(),
+            },
+        ] {
+            let message = error.to_string();
+            let fault = Fault::backend(error);
+            assert_eq!(fault.failure, Failure::Terminal, "{message}");
+            assert_eq!(fault.message, message);
+        }
+    }
+
+    #[test]
+    fn a_renewal_codex_reports_only_on_stderr_is_still_not_retried() {
+        use zone_core::llm::AgentKind;
+
+        let fault = Fault::agent(
+            &agent(AgentKind::Codex, SignIn::Organization),
+            format!(
+                "Stream error: codex: workspace routing discovery unauthorized (401)\
+                 {STDERR_HEADING}\
+                 2026-09-23T07:42:41Z ERROR codex_login::auth::manager: Failed to refresh token: \
+                 Your access token could not be refreshed because your refresh token was \
+                 revoked. Please log out and sign in again."
+            ),
+        );
+
+        assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+        assert!(
+            fault.message.ends_with(backend::REMEDY),
+            "{}",
+            fault.message
+        );
+    }
+
+    /// A subscription reports its own limits in words, not in a status. The
+    /// wording is each CLI's own: codex's quota fixture, claude's parser
+    /// fixture, and what each release prints for the rest of its limits.
+    #[test]
+    fn a_subscription_limit_backs_off_like_any_rate_limit() {
+        for (kind, message) in [
+            (
+                AgentKind::Codex,
+                "Stream error: codex: You have hit your usage limit. Try again later.",
+            ),
+            (
+                AgentKind::Codex,
+                "Stream error: codex: You've hit your usage limit. Upgrade to Plus to continue \
+                 using Codex (https://chatgpt.com/explore/plus), or try again later.",
+            ),
+            (
+                AgentKind::Claude,
+                "Stream error: claude: You have hit your weekly limit",
+            ),
+            (
+                AgentKind::Claude,
+                "Stream error: claude: You've hit your weekly limit",
+            ),
+            (
+                AgentKind::Claude,
+                "Stream error: claude: You've hit your session limit · resets 3pm",
+            ),
+            (
+                AgentKind::Claude,
+                "Stream error: claude: You've hit your Opus limit · resets Mon 9am",
+            ),
+            (
+                AgentKind::Claude,
+                "Stream error: claude: Usage limit reached · resets 3pm",
+            ),
+        ] {
+            let fault = Fault::agent(&agent(kind, SignIn::Organization), message.to_string());
+
+            assert!(
+                matches!(fault.failure, Failure::RateLimited { .. }),
+                "{message} was classified {}",
+                fault.failure.label()
+            );
+        }
+    }
+
+    /// The words a subscription names its limits in are a coding agent's. An
+    /// endpoint's failure that happens to use them is judged by the rest of
+    /// what it says, as every endpoint failure was before coding agents ran
+    /// tasks: a rejection stays terminal, and anything else is retried.
+    #[test]
+    fn an_endpoint_failure_in_a_subscriptions_words_is_judged_as_it_always_was() {
+        for (message, judged) in [
+            (
+                "400 Bad Request: you hit your model's maximum context length",
+                Failure::Terminal,
+            ),
+            (
+                "401 Unauthorized: this key hit your organization's session limit",
+                Failure::Terminal,
+            ),
+            (
+                "invalid_request_error: a usage limit is not supported on this deployment",
+                Failure::Terminal,
+            ),
+            (
+                "model_not_found: no model under your weekly limit is named gpt-9",
+                Failure::Terminal,
+            ),
+            (
+                "upstream closed the stream once you hit your session limit",
+                Failure::Transient,
+            ),
+        ] {
+            let fault = Fault::agent(&LlmBackend::Http, message.to_string());
+
+            assert_eq!(fault.failure, judged, "{message}");
         }
     }
 
@@ -3556,7 +4260,7 @@ mod retry_tests {
                 let runs = Arc::clone(&runs);
                 async move {
                     runs.fetch_add(1, Ordering::SeqCst);
-                    Err(Fault::agent("401 Unauthorized: invalid api key".into()))
+                    Err(Fault::reported("401 Unauthorized: invalid api key".into()))
                 }
             },
             |attempt| {
@@ -3588,7 +4292,7 @@ mod retry_tests {
                 let runs = Arc::clone(&runs);
                 async move {
                     runs.fetch_add(1, Ordering::SeqCst);
-                    Err(Fault::agent("connection reset by peer".into()))
+                    Err(Fault::reported("connection reset by peer".into()))
                 }
             },
             |attempt| {
@@ -3627,7 +4331,7 @@ mod retry_tests {
             RetryPolicy::default(),
             |number| async move {
                 if number < 3 {
-                    Err(Fault::agent("429 Too Many Requests".into()))
+                    Err(Fault::reported("429 Too Many Requests".into()))
                 } else {
                     Ok(outcome())
                 }
@@ -3657,7 +4361,7 @@ mod retry_tests {
                 RetryPolicy::default(),
                 |number| async move {
                     if number == 1 {
-                        Err(Fault::agent("connection reset by peer".into()))
+                        Err(Fault::reported("connection reset by peer".into()))
                     } else {
                         Ok(outcome())
                     }
@@ -4418,6 +5122,7 @@ mod watchdog_tests {
                 owner,
                 workspace_id,
                 None,
+                &LlmBackend::Http,
                 "gpt-4",
                 "# Task: Budget\n\nKeep asking until something stops you",
                 "",
@@ -4427,6 +5132,7 @@ mod watchdog_tests {
                 false,
                 false,
                 &plan::Approval::default(),
+                tokio::time::Instant::now() + TASK_TIMEOUT,
             ),
         )
         .await
@@ -5396,6 +6102,7 @@ mod watchdog_tests {
             owner,
             workspace_id,
             None,
+            &LlmBackend::Http,
             "gpt-4",
             "# Task: Retry\n\nFinish without waiting",
             "",
@@ -5405,6 +6112,7 @@ mod watchdog_tests {
             false,
             false,
             &plan::Approval::default(),
+            tokio::time::Instant::now() + TASK_TIMEOUT,
         )
         .await
         .expect("an attempt that waits on nothing finishes");
@@ -5430,5 +6138,1153 @@ mod watchdog_tests {
             "the allowance the refused eleventh wait is counted against has to start empty"
         );
         sqlx::query("DELETE FROM organizations WHERE id=(SELECT organization_id FROM workspaces WHERE id=$1)").bind(workspace_id).execute(&pool).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use crate::config::{AgentConfig, Config, ModelBackend};
+    use crate::db::agent_logins::{self, Upsert};
+    use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
+    use crate::db::{organizations, users, workspace_members, workspaces};
+    use crate::services::login::claude::Tokens;
+    use axum::http::{HeaderMap, HeaderValue, header};
+    use chrono::{TimeDelta, Utc};
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use wiremock::MockServer;
+    use zone_core::llm::{AgentKind, CliSettings, Toolset};
+    use zone_core::secret::SecretValue;
+
+    const ANSWER: &str = "Wrote it.";
+    const EXECUTABLE: &str = "claude";
+    const ARGUMENTS: &str = "arguments";
+    const PROMPT: &str = "prompt";
+    const TOKEN: &str = "token";
+    const TOKENS: &str = "tokens";
+    const INVOCATIONS: &str = "invocations";
+    const FAILED: &str = "failed";
+    const RELEASE: &str = "release";
+    const COMPLETIONS: &str = "/chat/completions";
+    const POLL: Duration = Duration::from_millis(25);
+    const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Long enough for a test to change the organization's settings while
+    /// the first attempt waits on the endpoint's answer.
+    const FIRST_ANSWER_DELAY: Duration = Duration::from_millis(500);
+
+    /// A stand-in for the host's `claude`, which saves the prompt it was
+    /// handed on stdin and then runs a script of the test's.
+    struct Agent {
+        directory: TempDir,
+    }
+
+    impl Agent {
+        fn with(script: impl FnOnce(&Self) -> String) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+
+            let agent = Self {
+                directory: TempDir::new().expect("a directory for the stand-in agent"),
+            };
+            let body = format!(
+                "#!/bin/sh\ncat > '{prompt}'\n{script}",
+                prompt = agent.path(PROMPT).display(),
+                script = script(&agent),
+            );
+            std::fs::write(agent.path(EXECUTABLE), body).expect("the stand-in agent");
+            std::fs::set_permissions(
+                agent.path(EXECUTABLE),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("the stand-in agent to be executable");
+            agent
+        }
+
+        /// It records how the run invoked it, one argument per line, and the
+        /// token in its environment, then holds the turn open until released,
+        /// so the token is exercised while the attempt that minted it is still
+        /// running.
+        fn write() -> Self {
+            Self::with(|agent| {
+                format!(
+                    "printf '%s' \"$ZONE_MCP_TOKEN\" > '{token}'\nfor argument in \"$@\"; do \
+                     printf '%s\\n' \"$argument\"; done > '{arguments}.partial'\nmv \
+                     '{arguments}.partial' '{arguments}'\nwhile [ ! -f '{release}' ]; do sleep \
+                     0.05; done\n{answer}",
+                    token = agent.path(TOKEN).display(),
+                    arguments = agent.path(ARGUMENTS).display(),
+                    release = agent.path(RELEASE).display(),
+                    answer = answer(),
+                )
+            })
+        }
+
+        /// It answers once `seconds` have passed.
+        fn slow(seconds: u64) -> Self {
+            Self::with(|_| format!("sleep {seconds}\n{}", answer()))
+        }
+
+        /// It records the claude token and the arguments of each invocation.
+        /// The first then waits to be released and fails the way a dropped
+        /// stream does, which a run retries; any later one answers.
+        fn flaky() -> Self {
+            Self::with(|agent| {
+                format!(
+                    "printf '%s\\n' \"$CLAUDE_CODE_OAUTH_TOKEN\" >> '{tokens}'\nprintf '%s\\n' \
+                     \"$*\" >> '{invocations}'\nif [ ! -f '{failed}' ]; then\n: > \
+                     '{failed}'\nwhile [ ! -f '{release}' ]; do sleep 0.05; done\necho \
+                     '{failure}'\nexit 1\nfi\n{answer}",
+                    tokens = agent.path(TOKENS).display(),
+                    invocations = agent.path(INVOCATIONS).display(),
+                    failed = agent.path(FAILED).display(),
+                    release = agent.path(RELEASE).display(),
+                    failure = json!({
+                        "type": "result",
+                        "subtype": "error_during_execution",
+                        "is_error": true,
+                        "result": "stream disconnected before completion",
+                    }),
+                    answer = answer(),
+                )
+            })
+        }
+
+        /// Wait until the run's first attempt has spawned this agent.
+        async fn first_attempt(&self) {
+            let deadline = tokio::time::Instant::now() + SPAWN_TIMEOUT;
+            while self.lines(TOKENS).is_empty() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the first attempt never spawned its agent"
+                );
+                tokio::time::sleep(POLL).await;
+            }
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.directory.path().join(name)
+        }
+
+        fn prompt(&self) -> String {
+            std::fs::read_to_string(self.path(PROMPT)).expect("the prompt the agent was handed")
+        }
+
+        /// What the agent has written to `name` so far, a line at a time.
+        fn lines(&self, name: &str) -> Vec<String> {
+            std::fs::read_to_string(self.path(name))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+
+        /// How the run invoked the agent, and the token it handed it, which is
+        /// empty when the run served it no tools.
+        async fn spawned(&self) -> (Vec<String>, String) {
+            let deadline = tokio::time::Instant::now() + SPAWN_TIMEOUT;
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(arguments) = std::fs::read_to_string(self.path(ARGUMENTS)) {
+                    let token = std::fs::read_to_string(self.path(TOKEN)).unwrap_or_default();
+                    return (arguments.lines().map(str::to_string).collect(), token);
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            panic!("the run never spawned its agent");
+        }
+
+        fn release(&self) {
+            std::fs::write(self.path(RELEASE), "go").expect("releasing the agent");
+        }
+    }
+
+    impl Drop for Agent {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.path(RELEASE), "go");
+        }
+    }
+
+    /// The value the agent was given for `name`.
+    fn flag<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
+        let position = arguments.iter().position(|argument| argument == name)?;
+        arguments.get(position + 1).map(String::as_str)
+    }
+
+    /// How many attempts a finished run records having made.
+    fn attempts(run: &tasks::TaskRunRow) -> Option<&Value> {
+        run.artifacts.as_ref()?.get("attempts")
+    }
+
+    /// The lines that end a claude turn on [`ANSWER`].
+    fn answer() -> String {
+        format!(
+            "echo '{assistant}'\necho '{result}'\n",
+            assistant = json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": ANSWER}]},
+            }),
+            result = json!({"type": "result", "subtype": "success", "is_error": false}),
+        )
+    }
+
+    /// An instance whose own backend is the stand-in agent, and whose capacity
+    /// lookups all miss rather than reaching a real endpoint.
+    fn config(agent: &Agent, provider: &MockServer) -> Config {
+        Config {
+            model_backend: ModelBackend::Cli {
+                agent: AgentKind::Claude,
+                executable: Some(agent.path(EXECUTABLE)),
+            },
+            litellm_host: provider.uri(),
+            ollama_host: provider.uri(),
+            ..crate::state::test_config()
+        }
+    }
+
+    /// Where agent homes go, for a test whose organization chose an agent.
+    fn homed(config: Config, agents: &TempDir) -> Config {
+        Config {
+            agents: AgentConfig {
+                state: agents.path().to_path_buf(),
+                ..AgentConfig::default()
+            },
+            ..config
+        }
+    }
+
+    /// One JSON-RPC call to zone's MCP endpoint, as the agent would make it.
+    async fn rpc(token: &str, method: &str, params: Value) -> Value {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("a header value"),
+        );
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let response = crate::mcp::serve(headers, request.to_string().into()).await;
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("the endpoint answers")
+            .to_bytes();
+        serde_json::from_slice(&body).expect("the endpoint answers JSON")
+    }
+
+    /// A queued run of a writer's task, on a model the agent knows.
+    struct Fixture {
+        pool: PgPool,
+        organization: Uuid,
+        user: Uuid,
+        workspace: Uuid,
+        task: Uuid,
+        run: Uuid,
+    }
+
+    impl Fixture {
+        async fn new(plan_approval: bool) -> Self {
+            let pool =
+                PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("disposable database"))
+                    .await
+                    .unwrap();
+            let organization = organizations::create_organization(
+                &pool,
+                "Agent run",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            let workspace = workspaces::create_workspace(
+                &pool,
+                organization.id,
+                "Agent run",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            let user = users::create_user(
+                &pool,
+                &format!("{}@example.com", Uuid::new_v4()),
+                "unused",
+                Some("Agent actor"),
+                false,
+            )
+            .await
+            .unwrap();
+            workspace_members::add_member(
+                &pool,
+                workspace.id,
+                user.id,
+                workspace_members::WorkspaceRole::Member,
+                None,
+            )
+            .await
+            .unwrap();
+            let task = tasks::create_task_as(
+                &pool,
+                workspace.id,
+                &[],
+                "Agent run",
+                "Write the file",
+                None,
+                None,
+                true,
+                None,
+                Some(user.id),
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE tasks SET model_name = 'sonnet', require_plan_approval = $2 WHERE id = $1",
+            )
+            .bind(task.id)
+            .bind(plan_approval)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let run = tasks::create_task_run_as(&pool, task.id, Some(user.id))
+                .await
+                .unwrap();
+            Self {
+                pool,
+                organization: organization.id,
+                user: user.id,
+                workspace: workspace.id,
+                task: task.id,
+                run: run.id,
+            }
+        }
+
+        fn state(&self, config: Config) -> AppState {
+            let state = AppState::new(config, self.pool.clone(), None);
+            state.disable_mcp();
+            state
+        }
+
+        /// The organization's workspaces run on `provider`, in place of
+        /// whatever they ran on.
+        async fn choose(&self, provider: &str) {
+            sqlx::query(
+                "INSERT INTO organization_ai_settings (organization_id, provider) VALUES ($1, $2) \
+                 ON CONFLICT (organization_id) DO UPDATE SET provider = EXCLUDED.provider",
+            )
+            .bind(self.organization)
+            .bind(provider)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+
+        /// The organization signs claude in on `access`, in place of any
+        /// sign-in it had.
+        async fn sign_in(&self, state: &AppState, access: &str) {
+            let sealed = Tokens {
+                access: SecretValue::new(access),
+                refresh: None,
+                expires_at: Utc::now() + TimeDelta::hours(8),
+                issued_at: None,
+                scope: "user:inference".to_string(),
+                subscription: None,
+            }
+            .seal(state.encryption_key())
+            .expect("the tokens to seal");
+            agent_logins::upsert(
+                &self.pool,
+                &Upsert {
+                    organization_id: self.organization,
+                    agent: AgentKind::Claude.as_str(),
+                    credential: Some(&sealed),
+                    label: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        /// The task names a repository no checkout can be made of.
+        async fn unreachable_repository(&self) {
+            sqlx::query("UPDATE tasks SET github_repo_url = 'not a repository' WHERE id = $1")
+                .bind(self.task)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+
+        /// Claim the run as an execution would, for a test that drives one
+        /// attempt of it directly.
+        async fn claim(&self) -> Uuid {
+            let owner = Uuid::new_v4();
+            assert!(
+                tasks::claim_task_run(&self.pool, self.run, owner)
+                    .await
+                    .unwrap()
+            );
+            owner
+        }
+
+        async fn finished(&self) -> tasks::TaskRunRow {
+            tasks::get_task_run(&self.pool, self.run)
+                .await
+                .unwrap()
+                .expect("the run")
+        }
+
+        async fn remove(self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(self.user)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// The agent is pointed at this server with exactly the run's own registry
+    /// allowed, reaches it with a token that names this attempt, and loses it
+    /// the moment the attempt ends.
+    #[tokio::test]
+    async fn a_run_on_a_coding_agent_serves_it_the_tasks_own_tools() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::write();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+
+        let (arguments, token) = agent.spawned().await;
+        let definition: Value = serde_json::from_str(
+            flag(&arguments, "--mcp-config")
+                .expect("the agent is told where zone serves the run's tools"),
+        )
+        .expect("the server definition is JSON");
+        assert_eq!(
+            definition["mcpServers"][Toolset::SERVER]["url"],
+            crate::mcp::local_endpoint(state.config())
+        );
+        assert_eq!(
+            flag(&arguments, "--tools"),
+            Some(""),
+            "a run on an agent is served zone's tools and keeps none of its own"
+        );
+
+        let turn = crate::mcp::Turn::find(&token)
+            .expect("the token reaches the attempt that minted it while it runs");
+        assert_eq!(
+            (turn.workspace(), turn.chat(), turn.user()),
+            (fixture.workspace, fixture.run, Some(fixture.user)),
+            "the attempt's turn acts for whoever started the run, not for its lease"
+        );
+        let prompt = agent.prompt();
+        assert!(prompt.contains("# Task: Agent run"), "{prompt}");
+        for tool in [question::ASK_USER, wait::WAIT_FOR] {
+            assert!(
+                !prompt.contains(tool),
+                "the run's prompt teaches {tool}, which the agent is not served"
+            );
+        }
+        let served: Vec<String> = turn
+            .tools()
+            .names()
+            .iter()
+            .filter(|name| turn.serves(name))
+            .map(|name| format!("mcp__{}__{name}", Toolset::SERVER))
+            .collect();
+        let allowed: Vec<String> = flag(&arguments, "--allowedTools")
+            .expect("the agent is allowed the run's tools")
+            .split(',')
+            .map(str::to_string)
+            .collect();
+        assert_eq!(allowed, served);
+        for tool in [
+            "apply_patch",
+            "read_file",
+            "run_command",
+            "write_file",
+            "create_document",
+        ] {
+            assert!(turn.serves(tool), "the run's own {tool} is served");
+        }
+        assert!(
+            !turn.tools().has("run_shell"),
+            "a run is served its own sandboxed registry, not a chat's"
+        );
+        for tool in [question::ASK_USER, wait::WAIT_FOR] {
+            assert!(
+                !turn.tools().has(tool),
+                "{tool} would end the run on a park that never comes"
+            );
+        }
+
+        let answer = rpc(
+            &token,
+            "tools/call",
+            json!({"name": "write_file", "arguments": {
+                "path": "served.txt",
+                "content": "written",
+                "reason": "The task asked for this file.",
+            }}),
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        let refused = rpc(
+            &token,
+            "tools/call",
+            json!({"name": question::ASK_USER, "arguments": {}}),
+        )
+        .await;
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
+
+        agent.release();
+        tokio::time::timeout(SPAWN_TIMEOUT, running)
+            .await
+            .expect("the run finishes once its agent does")
+            .unwrap();
+        let finished = tasks::get_task_run(&fixture.pool, fixture.run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(
+            finished
+                .artifacts
+                .as_ref()
+                .expect("a finished run's artifacts")["tool_calls"],
+            1,
+            "the call the agent made over MCP is counted as the run's own"
+        );
+        assert!(
+            crate::mcp::Turn::find(&token).is_none(),
+            "a token that outlives its attempt is a standing grant on the workspace"
+        );
+        let logs = tasks::get_task_run_logs(&fixture.pool, fixture.run)
+            .await
+            .unwrap();
+        assert!(
+            !logs.iter().any(|log| log.message.contains("not offered")),
+            "the run said zone's tools went unoffered: {:?}",
+            logs.iter().map(|log| &log.message).collect::<Vec<_>>()
+        );
+        fixture.remove().await;
+    }
+
+    /// `submit_plan` parks the run until someone approves the plan, which only
+    /// zone's own loop can do. The run says so as soon as it knows its backend:
+    /// before it checks out a repository, which the unreachable one here would
+    /// have failed first, and before it spawns an agent. Every provider on an
+    /// instance that runs an agent runs one, so it offers no other.
+    #[tokio::test]
+    async fn a_run_that_needs_its_plan_approved_fails_before_its_checkout() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(true).await;
+        fixture.unreachable_repository().await;
+        let agent = Agent::write();
+        agent.release();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+
+        tokio::time::timeout(
+            SPAWN_TIMEOUT,
+            execute_task_run(&state, fixture.run, fixture.task),
+        )
+        .await
+        .expect("a run that cannot start ends at once");
+
+        let failed = fixture.finished().await;
+        assert_eq!(failed.status, RUN_FAILED, "{:?}", failed.error_message);
+        assert_eq!(
+            failed.error_message.as_deref(),
+            Some(
+                "Plan approval is not available when a task runs on a coding agent CLI, and \
+                 every provider on this server runs on one; turn off Require plan approval."
+            )
+        );
+        assert_eq!(
+            attempts(&failed),
+            None,
+            "a run that could never have its plan approved made an attempt"
+        );
+        assert!(
+            !agent.path(ARGUMENTS).exists(),
+            "the agent was spawned for a run that could never have its plan approved"
+        );
+        fixture.remove().await;
+    }
+
+    /// An organization that chose an agent on an instance whose own provider is
+    /// the endpoint can still approve plans, on Self-Hosted.
+    #[tokio::test]
+    async fn a_run_on_an_organizations_agent_is_pointed_at_the_provider_that_approves_plans() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(true).await;
+        fixture.unreachable_repository().await;
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let mut config = homed(
+            Config {
+                litellm_host: provider.uri(),
+                ollama_host: provider.uri(),
+                ..crate::state::test_config()
+            },
+            &agents,
+        );
+        config.agents.host_login = true;
+        let state = fixture.state(config);
+
+        tokio::time::timeout(
+            SPAWN_TIMEOUT,
+            execute_task_run(&state, fixture.run, fixture.task),
+        )
+        .await
+        .expect("a run that cannot start ends at once");
+
+        let failed = fixture.finished().await;
+        assert_eq!(failed.status, RUN_FAILED, "{:?}", failed.error_message);
+        assert_eq!(
+            failed.error_message.as_deref(),
+            Some(
+                "Plan approval is not available when a task runs on a coding agent CLI; turn \
+                 off Require plan approval or use the Self-Hosted provider."
+            )
+        );
+        assert_eq!(attempts(&failed), None);
+        fixture.remove().await;
+    }
+
+    /// A sign-in renewed while the run waits to retry is the one its next
+    /// attempt runs under: each attempt resolves its backend afresh, on the
+    /// model the run was prepared with.
+    #[tokio::test]
+    async fn each_attempt_runs_under_the_sign_in_as_it_stands_when_the_attempt_starts() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::flaky();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(homed(config(&agent, &provider), &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        fixture.sign_in(&state, "first-access").await;
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+
+        agent.first_attempt().await;
+        fixture.sign_in(&state, "renewed-access").await;
+        agent.release();
+        tokio::time::timeout(SPAWN_TIMEOUT * 2, running)
+            .await
+            .expect("the run finishes once its second attempt does")
+            .unwrap();
+
+        let finished = fixture.finished().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(agent.lines(TOKENS), ["first-access", "renewed-access"]);
+        let invocations = agent.lines(INVOCATIONS);
+        assert_eq!(invocations.len(), 2, "{invocations:?}");
+        for invocation in &invocations {
+            assert!(
+                invocation.contains("--model sonnet"),
+                "an attempt left the model the run was prepared with: {invocation}"
+            );
+        }
+        fixture.remove().await;
+    }
+
+    /// An organization that signs out while its run waits to retry stops the
+    /// run there: the next attempt finds no sign-in to run under, and no retry
+    /// makes one.
+    #[tokio::test]
+    async fn a_run_whose_organization_signs_out_between_attempts_stops_there() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::flaky();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let mut config = homed(config(&agent, &provider), &agents);
+        config.agents.host_login = false;
+        let state = fixture.state(config);
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        fixture.sign_in(&state, "first-access").await;
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+
+        agent.first_attempt().await;
+        assert!(
+            agent_logins::delete(&fixture.pool, fixture.organization, "claude")
+                .await
+                .unwrap()
+        );
+        agent.release();
+        tokio::time::timeout(SPAWN_TIMEOUT * 2, running)
+            .await
+            .expect("the run stops at its second attempt")
+            .unwrap();
+
+        let failed = fixture.finished().await;
+        assert_eq!(failed.status, RUN_FAILED, "{:?}", failed.error_message);
+        assert_eq!(
+            failed.error_message,
+            Some(
+                backend::Error::SignedOut {
+                    agent: AgentKind::Claude
+                }
+                .to_string()
+            )
+        );
+        let artifacts = failed.artifacts.expect("a failed run's artifacts");
+        assert_eq!(
+            (&artifacts["attempts"], &artifacts["stopped"]),
+            (&json!(2), &json!("terminal"))
+        );
+        assert_eq!(agent.lines(TOKENS), ["first-access"]);
+        fixture.remove().await;
+    }
+
+    /// A run that began on an organization's agent finishes on it: moving the
+    /// organization to another agent while the run waits to retry neither
+    /// stops the run for the other agent's missing sign-in nor takes away the
+    /// sign-in it runs under.
+    #[tokio::test]
+    async fn a_run_whose_organization_moves_to_another_agent_keeps_its_own_sign_in() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::flaky();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let mut config = homed(config(&agent, &provider), &agents);
+        config.agents.host_login = false;
+        let state = fixture.state(config);
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        fixture.sign_in(&state, "first-access").await;
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+
+        agent.first_attempt().await;
+        fixture.choose(PROVIDER_CODEX).await;
+        agent.release();
+        tokio::time::timeout(SPAWN_TIMEOUT * 2, running)
+            .await
+            .expect("the run finishes once its second attempt does")
+            .unwrap();
+
+        let finished = fixture.finished().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(agent.lines(TOKENS), ["first-access", "first-access"]);
+        fixture.remove().await;
+    }
+
+    /// How many completions `provider` has been asked for.
+    async fn completions(provider: &MockServer) -> usize {
+        provider
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == COMPLETIONS)
+            .count()
+    }
+
+    /// An endpoint run reads nothing between its attempts: an organization
+    /// that picks an agent it has not signed in to while the run waits to
+    /// retry changes nothing about where the next attempt goes.
+    #[tokio::test]
+    async fn an_endpoint_run_finishes_on_the_endpoint_when_its_organization_picks_an_agent() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(COMPLETIONS))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_string("upstream unavailable")
+                    .set_delay(FIRST_ANSWER_DELAY),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&provider)
+            .await;
+        let chunk = json!({"id": "completion", "object": "chat.completion.chunk", "created": 0,
+            "model": "test", "choices": [{"index": 0, "delta": {"content": ANSWER},
+            "finish_reason": null}]});
+        let end = json!({"id": "completion", "object": "chat.completion.chunk", "created": 0,
+            "model": "test", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]});
+        Mock::given(method("POST"))
+            .and(path(COMPLETIONS))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n")),
+            )
+            .mount(&provider)
+            .await;
+        let agents = TempDir::new().expect("an agent state root");
+        let mut config = homed(
+            Config {
+                litellm_host: provider.uri(),
+                ollama_host: provider.uri(),
+                ..crate::state::test_config()
+            },
+            &agents,
+        );
+        config.agents.host_login = false;
+        let state = fixture.state(config);
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+
+        let deadline = tokio::time::Instant::now() + SPAWN_TIMEOUT;
+        while completions(&provider).await == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the first attempt never asked the endpoint"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        tokio::time::timeout(SPAWN_TIMEOUT * 2, running)
+            .await
+            .expect("the run finishes once its second attempt does")
+            .unwrap();
+
+        let finished = fixture.finished().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(completions(&provider).await, 2);
+        fixture.remove().await;
+    }
+
+    /// One attempt of the fixture's run on `backend`, given until `deadline`.
+    async fn attempt(
+        state: &AppState,
+        fixture: &Fixture,
+        owner: Uuid,
+        backend: &LlmBackend,
+        deadline: tokio::time::Instant,
+    ) -> Result<TaskOutcome, Fault> {
+        let workspace = std::env::temp_dir();
+        let environment = Environment {
+            directory: workspace.clone(),
+            ..Environment::here()
+        };
+        attempt_run(
+            state,
+            fixture.run,
+            owner,
+            fixture.workspace,
+            None,
+            backend,
+            "sonnet",
+            "# Task: Agent run\n\nWrite the file",
+            "",
+            &workspace,
+            &environment,
+            &Permit::acquire().await.unwrap(),
+            false,
+            false,
+            &plan::Approval::default(),
+            deadline,
+        )
+        .await
+    }
+
+    /// An agent whose own default timeout is shorter than the attempt it
+    /// serves: the chat turn's thirty minutes, inside a task's hour.
+    fn impatient(agent: &Agent) -> LlmBackend {
+        LlmBackend::cli(
+            AgentKind::Claude,
+            CliSettings::default()
+                .with_executable(agent.path(EXECUTABLE))
+                .with_timeout(Duration::from_secs(1)),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_attempts_agent_may_run_for_the_rest_of_the_attempt() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let owner = fixture.claim().await;
+        let agent = Agent::slow(2);
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+
+        let outcome = attempt(
+            &state,
+            &fixture,
+            owner,
+            &impatient(&agent),
+            tokio::time::Instant::now() + SPAWN_TIMEOUT,
+        )
+        .await;
+
+        let outcome =
+            outcome.unwrap_or_else(|fault| panic!("the attempt still had time: {}", fault.message));
+        assert_eq!(outcome.summary, ANSWER);
+        fixture.remove().await;
+    }
+
+    /// The attempt's deadline ends the agent's turn whichever clock sees it
+    /// first, and a run that spent its budget is not given it again.
+    #[tokio::test]
+    async fn an_attempt_whose_agent_outruns_its_budget_is_not_retried() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let owner = fixture.claim().await;
+        let agent = Agent::slow(30);
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+
+        let fault = attempt(
+            &state,
+            &fixture,
+            owner,
+            &impatient(&agent),
+            tokio::time::Instant::now() + Duration::from_secs(3),
+        )
+        .await
+        .expect_err("an agent still running at the attempt's deadline");
+
+        assert_eq!(
+            (fault.failure, fault.status),
+            (Failure::Terminal, "timeout"),
+            "{}",
+            fault.message
+        );
+        fixture.remove().await;
+    }
+
+    /// An answer stopped at the output cap is stopped there again by a retry,
+    /// which hands the same agent the same prompt, so it is not retried.
+    #[tokio::test]
+    async fn an_attempt_whose_answer_outgrows_the_output_cap_is_not_retried() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let owner = fixture.claim().await;
+        let agent = Agent::with(|_| {
+            format!(
+                "while :; do echo '{}'; done",
+                json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "And more."}]},
+                })
+            )
+        });
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let capped = LlmBackend::cli(
+            AgentKind::Claude,
+            CliSettings::default()
+                .with_executable(agent.path(EXECUTABLE))
+                .with_output_limit(4 * 1024),
+        );
+
+        let fault = attempt(
+            &state,
+            &fixture,
+            owner,
+            &capped,
+            tokio::time::Instant::now() + SPAWN_TIMEOUT,
+        )
+        .await
+        .expect_err("an answer that outgrew the cap");
+
+        assert!(fault.message.contains("4096"), "{}", fault.message);
+        assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+        fixture.remove().await;
+    }
+
+    /// Over MCP the agent runs the loop, so zone counts its calls where they
+    /// arrive: an attempt makes as many as zone's own loop would have made, and
+    /// the next is refused without running.
+    #[tokio::test]
+    async fn a_run_on_a_coding_agent_is_held_to_the_tasks_tool_budget() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::write();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+        let (_, token) = agent.spawned().await;
+        let call = json!({"name": "write_file", "arguments": {
+            "path": "budget.txt",
+            "content": "written",
+            "reason": "The task asked for this file.",
+        }});
+        let budget = LoopBudget::task().max_tool_calls;
+
+        for _ in 0..budget {
+            let answer = rpc(&token, "tools/call", call.clone()).await;
+            assert_eq!(answer["result"]["isError"], false, "{answer}");
+        }
+        let refused = rpc(&token, "tools/call", call).await;
+
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+        agent.release();
+        tokio::time::timeout(SPAWN_TIMEOUT, running)
+            .await
+            .expect("the run finishes once its agent does")
+            .unwrap();
+        let finished = fixture.finished().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(
+            finished
+                .artifacts
+                .as_ref()
+                .expect("a finished run's artifacts")["tool_calls"],
+            budget,
+            "a refused call ran"
+        );
+        fixture.remove().await;
+    }
+
+    /// The agent makes its calls over MCP as it likes, several at once, so two
+    /// calls to one tool can finish in either order. Each record keeps its own
+    /// arguments and its own result.
+    #[tokio::test]
+    async fn calls_to_one_tool_that_finish_out_of_order_keep_their_own_results() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let fixture = Fixture::new(false).await;
+        let owner = fixture.claim().await;
+        let provider = MockServer::start().await;
+        let chunk = json!({"id": "completion", "object": "chat.completion.chunk", "created": 0,
+            "model": "test", "choices": [{"index": 0, "delta": {"content": "Read both."},
+            "finish_reason": null}]});
+        let end = json!({"id": "completion", "object": "chat.completion.chunk", "created": 0,
+            "model": "test", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]});
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n")),
+            )
+            .mount(&provider)
+            .await;
+        let started = |id: &str, path: &str| AgentEvent::ToolCallStarted {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"path": path}).to_string(),
+        };
+        let completed = |id: &str, detail: &str| AgentEvent::ToolCallCompleted {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            success: true,
+            detail: detail.to_string(),
+            duration_ms: 1,
+            citations: Vec::new(),
+            receipt: None,
+        };
+        let (sender, mut calls) = mpsc::unbounded_channel();
+        for event in [
+            started("first", "a.txt"),
+            started("second", "b.txt"),
+            completed("second", "read b"),
+            completed("first", "read a"),
+        ] {
+            sender.send(event).expect("the calls reach the run");
+        }
+        let callback = DatabaseTaskCallback {
+            pool: fixture.pool.clone(),
+            run_id: fixture.run,
+            owner: Some(owner),
+            open_calls: Arc::default(),
+        };
+
+        run_task_loop(
+            LlmClient::new(LlmConfig {
+                base_url: provider.uri(),
+                ..LlmConfig::default()
+            }),
+            "test".to_string(),
+            ChatTools::empty(),
+            RunContext::from_messages(vec![LlmMessage::user("Read both files.")]),
+            LoopBudget::task(),
+            &callback,
+            Some(&mut calls),
+        )
+        .await
+        .expect("the turn finishes");
+
+        let deadline = tokio::time::Instant::now() + SPAWN_TIMEOUT;
+        let recorded = loop {
+            let rows: Vec<(Value, Value)> = sqlx::query_as(
+                "SELECT tool_input, tool_output FROM task_tool_calls \
+                 WHERE task_run_id = $1 AND completed_at IS NOT NULL",
+            )
+            .bind(fixture.run)
+            .fetch_all(&fixture.pool)
+            .await
+            .unwrap();
+            if rows.len() == 2 {
+                break rows;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the calls were never recorded: {rows:?}"
+            );
+            tokio::time::sleep(POLL).await;
+        };
+        for (input, output) in recorded {
+            let result = match input["path"].as_str() {
+                Some("a.txt") => "read a",
+                Some("b.txt") => "read b",
+                other => panic!("a call nobody made was recorded: {other:?}"),
+            };
+            assert_eq!(
+                output,
+                json!(result),
+                "the call on {input} was recorded with another call's result"
+            );
+        }
+        fixture.remove().await;
     }
 }

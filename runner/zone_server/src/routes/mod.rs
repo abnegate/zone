@@ -2,6 +2,7 @@
 //!
 //! This module defines all HTTP endpoints for the Zone API.
 
+pub mod agents;
 pub mod ai_settings;
 pub mod artifacts;
 pub mod audit;
@@ -337,6 +338,28 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai/effective",
             get(ai_settings::get_effective),
+        )
+        // Coding agent sign-ins
+        .route("/api/organizations/{org_id}/agents", get(agents::list))
+        .route(
+            "/api/organizations/{org_id}/agents/{agent}",
+            get(agents::get),
+        )
+        .route(
+            "/api/organizations/{org_id}/agents/{agent}/login",
+            post(agents::start).delete(agents::sign_out),
+        )
+        .route(
+            "/api/organizations/{org_id}/agents/{agent}/login/code",
+            post(agents::finish),
+        )
+        .route(
+            "/api/organizations/{org_id}/agents/{agent}/login/receipt",
+            post(agents::redeem),
+        )
+        .route(
+            "/api/organizations/{org_id}/agents/{agent}/login/attempt",
+            delete(agents::cancel),
         )
         // Billing routes
         .route(

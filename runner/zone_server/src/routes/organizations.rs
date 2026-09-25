@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::auth::{AuthUser, OrgAdmin, OrgMember, OrgOwner, WorkspaceAdmin, WorkspaceMember};
 use crate::db::audit::{actions, resources};
 use crate::db::{organization_members, organizations, workspaces};
+use crate::services::login::devices;
 use crate::state::AppState;
 
 use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
@@ -342,6 +343,13 @@ pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl Into
                 },
             )
             .await;
+            if let Err(error) = devices::forget(&state, owner.org_id).await {
+                tracing::error!(
+                    organization = %owner.org_id,
+                    %error,
+                    "Could not forget a deleted organization's coding agent sign-ins"
+                );
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => (
@@ -349,8 +357,8 @@ pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl Into
             Json(ErrorResponse::new("Organization not found")),
         )
             .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
+        Err(error) => {
+            tracing::error!("Database error: {}", error);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
-use zone_core::llm::{LlmClient, LlmConfig, Message, Role};
+use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message, Role};
 
 use crate::agent::prompt::{self, Environment};
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
@@ -14,8 +14,9 @@ use crate::db::chats::ChatRow;
 use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
 use crate::services::artifacts::ArtifactStore;
+use crate::services::backend;
 use crate::services::completion_tokens::merge_stops;
-use crate::state::{AppState, llm_backend};
+use crate::state::AppState;
 use zone_chat::{capacity, history};
 use zone_search::client::SearchContext;
 
@@ -235,10 +236,11 @@ impl RunContext {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum Mode {
     Preview,
-    Generation,
+    /// A turn a model answers, on the backend its model was chosen for.
+    Generation(LlmBackend),
 }
 
 pub struct Preparation {
@@ -295,7 +297,7 @@ pub async fn build(
         user_id: user,
     };
     let catalog = async {
-        if mode == Mode::Generation && chat.agent_enabled {
+        if matches!(mode, Mode::Generation(_)) && chat.agent_enabled {
             ChatTools::build(scope).await
         } else {
             ChatTools::preview(scope).await
@@ -315,6 +317,11 @@ pub async fn build(
         }
         _ => tools,
     };
+    let backend = match &mode {
+        Mode::Preview => backend::instance(state.config()),
+        Mode::Generation(backend) => backend::bounded(backend.clone(), settings.timeout),
+    };
+    let tools = crate::mcp::offered(&backend, tools);
     let agentic = chat.agent_enabled && !tools.is_empty();
     let policy = policy(settings, &capacity);
     let request = pending
@@ -407,7 +414,7 @@ pub async fn build(
                 Some("Requested search results will be counted when retrieval completes.".into());
         }
     }
-    if mode == Mode::Preview
+    if matches!(mode, Mode::Preview)
         && agentic
         && state.existing_mcp().is_none()
         && !zone_core::mcp::McpConfig::from_env().servers.is_empty()
@@ -417,7 +424,7 @@ pub async fn build(
             "Configured MCP tool definitions will be counted when their servers connect.".into(),
         );
     }
-    if mode == Mode::Preview && !agentic && chat.character.is_none() {
+    if matches!(mode, Mode::Preview) && !agentic && chat.character.is_none() {
         let knowledge: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM knowledge_entries WHERE workspace_id=$1 AND is_active=TRUE ", not_memory!(), ")"))
             .bind(workspace).fetch_one(state.db()).await.map_err(|error|error.to_string())?;
         let sources = if state.context_service().is_some() {
@@ -453,7 +460,7 @@ pub async fn build(
         default_model: chat.model_name.clone(),
         temperature: 0.7,
         max_tokens: policy.reserved,
-        backend: llm_backend(state.config()),
+        backend,
     })
     .with_stop(stop.clone());
     if let Some(limit) = capacity.ollama {

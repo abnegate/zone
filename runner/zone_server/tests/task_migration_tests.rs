@@ -1041,6 +1041,96 @@ async fn task_migration_repairs_a_cancelled_memory_index_build() {
     database.cleanup().await;
 }
 
+#[tokio::test]
+async fn agent_providers_are_refused_before_048_and_stored_after_it() {
+    const CHECK_VIOLATION: &str = "23514";
+    const AGENT_PROVIDERS: [&str; 2] = ["claude_code", "codex"];
+    const ORGANIZATION_PROVIDER: &str =
+        "UPDATE organization_ai_settings SET provider=$2 WHERE organization_id=$1";
+    const WORKSPACE_PROVIDER: &str =
+        "UPDATE workspace_ai_settings SET provider=$2 WHERE workspace_id=$1";
+    let database = Database::new().await;
+    database.through(47).await;
+    let (workspace, _) = database.workspace().await;
+    let organization: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id=$1")
+            .bind(workspace)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO organization_ai_settings(organization_id,provider) VALUES($1,'bedrock')",
+    )
+    .bind(organization)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO workspace_ai_settings(workspace_id) VALUES($1)")
+        .bind(workspace)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+    let refused = sqlx::query(ORGANIZATION_PROVIDER)
+        .bind(organization)
+        .bind("codex")
+        .execute(&database.pool)
+        .await
+        .expect_err("047 knows only the four API providers");
+    let refused = refused.as_database_error().unwrap();
+    assert_eq!(refused.code().as_deref(), Some(CHECK_VIOLATION));
+    assert_eq!(
+        refused.constraint(),
+        Some("organization_ai_settings_provider_check"),
+        "048 drops the check by this name; under any other it would stay and keep refusing"
+    );
+
+    migrations::run(&database.pool).await.unwrap();
+
+    let kept: (String, Option<String>) = sqlx::query_as(
+        "SELECT o.provider, w.provider FROM organization_ai_settings o, workspace_ai_settings w WHERE o.organization_id=$1 AND w.workspace_id=$2",
+    )
+    .bind(organization)
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        kept,
+        ("bedrock".to_string(), None),
+        "048 must keep the settings saved before it"
+    );
+    for (statement, target) in [
+        (ORGANIZATION_PROVIDER, organization),
+        (WORKSPACE_PROVIDER, workspace),
+    ] {
+        for provider in AGENT_PROVIDERS {
+            sqlx::query(statement)
+                .bind(target)
+                .bind(provider)
+                .execute(&database.pool)
+                .await
+                .unwrap_or_else(|error| panic!("{statement} must take {provider}: {error}"));
+        }
+        let refused = sqlx::query(statement)
+            .bind(target)
+            .bind("gemini")
+            .execute(&database.pool)
+            .await
+            .expect_err("048 widens the check; it must not remove it");
+        assert_eq!(
+            refused.as_database_error().unwrap().code().as_deref(),
+            Some(CHECK_VIOLATION)
+        );
+    }
+    sqlx::query("INSERT INTO agent_logins(organization_id,agent) VALUES($1,'codex')")
+        .bind(organization)
+        .execute(&database.pool)
+        .await
+        .expect("048 creates the table an organization's sign-in is kept in");
+    database.cleanup().await;
+}
+
 /// Every lock these take on `task_runs` is one ordinary traffic already holds,
 /// and the boot holds sqlx's advisory lock while it queues for them: an
 /// unbounded wait wedges every other instance instead of failing with 55P03.
@@ -1103,6 +1193,7 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
             "042_auto_projects.sql",
             "043_auto_projects_validation.sql",
             "046_invitations_pending_unique.sql",
+            "048_agent_logins.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );

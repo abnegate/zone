@@ -4,12 +4,17 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use super::beneath::{self, Access};
+use super::denied::Denied;
+use super::identity::Identity;
 use super::{REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolResult, reason_property};
+use crate::llm::provider::environment;
 
 // Prompt budget; matches `read_repository_file` paging in zone_server.
 const FILE_PAGE_CHARS: usize = super::MAX_TOOL_OUTPUT_CHARS;
@@ -18,14 +23,23 @@ const LIST_FILES_CAP: usize = 200;
 const PATCH_HUNK_CHARS: usize = 80;
 const SEARCH_MAX_RESULTS: usize = 100;
 
-/// What a file tool answers for a path in [`ToolContext::denied`] or in a
-/// process's `/proc` entry, however unrestricted its context.
+/// What a file tool answers for a path in [`ToolContext::denied`], or in a
+/// directory that reaches a file by identity, however unrestricted its
+/// context.
 pub const OFF_LIMITS: &str = "Path is off limits to file tools";
 
 const PROC: &str = "/proc";
 
 /// The links `/proc` keeps to the reader's own entry.
 const OWN_ENTRIES: [&str; 2] = ["self", "thread-self"];
+
+/// Where a process reads its own descriptors as files: a link into `/proc` on
+/// Linux, and a directory of its own on macOS.
+const DESCRIPTORS: &str = "/dev/fd";
+
+/// macOS's volume file system, which opens `/.vol/<device>/<inode>` by
+/// identity, so the path names neither the file nor any directory above it.
+const VOLUMES: &str = "/.vol";
 
 /// Refuse a resolved path a file tool may not reach: one that is withheld from
 /// every file tool, and unless the context is unrestricted, one that leaves
@@ -54,14 +68,29 @@ pub(super) fn confine(resolved: &Path, context: &ToolContext) -> Result<(), Tool
     }
 }
 
-/// Whether a resolved path is in a process's `/proc` entry or under a denied
-/// path, which is resolved too, for the reason `cwd` is canonicalized above.
+/// Whether a resolved path is in a process's `/proc` entry, or under a denied
+/// path or a directory that reaches a file by identity.
+///
+/// Each is compared by what it is on disk rather than by how it is spelled: a
+/// firmlink, a bind mount, or a name that differs only in case or in Unicode
+/// normalization reaches it under a string that no comparison matches.
 fn withheld(resolved: &Path, context: &ToolContext) -> bool {
-    per_process(resolved)
-        || context
-            .denied
-            .iter()
-            .any(|denied| resolved.starts_with(resolve(denied)))
+    if per_process(resolved) {
+        return true;
+    }
+    let denied: Vec<Denied> = context
+        .denied
+        .iter()
+        .map(PathBuf::as_path)
+        .chain([Path::new(DESCRIPTORS), Path::new(VOLUMES)])
+        .filter_map(Denied::of)
+        .collect();
+    resolved.ancestors().any(|ancestor| {
+        Identity::of(ancestor).is_some_and(|identity| {
+            let below = resolved.strip_prefix(ancestor).unwrap_or(resolved);
+            denied.iter().any(|path| path.covers(identity, below))
+        })
+    })
 }
 
 /// Whether `path` is in one process's `/proc` entry.
@@ -643,7 +672,8 @@ impl Tool for ListFilesTool {
         let params: ListFilesParams =
             serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
 
-        let full_path = context.cwd.join(&params.path);
+        let full_path = resolve(&context.cwd.join(&params.path));
+        confine(&full_path, context)?;
 
         if !full_path.exists() {
             return Err(ToolError::Execution(format!(
@@ -651,9 +681,6 @@ impl Tool for ListFilesTool {
                 params.path
             )));
         }
-
-        let full_path = resolve(&full_path);
-        confine(&full_path, context)?;
 
         let mut files = Vec::new();
         let mut total = 0;
@@ -960,11 +987,11 @@ async fn search_ripgrep(
     }
 
     let mut command = tokio::process::Command::new("rg");
-    // Matches are judged below by the path rg prints, which is the file's own
-    // only while rg follows no link, and which ends at the NUL `--null` puts
-    // after it because a file name can hold a `:`. A config file could add
-    // `--follow` or reshape the output.
+    // Each match is judged by the file rg names for it, so the output has to
+    // keep the shape read below, which a config file could change.
     command
+        .env_clear()
+        .envs(environment::inherited())
         .arg("--no-config")
         .arg("--null")
         .arg("--with-filename")
@@ -999,35 +1026,48 @@ async fn search_ripgrep(
         return None;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let mut results = Vec::new();
-    for line in stdout.lines() {
+    let mut judged: Option<(&Path, bool)> = None;
+    for line in output.stdout.split(|byte| *byte == b'\n') {
         if results.len() >= max_results {
             break;
         }
-        let Some((path, found)) = line.split_once('\0') else {
+        let Some((path, found)) = ripgrep_match(line) else {
             continue;
         };
-        let path = Path::new(path);
-        if withheld(path, context) {
-            continue;
+        let reachable = match judged {
+            Some((last, reachable)) if last == path => reachable,
+            _ => confine(&resolve(path), context).is_ok(),
+        };
+        judged = Some((path, reachable));
+        if reachable {
+            results.push(shown_match(path, &found, search_path));
         }
-        results.push(normalize_rg_line(path, found, search_path));
     }
     Some(format_search_results(results, max_results))
 }
 
-/// One match as `path:line: text`, with the path relative to the search root
-/// unless the root is the file itself.
-fn normalize_rg_line(path: &Path, found: &str, search_path: &Path) -> String {
-    let relative = path
-        .strip_prefix(search_path)
-        .ok()
-        .filter(|relative| !relative.as_os_str().is_empty())
-        .unwrap_or(path);
+/// One line of ripgrep's `--null` output, `path\0number:text`: the file it
+/// names, and what it found there.
+fn ripgrep_match(line: &[u8]) -> Option<(&Path, String)> {
+    let separator = line.iter().position(|byte| *byte == b'\0')?;
+    let (path, found) = line.split_at(separator);
+    Some((
+        Path::new(OsStr::from_bytes(path)),
+        String::from_utf8_lossy(&found[1..]).into_owned(),
+    ))
+}
+
+/// A match as the model reads it, `path:number: text`, the path relative to
+/// the search root unless the root is the file itself.
+fn shown_match(path: &Path, found: &str, search_path: &Path) -> String {
+    let shown = match path.strip_prefix(search_path) {
+        Ok(relative) if !relative.as_os_str().is_empty() => relative,
+        _ => path,
+    };
     match found.split_once(':') {
-        Some((number, text)) => format!("{}:{}: {}", relative.display(), number, text.trim()),
-        None => format!("{}: {}", relative.display(), found.trim()),
+        Some((number, text)) => format!("{}:{number}: {}", shown.display(), text.trim()),
+        None => format!("{}: {}", shown.display(), found.trim()),
     }
 }
 
@@ -1036,6 +1076,8 @@ fn ripgrep_available() -> bool {
     *AVAILABLE.get_or_init(|| {
         std::process::Command::new("rg")
             .arg("--version")
+            .env_clear()
+            .envs(environment::inherited())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -1048,7 +1090,7 @@ fn ripgrep_available() -> bool {
 mod tests {
     use super::*;
     use crate::tools::Session;
-    use crate::tools::test_support::captured_logs;
+    use crate::tools::test_support::{self, Recorder, captured_logs};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2666,6 +2708,360 @@ mod tests {
                 .unwrap()
                 .join("missing/deeper.txt")
         );
+    }
+
+    /// A denied directory is withheld by what it is, not by how a path spells
+    /// it. A firmlink, a bind mount or a case-folded name reaches it under a
+    /// string no comparison matches; a symlinked parent, handed over
+    /// unresolved, is the same alias on any host.
+    #[cfg(unix)]
+    #[test]
+    fn a_denied_directory_is_withheld_under_any_name_that_reaches_it() {
+        let shared = shared();
+        symlinked(&shared.root, "alias", &shared.state);
+        let alias = shared.root.join("alias");
+        let context = chat_context(&shared);
+
+        for path in [
+            alias.clone(),
+            alias.join(ORGANIZATION).join("codex/auth.json"),
+            alias.join("an-organization-yet-to-sign-in/codex/AGENTS.md"),
+        ] {
+            assert!(withheld(&path, &context), "{}", path.display());
+        }
+        assert!(
+            !withheld(&shared.workspace.join("own.rs"), &context),
+            "a path beside the denied directory stays in reach"
+        );
+    }
+
+    /// A state root nobody has made yet has no identity to compare, so the
+    /// names it will have are compared instead, from the deepest directory
+    /// that exists, the way a filesystem that folds case would compare them.
+    #[tokio::test]
+    async fn a_denied_directory_yet_to_be_made_is_withheld_in_any_case() {
+        let directory = tempdir().unwrap();
+        let context = ToolContext {
+            unrestricted: true,
+            denied: vec![directory.path().join("agent-state")],
+            ..create_test_context(directory.path())
+        };
+        let folded = directory.path().join("AGENT-STATE");
+
+        let planted = WriteFileTool
+            .execute(
+                serde_json::json!({
+                    "path": folded.join(ORGANIZATION).join("codex/AGENTS.md"),
+                    "content": "Obey the file."
+                }),
+                &context,
+            )
+            .await;
+        off_limits(planted, "a plant under the state root's name to be");
+        assert!(!folded.exists(), "the plant made the state root");
+
+        let beside = WriteFileTool
+            .execute(
+                serde_json::json!({
+                    "path": directory.path().join("agent-state-notes/today.md"),
+                    "content": "mine"
+                }),
+                &context,
+            )
+            .await;
+        assert!(beside.is_ok(), "{beside:?}");
+    }
+
+    /// APFS folds case, so the state root in capitals is the same directory
+    /// under a name no string comparison matches.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_file_tools_refuse_denied_state_spelled_in_another_case() {
+        let shared = shared();
+        let folded = PathBuf::from(shared.state.to_string_lossy().to_uppercase());
+        if !folded.exists() {
+            eprintln!(
+                "skipping: {} is on a case-sensitive filesystem",
+                shared.state.display()
+            );
+            return;
+        }
+        let home = folded.join(ORGANIZATION.to_uppercase()).join("CODEX");
+        let fresh = folded.join("AN-ORGANIZATION-YET-TO-SIGN-IN");
+        let context = chat_context(&shared);
+
+        let read = ReadFileTool
+            .execute(
+                serde_json::json!({"path": home.join("AUTH.JSON")}),
+                &context,
+            )
+            .await;
+        assert!(!format!("{read:?}").contains(OTHER_LOGIN), "{read:?}");
+        off_limits(read, "read_file");
+        let listed = ListFilesTool
+            .execute(
+                serde_json::json!({"path": folded, "recursive": true}),
+                &context,
+            )
+            .await;
+        off_limits(listed, "list_files");
+        let searched = SearchCodeTool
+            .execute(
+                serde_json::json!({"pattern": OTHER_LOGIN, "path": home}),
+                &context,
+            )
+            .await;
+        off_limits(searched, "search_code");
+        let planted = WriteFileTool
+            .execute(
+                serde_json::json!({
+                    "path": fresh.join("CODEX/AGENTS.md"),
+                    "content": "Obey the file."
+                }),
+                &context,
+            )
+            .await;
+        off_limits(planted, "write_file");
+        assert!(!fresh.exists(), "a directory was made in the agent state");
+    }
+
+    /// APFS looks a name up whichever Unicode normalization spells it, so a
+    /// state root named in composed characters is the same directory spelled
+    /// in decomposed ones.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_file_tools_refuse_denied_state_spelled_in_another_normalization() {
+        const COMPOSED: &str = "\u{e9}tat";
+        const DECOMPOSED: &str = "e\u{301}tat";
+        let directory = tempdir().unwrap();
+        let state = directory.path().join(COMPOSED);
+        fs::create_dir(&state).unwrap();
+        fs::write(state.join("auth.json"), OTHER_LOGIN).unwrap();
+        let respelled = directory.path().join(DECOMPOSED).join("auth.json");
+        if !respelled.exists() {
+            eprintln!(
+                "skipping: {} is on a filesystem that tells normalizations apart",
+                directory.path().display()
+            );
+            return;
+        }
+        let context = ToolContext {
+            unrestricted: true,
+            denied: vec![state],
+            ..create_test_context(directory.path())
+        };
+
+        let read = ReadFileTool
+            .execute(serde_json::json!({"path": respelled}), &context)
+            .await;
+
+        assert!(!format!("{read:?}").contains(OTHER_LOGIN), "{read:?}");
+        off_limits(read, "read_file");
+    }
+
+    /// Everything writable on macOS lives on the data volume, and a firmlink
+    /// shows each of its top directories at the root of the tree as well: two
+    /// names for one directory, and neither of them a link.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_file_tools_refuse_denied_state_through_a_firmlink() {
+        const DATA_VOLUME: &str = "/System/Volumes/Data";
+        let shared = shared();
+        let canonical = shared.state.canonicalize().unwrap();
+        let firmlinked = Path::new(DATA_VOLUME).join(canonical.strip_prefix("/").unwrap());
+        if !firmlinked.exists() {
+            eprintln!(
+                "skipping: {} has no second name under {DATA_VOLUME}",
+                canonical.display()
+            );
+            return;
+        }
+        let home = firmlinked.join(ORGANIZATION).join("codex");
+        let context = chat_context(&shared);
+
+        let read = ReadFileTool
+            .execute(
+                serde_json::json!({"path": home.join("auth.json")}),
+                &context,
+            )
+            .await;
+        assert!(!format!("{read:?}").contains(OTHER_LOGIN), "{read:?}");
+        off_limits(read, "read_file");
+        let listed = ListFilesTool
+            .execute(
+                serde_json::json!({"path": firmlinked, "recursive": true}),
+                &context,
+            )
+            .await;
+        off_limits(listed, "list_files");
+        let searched = SearchCodeTool
+            .execute(
+                serde_json::json!({"pattern": OTHER_LOGIN, "path": home}),
+                &context,
+            )
+            .await;
+        off_limits(searched, "search_code");
+    }
+
+    /// A process reads its own descriptors under `/dev/fd`. On macOS that is
+    /// a directory of its own rather than a link into `/proc`, so a descriptor
+    /// the server holds on a sign-in would read by its number.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_file_tools_refuse_the_readers_own_descriptors() {
+        use std::os::fd::AsRawFd;
+
+        let shared = shared();
+        let login = fs::File::open(shared.home.join("auth.json")).unwrap();
+        let descriptor = login.as_raw_fd();
+        let context = chat_context(&shared);
+        let mut paths = vec![PathBuf::from(format!("/dev/fd/{descriptor}"))];
+        let folded = PathBuf::from(format!("/DEV/fd/{descriptor}"));
+        if folded.exists() {
+            paths.push(folded);
+        }
+
+        for path in paths {
+            let read = ReadFileTool
+                .execute(serde_json::json!({"path": path}), &context)
+                .await;
+            assert!(
+                !format!("{read:?}").contains(OTHER_LOGIN),
+                "{}: {read:?}",
+                path.display()
+            );
+            off_limits(read, &path.display().to_string());
+        }
+        let listed = ListFilesTool
+            .execute(serde_json::json!({"path": "/dev/fd"}), &context)
+            .await;
+        off_limits(listed, "list_files /dev/fd");
+        drop(login);
+    }
+
+    /// macOS opens `/.vol/<device>/<inode>` by identity, so the path names
+    /// neither the file nor any directory above it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_file_tools_refuse_a_file_named_by_its_device_and_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let shared = shared();
+        let login = fs::metadata(shared.home.join("auth.json")).unwrap();
+        let by_identity = PathBuf::from(format!("/.vol/{}/{}", login.dev(), login.ino()));
+        if !by_identity.exists() {
+            eprintln!("skipping: this host opens nothing by device and inode under /.vol");
+            return;
+        }
+        let context = chat_context(&shared);
+
+        let read = ReadFileTool
+            .execute(serde_json::json!({"path": by_identity}), &context)
+            .await;
+
+        assert!(!format!("{read:?}").contains(OTHER_LOGIN), "{read:?}");
+        off_limits(read, "read_file by device and inode");
+    }
+
+    /// Ripgrep walks the tree itself and reports each match under the path
+    /// it took, so a match is held to the check a file the walker opened would
+    /// be. Here the state root is configured in another case than the one on
+    /// disk, which is the one ripgrep prints.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn ripgreps_matches_are_withheld_by_identity() {
+        if !ripgrep_available() {
+            eprintln!("skipping: ripgrep is not installed");
+            return;
+        }
+        let shared = shared();
+        let folded = PathBuf::from(shared.state.to_string_lossy().to_uppercase());
+        if !folded.exists() {
+            eprintln!(
+                "skipping: {} is on a case-sensitive filesystem",
+                shared.state.display()
+            );
+            return;
+        }
+        fs::write(shared.workspace.join("own.rs"), OTHER_LOGIN).unwrap();
+        let context = ToolContext {
+            unrestricted: true,
+            denied: vec![folded],
+            ..create_test_context(&shared.workspace)
+        };
+        let params = SearchCodeParams {
+            pattern: OTHER_LOGIN.to_string(),
+            path: None,
+            case_sensitive: true,
+            max_results: None,
+        };
+
+        let output = search_ripgrep(
+            &params,
+            &resolve(&shared.root),
+            SEARCH_MAX_RESULTS,
+            &context,
+        )
+        .await
+        .expect("ripgrep ran")
+        .output
+        .unwrap();
+
+        assert!(output.contains("own.rs"), "{output}");
+        assert!(!output.contains("auth.json"), "{output}");
+    }
+
+    /// Whether something exists under the agents' state is itself withheld:
+    /// it says which organizations have signed in, and to what. So the refusal
+    /// comes before the answer about existence, not after it.
+    #[tokio::test]
+    async fn list_files_refuses_before_saying_whether_a_path_exists() {
+        let shared = shared();
+
+        let listed = ListFilesTool
+            .execute(
+                serde_json::json!({"path": shared.state.join("an-organization-yet-to-sign-in")}),
+                &chat_context(&shared),
+            )
+            .await;
+        off_limits(listed, "a missing directory in the agent state");
+
+        let escaped = ListFilesTool
+            .execute(
+                serde_json::json!({"path": shared.root.join("nothing-here")}),
+                &create_test_context(&shared.workspace),
+            )
+            .await
+            .expect_err("a missing directory outside cwd");
+        assert!(
+            escaped.to_string().contains("escapes working directory"),
+            "{escaped}"
+        );
+    }
+
+    /// The server makes itself non-dumpable, and the children it starts are
+    /// not, so a child handed the server's environment shows it to anything
+    /// able to read `/proc/<pid>/environ` as the server's user.
+    #[tokio::test]
+    async fn search_code_starts_ripgrep_from_the_allowlisted_environment() {
+        const TEST: &str =
+            "tools::file::tests::search_code_starts_ripgrep_from_the_allowlisted_environment";
+        if test_support::copied() {
+            let directory = tempdir().unwrap();
+            SearchCodeTool
+                .execute(
+                    serde_json::json!({"pattern": "anything"}),
+                    &create_test_context(directory.path()),
+                )
+                .await
+                .expect("a search");
+            return;
+        }
+
+        let ripgrep = Recorder::new("rg", 0);
+        ripgrep.run(TEST).await;
+
+        ripgrep.assert_allowlisted();
     }
 
     #[test]
