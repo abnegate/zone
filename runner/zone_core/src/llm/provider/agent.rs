@@ -30,7 +30,7 @@ const AUTO: &str = "auto";
 const TAG_SEPARATOR: char = ':';
 
 const CLAUDE_MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
-const CLAUDE_GATED: &[&str] = &["fable"];
+const CLAUDE_NAMED_ONLY: &[&str] = &["fable"];
 
 /// Claude's names for its latest models, in any case. `default` is left out:
 /// it means what passing no `--model` means.
@@ -170,9 +170,9 @@ impl AgentKind {
     }
 
     /// The offered models Zone runs only when a person names one.
-    pub fn gated(self) -> &'static [&'static str] {
+    pub fn named_only(self) -> &'static [&'static str] {
         match self {
-            Self::Claude => CLAUDE_GATED,
+            Self::Claude => CLAUDE_NAMED_ONLY,
             Self::Codex => &[],
         }
     }
@@ -294,15 +294,41 @@ impl AgentKind {
         arguments
     }
 
+    /// A reader for one turn of this agent's output.
+    pub fn reader(self) -> Reader {
+        match self {
+            Self::Claude => Reader::Claude(parser::claude::Reader::default()),
+            Self::Codex => Reader::Codex,
+        }
+    }
+}
+
+/// One turn of an agent's output, read a line at a time.
+#[derive(Debug)]
+pub enum Reader {
+    Claude(parser::claude::Reader),
+    Codex,
+}
+
+impl Reader {
     /// Translate one output line, appending whatever it means.
     ///
     /// A line this agent has no opinion about appends nothing rather than
     /// failing: agents add event types between releases, and a stream that
     /// aborted on the first unrecognised line would lose the whole answer.
-    pub fn interpret(self, line: &str, events: &mut Vec<AgentEvent>) {
+    pub fn interpret(&mut self, line: &str, events: &mut Vec<AgentEvent>) {
         match self {
-            Self::Claude => parser::claude::interpret(line, events),
+            Self::Claude(reader) => reader.interpret(line, events),
             Self::Codex => parser::codex::interpret(line, events),
+        }
+    }
+
+    /// The plan's window usage credits carried this turn past, the first time
+    /// it is asked after the agent said so.
+    pub fn credits(&mut self) -> Option<String> {
+        match self {
+            Self::Claude(reader) => reader.credits(),
+            Self::Codex => None,
         }
     }
 }
@@ -662,15 +688,15 @@ mod tests {
     }
 
     #[test]
-    fn only_claudes_fable_is_gated_and_every_gated_model_is_offered() {
-        assert_eq!(AgentKind::Claude.gated(), ["fable"]);
-        assert!(AgentKind::Codex.gated().is_empty());
+    fn only_claudes_fable_runs_only_when_named_and_is_still_offered() {
+        assert_eq!(AgentKind::Claude.named_only(), ["fable"]);
+        assert!(AgentKind::Codex.named_only().is_empty());
 
         for agent in AgentKind::ALL {
-            for model in agent.gated() {
+            for model in agent.named_only() {
                 assert!(
                     agent.models().contains(model),
-                    "{agent} gates {model} without offering it"
+                    "{agent} runs {model} only when named without offering it"
                 );
             }
         }
@@ -1268,10 +1294,11 @@ mod tests {
     #[test]
     fn an_unrecognised_line_is_ignored_rather_than_fatal() {
         for agent in [AgentKind::Claude, AgentKind::Codex] {
+            let mut reader = agent.reader();
             let mut events = Vec::new();
-            agent.interpret(r#"{"type":"something_added_next_release"}"#, &mut events);
-            agent.interpret("not json at all", &mut events);
-            agent.interpret("", &mut events);
+            reader.interpret(r#"{"type":"something_added_next_release"}"#, &mut events);
+            reader.interpret("not json at all", &mut events);
+            reader.interpret("", &mut events);
             assert!(events.is_empty(), "{agent} reacted to noise");
         }
     }

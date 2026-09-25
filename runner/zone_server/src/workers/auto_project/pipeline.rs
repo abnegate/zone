@@ -799,7 +799,12 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                     )
                     .await;
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                return match error.stalled() {
+                    Some(reason) => step.pause(&reason).await,
+                    None => Err(error.to_string()),
+                };
+            }
         }
         rows = auto_projects::reviews(pool, step.task.task_id)
             .await

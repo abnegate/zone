@@ -14,7 +14,7 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc};
 use uuid::Uuid;
 use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
-use zone_core::llm::provider::{OUTGROWN, SignIn, UNFUNDED};
+use zone_core::llm::provider::{OUTGROWN, SignIn, UNFUNDED, UNFUNDED_CONTEXT};
 use zone_core::llm::{
     AgentKind, BuiltinTools, Credential, LlmBackend, LlmClient, LlmConfig, Message as LlmMessage,
 };
@@ -444,9 +444,9 @@ const RATE_LIMIT_MARKERS: &[&str] = &[
 ];
 
 /// How zone_core words a coding agent's failure that a retry of the same
-/// prompt meets again: an answer past the output cap, and a Fable turn the
-/// account has no usage credits for.
-const AGENT_TERMINAL_MARKERS: &[&str] = &[OUTGROWN, UNFUNDED];
+/// prompt meets again: an answer past the output cap, and a model or a
+/// context the signed-in account cannot spend usage credits on.
+const AGENT_TERMINAL_MARKERS: &[&str] = &[OUTGROWN, UNFUNDED, UNFUNDED_CONTEXT];
 
 /// How a coding agent says its subscription ran out. Only a coding agent's
 /// own words are read for these: an endpoint's failure that happens to use
@@ -3730,7 +3730,14 @@ mod retry_tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use zone_core::llm::provider::{STDERR_HEADING, SignIn, UNFUNDED};
+    use zone_core::llm::provider::{
+        STDERR_HEADING, SignIn, UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT,
+    };
+
+    const FABLE_REFUSAL: &str =
+        "Fable 5.1 requires usage credits. Switch to another model to continue.";
+    const LONG_CONTEXT_REFUSAL: &str = "API Error: Usage credits required for 1M context · turn on usage credits at claude.ai/settings/usage?from=cc_cli_limit_message (they take effect in a new session)";
+    const SESSION_LIMIT: &str = "You've hit your session limit · resets 5pm";
 
     fn outcome() -> TaskOutcome {
         TaskOutcome {
@@ -3792,7 +3799,7 @@ mod retry_tests {
     fn a_coding_agent_that_has_to_be_signed_in_again_is_not_retried() {
         use zone_core::llm::AgentKind;
 
-        for sign_in in [SignIn::Organization, SignIn::Instance] {
+        for sign_in in [SignIn::Organization, SignIn::Host, SignIn::Instance] {
             let fault = Fault::agent(
                 &agent(AgentKind::Claude, sign_in),
                 "Stream error: claude: Not logged in · Please run /login".to_string(),
@@ -3856,41 +3863,64 @@ mod retry_tests {
         );
     }
 
-    /// A Fable turn the signed-in account has no usage credits for is refused
-    /// again on every retry, whatever throttling the agent's stderr logged
-    /// after it, and no sign-in fixes it.
+    /// A turn on a model, or on a context, that the signed-in account cannot
+    /// spend usage credits on is refused again on every retry, and no sign-in
+    /// fixes it.
     #[test]
-    fn a_coding_agent_refused_fable_for_want_of_usage_credits_is_not_retried() {
-        for sign_in in [SignIn::Organization, SignIn::Instance] {
+    fn a_coding_agent_refused_for_want_of_usage_credits_is_not_retried() {
+        for sign_in in [SignIn::Organization, SignIn::Host, SignIn::Instance] {
             for message in [
-                format!("Stream error: claude: {UNFUNDED}"),
-                format!(
-                    "Stream error: claude: {UNFUNDED}{STDERR_HEADING}\
-                     2026-09-25T03:12:09Z WARN claude: 429 Too Many Requests; retrying"
-                ),
+                format!("Stream error: claude: {UNFUNDED}: {FABLE_REFUSAL}"),
+                format!("Stream error: claude: {UNFUNDED_CONTEXT}: {LONG_CONTEXT_REFUSAL}"),
             ] {
-                let fault = Fault::agent(&agent(AgentKind::Claude, sign_in), message);
+                let fault = Fault::agent(&agent(AgentKind::Claude, sign_in), message.clone());
 
-                assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
-                assert!(
-                    !fault.message.contains(backend::REMEDY),
-                    "{}",
-                    fault.message
-                );
+                assert_eq!(fault.failure, Failure::Terminal, "{message}");
+                assert_eq!(fault.message, message);
             }
         }
     }
 
-    /// Claude's words for a Fable turn without usage credits, and Zone's, are
-    /// a coding agent's. An endpoint's failure that happens to use them is
-    /// judged exactly as it was before coding agents ran tasks.
+    /// Only the agent's own words say a turn cannot be funded. Zone's wording
+    /// in the stderr that follows them decides nothing.
     #[test]
-    fn an_endpoint_failure_in_the_words_of_a_fable_credits_refusal_is_judged_as_it_always_was() {
-        for (message, judged) in [
-            (
-                "Fable 5 requires usage credits. Switch to another model to continue.",
-                Failure::Transient,
+    fn a_usage_credits_refusal_only_in_a_coding_agents_stderr_is_retried() {
+        let fault = Fault::agent(
+            &agent(AgentKind::Claude, SignIn::Organization),
+            format!(
+                "Stream error: claude: the agent exited without completing its event stream\
+                 {STDERR_HEADING}{UNFUNDED}: {FABLE_REFUSAL}"
             ),
+        );
+
+        assert_eq!(fault.failure, Failure::Transient, "{}", fault.message);
+    }
+
+    /// claude could not look the account's usage credits up, so a later
+    /// attempt may find them.
+    #[test]
+    fn a_usage_credits_refusal_claude_could_not_confirm_is_retried() {
+        for (words, judged) in [
+            (FABLE_REFUSAL, Failure::Transient),
+            (
+                "You've hit your team's shared budget. Switch to another model to continue.",
+                Failure::RateLimited { retry_after: None },
+            ),
+        ] {
+            let message = format!("Stream error: claude: {UNCONFIRMED} (fetch_error): {words}");
+            let fault = Fault::agent(&agent(AgentKind::Claude, SignIn::Organization), message);
+
+            assert_eq!(fault.failure, judged, "{}", fault.message);
+        }
+    }
+
+    /// claude's words for a turn it cannot fund, and Zone's, are a coding
+    /// agent's. An endpoint's failure that happens to use them is judged
+    /// exactly as it was before coding agents ran tasks.
+    #[test]
+    fn an_endpoint_failure_in_the_words_of_a_usage_credits_refusal_is_judged_as_it_always_was() {
+        for (message, judged) in [
+            (FABLE_REFUSAL, Failure::Transient),
             (
                 "You've reached your Fable limit. Switch to another model to continue.",
                 Failure::Transient,
@@ -3900,17 +3930,26 @@ mod retry_tests {
                 Failure::Transient,
             ),
             (
-                "429 credits_required: Fable 5 requires usage credits",
+                "429 credits_required: Fable 5.1 requires usage credits",
                 Failure::RateLimited { retry_after: None },
             ),
             ("400 Bad Request: credits_required", Failure::Terminal),
             (UNFUNDED, Failure::Transient),
+            (UNFUNDED_CONTEXT, Failure::Transient),
+            (SESSION_LIMIT, Failure::Transient),
         ] {
             let fault = Fault::agent(&LlmBackend::Http, message.to_string());
 
             assert_eq!(fault.failure, judged, "{message}");
             assert_eq!(fault.failure, classify(message), "{message}");
             assert_eq!(fault.message, message);
+        }
+        for message in [UNFUNDED, UNFUNDED_CONTEXT, SESSION_LIMIT] {
+            assert_ne!(
+                classify_agent(message),
+                classify(message),
+                "{message} no longer tells an endpoint's failure from a coding agent's"
+            );
         }
     }
 

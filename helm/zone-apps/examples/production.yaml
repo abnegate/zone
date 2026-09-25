@@ -15,7 +15,7 @@ commonEnv:
   DB_PORT: "5432"
   DB_NAME: "manager"
   DB_USER: "zone_app"
-  RUST_LOG: "warn,zone_server=info"
+  RUST_LOG: "warn,zone_server=info,zone_core=info"
   LITELLM_HOST: "http://litellm:4000"
   OLLAMA_HOST: "http://ollama:11434"
 

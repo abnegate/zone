@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 use tool_runner::executor::{GRACE_PERIOD, ProcessGroup};
 
-use super::agent::AgentKind;
+use super::agent::{AgentKind, Reader};
 use super::completion::{Completion, CompletionProvider, CompletionRequest, ProviderKind};
 use super::credential::Credential;
 use super::environment;
@@ -175,8 +175,10 @@ impl CliProvider {
         };
 
         let name = self.name.clone();
-        let agent = self.agent;
+        let mut reader = self.agent.reader();
         let line_limit = self.settings.line_limit;
+        let sign_in = self.settings.sign_in;
+        let directory = self.settings.working_directory.clone();
 
         Ok(Box::pin(async_stream::try_stream! {
             let mut lines = Lines::new(line_limit);
@@ -191,13 +193,23 @@ impl CliProvider {
                 if read == 0 {
                     ended = true;
                     if let Some(frame) = lines.flush() {
-                        interpret(agent, &name, line_limit, frame, &mut events);
+                        interpret(&mut reader, &name, line_limit, frame, &mut events);
                     }
                 } else {
                     lines.extend(&buffer[..read]);
                     while let Some(frame) = lines.take() {
-                        interpret(agent, &name, line_limit, frame, &mut events);
+                        interpret(&mut reader, &name, line_limit, frame, &mut events);
                     }
+                }
+
+                if let Some(window) = reader.credits() {
+                    tracing::info!(
+                        provider = %name,
+                        sign_in = ?sign_in,
+                        directory = ?directory,
+                        window = %window,
+                        "the turn runs on usage credits past the plan's limit"
+                    );
                 }
 
                 for event in events.drain(..) {
@@ -412,14 +424,14 @@ impl CompletionProvider for CliProvider {
 }
 
 fn interpret(
-    agent: AgentKind,
+    reader: &mut Reader,
     provider: &str,
     limit: usize,
     frame: Frame,
     events: &mut Vec<AgentEvent>,
 ) {
     match frame {
-        Frame::Line(line) => agent.interpret(&line, events),
+        Frame::Line(line) => reader.interpret(&line, events),
         Frame::Dropped => tracing::warn!(
             provider,
             limit,
@@ -494,8 +506,9 @@ fn is_continuation(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::llm::RequestOptions;
-    use crate::llm::provider::UNFUNDED;
-    use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT};
+    use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, SignIn};
+    use crate::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
+    use crate::tools::test_support::captured_logs;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::io::Write;
@@ -857,29 +870,137 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         );
     }
 
+    /// A stand-in agent that replays `stream` as its output.
+    fn replayed(directory: &TempDir, stream: &str) -> CliSettings {
+        let lines: Vec<String> = stream.lines().map(str::to_string).collect();
+        settings(directory, &replaying(directory, &lines))
+    }
+
     #[tokio::test]
-    async fn a_fable_turn_without_usage_credits_fails_naming_them_and_not_a_rate_limit() {
-        for stream in [
-            include_str!("parser/fixtures/claude/fable-credits-required.jsonl"),
-            include_str!("parser/fixtures/claude/fable-limit-reached.jsonl"),
+    async fn a_turn_the_account_cannot_fund_fails_in_claudes_words_and_not_as_a_rate_limit() {
+        for (stream, failure) in [
+            (
+                include_str!("parser/fixtures/claude/fable-credits-required.jsonl"),
+                format!(
+                    "{UNFUNDED}: Fable 5.1 requires usage credits. Switch to another model to continue."
+                ),
+            ),
+            (
+                include_str!("parser/fixtures/claude/fable-limit-reached.jsonl"),
+                format!(
+                    "{UNFUNDED}: You've reached your Fable limit. Switch to another model to continue."
+                ),
+            ),
+            (
+                include_str!("parser/fixtures/claude/long-context-credits-required.jsonl"),
+                format!(
+                    "{UNFUNDED_CONTEXT}: API Error: Usage credits required for 1M context · turn on usage credits at claude.ai/settings/usage?from=cc_cli_limit_message (they take effect in a new session)"
+                ),
+            ),
         ] {
             let directory = TempDir::new().expect("a temporary directory");
-            let recording = directory.path().join("recording.jsonl");
-            std::fs::write(&recording, stream).expect("the recording");
-            let script = format!("cat '{}'", recording.display());
-            let provider = CliProvider::agent(AgentKind::Claude, settings(&directory, &script));
+            let provider = CliProvider::agent(AgentKind::Claude, replayed(&directory, stream));
 
             let error = run(&provider, &[Message::user("Review the change.")])
                 .await
                 .expect_err("a refused turn");
 
             let rendered = error.to_string();
-            assert!(rendered.contains(UNFUNDED), "{rendered}");
+            assert_eq!(rendered, format!("claude: {failure}"));
             assert!(
                 !rendered.to_ascii_lowercase().contains("rate limit"),
                 "{rendered}"
             );
         }
+    }
+
+    /// claude hands a subagent's refusal to the main agent as the result of
+    /// the call that started it, and the turn goes on to the main agent's
+    /// answer.
+    #[tokio::test]
+    async fn a_subagents_refusal_leaves_the_turn_to_the_main_agents_answer() {
+        const ANSWER: &str = "Fable could not run on this account, so the review is mine.";
+        let stream = [
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_01Agent", "name": "Agent", "input": {"description": "Ask Fable", "prompt": "Review the change.", "model": "fable"}}]}, "parent_tool_use_id": null}),
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "overageStatus": "rejected", "overageDisabledReason": "overage_not_provisioned", "isUsingOverage": false, "errorCode": "credits_required"}}),
+            json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "Fable 5.1 requires usage credits. Switch to another model to continue."}]}, "parent_tool_use_id": "toolu_01Agent", "is_api_error_message": true, "api_error": "model_requires_usage_credits"}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}, "parent_tool_use_id": null}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER}),
+        ]
+        .map(|line| line.to_string());
+        let directory = TempDir::new().expect("a temporary directory");
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            settings(&directory, &replaying(&directory, &stream)),
+        );
+
+        let completion = run(
+            &provider,
+            &[Message::user("Ask Fable to review the change.")],
+        )
+        .await
+        .expect("the main agent's answer");
+
+        assert_eq!(completion.message.content.as_deref(), Some(ANSWER));
+    }
+
+    /// A turn usage credits carry past the plan's window is logged once, with
+    /// the window and whose sign-in pays for it, and never with its token.
+    #[tokio::test]
+    async fn a_turn_on_usage_credits_is_logged_once_with_its_window_and_sign_in() {
+        const TOKEN: &str = "sk-ant-oat01-notarealtoken";
+        let stream = [
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour", "overageStatus": "allowed", "isUsingOverage": true}}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Reviewed."}]}}),
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour", "overageStatus": "allowed_warning", "isUsingOverage": true}}),
+            json!({"type": "result", "subtype": "success", "is_error": false}),
+        ]
+        .map(|line| line.to_string());
+        for sign_in in [SignIn::Organization, SignIn::Host, SignIn::Instance] {
+            let directory = TempDir::new().expect("a temporary directory");
+            let provider = CliProvider::agent(
+                AgentKind::Claude,
+                settings(&directory, &replaying(&directory, &stream))
+                    .with_sign_in(sign_in)
+                    .with_credential(Credential::key("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)),
+            );
+
+            let (completion, logged) =
+                captured_logs(run(&provider, &[Message::user("Review the change.")])).await;
+
+            assert_eq!(
+                completion
+                    .expect("a turn on usage credits")
+                    .message
+                    .content
+                    .as_deref(),
+                Some("Reviewed.")
+            );
+            let credited: Vec<&str> = logged
+                .lines()
+                .filter(|line| line.contains("usage credits"))
+                .collect();
+            assert_eq!(credited.len(), 1, "{logged}");
+            assert!(credited[0].contains("INFO"), "{logged}");
+            assert!(credited[0].contains("five_hour"), "{logged}");
+            assert!(
+                credited[0].contains(&format!("sign_in={sign_in:?}")),
+                "{logged}"
+            );
+            assert!(!logged.contains(TOKEN), "{logged}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_inside_the_plans_window_logs_no_usage_credits() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let provider = CliProvider::agent(AgentKind::Claude, settings(&directory, CLAUDE_SESSION));
+
+        let (completion, logged) =
+            captured_logs(run(&provider, &[Message::user("What does a.rs do?")])).await;
+
+        completion.expect("an answer");
+        assert!(!logged.contains("usage credits"), "{logged}");
     }
 
     #[test]

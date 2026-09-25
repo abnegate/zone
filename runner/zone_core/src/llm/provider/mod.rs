@@ -47,7 +47,7 @@ pub use error::{ExitStatus, ProviderError};
 pub use event::AgentEvent;
 pub use http::HttpProvider;
 pub use lines::{Frame, Lines};
-pub use parser::claude::UNFUNDED;
+pub use parser::claude::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
 pub use router::Router;
 pub use selection::{SelectionStrategy, Weighted, choose, sample};
 pub use settings::{
