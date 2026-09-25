@@ -727,10 +727,15 @@ a name containing a colon or a space, so an Ollama model such as `llama3.2:3b`
 or `gpt-oss:20b` never reaches an agent.
 
 A claude turn whose context passes 200K tokens, on a model that takes a longer
-one such as `opus[1m]`, can need usage credits too. When claude refuses one
-for want of them, Zone reports claude's own words after "The signed-in Claude
-account cannot spend usage credits on a context this long: ", and a task run
-does not retry it.
+one such as `opus[1m]`, can need usage credits too. claude 2.1.278 names the
+context as the reason it refuses one only when the 429 carries neither the
+`anthropic-ratelimit-unified-representative-claim` nor the
+`anthropic-ratelimit-unified-overage-status` header. Zone then reports claude's
+own words after "The signed-in Claude account cannot spend usage credits on a
+context this long: ", and a task run does not retry it. When the 429 carries
+either header, claude words the refusal as the plan's limit instead, and Zone
+reports claude's words as a rate limit: a task run backs off before it tries
+again.
 
 A turn asks for the chat's own model only when the agent knows it. Otherwise
 it asks for the Reasoning model from AI settings when Zone judges the prompt
@@ -768,10 +773,11 @@ happens when the agent gives no usable answer within
   sign-in that cannot be read, a Claude token that cannot be renewed, or an
   unwritable state directory), that task pauses with the reason and the
   project continues. A CLI that starts and then fails is retried on the next
-  tick, except when claude refuses the reviewer model, or the review's
+  tick, except when claude says it refuses the reviewer model, or the review's
   context, because the signed-in account cannot spend usage credits on it:
   every tick would be refused the same way, so the task pauses with claude's
-  words. The reviewer's model is one the agent knows, taken from
+  words. *Naming a model* says when claude names a context as the reason.
+  The reviewer's model is one the agent knows, taken from
   `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else one of the agent's own
   models, never an installed Ollama model. Zone does not pick `fable` on its
   own: Fable has a weekly allowance of its own, and claude refuses a Fable
@@ -1249,7 +1255,7 @@ Inside Docker the manager image does not include magents. Install it on the host
 
 An auto project runs itself: every agentic task in it is executed unattended, its pull request waits for checks, is reviewed by a model other than the one that wrote it and by the review bots already installed on the repository (CodeRabbit, Greptile), is fixed until nothing raised is left open, is merged — with administrator privileges when branch protection would otherwise refuse — and is reported with a high-level and a low-level summary. Start one from **Projects → Auto project**, which opens a planner chat that interviews you and creates the project and its tasks, or turn **Auto** on for an existing project. All settings are optional.
 
-On Claude Code, an auto project's runs, reviews and summaries run with no one watching, on the organization's Claude sign-in or, when the organization has not signed in and `ZONE_AGENT_HOST_LOGIN` is on, on the login of the user the server runs as. When that account has usage credits turned on, they keep going on those credits past the plan's limits, through the night, up to the account's monthly cap; Zone logs each such turn, and whose account it ran on, as *Usage credits* under Model Backend describes. The account's owner stops it by turning usage credits off, or bounds it with a monthly cap, at claude.ai/settings/usage. A review whose model, or context, the account cannot spend usage credits on pauses its task with claude's words rather than asking again every tick.
+On Claude Code, an auto project's runs, reviews and summaries run with no one watching, on the organization's Claude sign-in or, when the organization has not signed in and `ZONE_AGENT_HOST_LOGIN` is on, on the login of the user the server runs as. When that account has usage credits turned on, they keep going on those credits past the plan's limits, through the night, up to the account's monthly cap; Zone logs each such turn, and whose account it ran on, as *Usage credits* under Model Backend describes. The account's owner stops it by turning usage credits off, or bounds it with a monthly cap, at claude.ai/settings/usage. A review whose model, or context, claude says the account cannot spend usage credits on pauses its task with claude's words rather than asking again every tick.
 
 ### `ZONE_AUTO_ENABLED`
 - **Default**: `true`
