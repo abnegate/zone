@@ -143,7 +143,32 @@ neither follow `ZONE_LLM_BACKEND`, the instance-wide default.
 
 No instance-wide setting turns these providers off: any organization admin can
 select them. Read *Security* below before using them on an instance shared by
-organizations that must not see each other's data.
+organizations that must not see each other's data. On Claude Code, a Claude
+account with usage credits turned on keeps every turn going past its plan's
+limits, on those credits: read *Usage credits* before choosing it for an
+organization whose tasks run unattended.
+
+### Usage credits
+
+A Claude account can turn on usage credits, which pay for use past its plan's
+limits, and claude spends them without asking. When a turn passes the plan's
+five-hour or weekly window and the account's usage credits cover it, the turn
+keeps going on those credits, up to the account's monthly cap, and Zone lets
+it. That holds for every turn Zone runs on Claude Code, under an
+organization's sign-in or the server's own: any member's chats, task runs,
+including an auto project's runs through the night, and auto-project reviews
+and summaries. With usage credits off, such a turn fails as a rate limit, and
+a task run backs off before it tries again.
+
+Zone logs each turn that runs on usage credits, once per turn, at info level:
+"the turn runs on usage credits past the plan's limit", with the window it
+passed (`window`), whose sign-in it runs under (`sign_in`: `Organization`, or
+`Instance` for the server's own) and the turn's working directory
+(`directory`), which on an organization's sign-in names the organization. It
+never logs the token.
+
+The account's owner stops this by turning usage credits off, or bounds it by
+setting a monthly cap, at claude.ai/settings/usage.
 
 ### `ZONE_LLM_BACKEND`
 - **Default**: `litellm`
@@ -650,16 +675,23 @@ settings list that agent's own models, and Automatic leaves the choice to the
 agent:
 
 - Claude Code: `sonnet`, `opus`, `haiku` and `fable`, the aliases claude
-  resolves to its latest models. On Pro and Max plans, Fable runs on the
-  plan's weekly Fable allowance and then on usage credits, which claude spends
-  without asking, as it does on any model past the plan's own limits. Usage
-  credits are turned on once per account, at claude.ai/settings/usage or with
-  `/usage-credits` in the interactive claude CLI, and every Zone sign-in for
-  that account can then use Fable. Without them claude refuses a Fable turn
-  ("Fable 5 requires usage credits", or "You've reached your Fable limit" once
-  the allowance is spent), and Zone reports "The signed-in Claude account
-  needs usage credits for Fable; turn them on at claude.ai/settings/usage or
-  pick another model". A task run does not retry it.
+  resolves to its latest models; `fable` is Fable 5.1. On Pro and Max plans,
+  Fable bills the plan's weekly Fable allowance and, past it, the account's
+  usage credits if the account has them on, which claude spends without
+  asking (see *Usage credits*). Whether a Fable turn inside the allowance runs
+  with usage credits off is not verified. When claude refuses a Fable turn it
+  cannot fund, Zone reports claude's own words after "The signed-in Claude
+  account cannot spend usage credits on this model: ", as in "…: Fable 5.1
+  requires usage credits. Switch to another model to continue." or "…: You've
+  hit your monthly spend limit. Switch to another model to continue.", and a
+  task run does not retry it. When claude could not look the account's usage
+  credits up, the failure begins "The signed-in Claude account's usage
+  credits could not be confirmed" instead, and a task run retries it. The
+  account's owner turns usage credits on, or raises their cap, at
+  claude.ai/settings/usage; on Team and Enterprise plans an admin does, at
+  claude.ai/admin-settings/usage. claude 2.1.278 answers a request Fable
+  refuses as a biology or cybersecurity risk on an Opus model instead,
+  without asking.
 - Codex: `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`,
   `gpt-5.6-terra`, `gpt-5.6-luna` and `gpt-5.5`, the presets codex 0.156.1
   ships, in its order. A signed-in ChatGPT account may see a different set.
@@ -682,6 +714,12 @@ such as `claude-opus-4-8`, optionally ending in `[1m]`. codex knows its presets
 and lowercase names beginning `gpt-`. Neither knows an empty name, `auto`, or
 a name containing a colon or a space, so an Ollama model such as `llama3.2:3b`
 or `gpt-oss:20b` never reaches an agent.
+
+A claude turn whose context passes 200K tokens, on a model that takes a longer
+one such as `opus[1m]`, can need usage credits too. When claude refuses one
+for want of them, Zone reports claude's own words after "The signed-in Claude
+account cannot spend usage credits on a context this long: ", and a task run
+does not retry it.
 
 A turn asks for the chat's own model only when the agent knows it. Otherwise
 it asks for the Reasoning model from AI settings when Zone judges the prompt
@@ -719,12 +757,17 @@ happens when the agent gives no usable answer within
   sign-in that cannot be read, a Claude token that cannot be renewed, or an
   unwritable state directory), that task pauses with the reason and the
   project continues. A CLI that starts and then fails is retried on the next
-  tick. The reviewer's model is one the agent knows, taken from
+  tick, except when claude refuses the reviewer model, or the review's
+  context, because the signed-in account cannot spend usage credits on it:
+  every tick would be refused the same way, so the task pauses with claude's
+  words. The reviewer's model is one the agent knows, taken from
   `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else one of the agent's own
   models, never an installed Ollama model. Zone does not pick `fable` on its
-  own, because a turn on it can spend usage credits without asking or fail
-  for want of them, as described under Naming a model: a review runs on Fable
-  only when `ZONE_AUTO_REVIEW_MODELS` or the Fast or Reasoning model names it.
+  own: Fable has a weekly allowance of its own, and claude refuses a Fable
+  turn it cannot fund outright, where a turn on another model past the plan's
+  limits is a rate limit that a task run backs off from. A review runs on
+  Fable only when `ZONE_AUTO_REVIEW_MODELS` or the Fast or Reasoning model
+  names it.
   A run whose agent chose its own model records `auto`, which names no model,
   so Zone counts any review of it as one by the model that wrote the change:
   the review says so, and with `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL` on
@@ -1194,6 +1237,8 @@ Inside Docker the manager image does not include magents. Install it on the host
 ## 🤖 Auto projects
 
 An auto project runs itself: every agentic task in it is executed unattended, its pull request waits for checks, is reviewed by a model other than the one that wrote it and by the review bots already installed on the repository (CodeRabbit, Greptile), is fixed until nothing raised is left open, is merged — with administrator privileges when branch protection would otherwise refuse — and is reported with a high-level and a low-level summary. Start one from **Projects → Auto project**, which opens a planner chat that interviews you and creates the project and its tasks, or turn **Auto** on for an existing project. All settings are optional.
+
+On Claude Code, an auto project's runs, reviews and summaries run on the organization's Claude sign-in with no one watching. When that account has usage credits turned on, they keep going on those credits past the plan's limits, through the night, up to the account's monthly cap; Zone logs each such turn, as *Usage credits* under Model Backend describes. The account's owner stops it by turning usage credits off, or bounds it with a monthly cap, at claude.ai/settings/usage. A review whose model, or context, the account cannot spend usage credits on pauses its task with claude's words rather than asking again every tick.
 
 ### `ZONE_AUTO_ENABLED`
 - **Default**: `true`
