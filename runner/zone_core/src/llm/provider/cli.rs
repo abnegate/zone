@@ -914,6 +914,36 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         }
     }
 
+    /// claude hands a subagent's refusal to the main agent as the result of
+    /// the call that started it, and the turn goes on to the main agent's
+    /// answer.
+    #[tokio::test]
+    async fn a_subagents_refusal_leaves_the_turn_to_the_main_agents_answer() {
+        const ANSWER: &str = "Fable could not run on this account, so the review is mine.";
+        let stream = [
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_01Agent", "name": "Agent", "input": {"description": "Ask Fable", "prompt": "Review the change.", "model": "fable"}}]}, "parent_tool_use_id": null}),
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "overageStatus": "rejected", "overageDisabledReason": "overage_not_provisioned", "isUsingOverage": false, "errorCode": "credits_required"}}),
+            json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "Fable 5.1 requires usage credits. Switch to another model to continue."}]}, "parent_tool_use_id": "toolu_01Agent", "is_api_error_message": true, "api_error": "model_requires_usage_credits"}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}, "parent_tool_use_id": null}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER}),
+        ]
+        .map(|line| line.to_string());
+        let directory = TempDir::new().expect("a temporary directory");
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            settings(&directory, &replaying(&directory, &stream)),
+        );
+
+        let completion = run(
+            &provider,
+            &[Message::user("Ask Fable to review the change.")],
+        )
+        .await
+        .expect("the main agent's answer");
+
+        assert_eq!(completion.message.content.as_deref(), Some(ANSWER));
+    }
+
     /// A turn usage credits carry past the plan's window is logged once, with
     /// the window and whose sign-in pays for it, and never with its token.
     #[tokio::test]

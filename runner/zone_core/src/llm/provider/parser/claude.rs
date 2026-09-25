@@ -87,6 +87,8 @@ enum Event {
         #[serde(default)]
         message: Option<AssistantMessage>,
         #[serde(default)]
+        parent_tool_use_id: Option<String>,
+        #[serde(default)]
         is_api_error_message: bool,
         #[serde(default)]
         api_error: Option<String>,
@@ -145,6 +147,22 @@ enum Block {
     },
     #[serde(other)]
     Ignored,
+}
+
+impl Block {
+    fn call(self) -> Option<ToolCall> {
+        match self {
+            Self::ToolUse { id, name, input } => Some(ToolCall {
+                id,
+                call_type: CALL_TYPE.to_string(),
+                function: FunctionCall {
+                    name,
+                    arguments: input.to_string(),
+                },
+            }),
+            Self::Text { .. } | Self::Ignored => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,6 +256,12 @@ impl Reader {
         match event {
             Event::Assistant {
                 message,
+                parent_tool_use_id: Some(_),
+                ..
+            } => subagent(message, events),
+            Event::Assistant {
+                message,
+                parent_tool_use_id: None,
                 is_api_error_message,
                 api_error,
             } => self.assistant(message, is_api_error_message, api_error.as_deref(), events),
@@ -288,17 +312,7 @@ impl Reader {
         for block in message.content {
             match block {
                 Block::Text { text } => events.push(AgentEvent::Text(text)),
-                Block::ToolUse { id, name, input } => {
-                    events.push(AgentEvent::Tool(ToolCall {
-                        id,
-                        call_type: CALL_TYPE.to_string(),
-                        function: FunctionCall {
-                            name,
-                            arguments: input.to_string(),
-                        },
-                    }));
-                }
-                Block::Ignored => {}
+                block => events.extend(block.call().map(AgentEvent::Tool)),
             }
         }
         if let Some(usage) = message.usage {
@@ -363,6 +377,17 @@ impl Reader {
             format!("{marker}: {words}")
         }
     }
+}
+
+/// A line of a subagent's own conversation. Its words, token counts and API
+/// errors stay there: claude hands a failure to the main agent as the result
+/// of the call that started the subagent. What it reaches for is the turn's.
+fn subagent(message: Option<AssistantMessage>, events: &mut Vec<AgentEvent>) {
+    let calls = message
+        .into_iter()
+        .flat_map(|message| message.content)
+        .filter_map(Block::call);
+    events.extend(calls.map(AgentEvent::Tool));
 }
 
 fn fable_refusal(words: &str) -> bool {
@@ -504,6 +529,88 @@ mod tests {
 
     fn unfunded(words: &str) -> String {
         format!("{UNFUNDED}: {words}")
+    }
+
+    const AGENT_CALL: &str = "toolu_01AgentFable";
+    const ANSWER: &str = "Fable could not run on this account, so the review is mine: it is sound.";
+
+    fn said(words: &str) -> Value {
+        json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": words}],
+                "usage": {"input_tokens": 12, "cache_read_input_tokens": 3400, "output_tokens": 20},
+            },
+            "parent_tool_use_id": null,
+            "session_id": "6f1",
+        })
+    }
+
+    fn called(id: &str, name: &str, input: Value) -> Value {
+        json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": id, "name": name, "input": input}],
+            },
+            "parent_tool_use_id": null,
+            "session_id": "6f1",
+        })
+    }
+
+    /// The main agent's call that starts a subagent on Fable.
+    fn delegated() -> Value {
+        called(
+            AGENT_CALL,
+            "Agent",
+            json!({
+                "description": "Ask Fable",
+                "prompt": "Review the change.",
+                "subagent_type": "general-purpose",
+                "model": "fable",
+            }),
+        )
+    }
+
+    /// `line` as claude writes it for a subagent: claude runs an Agent in the
+    /// background by default and writes each of its lines into the stream,
+    /// naming the call that started it, with its API errors and their kinds.
+    fn subagents(mut line: Value) -> Value {
+        line["parent_tool_use_id"] = AGENT_CALL.into();
+        line["subagent_type"] = "general-purpose".into();
+        line["task_description"] = "Ask Fable".into();
+        line
+    }
+
+    fn succeeded(words: &str) -> Value {
+        json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": words,
+            "session_id": "6f1",
+        })
+    }
+
+    fn refused_for_credits() -> String {
+        limit(json!({
+            "status": "rejected",
+            "overageStatus": "rejected",
+            "overageDisabledReason": "overage_not_provisioned",
+            "isUsingOverage": false,
+            "errorCode": "credits_required",
+        }))
+    }
+
+    fn tools(events: &[AgentEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Tool(call) => Some(call.function.name.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -944,6 +1051,106 @@ mod tests {
             "{failures:?}"
         );
         assert_eq!(text(&events), "", "claude's refusal read as an answer");
+    }
+
+    /// claude hands a subagent's refusal to the main agent as the result of
+    /// the call that started it, and the main agent answers without it.
+    #[test]
+    fn a_subagents_refusal_leaves_the_main_agent_to_answer() {
+        for (kind, words) in [
+            (MODEL_REQUIRES_USAGE_CREDITS, REQUIRES_CREDITS),
+            (LONG_CONTEXT_CREDITS_REQUIRED, LONG_CONTEXT),
+        ] {
+            let events = interpret_all(&stream(&[
+                delegated().to_string(),
+                refused_for_credits(),
+                subagents(api_error(words, Some(kind))).to_string(),
+                said(ANSWER).to_string(),
+                succeeded(ANSWER).to_string(),
+            ]));
+
+            assert!(failures(&events).is_empty(), "{kind}: {events:?}");
+            assert_eq!(text(&events), ANSWER, "{kind}");
+            assert!(
+                matches!(events.last(), Some(AgentEvent::Finished { .. })),
+                "{kind}: {events:?}"
+            );
+        }
+    }
+
+    /// A subagent's words are its own conversation's. What it reaches for is
+    /// still the turn's work, shown as the main agent's calls are.
+    #[test]
+    fn a_subagents_words_never_reach_the_answer() {
+        let events = interpret_all(&stream(&[
+            delegated().to_string(),
+            subagents(said("Reading the diff first.")).to_string(),
+            subagents(called(
+                "toolu_02Read",
+                "Read",
+                json!({"file_path": "/w/main.rs"}),
+            ))
+            .to_string(),
+            subagents(said("The change is sound.")).to_string(),
+            said(ANSWER).to_string(),
+            succeeded(ANSWER).to_string(),
+        ]));
+
+        assert_eq!(text(&events), ANSWER);
+        assert_eq!(tools(&events), ["Agent", "Read"]);
+    }
+
+    #[test]
+    fn a_subagents_token_counts_are_not_the_turns() {
+        let mut subagent = subagents(said("The change is sound."));
+        subagent["message"]["usage"] = json!({"input_tokens": 190_000, "output_tokens": 900});
+
+        let events = interpret_all(&stream(&[
+            delegated().to_string(),
+            subagent.to_string(),
+            said(ANSWER).to_string(),
+        ]));
+
+        let prompts: Vec<u32> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Usage(usage) => Some(usage.prompt_tokens),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompts, [12 + 3400]);
+    }
+
+    #[test]
+    fn the_main_agents_refusal_still_fails_the_turn_beside_a_subagent() {
+        for (kind, words, marker) in [
+            (MODEL_REQUIRES_USAGE_CREDITS, REQUIRES_CREDITS, UNFUNDED),
+            (
+                LONG_CONTEXT_CREDITS_REQUIRED,
+                LONG_CONTEXT,
+                UNFUNDED_CONTEXT,
+            ),
+        ] {
+            let events = interpret_all(&stream(&[
+                delegated().to_string(),
+                subagents(called(
+                    "toolu_02Read",
+                    "Read",
+                    json!({"file_path": "/w/main.rs"}),
+                ))
+                .to_string(),
+                refused_for_credits(),
+                api_error(words, Some(kind)).to_string(),
+                failed_result(words).to_string(),
+            ]));
+
+            assert_eq!(
+                failures(&events).first().copied(),
+                Some(format!("{marker}: {words}").as_str()),
+                "{kind}: {events:?}"
+            );
+            assert_eq!(text(&events), "", "{kind}");
+        }
     }
 
     /// A turn usage credits carried past the plan's window says so once, with
