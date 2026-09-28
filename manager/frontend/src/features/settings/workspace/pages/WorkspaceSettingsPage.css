@@ -3,11 +3,6 @@
   color: var(--ui-text-primary);
 }
 
-.settings-page .page-bar-actions .ui-tabs-list {
-  max-width: 100%;
-  overflow-x: auto;
-}
-
 .settings-body {
   display: flex;
   flex-direction: column;

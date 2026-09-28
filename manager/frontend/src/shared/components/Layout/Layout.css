@@ -56,11 +56,13 @@ body:has(.page--workspace) {
 
 .page-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--ui-space-3);
+  justify-content: space-between;
+  gap: var(--ui-space-2) var(--ui-space-3);
   flex-shrink: 0;
-  height: var(--ui-header-height);
-  padding: 0 var(--ui-gutter);
+  min-height: var(--ui-header-height);
+  padding: calc((var(--ui-header-height) - var(--ui-control-height) - 1px) / 2) var(--ui-gutter);
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg-base);
 }
@@ -78,6 +80,7 @@ body:has(.page--workspace) {
 }
 
 .page-bar-subtitle {
+  flex: 1 1 0;
   margin: 0;
   min-width: 0;
   padding-left: var(--ui-space-3);
@@ -94,12 +97,23 @@ body:has(.page--workspace) {
   display: flex;
   align-items: center;
   gap: var(--ui-space-2);
-  flex-shrink: 0;
-  margin-left: auto;
+  min-width: 0;
+}
+
+.page-bar-actions > :has(> .ui-tabs-list) {
+  min-width: 0;
 }
 
 .page-bar-actions .ui-tabs-list {
+  justify-content: flex-start;
+  max-width: 100%;
   height: var(--ui-control-height);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.page-bar-actions .ui-tabs-list::-webkit-scrollbar {
+  display: none;
 }
 
 .page-container {

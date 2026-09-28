@@ -27,6 +27,10 @@
   color: var(--ui-error-600);
 }
 
+.wiki-tabs {
+  flex-shrink: 0;
+}
+
 .wiki-search {
   position: relative;
   width: 15rem;
@@ -537,7 +541,14 @@
 }
 
 @media (max-width: 768px) {
+  .wiki-page .page-bar-actions {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+
   .wiki-search {
+    order: 1;
     width: 100%;
   }
 

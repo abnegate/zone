@@ -102,7 +102,21 @@ describe('shared surfaces', () => {
     expect(rule(layout, '.page--workspace:has(> .page-bar)')).toContain('flex-direction: column');
     expect(rule(layout, '.page-body')).toContain('overflow-y: auto');
     expect(rule(layout, '.page-body')).toContain('min-height: 0');
-    expect(rule(layout, '.page-bar')).toContain('height: var(--ui-header-height)');
+    expect(rule(layout, '.page-bar')).toContain('min-height: var(--ui-header-height)');
+  });
+
+  it('keeps a one-row page bar at 48 (7.5 + 32 + 7.5 + 1) and wraps its actions under the title', () => {
+    const layout = read(join(styles, '..', 'shared', 'components', 'Layout', 'Layout.css'));
+    const bar = rule(layout, '.page-bar');
+    expect(bar).toContain('flex-wrap: wrap');
+    expect(bar).toContain(
+      'padding: calc((var(--ui-header-height) - var(--ui-control-height) - 1px) / 2) var(--ui-gutter)'
+    );
+    expect(rule(layout, '.page-bar-subtitle')).toContain('flex: 1 1 0');
+    const actions = rule(layout, '.page-bar-actions');
+    expect(actions).toContain('min-width: 0');
+    expect(actions).not.toContain('flex-shrink: 0');
+    expect(rule(layout, '.page-bar-actions .ui-tabs-list')).toContain('overflow-x: auto');
   });
 
   it('never lets the document itself scroll behind a workspace page', () => {
