@@ -944,6 +944,36 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         assert_eq!(completion.message.content.as_deref(), Some(ANSWER));
     }
 
+    /// claude refuses a subagent's request past the plan's window on an
+    /// event that names no agent, and the turn goes on to the main agent's
+    /// answer.
+    #[tokio::test]
+    async fn a_subagents_refused_window_leaves_the_turn_to_the_main_agents_answer() {
+        const ANSWER: &str = "Opus is past its weekly limit, so the review is mine.";
+        let stream = [
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_01Agent", "name": "Agent", "input": {"description": "Ask Opus", "prompt": "Review the change.", "model": "opus"}}]}, "parent_tool_use_id": null}),
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_208_000, "rateLimitType": "seven_day_opus", "isUsingOverage": false}}),
+            json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "You've hit your Opus limit · resets Mon 9am"}]}, "parent_tool_use_id": "toolu_01Agent", "error": "rate_limit", "is_api_error_message": true}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}, "parent_tool_use_id": null}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER}),
+        ]
+        .map(|line| line.to_string());
+        let directory = TempDir::new().expect("a temporary directory");
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            settings(&directory, &replaying(&directory, &stream)),
+        );
+
+        let completion = run(
+            &provider,
+            &[Message::user("Ask Opus to review the change.")],
+        )
+        .await
+        .expect("the main agent's answer");
+
+        assert_eq!(completion.message.content.as_deref(), Some(ANSWER));
+    }
+
     /// A turn usage credits carry past the plan's window is logged once, with
     /// the window and whose sign-in pays for it, and never with its token.
     #[tokio::test]
