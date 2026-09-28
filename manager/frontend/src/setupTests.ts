@@ -35,6 +35,28 @@ for (const [name, value] of [
   }
 }
 
+// Bun otherwise expands a node's whole happy-dom object graph in a failure message, taking seconds.
+const inspectLength = 300;
+
+function inspect(node: Node): string {
+  if (node instanceof Element) {
+    return node.outerHTML;
+  }
+  if (node instanceof window.CharacterData) {
+    return `${node.nodeName} ${JSON.stringify(node.data)}`;
+  }
+  return node.constructor.name;
+}
+
+Object.defineProperty(Node.prototype, Bun.inspect.custom, {
+  writable: true,
+  configurable: true,
+  value(this: Node) {
+    const inspected = inspect(this);
+    return inspected.length > inspectLength ? `${inspected.slice(0, inspectLength)}…` : inspected;
+  },
+});
+
 function unstubbedConfirm(): never {
   throw new Error(
     'window.confirm was called without a stub. Assign window.confirm in the test to choose the answer, so the confirmed and cancelled branches are each asserted deliberately.'

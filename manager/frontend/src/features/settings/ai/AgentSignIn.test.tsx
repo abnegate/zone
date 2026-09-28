@@ -441,9 +441,9 @@ describe('AgentSignIn', () => {
       );
       expect(agentsApi.signOut).not.toHaveBeenCalled();
       fireEvent.click(within(dialog).getByRole('button', { name: 'Sign out' }));
+      expect(screen.queryByRole('dialog')).toBeNull();
 
       await waitFor(() => expect(onChange).toHaveBeenCalledWith(claudeSignedOut));
-      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
       expect(agentsApi.signOut).toHaveBeenCalledWith(organization, 'claude');
       expect(agentsApi.get).toHaveBeenCalledWith(organization, 'claude');
       expect(await screen.findByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
@@ -456,7 +456,7 @@ describe('AgentSignIn', () => {
       const dialog = await screen.findByRole('dialog', { name: 'Sign out of Claude Code?' });
       fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
 
-      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(screen.queryByRole('dialog')).toBeNull();
       expect(agentsApi.signOut).not.toHaveBeenCalled();
       expect(screen.getByText('Signed in')).toBeInTheDocument();
     });
