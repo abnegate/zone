@@ -3914,6 +3914,49 @@ mod retry_tests {
         }
     }
 
+    /// claude refuses the main agent's request past the plan's window in
+    /// words that need not call it a limit. The window zone_core reads first
+    /// makes the turn a rate limit a task run backs off from, and claude's
+    /// words still say why.
+    #[test]
+    fn a_coding_agent_refused_past_the_plans_window_backs_off_in_its_own_words() {
+        for words in [
+            SESSION_LIMIT,
+            "You're out of usage credits · resets 5pm",
+            "Your usage allocation has been disabled by your admin · ask your admin for a higher limit",
+        ] {
+            let mut reader = AgentKind::Claude.reader();
+            let mut events = Vec::new();
+            for line in [
+                serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_208_000, "rateLimitType": "five_hour", "isUsingOverage": false}}),
+                serde_json::json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": words}]}, "parent_tool_use_id": null, "error": "rate_limit", "is_api_error_message": true}),
+                serde_json::json!({"type": "result", "subtype": "success", "is_error": true, "api_error_status": 429, "result": words}),
+            ] {
+                reader.interpret(&line.to_string(), &mut events);
+            }
+            let failure = events
+                .iter()
+                .find_map(|event| match event {
+                    zone_core::llm::provider::AgentEvent::Failed(message) => Some(message),
+                    _ => None,
+                })
+                .expect("the refusal fails the turn");
+
+            let fault = Fault::agent(
+                &agent(AgentKind::Claude, SignIn::Organization),
+                format!("Stream error: claude: {failure}"),
+            );
+
+            assert_eq!(
+                fault.failure,
+                Failure::RateLimited { retry_after: None },
+                "{}",
+                fault.message
+            );
+            assert!(fault.message.ends_with(words), "{}", fault.message);
+        }
+    }
+
     /// claude's words for a turn it cannot fund, and Zone's, are a coding
     /// agent's. An endpoint's failure that happens to use them is judged
     /// exactly as it was before coding agents ran tasks.

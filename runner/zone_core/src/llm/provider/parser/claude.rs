@@ -188,8 +188,9 @@ impl Limit {
                 .is_some_and(|status| ALLOWED.contains(&status))
     }
 
+    /// A refused request as the worker reads a rate limit, naming its window.
     /// claude writes the typed line for a refused request right after its
-    /// event, so an event that line can name better waits for it.
+    /// event, so an event that line can name better has none.
     fn refusal(&self) -> Option<String> {
         if self.headroom()
             || self.code.is_some()
@@ -244,6 +245,10 @@ enum Credits {
 #[derive(Debug, Default)]
 pub struct Reader {
     reason: Option<String>,
+    /// The latest refused window. claude reports a subagent's refused request
+    /// with the same event as the main agent's, naming neither, so the window
+    /// fails the turn only on the main agent's API error or a failed result.
+    refusal: Option<String>,
     credits: Credits,
 }
 
@@ -273,7 +278,7 @@ impl Reader {
             } => self.result(subtype, is_error, result, usage, events),
             Event::RateLimit {
                 rate_limit_info: Some(limit),
-            } => self.limit(&limit, events),
+            } => self.limit(&limit),
             Event::RateLimit {
                 rate_limit_info: None,
             }
@@ -293,20 +298,29 @@ impl Reader {
     }
 
     fn assistant(
-        &self,
+        &mut self,
         message: Option<AssistantMessage>,
         api_error_message: bool,
         api_error: Option<&str>,
         events: &mut Vec<AgentEvent>,
     ) {
-        if let Some(kind) = api_error.and_then(ApiError::named) {
-            let words = message.as_ref().map(AssistantMessage::words);
-            events.push(AgentEvent::Failed(
-                self.refused(kind.marker(), words.as_deref().unwrap_or_default()),
-            ));
+        let kind = api_error.and_then(ApiError::named);
+        if kind.is_some() || api_error_message {
+            let words = message
+                .as_ref()
+                .map(AssistantMessage::words)
+                .unwrap_or_default();
+            let failure = match kind {
+                Some(kind) => Some(self.refused(kind.marker(), &words)),
+                None => self.refusal.as_deref().map(|window| worded(window, &words)),
+            };
+            events.extend(failure.map(AgentEvent::Failed));
             return;
         }
-        let Some(message) = message.filter(|_| !api_error_message) else {
+        // The main agent's request went through, so any window refused
+        // before it was a subagent's.
+        self.refusal = None;
+        let Some(message) = message else {
             return;
         };
         for block in message.content {
@@ -341,22 +355,25 @@ impl Reader {
             });
             return;
         }
-        let message = match result.filter(|result| !result.trim().is_empty()) {
-            Some(words) if fable_refusal(&words) => self.refused(UNFUNDED, &words),
-            Some(words) => words,
-            None => subtype.unwrap_or_else(|| UNWORDED_FAILURE.to_string()),
+        let words = result.filter(|result| !result.trim().is_empty());
+        let message = match (words, &self.refusal) {
+            (Some(words), _) if fable_refusal(&words) => self.refused(UNFUNDED, &words),
+            (Some(words), Some(window)) => worded(window, &words),
+            (Some(words), None) => words,
+            (None, Some(window)) => window.clone(),
+            (None, None) => subtype.unwrap_or_else(|| UNWORDED_FAILURE.to_string()),
         };
         events.push(AgentEvent::Failed(message));
     }
 
-    fn limit(&mut self, limit: &Limit, events: &mut Vec<AgentEvent>) {
+    fn limit(&mut self, limit: &Limit) {
         self.reason.clone_from(&limit.reason);
         if limit.on_credits && matches!(self.credits, Credits::Unused) {
             let window = limit.window.as_deref().unwrap_or(UNNAMED_WINDOW);
             self.credits = Credits::Unreported(window.to_string());
         }
         if let Some(refusal) = limit.refusal() {
-            events.push(AgentEvent::Failed(refusal));
+            self.refusal = Some(refusal);
         }
     }
 
@@ -370,12 +387,17 @@ impl Reader {
             }
             _ => unfunded.to_string(),
         };
-        let words = words.trim();
-        if words.is_empty() {
-            marker
-        } else {
-            format!("{marker}: {words}")
-        }
+        worded(&marker, words)
+    }
+}
+
+/// `marker`, followed by claude's own `words` when it gave any.
+fn worded(marker: &str, words: &str) -> String {
+    let words = words.trim();
+    if words.is_empty() {
+        marker.to_string()
+    } else {
+        format!("{marker}: {words}")
     }
 }
 
@@ -442,6 +464,9 @@ mod tests {
         "You've reached your Fable limit. Switch to another model to continue.";
     const LONG_CONTEXT: &str = "API Error: Usage credits required for 1M context · turn on usage credits at claude.ai/settings/usage?from=cc_cli_limit_message (they take effect in a new session)";
     const SESSION_LIMIT: &str = "You've hit your session limit · resets 5pm";
+    const LIMIT_HIT: &str = "You've hit your limit · resets 5pm";
+    const OPUS_LIMIT: &str = "You've hit your Opus limit · resets Mon 9am";
+    const OVERLOADED: &str = "API Error: Repeated 529 Overloaded errors";
 
     const MODEL_REQUIRES_USAGE_CREDITS: &str = "model_requires_usage_credits";
     const LONG_CONTEXT_CREDITS_REQUIRED: &str = "long_context_credits_required";
@@ -531,8 +556,24 @@ mod tests {
         format!("{UNFUNDED}: {words}")
     }
 
-    const AGENT_CALL: &str = "toolu_01AgentFable";
+    fn throttled(window: &str, words: &str) -> String {
+        format!("{THROTTLED} ({window}, rejected): {words}")
+    }
+
+    /// The event claude writes when it refuses a request past the plan's
+    /// weekly Opus limit, which names no agent.
+    fn refused_past_the_opus_limit() -> String {
+        limit(json!({
+            "status": "rejected",
+            "resetsAt": 1_790_208_000,
+            "rateLimitType": "seven_day_opus",
+            "isUsingOverage": false,
+        }))
+    }
+
+    const AGENT_CALL: &str = "toolu_01Agent";
     const ANSWER: &str = "Fable could not run on this account, so the review is mine: it is sound.";
+    const OPUS_ANSWER: &str = "Opus is past its weekly limit, so the review is mine: it is sound.";
 
     fn said(words: &str) -> Value {
         json!({
@@ -559,16 +600,16 @@ mod tests {
         })
     }
 
-    /// The main agent's call that starts a subagent on Fable.
-    fn delegated() -> Value {
+    /// The main agent's call that starts a subagent on `model`.
+    fn delegated(model: &str) -> Value {
         called(
             AGENT_CALL,
             "Agent",
             json!({
-                "description": "Ask Fable",
+                "description": "Ask for a review",
                 "prompt": "Review the change.",
                 "subagent_type": "general-purpose",
-                "model": "fable",
+                "model": model,
             }),
         )
     }
@@ -579,7 +620,7 @@ mod tests {
     fn subagents(mut line: Value) -> Value {
         line["parent_tool_use_id"] = AGENT_CALL.into();
         line["subagent_type"] = "general-purpose".into();
-        line["task_description"] = "Ask Fable".into();
+        line["task_description"] = "Ask for a review".into();
         line
     }
 
@@ -693,24 +734,53 @@ mod tests {
                     "isUsingOverage": false,
                 }),
             ] {
-                let events = interpret_all(&limit(info));
+                let events = interpret_all(&stream(&[
+                    limit(info),
+                    api_error(LIMIT_HIT, None).to_string(),
+                ]));
 
-                let [AgentEvent::Failed(message)] = events.as_slice() else {
-                    panic!("expected one failure, got {events:?}");
-                };
-                assert_eq!(message, &format!("rate limit reached ({window}, rejected)"));
+                assert_eq!(failures(&events), [throttled(window, LIMIT_HIT)]);
             }
         }
     }
 
     #[test]
     fn a_refused_request_that_names_no_window_is_a_rate_limit_on_the_request() {
-        let events = interpret_all(&limit(json!({"status": "rejected"})));
+        let events = interpret_all(&stream(&[
+            limit(json!({"status": "rejected"})),
+            api_error(LIMIT_HIT, None).to_string(),
+        ]));
 
-        assert_eq!(
-            failures(&events),
-            ["rate limit reached (request, rejected)"]
-        );
+        assert_eq!(failures(&events), [throttled("request", LIMIT_HIT)]);
+    }
+
+    /// claude refuses a request past the plan's window on an event that
+    /// names no agent, then writes the refusal as the line of the agent that
+    /// sent it. The main agent's refusal fails the turn there, in claude's
+    /// words after the window, and the failed result says the same.
+    #[test]
+    fn the_main_agents_refused_window_still_fails_the_turn_as_a_rate_limit() {
+        let mut reader = Reader::default();
+        let verdicts: Vec<Vec<String>> = [
+            limit(json!({
+                "status": "rejected",
+                "resetsAt": 1_790_208_000,
+                "rateLimitType": "five_hour",
+                "isUsingOverage": false,
+            })),
+            api_error(SESSION_LIMIT, None).to_string(),
+            failed_result(SESSION_LIMIT).to_string(),
+        ]
+        .iter()
+        .map(|line| {
+            let mut events = Vec::new();
+            reader.interpret(line, &mut events);
+            failures(&events).into_iter().map(str::to_string).collect()
+        })
+        .collect();
+
+        let refused = throttled("five_hour", SESSION_LIMIT);
+        assert_eq!(verdicts, [Vec::new(), vec![refused.clone()], vec![refused]]);
     }
 
     /// claude reports a plan's window as rejected once the account's usage
@@ -757,7 +827,10 @@ mod tests {
             json!({"status": "exhausted", "rateLimitType": "five_hour", "overageStatus": "allowed"}),
             json!({"rateLimitType": "five_hour", "overageStatus": "allowed_warning"}),
         ] {
-            let events = interpret_all(&limit(info.clone()));
+            let events = interpret_all(&stream(&[
+                limit(info.clone()),
+                api_error(SESSION_LIMIT, None).to_string(),
+            ]));
 
             assert!(
                 matches!(events.as_slice(), [AgentEvent::Failed(message)] if message.starts_with(THROTTLED)),
@@ -782,10 +855,9 @@ mod tests {
             failed_result(SESSION_LIMIT).to_string(),
         ]));
 
-        let failures = failures(&events);
         assert_eq!(
-            failures.first(),
-            Some(&"rate limit reached (five_hour, rejected)"),
+            failures(&events).first().copied(),
+            Some(throttled("five_hour", SESSION_LIMIT).as_str()),
             "{events:?}"
         );
         assert_eq!(text(&events), "", "claude's failure read as an answer");
@@ -1062,7 +1134,7 @@ mod tests {
             (LONG_CONTEXT_CREDITS_REQUIRED, LONG_CONTEXT),
         ] {
             let events = interpret_all(&stream(&[
-                delegated().to_string(),
+                delegated("fable").to_string(),
                 refused_for_credits(),
                 subagents(api_error(words, Some(kind))).to_string(),
                 said(ANSWER).to_string(),
@@ -1078,12 +1150,51 @@ mod tests {
         }
     }
 
+    /// A main agent on Sonnet starts a subagent on Opus past the plan's
+    /// weekly Opus limit. claude refuses the subagent's request on an event
+    /// that names no agent, hands the refusal to the main agent as the
+    /// result of the call that started it, and the main agent answers.
+    #[test]
+    fn a_subagents_refused_window_leaves_the_main_agent_to_answer() {
+        let events = interpret_all(&stream(&[
+            delegated("opus").to_string(),
+            refused_past_the_opus_limit(),
+            subagents(api_error(OPUS_LIMIT, None)).to_string(),
+            said(OPUS_ANSWER).to_string(),
+            succeeded(OPUS_ANSWER).to_string(),
+        ]));
+
+        assert!(failures(&events).is_empty(), "{events:?}");
+        assert_eq!(text(&events), OPUS_ANSWER);
+        assert!(
+            matches!(events.last(), Some(AgentEvent::Finished { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// A line the main agent writes after a refused window shows that its
+    /// own request went through, so the refusal was a subagent's, and a
+    /// later failure of the main agent's is judged by its own words.
+    #[test]
+    fn a_refused_window_the_main_agent_writes_past_was_not_its_own() {
+        let events = interpret_all(&stream(&[
+            delegated("opus").to_string(),
+            refused_past_the_opus_limit(),
+            subagents(api_error(OPUS_LIMIT, None)).to_string(),
+            said("Opus is past its weekly limit, so I will review the change.").to_string(),
+            api_error(OVERLOADED, None).to_string(),
+            failed_result(OVERLOADED).to_string(),
+        ]));
+
+        assert_eq!(failures(&events), [OVERLOADED]);
+    }
+
     /// A subagent's words are its own conversation's. What it reaches for is
     /// still the turn's work, shown as the main agent's calls are.
     #[test]
     fn a_subagents_words_never_reach_the_answer() {
         let events = interpret_all(&stream(&[
-            delegated().to_string(),
+            delegated("fable").to_string(),
             subagents(said("Reading the diff first.")).to_string(),
             subagents(called(
                 "toolu_02Read",
@@ -1106,7 +1217,7 @@ mod tests {
         subagent["message"]["usage"] = json!({"input_tokens": 190_000, "output_tokens": 900});
 
         let events = interpret_all(&stream(&[
-            delegated().to_string(),
+            delegated("fable").to_string(),
             subagent.to_string(),
             said(ANSWER).to_string(),
         ]));
@@ -1132,7 +1243,7 @@ mod tests {
             ),
         ] {
             let events = interpret_all(&stream(&[
-                delegated().to_string(),
+                delegated("fable").to_string(),
                 subagents(called(
                     "toolu_02Read",
                     "Read",
