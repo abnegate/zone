@@ -65,6 +65,11 @@ async function fitsViewport(page: Page): Promise<void> {
     viewport: innerWidth,
   }));
   expect(width.content).toBeLessThanOrEqual(width.viewport);
+  const main = await page.locator('main.main-content').evaluate((element) => ({
+    scroll: element.scrollWidth,
+    client: element.clientWidth,
+  }));
+  expect(main.scroll).toBeLessThanOrEqual(main.client);
 }
 
 async function capture(
