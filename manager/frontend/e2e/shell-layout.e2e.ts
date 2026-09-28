@@ -4,6 +4,7 @@ import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 const timestamp = '2026-09-05T00:00:00Z';
+const settingsTabs = { height: 32, gap: 24.5 };
 const scenarios = [
   { name: 'desktop-light', width: 1440, height: 1000, mode: 'light' },
   { name: 'mobile-light', width: 390, height: 844, mode: 'light' },
@@ -162,6 +163,21 @@ async function capture(
   });
 }
 
+async function signIn(
+  page: Page,
+  scenario: (typeof scenarios)[number],
+  path: string,
+): Promise<void> {
+  await page.setViewportSize({
+    width: scenario.width,
+    height: scenario.height,
+  });
+  await prepare(page, scenario.mode);
+  await page.goto('/login', { waitUntil: 'domcontentloaded' });
+  await setupAdminAuth(page);
+  await page.goto(path, { waitUntil: 'domcontentloaded' });
+}
+
 for (const scenario of scenarios) {
   test(`authentication layouts ${scenario.name}`, async ({
     page,
@@ -202,20 +218,12 @@ for (const scenario of scenarios) {
     await expect(button).toHaveCSS('font-size', '14px');
   });
 
-  test(`settings and sessions layouts ${scenario.name}`, async ({
+  test(`workspace settings layouts ${scenario.name}`, async ({
     page,
   }, information) => {
-    await page.setViewportSize({
-      width: scenario.width,
-      height: scenario.height,
-    });
-    await prepare(page, scenario.mode);
-    await page.goto('/login', { waitUntil: 'domcontentloaded' });
-    await setupAdminAuth(page);
-    await page.goto('/settings', { waitUntil: 'domcontentloaded' });
+    await signIn(page, scenario, '/settings');
     await expect(page.locator('#font-family')).toBeVisible();
-    const workspaceTabs = await tabs(page);
-    expect(workspaceTabs).toEqual({ height: 32, gap: 24.5 });
+    await expect.poll(() => tabs(page)).toEqual(settingsTabs);
     const workspaceTitle = page.locator('.settings-page .page-bar-title');
     const rhythm = await page
       .locator('.settings-form')
@@ -269,7 +277,12 @@ for (const scenario of scenarios) {
         await page.getByRole('button', { name: 'Cancel', exact: true }).click();
       }
     }
-    await page.goto('/org-settings', { waitUntil: 'domcontentloaded' });
+  });
+
+  test(`organization settings layouts ${scenario.name}`, async ({
+    page,
+  }, information) => {
+    await signIn(page, scenario, '/org-settings');
     for (const tab of [
       'AI Settings',
       'Members',
@@ -282,7 +295,7 @@ for (const scenario of scenarios) {
       await expect(
         page.getByRole('tab', { name: tab, exact: true }),
       ).toHaveAttribute('aria-selected', 'true');
-      expect.soft(await tabs(page)).toEqual(workspaceTabs);
+      await expect.poll(() => tabs(page)).toEqual(settingsTabs);
       await capture(
         page,
         information,
@@ -311,7 +324,12 @@ for (const scenario of scenarios) {
         await page.getByRole('button', { name: 'Cancel', exact: true }).click();
       }
     }
-    await page.goto('/sessions', { waitUntil: 'domcontentloaded' });
+  });
+
+  test(`sessions and navigation layouts ${scenario.name}`, async ({
+    page,
+  }, information) => {
+    await signIn(page, scenario, '/sessions');
     await expect(
       page.getByRole('heading', { name: 'Active Sessions' }),
     ).toHaveCSS('font-size', '18px');
