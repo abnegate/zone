@@ -110,12 +110,12 @@ test.describe('plan revise', () => {
         .evaluateAll((els) =>
           els.map((e) => (e as HTMLInputElement).labels?.[0]?.innerText ?? ''),
         );
-      await prompt.getByRole('radio', { name: 'Revise' }).check();
-      const other = prompt.locator('[data-testid="question-free-text"]');
-      if (await other.isEnabled().catch(() => false))
-        await other.fill(
-          'Do not make this change. Stop here without editing any file.',
-        );
+      // Revise says "say what to change under Other", and the text box
+      // opens only under Other, so the instruction to stop is sent as Other.
+      await prompt.getByRole('radio', { name: 'Other' }).check();
+      await prompt
+        .locator('[data-testid="question-free-text"]')
+        .fill('Do not make this change. Stop here without editing any file.');
       await shot(page, '26-plan-revise');
       await prompt.locator('[data-testid="question-submit"]').click();
     }
@@ -147,7 +147,7 @@ test.describe('plan revise', () => {
     record(26.5, {
       result:
         parked[1] === 'waiting' && writes.length === 0 ? 'WORKS' : 'FAILS',
-      note: 'The plan card offers Approve and Revise; there is no Reject. Revise with an instruction to stop was sent instead.',
+      note: 'The plan card offers Approve, Revise and Other; there is no Reject. What to change goes under Other, so the instruction to stop was sent there.',
       task_id: task!.id,
       run_id: after[0],
       parked_status: parked[1],

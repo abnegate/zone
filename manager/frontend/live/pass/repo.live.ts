@@ -939,12 +939,12 @@ test.describe('sources, projects and tasks', () => {
       .evaluateAll((els) =>
         els.map((e) => (e as HTMLInputElement).labels?.[0]?.innerText ?? ''),
       );
-    await prompt2.getByRole('radio', { name: 'Revise' }).check();
-    const other = prompt2.locator('[data-testid="question-free-text"]');
-    if (await other.isEnabled().catch(() => false))
-      await other.fill(
-        'Do not make this change. Stop here without editing any file.',
-      );
+    // Revise says "say what to change under Other", and the text box opens
+    // only under Other, so the instruction to stop is sent as Other.
+    await prompt2.getByRole('radio', { name: 'Other' }).check();
+    await prompt2
+      .locator('[data-testid="question-free-text"]')
+      .fill('Do not make this change. Stop here without editing any file.');
     await shot(page, '26-plan-revise');
     await prompt2.locator('[data-testid="question-submit"]').click();
     const done2 = await finished(task2);
@@ -958,7 +958,7 @@ test.describe('sources, projects and tasks', () => {
         parked2.status === 'waiting' && writes2.length === 0
           ? 'WORKS'
           : 'FAILS',
-      note: 'The plan card offers Approve and Revise; there is no Reject. Revise with an instruction to stop was sent instead.',
+      note: 'The plan card offers Approve, Revise and Other; there is no Reject. What to change goes under Other, so the instruction to stop was sent there.',
       options,
       task_id: task2,
       run_id: done2.id,
