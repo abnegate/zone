@@ -451,8 +451,7 @@ zone/
 │   │   ├── src/cache/       # Redis cache layer
 │   │   └── src/auth/        # JWT & password auth
 │   ├── zone_cli/            # CLI tool
-│   ├── zone_runner/         # Daemon binary
-│   └── tool_runner/         # Command execution
+│   └── zone_runner/         # Daemon binary (command execution via abnegate-exec)
 ├── manager/                 # Manager frontend
 │   └── frontend/            # React frontend
 │       ├── src/components/  # UI components

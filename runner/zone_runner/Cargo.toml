@@ -12,7 +12,7 @@ name = "zone-runner"
 path = "src/main.rs"
 
 [dependencies]
-tool_runner = { path = "../tool_runner" }
+abnegate-exec = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true }

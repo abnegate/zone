@@ -163,7 +163,7 @@ enum LighthouseTarget {
 enum Project {
     /// Manager frontend (React/TypeScript)
     ManagerFrontend,
-    /// Runner (Rust - tool_runner, zone_core, zone_cli)
+    /// Runner (Rust - zone_runner, zone_core, zone_cli)
     Runner,
     /// Server (Rust - zone_server, requires database)
     Server,
@@ -621,7 +621,7 @@ fn create_test_tasks(root: &Path, projects: &[Project]) -> Vec<TaskConfig> {
                 });
             }
             Project::Runner => {
-                // Test tool_runner, zone_core, zone_cli (no database needed)
+                // Test zone_runner, zone_core, zone_cli (no database needed)
                 tasks.push(TaskConfig {
                     project: *project,
                     name: "Test Runner".to_string(),
@@ -629,7 +629,7 @@ fn create_test_tasks(root: &Path, projects: &[Project]) -> Vec<TaskConfig> {
                     args: vec![
                         "test".to_string(),
                         "-p".to_string(),
-                        "tool_runner".to_string(),
+                        "zone_runner".to_string(),
                         "-p".to_string(),
                         "zone_core".to_string(),
                         "-p".to_string(),

@@ -11,7 +11,6 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tool_runner::Proxy;
 
 use super::config::{McpConfig, McpServerSpec};
 use super::tool::{McpTool, unique_qualified_tool_name};
@@ -152,7 +151,7 @@ impl McpSession {
             for (key, value) in &spec.env {
                 cmd.env(key, value);
             }
-            Proxy::from_env().apply(cmd);
+            crate::tools::routing::proxy().apply(cmd);
             if let Some(cwd) = &spec.cwd {
                 cmd.current_dir(cwd);
             }

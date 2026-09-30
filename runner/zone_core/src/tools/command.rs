@@ -9,10 +9,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
-use tool_runner::Proxy;
 
 use super::file::{confine, resolve};
 use super::job::{self, JobCommand, Jobs};
+use super::routing;
 use super::{
     ERROR_PREFIX, MAX_PREVIEW_CHARS, MAX_TOOL_OUTPUT_CHARS, REASON_PARAM, Tier, Tool, ToolContext,
     ToolError, ToolResult, WaitFor, excerpt, reason_property, trim_middle,
@@ -323,7 +323,7 @@ impl Waiting for RunCommandTool {
         for (key, value) in &context.env {
             cmd.env(key, value);
         }
-        Proxy::from_env().apply(&mut cmd);
+        routing::proxy().apply(&mut cmd);
 
         // Execute with timeout
         let timeout_duration =
@@ -646,7 +646,7 @@ impl Waiting for RunShellTool {
         for (key, value) in &context.env {
             cmd.env(key, value);
         }
-        Proxy::from_env().apply(&mut cmd);
+        routing::proxy().apply(&mut cmd);
 
         let output = match timeout(limit, cmd.output()).await {
             Ok(Ok(output)) => output,

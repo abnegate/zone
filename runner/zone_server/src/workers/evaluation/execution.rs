@@ -1,12 +1,13 @@
 //! Running a detected tool under the tool runner's confined executor.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use abnegate_exec::{
+    CommandExecutor, EnvironmentPolicy, ErrorCode, ExecutorConfig, OutboundMessage, RunStart,
+};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::sync::mpsc;
-use tool_runner::{CommandExecutor, ErrorCode, ExecutorConfig, InboundMessage, OutboundMessage};
 use uuid::Uuid;
 
 use super::detector::DetectedTool;
@@ -85,30 +86,29 @@ pub async fn capture(
     let executor = CommandExecutor::with_config(
         ExecutorConfig::new()
             .with_timeout(timeout)
-            .with_max_output(settings.capture_limit),
+            .with_output_limit(settings.capture_limit)
+            .with_environment(EnvironmentPolicy::inherit()),
     );
-    let request = InboundMessage::RunStart {
-        job_id: Uuid::new_v4().to_string(),
-        workspace: tool.directory.clone(),
-        command: tool.program.clone(),
-        args: tool.arguments.clone(),
-        env: environment(),
-        timeout_ms: Some(timeout.as_millis().min(u128::from(u64::MAX)) as u64),
-        max_output_bytes: Some(settings.capture_limit),
-        working_dir: None,
-        // Not confined, and no longer for want of a process tree: the runner
-        // now has one, and a real `cargo test` builds, links and runs its test
-        // binaries under it with the network still denied. What is missing is
-        // here, not there. Confining a tool needs its toolchain named — the
-        // directories holding `rustc`, the linker and the package manager, plus
-        // a HOME the tool can find its own cache under. Detection reports a bare
-        // program name, so none of that is derivable yet, and a root set guessed
-        // wrong does not fail loudly: the tool reports unresolved dependencies
-        // and the parser records a regression that never happened. Until
-        // detection carries a toolchain, the executor's session isolation,
-        // timeout and output caps are what bound this.
-        confinement: None,
-    };
+    // Not confined, and no longer for want of a process tree: the runner
+    // now has one, and a real `cargo test` builds, links and runs its test
+    // binaries under it with the network still denied. What is missing is
+    // here, not there. Confining a tool needs its toolchain named — the
+    // directories holding `rustc`, the linker and the package manager, plus
+    // a HOME the tool can find its own cache under. Detection reports a bare
+    // program name, so none of that is derivable yet, and a root set guessed
+    // wrong does not fail loudly: the tool reports unresolved dependencies
+    // and the parser records a regression that never happened. Until
+    // detection carries a toolchain, the executor's session isolation,
+    // timeout and output caps are what bound this.
+    let request = RunStart::new(
+        Uuid::new_v4().to_string(),
+        tool.directory.clone(),
+        tool.program.clone(),
+    )
+    .with_arguments(tool.arguments.clone())
+    .with_environment(DETERMINISTIC_ENVIRONMENT)
+    .with_timeout(timeout)
+    .with_output_limit(settings.capture_limit);
 
     if let Err(error) = executor.spawn(&request, sender).await {
         tracing::warn!(tool = %tool.identity(), %error, "evaluation tool could not start");
@@ -161,13 +161,6 @@ fn append(buffer: &mut String, encoded: &str) {
     if let Ok(bytes) = BASE64.decode(encoded) {
         buffer.push_str(&String::from_utf8_lossy(&bytes));
     }
-}
-
-fn environment() -> HashMap<String, String> {
-    DETERMINISTIC_ENVIRONMENT
-        .iter()
-        .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
-        .collect()
 }
 
 /// Keeps the tail, because a tool's verdict is the last thing it prints.

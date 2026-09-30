@@ -29,6 +29,7 @@ nix = { workspace = true, features = ["fs"] }
 # Session storage
 dirs = "=6.0.0"
 
+abnegate-exec = { workspace = true }
 abnegate-secret = { workspace = true }
 rand = { workspace = true }
 
@@ -38,8 +39,6 @@ once_cell = { workspace = true }
 
 # Streaming
 async-stream = "=0.3.6"
-
-tool_runner = { path = "../tool_runner" }
 
 # MCP client: talk to stdio servers (magents and anything in mcp.json)
 rmcp = { workspace = true, default-features = false, features = [

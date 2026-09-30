@@ -14,7 +14,7 @@
 //!
 //! # Confinement
 //!
-//! A [`CliProvider`] does not run under [`tool_runner`]'s sandbox. That
+//! A [`CliProvider`] does not run under [`abnegate_exec`]'s sandbox. That
 //! sandbox denies all network access and grants `process-exec` for a single
 //! literal command, and a coding agent needs the network to reach its own API
 //! and forks a tree of helper processes to do its work. It does reuse that

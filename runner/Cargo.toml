@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["tool_runner", "zone_runner", "zone_core", "zone_chat", "zone_comfy", "zone_email", "zone_notify", "zone_search", "zone_vcs", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_vision", "zone_desktop"]
-default-members = ["tool_runner", "zone_runner", "zone_core", "zone_chat", "zone_comfy", "zone_email", "zone_notify", "zone_search", "zone_vcs", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_vision"]
+members = ["zone_runner", "zone_core", "zone_chat", "zone_comfy", "zone_email", "zone_notify", "zone_search", "zone_vcs", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_vision", "zone_desktop"]
+default-members = ["zone_runner", "zone_core", "zone_chat", "zone_comfy", "zone_email", "zone_notify", "zone_search", "zone_vcs", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_vision"]
 
 [workspace.package]
 version = "0.1.0"
@@ -35,6 +35,7 @@ rmcp = { version = "=3.2.0", default-features = false }
 
 # Shared crates, published from abnegate/crates. Caret ranges, unlike every
 # other dependency here, so a patch release of a crate reaches zone on update.
+abnegate-exec = "0.1"
 abnegate-http = "0.1"
 abnegate-secret = "0.1"
 
