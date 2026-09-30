@@ -1798,15 +1798,26 @@ describe('ChatsPage', () => {
 
     it('keeps the messages anchored to the bottom when the scroller resizes', async () => {
       const Original = globalThis.ResizeObserver;
-      const callbacks: ResizeObserverCallback[] = [];
+      const observers: StubObserver[] = [];
       class StubObserver {
+        readonly callback: ResizeObserverCallback;
+        readonly targets = new Set<Element>();
         constructor(callback: ResizeObserverCallback) {
-          callbacks.push(callback);
+          this.callback = callback;
+          observers.push(this);
         }
-        observe(): void {}
-        unobserve(): void {}
-        disconnect(): void {}
+        observe(target: Element): void {
+          this.targets.add(target);
+        }
+        unobserve(target: Element): void {
+          this.targets.delete(target);
+        }
+        disconnect(): void {
+          this.targets.clear();
+        }
       }
+      const watching = (scroller: Element | null) =>
+        observers.filter((observer) => scroller !== null && observer.targets.has(scroller));
       globalThis.ResizeObserver = StubObserver as unknown as typeof ResizeObserver;
       try {
         renderChatsPage();
@@ -1819,15 +1830,15 @@ describe('ChatsPage', () => {
 
         await waitFor(() => {
           expect(screen.getByText('Hello')).toBeInTheDocument();
+          expect(watching(document.querySelector('.messages-container'))).not.toHaveLength(0);
         });
         const container = document.querySelector('.messages-container') as HTMLDivElement;
         Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 900 });
         const scrollTo = spyOn(container, 'scrollTo').mockImplementation(() => {});
-        expect(callbacks.length).toBeGreaterThan(0);
 
         act(() => {
-          for (const callback of callbacks) {
-            callback([], {} as ResizeObserver);
+          for (const observer of watching(container)) {
+            observer.callback([], observer as unknown as ResizeObserver);
           }
         });
 
