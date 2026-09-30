@@ -445,7 +445,6 @@ async fn process_webhook_event(
     _project_id: &Uuid,
     event: crate::sync::WebhookEvent,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    // Find synced item by external ID
     let synced_item =
         sync_config::get_synced_item_by_external_id(state.db(), sync_config_id, &event.external_id)
             .await?;
@@ -471,44 +470,22 @@ async fn process_webhook_event(
         return Ok("Sync is outbound-only, ignoring inbound event".to_string());
     }
 
-    // Update task based on webhook payload with validation
-    let mut title = None;
-    let mut description = None;
-    let mut status = None;
+    let title = event
+        .payload
+        .title
+        .as_deref()
+        .map(|title| truncate("title", title, MAX_TITLE_LENGTH));
+    let description = event
+        .payload
+        .description
+        .as_deref()
+        .map(|description| truncate("description", description, MAX_DESCRIPTION_LENGTH));
+    let status = event.payload.state.map(|state| match state {
+        IssueState::Closed => "complete",
+        IssueState::InProgress => "in_progress",
+        IssueState::Open => "created",
+    });
 
-    if let Some(ref t) = event.payload.title {
-        // Validate and truncate title if too long
-        if t.len() > MAX_TITLE_LENGTH {
-            tracing::warn!("Webhook title too long ({} chars), truncating", t.len());
-            title = Some(&t[..MAX_TITLE_LENGTH]);
-        } else {
-            title = Some(t.as_str());
-        }
-    }
-
-    if let Some(ref d) = event.payload.description {
-        // Validate and truncate description if too long
-        if d.len() > MAX_DESCRIPTION_LENGTH {
-            tracing::warn!(
-                "Webhook description too long ({} chars), truncating",
-                d.len()
-            );
-            description = Some(&d[..MAX_DESCRIPTION_LENGTH]);
-        } else {
-            description = Some(d.as_str());
-        }
-    }
-
-    // Map external state to task status
-    if let Some(state_value) = event.payload.state {
-        status = Some(match state_value {
-            IssueState::Closed => "complete",
-            IssueState::InProgress => "in_progress",
-            IssueState::Open => "created",
-        });
-    }
-
-    // Update the task
     tasks::update_task(
         state.db(),
         synced_item.task_id,
@@ -521,7 +498,6 @@ async fn process_webhook_event(
     )
     .await?;
 
-    // Update synced item
     sync_config::update_synced_item(
         state.db(),
         synced_item.id,
@@ -529,7 +505,6 @@ async fn process_webhook_event(
     )
     .await?;
 
-    // Log sync event
     sync_config::create_sync_event(
         state.db(),
         sync_config_id,
@@ -542,4 +517,39 @@ async fn process_webhook_event(
     .await?;
 
     Ok(format!("Task {} updated from webhook", synced_item.task_id))
+}
+
+fn truncate<'a>(field: &str, text: &'a str, limit: usize) -> &'a str {
+    if text.len() <= limit {
+        return text;
+    }
+    tracing::warn!(
+        "Webhook {field} too long ({} bytes), truncating",
+        text.len()
+    );
+    &text[..text.floor_char_boundary(limit)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn text_within_the_limit_is_kept_whole() {
+        assert_eq!(truncate("title", "héllo", 6), "héllo");
+    }
+
+    #[test]
+    fn a_limit_inside_a_character_cuts_before_that_character() {
+        let text = format!("a{}", "é".repeat(250));
+
+        let truncated = truncate("title", &text, 500);
+
+        assert_eq!(truncated, format!("a{}", "é".repeat(249)));
+    }
+
+    #[test]
+    fn a_limit_on_a_character_boundary_keeps_every_byte_before_it() {
+        assert_eq!(truncate("title", "日本語", 6), "日本");
+    }
 }

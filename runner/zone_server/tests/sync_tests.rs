@@ -769,12 +769,11 @@ impl SyncedTask {
             .await
     }
 
-    async fn task_title(&self) -> String {
+    async fn task(&self) -> tasks::TaskRow {
         tasks::get_task(self.state.db(), self.task_id)
             .await
             .expect("Failed to read task")
             .expect("Task disappeared")
-            .title
     }
 
     async fn cleanup(self) {
@@ -796,7 +795,7 @@ async fn a_signed_github_edit_updates_the_task_and_answers_ok() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(synced.item_event_types().await, vec![SyncEventType::Update]);
-    assert_eq!(synced.task_title().await, "Renamed");
+    assert_eq!(synced.task().await.title, "Renamed");
 
     let status = synced
         .post(
@@ -832,8 +831,26 @@ async fn an_outbound_only_item_ignores_a_signed_inbound_edit() {
     let status = synced.post_github(&github_issue("edited", "Renamed")).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(synced.task_title().await, "Original");
+    assert_eq!(synced.task().await.title, "Original");
     assert!(synced.item_event_types().await.is_empty());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_overlong_multibyte_title_and_description_are_cut_on_a_character_boundary() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let title = format!("a{}", "é".repeat(250));
+    let description = format!("a{}", "é".repeat(25_000));
+    let mut body = github_issue("edited", &title);
+    body["issue"]["body"] = json!(description);
+
+    let status = synced.post_github(&body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let task = synced.task().await;
+    assert_eq!(task.title, format!("a{}", "é".repeat(249)));
+    assert_eq!(task.description, format!("a{}", "é".repeat(24_999)));
 
     synced.cleanup().await;
 }
@@ -882,7 +899,7 @@ async fn a_signed_linear_update_updates_the_task_and_answers_ok() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(synced.item_event_types().await, vec![SyncEventType::Update]);
-    assert_eq!(synced.task_title().await, "Renamed");
+    assert_eq!(synced.task().await.title, "Renamed");
 
     let status = synced
         .post("linear", "Linear-Signature", "invalid", &body)
