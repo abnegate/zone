@@ -1134,6 +1134,29 @@ async fn an_edit_in_the_same_second_as_a_close_renames_the_task_without_reopenin
 }
 
 #[tokio::test]
+async fn a_close_in_the_same_second_as_an_edit_completes_the_renamed_task() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    synced.set_task("Original", "in_progress").await;
+    let edited = github_issue_at("edited", "Renamed", "open", "2026-01-01T00:00:10Z");
+    assert_eq!(synced.post_github(&edited).await, StatusCode::OK);
+
+    let closed = github_issue_at("closed", "Renamed", "closed", "2026-01-01T00:00:10Z");
+    let (status, response) = synced.send_github(&closed, None).await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["message"], "Task updated from the issue");
+    let task = synced.task().await;
+    assert_eq!(task.title, "Renamed");
+    assert_eq!(task.status, "complete");
+    assert_eq!(
+        synced.item_event_types().await,
+        vec![SyncEventType::Update, SyncEventType::Close]
+    );
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
 async fn a_close_and_a_reopen_in_the_same_second_leave_the_task_created() {
     let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
     let closed = github_issue_at("closed", "Original", "closed", "2026-01-01T00:00:10Z");
