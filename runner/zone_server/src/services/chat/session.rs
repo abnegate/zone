@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
-use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message, Role};
+use zone_core::llm::{LlmBackend, LlmClient, Message, Role};
 
 use crate::agent::prompt::{self, Environment};
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
@@ -16,11 +16,13 @@ use crate::db::knowledge::not_memory;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::backend;
 use crate::services::completion_tokens::merge_stops;
+use crate::services::endpoint::Endpoint;
 use crate::state::AppState;
 use zone_chat::{capacity, history};
 use zone_search::client::SearchContext;
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
+const TEMPERATURE: f32 = 0.7;
 const SEARCH: &str = "supplement:search";
 pub const WITHHELD_IMAGE: &str = "[An image was attached but this model can't view images.]";
 
@@ -279,6 +281,9 @@ pub struct Preparation {
     pub tools: ChatTools,
     pub context: RunContext,
     pub llm: LlmClient,
+    /// Where [`Self::llm`] sends completions, kept so a failure it reports
+    /// reaches the reader without the endpoint's key.
+    pub endpoint: Endpoint,
     pub stop: Vec<String>,
     pub budget: LoopBudget,
     pub timeout: Duration,
@@ -308,12 +313,6 @@ pub async fn build(
         .ok_or("Chat has no workspace association")?;
     let settings = &state.config().chat;
     let store = Store::new(state.db().clone(), chat.id, Some(workspace));
-    let resolver = capacity::Resolver::with_context(
-        &state.config().litellm_host,
-        &state.config().litellm_key,
-        &state.config().ollama_host,
-        Some(settings.context),
-    );
     let scope = WorkspaceScope {
         state: state.clone(),
         workspace_id: workspace,
@@ -327,8 +326,20 @@ pub async fn build(
             ChatTools::preview(scope).await
         }
     };
-    let (history, capacity, tools) =
-        tokio::join!(store.load(), resolver.resolve(&chat.model_name), catalog);
+    let endpoint = async {
+        let endpoint = Endpoint::for_workspace(state, workspace).await;
+        let capacity = endpoint
+            .capacity(state.config())
+            .resolve(&chat.model_name)
+            .await;
+        (endpoint, capacity)
+    };
+    let (history, (endpoint, capacity), tools) = tokio::join!(store.load(), endpoint, catalog);
+    if matches!(mode, Mode::Generation(_)) {
+        endpoint
+            .model(&chat.model_name)
+            .map_err(|error| error.to_string())?;
+    }
     let history = history.map_err(|error| error.to_string())?;
     // A planner chat carries the two calls that end its interview until it
     // has made its project; after that it is a chat about the project.
@@ -478,14 +489,12 @@ pub async fn build(
             .map(|card| card.stop_sequences.as_slice())
             .unwrap_or(&[]),
     );
-    let mut llm = LlmClient::new(LlmConfig {
-        base_url: state.config().litellm_host.clone(),
-        api_key: state.config().litellm_key.clone(),
-        default_model: chat.model_name.clone(),
-        temperature: 0.7,
-        max_tokens: policy.reserved,
+    let mut llm = LlmClient::new(endpoint.llm(
+        chat.model_name.clone(),
+        TEMPERATURE,
+        policy.reserved,
         backend,
-    })
+    ))
     .with_stop(stop.clone());
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(&chat.model_name, limit);
@@ -515,6 +524,7 @@ pub async fn build(
         tools,
         context,
         llm,
+        endpoint,
         stop,
         budget: settings.budget(),
         timeout: settings.timeout,
@@ -1118,6 +1128,68 @@ mod tests {
         {
             let error = parse_timeout(u64::MAX).expect_err("overflowing deadline");
             assert!(error.contains("ZONE_CHAT_TIMEOUT_SECONDS"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_saved_endpoint_with_no_model_refuses_a_turn_but_still_previews() {
+        use crate::db::{chats, organizations, workspaces};
+        use crate::services::endpoint;
+        use crate::services::stages::AUTO;
+        use sqlx::PgPool;
+        use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+
+        const GATEWAY: &str = "http://127.0.0.1:9";
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        )
+        .await
+        .expect("the test database");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let organization = organizations::create_organization(&pool, "Unset", &suffix, None)
+            .await
+            .expect("an organization");
+        let workspace =
+            workspaces::create_workspace(&pool, organization.id, "Unset", &suffix, None)
+                .await
+                .expect("a workspace");
+        sqlx::query(
+            "INSERT INTO organization_ai_settings (organization_id, provider, litellm_host) VALUES ($1, $2, $3)",
+        )
+        .bind(organization.id)
+        .bind(PROVIDER_SELF_HOSTED)
+        .bind(GATEWAY)
+        .execute(&pool)
+        .await
+        .expect("the organization's AI settings");
+        let chat = chats::create_chat(&pool, Some(workspace.id), "Unset", AUTO, false, false)
+            .await
+            .expect("a chat on automatic model selection");
+        let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+        let user = Uuid::new_v4();
+
+        let turn = build(
+            &state,
+            &chat,
+            user,
+            None,
+            Mode::Generation(LlmBackend::Http),
+        )
+        .await;
+        let preview = build(&state, &chat, user, None, Mode::Preview).await;
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .expect("the organization to be removed");
+
+        assert_eq!(
+            turn.err(),
+            Some(endpoint::Error::ModelUnset.to_string()),
+            "a turn on a saved endpoint with no model must tell the reader to set one"
+        );
+        if let Err(error) = preview {
+            panic!("the context meter must still preview a chat with no model: {error}");
         }
     }
 }
