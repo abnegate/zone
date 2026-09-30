@@ -842,6 +842,7 @@ mod tests {
             "http://localhost:11434",
             "http://127.0.0.1:4000/v1",
             "http://[::1]:4000",
+            "http://192.168.1.10:4000",
             "http://litellm:4000",
             "https://api.openai.com/v1",
             "  https://api.anthropic.com/v1/  ",
@@ -851,6 +852,8 @@ mod tests {
         for (refused, error) in [
             ("", UrlError::Unparseable),
             ("api.openai.com/v1", UrlError::Unparseable),
+            ("not a url", UrlError::Unparseable),
+            ("litellm:4000", UrlError::Scheme),
             ("ftp://files.example", UrlError::Scheme),
             ("file:///etc/passwd", UrlError::Scheme),
             ("unix:/var/run/litellm.sock", UrlError::Scheme),

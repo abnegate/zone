@@ -9,6 +9,8 @@ use zone_context::embeddings::providers::{
 use zone_core::SecretValue;
 use zone_core::llm::AgentKind;
 
+use crate::services::endpoint;
+
 use super::{
     DbResult,
     organization_members::{self, OrgRole},
@@ -78,47 +80,6 @@ pub struct Update<'a> {
     pub model_audio: Option<&'a str>,
 }
 
-const ENDPOINT_SCHEMES: [&str; 2] = ["http", "https"];
-
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub enum EndpointUrlError {
-    #[error("must be a valid URL")]
-    Unparseable,
-    #[error("must use http or https")]
-    Scheme,
-    #[error("must name a host")]
-    MissingHost,
-    #[error("must not carry a username or password")]
-    Credentials,
-    #[error("must not carry a query")]
-    Query,
-    #[error("must not carry a fragment")]
-    Fragment,
-}
-
-/// Checks the shape of an endpoint an organization or workspace saved. Hosts
-/// are not filtered: private, loopback and single-label hosts are legitimate
-/// operator config.
-pub fn check_endpoint_url(value: &str) -> Result<reqwest::Url, EndpointUrlError> {
-    let url = reqwest::Url::parse(value.trim()).map_err(|_| EndpointUrlError::Unparseable)?;
-    if !ENDPOINT_SCHEMES.contains(&url.scheme()) {
-        return Err(EndpointUrlError::Scheme);
-    }
-    if url.host_str().is_none_or(str::is_empty) {
-        return Err(EndpointUrlError::MissingHost);
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(EndpointUrlError::Credentials);
-    }
-    if url.query().is_some() {
-        return Err(EndpointUrlError::Query);
-    }
-    if url.fragment().is_some() {
-        return Err(EndpointUrlError::Fragment);
-    }
-    Ok(url)
-}
-
 fn validate(update: &Update<'_>) -> AccessResult<()> {
     if let Some(provider) = update.provider
         && !PROVIDERS.contains(&provider)
@@ -134,8 +95,8 @@ fn validate(update: &Update<'_>) -> AccessResult<()> {
         ("anthropic_base_url", update.anthropic_base_url),
     ] {
         if let Some(value) = nonempty(value) {
-            check_endpoint_url(value)
-                .map_err(|error| AccessError::Invalid(format!("{field} {error}")))?;
+            endpoint::validate_url(value)
+                .map_err(|error| AccessError::Invalid(format!("{field}: {error}")))?;
         }
     }
     Ok(())
@@ -1126,44 +1087,6 @@ mod tests {
     }
 
     #[test]
-    fn check_endpoint_url_accepts_private_loopback_and_single_label_hosts() {
-        for url in [
-            "http://127.0.0.1:4000",
-            "http://192.168.1.10:4000",
-            "http://litellm:4000",
-            "http://[::1]:4000/v1",
-            "https://api.openai.com/v1",
-            "https://api.anthropic.com/v1/",
-        ] {
-            assert!(check_endpoint_url(url).is_ok(), "{url} must be accepted");
-        }
-    }
-
-    #[test]
-    fn check_endpoint_url_refuses_every_malformed_shape() {
-        for (url, refusal) in [
-            ("litellm:4000", EndpointUrlError::Scheme),
-            ("not a url", EndpointUrlError::Unparseable),
-            ("", EndpointUrlError::Unparseable),
-            ("file:///etc/passwd", EndpointUrlError::Scheme),
-            ("ftp://litellm:4000", EndpointUrlError::Scheme),
-            (
-                "http://user:secret@litellm:4000",
-                EndpointUrlError::Credentials,
-            ),
-            ("http://user@litellm:4000", EndpointUrlError::Credentials),
-            ("http://litellm:4000/?key=x", EndpointUrlError::Query),
-            ("http://litellm:4000/#key", EndpointUrlError::Fragment),
-        ] {
-            assert_eq!(
-                check_endpoint_url(url).err(),
-                Some(refusal),
-                "{url} must be refused"
-            );
-        }
-    }
-
-    #[test]
     fn validate_names_the_field_whose_url_it_refuses_and_allows_blanks() {
         let refused = validate(&Update {
             anthropic_base_url: Some("file:///etc/passwd"),
@@ -1172,7 +1095,7 @@ mod tests {
         .expect_err("a file URL is no endpoint");
         assert_eq!(
             refused.to_string(),
-            "anthropic_base_url must use http or https"
+            "anthropic_base_url: The URL must use http or https."
         );
 
         let blank = Update {
