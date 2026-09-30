@@ -1,4 +1,6 @@
 import type { Page } from '@playwright/test';
+import { ProjectAutomationSchema } from '../../src/features/projects/schemas';
+import type { ProjectAutomation } from '../../src/features/projects/types';
 import {
   api,
   enabled,
@@ -27,6 +29,9 @@ import {
 
 const INTERVIEW_ROUNDS = 14;
 const DRIVE_TIMEOUT_MS = 4 * 3_600_000;
+const QUIET_POLLS = 3;
+
+let plannedProjectId = '';
 
 const BRIEF = (s: string) =>
   [
@@ -42,6 +47,7 @@ const SETTLE =
 async function turnOver(
   page: Page,
 ): Promise<'question' | 'approval' | 'reply'> {
+  let quiet = 0;
   for (;;) {
     const approval = page.locator('[data-testid="tool-deny"]').first();
     if (await approval.isVisible().catch(() => false)) return 'approval';
@@ -52,10 +58,23 @@ async function turnOver(
       .last();
     if (await submit.isVisible().catch(() => false)) return 'question';
     const status = await page.locator('.message-status').count();
-    if (status === 0) {
-      await page.waitForTimeout(4_000);
-      if ((await page.locator('.message-status').count()) === 0) return 'reply';
-    }
+    const replied = await page.evaluate(() => {
+      const users = document.querySelectorAll('.message-user');
+      const last = users[users.length - 1];
+      return Array.from(
+        document.querySelectorAll('.message-assistant .message-content'),
+      ).some(
+        (reply) =>
+          (!last ||
+            Boolean(
+              last.compareDocumentPosition(reply) &
+                Node.DOCUMENT_POSITION_FOLLOWING,
+            )) &&
+          (reply.textContent ?? '').trim().length > 0,
+      );
+    });
+    quiet = replied && status === 0 ? quiet + 1 : 0;
+    if (quiet >= QUIET_POLLS) return 'reply';
     await page.waitForTimeout(2_000);
   }
 }
@@ -167,6 +186,7 @@ test.describe('auto project', () => {
       }
       await page.waitForTimeout(3_000);
     }
+    plannedProjectId = projectId;
     await shot(page, '112-planner-chat-finalized');
     const planner = logLines(
       mark,
@@ -207,41 +227,28 @@ test.describe('auto project', () => {
   test('114: the planned project runs, merges and reports unattended', async ({
     page,
   }) => {
-    await signIn(page);
     const projectId =
-      process.env.ZONE_AUTO_PROJECT_ID ??
-      sql(
-        `select id from projects where auto order by created_at desc limit 1`,
-      )[0] ??
-      '';
-    expect(projectId).not.toBe('');
-    const read = async () =>
-      (
-        await api('GET', `/api/projects/${projectId}/automation`, {
-          token: await ownerToken(),
-        })
-      ).body as {
-        auto: boolean;
-        paused_reason: string | null;
-        completed_at: string | null;
-        updates_chat_id: string | null;
-        counts: Record<string, number>;
-        tasks: {
-          title: string;
-          stage: string | null;
-          reason: string | null;
-          runs: number;
-          pr_url: string | null;
-          status: string;
-        }[];
-      };
+      plannedProjectId || process.env.ZONE_AUTO_PROJECT_ID || '';
+    test.skip(
+      !projectId,
+      'run 112 first, or set ZONE_AUTO_PROJECT_ID to the project it planned',
+    );
+    await signIn(page);
+    const read = async (): Promise<ProjectAutomation> => {
+      const { status, body } = await api(
+        'GET',
+        `/api/projects/${projectId}/automation`,
+        { token: await ownerToken() },
+      );
+      expect(status, JSON.stringify(body).slice(0, 300)).toBe(200);
+      return ProjectAutomationSchema.parse(body);
+    };
     const started = Date.now();
     const timeline: string[] = [];
     let last = '';
     let automation = await read();
     while (Date.now() - started < DRIVE_TIMEOUT_MS) {
       automation = await read();
-      automation.tasks ??= [];
       const line = `${automation.completed_at ? 'complete' : automation.paused_reason ? `paused: ${automation.paused_reason}` : 'running'} | ${automation.tasks
         .map(
           (t) =>
@@ -306,18 +313,25 @@ test.describe('auto project', () => {
     const merged = automation.tasks.filter(
       (t) => t.stage === 'merged' || t.status === 'complete',
     );
+    const pulled = merged.filter((t) => t.pr_url);
+    const works = Boolean(
+      automation.completed_at && updates.length > 0 && pulled.length > 0,
+    );
+    const cause = automation.completed_at
+      ? updates.length === 0
+        ? 'the project completed but its updates chat is empty'
+        : pulled.length === 0
+          ? 'the project completed without merging a pull request'
+          : undefined
+      : automation.paused_reason
+        ? `paused: ${automation.paused_reason}`
+        : `not complete after ${Math.round((Date.now() - started) / 60_000)} minutes`;
     record(114, {
       list: 'features',
       feature:
         'Auto project driver: runs, PRs, CI wait, review, squash-merge, summary',
-      result: automation.completed_at && updates.length > 0 ? 'WORKS' : 'FAILS',
-      cause: automation.completed_at
-        ? updates.length > 0
-          ? undefined
-          : 'the project completed but its updates chat is empty'
-        : automation.paused_reason
-          ? `paused: ${automation.paused_reason}`
-          : `not complete after ${Math.round((Date.now() - started) / 60_000)} minutes`,
+      result: works ? 'WORKS' : 'FAILS',
+      cause,
       project_id: projectId,
       minutes: Math.round((Date.now() - started) / 60_000),
       counts: automation.counts,
@@ -334,5 +348,6 @@ test.describe('auto project', () => {
       server_log: driver,
       screenshots: ['114-automation-panel.png', '114-updates-chat.png'],
     });
+    expect(works, `${cause} || ${timeline.join(' || ')}`).toBe(true);
   });
 });
