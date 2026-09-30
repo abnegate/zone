@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "abnegate-http"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "504d49c847c9882e364fe1c5f35091fcf32912d77a99ce3c90b48703d6cbb41b"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "rand 0.10.2",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "abnegate-secret"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5888,6 +5904,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -9930,6 +9947,7 @@ dependencies = [
 name = "zone_server"
 version = "0.1.0"
 dependencies = [
+ "abnegate-http",
  "abnegate-secret",
  "aes-gcm",
  "argon2",

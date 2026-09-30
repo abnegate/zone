@@ -1,11 +1,12 @@
 //! Context gathering and search routes
 
+use abnegate_http::validate_public_url;
 use axum::{
     Json,
     extract::{Path, Query, State},
     http::{
         StatusCode,
-        header::{HeaderMap, HeaderName},
+        header::{HeaderMap, HeaderName, HeaderValue},
     },
     response::IntoResponse,
 };
@@ -264,34 +265,29 @@ pub async fn gather(
         }
     };
 
-    // Check rate limit
     let rate_limiter = state.rate_limiter();
-    let (allowed, remaining, reset_at) = rate_limiter.check_rate_limit(user_id);
+    let decision = rate_limiter.check_rate_limit(user_id);
+    let reset_seconds = decision.reset_at.map_or(0, |reset_at| {
+        reset_at
+            .saturating_duration_since(std::time::Instant::now())
+            .as_secs()
+    });
 
-    // Create rate limit headers
     let mut headers = HeaderMap::new();
-    let rate_limit_max = rate_limiter.config().max_requests;
     headers.insert(
         HeaderName::from_static("x-ratelimit-limit"),
-        rate_limit_max.to_string().parse().unwrap(),
+        HeaderValue::from(rate_limiter.config().limit),
     );
     headers.insert(
         HeaderName::from_static("x-ratelimit-remaining"),
-        remaining.to_string().parse().unwrap(),
+        HeaderValue::from(decision.remaining),
     );
-    // Calculate seconds until reset (reset_at is in the future)
-    let now = std::time::Instant::now();
-    let reset_seconds = if reset_at > now {
-        (reset_at - now).as_secs()
-    } else {
-        0
-    };
     headers.insert(
         HeaderName::from_static("x-ratelimit-reset"),
-        reset_seconds.to_string().parse().unwrap(),
+        HeaderValue::from(reset_seconds),
     );
 
-    if !allowed {
+    if !decision.allowed {
         tracing::warn!("Rate limit exceeded for user_id: {}", user_id);
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -1198,8 +1194,12 @@ pub async fn create_knowledge(
             )
                 .into_response();
         }
-        if let Err(error) = crate::utils::url::validate_public_url(url) {
-            return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(error))).into_response();
+        if let Err(error) = validate_public_url(url) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(error.to_string())),
+            )
+                .into_response();
         }
     }
 
@@ -1443,7 +1443,7 @@ pub async fn create_knowledge(
 async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
     use sha2::{Digest, Sha256};
 
-    let url = crate::utils::url::validate_public_url(url)?;
+    let url = validate_public_url(url).map_err(|error| error.to_string())?;
 
     // Timeout for fetching
     let client = reqwest::Client::builder()
@@ -1459,7 +1459,7 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
 
-    crate::utils::url::validate_public_url(response.url().as_str())?;
+    validate_public_url(response.url().as_str()).map_err(|error| error.to_string())?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP error: {}", response.status()));

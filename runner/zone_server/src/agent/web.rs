@@ -3,6 +3,7 @@
 //! Pre-turn SearXNG injection still runs when the server selects a lookup.
 //! These tools let the model refine a query or read a cited page afterwards.
 
+use abnegate_http::{public_client_builder, read_capped, validate_public_url};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -12,7 +13,6 @@ use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 use super::identifier::Kind;
 use super::tools::{WorkspaceScope, truncate};
 use crate::db::{DbResult, chat_sources};
-use crate::utils::url::{public_client_builder, read_capped, validate_public_url};
 use zone_search::client::{SearchHit, SearxngClient, format_search_context, sanitize_query};
 use zone_search::{TimeRange, WebSearchConfig};
 
@@ -207,23 +207,32 @@ impl Tool for FetchUrlTool {
 async fn fetch_public_url(raw: &str) -> ToolResult {
     let url = match validate_public_url(raw) {
         Ok(url) => url,
-        Err(error) => return ToolResult::error(error),
+        Err(error) => return ToolResult::error(error.to_string()),
     };
 
-    let mut builder = public_client_builder(Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .user_agent("zone-server/fetch-url");
-    if let Ok(proxy) = std::env::var("TOOL_RUNNER_PROXY_URL")
-        && !proxy.trim().is_empty()
-        && let Ok(proxy) = reqwest::Proxy::all(proxy)
+    let proxy = std::env::var("TOOL_RUNNER_PROXY_URL")
+        .ok()
+        .filter(|proxy| !proxy.trim().is_empty())
+        .and_then(|proxy| reqwest::Proxy::all(proxy).ok());
+    let client = match public_client_builder(Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .configure(|builder| {
+            let builder = builder.user_agent("zone-server/fetch-url");
+            match proxy {
+                Some(proxy) => builder.proxy(proxy),
+                None => builder,
+            }
+        })
+        .build()
     {
-        builder = builder.proxy(proxy);
-    }
-    let client = match builder.build() {
         Ok(client) => client,
         Err(error) => return ToolResult::error(error.to_string()),
     };
 
-    let response = match client.get(url.clone()).send().await {
+    let sent = match client.get(url.as_str()) {
+        Ok(request) => request.send().await,
+        Err(refused) => Err(refused),
+    };
+    let response = match sent {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(%error, url = %url, "fetch_url request failed");
@@ -234,7 +243,7 @@ async fn fetch_public_url(raw: &str) -> ToolResult {
         return ToolResult::error(format!("Fetch returned HTTP {}.", response.status()));
     }
     if let Err(error) = validate_public_url(response.url().as_str()) {
-        return ToolResult::error(error);
+        return ToolResult::error(error.to_string());
     }
 
     let content_type = response
@@ -256,7 +265,7 @@ async fn fetch_public_url(raw: &str) -> ToolResult {
         Ok(bytes) => bytes,
         Err(error) => {
             tracing::warn!(%error, "fetch_url body refused");
-            return ToolResult::error(error);
+            return ToolResult::error(error.to_string());
         }
     };
     let raw = String::from_utf8_lossy(&bytes);
