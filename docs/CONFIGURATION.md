@@ -177,16 +177,30 @@ of the organization's, and inherits the ones it leaves blank.
   the instance endpoint.
 - **AWS Bedrock** is not routed yet: it runs on the instance default.
 
+Settings saved before completions were routed keep running on the instance
+endpoint, since their hosts, base URLs and keys were never used and may be
+stale: an old Ollama placeholder, an OpenAI key saved long ago, or a workspace
+URL saved on the promise that it pairs with the organization's key. AI Settings
+marks such a row *Saved before completions were routed; save to start sending
+completions here*. Saving the row, even unchanged, routes it.
+
+Emptying a host or base URL and saving clears it, and the API clears an
+endpoint field sent as an empty string. A field left out of the request keeps
+its saved value, which is how the console keeps a key it never shows.
+
 Keys stay with the URL they were saved beside. A URL a workspace saves never
 receives the organization's key, and the instance's `LITELLM_KEY` only ever goes
 to `LITELLM_HOST`. A URL saved with no key, or a blank one, is sent no
-`Authorization` header.
+`Authorization` header. A workspace that names a host without a key while its
+organization saved one is warned in AI Settings that the host gets no key.
 
 A URL is checked when it is saved: it must be `http` or `https`, name a host,
 and carry no credentials, query or fragment. Private, LAN and loopback hosts are
 allowed, since an operator may run the model next to Zone. A URL saved before
 this check that fails it is ignored: that provider runs on the instance
-endpoint, and the server logs a warning. The URL is read as it was saved:
+endpoint, and the server logs a warning. Every member can read a workspace's
+settings, so such a URL is returned without its username, password, query and
+fragment. The URL is read as it was saved:
 
 - no path gets `/v1`: `http://10.0.0.5:4000` sends to `http://10.0.0.5:4000/v1`;
 - a trailing `/` and no path is the host's root, sent as is:
