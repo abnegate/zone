@@ -11,7 +11,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::crypto;
-use crate::db::{sync_config, tasks};
+use crate::db::sync_config::{self, SyncEventDirection, SyncEventType};
+use crate::db::tasks;
 use crate::state::AppState;
 use crate::sync::{IssueState, SyncError};
 
@@ -178,8 +179,8 @@ pub async fn github_webhook(
         state.db(),
         sync_config_id,
         None,
-        "webhook_received",
-        "inbound",
+        SyncEventType::WebhookReceived,
+        SyncEventDirection::Inbound,
         Some(serde_json::to_value(&webhook_event.payload).unwrap_or_default()),
         None,
     )
@@ -217,8 +218,8 @@ pub async fn github_webhook(
                 state.db(),
                 sync_config_id,
                 None,
-                "sync_error",
-                "inbound",
+                SyncEventType::SyncError,
+                SyncEventDirection::Inbound,
                 None,
                 Some(&e.to_string()),
             )
@@ -375,8 +376,8 @@ pub async fn linear_webhook(
         state.db(),
         sync_config_id,
         None,
-        "webhook_received",
-        "inbound",
+        SyncEventType::WebhookReceived,
+        SyncEventDirection::Inbound,
         Some(serde_json::to_value(&webhook_event.payload).unwrap_or_default()),
         None,
     )
@@ -414,8 +415,8 @@ pub async fn linear_webhook(
                 state.db(),
                 sync_config_id,
                 None,
-                "sync_error",
-                "inbound",
+                SyncEventType::SyncError,
+                SyncEventDirection::Inbound,
                 None,
                 Some(&e.to_string()),
             )
@@ -534,8 +535,8 @@ async fn process_webhook_event(
         state.db(),
         sync_config_id,
         Some(synced_item.id),
-        &event.event_type,
-        "inbound",
+        event.event_type,
+        SyncEventDirection::Inbound,
         Some(serde_json::to_value(&event.payload)?),
         None,
     )

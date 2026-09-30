@@ -10,6 +10,7 @@ use super::{
     ExternalIssue, IssueState, SyncConfig, SyncError, SyncProvider, SyncResult, WebhookEvent,
     WebhookPayload,
 };
+use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
 
 /// Linear-specific configuration
@@ -138,6 +139,14 @@ impl LinearSyncProvider {
             "completed" | "canceled" => IssueState::Closed,
             "started" => IssueState::InProgress,
             _ => IssueState::Open,
+        }
+    }
+
+    fn map_action_to_event_type(action: &str) -> SyncEventType {
+        match action {
+            "create" => SyncEventType::Create,
+            "remove" => SyncEventType::Close,
+            _ => SyncEventType::Update,
         }
     }
 
@@ -387,16 +396,8 @@ impl SyncProvider for LinearSyncProvider {
             .and_then(|v| v.as_str())
             .map(Self::map_linear_state_to_issue_state);
 
-        // Map event type
-        let event_type = match payload.action.as_str() {
-            "create" => "issue_created",
-            "update" => "issue_updated",
-            "remove" => "issue_closed",
-            _ => &payload.action,
-        };
-
         Ok(WebhookEvent {
-            event_type: event_type.to_string(),
+            event_type: Self::map_action_to_event_type(&payload.action),
             external_id: issue_id.to_string(),
             payload: WebhookPayload {
                 title,
@@ -466,6 +467,44 @@ mod tests {
         let sig = hex::encode(result.into_bytes());
 
         assert!(!LinearSyncProvider::verify_signature(secret, body, &sig));
+    }
+
+    fn parse_signed_action(action: &str) -> SyncEventType {
+        use hmac::{Hmac, KeyInit, Mac};
+        type HmacSha256 = Hmac<Sha256>;
+
+        let secret = "my-secret";
+        let body = serde_json::to_vec(&serde_json::json!({
+            "action": action,
+            "type": "Issue",
+            "data": { "id": "issue-123", "title": "Title" }
+        }))
+        .unwrap();
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(&body);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Linear-Signature",
+            hex::encode(mac.finalize().into_bytes()).parse().unwrap(),
+        );
+
+        LinearSyncProvider::new()
+            .parse_webhook(&headers, &body, secret)
+            .expect("a signed webhook parses")
+            .event_type
+    }
+
+    #[test]
+    fn webhook_actions_map_to_sync_event_types() {
+        assert_eq!(parse_signed_action("create"), SyncEventType::Create);
+        assert_eq!(parse_signed_action("remove"), SyncEventType::Close);
+        for action in ["update", "restore"] {
+            assert_eq!(
+                parse_signed_action(action),
+                SyncEventType::Update,
+                "{action}"
+            );
+        }
     }
 
     #[test]

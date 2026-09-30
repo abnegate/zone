@@ -14,6 +14,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
 
 #[derive(Error, Debug)]
@@ -85,10 +86,9 @@ pub enum IssueState {
 }
 
 /// Webhook event from external system
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WebhookEvent {
-    /// Type of event (e.g., "issue_created", "issue_updated", "issue_closed")
-    pub event_type: String,
+    pub event_type: SyncEventType,
     /// External issue ID
     pub external_id: String,
     /// Event payload

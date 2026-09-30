@@ -10,6 +10,7 @@ use super::{
     ExternalIssue, IssueState, SyncConfig, SyncError, SyncProvider, SyncResult, WebhookEvent,
     WebhookPayload,
 };
+use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
 
 /// GitHub-specific configuration
@@ -118,6 +119,14 @@ impl GitHubSyncProvider {
             "closed" => IssueState::Closed,
             "open" => IssueState::Open,
             _ => IssueState::Open,
+        }
+    }
+
+    fn map_action_to_event_type(action: &str) -> SyncEventType {
+        match action {
+            "opened" => SyncEventType::Create,
+            "closed" => SyncEventType::Close,
+            _ => SyncEventType::Update,
         }
     }
 }
@@ -301,17 +310,8 @@ impl SyncProvider for GitHubSyncProvider {
             SyncError::InvalidWebhookPayload(format!("Failed to parse JSON: {}", e))
         })?;
 
-        // Map event type
-        let event_type = match payload.action.as_str() {
-            "opened" => "issue_created",
-            "edited" => "issue_updated",
-            "closed" => "issue_closed",
-            "reopened" => "issue_reopened",
-            _ => &payload.action,
-        };
-
         Ok(WebhookEvent {
-            event_type: event_type.to_string(),
+            event_type: Self::map_action_to_event_type(&payload.action),
             external_id: payload.issue.number.to_string(),
             payload: WebhookPayload {
                 title: Some(payload.issue.title.clone()),
@@ -394,6 +394,47 @@ mod tests {
             body,
             sig_no_prefix
         ));
+    }
+
+    fn parse_signed_action(action: &str) -> SyncEventType {
+        use hmac::{Hmac, KeyInit, Mac};
+        type HmacSha256 = Hmac<Sha256>;
+
+        let secret = "my-secret";
+        let body = serde_json::to_vec(&serde_json::json!({
+            "action": action,
+            "issue": {
+                "number": 123,
+                "html_url": "https://github.com/owner/repo/issues/123",
+                "state": "open",
+                "title": "Title",
+                "body": null
+            }
+        }))
+        .unwrap();
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(&body);
+        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Hub-Signature-256", signature.parse().unwrap());
+
+        GitHubSyncProvider::new()
+            .parse_webhook(&headers, &body, secret)
+            .expect("a signed webhook parses")
+            .event_type
+    }
+
+    #[test]
+    fn webhook_actions_map_to_sync_event_types() {
+        assert_eq!(parse_signed_action("opened"), SyncEventType::Create);
+        assert_eq!(parse_signed_action("closed"), SyncEventType::Close);
+        for action in ["edited", "reopened", "labeled", "assigned"] {
+            assert_eq!(
+                parse_signed_action(action),
+                SyncEventType::Update,
+                "{action}"
+            );
+        }
     }
 
     #[test]

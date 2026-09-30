@@ -16,7 +16,11 @@ use uuid::Uuid;
 use zone_server::{
     config::Config,
     crypto,
-    db::{DbPool, projects, sync_config, tasks},
+    db::{
+        DbPool, projects,
+        sync_config::{self, SyncEventDirection, SyncEventType},
+        tasks,
+    },
     routes::create_router,
     state::AppState,
 };
@@ -313,8 +317,8 @@ async fn test_sync_event_logging() {
         state.db(),
         sync_config_row.id,
         None,
-        "webhook_received",
-        "inbound",
+        SyncEventType::WebhookReceived,
+        SyncEventDirection::Inbound,
         Some(payload.clone()),
         None,
     )
@@ -335,6 +339,50 @@ async fn test_sync_event_logging() {
     assert_eq!(events[0].id, event.id);
 
     // Cleanup
+    cleanup_project(state.db(), project.id).await;
+}
+
+#[tokio::test]
+async fn every_sync_event_type_and_direction_satisfies_the_sync_events_constraints() {
+    let state = setup_test_state().await;
+    let project = projects::create_project(state.db(), "Sync Event Drift Project", None, None)
+        .await
+        .expect("Failed to create project");
+    let sync_config_row = sync_config::create_sync_config(
+        state.db(),
+        project.id,
+        "github",
+        true,
+        json!({ "owner": "test-owner", "repo": "test-repo", "token": "ghp_test123" }),
+        None,
+    )
+    .await
+    .expect("Failed to create sync config");
+
+    for event_type in SyncEventType::ALL {
+        for direction in SyncEventDirection::ALL {
+            let event = sync_config::create_sync_event(
+                state.db(),
+                sync_config_row.id,
+                None,
+                event_type,
+                direction,
+                None,
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "sync_events rejected {} {}: {error}",
+                    event_type.as_str(),
+                    direction.as_str()
+                )
+            });
+            assert_eq!(event.event_type, event_type.as_str());
+            assert_eq!(event.direction, direction.as_str());
+        }
+    }
+
     cleanup_project(state.db(), project.id).await;
 }
 
@@ -410,8 +458,7 @@ async fn test_github_webhook_signature_verification() {
 
     let response = app.oneshot(request).await.unwrap();
 
-    // Should return 200 (or 500 if task processing fails, but not 401)
-    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.status(), StatusCode::OK);
 
     // Test with invalid signature
     let app = create_router(state.clone());
@@ -507,8 +554,7 @@ async fn test_linear_webhook_signature_verification() {
 
     let response = app.oneshot(request).await.unwrap();
 
-    // Should return 200 (or 500 if task processing fails, but not 401)
-    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.status(), StatusCode::OK);
 
     // Test with invalid signature
     let app = create_router(state.clone());
@@ -528,6 +574,203 @@ async fn test_linear_webhook_signature_verification() {
 
     // Cleanup
     cleanup_project(state.db(), project.id).await;
+}
+
+struct SyncedTask {
+    state: AppState,
+    project_id: Uuid,
+    task_id: Uuid,
+    sync_config_id: Uuid,
+    synced_item_id: Uuid,
+    webhook_secret: String,
+}
+
+impl SyncedTask {
+    async fn create(provider: &str, config: serde_json::Value) -> Self {
+        let state = setup_test_state().await;
+        let (_organization_id, workspace_id, _user_id) = common::setup_test_data(state.db()).await;
+        let project = projects::create_project(
+            state.db(),
+            "Inbound Webhook Project",
+            None,
+            Some(workspace_id),
+        )
+        .await
+        .expect("Failed to create project");
+        let task = tasks::create_task(
+            state.db(),
+            workspace_id,
+            &[project.id],
+            "Original",
+            "Original description",
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .expect("Failed to create task");
+
+        let webhook_secret = Uuid::new_v4().to_string();
+        let encryption_key =
+            crypto::derive_key(state.config().encryption_key()).expect("Failed to derive key");
+        let encrypted_secret =
+            crypto::encrypt(&encryption_key, &webhook_secret).expect("Failed to encrypt");
+        let sync_config_row = sync_config::create_sync_config(
+            state.db(),
+            project.id,
+            provider,
+            true,
+            config,
+            Some(&encrypted_secret),
+        )
+        .await
+        .expect("Failed to create sync config");
+        let synced_item = sync_config::create_synced_item(
+            state.db(),
+            sync_config_row.id,
+            task.id,
+            "123",
+            None,
+            "bidirectional",
+            None,
+        )
+        .await
+        .expect("Failed to create synced item");
+
+        Self {
+            state,
+            project_id: project.id,
+            task_id: task.id,
+            sync_config_id: sync_config_row.id,
+            synced_item_id: synced_item.id,
+            webhook_secret,
+        }
+    }
+
+    fn sign(&self, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(self.webhook_secret.as_bytes())
+            .expect("Failed to create HMAC");
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    async fn post(&self, provider: &str, header: &str, signature: &str, body: &[u8]) -> StatusCode {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/webhooks/sync/{}/{}",
+                self.sync_config_id, provider
+            ))
+            .header("Content-Type", "application/json")
+            .header(header, signature)
+            .body(Body::from(body.to_vec()))
+            .unwrap();
+        create_router(self.state.clone())
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn item_event_types(&self) -> Vec<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT event_type FROM sync_events WHERE synced_item_id = $1 ORDER BY created_at",
+        )
+        .bind(self.synced_item_id)
+        .fetch_all(self.state.db())
+        .await
+        .expect("Failed to read sync events")
+    }
+
+    async fn task_title(&self) -> String {
+        tasks::get_task(self.state.db(), self.task_id)
+            .await
+            .expect("Failed to read task")
+            .expect("Task disappeared")
+            .title
+    }
+
+    async fn cleanup(self) {
+        let _ = self
+            .state
+            .db()
+            .execute(sqlx::query("DELETE FROM tasks WHERE id = $1").bind(self.task_id))
+            .await;
+        cleanup_project(self.state.db(), self.project_id).await;
+    }
+}
+
+#[tokio::test]
+async fn a_signed_github_edit_updates_the_task_and_answers_ok() {
+    let synced = SyncedTask::create(
+        "github",
+        json!({ "owner": "test-owner", "repo": "test-repo", "token": "ghp_test123" }),
+    )
+    .await;
+    let body = serde_json::to_vec(&json!({
+        "action": "edited",
+        "issue": {
+            "number": 123,
+            "title": "Renamed",
+            "body": "Edited body",
+            "state": "open",
+            "html_url": "https://github.com/test-owner/test-repo/issues/123"
+        }
+    }))
+    .unwrap();
+
+    let signature = format!("sha256={}", synced.sign(&body));
+    let status = synced
+        .post("github", "X-Hub-Signature-256", &signature, &body)
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(synced.item_event_types().await, vec!["update".to_string()]);
+    assert_eq!(synced.task_title().await, "Renamed");
+
+    let status = synced
+        .post("github", "X-Hub-Signature-256", "sha256=invalid", &body)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_signed_linear_update_updates_the_task_and_answers_ok() {
+    let synced = SyncedTask::create(
+        "linear",
+        json!({ "api_key": "lin_api_test123", "team_id": "TEAM-123" }),
+    )
+    .await;
+    let body = serde_json::to_vec(&json!({
+        "action": "update",
+        "type": "Issue",
+        "data": {
+            "id": "123",
+            "title": "Renamed",
+            "description": "Edited description",
+            "state": { "type": "started", "name": "In Progress" }
+        }
+    }))
+    .unwrap();
+
+    let signature = synced.sign(&body);
+    let status = synced
+        .post("linear", "Linear-Signature", &signature, &body)
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(synced.item_event_types().await, vec!["update".to_string()]);
+    assert_eq!(synced.task_title().await, "Renamed");
+
+    let status = synced
+        .post("linear", "Linear-Signature", "invalid", &body)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    synced.cleanup().await;
 }
 
 // The console's External Sync section: configuration only, no engine yet.

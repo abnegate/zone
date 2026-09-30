@@ -47,6 +47,56 @@ pub struct SyncEventRow {
     pub created_at: Option<NaiveDateTime>,
 }
 
+/// What a `sync_events` row records; each value is one the table's
+/// `event_type` CHECK constraint accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncEventType {
+    Create,
+    Update,
+    Close,
+    WebhookReceived,
+    SyncError,
+}
+
+impl SyncEventType {
+    pub const ALL: [Self; 5] = [
+        Self::Create,
+        Self::Update,
+        Self::Close,
+        Self::WebhookReceived,
+        Self::SyncError,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Close => "close",
+            Self::WebhookReceived => "webhook_received",
+            Self::SyncError => "sync_error",
+        }
+    }
+}
+
+/// Which way a logged sync event travelled; each value is one the
+/// `sync_events.direction` CHECK constraint accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncEventDirection {
+    Inbound,
+    Outbound,
+}
+
+impl SyncEventDirection {
+    pub const ALL: [Self; 2] = [Self::Inbound, Self::Outbound];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+        }
+    }
+}
+
 /// Get sync config by ID
 pub async fn get_sync_config(pool: &PgPool, id: Uuid) -> DbResult<Option<SyncConfigRow>> {
     let row = sqlx::query!(
@@ -371,8 +421,8 @@ pub async fn create_sync_event(
     pool: &PgPool,
     sync_config_id: Uuid,
     synced_item_id: Option<Uuid>,
-    event_type: &str,
-    direction: &str,
+    event_type: SyncEventType,
+    direction: SyncEventDirection,
     payload: Option<JsonValue>,
     error_message: Option<&str>,
 ) -> DbResult<SyncEventRow> {
@@ -384,8 +434,8 @@ pub async fn create_sync_event(
         "#,
         sync_config_id,
         synced_item_id,
-        event_type,
-        direction,
+        event_type.as_str(),
+        direction.as_str(),
         payload,
         error_message
     )
@@ -437,4 +487,52 @@ pub async fn list_sync_events(
             created_at: r.created_at,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event_type_position(event_type: SyncEventType) -> usize {
+        match event_type {
+            SyncEventType::Create => 0,
+            SyncEventType::Update => 1,
+            SyncEventType::Close => 2,
+            SyncEventType::WebhookReceived => 3,
+            SyncEventType::SyncError => 4,
+        }
+    }
+
+    fn direction_position(direction: SyncEventDirection) -> usize {
+        match direction {
+            SyncEventDirection::Inbound => 0,
+            SyncEventDirection::Outbound => 1,
+        }
+    }
+
+    #[test]
+    fn all_lists_every_sync_event_type_once_in_order() {
+        let positions: Vec<usize> = SyncEventType::ALL
+            .into_iter()
+            .map(event_type_position)
+            .collect();
+        assert_eq!(
+            positions,
+            (0..5).collect::<Vec<_>>(),
+            "a new SyncEventType must join ALL, which the sync_events drift test inserts"
+        );
+    }
+
+    #[test]
+    fn all_lists_every_sync_event_direction_once_in_order() {
+        let positions: Vec<usize> = SyncEventDirection::ALL
+            .into_iter()
+            .map(direction_position)
+            .collect();
+        assert_eq!(
+            positions,
+            (0..2).collect::<Vec<_>>(),
+            "a new SyncEventDirection must join ALL, which the sync_events drift test inserts"
+        );
+    }
 }
