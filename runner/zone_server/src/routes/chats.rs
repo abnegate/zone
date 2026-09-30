@@ -15,6 +15,8 @@ use crate::error::ServerError;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
 use crate::services::chat::session;
+use crate::services::endpoint::Origin;
+use crate::services::model::Model;
 use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
@@ -231,8 +233,14 @@ async fn chat_with_messages(
     auth: &AuthUser,
     chat: chats::ChatRow,
 ) -> ChatWithMessagesResponse {
-    let profile =
-        crate::services::model::Model::profile(&state.config().ollama_host, &chat.model_name).await;
+    let route = match chat.workspace_id {
+        Some(workspace) => Some(Route::for_workspace(state, workspace).await),
+        None => None,
+    };
+    let profile = match route.as_ref().map(|route| route.endpoint.origin()) {
+        Some(Origin::Settings) => Model::unshown(&chat.model_name),
+        _ => Model::profile(&state.config().ollama_host, &chat.model_name).await,
+    };
     let messages = chats::list_messages(state.db(), chat.id)
         .await
         .unwrap_or_default()
@@ -240,20 +248,26 @@ async fn chat_with_messages(
         .map(MessageResponse::from)
         .collect();
 
-    let context = match (chat.workspace_id, auth.0.user_id()) {
-        (Some(workspace), Ok(actor)) => {
+    let context = match (route, auth.0.user_id()) {
+        (Some(route), Ok(actor)) => {
             // No draft or inference; reconstruct a fresh observation for reconnect.
-            let endpoint = Route::for_workspace(state, workspace).await.endpoint;
-            session::build(state, &chat, actor, None, session::Mode::Preview, endpoint)
-                .await
-                .ok()
-                .map(|prepared| {
-                    // The exposed set, not every registered tool: this is what
-                    // a turn would actually send, which is the number a reader
-                    // is asking for when they ask what a chat costs.
-                    let exposed = prepared.agentic.then(|| prepared.tools.definitions());
-                    prepared.context.usage(&prepared.model, exposed.as_deref())
-                })
+            session::build(
+                state,
+                &chat,
+                actor,
+                None,
+                session::Mode::Preview,
+                route.endpoint,
+            )
+            .await
+            .ok()
+            .map(|prepared| {
+                // The exposed set, not every registered tool: this is what
+                // a turn would actually send, which is the number a reader
+                // is asking for when they ask what a chat costs.
+                let exposed = prepared.agentic.then(|| prepared.tools.definitions());
+                prepared.context.usage(&prepared.model, exposed.as_deref())
+            })
         }
         _ => None,
     };
@@ -417,9 +431,7 @@ pub async fn create(
         return e.into_response();
     }
 
-    if crate::services::model::Model::completion(&state.config().ollama_host, &req.model_name).await
-        == Some(false)
-    {
+    if Model::completion(&state.config().ollama_host, &req.model_name).await == Some(false) {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(crate::services::model::UNSUPPORTED)),

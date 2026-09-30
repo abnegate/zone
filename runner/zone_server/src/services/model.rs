@@ -44,6 +44,17 @@ impl Model {
 
     pub async fn profile(host: &str, name: &str) -> ModelProfile {
         if crate::services::stages::is_auto(name) {
+            return Self::unshown(name);
+        }
+        match Self::show(host, name).await {
+            Some(model) => model.into_profile(name),
+            None => Self::unshown(name),
+        }
+    }
+
+    /// What is known of `name` without asking the inference engine about it.
+    pub fn unshown(name: &str) -> ModelProfile {
+        if crate::services::stages::is_auto(name) {
             return ModelProfile {
                 capabilities: Some(vec![
                     "completion".to_string(),
@@ -56,15 +67,12 @@ impl Model {
                 needs_character: false,
             };
         }
-        match Self::show(host, name).await {
-            Some(model) => model.into_profile(name),
-            None => ModelProfile {
-                capabilities: None,
-                completion: None,
-                tools: None,
-                reasoning: None,
-                needs_character: needs_character(name, None, false),
-            },
+        ModelProfile {
+            capabilities: None,
+            completion: None,
+            tools: None,
+            reasoning: None,
+            needs_character: needs_character(name, None, false),
         }
     }
 

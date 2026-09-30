@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as Frame;
 use uuid::Uuid;
-use wiremock::matchers::{body_partial_json, method};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::ReasoningEffort;
 use zone_server::config::Config;
@@ -36,6 +36,7 @@ const OPENAI_MODEL: &str = "gpt-4o-mini";
 const TASK_MODEL: &str = "gpt-4";
 const COMPLETIONS: &str = "/v1/chat/completions";
 const ANY_COMPLETIONS: &str = "/chat/completions";
+const SHOW: &str = "/api/show";
 const UNREACHABLE: &str = "http://127.0.0.1:9";
 const REPLY: &str = "Routed reply";
 const CLASSIFIER_PROMPT: &str = "Return exactly IMAGE, AUDIO, or CHAT";
@@ -646,4 +647,59 @@ async fn a_chat_title_uses_the_organization_endpoint() {
         &format!("the chat was titled {title:?}"),
     )
     .await;
+}
+
+/// The questions the instance's Ollama was asked about a model.
+async fn shown(ollama: &MockServer) -> usize {
+    ollama
+        .received_requests()
+        .await
+        .expect("Ollama records its requests")
+        .iter()
+        .filter(|request| request.url.path() == SHOW)
+        .count()
+}
+
+#[tokio::test]
+async fn reading_a_chat_on_a_saved_endpoint_asks_the_instance_ollama_nothing() {
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(SHOW))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"capabilities": ["completion", "tools", "thinking"]})),
+        )
+        .mount(&ollama)
+        .await;
+    let mut config = endpoints.config();
+    config.ollama_host = ollama.uri();
+    let client = TestClient::with_config(config).await;
+    let pool = client.state().db().clone();
+    let (token, chat, workspace) = chat_on(&client, CHAT_MODEL).await;
+    save_for_organization(
+        &pool,
+        workspace,
+        &Saved::litellm(&endpoints.organization, Some(ORGANIZATION_KEY)),
+    )
+    .await;
+    let before = shown(&ollama).await;
+
+    let response = client.get_auth(&format!("/api/chats/{chat}"), &token).await;
+    let asked = shown(&ollama).await - before;
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    response.assert_status(axum::http::StatusCode::OK);
+    assert_eq!(
+        asked, 0,
+        "the instance's Ollama was asked about a model the saved endpoint runs"
+    );
+    let read = response.json_value();
+    for capability in ["tools", "reasoning"] {
+        assert!(
+            read["chat"][capability].is_null(),
+            "the chat took its {capability} from the instance's Ollama: {read}"
+        );
+    }
 }
