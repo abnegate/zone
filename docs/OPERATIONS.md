@@ -204,7 +204,9 @@ the last update applied did: `started` is in progress, `completed` or
 to a task linked some other way than by a created issue only records the
 state. Labels, assignments and edits leave the status alone. Deleting a
 GitHub issue or removing a Linear issue unlinks it and leaves its task as it
-is, and that issue never becomes a task again.
+is, and that issue never becomes a task again. The same holds for an issue in
+the configured repository or project that is deleted before the event opening
+it arrives: the late `opened` or `create` creates no task.
 
 While a run owns a task's status, an event that would move it updates only the
 title and description, and the state stored for the issue stays the one the

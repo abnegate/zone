@@ -101,6 +101,7 @@ enum Outcome {
     AlreadyLinked,
     Updated,
     Unlinked,
+    DeletedBeforeLinked,
     AlreadyProcessed,
     Stale,
     NotLinked,
@@ -119,6 +120,9 @@ impl Outcome {
             Self::AlreadyLinked => "Issue is already linked to a task",
             Self::Updated => "Task updated from the issue",
             Self::Unlinked => "Issue unlinked from its task",
+            Self::DeletedBeforeLinked => {
+                "Issue was deleted before it was linked and never becomes a task"
+            }
             Self::AlreadyProcessed => "Delivery already processed",
             Self::Stale => "Delivery is no newer than the last one applied",
             Self::NotLinked => "Issue is not linked to a task",
@@ -319,6 +323,9 @@ async fn process(
     .await?;
     let outcome = match (linked, admission) {
         (Some(item), _) => apply_to_linked(&mut transaction, config.id, item, event).await?,
+        (None, _) if event.event_type == SyncEventType::Unlink => {
+            record_early_deletion(&mut transaction, config.id, event).await?
+        }
         (None, Admission::Admitted { workspace_id }) => {
             if sync_config::was_unlinked(&mut transaction, config.id, &event.external_id).await? {
                 tracing::info!(
@@ -335,6 +342,31 @@ async fn process(
     };
     transaction.commit().await?;
     Ok(outcome)
+}
+
+/// Remember a deleted issue no task is linked to yet, so an `opened` or
+/// `create` delivered after its deletion does not turn it into a task.
+async fn record_early_deletion(
+    connection: &mut PgConnection,
+    sync_config_id: Uuid,
+    event: WebhookEvent,
+) -> Result<Outcome, BoxError> {
+    sync_config::create_sync_event(
+        &mut *connection,
+        sync_config_id,
+        None,
+        SyncEventType::Unlink,
+        SyncEventDirection::Inbound,
+        Some(serde_json::to_value(&event.payload)?),
+        None,
+    )
+    .await?;
+    sync_config::mark_unlinked(&mut *connection, sync_config_id, &event.external_id).await?;
+    tracing::info!(
+        "Recorded issue {} for {sync_config_id} as deleted before it was linked",
+        event.external_id
+    );
+    Ok(Outcome::DeletedBeforeLinked)
 }
 
 /// Whether the delivery's issue would become a task if no task is linked to

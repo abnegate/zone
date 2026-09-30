@@ -911,6 +911,18 @@ impl SyncedTask {
         .expect("Failed to read synced item")
     }
 
+    async fn was_unlinked(&self, external_id: &str) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sync_unlinked_items \
+             WHERE sync_config_id = $1 AND external_id = $2)",
+        )
+        .bind(self.sync_config_id)
+        .bind(external_id)
+        .fetch_one(self.state.db())
+        .await
+        .expect("Failed to read unlinked issues")
+    }
+
     async fn link_count(&self) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM synced_items WHERE sync_config_id = $1")
             .bind(self.sync_config_id)
@@ -2087,6 +2099,99 @@ async fn an_edit_racing_the_delivery_that_opens_its_issue_waits_for_the_link_and
         "Renamed while opening",
         "the edit waited for the link instead of finding none: {response}"
     );
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_github_issue_deleted_before_its_opening_arrives_never_becomes_a_task() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let opened = opened_issue_at("2026-01-01T00:00:10Z");
+
+    let (status, response) = synced
+        .send_github(&with_action(&opened, "deleted"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(
+        response["message"],
+        "Issue was deleted before it was linked and never becomes a task"
+    );
+    assert!(
+        synced.event_types().await.contains(&SyncEventType::Unlink),
+        "the deletion is logged as an unlink"
+    );
+
+    let (status, response) = synced.send_github(&opened, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(
+        response["message"],
+        "Issue was unlinked from its task and is not linked again"
+    );
+    assert!(synced.new_tasks().await.is_empty());
+    assert!(synced.linked(NEW_ISSUE).await.is_none());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_deletion_from_another_repository_leaves_the_issue_free_to_become_a_task() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let foreign = with_action(&opened_issue("MEMBER", "someone-else/test-repo"), "deleted");
+    let (status, response) = synced.send_github(&foreign, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(!synced.was_unlinked(NEW_ISSUE).await, "{response}");
+
+    let (status, response) = synced
+        .send_github(&opened_issue_at("2026-01-01T00:00:10Z"), None)
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(synced.new_task().await.title, NEW_ISSUE_TITLE);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_linear_issue_removed_before_its_creation_arrives_never_becomes_a_task() {
+    let synced = SyncedTask::create(
+        "linear",
+        configured_linear("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let created = created_linear_issue("Issue", LINEAR_PROJECT);
+    let mut foreign = created_linear_issue("Issue", "7d1f2a9b-0000-4c3e-8f6a-1b2c3d4e5f60");
+    foreign["action"] = json!("remove");
+    let (status, response) = synced.send_linear(&foreign, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(
+        !synced.was_unlinked(NEW_ISSUE).await,
+        "a removal from another project records nothing: {response}"
+    );
+
+    let mut removed = created.clone();
+    removed["action"] = json!("remove");
+    let (status, response) = synced.send_linear(&removed, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(
+        response["message"],
+        "Issue was deleted before it was linked and never becomes a task"
+    );
+
+    let (status, response) = synced.send_linear(&created, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(synced.new_tasks().await.is_empty(), "{response}");
+    assert!(synced.linked(NEW_ISSUE).await.is_none());
 
     synced.cleanup().await;
 }

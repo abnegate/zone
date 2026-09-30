@@ -665,6 +665,18 @@ pub async fn unlink_synced_item(
     connection: &mut PgConnection,
     item: &SyncedItemRow,
 ) -> DbResult<()> {
+    mark_unlinked(&mut *connection, item.sync_config_id, &item.external_id).await?;
+    delete_synced_item(&mut *connection, item.id).await?;
+    Ok(())
+}
+
+/// Remember that the issue `external_id` of a sync is gone, so no later
+/// delivery links it to a task, whether or not one was linked before.
+pub async fn mark_unlinked(
+    connection: &mut PgConnection,
+    sync_config_id: Uuid,
+    external_id: &str,
+) -> DbResult<()> {
     sqlx::query(
         r#"
         INSERT INTO sync_unlinked_items (sync_config_id, external_id)
@@ -672,11 +684,10 @@ pub async fn unlink_synced_item(
         ON CONFLICT (sync_config_id, external_id) DO UPDATE SET unlinked_at = NOW()
         "#,
     )
-    .bind(item.sync_config_id)
-    .bind(&item.external_id)
+    .bind(sync_config_id)
+    .bind(external_id)
     .execute(&mut *connection)
     .await?;
-    delete_synced_item(&mut *connection, item.id).await?;
     Ok(())
 }
 
