@@ -31,6 +31,7 @@ const KEY = process.env.ZONE_LIVE_LITELLM_KEY ?? '';
 const CONTAINER = process.env.ZONE_LIVE_LITELLM_CONTAINER ?? '';
 const FAST = process.env.ZONE_LIVE_LITELLM_FAST ?? 'llama3.2:3b';
 const REASON = process.env.ZONE_LIVE_LITELLM_REASON ?? 'qwen3.8:27b-ctx32k';
+const BACKUP = 'live_pass_ai_settings_backup';
 
 function litellmLog(since: string): string {
   return execFileSync(
@@ -63,10 +64,14 @@ test.describe('LiteLLM routing', () => {
   }) => {
     const tenant = state.intruder;
     const token = await tokenFor(tenant);
-    const settingsPath = `/api/organizations/${tenant.organization.id}/settings/ai`;
-    const prior = sql(
-      `select row_to_json(s) from organization_ai_settings s where organization_id = '${tenant.organization.id}'`,
-    )[0];
+    const organization = tenant.organization.id;
+    const settingsPath = `/api/organizations/${organization}/settings/ai`;
+    sql(
+      `create table if not exists ${BACKUP} (organization_id uuid primary key, settings jsonb)`,
+    );
+    sql(
+      `insert into ${BACKUP} values ('${organization}', (select to_jsonb(s) from organization_ai_settings s where organization_id = '${organization}')) on conflict (organization_id) do nothing`,
+    );
     const saved = await api('PUT', settingsPath, {
       token,
       body: {
@@ -125,12 +130,9 @@ test.describe('LiteLLM routing', () => {
       });
       expect(routed).toBe(true);
     } finally {
-      await api('DELETE', settingsPath, { token });
-      if (prior) {
-        sql(
-          `insert into organization_ai_settings select * from json_populate_record(null::organization_ai_settings, $prior$${prior}$prior$::json)`,
-        );
-      }
+      sql(
+        `begin; delete from organization_ai_settings where organization_id = '${organization}'; insert into organization_ai_settings select (jsonb_populate_record(null::organization_ai_settings, settings)).* from ${BACKUP} where organization_id = '${organization}' and settings is not null; delete from ${BACKUP} where organization_id = '${organization}'; commit;`,
+      );
     }
   });
 });
