@@ -34,7 +34,7 @@ log_error() {
     printf '%s[ollama-init ERROR]%s %s\n' "${RED}" "${ERROR_RESET}" "$1" >&2
 }
 
-validate_env() {
+validate_env() (
     missing=0
 
     if [ -z "${OLLAMA_HOST}" ]; then
@@ -61,7 +61,7 @@ validate_env() {
         log_error "Missing required environment variables. Exiting."
         exit 1
     fi
-}
+)
 
 readonly BUNDLED_OLLAMA_HOST='http://ollama:11434'
 
@@ -72,7 +72,7 @@ targets_bundled_ollama() {
     [ "${OLLAMA_HOST%/}" = "${BUNDLED_OLLAMA_HOST}" ]
 }
 
-wait_for_ollama() {
+wait_for_ollama() (
     if targets_bundled_ollama; then
         log_info "Pulling into the bundled Ollama at ${OLLAMA_HOST}"
     else
@@ -92,21 +92,14 @@ wait_for_ollama() {
         sleep "${RETRY_INTERVAL}"
     done
 
-    if targets_bundled_ollama; then
-        log_error "Ollama API failed to become ready after $MAX_RETRIES attempts"
-        exit 1
-    fi
-
-    log_warn "OLLAMA_HOST ${OLLAMA_HOST} is not reachable from this container after $MAX_RETRIES attempts; nothing pulled."
-    log_warn "Set OLLAMA_BASE_URL=${BUNDLED_OLLAMA_HOST} to pull into the bundled Ollama, or run 'ollama pull' on the host that serves ${OLLAMA_HOST}."
-    exit 0
-}
+    return 1
+)
 
 model_exists() {
     ollama list | grep -qF "$1"
 }
 
-pull_model() {
+pull_model() (
     model_name="$1"
     model_type="$2"
 
@@ -126,14 +119,23 @@ pull_model() {
         log_error "✗ Failed to pull ${model_name}"
         return 1
     fi
-}
+)
 
-main() {
+main() (
     log_info "===== Ollama Model Initialization ====="
 
     validate_env
 
-    wait_for_ollama
+    if ! wait_for_ollama; then
+        if targets_bundled_ollama; then
+            log_error "Ollama API failed to become ready after $MAX_RETRIES attempts"
+            exit 1
+        fi
+
+        log_warn "OLLAMA_HOST ${OLLAMA_HOST} is not reachable from this container after $MAX_RETRIES attempts; nothing pulled."
+        log_warn "Set OLLAMA_BASE_URL=${BUNDLED_OLLAMA_HOST} to pull into the bundled Ollama, or run 'ollama pull' on the host that serves ${OLLAMA_HOST}."
+        exit 0
+    fi
 
     log_info "Model Configuration:"
     log_info "  Fast Model:      ${OLLAMA_MODEL_FAST}"
@@ -157,6 +159,6 @@ main() {
         log_error "Some models failed to pull. Check logs above for details."
         exit 1
     fi
-}
+)
 
 main
