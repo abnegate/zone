@@ -11,10 +11,12 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::crypto;
-use crate::db::sync_config::{self, SyncDirection, SyncEventDirection, SyncEventType};
-use crate::db::tasks;
+use crate::db::sync_config::{
+    self, NewSyncedTask, SyncConfigRow, SyncDirection, SyncEventDirection, SyncEventType,
+};
+use crate::db::{projects, tasks};
 use crate::state::AppState;
-use crate::sync::{Delivery, IssueState, SyncError, github, linear};
+use crate::sync::{Delivery, IssueState, Settings, SyncError, WebhookEvent, github, linear};
 
 /// Maximum allowed webhook body size (1MB)
 const MAX_WEBHOOK_BODY_SIZE: usize = 1024 * 1024;
@@ -128,8 +130,8 @@ async fn receive(
         );
     }
 
-    let webhook_secret = match sync_config_row.webhook_secret_encrypted {
-        Some(encrypted) => match crypto::decrypt(state.encryption_key(), &encrypted) {
+    let webhook_secret = match &sync_config_row.webhook_secret_encrypted {
+        Some(encrypted) => match crypto::decrypt(state.encryption_key(), encrypted) {
             Ok(secret) => secret,
             Err(e) => {
                 tracing::error!(
@@ -204,14 +206,7 @@ async fn receive(
         }
     };
 
-    match process_webhook_event(
-        state,
-        sync_config_id,
-        &sync_config_row.project_id,
-        webhook_event,
-    )
-    .await
-    {
+    match process_webhook_event(state, &sync_config_row, webhook_event).await {
         Ok(message) => success(message),
         Err(e) => {
             tracing::error!(
@@ -247,31 +242,20 @@ async fn receive(
     }
 }
 
-/// Process a webhook event by updating the corresponding task
+/// Apply a webhook event to the task its issue is linked to, or link a new
+/// issue to a task of its own
 async fn process_webhook_event(
     state: &AppState,
-    sync_config_id: Uuid,
-    _project_id: &Uuid,
-    event: crate::sync::WebhookEvent,
+    config: &SyncConfigRow,
+    event: WebhookEvent,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let sync_config_id = config.id;
     let synced_item =
         sync_config::get_synced_item_by_external_id(state.db(), sync_config_id, &event.external_id)
             .await?;
 
-    let synced_item = match synced_item {
-        Some(item) => item,
-        None => {
-            // If no synced item exists and event is "created", we might want to create a task
-            // For now, just log and ignore
-            tracing::info!(
-                "Received webhook for external ID {} but no synced item found",
-                event.external_id
-            );
-            return Ok(format!(
-                "No synced item found for external ID {}",
-                event.external_id
-            ));
-        }
+    let Some(synced_item) = synced_item else {
+        return link_new_issue(state, config, event).await;
     };
 
     if synced_item.sync_direction == SyncDirection::Outbound {
@@ -326,6 +310,84 @@ async fn process_webhook_event(
     .await?;
 
     Ok(format!("Task {} updated from webhook", synced_item.task_id))
+}
+
+/// Turn a newly opened external issue into a linked, non-agentic task, when
+/// the sync takes issues in and this one is from where it is configured to.
+async fn link_new_issue(
+    state: &AppState,
+    config: &SyncConfigRow,
+    event: WebhookEvent,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let external_id = &event.external_id;
+    if event.event_type != SyncEventType::Create {
+        tracing::info!("Received webhook for external ID {external_id} but no synced item found");
+        return Ok(format!(
+            "No synced item found for external ID {external_id}"
+        ));
+    }
+
+    let settings = Settings::from_config(&config.config);
+    let direction = settings.direction()?;
+    if direction == SyncDirection::Outbound {
+        return Ok(format!(
+            "Sync is outbound-only, ignoring new issue {external_id}"
+        ));
+    }
+
+    let workspace_id = projects::get_project(state.db(), config.project_id)
+        .await?
+        .and_then(|project| project.workspace_id);
+    let Some(workspace_id) = workspace_id else {
+        return Ok(format!(
+            "Project has no workspace to hold a task, ignoring new issue {external_id}"
+        ));
+    };
+
+    if !event.origin.may_become_task(&settings) {
+        tracing::info!(
+            "Ignoring new issue {external_id} for {}: not from the configured source, or not opened by a writer",
+            config.id
+        );
+        return Ok(format!(
+            "Issue {external_id} is not one this sync creates tasks for"
+        ));
+    }
+
+    let title = event.payload.title.as_deref().unwrap_or(external_id);
+    let description = event.payload.description.as_deref().unwrap_or_default();
+    let external_state = serde_json::to_value(&event.payload)?;
+    let item = sync_config::create_synced_task(
+        state.db(),
+        NewSyncedTask {
+            sync_config_id: config.id,
+            workspace_id,
+            project_id: config.project_id,
+            title: truncate("title", title, MAX_TITLE_LENGTH),
+            description: truncate("description", description, MAX_DESCRIPTION_LENGTH),
+            external_id,
+            external_url: event.url.as_deref(),
+            sync_direction: direction,
+            last_external_state: Some(external_state.clone()),
+        },
+    )
+    .await?;
+    let Some(item) = item else {
+        return Ok(format!("Issue {external_id} is already linked to a task"));
+    };
+
+    sync_config::create_sync_event(
+        state.db(),
+        config.id,
+        Some(item.id),
+        SyncEventType::Create,
+        SyncEventDirection::Inbound,
+        Some(external_state),
+        None,
+    )
+    .await?;
+
+    Ok(format!("Task {} created from webhook", item.task_id))
 }
 
 fn truncate<'a>(field: &str, text: &'a str, limit: usize) -> &'a str {

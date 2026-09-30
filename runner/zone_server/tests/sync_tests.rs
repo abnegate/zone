@@ -92,7 +92,12 @@ async fn cleanup_project(pool: &sqlx::PgPool, project_id: Uuid) {
         .execute(sqlx::query("DELETE FROM sync_configs WHERE project_id = $1").bind(project_id))
         .await;
     let _ = pool
-        .execute(sqlx::query("DELETE FROM tasks WHERE project_id = $1").bind(project_id))
+        .execute(
+            sqlx::query(
+                "DELETE FROM tasks WHERE id IN (SELECT task_id FROM task_projects WHERE project_id = $1)",
+            )
+            .bind(project_id),
+        )
         .await;
     let _ = pool
         .execute(sqlx::query("DELETE FROM projects WHERE id = $1").bind(project_id))
@@ -824,6 +829,52 @@ impl SyncedTask {
             .expect("Task disappeared")
     }
 
+    async fn new_tasks(&self) -> Vec<tasks::TaskRow> {
+        let ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT t.id FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
+             WHERE tp.project_id = $1 AND t.id <> $2 ORDER BY t.created_at",
+        )
+        .bind(self.project_id)
+        .bind(self.task_id)
+        .fetch_all(self.state.db())
+        .await
+        .expect("Failed to list the project's tasks");
+        let mut found = Vec::new();
+        for id in ids {
+            found.push(
+                tasks::get_task(self.state.db(), id)
+                    .await
+                    .expect("Failed to read task")
+                    .expect("Task disappeared"),
+            );
+        }
+        found
+    }
+
+    async fn new_task(&self) -> tasks::TaskRow {
+        let mut created = self.new_tasks().await;
+        assert_eq!(created.len(), 1, "exactly one task from the new issue");
+        created.remove(0)
+    }
+
+    async fn linked(&self, external_id: &str) -> Option<sync_config::SyncedItemRow> {
+        sync_config::get_synced_item_by_external_id(
+            self.state.db(),
+            self.sync_config_id,
+            external_id,
+        )
+        .await
+        .expect("Failed to read synced item")
+    }
+
+    async fn link_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM synced_items WHERE sync_config_id = $1")
+            .bind(self.sync_config_id)
+            .fetch_one(self.state.db())
+            .await
+            .expect("Failed to count synced items")
+    }
+
     async fn cleanup(self) {
         let _ = self
             .state
@@ -1075,6 +1126,468 @@ fn linear_issue_update() -> serde_json::Value {
         },
         "webhookTimestamp": now_milliseconds()
     })
+}
+
+const NEW_ISSUE: &str = "456";
+const NEW_ISSUE_URL: &str = "https://github.com/test-owner/test-repo/issues/456";
+const NEW_ISSUE_TITLE: &str = "Crash on save";
+const NEW_ISSUE_BODY: &str = "Steps to reproduce";
+const LINEAR_PROJECT: &str = "0b6f3c2e-6f1a-4d8e-9a57-2f8c1d7e4b10";
+
+fn configured_github(direction: &str) -> serde_json::Value {
+    json!({
+        "direction": direction,
+        "external_repo_url": "https://GitHub.com/Test-Owner/Test-Repo/",
+        "external_project_id": null
+    })
+}
+
+fn opened_issue(association: &str, repository: &str) -> serde_json::Value {
+    json!({
+        "action": "opened",
+        "issue": {
+            "number": 456,
+            "title": NEW_ISSUE_TITLE,
+            "body": NEW_ISSUE_BODY,
+            "state": "open",
+            "html_url": NEW_ISSUE_URL,
+            "author_association": association,
+            "user": { "login": "someone" }
+        },
+        "repository": {
+            "full_name": repository,
+            "html_url": format!("https://github.com/{repository}")
+        },
+        "sender": { "login": "someone" }
+    })
+}
+
+fn configured_linear(direction: &str) -> serde_json::Value {
+    json!({
+        "direction": direction,
+        "external_repo_url": null,
+        "external_project_id": LINEAR_PROJECT
+    })
+}
+
+fn created_linear_issue(entity: &str, project_id: &str) -> serde_json::Value {
+    json!({
+        "action": "create",
+        "type": entity,
+        "data": {
+            "id": NEW_ISSUE,
+            "title": NEW_ISSUE_TITLE,
+            "description": NEW_ISSUE_BODY,
+            "projectId": project_id,
+            "url": "https://linear.app/acme/issue/ACME-456/crash-on-save",
+            "state": { "type": "backlog", "name": "Backlog" }
+        },
+        "webhookTimestamp": now_milliseconds()
+    })
+}
+
+#[tokio::test]
+async fn a_signed_github_issue_opened_by_a_member_of_the_configured_repository_becomes_a_linked_non_agentic_task()
+ {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+
+    let status = synced
+        .post_github(&opened_issue("MEMBER", "test-owner/test-repo"))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let task = synced.new_task().await;
+    assert_eq!(task.title, NEW_ISSUE_TITLE);
+    assert_eq!(task.description, NEW_ISSUE_BODY);
+    assert!(
+        !task.is_agentic,
+        "a task from a webhook never runs an agent"
+    );
+    assert_eq!(task.project_ids, vec![synced.project_id]);
+    let item = synced
+        .linked(NEW_ISSUE)
+        .await
+        .expect("the new issue is linked to its task");
+    assert_eq!(item.task_id, task.id);
+    assert_eq!(item.external_url.as_deref(), Some(NEW_ISSUE_URL));
+    assert_eq!(item.sync_direction, SyncDirection::Inbound);
+    let created: Vec<_> =
+        sync_config::list_sync_events(synced.state.db(), synced.sync_config_id, 100)
+            .await
+            .expect("Failed to read sync events")
+            .into_iter()
+            .filter(|event| event.event_type == SyncEventType::Create)
+            .collect();
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert_eq!(created[0].synced_item_id, Some(item.id));
+    assert_eq!(created[0].direction, SyncEventDirection::Inbound);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_owner_or_collaborator_opening_an_issue_also_creates_a_task() {
+    for association in ["OWNER", "COLLABORATOR"] {
+        let synced = SyncedTask::create(
+            "github",
+            configured_github("bidirectional"),
+            SyncDirection::Bidirectional,
+        )
+        .await;
+
+        let status = synced
+            .post_github(&opened_issue(association, "Test-Owner/Test-Repo"))
+            .await;
+
+        assert_eq!(status, StatusCode::OK, "{association}");
+        assert_eq!(synced.new_tasks().await.len(), 1, "{association}");
+        assert_eq!(
+            synced
+                .linked(NEW_ISSUE)
+                .await
+                .map(|item| item.sync_direction),
+            Some(SyncDirection::Bidirectional),
+            "{association}"
+        );
+
+        synced.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn redelivering_an_opened_issue_keeps_one_task_and_one_link() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let body = opened_issue("MEMBER", "test-owner/test-repo");
+
+    assert_eq!(synced.post_github(&body).await, StatusCode::OK);
+    assert_eq!(synced.post_github(&body).await, StatusCode::OK);
+    let (first, second) = tokio::join!(synced.post_github(&body), synced.post_github(&body));
+
+    assert_eq!((first, second), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(synced.new_tasks().await.len(), 1);
+    assert_eq!(
+        synced.link_count().await,
+        2,
+        "the fixture's link and the new one"
+    );
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn issues_opened_at_the_same_moment_race_to_one_task_and_one_link() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let body = opened_issue("MEMBER", "test-owner/test-repo");
+
+    let statuses = futures::future::join_all((0..4).map(|_| synced.post_github(&body))).await;
+
+    assert!(
+        statuses.iter().all(|status| *status == StatusCode::OK),
+        "{statuses:?}"
+    );
+    assert_eq!(synced.new_tasks().await.len(), 1);
+    assert_eq!(synced.link_count().await, 2);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn linking_an_issue_another_delivery_already_linked_leaves_no_orphan_task() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let workspace_id = synced.task().await.workspace_id;
+
+    let item = sync_config::create_synced_task(
+        synced.state.db(),
+        sync_config::NewSyncedTask {
+            sync_config_id: synced.sync_config_id,
+            workspace_id,
+            project_id: synced.project_id,
+            title: "Duplicate",
+            description: "",
+            external_id: "123",
+            external_url: None,
+            sync_direction: SyncDirection::Inbound,
+            last_external_state: None,
+        },
+    )
+    .await
+    .expect("losing the race is not an error");
+
+    assert!(item.is_none());
+    assert!(synced.new_tasks().await.is_empty());
+    assert_eq!(
+        synced.linked("123").await.map(|item| item.task_id),
+        Some(synced.task_id)
+    );
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_new_issue_with_an_overlong_title_and_description_becomes_a_task_cut_to_the_limits() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let mut opened = opened_issue("MEMBER", "test-owner/test-repo");
+    opened["issue"]["title"] = json!(format!("a{}", "é".repeat(250)));
+    opened["issue"]["body"] = json!(format!("a{}", "é".repeat(25_000)));
+
+    let status = synced.post_github(&opened).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let task = synced.new_task().await;
+    assert_eq!(task.title, format!("a{}", "é".repeat(249)));
+    assert_eq!(task.description, format!("a{}", "é".repeat(24_999)));
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_outbound_sync_creates_no_task_for_a_new_issue() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("outbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+
+    let status = synced
+        .post_github(&opened_issue("MEMBER", "test-owner/test-repo"))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(synced.new_tasks().await.is_empty());
+    assert!(synced.linked(NEW_ISSUE).await.is_none());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_issue_in_another_repository_creates_no_task() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+
+    for repository in ["someone-else/test-repo", "test-owner/test-repo-fork"] {
+        let status = synced
+            .post_github(&opened_issue("MEMBER", repository))
+            .await;
+
+        assert_eq!(status, StatusCode::OK, "{repository}");
+    }
+    let mut without_repository = opened_issue("MEMBER", "test-owner/test-repo");
+    without_repository
+        .as_object_mut()
+        .unwrap()
+        .remove("repository");
+    assert_eq!(
+        synced.post_github(&without_repository).await,
+        StatusCode::OK
+    );
+
+    assert!(synced.new_tasks().await.is_empty());
+    assert!(synced.linked(NEW_ISSUE).await.is_none());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_issue_opened_by_someone_without_write_access_creates_no_task() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+
+    for association in [
+        "NONE",
+        "CONTRIBUTOR",
+        "FIRST_TIME_CONTRIBUTOR",
+        "FIRST_TIMER",
+        "MANNEQUIN",
+        "SOMETHING_NEW",
+    ] {
+        let status = synced
+            .post_github(&opened_issue(association, "test-owner/test-repo"))
+            .await;
+
+        assert_eq!(status, StatusCode::OK, "{association}");
+    }
+    let mut unstated = opened_issue("MEMBER", "test-owner/test-repo");
+    unstated["issue"]
+        .as_object_mut()
+        .unwrap()
+        .remove("author_association");
+    assert_eq!(synced.post_github(&unstated).await, StatusCode::OK);
+
+    assert!(synced.new_tasks().await.is_empty());
+    assert!(synced.linked(NEW_ISSUE).await.is_none());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_edit_of_an_issue_that_was_never_linked_creates_no_task() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let mut edited = opened_issue("MEMBER", "test-owner/test-repo");
+    edited["action"] = json!("edited");
+
+    let status = synced.post_github(&edited).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(synced.new_tasks().await.is_empty());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_later_edit_of_a_new_issue_updates_the_task_it_became() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let opened = opened_issue("MEMBER", "test-owner/test-repo");
+    assert_eq!(synced.post_github(&opened).await, StatusCode::OK);
+    let mut edited = opened.clone();
+    edited["action"] = json!("edited");
+    edited["issue"]["title"] = json!("Crash on save as");
+    edited["issue"]["author_association"] = json!("NONE");
+
+    let status = synced.post_github(&edited).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let task = synced.new_task().await;
+    assert_eq!(task.title, "Crash on save as");
+    assert_eq!(task.description, NEW_ISSUE_BODY);
+    assert!(!task.is_agentic);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_task_created_from_an_issue_is_never_picked_to_run() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+
+    let status = synced
+        .post_github(&opened_issue("OWNER", "test-owner/test-repo"))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let task = synced.new_task().await;
+    assert_eq!(task.status, "created");
+    assert_eq!(
+        zone_server::db::auto_projects::next_runnable(synced.state.db(), synced.project_id)
+            .await
+            .expect("Failed to pick the next runnable task"),
+        None
+    );
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_linear_issue_becomes_a_task_only_in_the_configured_project() {
+    let synced = SyncedTask::create(
+        "linear",
+        configured_linear("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+
+    let status = synced
+        .post_linear(&created_linear_issue(
+            "Issue",
+            "7d1f2a9b-0000-4c3e-8f6a-1b2c3d4e5f60",
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut without_project = created_linear_issue("Issue", LINEAR_PROJECT);
+    without_project["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("projectId");
+    assert_eq!(synced.post_linear(&without_project).await, StatusCode::OK);
+    assert!(synced.new_tasks().await.is_empty());
+
+    let status = synced
+        .post_linear(&created_linear_issue("Issue", LINEAR_PROJECT))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let task = synced.new_task().await;
+    assert_eq!(task.title, NEW_ISSUE_TITLE);
+    assert_eq!(task.description, NEW_ISSUE_BODY);
+    assert!(!task.is_agentic);
+    let item = synced
+        .linked(NEW_ISSUE)
+        .await
+        .expect("the new issue is linked to its task");
+    assert_eq!(item.task_id, task.id);
+    assert_eq!(
+        item.external_url.as_deref(),
+        Some("https://linear.app/acme/issue/ACME-456/crash-on-save")
+    );
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_created_linear_comment_creates_no_task() {
+    let synced = SyncedTask::create(
+        "linear",
+        configured_linear("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+
+    let status = synced
+        .post_linear(&created_linear_issue("Comment", LINEAR_PROJECT))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(synced.new_tasks().await.is_empty());
+    assert!(synced.linked(NEW_ISSUE).await.is_none());
+
+    synced.cleanup().await;
 }
 
 // The console's External Sync section: configuration only, no engine yet.

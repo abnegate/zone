@@ -7,7 +7,7 @@ use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::DbResult;
+use super::{DbResult, tasks};
 
 /// Sync configuration row from database
 #[derive(Debug, Clone)]
@@ -460,6 +460,80 @@ pub async fn create_synced_item(
         last_external_state: row.last_external_state,
         created_at: row.created_at,
     })
+}
+
+/// An external issue to turn into a task of `project_id` and link to it.
+pub struct NewSyncedTask<'a> {
+    pub sync_config_id: Uuid,
+    pub workspace_id: Uuid,
+    pub project_id: Uuid,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub external_id: &'a str,
+    pub external_url: Option<&'a str>,
+    pub sync_direction: SyncDirection,
+    pub last_external_state: Option<JsonValue>,
+}
+
+/// Create a non-agentic task for an external issue and link the two, or
+/// nothing when another delivery linked that issue first.
+pub async fn create_synced_task(
+    pool: &PgPool,
+    input: NewSyncedTask<'_>,
+) -> DbResult<Option<SyncedItemRow>> {
+    let mut transaction = pool.begin().await?;
+    let task = tasks::create_in(
+        &mut transaction,
+        &tasks::Create {
+            workspace_id: input.workspace_id,
+            project_ids: &[input.project_id],
+            title: input.title,
+            description: input.description,
+            acceptance_criteria: None,
+            priority: None,
+            is_agentic: false,
+            require_plan_approval: false,
+            source_id: None,
+            created_by: None,
+        },
+    )
+    .await?;
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO synced_items (sync_config_id, task_id, external_id, external_url,
+                                  sync_direction, last_external_state)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (sync_config_id, external_id) DO NOTHING
+        RETURNING id, sync_config_id, task_id, external_id, external_url,
+                  last_synced_at, sync_direction, last_external_state, created_at
+        "#,
+        input.sync_config_id,
+        task.id,
+        input.external_id,
+        input.external_url,
+        input.sync_direction.as_str(),
+        input.last_external_state
+    )
+    .fetch_optional(&mut *transaction)
+    .await?;
+
+    let Some(row) = row else {
+        transaction.rollback().await?;
+        return Ok(None);
+    };
+    let item = SyncedItemRow {
+        id: row.id,
+        sync_config_id: row.sync_config_id,
+        task_id: row.task_id,
+        external_id: row.external_id,
+        external_url: row.external_url,
+        last_synced_at: row.last_synced_at,
+        sync_direction: decode("sync_direction", &row.sync_direction)?,
+        last_external_state: row.last_external_state,
+        created_at: row.created_at,
+    };
+    transaction.commit().await?;
+    Ok(Some(item))
 }
 
 /// Update synced item

@@ -7,8 +7,8 @@ use sha2::Sha256;
 use std::collections::HashMap;
 
 use super::{
-    Delivery, ExternalIssue, IgnoredDelivery, IssueState, SyncConfig, SyncError, SyncProvider,
-    SyncResult, WebhookEvent, WebhookPayload,
+    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, SyncConfig, SyncError,
+    SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
 };
 use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
@@ -42,6 +42,13 @@ struct GitHubIssue {
     state: String,
     title: String,
     body: Option<String>,
+    #[serde(default)]
+    author_association: AuthorAssociation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GitHubRepository {
+    full_name: String,
 }
 
 /// GitHub webhook event
@@ -49,6 +56,46 @@ struct GitHubIssue {
 struct GitHubWebhookPayload {
     action: String,
     issue: GitHubIssue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repository: Option<GitHubRepository>,
+}
+
+/// How an issue's author is related to its repository, as GitHub reports it
+/// in `issue.author_association`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AuthorAssociation {
+    Owner,
+    Member,
+    Collaborator,
+    Contributor,
+    FirstTimer,
+    FirstTimeContributor,
+    Mannequin,
+    #[default]
+    None,
+    #[serde(other)]
+    Unknown,
+}
+
+impl AuthorAssociation {
+    /// Whether the author has write access to the repository: its owner, a
+    /// member of the organization that owns it, or a collaborator.
+    pub fn can_write(self) -> bool {
+        matches!(self, Self::Owner | Self::Member | Self::Collaborator)
+    }
+}
+
+/// The lowercase `owner/name` a repository URL points at, ignoring a trailing
+/// slash or `.git`; `None` when it names no owner and repository.
+pub fn repository_name(url: &str) -> Option<String> {
+    let url = url.trim().to_lowercase();
+    let url = url.trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let mut segments = url.rsplit(['/', ':']).filter(|segment| !segment.is_empty());
+    let name = segments.next()?;
+    let owner = segments.next()?;
+    Some(format!("{owner}/{name}"))
 }
 
 /// GitHub sync provider
@@ -332,6 +379,14 @@ impl SyncProvider for GitHubSyncProvider {
         Ok(Delivery::Issue(WebhookEvent {
             event_type: Self::map_action_to_event_type(&payload.action),
             external_id: payload.issue.number.to_string(),
+            url: Some(payload.issue.html_url.clone()),
+            origin: IssueOrigin::GitHub {
+                repository: payload
+                    .repository
+                    .as_ref()
+                    .map(|repository| repository.full_name.clone()),
+                author_association: payload.issue.author_association,
+            },
             payload: WebhookPayload {
                 title: Some(payload.issue.title.clone()),
                 description: payload.issue.body.clone(),
@@ -510,6 +565,107 @@ mod tests {
                 SyncEventType::Update,
                 "{action}"
             );
+        }
+    }
+
+    #[test]
+    fn an_issues_delivery_carries_the_issue_url_repository_and_author_association() {
+        let body = serde_json::json!({
+            "action": "opened",
+            "issue": {
+                "number": 456,
+                "html_url": "https://github.com/acme/widgets/issues/456",
+                "state": "open",
+                "title": "Title",
+                "body": null,
+                "author_association": "COLLABORATOR"
+            },
+            "repository": { "full_name": "acme/widgets" }
+        });
+
+        let Delivery::Issue(event) = parse_signed(Some(ISSUES_EVENT), &body).unwrap() else {
+            panic!("an issues delivery is an issue");
+        };
+
+        assert_eq!(
+            event.url.as_deref(),
+            Some("https://github.com/acme/widgets/issues/456")
+        );
+        assert_eq!(
+            event.origin,
+            IssueOrigin::GitHub {
+                repository: Some("acme/widgets".to_string()),
+                author_association: AuthorAssociation::Collaborator,
+            }
+        );
+    }
+
+    #[test]
+    fn an_issues_delivery_without_a_repository_or_association_has_neither() {
+        let body = serde_json::json!({
+            "action": "opened",
+            "issue": {
+                "number": 456,
+                "html_url": "https://github.com/acme/widgets/issues/456",
+                "state": "open",
+                "title": "Title",
+                "body": null
+            }
+        });
+
+        let Delivery::Issue(event) = parse_signed(Some(ISSUES_EVENT), &body).unwrap() else {
+            panic!("an issues delivery is an issue");
+        };
+
+        assert_eq!(
+            event.origin,
+            IssueOrigin::GitHub {
+                repository: None,
+                author_association: AuthorAssociation::None,
+            }
+        );
+    }
+
+    #[test]
+    fn only_an_owner_member_or_collaborator_can_write() {
+        let parse = |value: &str| -> AuthorAssociation {
+            serde_json::from_value(serde_json::json!(value)).unwrap()
+        };
+
+        for writer in ["OWNER", "MEMBER", "COLLABORATOR"] {
+            assert!(parse(writer).can_write(), "{writer}");
+        }
+        for reader in [
+            "CONTRIBUTOR",
+            "FIRST_TIMER",
+            "FIRST_TIME_CONTRIBUTOR",
+            "MANNEQUIN",
+            "NONE",
+            "SOMETHING_NEW",
+        ] {
+            assert!(!parse(reader).can_write(), "{reader}");
+        }
+        assert_eq!(parse("SOMETHING_NEW"), AuthorAssociation::Unknown);
+    }
+
+    #[test]
+    fn a_repository_url_names_its_lowercase_owner_and_repository() {
+        for url in [
+            "https://github.com/Acme/Widgets",
+            "https://github.com/acme/widgets/",
+            "https://github.com/acme/widgets.git",
+            "https://github.com/acme/widgets.git/",
+            " git@github.com:Acme/Widgets.git ",
+            "acme/widgets",
+        ] {
+            assert_eq!(
+                repository_name(url).as_deref(),
+                Some("acme/widgets"),
+                "{url}"
+            );
+        }
+        for url in ["", "widgets", "/"] {
+            assert_eq!(repository_name(url), None, "{url:?}");
         }
     }
 

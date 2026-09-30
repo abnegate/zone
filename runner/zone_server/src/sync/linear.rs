@@ -8,8 +8,8 @@ use sha2::Sha256;
 use std::collections::HashMap;
 
 use super::{
-    Delivery, ExternalIssue, IgnoredDelivery, IssueState, SyncConfig, SyncError, SyncProvider,
-    SyncResult, WebhookEvent, WebhookPayload,
+    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, SyncConfig, SyncError,
+    SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
 };
 use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
@@ -403,17 +403,17 @@ impl SyncProvider for LinearSyncProvider {
             .and_then(|v| v.as_str())
             .ok_or_else(|| SyncError::InvalidWebhookPayload("Missing issue ID".to_string()))?;
 
-        let title = payload
-            .data
-            .get("title")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let description = payload
-            .data
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let text = |name: &str| {
+            payload
+                .data
+                .get(name)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        };
+        let title = text("title");
+        let description = text("description");
+        let url = text("url");
+        let project_id = text("projectId");
 
         // Parse state
         let state = payload
@@ -426,6 +426,8 @@ impl SyncProvider for LinearSyncProvider {
         Ok(Delivery::Issue(WebhookEvent {
             event_type: Self::map_action_to_event_type(&payload.action),
             external_id: issue_id.to_string(),
+            url,
+            origin: IssueOrigin::Linear { project_id },
             payload: WebhookPayload {
                 title,
                 description,
@@ -592,6 +594,38 @@ mod tests {
                 "{action}"
             );
         }
+    }
+
+    #[test]
+    fn an_issue_delivery_carries_the_issue_url_and_project() {
+        let mut body = delivery(ISSUE_TYPE, "create");
+        body["data"]["url"] = serde_json::json!("https://linear.app/acme/issue/ACME-1/title");
+        body["data"]["projectId"] = serde_json::json!("project-1");
+
+        let Delivery::Issue(event) = parse_signed(&body).unwrap() else {
+            panic!("an issue delivery is an issue");
+        };
+
+        assert_eq!(
+            event.url.as_deref(),
+            Some("https://linear.app/acme/issue/ACME-1/title")
+        );
+        assert_eq!(
+            event.origin,
+            IssueOrigin::Linear {
+                project_id: Some("project-1".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn an_issue_delivery_outside_any_project_has_none() {
+        let Delivery::Issue(event) = parse_signed(&delivery(ISSUE_TYPE, "create")).unwrap() else {
+            panic!("an issue delivery is an issue");
+        };
+
+        assert_eq!(event.url, None);
+        assert_eq!(event.origin, IssueOrigin::Linear { project_id: None });
     }
 
     #[test]

@@ -3,9 +3,11 @@
 //! A project can be pointed at a GitHub repository or a Linear project: which
 //! provider, which direction, where, and the secret its webhook deliveries are
 //! signed with. Inbound webhooks work: a delivery signed with that secret
-//! updates the task it is linked to. Outbound sync is not implemented, so every
-//! configuration answers with `status: configured` and no `last_synced_at`, and
-//! the console says so rather than pretending items have moved out.
+//! updates the task it is linked to, and a new issue from the configured
+//! repository or project becomes a non-agentic task. Outbound sync is not
+//! implemented, so every configuration answers with `status: configured` and
+//! no `last_synced_at`, and the console says so rather than pretending items
+//! have moved out.
 //!
 //! GitHub signs deliveries with whatever secret the repository's webhook is
 //! given, so Zone issues one when the configuration is created. Linear issues
