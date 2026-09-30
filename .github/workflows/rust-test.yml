@@ -6,11 +6,13 @@ on:
     paths:
       - 'runner/**'
       - 'scripts/patch-tauri-android.sh'
+      - 'scripts/sqlx-prepare.sh'
       - '.github/workflows/rust-test.yml'
   pull_request:
     paths:
       - 'runner/**'
       - 'scripts/patch-tauri-android.sh'
+      - 'scripts/sqlx-prepare.sh'
       - '.github/workflows/rust-test.yml'
 
 concurrency:
@@ -224,6 +226,56 @@ jobs:
           if [ -f "$RUNNER_TEMP/zone-redis.pid" ]; then
             redis-cli -h 127.0.0.1 -p 56379 shutdown nosave
           fi
+
+  # Every build compiles the query macros offline against runner/zone_server/.sqlx,
+  # so nothing else notices an entry that is stale, hand-written or unused.
+  sqlx-cache:
+    name: sqlx Offline Cache
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runner
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zone_sqlx
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: runner
+          shared-key: sqlx-cache
+          cache-on-failure: true
+
+      - name: Install sqlx-cli
+        uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2.87.9
+        with:
+          tool: sqlx-cli@0.9.0
+
+      - name: Check the offline query cache
+        run: ../scripts/sqlx-prepare.sh --check
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_sqlx
 
   # Ensure minimum supported Rust version compiles
   msrv:

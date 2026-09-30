@@ -12,7 +12,7 @@
 	live-verify live-real \
 	lint-console format-console check-console \
 	list-models stats prune version env urls \
-	sqlx-prepare \
+	sqlx-prepare sqlx-check \
 	build-runner test-runner setup-runner-coverage test-runner-coverage \
 	test-runner-coverage-html test-runner-coverage-json test-runner-coverage-text \
 	install-runner install-cli \
@@ -724,15 +724,17 @@ ios: sync-tauri-ui ## Run the Zone client on an iOS simulator or device
 	fi
 	cd runner/zone_desktop && bunx --bun @tauri-apps/cli@2 ios dev
 
-sqlx-prepare: ## Prepare sqlx offline query data (requires running postgres)
+SQLX_DATABASE_URL = $${DATABASE_URL:-postgresql://$${POSTGRES_USER:-zone}:$${POSTGRES_PASSWORD:-zone}@localhost:5432/$${POSTGRES_DB:-zone}}
+
+sqlx-prepare: ## Regenerate runner/zone_server/.sqlx with the sqlx-cli matching Cargo.lock (DATABASE_URL, else the compose postgres)
 	@echo "$(BLUE)Preparing sqlx offline query data...$(NC)"
-	@if docker ps --format '{{.Names}}' | grep -q '^postgres$$'; then \
-		cd runner/zone_server && DATABASE_URL="postgresql://$${POSTGRES_USER:-zone}:$${POSTGRES_PASSWORD:-zone}@localhost:5432/$${POSTGRES_DB:-zone}" cargo sqlx prepare; \
-		echo "$(GREEN)sqlx offline data prepared!$(NC)"; \
-	else \
-		echo "$(RED)Error: PostgreSQL container is not running. Start it with 'make up' first.$(NC)"; \
-		exit 1; \
-	fi
+	@DATABASE_URL="$(SQLX_DATABASE_URL)" ./scripts/sqlx-prepare.sh
+	@echo "$(GREEN)sqlx offline data prepared!$(NC)"
+
+sqlx-check: ## Fail if runner/zone_server/.sqlx is missing, stale or has unused entries (what CI runs)
+	@echo "$(BLUE)Checking sqlx offline query data...$(NC)"
+	@DATABASE_URL="$(SQLX_DATABASE_URL)" ./scripts/sqlx-prepare.sh --check
+	@echo "$(GREEN)sqlx offline data is current!$(NC)"
 
 test-console: ## Run console (React) unit tests
 	@echo "$(BLUE)Running console unit tests...$(NC)"
