@@ -1,19 +1,8 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { read, rule } from '../test/css';
 
 const features = join(import.meta.dir, '..', 'features');
-
-function read(path: string): string {
-  return readFileSync(path, 'utf8');
-}
-
-function rule(css: string, selector: string): string {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = css.match(new RegExp(`(^|\\n)${escaped}\\s*\\{([^}]*)\\}`));
-  if (!match) throw new Error(`rule ${selector} is not defined`);
-  return match[2];
-}
 
 describe('chats layout', () => {
   const chats = read(join(features, 'chats', 'pages', 'ChatsPage.css'));

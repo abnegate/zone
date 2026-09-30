@@ -8,14 +8,21 @@ import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { getErrors } from '../../../validation';
-import { AutomationPanel, AutoProjectModal, CreateProjectWizard } from '../components';
-import { useAutomation, useProjects, useSyncConfigs } from '../hooks';
+import {
+  AutomationPanel,
+  AutoProjectModal,
+  CreateProjectWizard,
+  SyncConfigCard,
+} from '../components';
+import { useAutomation, useCanAdministerWorkspace, useProjects, useSyncConfigs } from '../hooks';
 import { CreateSyncConfigRequestSchema, UpdateProjectRequestSchema } from '../schemas';
 import type {
   CreateSyncConfigRequest,
   Project,
   ProjectStatus,
+  RevealedSecret,
   SyncConfig,
+  SyncConfigSecret,
   SyncDirection,
   SyncProvider,
   UpdateProjectRequest,
@@ -69,6 +76,7 @@ export default function ProjectsPage() {
     queryFn: () => client.getSources(workspaceId as string),
     enabled: isAuthenticated && !!workspaceId,
   });
+  const canAdministerSync = useCanAdministerWorkspace(workspaceId);
 
   // State
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
@@ -86,8 +94,22 @@ export default function ProjectsPage() {
     configs: syncConfigs,
     loading: syncLoading,
     createSyncConfig: createSyncConfigMutation,
+    setWebhookSecret: setWebhookSecretMutation,
     deleteSyncConfig: deleteSyncConfigMutation,
   } = useSyncConfigs(selectedProject?.id || null);
+  const [revealedSecret, setRevealedSecret] = useState<RevealedSecret | null>(null);
+  const reveals = useRef(0);
+
+  const reveal = ({ config, webhookSecret }: SyncConfigSecret) => {
+    if (webhookSecret) {
+      reveals.current += 1;
+      setRevealedSecret({
+        configId: config.id,
+        secret: webhookSecret,
+        revision: reveals.current,
+      });
+    }
+  };
 
   // A link such as /projects?id=… (from a planner receipt) selects that project once
   // loaded, once: the router applies a URL change as a transition, so closing the
@@ -110,6 +132,7 @@ export default function ProjectsPage() {
   // An automation error belongs to the project it happened on
   const selectProject = (project: Project) => {
     setAutomationActionError(null);
+    setRevealedSecret(null);
     setSelectedProject(project);
   };
 
@@ -117,6 +140,7 @@ export default function ProjectsPage() {
   const closeDetails = () => {
     setSelectedProject(null);
     setAutomationActionError(null);
+    setRevealedSecret(null);
     if (searchParams.has('id')) {
       const next = new URLSearchParams(searchParams);
       next.delete('id');
@@ -307,7 +331,7 @@ export default function ProjectsPage() {
     setSubmitting(true);
     setOperationError(null);
     try {
-      await createSyncConfigMutation(request);
+      reveal(await createSyncConfigMutation(request));
       setShowSyncModal(false);
       resetForm();
     } catch (err) {
@@ -323,15 +347,24 @@ export default function ProjectsPage() {
     setOperationError(null);
     try {
       await deleteSyncConfigMutation(configId);
+      setRevealedSecret((current) => (current?.configId === configId ? null : current));
     } catch (err) {
       failed(err, 'Failed to remove sync');
     }
   };
 
-  const syncState = (config: SyncConfig) =>
-    config.last_synced_at
-      ? `Synced ${formatDate(config.last_synced_at)}`
-      : 'Configured, not yet synced';
+  const handleSetWebhookSecret = async (config: SyncConfig, secret?: string) => {
+    if (!isAuthenticated || !selectedProject) return false;
+
+    setOperationError(null);
+    try {
+      reveal(await setWebhookSecretMutation(config.id, secret));
+      return true;
+    } catch (err) {
+      failed(err, 'Failed to set the webhook secret');
+      return false;
+    }
+  };
 
   // Helper to get source info for display
   const getProjectSource = (project: Project) => {
@@ -577,16 +610,18 @@ export default function ProjectsPage() {
                   <div className="sync-config-section">
                     <div className="sync-config-header">
                       <h3>External Sync</h3>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => {
-                          resetForm();
-                          openModal(setShowSyncModal);
-                        }}
-                      >
-                        + Add Sync
-                      </Button>
+                      {canAdministerSync && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => {
+                            resetForm();
+                            openModal(setShowSyncModal);
+                          }}
+                        >
+                          + Add Sync
+                        </Button>
+                      )}
                     </div>
 
                     {syncLoading ? (
@@ -595,59 +630,24 @@ export default function ProjectsPage() {
                       </div>
                     ) : syncConfigs.length === 0 ? (
                       <div className="sync-config-empty">
-                        No sync configured. Add one to point this project at a GitHub repository or
-                        a Linear project.
+                        No sync configured.{' '}
+                        {canAdministerSync ? 'Add one' : 'A workspace admin can add one'} to point
+                        this project at a GitHub repository or a Linear project.
                       </div>
                     ) : (
                       <div className="sync-config-list">
                         {syncConfigs.map((config) => (
-                          <div key={config.id} className="sync-config-item">
-                            <div className="sync-config-info">
-                              <span className={`sync-provider-badge ${config.provider}`}>
-                                {config.provider}
-                              </span>
-                              <span className="sync-direction">{config.direction}</span>
-                              {config.external_repo_url && (
-                                <a
-                                  href={config.external_repo_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="sync-external-link"
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  {config.external_repo_url}
-                                </a>
-                              )}
-                              {config.external_project_id && (
-                                <span className="sync-external-link">
-                                  {config.external_project_id}
-                                </span>
-                              )}
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="sync-config-remove"
-                                onClick={() => handleDeleteSyncConfig(config.id)}
-                              >
-                                Remove
-                              </Button>
-                            </div>
-                            <div className="sync-config-state">
-                              <span
-                                className={`sync-status ${config.last_synced_at ? 'synced' : ''}`}
-                              >
-                                {syncState(config)}
-                              </span>
-                              {config.webhook_path && (
-                                <code
-                                  className="sync-webhook"
-                                  title="Register this webhook URL with the provider"
-                                >
-                                  {`${window.location.origin}${config.webhook_path}`}
-                                </code>
-                              )}
-                            </div>
-                          </div>
+                          <SyncConfigCard
+                            key={config.id}
+                            config={config}
+                            canAdminister={canAdministerSync}
+                            revealed={
+                              revealedSecret?.configId === config.id ? revealedSecret : null
+                            }
+                            onDismissSecret={() => setRevealedSecret(null)}
+                            onSetSecret={(secret) => handleSetWebhookSecret(config, secret)}
+                            onRemove={() => handleDeleteSyncConfig(config.id)}
+                          />
                         ))}
                       </div>
                     )}
@@ -897,9 +897,13 @@ export default function ProjectsPage() {
                 type="text"
                 value={formSyncProjectId}
                 onChange={(e) => setFormSyncProjectId(e.target.value)}
-                placeholder="LINEAR-123"
+                placeholder="00000000-0000-0000-0000-000000000000"
                 className={fieldErrors.external_project_id ? 'input-error' : ''}
+                aria-describedby="sync-project-id-hint"
               />
+              <span id="sync-project-id-hint" className="form-hint">
+                The Linear project's ID (a UUID), not its name or an issue key.
+              </span>
               {fieldErrors.external_project_id && (
                 <span className="field-error">{fieldErrors.external_project_id}</span>
               )}

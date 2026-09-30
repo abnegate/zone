@@ -98,6 +98,10 @@ For production, regenerate secrets for security.
   - `mxbai-embed-large` (1024 dimensions)
 - **Note**: Vectors written by one model do not compare with another's, so switching models means re-embedding what is indexed. With `EMBEDDING_ENGINE=local`, name a model the in-process engine can run, such as `nomic-embed-text`.
 
+### Automatic picks
+
+With no model pinned, a chat with an attached image goes to the smallest installed model that reads images and completes chats: a dedicated one such as `llava:7b` when it is the smaller, a general one such as `qwen3.8:27b` when it is the only one, and never an embedding model such as `nomic-embed-vision`. An agent-mode chat or a task run offers tools, so it skips any model Ollama lists without the `tools` capability, a pinned Fast or Reasoning model included; a model listed without capabilities is still used.
+
 ### `OLLAMA_HOST`
 - **Default**: `0.0.0.0:11434`
 - **Description**: Bind address for a bundled Ollama container
@@ -772,11 +776,12 @@ happens when the agent gives no usable answer within
   the workspace's CLI cannot be set up (signed out with the host login off, a
   sign-in that cannot be read, a Claude token that cannot be renewed, or an
   unwritable state directory), that task pauses with the reason and the
-  project continues. A CLI that starts and then fails is retried on the next
-  tick, except when claude says it refuses the reviewer model, or the review's
-  context, because the signed-in account cannot spend usage credits on it:
-  every tick would be refused the same way, so the task pauses with claude's
-  words. *Naming a model* says when claude names a context as the reason.
+  project continues. A CLI that starts and then fails records a failed round,
+  and the next tick asks the next reviewer; a second round on the same head
+  without a verdict pauses the task with the error. When claude says it
+  refuses the reviewer model, or the review's context, because the signed-in
+  account cannot spend usage credits on it, every tick would be refused the
+  same way, so the task pauses at once with claude's words. *Naming a model* says when claude names a context as the reason.
   The reviewer's model is one the agent knows, taken from
   `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else one of the agent's own
   models, never an installed Ollama model. Zone does not pick `fable` on its
@@ -1196,7 +1201,14 @@ details, and native macOS / bundled NVIDIA instructions.
 `make up PROFILES=dev,vpn,monitoring` (or `./scripts/compose.sh --profile dev
 --profile vpn --profile monitoring up`) saves `COMPOSE_PROFILES`, `COMPOSE_FILE`,
 `ZONE_VPN`, and both proxy URLs in `.env` so rebuilds keep the same stack.
-`make up` with no `PROFILES` starts core services only and clears them. The
+`make up` with no `PROFILES` starts core services only and clears them.
+`make up` and `make dev` also stop the containers of every profile they leave
+out without removing them, so each keeps its named and anonymous volumes and a
+later `make up` that names the profile again brings them back with their data.
+`make down` removes them. `make up-comfyui` adds `bundled-comfyui` to
+the saved profiles, so `make dev` and `./scripts/compose.sh` keep ComfyUI
+running afterwards. A later `make up` keeps it only when its list names it, as
+in `make up PROFILES=monitoring,bundled-comfyui`. The
 VPN overlay is the network sandbox. Proxy URLs remain as belt-and-suspenders
 for HTTP clients and Traefik ACME. A configured proxy does not silently fall
 back to a direct connection when unavailable. The runner applies its proxy
@@ -1283,7 +1295,7 @@ On Claude Code, an auto project's runs, reviews and summaries run with no one wa
 
 ### `ZONE_AUTO_REVIEW_MODELS`
 - **Default**: *empty*
-- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the installed catalogue. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers.
+- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the tool-capable installed models. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers, and a round whose reviewer errors or gives no readable verdict moves to the next. Two such rounds on one head pause the task. An endpoint that does not answer (a refused connection, a timeout, a 5xx while Ollama restarts, or a 429) judged nothing, so it is not a round: the same reviewer is asked again on the next tick, the next one in the rotation is asked instead once it has gone unanswered 5 times, and the task pauses only once every reviewer has gone unanswered at least 5 times over 10 minutes. A review session offers tools, so a model Ollama lists without the `tools` capability (such as `llava:7b`) is never picked, even when named here or when it wrote the change; a model Ollama lists without any capabilities, or does not list at all, is still tried. When every model left cannot call tools, the task pauses saying so.
 
 ### `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL`
 - **Default**: `false`
@@ -1291,7 +1303,7 @@ On Claude Code, an auto project's runs, reviews and summaries run with no one wa
 
 ### `ZONE_AUTO_REVIEW_BOTS`
 - **Default**: *empty* (every bot this build knows: `coderabbit`, `greptile`)
-- **Description**: Review bots to wait for and read. A bot named here is always expected; otherwise a bot is expected once it has commented on the repository.
+- **Description**: Review bots to wait for and read. A bot named here is always expected; otherwise a bot is expected once it has commented on the repository. A summary that carries no review, such as CodeRabbit's "Review limit reached" notice, counts as no review: the bot is waited for on that head as if it had not answered.
 
 ### `ZONE_AUTO_BOT_REVIEW_GRACE_SECS`
 - **Default**: `600` (60–3600)

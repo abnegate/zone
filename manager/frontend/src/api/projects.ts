@@ -6,6 +6,7 @@ import type {
   Project,
   ProjectAutomation,
   SyncConfig,
+  SyncConfigSecret,
   UpdateProjectRequest,
 } from '../features/projects/types';
 import { parse } from '../validation';
@@ -14,7 +15,7 @@ import {
   ProjectAutomationSchema,
   ProjectResponseSchema,
   ProjectsResponseSchema,
-  SyncConfigResponseSchema,
+  SyncConfigSecretResponseSchema,
   SyncConfigsResponseSchema,
 } from '../validation/schemas';
 import { API_BASE } from './client';
@@ -40,10 +41,6 @@ class ProjectsApi {
     }
     return headers;
   }
-
-  // =============================================================================
-  // Projects
-  // =============================================================================
 
   async getProjects(workspaceId: string, status?: string): Promise<Project[]> {
     const params = new URLSearchParams({ workspace_id: workspaceId });
@@ -200,10 +197,6 @@ class ProjectsApi {
     return data.project;
   }
 
-  // =============================================================================
-  // Sync Configurations
-  // =============================================================================
-
   async getSyncConfigs(projectId: string): Promise<SyncConfig[]> {
     const response = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(projectId)}/sync`, {
       headers: this.getHeaders(),
@@ -216,7 +209,10 @@ class ProjectsApi {
     return data.configs;
   }
 
-  async createSyncConfig(projectId: string, request: CreateSyncConfigRequest): Promise<SyncConfig> {
+  async createSyncConfig(
+    projectId: string,
+    request: CreateSyncConfigRequest
+  ): Promise<SyncConfigSecret> {
     const response = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(projectId)}/sync`, {
       method: 'POST',
       headers: this.getHeaders(),
@@ -226,8 +222,27 @@ class ProjectsApi {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to create sync config: ${response.status}`);
     }
-    const data = parse(SyncConfigResponseSchema, await response.json());
-    return data.config;
+    return this.parseSecretResponse(response);
+  }
+
+  async setWebhookSecret(
+    projectId: string,
+    configId: string,
+    secret?: string
+  ): Promise<SyncConfigSecret> {
+    const response = await fetch(
+      `${API_BASE}/api/projects/${encodeURIComponent(projectId)}/sync/${encodeURIComponent(configId)}/webhook-secret`,
+      {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify(secret === undefined ? {} : { secret }),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to set webhook secret: ${response.status}`);
+    }
+    return this.parseSecretResponse(response);
   }
 
   async deleteSyncConfig(projectId: string, configId: string): Promise<void> {
@@ -242,6 +257,11 @@ class ProjectsApi {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to delete sync config: ${response.status}`);
     }
+  }
+
+  private async parseSecretResponse(response: Response): Promise<SyncConfigSecret> {
+    const data = parse(SyncConfigSecretResponseSchema, await response.json());
+    return { config: data.config, webhookSecret: data.webhook_secret };
   }
 
   private async parseErrorResponse(response: Response): Promise<{ message?: string }> {

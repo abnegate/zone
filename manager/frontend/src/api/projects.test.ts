@@ -12,6 +12,20 @@ const project = {
   updated_at: '2026-09-20T00:00:00Z',
 };
 
+const syncConfig = {
+  id: 'sync-1',
+  project_id: 'proj-1',
+  provider: 'github',
+  direction: 'outbound',
+  external_repo_url: 'https://github.com/acme/project',
+  is_active: true,
+  webhook_secret_issued_by_zone: true,
+  created_at: '2026-09-20T04:13:23.000Z',
+  status: 'configured',
+  last_synced_at: null,
+  webhook_path: '/api/webhooks/sync/sync-1/github',
+};
+
 const answer = (status: number, body: unknown) =>
   Promise.resolve(new Response(JSON.stringify(body), { status }));
 
@@ -86,6 +100,7 @@ describe('ProjectsApi', () => {
             direction: 'outbound',
             external_repo_url: 'https://github.com/acme/project',
             is_active: true,
+            webhook_secret_issued_by_zone: true,
             created_at: '2026-09-20T04:13:23.000Z',
             status: 'configured',
             last_synced_at: null,
@@ -100,5 +115,63 @@ describe('ProjectsApi', () => {
     expect(config.status).toBe('configured');
     expect(config.last_synced_at).toBeNull();
     expect(config.webhook_path).toBe('/api/webhooks/sync/sync-1/github');
+  });
+
+  it('reads whether a sync configuration has a webhook secret', async () => {
+    mockFetch.mockImplementation(() =>
+      answer(200, { configs: [{ ...syncConfig, webhook_secret_configured: false }] })
+    );
+
+    const [config] = await projectsApi.getSyncConfigs('proj-1');
+
+    expect(config.webhook_secret_configured).toBe(false);
+  });
+
+  it('returns the secret generated for a new sync configuration', async () => {
+    const secret = 'd'.repeat(64);
+    mockFetch.mockImplementation(() =>
+      answer(201, {
+        config: { ...syncConfig, webhook_secret_configured: true },
+        webhook_secret: secret,
+      })
+    );
+
+    const created = await projectsApi.createSyncConfig('proj-1', {
+      provider: 'github',
+      direction: 'outbound',
+      external_repo_url: 'https://github.com/acme/project',
+    });
+
+    expect(created.webhookSecret).toBe(secret);
+    expect(created.config.id).toBe('sync-1');
+    expect(created.config.webhook_secret_configured).toBe(true);
+  });
+
+  it('rejects a created configuration whose response leaves out the secret', async () => {
+    mockFetch.mockImplementation(() => answer(201, { config: syncConfig }));
+
+    await expect(
+      projectsApi.createSyncConfig('proj-1', {
+        provider: 'github',
+        direction: 'outbound',
+        external_repo_url: 'https://github.com/acme/project',
+      })
+    ).rejects.toThrow('webhook_secret');
+  });
+
+  it('puts a webhook secret on the configuration, encoding its ids', async () => {
+    mockFetch.mockImplementation(() => answer(200, { config: syncConfig, webhook_secret: null }));
+
+    const result = await projectsApi.setWebhookSecret(
+      'proj 1',
+      'sync/1',
+      'lin_wh_0123456789abcdef'
+    );
+
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/projects/proj%201/sync/sync%2F1/webhook-secret');
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body as string)).toEqual({ secret: 'lin_wh_0123456789abcdef' });
+    expect(result.webhookSecret).toBeNull();
   });
 });

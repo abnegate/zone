@@ -7,10 +7,12 @@
 //! not write the change -- and its unresolved threads become findings a
 //! fix-up run has to answer.
 
-use crate::agent::readiness::{CommitSha, ReviewComment, SignalKind};
+use crate::agent::readiness::{
+    CommitSha, Confidence, ReviewComment, ReviewSignal, SignalKind, published_at,
+};
 use crate::config::AutoProjectConfig;
 use crate::db::auto_projects::{Finding, ReviewRow, Verdict};
-use zone_vcs::pull_request::{IssueComment, ReviewThreadRecord};
+use zone_vcs::pull_request::{IssueComment, ReviewThreadRecord, SubmittedReviewRecord};
 
 /// Characters of a thread's opening comment kept as a finding's title.
 const TITLE_CHARS: usize = 140;
@@ -89,29 +91,32 @@ pub struct BotRound {
     pub external_id: Option<String>,
 }
 
-/// The bot's round on `head`, if it has published one for that head.
+/// A bot's score on one head and where it was read from.
+struct Score {
+    confidence: Confidence,
+    text: String,
+    external_id: String,
+}
+
+/// The bot's round on `head`, if it has reviewed that head.
+///
+/// The score comes from the bot's summary comment when that comment names the
+/// head and carries one. CodeRabbit on a paid plan scores only in its review
+/// of the diff, so its latest scored review submitted on the head stands in.
+/// That head is the commit the review was submitted on, never a walkthrough's
+/// range: a rate-limited CodeRabbit still posts a walkthrough whose range
+/// names the new head. A head with neither is one the bot has not answered.
 pub fn round(
     kind: SignalKind,
     comments: &[IssueComment],
+    reviews: &[SubmittedReviewRecord],
     threads: &[ReviewThreadRecord],
     head: &str,
 ) -> Option<BotRound> {
     let signal = kind.as_signal();
-    let evidence: Vec<ReviewComment> = comments
-        .iter()
-        .map(|comment| ReviewComment {
-            id: comment.id,
-            author: comment.author.clone(),
-            body: comment.body.clone(),
-            url: comment.url.clone(),
-            created_at: comment.created_at.clone(),
-        })
-        .collect();
-    let summary = signal.summarize(&evidence)?;
     let head = CommitSha::parse(head)?;
-    if summary.reviewed_commit.as_ref() != Some(&head) {
-        return None;
-    }
+    let score = summarized(signal.as_ref(), comments, &head)
+        .or_else(|| reviewed(kind, signal.as_ref(), reviews, &head))?;
     let findings: Vec<Finding> = threads
         .iter()
         .filter(|thread| !thread.resolved && !thread.outdated)
@@ -139,26 +144,80 @@ pub fn round(
             }
         })
         .collect();
-    let at_bar = summary
-        .confidence
-        .is_some_and(|confidence| confidence.satisfies(signal.required()));
-    let verdict = if at_bar && findings.is_empty() {
+    let verdict = if score.confidence.satisfies(signal.required()) && findings.is_empty() {
         Verdict::Approve
     } else {
         Verdict::RequestChanges
     };
+    Some(BotRound {
+        reviewer: kind.reviewer(),
+        verdict,
+        summary: score.text,
+        findings,
+        external_id: Some(score.external_id),
+    })
+}
+
+/// The score in the bot's latest summary comment, when it names `head`.
+fn summarized(
+    signal: &dyn ReviewSignal,
+    comments: &[IssueComment],
+    head: &CommitSha,
+) -> Option<Score> {
+    let evidence: Vec<ReviewComment> = comments
+        .iter()
+        .map(|comment| ReviewComment {
+            id: comment.id,
+            author: comment.author.clone(),
+            body: comment.body.clone(),
+            url: comment.url.clone(),
+            created_at: comment.created_at.clone(),
+        })
+        .collect();
+    let summary = signal.summarize(&evidence)?;
+    if summary.reviewed_commit.as_ref() != Some(head) {
+        return None;
+    }
+    let confidence = summary.confidence?;
     let text = comments
         .iter()
         .find(|comment| comment.id == summary.comment_id)
         .map(|comment| excerpt(&comment.body, SUMMARY_CHARS))
         .unwrap_or_default();
-    Some(BotRound {
-        reviewer: kind.reviewer(),
-        verdict,
-        summary: text,
-        findings,
-        external_id: Some(summary.comment_id.to_string()),
+    Some(Score {
+        confidence,
+        text,
+        external_id: summary.comment_id.to_string(),
     })
+}
+
+/// The score in the bot's latest review submitted on `head` that carries one.
+fn reviewed(
+    kind: SignalKind,
+    signal: &dyn ReviewSignal,
+    reviews: &[SubmittedReviewRecord],
+    head: &CommitSha,
+) -> Option<Score> {
+    if !kind.scores_in_reviews() {
+        return None;
+    }
+    reviews
+        .iter()
+        .filter(|review| {
+            signal.authored(&review.author)
+                && CommitSha::parse(&review.commit_id).as_ref() == Some(head)
+        })
+        .filter_map(|review| {
+            signal
+                .confidence(&review.body)
+                .map(|confidence| (review, confidence))
+        })
+        .max_by_key(|(review, _)| (published_at(&review.submitted_at), review.id))
+        .map(|(review, confidence)| Score {
+            confidence,
+            text: excerpt(&review.body, SUMMARY_CHARS),
+            external_id: review.id.to_string(),
+        })
 }
 
 /// The first line of a comment, cut to a limit.
@@ -253,7 +312,7 @@ mod tests {
             ),
         )];
         let threads = vec![thread("coderabbitai", false)];
-        let round = round(SignalKind::CodeRabbit, &comments, &threads, HEAD).unwrap();
+        let round = round(SignalKind::CodeRabbit, &comments, &[], &threads, HEAD).unwrap();
         assert_eq!(round.reviewer, "coderabbitai");
         assert_eq!(round.verdict, Verdict::RequestChanges);
         assert_eq!(round.findings.len(), 1);
@@ -269,7 +328,7 @@ mod tests {
             "coderabbitai",
             "Actionable comments posted: 0\n\nReviewed between 1111111111111111111111111111111111111111 and 2222222222222222222222222222222222222222",
         )];
-        assert!(round(SignalKind::CodeRabbit, &stale, &[], HEAD).is_none());
+        assert!(round(SignalKind::CodeRabbit, &stale, &[], &[], HEAD).is_none());
         let clean = vec![comment(
             "coderabbitai",
             &format!(
@@ -279,6 +338,7 @@ mod tests {
         let round = round(
             SignalKind::CodeRabbit,
             &clean,
+            &[],
             &[thread("coderabbitai", true)],
             HEAD,
         )
@@ -288,6 +348,117 @@ mod tests {
             round.findings.is_empty(),
             "a resolved thread is not a finding"
         );
+    }
+
+    #[test]
+    fn a_coderabbit_summary_that_hit_its_review_limit_is_not_a_round() {
+        let head = "76ddcd8687b7a54576043a87b3c03ec48a7e9e9a";
+        let comments = vec![comment(
+            "coderabbitai[bot]",
+            include_str!("fixtures/coderabbit-review-limit-reached.md"),
+        )];
+        assert_eq!(
+            round(SignalKind::CodeRabbit, &comments, &[], &[], head),
+            None,
+            "a summary that names the head but carries no review is not a review of the head"
+        );
+    }
+
+    const PAID_HEAD: &str = "39edddf0d1abc06b84ebb74e8213c1fd41ec333e";
+    const PAID_REVIEW: &str = include_str!("fixtures/coderabbit-paid-plan-review.md");
+
+    fn unscored_walkthrough() -> IssueComment {
+        comment(
+            "coderabbitai[bot]",
+            &format!(
+                "## Walkthrough\n\nThe settings tests share one formatter.\n\nReviewed between 86a82b0f230c95b2b6c0429386bcfda031abd47b and {PAID_HEAD}"
+            ),
+        )
+    }
+
+    fn review(id: u64, body: &str, commit_id: &str, submitted_at: &str) -> SubmittedReviewRecord {
+        SubmittedReviewRecord {
+            id,
+            author: "coderabbitai[bot]".into(),
+            body: body.into(),
+            commit_id: commit_id.into(),
+            submitted_at: submitted_at.into(),
+        }
+    }
+
+    fn paid_reviews(body: &str, commit_id: &str) -> Vec<SubmittedReviewRecord> {
+        vec![
+            review(5333502514, body, commit_id, "2026-09-28T02:51:09Z"),
+            review(5333523878, "", commit_id, "2026-09-28T02:55:47Z"),
+        ]
+    }
+
+    #[test]
+    fn a_paid_coderabbit_review_of_the_head_with_an_open_thread_requests_changes() {
+        let round = round(
+            SignalKind::CodeRabbit,
+            &[unscored_walkthrough()],
+            &paid_reviews(PAID_REVIEW, PAID_HEAD),
+            &[thread("coderabbitai", false)],
+            PAID_HEAD,
+        )
+        .expect("the review on the head carries the score the summary lacks");
+        assert_eq!(round.verdict, Verdict::RequestChanges);
+        assert_eq!(round.findings.len(), 1);
+        assert_eq!(round.findings[0].thread_id.as_deref(), Some("PRRT_9"));
+        assert_eq!(
+            round.external_id.as_deref(),
+            Some("5333502514"),
+            "the scored review is the round's source, not the later empty one"
+        );
+        assert!(round.summary.contains("Actionable comments posted: 1"));
+    }
+
+    #[test]
+    fn a_paid_coderabbit_review_of_the_head_with_nothing_actionable_approves() {
+        let clean = PAID_REVIEW.replace(
+            "Actionable comments posted: 1",
+            "Actionable comments posted: 0",
+        );
+        let round = round(
+            SignalKind::CodeRabbit,
+            &[],
+            &paid_reviews(&clean, PAID_HEAD),
+            &[thread("coderabbitai", true)],
+            PAID_HEAD,
+        )
+        .expect("a review on the head is a round even without a summary comment");
+        assert_eq!(round.verdict, Verdict::Approve);
+        assert!(round.findings.is_empty());
+    }
+
+    #[test]
+    fn a_paid_coderabbit_review_of_another_commit_is_not_a_round_of_the_head() {
+        let head = "76ddcd8687b7a54576043a87b3c03ec48a7e9e9a";
+        let comments = vec![comment(
+            "coderabbitai[bot]",
+            include_str!("fixtures/coderabbit-review-limit-reached.md"),
+        )];
+        assert_eq!(
+            round(
+                SignalKind::CodeRabbit,
+                &comments,
+                &paid_reviews(PAID_REVIEW, PAID_HEAD),
+                &[thread("coderabbitai", false)],
+                head,
+            ),
+            None,
+            "a walkthrough whose range names the head does not make an older review one of the head"
+        );
+    }
+
+    #[test]
+    fn a_greptile_score_is_never_read_from_a_pull_request_review() {
+        let reviews = vec![SubmittedReviewRecord {
+            author: "greptile-apps[bot]".into(),
+            ..review(7, "Confidence Score: 5/5", HEAD, "2026-09-28T02:51:09Z")
+        }];
+        assert_eq!(round(SignalKind::Greptile, &[], &reviews, &[], HEAD), None);
     }
 
     #[test]

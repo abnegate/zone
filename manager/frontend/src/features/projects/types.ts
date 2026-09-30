@@ -1,7 +1,3 @@
-// =============================================================================
-// Project Types
-// =============================================================================
-
 export type ProjectStatus = 'active' | 'on_hold' | 'cancelled';
 
 export interface Project {
@@ -106,10 +102,6 @@ export interface UpdateProjectRequest {
   source_id?: string;
 }
 
-// =============================================================================
-// Sync Configuration Types
-// =============================================================================
-
 export type SyncProvider = 'github' | 'linear';
 export type SyncDirection = 'inbound' | 'outbound' | 'bidirectional';
 
@@ -127,6 +119,21 @@ export interface SyncConfig {
   last_synced_at?: string | null;
   /** Where the provider's webhooks are received, relative to the console's origin */
   webhook_path?: string;
+  webhook_secret_configured?: boolean;
+  /** Zone generates this secret and can rotate it; otherwise the provider issues it to paste in */
+  webhook_secret_issued_by_zone: boolean;
+}
+
+export interface RevealedSecret {
+  configId: string;
+  secret: string;
+  /** Counts reveals, so each new secret mounts a fresh callout */
+  revision: number;
+}
+
+export interface SyncConfigSecret {
+  config: SyncConfig;
+  webhookSecret: string | null;
 }
 
 export interface CreateSyncConfigRequest {
@@ -135,10 +142,6 @@ export interface CreateSyncConfigRequest {
   external_repo_url?: string;
   external_project_id?: string;
 }
-
-// =============================================================================
-// API Response Types
-// =============================================================================
 
 export interface ApiResponse {
   success?: boolean;
@@ -155,8 +158,4 @@ export interface ProjectResponse extends ApiResponse {
 
 export interface SyncConfigsResponse extends ApiResponse {
   configs: SyncConfig[];
-}
-
-export interface SyncConfigResponse extends ApiResponse {
-  config: SyncConfig;
 }

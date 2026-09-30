@@ -231,6 +231,8 @@ Pre-built dashboards for:
 
 Access Grafana at `https://grafana.localhost`.
 
+See [Monitoring in docs/OPERATIONS.md](docs/OPERATIONS.md#monitoring) for why the container panels are empty on Docker Desktop's containerd image store, and why SearXNG and Gluetun only appear with the `vpn` profile.
+
 ## Usage
 
 ### Makefile Commands
@@ -556,18 +558,18 @@ docker compose restart <service-name>
 make backup
 
 # Restore from backup
-make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz
+make restore BACKUP=backups/zone_backup_20250101_120000-4242.tar.gz
 ```
 
 The postgres cluster lives in the `zone_postgres_data` volume, mounted at
 `/var/lib/postgresql/data`. An install created while the compose file mounted
 that volume at `/var/lib/postgresql` kept its cluster in an anonymous volume
-that `make backup` never saw; move it once before the next `make up`:
+that `make backup` never saw; move it once before the stack next starts:
 
 ```bash
 make stop
 make migrate-pgdata
-make up
+./scripts/compose.sh up -d
 ```
 
 `make backup` refuses to archive an empty cluster until that is done, and

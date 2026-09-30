@@ -5,33 +5,37 @@
 //! decide leaves the stage alone with a reason, and a step that needs a person
 //! pauses the task with one.
 
-use chrono::Utc;
+use std::collections::HashSet;
+
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 use zone_vcs::conflict::{BranchName, ConflictError, ConflictRequest};
 use zone_vcs::pull_request::{
-    ChecksOutcome, MergeMethod, MergedPr, PrError, PullRequestDetail, PullRequestReference,
-    ReviewEvent,
+    ChecksOutcome, MergeMethod, MergedPr, PrError, PrService, PullRequestDetail,
+    PullRequestReference, ReviewEvent, SubmittedReviewRecord,
 };
 
+use crate::agent::readiness::SignalKind;
 use crate::db::auto_projects::{
     self, Finding, Kind, ReviewInsert, ReviewRow, ReviewerKind, Stage, TaskAutomation,
     Verdict as Recorded,
 };
 use crate::db::tasks::{self, TaskRow};
 use crate::services::backend;
-use crate::services::stages;
 use crate::workers::conflict::RepairOutcome;
 use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception};
 
 use super::driver::Drive;
 use super::notification::{self, MergeReport};
-use super::review::model::{self, Author};
+use super::review::model::{self, Author, Unavailable};
+use super::review::outage::Outages;
 use super::review::{self, Outcome, ReviewError, ReviewRequest, bots, verdict};
 use super::summary;
 
-/// Rounds in a row a reviewer may end without a readable verdict before the
-/// task is handed to a person: a model that cannot follow the contract is
-/// not reviewing anything.
-const MAX_UNPARSEABLE_ROUNDS: usize = 2;
+/// Rounds on one head that may end without a verdict, unreadable or failed,
+/// before the task is handed to a person: each such round moves the next one
+/// to another reviewer, and a model that cannot answer is reviewing nothing.
+const MAX_VERDICTLESS_ROUNDS: usize = 2;
 
 /// Bytes of diff a reviewer is shown.
 const DIFF_BYTES: usize = 60_000;
@@ -529,8 +533,10 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
         .fetch_review_threads(&step.reference, &step.token)
         .await
         .map_err(|error| error.to_string())?;
+    let expected = bots::expected(config, &rows, &comments, &threads);
+    let reviews = submitted_reviews(pr, &step.reference, &step.token, &expected).await;
     let mut waiting: Vec<_> = Vec::new();
-    for kind in bots::expected(config, &rows, &comments, &threads) {
+    for kind in expected {
         // A bot's verdict on a head moves as its threads get resolved, so it
         // is read again every tick and recorded again only when it changed;
         // a thread that is gone from the new reading counts as addressed.
@@ -538,7 +544,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .iter()
             .filter(|row| row.is_bot() && row.reviewer == kind.reviewer() && row.head == head)
             .max_by_key(|row| (row.round, row.created_at));
-        let Some(round) = bots::round(kind, &comments, &threads, &head) else {
+        let Some(round) = bots::round(kind, &comments, &reviews, &threads, &head) else {
             if previous.is_none() {
                 waiting.push(kind);
             }
@@ -555,7 +561,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             })
             .unwrap_or_default();
         if let Some(row) = previous
-            && row.verdict() == round.verdict
+            && row.verdict == round.verdict
             && addressed.is_empty()
             && row.findings().len() == fresh.len()
         {
@@ -646,19 +652,8 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
         .iter()
         .filter(|row| !row.is_bot() && row.head == head)
         .collect();
-    let unreadable = model_rows
-        .iter()
-        .filter(|row| row.verdict() == Recorded::Unparseable)
-        .count();
-    if model_rows.len() == unreadable {
-        if unreadable >= MAX_UNPARSEABLE_ROUNDS {
-            return step
-                .pause(
-                    "the reviewer model gave no readable verdict twice; check the model, or name \
-                     another in ZONE_AUTO_REVIEW_MODELS",
-                )
-                .await;
-        }
+    let verdictless = model_rows.iter().filter(|row| !row.reviewed()).count();
+    if model_rows.len() == verdictless {
         let author = match step.task.last_run_id {
             Some(run) => tasks::run_mode(pool, run)
                 .await
@@ -678,18 +673,25 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?
             + 1;
-        let reviewer = model::select(
+        let lineup = match model::lineup(
             &author,
             &prefs,
             &catalog,
             &config.review_models,
             u32::try_from(round).unwrap_or(1),
-        );
-        if stages::is_auto(&reviewer.model) {
-            return step
-                .pause("no completion model is installed to review with")
-                .await;
-        }
+        ) {
+            Ok(lineup) => lineup,
+            Err(unavailable) => return step.pause(&unavailable.to_string()).await,
+        };
+        let names: Vec<String> = lineup
+            .iter()
+            .map(|reviewer| reviewer.model.clone())
+            .collect();
+        let outages = &step.drive.services.outages;
+        let index = outages.next(step.task.task_id, &names).unwrap_or(0);
+        let Some(reviewer) = lineup.get(index).cloned() else {
+            return step.pause(&Unavailable::NoModel.to_string()).await;
+        };
         if config.require_distinct_reviewer
             && !bot_on_head
             && let Some(reason) = model::objection(&author, &reviewer)
@@ -725,6 +727,9 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             },
         )
         .await;
+        if !matches!(outcome, Err(ReviewError::Unreachable(_))) {
+            outages.clear(step.task.task_id);
+        }
         match outcome {
             Ok(verdict) => {
                 let body = verdict::comment(&verdict, &reviewer.model, round, reviewer.same_model);
@@ -769,40 +774,45 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
                 answer_bot_threads(step, &open, &verdict.addressed, &threads, &head).await;
             }
-            Err(ReviewError::Unparseable(message)) => {
-                auto_projects::record_review(
-                    pool,
-                    ReviewInsert {
-                        task_id: step.task.task_id,
-                        run_id: step.task.last_run_id,
-                        round,
-                        head: &head,
-                        reviewer_kind: ReviewerKind::Model,
-                        reviewer: &reviewer.model,
-                        author_model: author.model(),
-                        same_model: reviewer.same_model,
-                        verdict: Recorded::Unparseable,
-                        summary: &message,
-                        findings: &[],
-                        addressed: &[],
-                        external_id: None,
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                // Nothing was reviewed: ask again next tick rather than
-                // treating silence as a request for changes.
-                return step
-                    .set(
-                        Stage::AwaitingReviews,
-                        Some("the reviewer gave no readable verdict; asking again"),
-                    )
-                    .await;
-            }
             Err(error) => {
-                return match error.stalled() {
-                    Some(reason) => step.pause(&reason).await,
-                    None => Err(error.to_string()),
+                let recovery = recover(
+                    &error,
+                    &reviewer.model,
+                    verdictless,
+                    &Attempt {
+                        outages,
+                        project: step.drive.project.project_id,
+                        task: step.task.task_id,
+                        lineup: &names,
+                        now: Utc::now(),
+                    },
+                );
+                if let Some(missed) = &recovery.missed {
+                    tracing::warn!(task_id = %step.task.task_id, reviewer = %missed.reviewer, %error, "A review round ended without a verdict");
+                    auto_projects::record_review(
+                        pool,
+                        ReviewInsert {
+                            task_id: step.task.task_id,
+                            run_id: step.task.last_run_id,
+                            round,
+                            head: &head,
+                            reviewer_kind: ReviewerKind::Model,
+                            reviewer: &missed.reviewer,
+                            author_model: author.model(),
+                            same_model: reviewer.same_model,
+                            verdict: missed.verdict,
+                            summary: &missed.summary,
+                            findings: &[],
+                            addressed: &[],
+                            external_id: None,
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                }
+                return match recovery.next {
+                    Next::Retry(reason) => step.set(Stage::AwaitingReviews, Some(&reason)).await,
+                    Next::Pause(reason) => step.pause(&reason).await,
                 };
             }
         }
@@ -846,6 +856,43 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
     }
 }
 
+/// The reviews submitted on the pull request, read only when an `expected`
+/// bot can score in one. A failed read counts as none, as the changed files do.
+async fn submitted_reviews(
+    pr: &PrService,
+    reference: &PullRequestReference,
+    token: &str,
+    expected: &[SignalKind],
+) -> Vec<SubmittedReviewRecord> {
+    if !expected.iter().any(|kind| kind.scores_in_reviews()) {
+        return Vec::new();
+    }
+    pr.fetch_reviews(reference, token)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                owner = %reference.owner,
+                repository = %reference.repository,
+                number = reference.number,
+                %error,
+                "Could not read the pull request's reviews; reading bot scores from summaries alone"
+            );
+            Vec::new()
+        })
+}
+
+/// The rounds of review a change went through: each head a model or a bot
+/// judged. A round that ended without a verdict, and a bot reading a head it
+/// already judged again, add none.
+fn review_rounds(rows: &[ReviewRow]) -> u32 {
+    let heads: HashSet<&str> = rows
+        .iter()
+        .filter(|row| row.reviewed())
+        .map(|row| row.head.as_str())
+        .collect();
+    u32::try_from(heads.len()).unwrap_or(u32::MAX)
+}
+
 /// Reply on, and resolve, every bot thread the reviewer found addressed.
 async fn answer_bot_threads(
     step: &Step<'_>,
@@ -887,6 +934,132 @@ async fn answer_bot_threads(
     }
 }
 
+/// A review round that ran and ended without a verdict, ready to record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Missed {
+    pub reviewer: String,
+    pub verdict: Recorded,
+    pub summary: String,
+}
+
+/// Where a review that returned no verdict leaves the task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Next {
+    /// Stay in review; the next tick asks again, the next reviewer in the
+    /// rotation when this round was recorded, and when it was not the same one
+    /// until it has gone unanswered too often.
+    Retry(String),
+    /// Hand the task to a person.
+    Pause(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recovery {
+    /// The round to record, which moves the next one to another reviewer;
+    /// none when no later tick could get past the failure.
+    pub missed: Option<Missed>,
+    pub next: Next,
+}
+
+/// The reviewers a round could ask, and where to count those that do not
+/// answer.
+pub struct Attempt<'a> {
+    pub outages: &'a Outages,
+    pub project: Uuid,
+    pub task: Uuid,
+    pub lineup: &'a [String],
+    pub now: DateTime<Utc>,
+}
+
+/// What follows a review by `reviewer` that ended in `error`, when `earlier`
+/// rounds on the same head also ended without a verdict. An endpoint that did
+/// not answer judged nothing, so its tick is not a round: [`review::outage`]
+/// moves the task along its lineup and bounds how long that goes on.
+pub fn recover(
+    error: &ReviewError,
+    reviewer: &str,
+    earlier: usize,
+    attempt: &Attempt<'_>,
+) -> Recovery {
+    if let Some(reason) = error.stalled() {
+        return Recovery {
+            missed: None,
+            next: Next::Pause(reason),
+        };
+    }
+    if let ReviewError::Unreachable(failure) = error {
+        return Recovery {
+            missed: None,
+            next: unanswered(attempt, reviewer, failure),
+        };
+    }
+    let (verdict, summary, retry) = if let ReviewError::Unparseable(message) = error {
+        (
+            Recorded::Unparseable,
+            message.clone(),
+            "the reviewer gave no readable verdict; asking again".to_string(),
+        )
+    } else {
+        (
+            Recorded::Failed,
+            error.to_string(),
+            format!("the reviewer model {reviewer} failed; trying another"),
+        )
+    };
+    let rounds = earlier + 1;
+    let next = if rounds >= MAX_VERDICTLESS_ROUNDS {
+        Next::Pause(format!(
+            "{rounds} review rounds on this head ended without a verdict; the last, by \
+             {reviewer}: {summary}. Check the model, or name another in ZONE_AUTO_REVIEW_MODELS"
+        ))
+    } else {
+        Next::Retry(retry)
+    };
+    Recovery {
+        missed: Some(Missed {
+            reviewer: reviewer.to_string(),
+            verdict,
+            summary,
+        }),
+        next,
+    }
+}
+
+/// Count `reviewer`'s silence and say who the task asks next, or why nobody
+/// is left to ask.
+fn unanswered(attempt: &Attempt<'_>, reviewer: &str, failure: &str) -> Next {
+    let Attempt {
+        outages,
+        project,
+        task,
+        lineup,
+        now,
+    } = *attempt;
+    let streak = outages.record(project, task, reviewer, now);
+    tracing::warn!(
+        task_id = %task,
+        reviewer,
+        attempts = streak.attempts,
+        since = %streak.since,
+        failure,
+        "The reviewer model could not be reached"
+    );
+    match outages.next(task, lineup) {
+        Some(index) if lineup[index] == reviewer => Next::Retry(format!(
+            "the reviewer model {reviewer} could not be reached; asking it again"
+        )),
+        Some(index) => Next::Retry(format!(
+            "the reviewer model {reviewer} could not be reached on {} attempts; asking {} instead",
+            streak.attempts, lineup[index]
+        )),
+        None => {
+            let reason = outages.reason(task, lineup, failure);
+            outages.clear(task);
+            Next::Pause(reason)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Merge,
@@ -899,12 +1072,12 @@ pub enum Decision {
 pub fn decide(rows: &[ReviewRow], open: &[Finding], head: &str, distinct: bool) -> Decision {
     let latest = rows
         .iter()
-        .filter(|row| !row.is_bot() && row.head == head && row.verdict() != Recorded::Unparseable)
+        .filter(|row| !row.is_bot() && row.head == head && row.reviewed())
         .max_by_key(|row| (row.round, row.created_at));
     let Some(latest) = latest else {
         return Decision::Fix("no review of this head has been recorded".to_string());
     };
-    if latest.verdict() != Recorded::Approve {
+    if latest.verdict != Recorded::Approve {
         return Decision::Fix(format!(
             "round {} requested changes: {}",
             latest.round,
@@ -931,7 +1104,7 @@ pub fn decide(rows: &[ReviewRow], open: &[Finding], head: &str, distinct: bool) 
     }
     let bots_short: Vec<&ReviewRow> = latest_bots
         .into_iter()
-        .filter(|row| row.verdict() != Recorded::Approve)
+        .filter(|row| row.verdict != Recorded::Approve)
         .collect();
     if !bots_short.is_empty() {
         return Decision::Fix(format!(
@@ -1112,7 +1285,7 @@ async fn merging(step: &Step<'_>) -> Result<(), String> {
 /// Who reviewed the pull request, for the notice.
 fn reviewer_names(rows: &[ReviewRow]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for row in rows {
+    for row in rows.iter().filter(|row| row.reviewed()) {
         let name = if row.is_bot() {
             bots::display_name(&row.reviewer)
         } else {
@@ -1174,8 +1347,9 @@ async fn finish_merged(
     });
     let raised: usize = rows.iter().map(|row| row.findings().len()).sum();
     let open = auto_projects::open_findings_of(rows).len();
-    let rounds = rows.iter().map(|row| row.round).max().unwrap_or(0);
-    let same_model = rows.iter().any(|row| !row.is_bot() && row.same_model)
+    let same_model = rows
+        .iter()
+        .any(|row| !row.is_bot() && row.reviewed() && row.same_model)
         && !rows.iter().any(ReviewRow::is_bot);
     let bots_absent: Vec<String> = step
         .task
@@ -1199,7 +1373,7 @@ async fn finish_merged(
             .take(TOP_PATHS)
             .map(|file| file.filename.clone())
             .collect(),
-        review_rounds: u32::try_from(rounds).unwrap_or(0),
+        review_rounds: review_rounds(rows),
         reviewers: reviewer_names(rows),
         same_model,
         bots_absent,
@@ -1366,7 +1540,7 @@ mod tests {
             reviewer: reviewer.into(),
             author_model: None,
             same_model,
-            verdict: verdict.into(),
+            verdict: Recorded::parse(verdict).expect("a verdict the table accepts"),
             summary: String::new(),
             findings: json!([]),
             addressed: json!([]),
@@ -1444,5 +1618,373 @@ mod tests {
             decide(&unreadable, &[], head, true),
             Decision::Fix(reason) if reason.contains("no review")
         ));
+    }
+
+    #[test]
+    fn a_failed_round_is_no_review_and_does_not_supersede_an_approval() {
+        let head = "h1";
+        let failed = [row(1, false, "gemma", "failed", false, head)];
+        assert!(matches!(
+            decide(&failed, &[], head, true),
+            Decision::Fix(reason) if reason.contains("no review")
+        ));
+        let approved_then_failed = [
+            row(1, false, "big", "approve", false, head),
+            row(2, false, "gemma", "failed", false, head),
+        ];
+        assert_eq!(
+            decide(&approved_then_failed, &[], head, true),
+            Decision::Merge
+        );
+    }
+
+    #[test]
+    fn a_reviewer_model_error_is_recorded_as_a_failed_round_and_the_next_tick_tries_another() {
+        let error = ReviewError::Model("Ollama returned 400: model does not support tools".into());
+
+        let recovery = recover(&error, "gemma3:27b", 0, &unwatched());
+
+        assert_eq!(
+            recovery.missed,
+            Some(Missed {
+                reviewer: "gemma3:27b".into(),
+                verdict: Recorded::Failed,
+                summary: "the reviewer model failed: Ollama returned 400: model does not support \
+                          tools"
+                    .into(),
+            }),
+            "the round is recorded so the next one is a new round on another reviewer"
+        );
+        assert_eq!(
+            recovery.next,
+            Next::Retry("the reviewer model gemma3:27b failed; trying another".into())
+        );
+    }
+
+    #[test]
+    fn a_review_that_timed_out_is_a_failed_round() {
+        let recovery = recover(&ReviewError::TimedOut, "qwen3:32b", 0, &unwatched());
+
+        let missed = recovery.missed.expect("a timed-out round is recorded");
+        assert_eq!(missed.verdict, Recorded::Failed);
+        assert_eq!(missed.summary, ReviewError::TimedOut.to_string());
+        assert!(matches!(recovery.next, Next::Retry(_)));
+    }
+
+    #[test]
+    fn an_unreadable_reply_is_recorded_as_unparseable_and_asked_again() {
+        let error = ReviewError::Unparseable("the reply carries no <zone-review> marker".into());
+
+        let recovery = recover(&error, "big", 0, &unwatched());
+
+        let missed = recovery.missed.expect("an unreadable round is recorded");
+        assert_eq!(missed.verdict, Recorded::Unparseable);
+        assert_eq!(missed.summary, "the reply carries no <zone-review> marker");
+        assert_eq!(
+            recovery.next,
+            Next::Retry("the reviewer gave no readable verdict; asking again".into())
+        );
+    }
+
+    #[test]
+    fn a_second_round_without_a_verdict_pauses_the_task_with_the_last_error() {
+        let error = ReviewError::Model("the model returned no choices".into());
+
+        let recovery = recover(&error, "small", MAX_VERDICTLESS_ROUNDS - 1, &unwatched());
+
+        assert_eq!(
+            recovery.missed.map(|missed| missed.verdict),
+            Some(Recorded::Failed),
+            "the round that pauses the task is recorded too"
+        );
+        let Next::Pause(reason) = recovery.next else {
+            panic!("the task keeps retrying after {MAX_VERDICTLESS_ROUNDS} verdictless rounds");
+        };
+        assert!(reason.contains("the model returned no choices"), "{reason}");
+        assert!(reason.contains("small"), "{reason}");
+        assert!(reason.contains("ZONE_AUTO_REVIEW_MODELS"), "{reason}");
+    }
+
+    fn names(reviewers: &[&str]) -> Vec<String> {
+        reviewers.iter().map(ToString::to_string).collect()
+    }
+
+    fn attempt<'a>(outages: &'a Outages, lineup: &'a [String], minute: i64) -> Attempt<'a> {
+        Attempt {
+            outages,
+            project: Uuid::nil(),
+            task: Uuid::nil(),
+            lineup,
+            now: DateTime::UNIX_EPOCH + chrono::TimeDelta::minutes(minute),
+        }
+    }
+
+    fn unwatched() -> Attempt<'static> {
+        static OUTAGES: std::sync::LazyLock<Outages> = std::sync::LazyLock::new(Outages::default);
+        attempt(&OUTAGES, &[], 0)
+    }
+
+    fn unreachable() -> ReviewError {
+        ReviewError::Unreachable("HTTP error: connection refused".into())
+    }
+
+    #[test]
+    fn an_unreachable_reviewer_records_nothing_and_is_asked_again_whatever_came_before() {
+        let lineup = names(&["qwen3:32b", "gemma3:27b"]);
+
+        for earlier in [0, MAX_VERDICTLESS_ROUNDS] {
+            let outages = Outages::default();
+            assert_eq!(
+                recover(
+                    &unreachable(),
+                    "qwen3:32b",
+                    earlier,
+                    &attempt(&outages, &lineup, 0)
+                ),
+                Recovery {
+                    missed: None,
+                    next: Next::Retry(
+                        "the reviewer model qwen3:32b could not be reached; asking it again".into()
+                    ),
+                },
+                "a restarting server judged nothing, so it neither rotates at once nor counts"
+            );
+        }
+    }
+
+    #[test]
+    fn a_task_whose_siblings_space_its_attempts_a_window_apart_pauses_instead_of_retrying_forever()
+    {
+        let outages = Outages::default();
+        let lineup = names(&["qwen3:32b"]);
+        let spacing = 11;
+
+        let paused = (0..50).find_map(|tick| {
+            match recover(
+                &unreachable(),
+                "qwen3:32b",
+                0,
+                &attempt(&outages, &lineup, tick * spacing),
+            ) {
+                Recovery {
+                    missed: None,
+                    next: Next::Pause(reason),
+                } => Some((tick + 1, reason)),
+                Recovery {
+                    missed: None,
+                    next: Next::Retry(_),
+                } => None,
+                recovery => panic!("an unanswered attempt recorded a round: {recovery:?}"),
+            }
+        });
+
+        let (attempts, reason) = paused.expect("the task retried the silent reviewer forever");
+        assert_eq!(attempts, i64::from(review::outage::ATTEMPTS));
+        assert_eq!(
+            reason,
+            "the reviewer model qwen3:32b could not be reached on 5 attempts over 44 minutes; the \
+             last: HTTP error: connection refused. Check that the model server is running"
+        );
+        assert_eq!(
+            outages.streak(Uuid::nil(), "qwen3:32b"),
+            None,
+            "a person was told, so the streak ends"
+        );
+    }
+
+    #[test]
+    fn a_task_asks_its_next_reviewer_once_one_goes_unanswered_and_pauses_when_none_answer() {
+        let outages = Outages::default();
+        let lineup = names(&["gemma3:27b", "qwen3:32b"]);
+        let attempts = i64::from(review::outage::ATTEMPTS);
+
+        let mut asked = Vec::new();
+        let mut next = Next::Retry(String::new());
+        for tick in 0..4 * attempts {
+            let index = outages.next(Uuid::nil(), &lineup).unwrap_or(0);
+            asked.push(lineup[index].clone());
+            let recovery = recover(
+                &unreachable(),
+                &lineup[index],
+                0,
+                &attempt(&outages, &lineup, tick * 3),
+            );
+            assert_eq!(recovery.missed, None, "tick {tick} recorded a round");
+            next = recovery.next;
+            if matches!(next, Next::Pause(_)) {
+                break;
+            }
+            if tick + 1 == attempts {
+                assert_eq!(
+                    next,
+                    Next::Retry(
+                        "the reviewer model gemma3:27b could not be reached on 5 attempts; \
+                         asking qwen3:32b instead"
+                            .into()
+                    )
+                );
+            }
+        }
+
+        let gemma = asked
+            .iter()
+            .take_while(|name| *name == "gemma3:27b")
+            .count();
+        assert_eq!(gemma, usize::try_from(attempts).unwrap());
+        assert_eq!(asked[gemma], "qwen3:32b", "the silent reviewer hands over");
+        let Next::Pause(reason) = next else {
+            panic!("the task kept retrying two silent reviewers: {asked:?}");
+        };
+        assert!(
+            reason.starts_with("no reviewer model could be reached: gemma3:27b on "),
+            "{reason}"
+        );
+        assert!(reason.contains(", qwen3:32b on "), "{reason}");
+        assert!(reason.contains("ZONE_AUTO_REVIEW_MODELS"), "{reason}");
+    }
+
+    #[test]
+    fn a_reviewer_that_answers_after_another_went_unanswered_is_the_one_asked() {
+        let outages = Outages::default();
+        let lineup = names(&["gemma3:27b", "qwen3:32b"]);
+        for tick in 0..i64::from(review::outage::ATTEMPTS) {
+            recover(
+                &unreachable(),
+                "gemma3:27b",
+                0,
+                &attempt(&outages, &lineup, tick),
+            );
+        }
+
+        assert_eq!(
+            outages.next(Uuid::nil(), &lineup),
+            Some(1),
+            "the reachable reviewer is asked without a round being recorded"
+        );
+        let recovery = recover(
+            &ReviewError::Model("the model returned no choices".into()),
+            "qwen3:32b",
+            0,
+            &attempt(&outages, &lineup, 6),
+        );
+        assert!(
+            recovery.missed.is_some(),
+            "an answer without a verdict is still a round"
+        );
+    }
+
+    #[test]
+    fn an_unfunded_reviewer_records_nothing_and_pauses_with_its_refusal() {
+        let error = ReviewError::Unfunded {
+            reviewer: "fable".into(),
+            reason: "claude: out of usage credits".into(),
+        };
+
+        let recovery = recover(&error, "fable", 0, &unwatched());
+
+        assert_eq!(recovery.missed, None);
+        assert_eq!(recovery.next, Next::Pause(error.to_string()));
+    }
+
+    #[test]
+    fn a_round_without_a_verdict_names_no_reviewer_in_the_merge_notice() {
+        let head = "h1";
+        let rows = [
+            row(1, false, "gemma", "failed", false, head),
+            row(2, false, "tiny", "unparseable", false, head),
+            row(3, false, "big", "approve", false, head),
+        ];
+        assert_eq!(reviewer_names(&rows), ["big (Zone)"]);
+    }
+
+    #[test]
+    fn the_merge_notice_counts_each_judged_head_once_and_no_round_without_a_verdict() {
+        let rows = [
+            row(1, false, "gemma", "failed", false, "h1"),
+            row(2, false, "big", "request_changes", false, "h1"),
+            row(3, true, "coderabbitai", "request_changes", false, "h1"),
+            row(4, true, "coderabbitai", "approve", false, "h2"),
+            row(5, false, "tiny", "unparseable", false, "h2"),
+            row(6, false, "big", "approve", false, "h2"),
+            row(7, true, "coderabbitai", "approve", false, "h2"),
+        ];
+
+        assert_eq!(review_rounds(&rows), 2);
+        assert_eq!(
+            review_rounds(&rows[..1]),
+            0,
+            "a failed round reviewed nothing"
+        );
+    }
+
+    fn reference() -> PullRequestReference {
+        PullRequestReference {
+            owner: "acme".into(),
+            repository: "shop".into(),
+            number: 7,
+        }
+    }
+
+    async fn github(status: u16) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn requests(server: &wiremock::MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .expect("the mock records requests")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn reviews_are_read_only_when_an_expected_bot_scores_in_them() {
+        let server = github(200).await;
+        let pr = PrService::standing_in_for("github.com", server.uri());
+
+        for expected in [&[][..], &[SignalKind::Greptile][..]] {
+            assert!(
+                submitted_reviews(&pr, &reference(), "token", expected)
+                    .await
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            requests(&server).await,
+            0,
+            "Greptile scores only in its summary"
+        );
+
+        submitted_reviews(
+            &pr,
+            &reference(),
+            "token",
+            &[SignalKind::Greptile, SignalKind::CodeRabbit],
+        )
+        .await;
+        assert_eq!(requests(&server).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_read_of_the_reviews_counts_as_none_rather_than_failing_the_tick() {
+        for status in [403, 429, 502] {
+            let server = github(status).await;
+            let pr = PrService::standing_in_for("github.com", server.uri());
+
+            let reviews =
+                submitted_reviews(&pr, &reference(), "token", &[SignalKind::CodeRabbit]).await;
+
+            assert!(reviews.is_empty(), "{status}");
+            assert!(requests(&server).await >= 1, "{status}");
+        }
     }
 }

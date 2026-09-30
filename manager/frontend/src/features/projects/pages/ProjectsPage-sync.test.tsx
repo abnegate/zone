@@ -8,10 +8,12 @@ const mockGetProjects = mock();
 const mockGetSyncConfigs = mock();
 const mockCreateSyncConfig = mock();
 const mockDeleteSyncConfig = mock();
+const mockSetWebhookSecret = mock();
 const mockCreateProject = mock();
 const mockUpdateProject = mock();
 const mockDeleteProject = mock();
 const mockGetSources = mock();
+const mockGetWorkspaceMembers = mock();
 const mockLinkSource = mock();
 const mockUnlinkSource = mock();
 
@@ -22,6 +24,7 @@ mock.module('../../../api/projects', () => ({
     getSyncConfigs: mockGetSyncConfigs,
     createSyncConfig: mockCreateSyncConfig,
     deleteSyncConfig: mockDeleteSyncConfig,
+    setWebhookSecret: mockSetWebhookSecret,
     createProject: mockCreateProject,
     updateProject: mockUpdateProject,
     deleteProject: mockDeleteProject,
@@ -35,6 +38,7 @@ mock.module('../../../api/projects', () => ({
 mock.module('../../../api/client', () => ({
   client: {
     getSources: mockGetSources,
+    getWorkspaceMembers: mockGetWorkspaceMembers,
     linkSource: mockLinkSource,
     unlinkSource: mockUnlinkSource,
   },
@@ -73,6 +77,20 @@ mock.module('../../../shared/context/WorkspaceContext', () => ({
 }));
 
 let ProjectsPage: typeof import('./ProjectsPage').default;
+
+const membership = (role: string) => ({
+  members: [
+    {
+      id: 'membership-1',
+      user_id: '1',
+      workspace_id: 'test-workspace-id',
+      role,
+      email: 'test@test.com',
+      display_name: null,
+      joined_at: '2024-01-01T00:00:00Z',
+    },
+  ],
+});
 
 beforeAll(async () => {
   ProjectsPage = (await import('./ProjectsPage')).default;
@@ -121,6 +139,7 @@ const mockSyncConfigs: SyncConfig[] = [
     direction: 'bidirectional',
     external_repo_url: 'https://github.com/user/repo',
     is_active: true,
+    webhook_secret_issued_by_zone: true,
     created_at: '2024-01-01T00:00:00Z',
   },
 ];
@@ -131,6 +150,11 @@ describe('ProjectsPage - Sync Configuration', () => {
     mockGetProjects.mockReset();
     mockGetSyncConfigs.mockReset();
     mockGetSources.mockReset();
+    mockCreateSyncConfig.mockReset();
+    mockSetWebhookSecret.mockReset();
+    mockDeleteSyncConfig.mockReset();
+    mockGetWorkspaceMembers.mockReset();
+    mockGetWorkspaceMembers.mockResolvedValue(membership('admin'));
     mockGetProjects.mockResolvedValue([mockProject]);
     mockGetSources.mockResolvedValue([]);
     mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
@@ -273,6 +297,306 @@ describe('ProjectsPage - Sync Configuration', () => {
 
     await waitFor(() => {
       expect(screen.getByLabelText('Project ID')).toBeInTheDocument();
+    });
+  });
+
+  describe('webhook secrets', () => {
+    const secret = 'a'.repeat(64);
+    const rotated = 'b'.repeat(64);
+    const githubConfig: SyncConfig = {
+      ...mockSyncConfigs[0],
+      webhook_path: '/api/webhooks/sync/sync-1/github',
+      webhook_secret_configured: true,
+    };
+    const linearConfig: SyncConfig = {
+      id: 'sync-2',
+      project_id: 'proj-1',
+      provider: 'linear',
+      direction: 'inbound',
+      external_project_id: '2f1c1b8e-7a8d-4a55-9d53-2b5f0e0c9a11',
+      is_active: true,
+      webhook_secret_issued_by_zone: false,
+      created_at: '2024-01-01T00:00:00Z',
+      webhook_path: '/api/webhooks/sync/sync-2/linear',
+      webhook_secret_configured: false,
+    };
+
+    const openProject = async () => {
+      renderWithQueryClient(<ProjectsPage />);
+      await waitFor(() => {
+        expect(screen.getByText('Test Project')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Test Project').closest('.project-card')!);
+    };
+
+    const rotateConfirmed = async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Rotate secret' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Generate new secret' }));
+    };
+
+    it('shows the generated secret once after creating a GitHub sync, and not after dismissing or refetching', async () => {
+      mockGetSyncConfigs.mockResolvedValue([]);
+      mockCreateSyncConfig.mockImplementation(async () => {
+        mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+        return { config: githubConfig, webhookSecret: secret };
+      });
+
+      await openProject();
+      await waitFor(() => {
+        expect(screen.getByText(/No sync configured/)).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('+ Add Sync'));
+      fireEvent.change(screen.getByLabelText('Repository URL'), {
+        target: { value: 'https://github.com/user/repo' },
+      });
+      fireEvent.click(screen.getByText('Add Sync Config'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('sync-secret-value').textContent).toBe(secret);
+      });
+      expect(screen.getByText(/content type application\/json/)).toBeInTheDocument();
+      expect(screen.getByText(/events: Issues/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(screen.queryByText(secret)).toBeNull();
+
+      const reads = mockGetSyncConfigs.mock.calls.length;
+      fireEvent.click(screen.getByLabelText('Close'));
+      fireEvent.click(screen.getByText('Test Project').closest('.project-card')!);
+      await waitFor(() => {
+        expect(mockGetSyncConfigs.mock.calls.length).toBeGreaterThan(reads);
+      });
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Rotate secret' })).toBeInTheDocument();
+      });
+      expect(screen.queryByText(secret)).toBeNull();
+      expect(screen.queryByTestId('sync-secret')).toBeNull();
+    });
+
+    it('drops a revealed secret once the project is closed', async () => {
+      mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+      mockSetWebhookSecret.mockResolvedValue({ config: githubConfig, webhookSecret: rotated });
+
+      await openProject();
+      await rotateConfirmed();
+      await screen.findByText(rotated);
+
+      fireEvent.click(screen.getByLabelText('Close'));
+      fireEvent.click(screen.getByText('Test Project').closest('.project-card')!);
+      await screen.findByRole('button', { name: 'Rotate secret' });
+      expect(screen.queryByText(rotated)).toBeNull();
+    });
+
+    it('rotates a GitHub secret by asking the server to generate one and shows the new secret', async () => {
+      mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+      mockSetWebhookSecret.mockResolvedValue({ config: githubConfig, webhookSecret: rotated });
+
+      await openProject();
+      await rotateConfirmed();
+
+      await waitFor(() => {
+        expect(screen.getByTestId('sync-secret-value').textContent).toBe(rotated);
+      });
+      expect(mockSetWebhookSecret).toHaveBeenCalledWith('proj-1', 'sync-1', undefined);
+    });
+
+    it('asks before rotating, warning that the live webhook breaks until the new secret is pasted', async () => {
+      mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+      mockSetWebhookSecret.mockResolvedValue({ config: githubConfig, webhookSecret: rotated });
+
+      await openProject();
+      fireEvent.click(await screen.findByRole('button', { name: 'Rotate secret' }));
+
+      const dialog = await screen.findByRole('dialog', { name: 'Rotate webhook secret?' });
+      expect(dialog.textContent).toContain('stops accepting the current one straight away');
+      expect(dialog.textContent).toContain(
+        'GitHub webhook keeps signing with the old secret, so its deliveries are refused until you paste the new one'
+      );
+      expect(mockSetWebhookSecret).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull();
+      });
+      expect(mockSetWebhookSecret).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('sync-secret')).toBeNull();
+    });
+
+    it('shows each newly rotated secret in a fresh callout', async () => {
+      const again = 'c'.repeat(64);
+      mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+      mockSetWebhookSecret
+        .mockResolvedValueOnce({ config: githubConfig, webhookSecret: rotated })
+        .mockResolvedValueOnce({ config: githubConfig, webhookSecret: again });
+
+      await openProject();
+      await rotateConfirmed();
+      await screen.findByText(rotated);
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+      });
+
+      await rotateConfirmed();
+      await screen.findByText(again);
+      expect(screen.queryByText(rotated)).toBeNull();
+      expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
+    });
+
+    it('offers rotation where the server says Zone issues the secret, whatever the provider', async () => {
+      mockGetSyncConfigs.mockResolvedValue([
+        { ...githubConfig, webhook_secret_issued_by_zone: false },
+      ]);
+
+      await openProject();
+
+      await screen.findByLabelText('Set signing secret');
+      expect(screen.queryByRole('button', { name: 'Rotate secret' })).toBeNull();
+    });
+
+    it('keeps the Linear signing secret out of password managers while masking it', async () => {
+      mockGetSyncConfigs.mockResolvedValue([linearConfig]);
+
+      await openProject();
+      const input = (await screen.findByLabelText('Set signing secret')) as HTMLInputElement;
+
+      expect(input.type).toBe('text');
+      expect(input.classList.contains('sync-secret-input')).toBe(true);
+      expect(input.getAttribute('autocomplete')).toBe('off');
+      expect(input.hasAttribute('data-1p-ignore')).toBe(true);
+      expect(input.getAttribute('data-lpignore')).toBe('true');
+      expect(input.getAttribute('data-form-type')).toBe('other');
+    });
+
+    it('saves the signing secret Linear issued, without echoing it', async () => {
+      mockGetSyncConfigs.mockResolvedValue([linearConfig]);
+      mockSetWebhookSecret.mockResolvedValue({
+        config: { ...linearConfig, webhook_secret_configured: true },
+        webhookSecret: null,
+      });
+      const signing = 'lin_wh_0123456789abcdef';
+
+      await openProject();
+      const input = await screen.findByLabelText('Set signing secret');
+      expect(screen.getByText(/Create an Issues webhook in Linear/)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Rotate secret' })).toBeNull();
+
+      fireEvent.change(input, { target: { value: `  ${signing}  ` } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => {
+        expect(mockSetWebhookSecret).toHaveBeenCalledWith('proj-1', 'sync-2', signing);
+      });
+      await screen.findByText('Signing secret saved');
+      expect((input as HTMLInputElement).value).toBe('');
+      expect(screen.queryByTestId('sync-secret')).toBeNull();
+    });
+
+    it('refuses a Linear signing secret shorter than 16 characters before sending it', async () => {
+      mockGetSyncConfigs.mockResolvedValue([linearConfig]);
+
+      await openProject();
+      fireEvent.change(await screen.findByLabelText('Set signing secret'), {
+        target: { value: 'too-short' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      expect(await screen.findByText(/at least 16 characters/)).toBeInTheDocument();
+      expect(mockSetWebhookSecret).not.toHaveBeenCalled();
+    });
+
+    it('warns that deliveries are refused while a configuration has no secret', async () => {
+      mockGetSyncConfigs.mockResolvedValue([
+        { ...githubConfig, webhook_secret_configured: false },
+        linearConfig,
+      ]);
+      mockSetWebhookSecret.mockResolvedValue({ config: githubConfig, webhookSecret: secret });
+
+      await openProject();
+
+      await waitFor(() => {
+        expect(
+          screen.getAllByText('No webhook secret: deliveries are refused until one is set')
+        ).toHaveLength(2);
+      });
+      expect(screen.queryByRole('button', { name: 'Rotate secret' })).toBeNull();
+      expect(screen.getAllByRole('button', { name: 'Generate secret' })).toHaveLength(1);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Generate secret' }));
+      await waitFor(() => {
+        expect(screen.getByTestId('sync-secret-value').textContent).toBe(secret);
+      });
+      expect(mockSetWebhookSecret).toHaveBeenCalledWith('proj-1', 'sync-1', undefined);
+    });
+
+    it('shows a member who is not an admin the syncs without any control to add, remove or change a secret', async () => {
+      mockGetWorkspaceMembers.mockResolvedValue(membership('member'));
+      mockGetSyncConfigs.mockResolvedValue([
+        githubConfig,
+        { ...githubConfig, id: 'sync-3', webhook_secret_configured: false },
+        linearConfig,
+      ]);
+
+      await openProject();
+
+      await screen.findByTestId('sync-config-sync-2');
+      await waitFor(() => {
+        expect(mockGetWorkspaceMembers).toHaveBeenCalledWith('test-workspace-id');
+      });
+      expect(screen.getAllByText('Configured, not yet synced')).toHaveLength(3);
+      expect(screen.queryByText('+ Add Sync')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Rotate secret' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Generate secret' })).toBeNull();
+      expect(screen.queryByLabelText('Set signing secret')).toBeNull();
+      expect(
+        screen.getAllByText('No webhook secret: deliveries are refused until one is set')
+      ).toHaveLength(2);
+    });
+
+    it('tells a member who is not an admin that a workspace admin adds a sync', async () => {
+      mockGetWorkspaceMembers.mockResolvedValue(membership('viewer'));
+      mockGetSyncConfigs.mockResolvedValue([]);
+
+      await openProject();
+
+      expect(await screen.findByText(/A workspace admin can add one/)).toBeInTheDocument();
+      expect(screen.queryByText('+ Add Sync')).toBeNull();
+    });
+
+    it('offers an owner every control an admin has', async () => {
+      mockGetWorkspaceMembers.mockResolvedValue(membership('owner'));
+      mockGetSyncConfigs.mockResolvedValue([githubConfig, linearConfig]);
+
+      await openProject();
+
+      expect(await screen.findByText('+ Add Sync')).toBeInTheDocument();
+      expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
+      expect(screen.getByRole('button', { name: 'Rotate secret' })).toBeInTheDocument();
+      expect(screen.getByLabelText('Set signing secret')).toBeInTheDocument();
+    });
+
+    it('shows the server refusal when the role cannot be read and removing a sync is refused', async () => {
+      mockGetWorkspaceMembers.mockRejectedValue(new Error('Members unavailable'));
+      mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+      mockDeleteSyncConfig.mockRejectedValue(new Error('Workspace admin access required'));
+
+      await openProject();
+      fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+
+      expect((await screen.findByRole('alert')).textContent).toBe(
+        'Workspace admin access required'
+      );
+      expect(mockDeleteSyncConfig).toHaveBeenCalledWith('proj-1', 'sync-1');
+    });
+
+    it('tells a Linear sync that the project ID is the Linear project UUID', async () => {
+      await openProject();
+      fireEvent.click(await screen.findByText('+ Add Sync'));
+      fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'linear' } });
+
+      expect(await screen.findByText(/Linear project's ID \(a UUID\)/)).toBeInTheDocument();
     });
   });
 });

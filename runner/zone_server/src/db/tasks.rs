@@ -504,12 +504,21 @@ pub async fn create_task(
         created_by: None,
     };
     let mut transaction = pool.begin().await?;
-    lock_projects(&mut transaction, input.workspace_id, input.project_ids)
-        .await
-        .map_err(MutationError::into_database)?;
-    let task = insert_task(&mut transaction, &input).await?;
+    let task = create_in(&mut transaction, &input).await?;
     transaction.commit().await?;
     Ok(task)
+}
+
+/// Create a task inside the caller's transaction, holding its projects until
+/// that transaction ends.
+pub(crate) async fn create_in(
+    connection: &mut PgConnection,
+    input: &Create<'_>,
+) -> DbResult<TaskRow> {
+    lock_projects(connection, input.workspace_id, input.project_ids)
+        .await
+        .map_err(MutationError::into_database)?;
+    insert_task(connection, input).await
 }
 
 pub async fn create_task_authorized(
@@ -675,7 +684,9 @@ async fn run_is_active(
     Ok(active.is_none() || (changes_status && active.flatten().is_some()))
 }
 
-async fn update_task_in(
+/// Apply `input` inside the caller's transaction; `None` when the task is
+/// gone, or when `input` sets a status that a live run owns.
+pub(crate) async fn update_task_in(
     connection: &mut PgConnection,
     input: &Patch<'_>,
 ) -> DbResult<Option<TaskRow>> {

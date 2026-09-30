@@ -115,12 +115,13 @@ export {
   ProjectSchema,
   ProjectStatusSchema,
   ProjectsResponseSchema,
-  SyncConfigResponseSchema,
   SyncConfigSchema,
+  SyncConfigSecretResponseSchema,
   SyncConfigsResponseSchema,
   SyncDirectionSchema,
   SyncProviderSchema,
   UpdateProjectRequestSchema,
+  WebhookSecretSchema,
 } from '../features/projects/schemas';
 export {
   BorderRadiusSchema,

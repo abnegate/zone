@@ -117,6 +117,25 @@ cargo test
 cargo run --bin zone-server
 ```
 
+### sqlx Offline Query Cache
+
+`runner/.cargo/config.toml` sets `SQLX_OFFLINE=true`, so every `sqlx::query!`
+in `zone_server` compiles against `zone_server/.sqlx` rather than a live
+database. After changing a checked query or a migration, regenerate it from the
+repository root and commit the result:
+
+```bash
+make sqlx-prepare   # DATABASE_URL, or the compose postgres when unset
+make sqlx-check     # what CI runs: fails on a missing, stale or unused entry
+```
+
+Both run `scripts/sqlx-prepare.sh`, which applies pending migrations and uses
+the sqlx-cli release matching the `sqlx` version in `Cargo.lock` (0.9.0 today),
+installing it under `runner/target/sqlx-cli/` when the `sqlx` on `PATH` differs,
+so the CLI and the macros it drives are always the same release. The cache lives
+only in `zone_server/.sqlx`: the macros fall back to a workspace-level
+`runner/.sqlx` for anything missing there, so the check rejects one.
+
 ### Running the CLI
 
 ```bash

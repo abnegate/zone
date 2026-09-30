@@ -12,7 +12,7 @@
 	live-verify live-real \
 	lint-console format-console check-console \
 	list-models stats prune version env urls \
-	sqlx-prepare \
+	sqlx-prepare sqlx-check \
 	build-runner test-runner setup-runner-coverage test-runner-coverage \
 	test-runner-coverage-html test-runner-coverage-json test-runner-coverage-text \
 	install-runner install-cli \
@@ -34,6 +34,15 @@ NC := \033[0m
 DOCKER_COMPOSE := $(shell which docker-compose 2>/dev/null || echo "docker compose")
 # Maps Compose profiles to overlay files (dev, vpn) and --profile flags.
 COMPOSE := ./scripts/compose.sh
+VOLUME_PREFIX := zone
+BACKUP_VOLUMES := ollama_data:ollama postgres_data:postgres valkey_data:valkey \
+	manager_repos:manager_repos manager_artifacts:manager_artifacts \
+	manager_agent_state:manager_agent_state prometheus_data:prometheus grafana_data:grafana \
+	traefik_letsencrypt:traefik
+POSTGRES_VOLUME := $(VOLUME_PREFIX)_postgres_data
+backup_volume = $(VOLUME_PREFIX)_$(firstword $(subst :, ,$(1)))
+backup_directory = /data/$(lastword $(subst :, ,$(1)))
+RESTORE_PREVIOUS := .zone-restore-previous
 
 ##@ Setup & Configuration
 
@@ -167,21 +176,22 @@ build: ## Build all services
 	$(COMPOSE) build
 	@echo "$(GREEN)Services built!$(NC)"
 
-up: ## Start services. Combine with PROFILES=dev,vpn,monitoring
 ifeq ($(origin PROFILES),command line)
-	@echo "$(GREEN)Starting services ($(PROFILES))...$(NC)"
-	@$(COMPOSE) persist "$(PROFILES)" >/dev/null
-	@$(COMPOSE) --replace-profiles="$(PROFILES)" up -d
+UP_PROFILES := $(PROFILES)
 else ifeq ($(origin COMPOSE_PROFILES),environment)
-	@echo "$(GREEN)Starting services ($(COMPOSE_PROFILES))...$(NC)"
-	@$(COMPOSE) persist "$(COMPOSE_PROFILES)" >/dev/null
-	@$(COMPOSE) --replace-profiles="$(COMPOSE_PROFILES)" up -d
+UP_PROFILES := $(COMPOSE_PROFILES)
 else
-	@echo "$(GREEN)Starting core services...$(NC)"
-	@$(COMPOSE) persist "" >/dev/null
-	@$(COMPOSE) --replace-profiles= up -d
-	@echo "$(YELLOW)Optional profiles off. Combine with: make up PROFILES=dev,vpn,monitoring$(NC)"
+UP_PROFILES :=
 endif
+
+up: ## Start services. Combine with PROFILES=dev,vpn,monitoring
+	@profiles=$$($(COMPOSE) persist "$(UP_PROFILES)") && \
+	 echo "$(GREEN)Starting services ($${profiles:-core only})...$(NC)" && \
+	 $(COMPOSE) retire "$$profiles" && \
+	 $(COMPOSE) --replace-profiles="$$profiles" up -d && \
+	 if [ -z "$$profiles" ]; then \
+		echo "$(YELLOW)Optional profiles off. Combine with: make up PROFILES=dev,vpn,monitoring$(NC)"; \
+	 fi
 	@echo "$(GREEN)Services started! Check status with: make ps$(NC)"
 
 up-vpn: ## Start with full-tunnel VPN
@@ -192,6 +202,7 @@ up-monitoring: ## Start with Prometheus and Grafana
 
 up-comfyui: verify-comfyui-model ## Start the bundled NVIDIA ComfyUI runtime
 	@echo "$(GREEN)Starting bundled NVIDIA ComfyUI...$(NC)"
+	@$(COMPOSE) persist --ensure bundled-comfyui >/dev/null
 	$(COMPOSE) --profile bundled-comfyui up -d comfyui
 
 up-all: ## Start with VPN and monitoring
@@ -350,70 +361,193 @@ prune: ## Remove unused Docker resources
 
 ##@ Backup & Restore
 
-backup: ## Backup volumes to ./backups directory (the postgres cluster lives in zone_postgres_data; see migrate-pgdata for installs from before it did)
+backup: ## Backup volumes to ./backups, stopping postgres while its cluster is copied (see migrate-pgdata for installs from before zone_postgres_data held it)
 	@echo "$(BLUE)Creating backup...$(NC)"
-	@if ! docker run --rm -v zone_postgres_data:/postgres:ro alpine test -f /postgres/PG_VERSION; then \
-		echo "$(RED)zone_postgres_data holds no database cluster, so this archive would carry no data.$(NC)"; \
-		echo "An install from before the PGDATA mount keeps its cluster in an anonymous volume: run 'make stop && make migrate-pgdata && make up' first."; \
+	@docker image inspect alpine >/dev/null 2>&1 || docker pull alpine >/dev/null || exit 1; \
+	interrupted=$$(docker run --rm \
+		$(foreach pair,$(BACKUP_VOLUMES),-v $(call backup_volume,$(pair)):$(call backup_directory,$(pair)):ro) \
+		alpine sh -c 'for directory in /data/*; do if [ -e "$$directory/$(RESTORE_PREVIOUS)" ]; then echo "$${directory#/data/}"; fi; done') || exit 1; \
+	if [ -n "$$interrupted" ]; then \
+		for name in $$interrupted; do \
+			echo "$(RED)An interrupted restore left $$name/$(RESTORE_PREVIOUS), which may hold the only intact copy of that volume, and a backup leaves it out.$(NC)" >&2; \
+		done; \
+		echo "Undo the restore by replacing the rest of each such volume with the contents of its $(RESTORE_PREVIOUS) and removing it, or finish the restore by removing $(RESTORE_PREVIOUS) and running make restore again with the same archive. Then back up." >&2; \
+		exit 1; \
+	fi; \
+	cluster=1; \
+	if ! docker run --rm -v $(POSTGRES_VOLUME):/postgres:ro alpine test -f /postgres/PG_VERSION; then \
+		echo "$(RED)$(POSTGRES_VOLUME) holds no database cluster, so this archive would carry no data.$(NC)"; \
+		echo "An install from before the PGDATA mount keeps its cluster in an anonymous volume: run 'make stop && make migrate-pgdata && $(COMPOSE) up -d' first."; \
 		echo "Set ALLOW_EMPTY_POSTGRES=1 to archive the other volumes anyway."; \
 		[ -n "$(ALLOW_EMPTY_POSTGRES)" ] || exit 1; \
-	fi
-	@mkdir -m 700 -p backups
-	@DATE=$$(date +%Y%m%d_%H%M%S); \
-	docker run --rm \
-		-v zone_ollama_data:/data/ollama:ro \
-		-v zone_postgres_data:/data/postgres:ro \
-		-v zone_valkey_data:/data/valkey:ro \
-		-v zone_manager_repos:/data/manager_repos:ro \
-		-v zone_manager_artifacts:/data/manager_artifacts:ro \
-		-v zone_manager_agent_state:/data/manager_agent_state:ro \
-		-v zone_prometheus_data:/data/prometheus:ro \
-		-v zone_grafana_data:/data/grafana:ro \
-		-v zone_traefik_letsencrypt:/data/traefik:ro \
-		-v $$(pwd)/backups:/backup \
-		alpine sh -c "umask 077 && tar czf /backup/zone_backup_$$DATE.tar.gz -C /data ." && \
-	echo "$(GREEN)Backup created: backups/zone_backup_$$DATE.tar.gz$(NC)"
+		cluster=; \
+	fi; \
+	running=; \
+	if [ -n "$$cluster" ]; then \
+		running=$$(docker ps -q --filter label=com.docker.compose.service=postgres --filter volume=$(POSTGRES_VOLUME)) || exit 1; \
+	fi; \
+	umask 077; \
+	mkdir -m 700 -p backups || exit 1; \
+	run=$$(date +%Y%m%d_%H%M%S)-$$$$; \
+	name=zone_backup_$$run.tar.gz; \
+	partial=backups/.$$name; \
+	worker=$(VOLUME_PREFIX)_backup_$$run; \
+	halted=; \
+	stage=; \
+	source=$(POSTGRES_VOLUME); \
+	status=0; \
+	restart() { \
+		[ -n "$$halted" ] || return 0; \
+		stopped=$$halted; \
+		halted=; \
+		echo "$(BLUE)Starting postgres again...$(NC)"; \
+		docker stop -t 120 $$stopped >/dev/null 2>&1; \
+		docker start $$stopped >/dev/null && return 0; \
+		echo "$(RED)postgres did not start again: run 'docker start $$stopped'.$(NC)" >&2; \
+		return 1; \
+	}; \
+	cleanup() { \
+		restart; \
+		docker rm -f "$$worker" >/dev/null 2>&1; \
+		if [ -n "$$stage" ]; then \
+			docker volume rm "$$stage" >/dev/null || echo "$(RED)Remove the staged cluster copy: docker volume rm $$stage$(NC)" >&2; \
+		fi; \
+		rm -f "$$partial"; \
+	}; \
+	trap '' PIPE; \
+	trap cleanup EXIT; \
+	trap 'exit 130' INT TERM HUP QUIT; \
+	if [ -n "$$running" ]; then \
+		stage=$(VOLUME_PREFIX)_backup_stage_$$run; \
+		docker volume create "$$stage" >/dev/null || exit 1; \
+		echo "$(YELLOW)Stopping postgres while its cluster is copied; the stack has no database until it starts again.$(NC)"; \
+		halted=$$running; \
+		docker stop -t 120 $$running >/dev/null || exit 1; \
+		codes=$$(docker inspect -f '{{.State.ExitCode}}' $$running) || exit 1; \
+		if printf '%s\n' "$$codes" | grep -qvx 0; then \
+			echo "$(RED)postgres did not shut down cleanly (exit code $$codes), so its cluster would need crash recovery; not archiving it.$(NC)" >&2; \
+			exit 1; \
+		fi; \
+		docker run --rm --name "$$worker" \
+			-v $(POSTGRES_VOLUME):/source:ro \
+			-v "$$stage":/stage \
+			alpine cp -a /source/. /stage/ || exit 1; \
+		source=$$stage; \
+		restart || status=1; \
+	fi; \
+	(set -C && : > "$$partial") || exit 1; \
+	docker run --rm --name "$$worker" \
+		$(foreach pair,$(BACKUP_VOLUMES),-v $(if $(filter $(POSTGRES_VOLUME),$(call backup_volume,$(pair))),"$$source",$(call backup_volume,$(pair))):$(call backup_directory,$(pair)):ro) \
+		-v "$$(pwd)/backups:/backup" \
+		alpine sh -c "umask 077 && tar czf /backup/.$$name --exclude='./*/$(RESTORE_PREVIOUS)' -C /data . && if [ -e /backup/$$name ]; then echo 'backups/$$name already exists; not overwriting it.' >&2; exit 1; fi && mv /backup/.$$name /backup/$$name" || exit 1; \
+	echo "$(GREEN)Backup created: backups/$$name$(NC)"; \
+	exit $$status
 
-restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_YYYYMMDD_HHMMSS.tar.gz)
+restore: ## Restore from backup with the stack stopped, replacing each volume the archive carries (usage: make restore BACKUP=backups/zone_backup_YYYYMMDD_HHMMSS-PID.tar.gz)
 	@if [ -z "$(BACKUP)" ]; then \
 		echo "$(RED)Error: Please specify BACKUP file$(NC)"; \
-		echo "Usage: make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz"; \
+		echo "Usage: make restore BACKUP=backups/zone_backup_20250101_120000-4242.tar.gz"; \
+		exit 1; \
+	fi
+	@running=$$(docker ps -q $(foreach pair,$(BACKUP_VOLUMES),--filter volume=$(call backup_volume,$(pair)))) || exit 1; \
+	if [ -n "$$running" ]; then \
+		echo "$(RED)Running containers use the volumes a restore overwrites. Stop the stack first: make stop$(NC)" >&2; \
 		exit 1; \
 	fi
 	@echo "$(YELLOW)Restoring from $(BACKUP)...$(NC)"
 	@docker run --rm \
-		-v zone_ollama_data:/data/ollama \
-		-v zone_postgres_data:/data/postgres \
-		-v zone_valkey_data:/data/valkey \
-		-v zone_manager_repos:/data/manager_repos \
-		-v zone_manager_artifacts:/data/manager_artifacts \
-		-v zone_manager_agent_state:/data/manager_agent_state \
-		-v zone_prometheus_data:/data/prometheus \
-		-v zone_grafana_data:/data/grafana \
-		-v zone_traefik_letsencrypt:/data/traefik \
-		-v $$(pwd)/backups:/backup \
-		alpine tar xzf /backup/$$(basename $(BACKUP)) -C /data
-	@if ! docker run --rm -v zone_postgres_data:/postgres:ro alpine test -f /postgres/PG_VERSION; then \
-		echo "$(YELLOW)The archive carried no postgres cluster: backups taken before the PGDATA mount moved into zone_postgres_data hold an empty postgres/ directory.$(NC)"; \
-	fi
+		$(foreach pair,$(BACKUP_VOLUMES),-v $(call backup_volume,$(pair)):$(call backup_directory,$(pair))) \
+		-v "$$(pwd)/backups:/backup:ro" \
+		alpine sh -c ' \
+			previous=$(RESTORE_PREVIOUS); \
+			tar tzf "/backup/$$1" > /tmp/entries || exit 1; \
+			if grep -Eq "^(\./)?[^/]+/\$(RESTORE_PREVIOUS)(/|\$$)" /tmp/entries; then \
+				echo "The archive holds a volume-level $$previous, the directory a restore sets the current contents aside in; not restoring it." >&2; \
+				exit 1; \
+			fi; \
+			volumes=; \
+			exclude=; \
+			for directory in /data/*; do \
+				name=$${directory#/data/}; \
+				grep -Eq "^(\./)?$$name/" /tmp/entries || continue; \
+				if [ "$$name" = postgres ] && ! grep -Eqx "(\./)?postgres/PG_VERSION" /tmp/entries; then \
+					printf "%b\n" "$(YELLOW)The archive carries no postgres cluster, so $(POSTGRES_VOLUME) keeps what it holds: backups taken before the PGDATA mount moved into $(POSTGRES_VOLUME) hold an empty postgres/ directory.$(NC)"; \
+					exclude=--exclude=./postgres; \
+					continue; \
+				fi; \
+				if [ -e "$$directory/$$previous" ]; then \
+					echo "An interrupted restore left $$name/$$previous, which holds what that volume held before it. Delete it to keep what $$name/ holds now, or replace the rest of $$name/ with its contents, then restore again." >&2; \
+					exit 1; \
+				fi; \
+				volumes="$$volumes $$directory"; \
+			done; \
+			set_aside() { \
+				for entry in "$$1"/* "$$1"/.[!.]* "$$1"/..?*; do \
+					[ -e "$$entry" ] || [ -L "$$entry" ] || continue; \
+					[ "$${entry##*/}" = "$$previous" ] && continue; \
+					mv "$$entry" "$$1/$$previous/" || return 1; \
+				done; \
+			}; \
+			discard_extracted() { \
+				for entry in "$$1"/* "$$1"/.[!.]* "$$1"/..?*; do \
+					[ -e "$$entry" ] || [ -L "$$entry" ] || continue; \
+					[ "$${entry##*/}" = "$$previous" ] && continue; \
+					rm -rf "$$entry" || return 1; \
+				done; \
+			}; \
+			put_back() { \
+				for entry in "$$1/$$previous"/* "$$1/$$previous"/.[!.]* "$$1/$$previous"/..?*; do \
+					[ -e "$$entry" ] || [ -L "$$entry" ] || continue; \
+					mv "$$entry" "$$1/" || return 1; \
+				done; \
+				rmdir "$$1/$$previous"; \
+			}; \
+			moved=; \
+			extracting=; \
+			extracted=; \
+			roll_back() { \
+				[ -n "$$extracted" ] && return 0; \
+				[ -n "$$moved" ] || return 0; \
+				failed=; \
+				for directory in $$moved; do \
+					if [ -n "$$extracting" ] && ! discard_extracted "$$directory"; then \
+						failed=1; \
+						continue; \
+					fi; \
+					put_back "$$directory" || failed=1; \
+				done; \
+				if [ -n "$$failed" ]; then \
+					echo "The restore failed and could not put every volume back: a volume that still has a $$previous directory holds its earlier contents there." >&2; \
+				else \
+					echo "The restore failed; every volume holds what it held before." >&2; \
+				fi; \
+			}; \
+			trap roll_back EXIT; \
+			trap "exit 130" INT TERM HUP; \
+			for directory in $$volumes; do \
+				mkdir -m 700 "$$directory/$$previous" || exit 1; \
+				moved="$$moved $$directory"; \
+				set_aside "$$directory" || exit 1; \
+			done; \
+			extracting=1; \
+			tar xzf "/backup/$$1" -C /data $$exclude || exit 1; \
+			extracted=1; \
+			for directory in $$moved; do \
+				rm -rf "$${directory:?}/$${previous:?}" || { echo "Remove $${directory#/data/}/$$previous from its volume: it holds what that volume held before the restore." >&2; exit 1; }; \
+			done' sh "$$(basename $(BACKUP))"
 	@echo "$(GREEN)Restore complete!$(NC)"
 
-migrate-pgdata: ## Move an existing install's postgres cluster out of the anonymous PGDATA volume into zone_postgres_data (run after 'make stop', before 'make up')
+migrate-pgdata: ## Move an existing install's postgres cluster out of the anonymous PGDATA volume into zone_postgres_data (run after 'make stop', before './scripts/compose.sh up -d')
 	@sh scripts/migrate-pgdata.sh
 
 ##@ Development
 
 dev: ## Hot reload. Combine with PROFILES=vpn,monitoring
 	@echo "$(GREEN)Console: http://localhost:3001$(NC)"
-ifeq ($(origin PROFILES),command line)
-	@profiles=$$($(COMPOSE) persist --ensure dev "$(PROFILES)"); \
-	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)"; \
+	@profiles=$$($(COMPOSE) persist --ensure dev $(if $(filter command line,$(origin PROFILES)),"$(PROFILES)")) && \
+	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)" && \
+	 $(COMPOSE) retire "$$profiles" && \
 	 $(COMPOSE) --replace-profiles="$$profiles" up --build
-else
-	@profiles=$$($(COMPOSE) persist --ensure dev); \
-	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)"; \
-	 $(COMPOSE) --replace-profiles="$$profiles" up --build
-endif
 
 dev-console: ## Start console frontend in development mode
 	@echo "$(BLUE)Starting console frontend dev server...$(NC)"
@@ -668,15 +802,17 @@ ios: sync-tauri-ui ## Run the Zone client on an iOS simulator or device
 	fi
 	cd runner/zone_desktop && bunx --bun @tauri-apps/cli@2 ios dev
 
-sqlx-prepare: ## Prepare sqlx offline query data (requires running postgres)
+SQLX_DATABASE_URL = $${DATABASE_URL:-postgresql://$${POSTGRES_USER:-zone}:$${POSTGRES_PASSWORD:-zone}@localhost:5432/$${POSTGRES_DB:-zone}}
+
+sqlx-prepare: ## Regenerate runner/zone_server/.sqlx with the sqlx-cli matching Cargo.lock (DATABASE_URL, else the compose postgres)
 	@echo "$(BLUE)Preparing sqlx offline query data...$(NC)"
-	@if docker ps --format '{{.Names}}' | grep -q '^postgres$$'; then \
-		cd runner/zone_server && DATABASE_URL="postgresql://$${POSTGRES_USER:-zone}:$${POSTGRES_PASSWORD:-zone}@localhost:5432/$${POSTGRES_DB:-zone}" cargo sqlx prepare; \
-		echo "$(GREEN)sqlx offline data prepared!$(NC)"; \
-	else \
-		echo "$(RED)Error: PostgreSQL container is not running. Start it with 'make up' first.$(NC)"; \
-		exit 1; \
-	fi
+	@DATABASE_URL="$(SQLX_DATABASE_URL)" ./scripts/sqlx-prepare.sh
+	@echo "$(GREEN)sqlx offline data prepared!$(NC)"
+
+sqlx-check: ## Fail if runner/zone_server/.sqlx is missing, stale or has unused entries (what CI runs)
+	@echo "$(BLUE)Checking sqlx offline query data...$(NC)"
+	@DATABASE_URL="$(SQLX_DATABASE_URL)" ./scripts/sqlx-prepare.sh --check
+	@echo "$(GREEN)sqlx offline data is current!$(NC)"
 
 test-console: ## Run console (React) unit tests
 	@echo "$(BLUE)Running console unit tests...$(NC)"

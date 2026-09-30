@@ -6,57 +6,123 @@
       {
         "ordinal": 0,
         "name": "id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "workspace_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "workspace_id"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "primary_color_light",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "primary_color_light"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "secondary_color_light",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "secondary_color_light"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "primary_color_dark",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "primary_color_dark"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "secondary_color_dark",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "secondary_color_dark"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "font_family",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "font_family"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "font_size_base",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "font_size_base"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "border_radius",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "border_radius"
+          }
+        }
       },
       {
         "ordinal": 9,
         "name": "created_at",
-        "type_info": "Timestamp"
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "created_at"
+          }
+        }
       },
       {
         "ordinal": 10,
         "name": "updated_at",
-        "type_info": "Timestamp"
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "workspace_themes",
+            "name": "updated_at"
+          }
+        }
       }
     ],
     "parameters": {

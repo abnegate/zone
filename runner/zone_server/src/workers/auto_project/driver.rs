@@ -1,13 +1,14 @@
 //! One pass over one project: settle what its runs left, advance every
 //! change through the pipeline, start what can start, and say when it is done.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use uuid::Uuid;
 use zone_notify::{Fanout, Notification, Notifier};
 
 use crate::config::AutoProjectConfig;
-use crate::db::auto_projects::{self, Kind, ProjectAutomation, SettledRun, Stage};
+use crate::db::auto_projects::{self, Kind, ProjectAutomation, SettledRun, Stage, TaskAutomation};
 use crate::db::chats::{self, ChatPurpose};
 use crate::db::tasks::{self, RunMutation};
 use crate::db::workspace_members;
@@ -207,10 +208,11 @@ pub async fn drive_project(
     }
 
     // 2. Every change on its way from a run to a merge.
-    for task in auto_projects::pipeline(pool, project_id)
+    let changes = auto_projects::pipeline(pool, project_id)
         .await
-        .map_err(|error| error.to_string())?
-    {
+        .map_err(|error| error.to_string())?;
+    services.outages.retain(project_id, &reviewing(&changes));
+    for task in changes {
         if let Err(error) = pipeline::advance(&drive, &task).await {
             tracing::warn!(%project_id, task_id = %task.task_id, %error, "Pipeline step failed; retrying next tick");
         }
@@ -312,6 +314,15 @@ pub async fn drive_project(
         }
     }
     Ok(())
+}
+
+/// The tasks among `changes` that are waiting on a review.
+fn reviewing(changes: &[TaskAutomation]) -> HashSet<Uuid> {
+    changes
+        .iter()
+        .filter(|task| task.stage() == Stage::AwaitingReviews)
+        .map(|task| task.task_id)
+        .collect()
 }
 
 /// Put a task whose run ended where the pipeline expects it.
@@ -431,4 +442,47 @@ async fn admit_runnable(drive: &Drive<'_>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    fn change(stage: Stage) -> TaskAutomation {
+        TaskAutomation {
+            task_id: Uuid::new_v4(),
+            project_id: Uuid::nil(),
+            kind: None,
+            stage: stage.as_str().to_string(),
+            reason: None,
+            runs: 1,
+            review_rounds: 0,
+            head: None,
+            checks: None,
+            checks_since: None,
+            bot_trigger_head: None,
+            merge_sha: None,
+            auto_created: false,
+            last_run_id: None,
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn only_changes_awaiting_review_keep_their_reviewer_outages() {
+        let changes: Vec<TaskAutomation> = [
+            Stage::AwaitingChecks,
+            Stage::AwaitingReviews,
+            Stage::Fixing,
+            Stage::Merging,
+            Stage::PostMerge,
+        ]
+        .into_iter()
+        .map(change)
+        .collect();
+
+        assert_eq!(reviewing(&changes), HashSet::from([changes[1].task_id]));
+    }
 }

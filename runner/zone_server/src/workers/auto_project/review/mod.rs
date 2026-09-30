@@ -7,6 +7,7 @@
 
 pub mod bots;
 pub mod model;
+pub mod outage;
 pub mod prompt;
 pub mod tools;
 pub mod verdict;
@@ -14,10 +15,11 @@ pub mod verdict;
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
 use zone_core::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message, ToolDefinition};
+use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, LlmError, Message, ToolDefinition};
 use zone_core::tools::{ToolContext, ToolResult};
 use zone_vcs::pull_request::{ChangedFile, PrService, PullRequestDetail, PullRequestReference};
 
@@ -47,6 +49,10 @@ pub enum ReviewError {
     Unparseable(String),
     #[error("the reviewer model failed: {0}")]
     Model(String),
+    /// Nothing answered for the model: the endpoint is down, restarting or
+    /// overloaded, and the same model may answer on a later tick.
+    #[error("the reviewer model could not be reached: {0}")]
+    Unreachable(String),
     #[error("the reviewer model {reviewer} cannot run: {reason}")]
     Unfunded { reviewer: String, reason: String },
     #[error("the review did not finish within {} seconds", REVIEW_TIMEOUT.as_secs())]
@@ -54,9 +60,12 @@ pub enum ReviewError {
 }
 
 impl ReviewError {
-    /// `message`, what failed the `reviewer` model the review ran on
-    /// `backend`.
-    fn model(backend: &LlmBackend, reviewer: &str, message: String) -> Self {
+    /// `error`, what failed the `reviewer` model the review ran on `backend`.
+    fn model(backend: &LlmBackend, reviewer: &str, error: LlmError) -> Self {
+        if unreachable(&error) {
+            return Self::Unreachable(error.to_string());
+        }
+        let message = error.to_string();
         let words = backend::own_words(&message);
         let unfunded = matches!(backend, LlmBackend::Cli { .. })
             && UNFUNDED_MARKERS.iter().any(|marker| words.contains(marker));
@@ -73,6 +82,27 @@ impl ReviewError {
     /// past this failure.
     pub fn stalled(&self) -> Option<String> {
         matches!(self, Self::Unfunded { .. }).then(|| self.to_string())
+    }
+}
+
+/// Whether `error` came from the way to the model rather than the model: no
+/// connection, no answer in time, or a status that says the server in front
+/// of it is overloaded or restarting. A proxy's 5xx that carries the model's
+/// refusal of tools is the model's.
+fn unreachable(error: &LlmError) -> bool {
+    match error {
+        LlmError::Http(error) => !error.is_decode(),
+        LlmError::Api { status, .. } => {
+            let status = StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (status.is_server_error()
+                || status == StatusCode::TOO_MANY_REQUESTS
+                || status == StatusCode::REQUEST_TIMEOUT)
+                && !error.unsupported_tools()
+        }
+        LlmError::Json(_)
+        | LlmError::Stream(_)
+        | LlmError::Agent(_)
+        | LlmError::InvalidConfig(_) => false,
     }
 }
 
@@ -141,9 +171,7 @@ pub async fn run(
             let response = client
                 .chat_with_model(&reviewer, &messages, definitions.as_deref())
                 .await
-                .map_err(|error| {
-                    ReviewError::model(&client.config().backend, &reviewer, error.to_string())
-                })?;
+                .map_err(|error| ReviewError::model(&client.config().backend, &reviewer, error))?;
             let Some(choice) = response.choices.into_iter().next() else {
                 return Err(ReviewError::Model("the model returned no choices".into()));
             };
@@ -423,7 +451,8 @@ mod tests {
         );
     }
 
-    /// A model that fails for any other reason may answer on the next tick.
+    /// A model that fails for any other reason is a failed round, and the next
+    /// tick asks another reviewer.
     #[tokio::test]
     async fn a_reviewer_that_hit_its_plans_window_is_a_model_failure() {
         let directory = TempDir::new().expect("a temporary directory");
@@ -447,14 +476,20 @@ mod tests {
         .expect_err("a refused review");
 
         assert!(matches!(error, ReviewError::Model(_)), "{error:?}");
-        assert_eq!(error.stalled(), None, "the next tick asks again");
+        assert_eq!(error.stalled(), None, "the next tick asks another reviewer");
     }
 
     /// An endpoint's failure is never read for a coding agent's wording.
     #[test]
     fn an_endpoint_failure_in_the_words_of_an_unfunded_reviewer_is_a_model_failure() {
-        let error =
-            ReviewError::model(&LlmBackend::Http, "fable", format!("{UNFUNDED}: {REFUSAL}"));
+        let error = ReviewError::model(
+            &LlmBackend::Http,
+            "fable",
+            LlmError::Api {
+                status: StatusCode::BAD_REQUEST.as_u16(),
+                message: format!("{UNFUNDED}: {REFUSAL}"),
+            },
+        );
 
         assert!(matches!(error, ReviewError::Model(_)), "{error:?}");
         assert_eq!(error.stalled(), None);
@@ -471,18 +506,106 @@ mod tests {
         );
 
         assert!(matches!(
-            ReviewError::model(&agent, "fable", stderr_only),
+            ReviewError::model(&agent, "fable", LlmError::Agent(stderr_only)),
             ReviewError::Model(_)
         ));
         assert!(matches!(
             ReviewError::model(
                 &agent,
                 "sonnet[1m]",
-                format!(
+                LlmError::Agent(format!(
                     "claude: {UNFUNDED_CONTEXT}: API Error: Usage credits required for 1M context"
-                )
+                ))
             ),
             ReviewError::Unfunded { .. }
         ));
+    }
+
+    fn endpoint(url: String) -> Config {
+        Config {
+            litellm_host: url,
+            ..crate::state::test_config()
+        }
+    }
+
+    async fn review_on(config: &Config) -> ReviewError {
+        let task = task();
+        let pull = pull();
+        run(
+            config,
+            LlmBackend::Http,
+            PrService::new(),
+            request(&task, &pull, "qwen3:32b"),
+        )
+        .await
+        .expect_err("the endpoint gave no verdict")
+    }
+
+    async fn answering(status: u16, message: &str) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(json!({"error": {"message": message}})),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_endpoint_nothing_listens_on_is_unreachable_and_records_no_round() {
+        use crate::workers::auto_project::pipeline::{Attempt, recover};
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a free port")
+            .local_addr()
+            .expect("its address")
+            .port();
+
+        let error = review_on(&endpoint(format!("http://127.0.0.1:{port}"))).await;
+
+        assert!(matches!(error, ReviewError::Unreachable(_)), "{error:?}");
+        let lineup = ["qwen3:32b".to_string()];
+        let attempt = Attempt {
+            outages: &outage::Outages::default(),
+            project: Uuid::nil(),
+            task: Uuid::nil(),
+            lineup: &lineup,
+            now: chrono::Utc::now(),
+        };
+        assert_eq!(recover(&error, "qwen3:32b", 0, &attempt).missed, None);
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_that_is_restarting_or_overloaded_is_unreachable() {
+        for status in [408, 429, 500, 502, 503, 504] {
+            let server = answering(status, "Ollama is starting").await;
+
+            let error = review_on(&endpoint(server.uri())).await;
+
+            assert!(
+                matches!(error, ReviewError::Unreachable(_)),
+                "{status}: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_that_refuses_the_review_is_a_failed_round_whatever_status_the_proxy_gives() {
+        const REFUSAL: &str = "llava:7b does not support tools";
+        for (status, message) in [(400, REFUSAL), (500, REFUSAL), (404, "model not found")] {
+            let server = answering(status, message).await;
+
+            let error = review_on(&endpoint(server.uri())).await;
+
+            assert!(
+                matches!(error, ReviewError::Model(_)),
+                "{status}: {error:?}"
+            );
+        }
     }
 }

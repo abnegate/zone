@@ -8,6 +8,7 @@ import type {
   CreateSyncConfigRequest,
   Project,
   SyncConfig,
+  SyncConfigSecret,
   UpdateProjectRequest,
 } from '../features/projects/types';
 import type { SourceTypesResponse, SourceVerifyResponse } from '../features/sources/schemas';
@@ -1104,8 +1105,19 @@ class Client {
     return projectsApi.getSyncConfigs(projectId);
   }
 
-  async createSyncConfig(projectId: string, request: CreateSyncConfigRequest): Promise<SyncConfig> {
+  async createSyncConfig(
+    projectId: string,
+    request: CreateSyncConfigRequest
+  ): Promise<SyncConfigSecret> {
     return projectsApi.createSyncConfig(projectId, request);
+  }
+
+  async setWebhookSecret(
+    projectId: string,
+    configId: string,
+    secret?: string
+  ): Promise<SyncConfigSecret> {
+    return projectsApi.setWebhookSecret(projectId, configId, secret);
   }
 
   async deleteSyncConfig(projectId: string, configId: string): Promise<void> {

@@ -6,8 +6,14 @@ on:
     paths:
       - 'tools/dev-cli/**'
       - 'Makefile'
+      - 'docker-compose*.yml'
+      - '.env.example'
       - 'scripts/compose.sh'
+      - 'scripts/configure-model-proxy.sh'
+      - 'scripts/test-compose-profiles.sh'
       - 'scripts/test-migrations.py'
+      - 'scripts/test-compose-up.py'
+      - 'scripts/test-backup.py'
       - 'scripts/test-dockerfile-members.sh'
       - 'manager/Dockerfile'
       - 'runner/Cargo.toml'
@@ -17,8 +23,14 @@ on:
     paths:
       - 'tools/dev-cli/**'
       - 'Makefile'
+      - 'docker-compose*.yml'
+      - '.env.example'
       - 'scripts/compose.sh'
+      - 'scripts/configure-model-proxy.sh'
+      - 'scripts/test-compose-profiles.sh'
       - 'scripts/test-migrations.py'
+      - 'scripts/test-compose-up.py'
+      - 'scripts/test-backup.py'
       - 'scripts/test-dockerfile-members.sh'
       - 'manager/Dockerfile'
       - 'runner/Cargo.toml'
@@ -60,6 +72,25 @@ jobs:
 
       - name: Verify migration Make commands without Docker
         run: python3 scripts/test-migrations.py
+
+      - name: Verify make up and make dev retire left-out profiles without Docker
+        run: python3 scripts/test-compose-up.py
+
+      - name: Verify profile selection and retirement against real Compose
+        run: |
+          docker compose version
+          sh scripts/test-compose-profiles.sh
+
+      - name: Verify backup and restore Make commands, also against throwaway Docker volumes
+        env:
+          ZONE_TEST_DOCKER: '1'
+        run: python3 scripts/test-backup.py
+
+      - name: Verify backup and restore Make commands under busybox sh, as an Alpine host runs them
+        run: >-
+          docker run --rm -v "$PWD:/zone:ro" -w /zone
+          alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+          sh -c 'apk add --no-cache make python3 >/dev/null && python3 scripts/test-backup.py'
 
       - name: Verify the manager Dockerfile copies every workspace member
         run: sh scripts/test-dockerfile-members.sh

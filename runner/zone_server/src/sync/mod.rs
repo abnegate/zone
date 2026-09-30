@@ -8,12 +8,15 @@ pub mod linear;
 
 use async_trait::async_trait;
 use axum::http::HeaderMap;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::db::sync_config::{SyncDirection, SyncEventType, UnknownSyncValue};
 use crate::db::tasks::TaskRow;
 
 #[derive(Error, Debug)]
@@ -51,6 +54,48 @@ pub enum SyncError {
 
 pub type SyncResult<T> = Result<T, SyncError>;
 
+/// The issue trackers a project can sync with; each value is one the
+/// `sync_configs.provider` CHECK constraint accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    GitHub,
+    Linear,
+}
+
+impl Provider {
+    pub const ALL: [Self; 2] = [Self::GitHub, Self::Linear];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GitHub => "github",
+            Self::Linear => "linear",
+        }
+    }
+
+    /// Whether Zone issues the secret deliveries are signed with, rather than
+    /// the provider.
+    pub fn issues_zone_secret(self) -> bool {
+        match self {
+            Self::GitHub => true,
+            Self::Linear => false,
+        }
+    }
+}
+
+impl FromStr for Provider {
+    type Err = UnknownSyncValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|provider| provider.as_str() == value)
+            .ok_or_else(|| UnknownSyncValue {
+                kind: "sync provider",
+                value: value.to_string(),
+            })
+    }
+}
+
 /// Configuration for a sync provider
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
@@ -84,15 +129,170 @@ pub enum IssueState {
     InProgress,
 }
 
+/// A verified webhook delivery: an issue event to apply, or one to acknowledge and skip
+#[derive(Debug, Clone)]
+pub enum Delivery {
+    Issue(WebhookEvent),
+    Ignored(IgnoredDelivery),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", content = "event", rename_all = "snake_case")]
+pub enum IgnoredDelivery {
+    Ping,
+    NotAnIssue(String),
+}
+
+impl IgnoredDelivery {
+    pub fn message(&self) -> String {
+        match self {
+            Self::Ping => "Ping acknowledged".to_string(),
+            Self::NotAnIssue(event) => {
+                format!("Ignored {event} delivery; only issue events are synced")
+            }
+        }
+    }
+}
+
 /// Webhook event from external system
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WebhookEvent {
-    /// Type of event (e.g., "issue_created", "issue_updated", "issue_closed")
-    pub event_type: String,
+    pub event_type: SyncEventType,
     /// External issue ID
     pub external_id: String,
+    /// The issue's page in the external system
+    pub url: Option<String>,
+    pub origin: IssueOrigin,
+    /// The provider's ID for this delivery, which each retry of it repeats
+    pub delivery_id: Option<String>,
+    /// When the issue was opened, as the signed body says
+    pub created_at: Option<DateTime<Utc>>,
+    pub state_change: StateChange,
     /// Event payload
     pub payload: WebhookPayload,
+}
+
+/// Whether a delivery moves its issue between states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateChange {
+    /// The event is the move itself, like GitHub's `closed` or `reopened`
+    MovedTo(IssueState),
+    /// The event leaves the state alone, like a GitHub label or edit. The
+    /// state it carries is followed only when it is later than the last one
+    /// seen and differs from it, which catches a task up with a move it could
+    /// not follow while a run owned its status.
+    Kept,
+    /// The event carries the issue's current state, which moved only if it
+    /// differs from the last one seen, like any Linear update
+    Reported,
+}
+
+impl StateChange {
+    /// The state a linked task follows the issue to, given this delivery's
+    /// payload and the last one seen before it.
+    pub fn target(
+        self,
+        current: &WebhookPayload,
+        previous: Option<&WebhookPayload>,
+    ) -> Option<IssueState> {
+        let differing = |previous: &WebhookPayload| match (current.state, previous.state) {
+            (Some(reported), Some(seen)) if reported != seen => Some(reported),
+            _ => None,
+        };
+        match self {
+            Self::MovedTo(state) => Some(state),
+            Self::Kept => previous
+                .filter(|previous| current.is_later_than(previous))
+                .and_then(differing),
+            Self::Reported => previous.and_then(differing),
+        }
+    }
+}
+
+/// Where an issue lives and who opened it, as far as its delivery says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueOrigin {
+    GitHub {
+        /// The repository's `owner/name`
+        repository: Option<String>,
+        author_association: github::AuthorAssociation,
+    },
+    Linear {
+        project_id: Option<String>,
+    },
+}
+
+impl IssueOrigin {
+    /// Whether an issue from here may become a new task under `settings`: a
+    /// GitHub issue in the configured repository opened by someone with write
+    /// access to it, or a Linear issue in the configured project.
+    pub fn may_become_task(&self, settings: &Settings) -> bool {
+        let opened_by_writer = match self {
+            Self::GitHub {
+                author_association, ..
+            } => author_association.can_write(),
+            Self::Linear { .. } => true,
+        };
+        opened_by_writer && self.is_configured_source(settings)
+    }
+
+    /// Whether the issue lives where `settings` point: the configured GitHub
+    /// repository or Linear project. A sync configured with neither matches
+    /// nothing.
+    pub fn is_configured_source(&self, settings: &Settings) -> bool {
+        match self {
+            Self::GitHub { repository, .. } => {
+                let configured = settings
+                    .external_repo_url
+                    .as_deref()
+                    .and_then(github::repository_name);
+                matches!(
+                    (repository, configured),
+                    (Some(repository), Some(configured))
+                        if repository.to_lowercase() == configured
+                )
+            }
+            Self::Linear { project_id } => matches!(
+                (project_id.as_deref(), settings.external_project_id.as_deref()),
+                (Some(project_id), Some(configured))
+                    if !configured.trim().is_empty()
+                        && project_id.trim().eq_ignore_ascii_case(configured.trim())
+            ),
+        }
+    }
+}
+
+/// What a `sync_configs.config` holds: which way items move and where from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settings {
+    pub direction: Option<String>,
+    pub external_repo_url: Option<String>,
+    pub external_project_id: Option<String>,
+}
+
+impl Settings {
+    /// The settings a stored configuration spells; fields it lacks, or holds
+    /// as anything but text, read as unset.
+    pub fn from_config(config: &serde_json::Value) -> Self {
+        let field = |name: &str| {
+            config
+                .get(name)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        };
+        Self {
+            direction: field("direction"),
+            external_repo_url: field("external_repo_url"),
+            external_project_id: field("external_project_id"),
+        }
+    }
+
+    /// The configured direction, bidirectional when none is stored.
+    pub fn direction(&self) -> Result<SyncDirection, UnknownSyncValue> {
+        self.direction
+            .as_deref()
+            .map_or(Ok(SyncDirection::Bidirectional), str::parse)
+    }
 }
 
 /// Webhook payload data
@@ -104,9 +304,51 @@ pub struct WebhookPayload {
     pub description: Option<String>,
     /// Issue state
     pub state: Option<IssueState>,
+    /// When the issue last changed, as the external system reports it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
     /// Raw event data for debugging
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<serde_json::Value>,
+}
+
+impl WebhookPayload {
+    /// The payload a synced item last stored, or `None` when what it stored
+    /// does not read as one.
+    pub fn from_stored(stored: &serde_json::Value) -> Option<Self> {
+        serde_json::from_value(stored.clone()).ok()
+    }
+
+    /// Whether this payload adds nothing to `previous`: the issue last changed
+    /// before `previous` says it did, or in the same second into the same
+    /// state, title and body. GitHub reports whole seconds, so two changes in
+    /// one second are told apart only by what they changed.
+    pub fn is_stale_against(&self, previous: &Self) -> bool {
+        self.is_older_than(previous)
+            || (self.updated_at.is_some()
+                && self.updated_at == previous.updated_at
+                && self.state == previous.state
+                && self.title == previous.title
+                && self.description == previous.description)
+    }
+
+    /// Whether the issue last changed before `previous` says it did, when
+    /// both say.
+    pub fn is_older_than(&self, previous: &Self) -> bool {
+        matches!(
+            (self.updated_at, previous.updated_at),
+            (Some(current), Some(previous)) if current < previous
+        )
+    }
+
+    /// Whether the issue last changed after `previous` says it did, when
+    /// both say.
+    pub fn is_later_than(&self, previous: &Self) -> bool {
+        matches!(
+            (self.updated_at, previous.updated_at),
+            (Some(current), Some(previous)) if current > previous
+        )
+    }
 }
 
 /// Sync provider trait
@@ -129,14 +371,9 @@ pub trait SyncProvider: Send + Sync {
     /// Close an external issue
     async fn close_issue(&self, config: &SyncConfig, external_id: &str) -> SyncResult<()>;
 
-    /// Parse and verify webhook payload
-    /// Returns the parsed event if signature verification passes
-    fn parse_webhook(
-        &self,
-        headers: &HeaderMap,
-        body: &[u8],
-        secret: &str,
-    ) -> SyncResult<WebhookEvent>;
+    /// Verify a delivery's signature, then classify it as an issue event or one to ignore
+    fn parse_webhook(&self, headers: &HeaderMap, body: &[u8], secret: &str)
+    -> SyncResult<Delivery>;
 }
 
 /// Registry for sync providers
@@ -188,6 +425,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_provider_reads_back_from_its_name() {
+        for provider in Provider::ALL {
+            assert_eq!(provider.as_str().parse::<Provider>(), Ok(provider));
+        }
+    }
+
+    #[test]
+    fn an_unknown_provider_names_itself_in_the_error() {
+        assert_eq!(
+            "jira".parse::<Provider>().unwrap_err().to_string(),
+            "\"jira\" is not a known sync provider"
+        );
+    }
+
+    #[test]
+    fn the_registry_serves_exactly_the_named_providers() {
+        let registry = SyncRegistry::new();
+        let mut registered = registry.list_providers();
+        registered.sort();
+        let mut named = Provider::ALL.map(|provider| provider.as_str().to_string());
+        named.sort();
+        assert_eq!(registered, named);
+    }
+
+    #[test]
+    fn only_github_is_issued_a_secret_by_zone() {
+        assert!(Provider::GitHub.issues_zone_secret());
+        assert!(!Provider::Linear.issues_zone_secret());
+    }
+
+    #[test]
     fn test_sync_registry_creates_with_providers() {
         let registry = SyncRegistry::new();
         let providers = registry.list_providers();
@@ -222,6 +490,258 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result, Err(SyncError::ProviderNotFound(_))));
+    }
+
+    #[test]
+    fn an_ignored_delivery_serializes_its_reason_and_event() {
+        assert_eq!(
+            serde_json::to_value(IgnoredDelivery::Ping).unwrap(),
+            serde_json::json!({ "reason": "ping" })
+        );
+        assert_eq!(
+            serde_json::to_value(IgnoredDelivery::NotAnIssue("Comment".to_string())).unwrap(),
+            serde_json::json!({ "reason": "not_an_issue", "event": "Comment" })
+        );
+    }
+
+    fn github_settings(url: &str) -> Settings {
+        Settings::from_config(&serde_json::json!({
+            "direction": "inbound",
+            "external_repo_url": url,
+            "external_project_id": null
+        }))
+    }
+
+    fn github_origin(
+        repository: Option<&str>,
+        author_association: github::AuthorAssociation,
+    ) -> IssueOrigin {
+        IssueOrigin::GitHub {
+            repository: repository.map(str::to_string),
+            author_association,
+        }
+    }
+
+    #[test]
+    fn settings_read_the_stored_direction_and_targets() {
+        let settings = github_settings("https://github.com/acme/widgets");
+
+        assert_eq!(settings.direction(), Ok(SyncDirection::Inbound));
+        assert_eq!(
+            settings.external_repo_url.as_deref(),
+            Some("https://github.com/acme/widgets")
+        );
+        assert_eq!(settings.external_project_id, None);
+    }
+
+    #[test]
+    fn settings_without_a_direction_are_bidirectional() {
+        let settings = Settings::from_config(&serde_json::json!({ "owner": "acme" }));
+
+        assert_eq!(settings.direction(), Ok(SyncDirection::Bidirectional));
+        assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn settings_with_an_unknown_direction_say_so() {
+        let settings = Settings::from_config(&serde_json::json!({ "direction": "sideways" }));
+
+        assert!(settings.direction().is_err());
+    }
+
+    #[test]
+    fn a_github_issue_becomes_a_task_only_from_a_writer_in_the_configured_repository() {
+        let settings = github_settings("https://github.com/Acme/Widgets.git");
+        let writer = github::AuthorAssociation::Member;
+
+        assert!(github_origin(Some("acme/widgets"), writer).may_become_task(&settings));
+        assert!(github_origin(Some("ACME/Widgets"), writer).may_become_task(&settings));
+        assert!(!github_origin(Some("acme/gadgets"), writer).may_become_task(&settings));
+        assert!(!github_origin(None, writer).may_become_task(&settings));
+        assert!(
+            !github_origin(Some("acme/widgets"), github::AuthorAssociation::Contributor)
+                .may_become_task(&settings)
+        );
+        assert!(
+            !github_origin(Some("acme/widgets"), writer).may_become_task(&Settings::default()),
+            "a sync without a repository creates nothing"
+        );
+    }
+
+    #[test]
+    fn a_linear_issue_becomes_a_task_only_in_the_configured_project() {
+        let settings =
+            Settings::from_config(&serde_json::json!({ "external_project_id": "Project-1" }));
+        let origin = |project_id: Option<&str>| IssueOrigin::Linear {
+            project_id: project_id.map(str::to_string),
+        };
+
+        assert!(origin(Some("project-1")).may_become_task(&settings));
+        assert!(!origin(Some("project-2")).may_become_task(&settings));
+        assert!(!origin(None).may_become_task(&settings));
+        assert!(!origin(Some("")).may_become_task(&Settings::from_config(
+            &serde_json::json!({ "external_project_id": "" })
+        )));
+    }
+
+    #[test]
+    fn an_update_to_a_linked_issue_counts_only_from_the_configured_source_whoever_wrote_it() {
+        let settings = github_settings("https://github.com/acme/widgets");
+        let reader = github::AuthorAssociation::None;
+
+        assert!(github_origin(Some("Acme/Widgets"), reader).is_configured_source(&settings));
+        assert!(
+            !github_origin(Some("someone-else/widgets"), reader).is_configured_source(&settings)
+        );
+        assert!(!github_origin(None, reader).is_configured_source(&settings));
+        assert!(
+            !github_origin(Some("acme/widgets"), reader).is_configured_source(&Settings::default())
+        );
+    }
+
+    fn payload(state: Option<IssueState>, updated_at: Option<&str>) -> WebhookPayload {
+        WebhookPayload {
+            title: Some("Title".to_string()),
+            description: Some("Body".to_string()),
+            state,
+            updated_at: updated_at.map(|time| time.parse().unwrap()),
+            raw: None,
+        }
+    }
+
+    const EARLIER: &str = "2026-01-01T00:00:05Z";
+    const SEEN: &str = "2026-01-01T00:00:10Z";
+    const LATER: &str = "2026-01-01T00:00:20Z";
+
+    #[test]
+    fn a_move_is_followed_whatever_the_state_was_before() {
+        let moved = StateChange::MovedTo(IssueState::Closed);
+        let open = payload(Some(IssueState::Open), Some(SEEN));
+        let closed_later = payload(Some(IssueState::Closed), Some(LATER));
+
+        assert_eq!(
+            moved.target(&payload(None, None), None),
+            Some(IssueState::Closed)
+        );
+        assert_eq!(
+            moved.target(&open, Some(&closed_later)),
+            Some(IssueState::Closed)
+        );
+    }
+
+    #[test]
+    fn a_kept_state_is_followed_only_when_it_is_later_than_and_differs_from_the_last_one_seen() {
+        let kept = StateChange::Kept;
+        let seen = payload(Some(IssueState::Open), Some(SEEN));
+
+        assert_eq!(
+            kept.target(&payload(Some(IssueState::Closed), Some(LATER)), Some(&seen)),
+            Some(IssueState::Closed),
+            "a later edit catches the task up with a close it could not follow"
+        );
+        assert_eq!(
+            kept.target(&payload(Some(IssueState::Closed), Some(SEEN)), Some(&seen)),
+            None,
+            "an edit in the same second may have come before the move it disagrees with"
+        );
+        assert_eq!(
+            kept.target(&payload(Some(IssueState::Open), Some(LATER)), Some(&seen)),
+            None
+        );
+        assert_eq!(
+            kept.target(&payload(Some(IssueState::Closed), Some(LATER)), None),
+            None
+        );
+        assert_eq!(
+            kept.target(
+                &payload(Some(IssueState::Closed), None),
+                Some(&payload(Some(IssueState::Open), None))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_reported_state_is_followed_only_when_it_differs_from_the_last_one_seen() {
+        let reported = StateChange::Reported;
+        let in_progress = payload(Some(IssueState::InProgress), Some(SEEN));
+
+        assert_eq!(
+            reported.target(
+                &payload(Some(IssueState::Closed), Some(SEEN)),
+                Some(&in_progress)
+            ),
+            Some(IssueState::Closed)
+        );
+        assert_eq!(
+            reported.target(
+                &payload(Some(IssueState::InProgress), Some(LATER)),
+                Some(&in_progress)
+            ),
+            None
+        );
+        assert_eq!(
+            reported.target(&payload(Some(IssueState::Closed), Some(SEEN)), None),
+            None
+        );
+        assert_eq!(
+            reported.target(
+                &payload(None, Some(SEEN)),
+                Some(&payload(Some(IssueState::Open), Some(SEEN)))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_payload_from_an_earlier_second_is_stale_and_one_from_a_later_second_is_not() {
+        let seen = payload(Some(IssueState::Open), Some(SEEN));
+
+        assert!(payload(Some(IssueState::Closed), Some(EARLIER)).is_stale_against(&seen));
+        assert!(!payload(Some(IssueState::Open), Some(LATER)).is_stale_against(&seen));
+        assert!(!payload(Some(IssueState::Open), None).is_stale_against(&seen));
+        assert!(!seen.is_stale_against(&payload(Some(IssueState::Open), None)));
+    }
+
+    #[test]
+    fn a_payload_from_the_same_second_is_stale_only_when_it_changes_nothing() {
+        let seen = payload(Some(IssueState::Open), Some(SEEN));
+        let mut renamed = seen.clone();
+        renamed.title = Some("Renamed".to_string());
+        let mut rewritten = seen.clone();
+        rewritten.description = Some("Rewritten".to_string());
+        let timeless = payload(Some(IssueState::Open), None);
+
+        assert!(seen.clone().is_stale_against(&seen));
+        assert!(!payload(Some(IssueState::Closed), Some(SEEN)).is_stale_against(&seen));
+        assert!(!renamed.is_stale_against(&seen));
+        assert!(!rewritten.is_stale_against(&seen));
+        assert!(!timeless.is_stale_against(&timeless));
+    }
+
+    #[test]
+    fn only_a_strictly_earlier_or_later_time_orders_two_payloads() {
+        let seen = payload(Some(IssueState::Open), Some(SEEN));
+
+        assert!(payload(None, Some(EARLIER)).is_older_than(&seen));
+        assert!(!payload(None, Some(SEEN)).is_older_than(&seen));
+        assert!(payload(None, Some(LATER)).is_later_than(&seen));
+        assert!(!payload(None, Some(SEEN)).is_later_than(&seen));
+        assert!(!payload(None, None).is_older_than(&seen));
+        assert!(!payload(None, None).is_later_than(&seen));
+    }
+
+    #[test]
+    fn a_stored_state_from_before_payloads_had_times_still_reads() {
+        let stored = WebhookPayload::from_stored(&serde_json::json!({
+            "state": "open",
+            "number": 123
+        }))
+        .expect("an older stored state reads as a payload");
+
+        assert_eq!(stored.state, Some(IssueState::Open));
+        assert_eq!(stored.updated_at, None);
+        assert!(WebhookPayload::from_stored(&serde_json::json!({ "state": "sideways" })).is_none());
     }
 
     #[test]

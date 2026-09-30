@@ -1,17 +1,27 @@
 use sqlx::migrate::MigrateError;
 use sqlx::{ConnectOptions, PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 use zone_server::db::{memory, migrations, tasks};
+
+/// Every test replays the whole chain into an empty database; more at once
+/// only queue on the same disk writes, and the tests' own time bounds with them.
+static DATABASES: Semaphore = Semaphore::const_new(4);
 
 struct Database {
     admin: PgPool,
     pool: PgPool,
     name: String,
+    _slot: SemaphorePermit<'static>,
 }
 
 impl Database {
     async fn new() -> Self {
+        let slot = DATABASES
+            .acquire()
+            .await
+            .expect("the database slots are never closed");
         let admin =
             PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("disposable database"))
                 .await
@@ -28,7 +38,12 @@ impl Database {
             .connect_with(options)
             .await
             .unwrap();
-        Self { admin, pool, name }
+        Self {
+            admin,
+            pool,
+            name,
+            _slot: slot,
+        }
     }
 
     async fn through(&self, version: i64) {
@@ -1131,6 +1146,60 @@ async fn agent_providers_are_refused_before_048_and_stored_after_it() {
     database.cleanup().await;
 }
 
+/// 049 swaps the verdict check under the brief lock of an unvalidated
+/// constraint, and 050 proves the rows while reviews stay writable.
+#[tokio::test]
+async fn the_failed_verdict_check_is_added_unvalidated_and_proven_after() {
+    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
+         WHERE conrelid = 'task_reviews'::regclass AND conname = 'task_reviews_verdict_check'";
+    let database = Database::new().await;
+
+    database.through(49).await;
+    let added: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("049 leaves the verdict check in place");
+    database.through(50).await;
+    let proven: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("050 keeps the verdict check");
+
+    assert!(
+        !added,
+        "049 must not scan task_reviews under its exclusive lock"
+    );
+    assert!(proven, "050 validates what 049 added");
+    database.cleanup().await;
+}
+
+/// 051 swaps the sync event type check under the brief lock of an unvalidated
+/// constraint, and 052 proves the rows while sync events stay writable.
+#[tokio::test]
+async fn the_unlink_event_check_is_added_unvalidated_and_proven_after() {
+    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
+         WHERE conrelid = 'sync_events'::regclass AND conname = 'sync_events_event_type_check'";
+    let database = Database::new().await;
+
+    database.through(51).await;
+    let added: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("051 leaves the event type check in place");
+    database.through(52).await;
+    let proven: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("052 keeps the event type check");
+
+    assert!(
+        !added,
+        "051 must not scan sync_events under its exclusive lock"
+    );
+    assert!(proven, "052 validates what 051 added");
+    database.cleanup().await;
+}
+
 /// Every lock these take on `task_runs` is one ordinary traffic already holds,
 /// and the boot holds sqlx's advisory lock while it queues for them: an
 /// unbounded wait wedges every other instance instead of failing with 55P03.
@@ -1194,6 +1263,10 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
             "043_auto_projects_validation.sql",
             "046_invitations_pending_unique.sql",
             "048_agent_logins.sql",
+            "049_task_reviews_failed_verdict.sql",
+            "050_task_reviews_failed_verdict_validation.sql",
+            "051_sync_deliveries.sql",
+            "052_sync_events_unlink_validation.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );

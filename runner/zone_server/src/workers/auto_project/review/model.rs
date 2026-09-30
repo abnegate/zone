@@ -14,6 +14,18 @@ const CHOSEN_AUTHOR: &str = "the agent chose its own model to write the change, 
 const NO_OTHER_MODEL: &str = "no model other than the one that wrote the change is available to \
      review it, and no review bot answered";
 
+/// Why no model can review a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Unavailable {
+    #[error("no completion model is installed to review with")]
+    NoModel,
+    #[error(
+        "no installed model can call tools, which a review session offers; install one that \
+         can, or name one in ZONE_AUTO_REVIEW_MODELS"
+    )]
+    NoToolModel,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reviewer {
     pub model: String,
@@ -48,30 +60,39 @@ impl Author {
     }
 }
 
-/// Pick a reviewer for `round` of a change `author` wrote.
+/// The reviewers for `round` of a change `author` wrote, in the order the
+/// round asks them: the first is the round's own, and each after it stands in
+/// when those before it do not answer. Never empty.
 ///
 /// Candidates in order: the operator's configured reviewers, the workspace's
 /// reasoning and fast models, then everything installed, largest first. The
-/// author is dropped, and successive rounds rotate through what is left so a
-/// change that keeps coming back is read by different eyes. With nothing left
-/// the author reviews itself, and says so.
+/// author is dropped, and so is any model the catalog lists as unable to call
+/// tools, since a review session offers them; a name the catalog does not
+/// list, or lists without its capabilities, stays. Successive rounds rotate
+/// through what is left so a change that keeps coming back is read by
+/// different eyes. With nothing left the author reviews itself, and says so,
+/// unless it too cannot call tools.
 ///
 /// On an agent, a candidate is a model the agent knows, and the agent's own
 /// models stand in for what is installed, less those it runs only when named.
 /// A change the agent wrote on a model of its own choosing may have come from
 /// any of them.
-pub fn select(
+pub fn lineup(
     author: &Author,
     prefs: &Preferences,
     catalog: &Catalog,
     configured: &[String],
     round: u32,
-) -> Reviewer {
+) -> Result<Vec<Reviewer>, Unavailable> {
     let named = author.model();
     let mut candidates: Vec<String> = Vec::new();
     let mut push = |name: &str| {
         let name = name.trim();
-        if name.is_empty() || stages::is_auto(name) || !catalog.accepts(name) {
+        if name.is_empty()
+            || stages::is_auto(name)
+            || !catalog.accepts(name)
+            || catalog.refuses_tools(name)
+        {
             return;
         }
         if named.is_some_and(|author| stages::same_model(author, name)) {
@@ -102,20 +123,30 @@ pub fn select(
         }
     }
     if candidates.is_empty() {
-        return Reviewer {
-            model: named
-                .map(str::to_string)
-                .or_else(|| prefs.reasoning.clone())
-                .or_else(|| prefs.fast.clone())
-                .unwrap_or_else(|| stages::AUTO.to_string()),
-            same_model: true,
+        let fallbacks: Vec<&str> = [named, prefs.reasoning.as_deref(), prefs.fast.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .filter(|name| !stages::is_auto(name))
+            .collect();
+        return match fallbacks.iter().find(|name| !catalog.refuses_tools(name)) {
+            Some(model) => Ok(vec![Reviewer {
+                model: (*model).to_string(),
+                same_model: true,
+            }]),
+            None if !fallbacks.is_empty() || catalog.completions().next().is_some() => {
+                Err(Unavailable::NoToolModel)
+            }
+            None => Err(Unavailable::NoModel),
         };
     }
     let index = usize::try_from(round.saturating_sub(1)).unwrap_or(0) % candidates.len();
-    Reviewer {
-        model: candidates[index].clone(),
-        same_model: *author == Author::Chosen && catalog.chooses(),
-    }
+    candidates.rotate_left(index);
+    let same_model = *author == Author::Chosen && catalog.chooses();
+    Ok(candidates
+        .into_iter()
+        .map(|model| Reviewer { model, same_model })
+        .collect())
 }
 
 /// Why a review by `reviewer` cannot count as independent of `author`, or
@@ -169,7 +200,34 @@ mod tests {
             embedding: false,
             vision: false,
             reranker: false,
+            tools: None,
         }
+    }
+
+    fn without_tools(model: Installed) -> Installed {
+        Installed {
+            tools: Some(false),
+            ..model
+        }
+    }
+
+    fn with_tools(model: Installed) -> Installed {
+        Installed {
+            tools: Some(true),
+            ..model
+        }
+    }
+
+    fn pick(
+        author: &Author,
+        prefs: &Preferences,
+        catalog: &Catalog,
+        configured: &[String],
+        round: u32,
+    ) -> Reviewer {
+        lineup(author, prefs, catalog, configured, round)
+            .expect("a model can review")
+            .swap_remove(0)
     }
 
     fn catalog() -> Catalog {
@@ -187,16 +245,54 @@ mod tests {
     fn the_author_is_never_its_own_reviewer_while_another_model_exists() {
         let prefs = Preferences::default();
         let author = Author::Model("author".into());
-        let first = select(&author, &prefs, &catalog(), &[], 1);
+        let first = pick(&author, &prefs, &catalog(), &[], 1);
         assert_eq!(first.model, "big:latest");
         assert!(!first.same_model);
-        let second = select(&author, &prefs, &catalog(), &[], 2);
+        let second = pick(&author, &prefs, &catalog(), &[], 2);
         assert_eq!(
             second.model, "small:latest",
             "rounds rotate through the rest"
         );
-        let third = select(&author, &prefs, &catalog(), &[], 3);
+        let third = pick(&author, &prefs, &catalog(), &[], 3);
         assert_eq!(third.model, "big:latest");
+    }
+
+    #[test]
+    fn the_round_after_a_failed_one_goes_to_the_next_configured_reviewer() {
+        let author = Author::Model("author".into());
+        let configured = ["gemma3:27b".to_string(), "qwen3:32b".to_string()];
+        let failed = pick(&author, &Preferences::default(), &catalog(), &configured, 1);
+        let next = pick(&author, &Preferences::default(), &catalog(), &configured, 2);
+        assert_eq!(failed.model, "gemma3:27b");
+        assert_eq!(next.model, "qwen3:32b");
+    }
+
+    #[test]
+    fn a_round_s_lineup_starts_at_its_own_reviewer_and_goes_on_through_the_rest() {
+        let author = Author::Model("author".into());
+        let configured = ["gemma3:27b".to_string(), "qwen3:32b".to_string()];
+        let names = |round| -> Vec<String> {
+            lineup(
+                &author,
+                &Preferences::default(),
+                &catalog(),
+                &configured,
+                round,
+            )
+            .expect("a model can review")
+            .into_iter()
+            .map(|reviewer| reviewer.model)
+            .collect()
+        };
+
+        assert_eq!(
+            names(1),
+            ["gemma3:27b", "qwen3:32b", "big:latest", "small:latest"]
+        );
+        assert_eq!(
+            names(2),
+            ["qwen3:32b", "big:latest", "small:latest", "gemma3:27b"]
+        );
     }
 
     #[test]
@@ -207,9 +303,9 @@ mod tests {
             ..Preferences::default()
         };
         let author = Author::Model("author".into());
-        let picked = select(&author, &prefs, &catalog(), &["ops-reviewer".into()], 1);
+        let picked = pick(&author, &prefs, &catalog(), &["ops-reviewer".into()], 1);
         assert_eq!(picked.model, "ops-reviewer");
-        let alone = select(
+        let alone = pick(
             &author,
             &Preferences::default(),
             &Catalog {
@@ -234,21 +330,18 @@ mod tests {
         let sonnet = Author::Model("sonnet".into());
 
         assert_eq!(
-            select(&sonnet, &prefs, &claude, &configured, 1),
+            pick(&sonnet, &prefs, &claude, &configured, 1),
             Reviewer {
                 model: "opus".into(),
                 same_model: false,
             }
         );
         assert_eq!(
-            select(&sonnet, &prefs, &claude, &configured, 2).model,
+            pick(&sonnet, &prefs, &claude, &configured, 2).model,
             "haiku",
             "the agent's other models follow the ones configured"
         );
-        assert_eq!(
-            select(&sonnet, &prefs, &claude, &configured, 3).model,
-            "opus"
-        );
+        assert_eq!(pick(&sonnet, &prefs, &claude, &configured, 3).model, "opus");
     }
 
     #[test]
@@ -257,7 +350,7 @@ mod tests {
         let sonnet = Author::Model("sonnet".into());
 
         let rotation: Vec<String> = (1..=4)
-            .map(|round| select(&sonnet, &Preferences::default(), &claude, &[], round).model)
+            .map(|round| pick(&sonnet, &Preferences::default(), &claude, &[], round).model)
             .collect();
 
         assert_eq!(rotation, ["opus", "haiku", "opus", "haiku"]);
@@ -270,7 +363,7 @@ mod tests {
         let fable = || Some("fable".to_string());
 
         assert_eq!(
-            select(
+            pick(
                 &sonnet,
                 &Preferences::default(),
                 &claude,
@@ -292,7 +385,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                select(&sonnet, &prefs, &claude, &[], 1).model,
+                pick(&sonnet, &prefs, &claude, &[], 1).model,
                 "fable",
                 "{prefs:?}"
             );
@@ -305,7 +398,7 @@ mod tests {
         let author = Author::recorded(Some(stages::AUTO.into()));
 
         for round in 1..=3 {
-            let reviewer = select(&author, &Preferences::default(), &claude, &[], round);
+            let reviewer = pick(&author, &Preferences::default(), &claude, &[], round);
             assert!(
                 reviewer.same_model,
                 "round {round}: {reviewer:?} counted as independent of a model the agent chose"
@@ -318,7 +411,7 @@ mod tests {
     fn an_agent_s_choice_is_not_called_an_endpoint_reviewer_s_own_model_nor_independent_of_it() {
         let author = Author::recorded(Some(stages::AUTO.into()));
 
-        let reviewer = select(&author, &Preferences::default(), &catalog(), &[], 1);
+        let reviewer = pick(&author, &Preferences::default(), &catalog(), &[], 1);
 
         assert_eq!(
             reviewer,
@@ -340,11 +433,11 @@ mod tests {
         };
         let author = Author::Model("author".into());
 
-        let other = select(&sonnet, &Preferences::default(), &claude, &[], 1);
+        let other = pick(&sonnet, &Preferences::default(), &claude, &[], 1);
         assert_eq!(objection(&sonnet, &other), None, "{other:?}");
-        let itself = select(&author, &Preferences::default(), &alone, &[], 1);
+        let itself = pick(&author, &Preferences::default(), &alone, &[], 1);
         assert_eq!(objection(&author, &itself), Some(NO_OTHER_MODEL));
-        let unknown = select(
+        let unknown = pick(
             &Author::Unrecorded,
             &Preferences::default(),
             &claude,
@@ -368,5 +461,139 @@ mod tests {
         assert_eq!(Author::recorded(None), Author::Unrecorded);
         assert_eq!(Author::Chosen.model(), None);
         assert_eq!(Author::Model("sonnet".into()).model(), Some("sonnet"));
+    }
+
+    const LLAVA: &str = "llava:7b";
+    const NOROMAID: &str = "hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest";
+
+    fn catalog_with_models_that_cannot_call_tools() -> Catalog {
+        Catalog {
+            models: vec![
+                without_tools(Installed {
+                    vision: true,
+                    ..installed(LLAVA, 4_733_363_377)
+                }),
+                with_tools(installed("qwen2.5:7b-instruct", 4_683_087_332)),
+                without_tools(installed(NOROMAID, 4_140_374_100)),
+                with_tools(installed("llama3.2:3b", 2_019_393_189)),
+            ],
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn reviewers_rotate_only_onto_models_that_can_call_tools() {
+        let author = Author::Model("qwen2.5:7b-instruct".into());
+        let catalog = catalog_with_models_that_cannot_call_tools();
+
+        let rotation: Vec<String> = (1..=4)
+            .map(|round| pick(&author, &Preferences::default(), &catalog, &[], round).model)
+            .collect();
+
+        assert_eq!(rotation, ["llama3.2:3b"; 4]);
+    }
+
+    #[test]
+    fn a_configured_or_preferred_model_that_cannot_call_tools_is_skipped() {
+        let author = Author::Model("qwen2.5:7b-instruct".into());
+        let prefs = Preferences {
+            reasoning: Some(LLAVA.into()),
+            fast: Some(NOROMAID.into()),
+            ..Preferences::default()
+        };
+
+        let reviewer = pick(
+            &author,
+            &prefs,
+            &catalog_with_models_that_cannot_call_tools(),
+            &[LLAVA.into(), "ops-reviewer".into()],
+            1,
+        );
+
+        assert_eq!(reviewer.model, "ops-reviewer");
+    }
+
+    #[test]
+    fn a_model_whose_capabilities_are_unknown_still_reviews() {
+        let author = Author::Model("author".into());
+        let catalog = Catalog {
+            models: vec![
+                without_tools(installed(LLAVA, 9)),
+                installed("unlisted-capabilities", 5),
+                installed("author", 1),
+            ],
+            agent: None,
+        };
+
+        let reviewer = pick(&author, &Preferences::default(), &catalog, &[], 1);
+
+        assert_eq!(reviewer.model, "unlisted-capabilities");
+        assert!(!reviewer.same_model);
+    }
+
+    #[test]
+    fn the_fallback_reviewer_is_never_a_model_that_cannot_call_tools() {
+        let prefs = Preferences {
+            reasoning: Some(LLAVA.into()),
+            fast: Some("llama3.2:3b".into()),
+            ..Preferences::default()
+        };
+        let catalog = Catalog {
+            models: vec![
+                without_tools(installed(LLAVA, 9)),
+                installed("llama3.2:3b", 2),
+            ],
+            agent: None,
+        };
+        let author = Author::Model("llama3.2:3b".into());
+
+        let reviewers = lineup(&author, &prefs, &catalog, &[], 1);
+
+        assert_eq!(
+            reviewers,
+            Ok(vec![Reviewer {
+                model: "llama3.2:3b".into(),
+                same_model: true,
+            }]),
+            "the author reviews itself rather than handing the review to a model that cannot"
+        );
+    }
+
+    #[test]
+    fn with_only_models_that_cannot_call_tools_the_review_says_so() {
+        let refusing = Catalog {
+            models: vec![
+                without_tools(installed(LLAVA, 9)),
+                without_tools(installed(NOROMAID, 5)),
+            ],
+            agent: None,
+        };
+        let prefs = Preferences {
+            reasoning: Some(LLAVA.into()),
+            ..Preferences::default()
+        };
+
+        for (author, prefs) in [
+            (Author::Unrecorded, prefs.clone()),
+            (Author::Unrecorded, Preferences::default()),
+            (Author::Model(NOROMAID.into()), Preferences::default()),
+        ] {
+            assert_eq!(
+                lineup(&author, &prefs, &refusing, &[LLAVA.into()], 1),
+                Err(Unavailable::NoToolModel),
+                "{author:?} {prefs:?}"
+            );
+        }
+        assert_eq!(
+            lineup(
+                &Author::Unrecorded,
+                &Preferences::default(),
+                &Catalog::default(),
+                &[],
+                1
+            ),
+            Err(Unavailable::NoModel),
+            "an endpoint that lists nothing has nothing to review with"
+        );
     }
 }

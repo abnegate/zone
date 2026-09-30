@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 use std::collections::HashSet;
 use std::time::Duration;
+use thiserror::Error;
 use uuid::Uuid;
 
 use super::DbResult;
@@ -654,14 +655,15 @@ pub async fn project_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<Vec<Proj
         "SELECT t.id AS task_id, t.title, t.status, t.is_agentic, t.priority, t.pr_url, t.dependencies, \
                 a.kind, a.stage, a.reason, a.runs, a.review_rounds, a.head, a.checks, a.merge_sha, \
                 a.auto_created, \
-                (SELECT string_agg(DISTINCT r.reviewer, ', ') FROM task_reviews r WHERE r.task_id = t.id) \
-                  AS reviewers \
+                (SELECT string_agg(DISTINCT r.reviewer, ', ') FROM task_reviews r \
+                   WHERE r.task_id = t.id AND r.verdict <> ALL($2)) AS reviewers \
          FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
          LEFT JOIN task_automation a ON a.task_id = t.id \
          WHERE tp.project_id = $1 \
          ORDER BY t.priority NULLS LAST, t.created_at, t.id",
     )
     .bind(project_id)
+    .bind(Verdict::verdictless())
     .fetch_all(pool)
     .await
 }
@@ -704,26 +706,61 @@ impl ReviewerKind {
 pub enum Verdict {
     Approve,
     RequestChanges,
+    /// The reviewer answered without a readable verdict.
     Unparseable,
+    /// The reviewer model failed before it answered.
+    Failed,
 }
 
 impl Verdict {
+    pub const ALL: [Self; 4] = [
+        Self::Approve,
+        Self::RequestChanges,
+        Self::Unparseable,
+        Self::Failed,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Approve => "approve",
             Self::RequestChanges => "request_changes",
             Self::Unparseable => "unparseable",
+            Self::Failed => "failed",
         }
     }
 
     /// The variant a stored name denotes, if any.
     pub fn parse(value: &str) -> Option<Self> {
-        Some(match value {
-            "approve" => Self::Approve,
-            "request_changes" => Self::RequestChanges,
-            "unparseable" => Self::Unparseable,
-            _ => return None,
-        })
+        Self::ALL
+            .into_iter()
+            .find(|verdict| verdict.as_str() == value)
+    }
+
+    /// Whether the round ended without judging the change: it neither
+    /// approves nor blocks it, and does not count as anyone's review.
+    pub const fn is_verdictless(self) -> bool {
+        matches!(self, Self::Unparseable | Self::Failed)
+    }
+
+    /// The stored names of the verdictless rounds.
+    pub fn verdictless() -> Vec<&'static str> {
+        Self::ALL
+            .into_iter()
+            .filter(|verdict| verdict.is_verdictless())
+            .map(Self::as_str)
+            .collect()
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("{0:?} is not a review verdict")]
+pub struct UnknownVerdict(String);
+
+impl TryFrom<String> for Verdict {
+    type Error = UnknownVerdict;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value).ok_or(UnknownVerdict(value))
     }
 }
 
@@ -754,7 +791,8 @@ pub struct ReviewRow {
     pub reviewer: String,
     pub author_model: Option<String>,
     pub same_model: bool,
-    pub verdict: String,
+    #[sqlx(try_from = "String")]
+    pub verdict: Verdict,
     pub summary: String,
     pub findings: Value,
     pub addressed: Value,
@@ -789,9 +827,9 @@ impl ReviewRow {
             .unwrap_or_default()
     }
 
-    /// The round's verdict; unparseable when the stored name is unknown.
-    pub fn verdict(&self) -> Verdict {
-        Verdict::parse(&self.verdict).unwrap_or(Verdict::Unparseable)
+    /// Whether this round judged the change.
+    pub fn reviewed(&self) -> bool {
+        !self.verdict.is_verdictless()
     }
 
     /// Whether a review bot, rather than a Zone reviewer session, wrote this round.
@@ -891,15 +929,17 @@ pub async fn open_findings(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<Finding
 }
 
 /// Whether a review by something other than the author's model has been
-/// recorded on this head: a Zone review on a different model, or any bot.
+/// recorded on this head: a Zone review on a different model, or any bot. A
+/// round that ended without a verdict reviewed nothing, whoever ran it.
 pub async fn distinct_review_on_head(pool: &PgPool, task_id: Uuid, head: &str) -> DbResult<bool> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM task_reviews WHERE task_id = $1 AND head = $2 \
            AND (reviewer_kind = 'bot' OR (NOT same_model AND author_model IS NOT NULL)) \
-           AND verdict <> 'unparseable')",
+           AND verdict <> ALL($3))",
     )
     .bind(task_id)
     .bind(head)
+    .bind(Verdict::verdictless())
     .fetch_one(pool)
     .await
 }
@@ -1124,7 +1164,7 @@ mod tests {
             reviewer: reviewer.into(),
             author_model: None,
             same_model: false,
-            verdict: "request_changes".into(),
+            verdict: Verdict::RequestChanges,
             summary: String::new(),
             findings: json!(findings),
             addressed: json!(addressed),
@@ -1223,5 +1263,29 @@ mod tests {
         }
         assert!(Stage::AwaitingReviews.in_flight());
         assert!(!Stage::Merged.in_flight());
+    }
+
+    #[test]
+    fn every_verdict_round_trips_and_an_unknown_name_is_refused_rather_than_guessed() {
+        for verdict in Verdict::ALL {
+            assert_eq!(Verdict::parse(verdict.as_str()), Some(verdict));
+            assert_eq!(
+                Verdict::try_from(verdict.as_str().to_string()).ok(),
+                Some(verdict)
+            );
+        }
+        assert_eq!(Verdict::parse("failed"), Some(Verdict::Failed));
+        assert_eq!(Verdict::parse("approved"), None);
+        assert!(
+            Verdict::try_from("approved".to_string()).is_err(),
+            "a stored name no variant owns fails the read instead of counting as unparseable"
+        );
+    }
+
+    #[test]
+    fn a_failed_round_and_an_unreadable_one_are_both_verdictless() {
+        assert_eq!(Verdict::verdictless(), ["unparseable", "failed"]);
+        assert!(!Verdict::Approve.is_verdictless());
+        assert!(!Verdict::RequestChanges.is_verdictless());
     }
 }

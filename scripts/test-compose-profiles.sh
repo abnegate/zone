@@ -48,6 +48,26 @@ assert_not_contains() {
     esac
 }
 
+assert_line() {
+    lines=$1
+    line=$2
+    message=$3
+    if ! printf '%s\n' "$lines" | grep -qx -- "$line"; then
+        printf '%s\n missing line %s in:\n%s\n' "$message" "$line" "$lines" >&2
+        exit 1
+    fi
+}
+
+assert_no_line() {
+    lines=$1
+    line=$2
+    message=$3
+    if printf '%s\n' "$lines" | grep -qx -- "$line"; then
+        printf '%s\n unexpected line %s in:\n%s\n' "$message" "$line" "$lines" >&2
+        exit 1
+    fi
+}
+
 flags_core=$(trim "$("$script" flags '')")
 assert_eq "$flags_core" '-f docker-compose.yml' 'core flags'
 
@@ -88,6 +108,27 @@ fi
 "$script" persist --env-file "$directory/environment" vpn >/dev/null
 ensured=$("$script" persist --env-file "$directory/environment" --ensure dev)
 assert_eq "$ensured" 'dev,vpn' 'persist --ensure keeps vpn and adds dev'
+
+"$script" persist --env-file "$directory/environment" --ensure bundled-comfyui >/dev/null
+assert_contains "$(cat "$directory/environment")" 'COMPOSE_PROFILES=dev,vpn,bundled-comfyui' \
+    'persist --ensure bundled-comfyui keeps the saved profiles'
+
+inactive_core=$("$script" inactive --env-file "$envfile" '')
+for service in prometheus grafana cadvisor gluetun searxng; do
+    assert_line "$inactive_core" "$service" 'core leaves out every optional service'
+done
+for service in manager postgres; do
+    assert_no_line "$inactive_core" "$service" 'core keeps the core services'
+done
+assert_eq "$inactive_core" "$(printf '%s\n' "$inactive_core" | sort)" 'inactive prints sorted services'
+
+inactive_monitoring=$("$script" inactive --env-file "$envfile" monitoring)
+assert_no_line "$inactive_monitoring" prometheus 'monitoring keeps prometheus'
+assert_line "$inactive_monitoring" gluetun 'monitoring leaves out gluetun'
+
+inactive_all=$("$script" inactive --env-file "$envfile" \
+    'dev,vpn,monitoring,bundled-ollama,bundled-comfyui,comfyui-model-setup')
+assert_eq "$inactive_all" '' 'every profile active leaves nothing out'
 
 # shellcheck disable=SC2046
 core_services=$(compose $("$script" flags '') config --services)

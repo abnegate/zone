@@ -179,7 +179,10 @@ test.describe('Projects Page', () => {
               external_repo_url: 'https://github.com/example/repo',
               is_active: true,
               created_at: new Date().toISOString(),
+              webhook_secret_configured: true,
+              webhook_secret_issued_by_zone: true,
             },
+            webhook_secret: 'a'.repeat(64),
           }),
         });
         return;

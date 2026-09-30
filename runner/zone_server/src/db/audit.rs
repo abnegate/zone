@@ -85,6 +85,11 @@ pub mod actions {
 
     pub const AGENT_SIGNED_IN: &str = "agent.signed_in";
     pub const AGENT_SIGNED_OUT: &str = "agent.signed_out";
+
+    pub const SYNC_CREATED: &str = "sync.created";
+    pub const SYNC_DELETED: &str = "sync.deleted";
+    pub const SYNC_WEBHOOK_SECRET_ROTATED: &str = "sync.webhook_secret_rotated";
+    pub const SYNC_WEBHOOK_SECRET_SET: &str = "sync.webhook_secret_set";
 }
 
 pub mod resources {
@@ -94,6 +99,7 @@ pub mod resources {
     pub const INVITATION: &str = "invitation";
     pub const AI_SETTINGS: &str = "ai_settings";
     pub const AGENT_LOGIN: &str = "agent_login";
+    pub const SYNC_CONFIG: &str = "sync_config";
 }
 
 /// Log an action to the audit trail
