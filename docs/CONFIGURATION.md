@@ -129,10 +129,11 @@ With no model pinned, a chat with an attached image goes to the smallest install
 Where chat turns and task runs get their completions, along with chat titles,
 pull request subjects, and auto-project reviews and summaries. The default is
 the OpenAI-compatible endpoint `LITELLM_HOST` names. An organization can instead
-choose a coding agent CLI as its provider, **Claude Code** or **Codex**, and
-sign it in with its own Claude or ChatGPT subscription. Zone then runs that CLI
-for the organization's completions and serves Zone's tools to it over MCP. The
-manager image ships both CLIs: claude 2.1.278 and codex 0.156.1.
+save its own endpoint (see *Saved endpoints*), or choose a coding agent CLI as
+its provider, **Claude Code** or **Codex**, and sign it in with its own Claude
+or ChatGPT subscription. Zone then runs that CLI for the organization's
+completions and serves Zone's tools to it over MCP. The manager image ships
+both CLIs: claude 2.1.278 and codex 0.156.1.
 
 ### Choosing a provider
 
@@ -143,7 +144,8 @@ Bedrock (`claude_code` and `codex` in the API). A workspace admin can choose
 one for a single workspace under **Workspace Settings > AI Settings**, with
 **Override organization AI settings** on; the workspace then runs on its
 organization's sign-in for that agent. Organizations and workspaces that choose
-neither follow `ZONE_LLM_BACKEND`, the instance-wide default.
+neither a CLI nor a saved endpoint follow `ZONE_LLM_BACKEND`, the instance-wide
+default.
 
 No instance-wide setting turns these providers off: any organization admin can
 select them. Read *Security* below before using them on an instance shared by
@@ -151,6 +153,39 @@ organizations that must not see each other's data. On Claude Code, a Claude
 account with usage credits turned on keeps every turn going past its plan's
 limits, on those credits: read *Usage credits* before choosing it for an
 organization whose tasks run unattended.
+
+### Saved endpoints
+
+Self-Hosted, OpenAI and Anthropic send completions over HTTP to the endpoint
+saved in AI Settings, even when `ZONE_LLM_BACKEND` names a CLI. A workspace
+with **Override organization AI settings** on uses its own settings in place of
+the organization's.
+
+- **Self-Hosted**: the saved LiteLLM host, with the saved key.
+- **OpenAI**: the saved base URL, or OpenAI's API without one, with the saved
+  key.
+- **Anthropic**: Anthropic's OpenAI-compatible endpoint,
+  `https://api.anthropic.com/v1/`, with the saved key as a Bearer token.
+  Anthropic describes that endpoint as meant for testing and "not considered a
+  long-term or production-ready solution for most use cases".
+- **AWS Bedrock** is not routed yet: it runs on the instance default.
+
+Keys stay with the URL they were saved beside. A URL a workspace saves never
+receives the organization's key, and the instance's `LITELLM_KEY` only ever goes
+to `LITELLM_HOST`.
+
+A URL is checked when it is saved: it must be `http` or `https`, name a host,
+and carry no credentials, query or fragment. Private, LAN and loopback hosts are
+allowed, since an operator may run the model next to Zone. A base URL with no
+path gets `/v1`, so `http://10.0.0.5:4000` becomes `http://10.0.0.5:4000/v1`.
+
+*Automatic* on a saved endpoint uses the **Fast Model** and **Reasoning Model**
+names saved in AI Settings, never the instance's `OLLAMA_MODEL_*` defaults. With
+no name saved, the turn fails asking you to set one.
+
+Embeddings, model captioning and LoRA training stay on the instance whatever the
+provider. A model known to lack vision gets the chat's history without its
+images and a one-line note saying so; the stored history keeps them.
 
 ### Usage credits
 
