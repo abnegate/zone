@@ -19,7 +19,7 @@ use crate::db::sync_config::{
 use crate::db::{projects, tasks};
 use crate::state::AppState;
 use crate::sync::{
-    Delivery, IssueState, Settings, SyncError, WebhookEvent, WebhookPayload, github, linear,
+    Delivery, IssueState, Provider, Settings, SyncError, WebhookEvent, WebhookPayload,
 };
 
 /// The largest delivery body either webhook route reads (1 MB)
@@ -137,14 +137,7 @@ pub async fn github_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    receive(
-        &state,
-        sync_config_id,
-        github::PROVIDER_NAME,
-        &headers,
-        &body,
-    )
-    .await
+    receive(&state, sync_config_id, Provider::GitHub, &headers, &body).await
 }
 
 /// POST /api/webhooks/sync/{sync_config_id}/linear
@@ -154,25 +147,18 @@ pub async fn linear_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    receive(
-        &state,
-        sync_config_id,
-        linear::PROVIDER_NAME,
-        &headers,
-        &body,
-    )
-    .await
+    receive(&state, sync_config_id, Provider::Linear, &headers, &body).await
 }
 
 async fn receive(
     state: &AppState,
     sync_config_id: Uuid,
-    provider_name: &str,
+    provider: Provider,
     headers: &HeaderMap,
     body: &[u8],
 ) -> Response {
-    let (config, delivery) = match verify(state, sync_config_id, provider_name, headers, body).await
-    {
+    let provider_name = provider.as_str();
+    let (config, delivery) = match verify(state, sync_config_id, provider, headers, body).await {
         Ok(verified) => verified,
         Err(rejection) => return rejection.into_response(),
     };
@@ -216,10 +202,11 @@ async fn receive(
 async fn verify(
     state: &AppState,
     sync_config_id: Uuid,
-    provider_name: &str,
+    provider: Provider,
     headers: &HeaderMap,
     body: &[u8],
 ) -> Result<(SyncConfigRow, Delivery), Rejection> {
+    let provider_name = provider.as_str();
     let unverified = |reason: &str| {
         tracing::warn!("Refused {provider_name} webhook for {sync_config_id}: {reason}");
         Rejection::Unverified
@@ -246,7 +233,7 @@ async fn verify(
         tracing::error!("Failed to decrypt webhook secret for {sync_config_id}: {error}");
         Rejection::Internal
     })?;
-    let provider = state
+    let tracker = state
         .sync_registry()
         .get_provider(provider_name)
         .map_err(|error| {
@@ -254,7 +241,7 @@ async fn verify(
             Rejection::Internal
         })?;
 
-    match provider.parse_webhook(headers, body, &secret) {
+    match tracker.parse_webhook(headers, body, &secret) {
         Ok(delivery) => Ok((config, delivery)),
         Err(SyncError::WebhookVerificationFailed(reason)) => Err(unverified(&reason)),
         Err(error) => {

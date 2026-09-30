@@ -8,13 +8,11 @@ use sha2::Sha256;
 use std::collections::HashMap;
 
 use super::{
-    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, StateChange, SyncConfig,
-    SyncError, SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
+    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, Provider, StateChange,
+    SyncConfig, SyncError, SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
 };
 use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
-
-pub const PROVIDER_NAME: &str = "github";
 
 const SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
 const EVENT_HEADER: &str = "X-GitHub-Event";
@@ -221,7 +219,7 @@ impl Default for GitHubSyncProvider {
 #[async_trait]
 impl SyncProvider for GitHubSyncProvider {
     fn provider_name(&self) -> &str {
-        PROVIDER_NAME
+        Provider::GitHub.as_str()
     }
 
     async fn create_issue(&self, config: &SyncConfig, task: &TaskRow) -> SyncResult<ExternalIssue> {

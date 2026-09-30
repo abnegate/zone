@@ -8,13 +8,11 @@ use sha2::Sha256;
 use std::collections::HashMap;
 
 use super::{
-    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, StateChange, SyncConfig,
-    SyncError, SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
+    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, Provider, StateChange,
+    SyncConfig, SyncError, SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
 };
 use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
-
-pub const PROVIDER_NAME: &str = "linear";
 
 const SIGNATURE_HEADER: &str = "Linear-Signature";
 const DELIVERY_HEADER: &str = "Linear-Delivery";
@@ -238,7 +236,7 @@ impl Default for LinearSyncProvider {
 #[async_trait]
 impl SyncProvider for LinearSyncProvider {
     fn provider_name(&self) -> &str {
-        PROVIDER_NAME
+        Provider::Linear.as_str()
     }
 
     async fn create_issue(&self, config: &SyncConfig, task: &TaskRow) -> SyncResult<ExternalIssue> {
