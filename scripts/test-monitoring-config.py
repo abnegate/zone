@@ -4,8 +4,11 @@
 import json
 import re
 import shutil
+import stat
 import subprocess
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -20,6 +23,8 @@ GLUETUN_METRICS = 'gluetun:8001'
 SEARXNG_TARGET = 'http://gluetun:8080/'
 BUDGET_RECORD = 'litellm_budget_low:minimum'
 BUDGET_METRIC = 'litellm_remaining_api_key_budget_metric'
+READABLE_FOLDER = 0o755
+READABLE_FILE = 0o644
 
 
 def load(path: Path) -> dict:
@@ -72,6 +77,18 @@ def prometheus_image() -> str:
     if match is None:
         raise AssertionError('docker-compose.yml does not pin prom/prometheus by version and digest')
     return f'prom/prometheus:{match.group(1)}@{match.group(2)}'
+
+
+@contextmanager
+def staged(files: dict[str, str]) -> Iterator[Path]:
+    with TemporaryDirectory() as folder:
+        staging = Path(folder)
+        staging.chmod(READABLE_FOLDER)
+        for name, content in files.items():
+            path = staging / name
+            path.write_text(content)
+            path.chmod(READABLE_FILE)
+        yield staging
 
 
 def docker_available() -> bool:
@@ -144,14 +161,23 @@ class SearxngProbeTests(unittest.TestCase):
         self.assertEqual(probes, ['ollama', 'comfyui'])
 
 
+class StagingTests(unittest.TestCase):
+    def test_container_user_can_read_staged_files(self) -> None:
+        with staged({'rules.yml': 'groups: []\n'}) as folder:
+            self.assertEqual(stat.S_IMODE(folder.stat().st_mode), READABLE_FOLDER, 'prometheus runs as nobody, so the mount must be world-readable')
+            self.assertEqual(stat.S_IMODE((folder / 'rules.yml').stat().st_mode), READABLE_FILE)
+            self.assertEqual((folder / 'rules.yml').read_text(), 'groups: []\n')
+
+
 @unittest.skipUnless(docker_available(), 'docker is not available')
 class PromtoolTests(unittest.TestCase):
-    def promtool(self, folder: Path, *arguments: str) -> None:
-        result = subprocess.run(
-            ['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'promtool',
-             '--volume', f'{folder}:/check:ro', prometheus_image(), *arguments],
-            capture_output=True, text=True, timeout=300,
-        )
+    def promtool(self, files: dict[str, str], *arguments: str) -> None:
+        with staged(files) as folder:
+            result = subprocess.run(
+                ['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'promtool',
+                 '--volume', f'{folder}:/check:ro', prometheus_image(), *arguments],
+                capture_output=True, text=True, timeout=300,
+            )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_budget_query_ignores_unlimited_keys(self) -> None:
@@ -179,13 +205,12 @@ class PromtoolTests(unittest.TestCase):
             ],
         }
         document = {'groups': [{'name': 'budget', 'interval': '1m', 'rules': [{'record': BUDGET_RECORD, 'expr': query}]}]}
-        with TemporaryDirectory() as folder:
-            (Path(folder) / 'rules.yml').write_text(yaml.safe_dump(document))
-            (Path(folder) / 'tests.yml').write_text(yaml.safe_dump(tests))
-            self.promtool(Path(folder), 'test', 'rules', '/check/tests.yml')
+        files = {'rules.yml': yaml.safe_dump(document), 'tests.yml': yaml.safe_dump(tests)}
+        self.promtool(files, 'test', 'rules', '/check/tests.yml')
 
     def test_scrape_config_is_valid(self) -> None:
-        self.promtool(PROMETHEUS_CONFIG.parent, 'check', 'config', '--syntax-only', '/check/prometheus.yml')
+        files = {PROMETHEUS_CONFIG.name: PROMETHEUS_CONFIG.read_text()}
+        self.promtool(files, 'check', 'config', '--syntax-only', f'/check/{PROMETHEUS_CONFIG.name}')
 
     def test_rule_queries_are_valid(self) -> None:
         queries = [
@@ -194,10 +219,8 @@ class PromtoolTests(unittest.TestCase):
             for index, expression in enumerate(prometheus_queries(rule))
         ]
         self.assertTrue(queries)
-        with TemporaryDirectory() as folder:
-            document = {'groups': [{'name': 'grafana', 'rules': queries}]}
-            (Path(folder) / 'rules.yml').write_text(yaml.safe_dump(document))
-            self.promtool(Path(folder), 'check', 'rules', '/check/rules.yml')
+        document = {'groups': [{'name': 'grafana', 'rules': queries}]}
+        self.promtool({'rules.yml': yaml.safe_dump(document)}, 'check', 'rules', '/check/rules.yml')
 
 
 if __name__ == '__main__':
