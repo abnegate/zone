@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -21,9 +22,12 @@ OTHER_MOUNTS = ['zone_ollama_data:/data/ollama:ro', 'zone_valkey_data:/data/valk
                 'zone_manager_agent_state:/data/manager_agent_state:ro', 'zone_prometheus_data:/data/prometheus:ro',
                 'zone_grafana_data:/data/grafana:ro', 'zone_traefik_letsencrypt:/data/traefik:ro']
 BACKUP = 'BACKUP=backups/zone_backup_20260930_000000.tar.gz'
+DATE = '20260930_000000'
+RUN_NAME = re.compile(rf'^zone_backup_{DATE}-[0-9]+$')
+ARCHIVE_NAME = re.compile(rf'^zone_backup_{DATE}-[0-9]+\.tar\.gz$')
 
 FAKE_DOCKER = '''#!/usr/bin/env python3
-import json, os, signal, sys, time
+import json, os, signal, subprocess, sys, time
 arguments = sys.argv[1:]
 with open(os.environ['FAKE_DOCKER_LOG'], 'a') as output:
     output.write(json.dumps(arguments) + '\\n')
@@ -47,7 +51,31 @@ if signalled and signalled in joined:
         while not os.path.exists(handshake + '.closed'):
             time.sleep(0.01)
     os.kill(os.getppid(), getattr(signal, os.environ['FAKE_DOCKER_SIGNAL']))
+    sys.exit(0)
+if arguments[0] == 'run' and 'tar czf' in arguments[-1]:
+    mounts = [arguments[index + 1] for index, argument in enumerate(arguments) if argument == '-v']
+    backup = next(mount.rsplit(':', 1)[0] for mount in mounts if mount.endswith(':/backup'))
+    sys.exit(subprocess.run(['sh', '-c', arguments[-1].replace('/backup/', backup + '/')]).returncode)
 sys.exit(0)
+'''
+
+FAKE_DATE = f'''#!/bin/sh
+echo {DATE}
+'''
+
+FAKE_TAR = '''#!/usr/bin/env python3
+import os, pathlib, sys, time
+if sys.argv[1] != 'czf':
+    sys.exit(64)
+partial = pathlib.Path(sys.argv[2])
+partial.write_text('archive')
+if os.environ.get('FAKE_TAR_COLLIDE'):
+    (partial.parent / partial.name.removeprefix('.')).write_text('other')
+block = os.environ.get('FAKE_TAR_BLOCK')
+if block:
+    pathlib.Path(block + '.ready').touch()
+    while not os.path.exists(block + '.release'):
+        time.sleep(0.01)
 '''
 
 
@@ -57,6 +85,7 @@ class Run:
     output: str
     calls: list[list[str]]
     directory_mode: int | None = None
+    files: dict[str, tuple[str, int]] = field(default_factory=dict)
 
     def indexes(self, predicate: Callable[[list[str]], bool]) -> list[int]:
         return [index for index, call in enumerate(self.calls) if predicate(call)]
@@ -118,6 +147,28 @@ def mounts(call: list[str]) -> list[str]:
     return [call[index + 1] for index, argument in enumerate(call) if argument == '-v']
 
 
+def names(calls: list[list[str]]) -> set[str]:
+    created = {call[2] for call in calls if is_stage_create(call)}
+    workers = {call[index + 1] for call in calls for index, argument in enumerate(call) if argument == '--name'}
+    return created | workers
+
+
+def removals(calls: list[list[str]]) -> set[str]:
+    removed = {call[-1] for call in calls if call[:2] == ['rm', '-f']}
+    return removed | {call[2] for call in calls if is_stage_remove(call)}
+
+
+def partial_of(calls: list[list[str]]) -> str:
+    script = next(call[-1] for call in calls if is_archive(call))
+    return re.search(r'tar czf /backup/(\S+)', script).group(1)
+
+
+def read_files(folder: Path) -> dict[str, tuple[str, int]]:
+    if not folder.exists():
+        return {}
+    return {path.name: (path.read_text(), path.stat().st_mode & 0o777) for path in folder.iterdir()}
+
+
 @dataclass
 class Fake:
     running: str = POSTGRES
@@ -127,44 +178,64 @@ class Fake:
     signal_on: str = ''
     signal: str = 'SIGTERM'
     closed_output: bool = False
+    tar_block: str = ''
+    tar_collide: bool = False
+
+
+class Sandbox:
+    def __init__(self, folder: Path) -> None:
+        self.folder = folder
+        self.bin = folder / 'bin'
+        self.bin.mkdir()
+        for name, source in [('docker', FAKE_DOCKER), ('date', FAKE_DATE), ('tar', FAKE_TAR)]:
+            command = self.bin / name
+            command.write_text(source)
+            command.chmod(0o700)
+        self.work = folder / 'work'
+        self.work.mkdir()
+        self.backups = self.work / 'backups'
+
+    def environment(self, fake: Fake, log: Path) -> dict[str, str]:
+        log.touch()
+        environment = os.environ | {
+            'PATH': f'{self.bin}:{os.environ["PATH"]}',
+            'FAKE_DOCKER_LOG': str(log),
+            'FAKE_DOCKER_PS': fake.running,
+            'FAKE_DOCKER_CLUSTER': '1' if fake.cluster else '0',
+            'FAKE_DOCKER_EXIT_CODE': fake.exit_code,
+            'FAKE_DOCKER_FAIL': json.dumps(fake.fail),
+            'FAKE_DOCKER_SIGNAL_ON': fake.signal_on,
+            'FAKE_DOCKER_SIGNAL': fake.signal,
+            'FAKE_TAR_BLOCK': fake.tar_block,
+            'FAKE_TAR_COLLIDE': '1' if fake.tar_collide else '',
+        }
+        environment.pop('ALLOW_EMPTY_POSTGRES', None)
+        return environment
+
+    def command(self, target: str, shell: str, *variables: str) -> list[str]:
+        return ['make', '-f', str(MAKEFILE), '-C', str(self.work), target, f'SHELL={shell}', *variables]
+
+
+def read_calls(log: Path) -> list[list[str]]:
+    return [json.loads(line) for line in log.read_text().splitlines()]
 
 
 class MakeTarget(unittest.TestCase):
     def make(self, target: str, fake: Fake, shell: str, *variables: str) -> Run:
         with tempfile.TemporaryDirectory(prefix='zone-backup-command-') as directory:
-            folder = Path(directory)
-            bin_directory = folder / 'bin'
-            bin_directory.mkdir()
-            command = bin_directory / 'docker'
-            command.write_text(FAKE_DOCKER)
-            command.chmod(0o700)
-            work = folder / 'work'
-            work.mkdir()
-            log = folder / 'calls.jsonl'
-            log.touch()
-            environment = os.environ | {
-                'PATH': f'{bin_directory}:{os.environ["PATH"]}',
-                'FAKE_DOCKER_LOG': str(log),
-                'FAKE_DOCKER_PS': fake.running,
-                'FAKE_DOCKER_CLUSTER': '1' if fake.cluster else '0',
-                'FAKE_DOCKER_EXIT_CODE': fake.exit_code,
-                'FAKE_DOCKER_FAIL': json.dumps(fake.fail),
-                'FAKE_DOCKER_SIGNAL_ON': fake.signal_on,
-                'FAKE_DOCKER_SIGNAL': fake.signal,
-            }
-            environment.pop('ALLOW_EMPTY_POSTGRES', None)
-            command = ['make', '-f', str(MAKEFILE), '-C', str(work), target, f'SHELL={shell}', *variables]
+            sandbox = Sandbox(Path(directory))
+            log = sandbox.folder / 'calls.jsonl'
+            environment = sandbox.environment(fake, log)
+            command = sandbox.command(target, shell, *variables)
             if fake.closed_output:
-                handshake = folder / 'handshake'
+                handshake = sandbox.folder / 'handshake'
                 environment['FAKE_DOCKER_HANDSHAKE'] = str(handshake)
                 returncode, output = self.run_with_output_closed_on_signal(command, environment, handshake)
             else:
                 result = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=30)
                 returncode, output = result.returncode, result.stdout + result.stderr
-            backups = work / 'backups'
-            mode = backups.stat().st_mode & 0o777 if backups.exists() else None
-            calls = [json.loads(line) for line in log.read_text().splitlines()]
-            return Run(returncode, output, calls, mode)
+            mode = sandbox.backups.stat().st_mode & 0o777 if sandbox.backups.exists() else None
+            return Run(returncode, output, read_calls(log), mode, read_files(sandbox.backups))
 
     def run_with_output_closed_on_signal(self, command: list[str], environment: dict[str, str],
                                          handshake: Path) -> tuple[int, str]:
@@ -222,6 +293,10 @@ class Backup(MakeTarget):
                 self.assertEqual(len(run.indexes(is_archive)), 1)
                 self.assertEqual(run.indexes(is_pull), [])
                 stage = run.stage()
+                self.assertRegex(stage, rf'^zone_backup_stage_{DATE}-[0-9]+$')
+                self.assertEqual(len(names(run.calls)), 2, run.calls)
+                for name in names(run.calls) - {stage}:
+                    self.assertRegex(name, RUN_NAME)
                 self.assertEqual(mounts(run.calls[copy]), ['zone_postgres_data:/source:ro', f'{stage}:/stage'])
                 self.assertEqual(run.calls[copy][-4:], ['cp', '-a', '/source/.', '/stage/'])
                 self.assertEqual(run.calls[remove], ['volume', 'rm', stage])
@@ -235,8 +310,12 @@ class Backup(MakeTarget):
                 self.assertIn('-C /data .', script)
                 self.assertNotIn('-rf', script)
                 self.assertNotIn('gzip', script)
-                self.assertIn('Backup created: backups/zone_backup_', run.output)
                 self.assertEqual(run.directory_mode, 0o700)
+                [(archive_name, (content, mode))] = run.files.items()
+                self.assertRegex(archive_name, ARCHIVE_NAME)
+                self.assertEqual((content, mode), ('archive', 0o600))
+                self.assertEqual(partial_of(run.calls), f'.{archive_name}')
+                self.assertIn(f'Backup created: backups/{archive_name}', run.output)
 
     def test_missing_image_is_pulled_before_postgres_stops(self) -> None:
         for shell in SHELLS:
@@ -326,6 +405,17 @@ class Backup(MakeTarget):
                 self.assertLess(run.first(is_start), run.first(is_archive))
                 self.assertIn('Backup created', run.output)
 
+    def test_existing_archive_is_not_overwritten(self) -> None:
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                run = self.make('backup', Fake(tar_collide=True), shell)
+                self.assertRestartedAndStageRemoved(run, is_stage_copy)
+                self.assertLess(run.first(is_archive), run.first(is_stage_remove))
+                [(archive_name, (content, _))] = run.files.items()
+                self.assertEqual(f'.{archive_name}', partial_of(run.calls))
+                self.assertEqual(content, 'other')
+                self.assertIn(f'backups/{archive_name} already exists; not overwriting it.', run.output)
+
     def test_stopped_postgres_is_archived_in_place(self) -> None:
         for shell in SHELLS:
             with self.subTest(shell=shell):
@@ -352,6 +442,51 @@ class Backup(MakeTarget):
                 self.assertEqual(run.indexes(is_start), [])
                 self.assertEqual(run.indexes(is_stage_create), [])
                 self.assertIn('zone_postgres_data:/data/postgres:ro', mounts(run.calls[run.first(is_archive)]))
+
+
+class ConcurrentBackups(unittest.TestCase):
+    def test_backups_started_in_the_same_second_keep_to_their_own_resources(self) -> None:
+        for shell in SHELLS:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory(prefix='zone-backup-concurrent-') as directory:
+                sandbox = Sandbox(Path(directory))
+                handshake = sandbox.folder / 'handshake'
+                first_log = sandbox.folder / 'first.jsonl'
+                second_log = sandbox.folder / 'second.jsonl'
+                first = subprocess.Popen(
+                    sandbox.command('backup', shell), env=sandbox.environment(Fake(tar_block=str(handshake)), first_log),
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                try:
+                    deadline = time.monotonic() + 30
+                    while not handshake.with_name('handshake.ready').exists():
+                        self.assertIsNone(first.poll(), 'the first backup ended before it wrote its archive')
+                        self.assertLess(time.monotonic(), deadline, 'the first backup never wrote its archive')
+                        time.sleep(0.01)
+                    second = subprocess.run(
+                        sandbox.command('backup', shell), env=sandbox.environment(Fake(), second_log),
+                        text=True, capture_output=True, timeout=30)
+                    during = read_files(sandbox.backups)
+                finally:
+                    handshake.with_name('handshake.release').touch()
+                    output, _ = first.communicate(timeout=30)
+                self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+                self.assertEqual(first.returncode, 0, output)
+                first_calls = read_calls(first_log)
+                second_calls = read_calls(second_log)
+                first_partial = partial_of(first_calls)
+                second_partial = partial_of(second_calls)
+                self.assertNotEqual(first_partial, second_partial)
+                self.assertIn(first_partial, during, "the second backup removed the first one's partial archive")
+                self.assertIn(second_partial.removeprefix('.'), during)
+                self.assertTrue(names(first_calls).isdisjoint(names(second_calls)), (first_calls, second_calls))
+                self.assertLessEqual(removals(first_calls), names(first_calls))
+                self.assertLessEqual(removals(second_calls), names(second_calls))
+                self.assertEqual(len(removals(second_calls)), 2, second_calls)
+                archives = read_files(sandbox.backups)
+                expected = [first_partial.removeprefix('.'), second_partial.removeprefix('.')]
+                self.assertEqual(sorted(archives), sorted(expected))
+                for name, (content, _) in archives.items():
+                    self.assertRegex(name, ARCHIVE_NAME)
+                    self.assertEqual(content, 'archive')
 
 
 class Restore(MakeTarget):

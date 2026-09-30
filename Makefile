@@ -377,9 +377,10 @@ backup: ## Backup volumes to ./backups, stopping postgres while its cluster is c
 	fi; \
 	umask 077; \
 	mkdir -m 700 -p backups || exit 1; \
-	DATE=$$(date +%Y%m%d_%H%M%S); \
-	partial=backups/.zone_backup_$$DATE.tar.gz; \
-	worker=$(VOLUME_PREFIX)_backup_$$DATE; \
+	run=$$(date +%Y%m%d_%H%M%S)-$$$$; \
+	name=zone_backup_$$run.tar.gz; \
+	partial=backups/.$$name; \
+	worker=$(VOLUME_PREFIX)_backup_$$run; \
 	halted=; \
 	stage=; \
 	source=$(POSTGRES_VOLUME); \
@@ -406,7 +407,7 @@ backup: ## Backup volumes to ./backups, stopping postgres while its cluster is c
 	trap cleanup EXIT; \
 	trap 'exit 130' INT TERM HUP QUIT; \
 	if [ -n "$$running" ]; then \
-		stage=$(VOLUME_PREFIX)_backup_stage_$$DATE; \
+		stage=$(VOLUME_PREFIX)_backup_stage_$$run; \
 		docker volume create "$$stage" >/dev/null || exit 1; \
 		echo "$(YELLOW)Stopping postgres while its cluster is copied; the stack has no database until it starts again.$(NC)"; \
 		halted=$$running; \
@@ -426,14 +427,14 @@ backup: ## Backup volumes to ./backups, stopping postgres while its cluster is c
 	docker run --rm --name "$$worker" \
 		$(foreach pair,$(BACKUP_VOLUMES),-v $(if $(filter $(POSTGRES_VOLUME),$(call backup_volume,$(pair))),"$$source",$(call backup_volume,$(pair))):$(call backup_directory,$(pair)):ro) \
 		-v "$$(pwd)/backups:/backup" \
-		alpine sh -c "umask 077 && tar czf /backup/.zone_backup_$$DATE.tar.gz -C /data . && mv /backup/.zone_backup_$$DATE.tar.gz /backup/zone_backup_$$DATE.tar.gz" || exit 1; \
-	echo "$(GREEN)Backup created: backups/zone_backup_$$DATE.tar.gz$(NC)"; \
+		alpine sh -c "umask 077 && tar czf /backup/.$$name -C /data . && if [ -e /backup/$$name ]; then echo 'backups/$$name already exists; not overwriting it.' >&2; exit 1; fi && mv /backup/.$$name /backup/$$name" || exit 1; \
+	echo "$(GREEN)Backup created: backups/$$name$(NC)"; \
 	exit $$status
 
-restore: ## Restore from backup with the stack stopped, replacing each volume the archive carries (usage: make restore BACKUP=backups/zone_backup_YYYYMMDD_HHMMSS.tar.gz)
+restore: ## Restore from backup with the stack stopped, replacing each volume the archive carries (usage: make restore BACKUP=backups/zone_backup_YYYYMMDD_HHMMSS-PID.tar.gz)
 	@if [ -z "$(BACKUP)" ]; then \
 		echo "$(RED)Error: Please specify BACKUP file$(NC)"; \
-		echo "Usage: make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz"; \
+		echo "Usage: make restore BACKUP=backups/zone_backup_20250101_120000-4242.tar.gz"; \
 		exit 1; \
 	fi
 	@running=$$(docker ps -q $(foreach pair,$(BACKUP_VOLUMES),--filter volume=$(call backup_volume,$(pair)))) || exit 1; \

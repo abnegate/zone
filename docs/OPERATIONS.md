@@ -49,7 +49,8 @@ the name the script printed: `docker volume rm <64-hex-name>`.
 ## Backup and restore
 
 `make backup` archives nine named volumes into
-`backups/zone_backup_<date>.tar.gz`: `zone_postgres_data` (the cluster, under
+`backups/zone_backup_<date>-<process>.tar.gz`, where `<process>` is the ID of
+the shell running the backup: `zone_postgres_data` (the cluster, under
 `postgres/`), `zone_valkey_data`, `zone_ollama_data`, `zone_manager_repos`,
 `zone_manager_artifacts`, `zone_manager_agent_state`, `zone_prometheus_data`,
 `zone_grafana_data` and `zone_traefik_letsencrypt`. It leaves out
@@ -64,12 +65,12 @@ A running postgres is stopped while its cluster is copied, so the archive
 holds a cleanly shut down, point-in-time copy rather than files read while
 Postgres wrote them. The backup first makes sure the `alpine` image it runs is
 present, pulling it if needed, and creates a temporary Docker volume,
-`zone_backup_stage_<date>`. It then stops postgres, allowing it 120 seconds to
-shut down, refuses to go on when it did not exit cleanly, copies the cluster
-into that volume with `cp -a`, and starts postgres again. The stack has no
-database only while the copy runs, usually seconds, but requests that need it
-fail meanwhile. Postgres starts again when the copy fails or the backup is
-interrupted too. If it cannot start, the backup prints the
+`zone_backup_stage_<date>-<process>`. It then stops postgres, allowing it 120
+seconds to shut down, refuses to go on when it did not exit cleanly, copies
+the cluster into that volume with `cp -a`, and starts postgres again. The
+stack has no database only while the copy runs, usually seconds, but requests
+that need it fail meanwhile. Postgres starts again when the copy fails or the
+backup is interrupted too. If it cannot start, the backup prints the
 `docker start <container>` command to run.
 
 The archive is then written in one streaming pass, the staged copy under
@@ -89,7 +90,12 @@ It creates `backups/` with mode 0700 when the directory does not exist yet,
 and writes each archive with mode 0600. Docker runs the archiving container as
 root, so on a Linux host whose Docker daemon runs as root the archive belongs
 to root: read or copy it with `sudo`. The archive is written as
-`backups/.zone_backup_<date>.tar.gz` and renamed once complete.
+`backups/.zone_backup_<date>-<process>.tar.gz` and renamed once complete; if
+an archive of that name already exists, the backup leaves it alone, removes
+its own partial archive and exits non-zero. The process ID keeps two backups
+started in the same second apart: each has its own temporary volume,
+container, partial archive and archive, and removes only its own when it
+ends.
 
 `make restore BACKUP=<archive>` refuses to start while any running container
 mounts one of the nine volumes: stop the stack first (`make stop`), and start
