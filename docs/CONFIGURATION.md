@@ -209,6 +209,12 @@ Embeddings, model captioning and LoRA training stay on the instance whatever the
 provider. A model known to lack vision gets the chat's history without its
 images and a one-line note saying so; the stored history keeps them.
 
+A key a workspace saves without a URL goes to the URL its organization saved,
+or on OpenAI and Anthropic to the provider's default without one. A chat's reasoning effort is not sent
+to a saved endpoint other than `LITELLM_HOST`, since Zone learns nothing of a
+model's capabilities there. The context estimate reads the stored history, so
+it still counts a withheld image, as an attachment of unknown size.
+
 ### Usage credits
 
 A Claude account can turn on usage credits, which pay for use past its plan's
