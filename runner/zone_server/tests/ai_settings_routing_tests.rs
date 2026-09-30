@@ -34,8 +34,8 @@ const OPENAI: &str = "openai";
 const CHAT_MODEL: &str = "llama3.2:3b";
 const OPENAI_MODEL: &str = "gpt-4o-mini";
 const TASK_MODEL: &str = "gpt-4";
-const COMPLETIONS: &str = "/chat/completions";
-const OPENAI_COMPLETIONS: &str = "/v1/chat/completions";
+const COMPLETIONS: &str = "/v1/chat/completions";
+const ANY_COMPLETIONS: &str = "/chat/completions";
 const UNREACHABLE: &str = "http://127.0.0.1:9";
 const REPLY: &str = "Routed reply";
 const CLASSIFIER_PROMPT: &str = "Return exactly IMAGE, AUDIO, or CHAT";
@@ -196,7 +196,9 @@ async fn completions(server: &MockServer, path: &str) -> Vec<Request> {
         .collect()
 }
 
-/// Every completion `server` was sent, on any base path.
+/// Every completion `server` was sent, on any base path. The instance's
+/// `LITELLM_HOST` is used as configured, so a completion that reached it could
+/// be on either `/chat/completions` or `/v1/chat/completions`.
 async fn any_completions(server: &MockServer) -> Vec<Request> {
     server
         .received_requests()
@@ -204,7 +206,7 @@ async fn any_completions(server: &MockServer) -> Vec<Request> {
         .expect("the provider records its requests")
         .into_iter()
         .filter(|request| {
-            request.method.as_str() == "POST" && request.url.path().ends_with(COMPLETIONS)
+            request.method.as_str() == "POST" && request.url.path().ends_with(ANY_COMPLETIONS)
         })
         .collect()
 }
@@ -437,7 +439,7 @@ async fn an_openai_provider_sends_completions_to_its_base_url_with_its_key() {
         &endpoints,
         Route {
             target: &endpoints.organization,
-            path: OPENAI_COMPLETIONS,
+            path: COMPLETIONS,
             key: Some(OPENAI_KEY),
             selected: all,
         },
