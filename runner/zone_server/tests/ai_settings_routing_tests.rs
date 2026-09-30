@@ -785,3 +785,38 @@ async fn creating_a_chat_on_the_instance_still_refuses_a_model_that_cannot_chat(
 
     response.assert_status(axum::http::StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn starting_a_project_on_a_saved_endpoint_asks_the_instance_ollama_nothing() {
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    let (client, token, workspace) =
+        member_on(&endpoints, &ollama, |config| config.auto.enabled = true).await;
+    let pool = client.state().db().clone();
+    save_for_organization(
+        &pool,
+        workspace,
+        &Saved::litellm(&endpoints.organization, Some(ORGANIZATION_KEY)),
+    )
+    .await;
+    embeds_everything(&ollama).await;
+    let before = shown(&ollama).await;
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{workspace}/projects/auto"),
+            &json!({"brief": "Plan a small landing page", "model_name": CHAT_MODEL}),
+            &token,
+        )
+        .await;
+    let asked = shown(&ollama).await - before;
+    tokio::time::sleep(SETTLE).await;
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    response.assert_status(axum::http::StatusCode::ACCEPTED);
+    assert_eq!(
+        asked, 0,
+        "the instance's Ollama was asked about a model the saved endpoint runs"
+    );
+}
