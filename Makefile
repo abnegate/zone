@@ -171,14 +171,17 @@ up: ## Start services. Combine with PROFILES=dev,vpn,monitoring
 ifeq ($(origin PROFILES),command line)
 	@echo "$(GREEN)Starting services ($(PROFILES))...$(NC)"
 	@$(COMPOSE) persist "$(PROFILES)" >/dev/null
+	@$(COMPOSE) retire "$(PROFILES)"
 	@$(COMPOSE) --replace-profiles="$(PROFILES)" up -d
 else ifeq ($(origin COMPOSE_PROFILES),environment)
 	@echo "$(GREEN)Starting services ($(COMPOSE_PROFILES))...$(NC)"
 	@$(COMPOSE) persist "$(COMPOSE_PROFILES)" >/dev/null
+	@$(COMPOSE) retire "$(COMPOSE_PROFILES)"
 	@$(COMPOSE) --replace-profiles="$(COMPOSE_PROFILES)" up -d
 else
 	@echo "$(GREEN)Starting core services...$(NC)"
 	@$(COMPOSE) persist "" >/dev/null
+	@$(COMPOSE) retire ""
 	@$(COMPOSE) --replace-profiles= up -d
 	@echo "$(YELLOW)Optional profiles off. Combine with: make up PROFILES=dev,vpn,monitoring$(NC)"
 endif
@@ -192,6 +195,7 @@ up-monitoring: ## Start with Prometheus and Grafana
 
 up-comfyui: verify-comfyui-model ## Start the bundled NVIDIA ComfyUI runtime
 	@echo "$(GREEN)Starting bundled NVIDIA ComfyUI...$(NC)"
+	@$(COMPOSE) persist --ensure bundled-comfyui >/dev/null
 	$(COMPOSE) --profile bundled-comfyui up -d comfyui
 
 up-all: ## Start with VPN and monitoring
@@ -406,12 +410,14 @@ migrate-pgdata: ## Move an existing install's postgres cluster out of the anonym
 dev: ## Hot reload. Combine with PROFILES=vpn,monitoring
 	@echo "$(GREEN)Console: http://localhost:3001$(NC)"
 ifeq ($(origin PROFILES),command line)
-	@profiles=$$($(COMPOSE) persist --ensure dev "$(PROFILES)"); \
-	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)"; \
+	@profiles=$$($(COMPOSE) persist --ensure dev "$(PROFILES)") && \
+	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)" && \
+	 $(COMPOSE) retire "$$profiles" && \
 	 $(COMPOSE) --replace-profiles="$$profiles" up --build
 else
-	@profiles=$$($(COMPOSE) persist --ensure dev); \
-	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)"; \
+	@profiles=$$($(COMPOSE) persist --ensure dev) && \
+	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)" && \
+	 $(COMPOSE) retire "$$profiles" && \
 	 $(COMPOSE) --replace-profiles="$$profiles" up --build
 endif
 

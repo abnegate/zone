@@ -1196,7 +1196,12 @@ details, and native macOS / bundled NVIDIA instructions.
 `make up PROFILES=dev,vpn,monitoring` (or `./scripts/compose.sh --profile dev
 --profile vpn --profile monitoring up`) saves `COMPOSE_PROFILES`, `COMPOSE_FILE`,
 `ZONE_VPN`, and both proxy URLs in `.env` so rebuilds keep the same stack.
-`make up` with no `PROFILES` starts core services only and clears them. The
+`make up` with no `PROFILES` starts core services only and clears them.
+`make up` and `make dev` also stop and remove the containers of every profile
+they leave out; their volumes stay. `make up-comfyui` adds `bundled-comfyui` to
+the saved profiles, so `make dev` and `./scripts/compose.sh` keep ComfyUI
+running afterwards. A later `make up` keeps it only when its list names it, as
+in `make up PROFILES=monitoring,bundled-comfyui`. The
 VPN overlay is the network sandbox. Proxy URLs remain as belt-and-suspenders
 for HTTP clients and Traefik ACME. A configured proxy does not silently fall
 back to a direct connection when unavailable. The runner applies its proxy

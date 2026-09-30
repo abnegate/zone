@@ -254,6 +254,42 @@ run_compose() {
     COMPOSE_FILE='' COMPOSE_PROFILES='' exec $compose "$@"
 }
 
+run_compose_with_env_file() {
+    profiles=$1
+    shift
+    if [ -f "$ZONE_ENV_FILE" ]; then
+        set -- --env-file "$ZONE_ENV_FILE" "$@"
+    fi
+    run_compose "$profiles" "$@"
+}
+
+inactive_services() {
+    wanted=$(normalize_profiles "$1")
+    every_service=$(run_compose_with_env_file "$ALL_OVERLAY_PROFILES" config --services) || exit 1
+    wanted_services=$(run_compose_with_env_file "$wanted" config --services) || exit 1
+    {
+        printf '%s\n' "$wanted_services"
+        printf ' \n'
+        printf '%s\n' "$every_service"
+    } | awk '
+        $0 == " " { listed = 1; next }
+        $0 == "" { next }
+        !listed { wanted[$0] = 1; next }
+        !($0 in wanted)
+    ' | sort -u
+}
+
+retire_services() {
+    services=$(inactive_services "$1") || exit 1
+    if [ -z "$services" ]; then
+        return 0
+    fi
+    # One service name per line; Compose service names never contain whitespace or globs.
+    # shellcheck disable=SC2086
+    set -- $services
+    run_compose_with_env_file "$ALL_OVERLAY_PROFILES" rm --stop --force "$@"
+}
+
 case "${1:-}" in
     normalize)
         shift
@@ -323,6 +359,39 @@ case "${1:-}" in
             list=$(ensure_profile "$ensure_arg" "$list")
         fi
         persist_profiles "$list"
+        exit 0
+        ;;
+    inactive|retire)
+        subcommand=$1
+        shift
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --env-file)
+                    ZONE_ENV_FILE=$2
+                    shift 2
+                    ;;
+                --env-file=*)
+                    ZONE_ENV_FILE=${1#*=}
+                    shift
+                    ;;
+                --)
+                    shift
+                    break
+                    ;;
+                -*)
+                    printf '%s\n' "Unknown $subcommand option: $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    break
+                    ;;
+            esac
+        done
+        if [ "$subcommand" = inactive ]; then
+            inactive_services "${1:-}"
+        else
+            retire_services "${1:-}"
+        fi
         exit 0
         ;;
 esac
