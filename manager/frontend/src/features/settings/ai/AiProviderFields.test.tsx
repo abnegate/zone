@@ -6,6 +6,7 @@ import {
   AiProviderFields,
   AUTOMATIC_HINT,
   KEYLESS_WORKSPACE_WARNING,
+  REKEY_HINT,
   UNROUTED_NOTICE,
   VERSION_HINT,
 } from './AiProviderFields';
@@ -396,6 +397,100 @@ describe('AiProviderFields keyless workspace host', () => {
       expect(screen.queryByText(KEYLESS_WORKSPACE_WARNING)).toBeNull();
       unmount();
     }
+  });
+});
+
+describe('AiProviderFields changed endpoint URL', () => {
+  const endpoints = [
+    ['self_hosted', 'litellmHost', 'litellm_host', 'has_litellm_key', /LiteLLM API Key/],
+    ['openai', 'openaiBaseUrl', 'openai_base_url', 'has_openai_api_key', /OpenAI API Key/],
+    [
+      'anthropic',
+      'anthropicBaseUrl',
+      'anthropic_base_url',
+      'has_anthropic_api_key',
+      /Anthropic API Key/,
+    ],
+  ] as const;
+
+  function renderEndpoint(
+    provider: AiProvider,
+    saved: AiSettings,
+    credentials: ProviderCredentials,
+    level: SettingsLevel = 'organization'
+  ) {
+    return render(
+      <AiProviderFields
+        level={level}
+        provider={provider}
+        onProviderChange={() => undefined}
+        credentials={credentials}
+        configured={configuredFromSettings(saved)}
+        onChange={() => undefined}
+        saved={saved}
+      />
+    );
+  }
+
+  it.each(endpoints)(
+    'asks for the %s key again once the URL differs from the one it was saved beside',
+    (provider, url, savedUrl, savedKey, keyLabel) => {
+      for (const level of ['organization', 'workspace'] as const) {
+        for (const [before, after] of [
+          ['http://first.example:4000', 'http://second.example:4000'],
+          [null, 'http://second.example:4000'],
+          ['http://first.example:4000', ''],
+        ] as const) {
+          const saved = { ...nothingSaved, provider, [savedUrl]: before, [savedKey]: true };
+          const { unmount } = renderEndpoint(
+            provider,
+            saved,
+            { ...credentialsFromSettings(saved), [url]: after },
+            level
+          );
+          const key = screen.getByLabelText(keyLabel) as HTMLInputElement;
+          expect(key.required).toBe(true);
+          expect(screen.getByText(REKEY_HINT)).toBeInTheDocument();
+          expect(
+            document.getElementById(key.getAttribute('aria-describedby') ?? '')
+          ).toHaveTextContent(REKEY_HINT);
+          unmount();
+        }
+      }
+    }
+  );
+
+  it.each(endpoints)(
+    'leaves the %s key optional while the URL is unchanged, or when no key was saved',
+    (provider, url, savedUrl, savedKey, keyLabel) => {
+      const saved = { ...nothingSaved, provider, [savedUrl]: 'http://first.example:4000' };
+      const cases: [AiSettings, string][] = [
+        [{ ...saved, [savedKey]: true }, 'http://first.example:4000'],
+        [{ ...saved, [savedKey]: true }, '  http://first.example:4000  '],
+        [saved, 'http://second.example:4000'],
+        [{ ...nothingSaved, provider, [savedKey]: true }, ''],
+      ];
+      for (const [row, entered] of cases) {
+        const { unmount } = renderEndpoint(provider, row, {
+          ...credentialsFromSettings(row),
+          [url]: entered,
+        });
+        expect((screen.getByLabelText(keyLabel) as HTMLInputElement).required).toBe(false);
+        expect(screen.queryByText(REKEY_HINT)).toBeNull();
+        unmount();
+      }
+    }
+  );
+
+  it('sends the re-entered key with the new URL', () => {
+    const request = buildAiSettingsRequest(
+      'openai',
+      { ...emptyCredentials, openaiBaseUrl: 'https://second.example/v1', openaiApiKey: 'sk-again' },
+      emptyModels,
+      { ...nothingSaved, openai_base_url: 'https://first.example/v1', has_openai_api_key: true }
+    );
+    expect(request.openai_base_url).toBe('https://second.example/v1');
+    expect(request.openai_api_key).toBe('sk-again');
   });
 });
 

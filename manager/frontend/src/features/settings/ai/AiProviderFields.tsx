@@ -3,6 +3,7 @@ import type { AiProvider, AiSettings, OrganizationKeys } from '../workspace/type
 import {
   awsRegions,
   missesOrganizationKey,
+  needsKeyAgain,
   type ProviderConfigured,
   type ProviderCredentials,
   providerOptions,
@@ -23,6 +24,7 @@ interface AiProviderFieldsProps {
 
 const MASK = '••••••••';
 const ENDPOINT_HINT_ID = 'ai-endpoint-hint';
+const REKEY_HINT_ID = 'ai-rekey-hint';
 
 function Field({
   id,
@@ -57,8 +59,51 @@ export const VERSION_HINT =
   "A URL naming only a host gets /v1 added. End it with / to use the host's root, or give a path to use it as saved.";
 export const AUTOMATIC_HINT =
   'Automatic needs a Fast or Reasoning model when completions go to a saved endpoint.';
+export const REKEY_HINT = 'Changing the URL needs the key again';
 export const KEYLESS_WORKSPACE_WARNING =
   "This workspace host has no key of its own, and the organization's key never goes to it. Enter a key if the host needs one.";
+
+interface EndpointKeyProps {
+  id: string;
+  label: string;
+  value: string;
+  placeholder: string;
+  configured: boolean;
+  optional?: boolean;
+  rekey: boolean;
+  onChange: (value: string) => void;
+}
+
+function EndpointKey({
+  id,
+  label,
+  value,
+  placeholder,
+  configured,
+  optional,
+  rekey,
+  onChange,
+}: EndpointKeyProps) {
+  return (
+    <Field id={id} label={label} configured={configured} optional={optional && !rekey}>
+      <input
+        type="password"
+        id={id}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={configured ? MASK : placeholder}
+        required={rekey}
+        aria-describedby={rekey ? REKEY_HINT_ID : undefined}
+        className="form-input"
+      />
+      {rekey && (
+        <p id={REKEY_HINT_ID} className="form-hint">
+          {REKEY_HINT}
+        </p>
+      )}
+    </Field>
+  );
+}
 
 interface EndpointHintsProps {
   level: SettingsLevel;
@@ -123,6 +168,7 @@ export function AiProviderFields({
   saved = null,
   organizationKeys,
 }: AiProviderFieldsProps) {
+  const rekey = needsKeyAgain(provider, credentials, configured, saved);
   const hints = (
     <EndpointHints
       level={level}
@@ -163,32 +209,31 @@ export function AiProviderFields({
               className="form-input"
             />
           </Field>
-          <Field id="litellm-key" label="LiteLLM API Key" configured={configured.litellm} optional>
-            <input
-              type="password"
-              id="litellm-key"
-              value={credentials.litellmKey}
-              onChange={(event) => onChange('litellmKey', event.target.value)}
-              placeholder={configured.litellm ? MASK : 'Enter API key'}
-              className="form-input"
-            />
-          </Field>
+          <EndpointKey
+            id="litellm-key"
+            label="LiteLLM API Key"
+            value={credentials.litellmKey}
+            placeholder="Enter API key"
+            configured={configured.litellm}
+            optional
+            rekey={rekey}
+            onChange={(value) => onChange('litellmKey', value)}
+          />
           {hints}
         </>
       )}
 
       {provider === 'openai' && (
         <>
-          <Field id="openai-key" label="OpenAI API Key" configured={configured.openai}>
-            <input
-              type="password"
-              id="openai-key"
-              value={credentials.openaiApiKey}
-              onChange={(event) => onChange('openaiApiKey', event.target.value)}
-              placeholder={configured.openai ? MASK : 'sk-...'}
-              className="form-input"
-            />
-          </Field>
+          <EndpointKey
+            id="openai-key"
+            label="OpenAI API Key"
+            value={credentials.openaiApiKey}
+            placeholder="sk-..."
+            configured={configured.openai}
+            rekey={rekey}
+            onChange={(value) => onChange('openaiApiKey', value)}
+          />
           <Field id="openai-base-url" label="Base URL" optional>
             <input
               type="text"
@@ -206,16 +251,15 @@ export function AiProviderFields({
 
       {provider === 'anthropic' && (
         <>
-          <Field id="anthropic-key" label="Anthropic API Key" configured={configured.anthropic}>
-            <input
-              type="password"
-              id="anthropic-key"
-              value={credentials.anthropicApiKey}
-              onChange={(event) => onChange('anthropicApiKey', event.target.value)}
-              placeholder={configured.anthropic ? MASK : 'sk-ant-...'}
-              className="form-input"
-            />
-          </Field>
+          <EndpointKey
+            id="anthropic-key"
+            label="Anthropic API Key"
+            value={credentials.anthropicApiKey}
+            placeholder="sk-ant-..."
+            configured={configured.anthropic}
+            rekey={rekey}
+            onChange={(value) => onChange('anthropicApiKey', value)}
+          />
           <Field id="anthropic-base-url" label="Base URL" optional>
             <input
               type="text"

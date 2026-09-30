@@ -287,6 +287,18 @@ export function missesOrganizationKey(
   );
 }
 
+export function needsKeyAgain(
+  provider: AiProvider,
+  credentials: ProviderCredentials,
+  configured: ProviderConfigured,
+  saved: AiSettings | null
+): boolean {
+  if (!isEndpointProvider(provider)) return false;
+  const fields = endpointFields[provider];
+  const savedUrl = saved?.[fields.savedUrl]?.trim() ?? '';
+  return configured[fields.configured] && credentials[fields.url].trim() !== savedUrl;
+}
+
 export function modelsFromSettings(settings: AiSettings): ModelSelection {
   return {
     fast: settings.model_fast || '',
