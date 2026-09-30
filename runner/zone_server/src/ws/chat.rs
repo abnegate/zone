@@ -47,7 +47,7 @@ use crate::db::{
 use crate::services::character::ChatCharacter;
 use crate::services::chat::session::{self, Session};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
-use crate::services::endpoint::Endpoint;
+use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
@@ -2594,6 +2594,7 @@ async fn prepare_message(
     .yielding_to_agent(chat.agent_enabled);
 
     if intent == crate::services::image_intent::GenerationIntent::Chat
+        && route.endpoint.origin() == Origin::Instance
         && crate::services::model::Model::completion(&state.config().ollama_host, &chat.model_name)
             .await
             == Some(false)
@@ -4149,6 +4150,71 @@ mod tests {
                 crate::services::route::reads::of(organization.workspace),
                 1,
                 "one turn read its workspace's AI settings more than once"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_chat_pinned_to_an_instance_model_runs_on_a_model_the_endpoint_settings_save() {
+            const SAVED: &str = "gpt-4o-mini";
+            let ollama = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/show"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"capabilities": ["embedding"]})),
+                )
+                .mount(&ollama)
+                .await;
+            let organization = Organization::on(PROVIDER_SELF_HOSTED).await;
+            sqlx::query(
+                "UPDATE organization_ai_settings SET litellm_host = $2, model_fast = $3 \
+                 WHERE organization_id = $1",
+            )
+            .bind(organization.id)
+            .bind("http://gateway.example:4000")
+            .bind(SAVED)
+            .execute(&organization.pool)
+            .await
+            .expect("the organization's endpoint");
+            sqlx::query("UPDATE chats SET model_name = 'llama3.2:3b' WHERE id = $1")
+                .bind(organization.chat)
+                .execute(&organization.pool)
+                .await
+                .expect("the chat's pinned model");
+            let state = AppState::new(
+                Config {
+                    litellm_host: UNREACHABLE.to_string(),
+                    ollama_host: ollama.uri(),
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+
+            let prepared = prepare_turn(&state, &organization).await;
+            organization.remove().await;
+
+            let preparation = prepared.unwrap_or_else(|error| {
+                panic!("the turn on the saved endpoint was not prepared: {error}")
+            });
+            assert_eq!(preparation.endpoint.origin(), Origin::Settings);
+            assert_eq!(
+                preparation.model, SAVED,
+                "the instance's model name was sent to the saved endpoint"
+            );
+            let shown = ollama
+                .received_requests()
+                .await
+                .expect("the requests Ollama received")
+                .len();
+            assert_eq!(
+                shown, 0,
+                "the instance's Ollama was asked about a model the saved endpoint runs"
+            );
+            assert_eq!(
+                preparation.context.policy.limit,
+                Some(state.config().chat.context),
+                "the saved endpoint's turn has no context limit to compact against"
             );
         }
 
