@@ -25,6 +25,7 @@ const PASSWORD_MANAGER_OPT_OUT = {
 
 interface SyncConfigCardProps {
   config: SyncConfig;
+  canAdminister: boolean;
   revealed: RevealedSecret | null;
   onDismissSecret: () => void;
   onSetSecret: (secret?: string) => Promise<boolean>;
@@ -33,6 +34,7 @@ interface SyncConfigCardProps {
 
 export function SyncConfigCard({
   config,
+  canAdminister,
   revealed,
   onDismissSecret,
   onSetSecret,
@@ -94,22 +96,24 @@ export function SyncConfigCard({
         {config.external_project_id && (
           <span className="sync-external-link">{config.external_project_id}</span>
         )}
-        <div className="sync-config-actions">
-          {zoneIssuesSecret && !missing && (
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={saving}
-              loading={saving}
-              onClick={() => setConfirmingRotation(true)}
-            >
-              Rotate secret
+        {canAdminister && (
+          <div className="sync-config-actions">
+            {zoneIssuesSecret && !missing && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={saving}
+                loading={saving}
+                onClick={() => setConfirmingRotation(true)}
+              >
+                Rotate secret
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" className="sync-config-remove" onClick={onRemove}>
+              Remove
             </Button>
-          )}
-          <Button variant="ghost" size="sm" className="sync-config-remove" onClick={onRemove}>
-            Remove
-          </Button>
-        </div>
+          </div>
+        )}
       </div>
       <div className="sync-config-state">
         <span className={`sync-status ${config.last_synced_at ? 'synced' : ''}`}>
@@ -126,7 +130,7 @@ export function SyncConfigCard({
       {missing && (
         <div className="sync-secret-missing" role="alert">
           <span>No webhook secret: deliveries are refused until one is set</span>
-          {zoneIssuesSecret && (
+          {canAdminister && zoneIssuesSecret && (
             <Button
               variant="secondary"
               size="sm"
@@ -147,7 +151,7 @@ export function SyncConfigCard({
           onDismiss={onDismissSecret}
         />
       )}
-      {!zoneIssuesSecret && (
+      {canAdminister && !zoneIssuesSecret && (
         <form className="sync-secret-form" onSubmit={save} noValidate>
           <label htmlFor={draftId}>Set signing secret</label>
           <p className="sync-secret-hint">{SETUP_HINTS.linear}</p>

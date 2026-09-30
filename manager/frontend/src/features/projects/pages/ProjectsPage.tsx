@@ -14,7 +14,7 @@ import {
   CreateProjectWizard,
   SyncConfigCard,
 } from '../components';
-import { useAutomation, useProjects, useSyncConfigs } from '../hooks';
+import { useAutomation, useCanAdministerWorkspace, useProjects, useSyncConfigs } from '../hooks';
 import { CreateSyncConfigRequestSchema, UpdateProjectRequestSchema } from '../schemas';
 import type {
   CreateSyncConfigRequest,
@@ -76,6 +76,7 @@ export default function ProjectsPage() {
     queryFn: () => client.getSources(workspaceId as string),
     enabled: isAuthenticated && !!workspaceId,
   });
+  const canAdministerSync = useCanAdministerWorkspace(workspaceId);
 
   // State
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
@@ -609,16 +610,18 @@ export default function ProjectsPage() {
                   <div className="sync-config-section">
                     <div className="sync-config-header">
                       <h3>External Sync</h3>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => {
-                          resetForm();
-                          openModal(setShowSyncModal);
-                        }}
-                      >
-                        + Add Sync
-                      </Button>
+                      {canAdministerSync && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => {
+                            resetForm();
+                            openModal(setShowSyncModal);
+                          }}
+                        >
+                          + Add Sync
+                        </Button>
+                      )}
                     </div>
 
                     {syncLoading ? (
@@ -627,8 +630,9 @@ export default function ProjectsPage() {
                       </div>
                     ) : syncConfigs.length === 0 ? (
                       <div className="sync-config-empty">
-                        No sync configured. Add one to point this project at a GitHub repository or
-                        a Linear project.
+                        No sync configured.{' '}
+                        {canAdministerSync ? 'Add one' : 'A workspace admin can add one'} to point
+                        this project at a GitHub repository or a Linear project.
                       </div>
                     ) : (
                       <div className="sync-config-list">
@@ -636,6 +640,7 @@ export default function ProjectsPage() {
                           <SyncConfigCard
                             key={config.id}
                             config={config}
+                            canAdminister={canAdministerSync}
                             revealed={
                               revealedSecret?.configId === config.id ? revealedSecret : null
                             }

@@ -73,6 +73,9 @@ const mockResumeAutomation = mock(() => Promise.resolve({} as Project));
 
 // Create mock functions for the client
 const mockGetSources = mock(() => Promise.resolve([] as Source[]));
+const mockGetWorkspaceMembers = mock(() =>
+  Promise.resolve({ members: [{ user_id: '1', role: 'admin' }] })
+);
 const mockLinkSource = mock(() => Promise.resolve({} as Project));
 const mockUnlinkSource = mock(() => Promise.resolve({} as Project));
 
@@ -96,6 +99,7 @@ mock.module('../../../api/projects', () => ({
 mock.module('../../../api/client', () => ({
   client: {
     getSources: mockGetSources,
+    getWorkspaceMembers: mockGetWorkspaceMembers,
     linkSource: mockLinkSource,
     unlinkSource: mockUnlinkSource,
   },

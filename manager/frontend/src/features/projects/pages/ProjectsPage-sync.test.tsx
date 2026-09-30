@@ -13,6 +13,7 @@ const mockCreateProject = mock();
 const mockUpdateProject = mock();
 const mockDeleteProject = mock();
 const mockGetSources = mock();
+const mockGetWorkspaceMembers = mock();
 const mockLinkSource = mock();
 const mockUnlinkSource = mock();
 
@@ -37,6 +38,7 @@ mock.module('../../../api/projects', () => ({
 mock.module('../../../api/client', () => ({
   client: {
     getSources: mockGetSources,
+    getWorkspaceMembers: mockGetWorkspaceMembers,
     linkSource: mockLinkSource,
     unlinkSource: mockUnlinkSource,
   },
@@ -75,6 +77,20 @@ mock.module('../../../shared/context/WorkspaceContext', () => ({
 }));
 
 let ProjectsPage: typeof import('./ProjectsPage').default;
+
+const membership = (role: string) => ({
+  members: [
+    {
+      id: 'membership-1',
+      user_id: '1',
+      workspace_id: 'test-workspace-id',
+      role,
+      email: 'test@test.com',
+      display_name: null,
+      joined_at: '2024-01-01T00:00:00Z',
+    },
+  ],
+});
 
 beforeAll(async () => {
   ProjectsPage = (await import('./ProjectsPage')).default;
@@ -136,6 +152,9 @@ describe('ProjectsPage - Sync Configuration', () => {
     mockGetSources.mockReset();
     mockCreateSyncConfig.mockReset();
     mockSetWebhookSecret.mockReset();
+    mockDeleteSyncConfig.mockReset();
+    mockGetWorkspaceMembers.mockReset();
+    mockGetWorkspaceMembers.mockResolvedValue(membership('admin'));
     mockGetProjects.mockResolvedValue([mockProject]);
     mockGetSources.mockResolvedValue([]);
     mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
@@ -509,6 +528,67 @@ describe('ProjectsPage - Sync Configuration', () => {
         expect(screen.getByTestId('sync-secret-value').textContent).toBe(secret);
       });
       expect(mockSetWebhookSecret).toHaveBeenCalledWith('proj-1', 'sync-1', undefined);
+    });
+
+    it('shows a member who is not an admin the syncs without any control to add, remove or change a secret', async () => {
+      mockGetWorkspaceMembers.mockResolvedValue(membership('member'));
+      mockGetSyncConfigs.mockResolvedValue([
+        githubConfig,
+        { ...githubConfig, id: 'sync-3', webhook_secret_configured: false },
+        linearConfig,
+      ]);
+
+      await openProject();
+
+      await screen.findByTestId('sync-config-sync-2');
+      await waitFor(() => {
+        expect(mockGetWorkspaceMembers).toHaveBeenCalledWith('test-workspace-id');
+      });
+      expect(screen.getAllByText('Configured, not yet synced')).toHaveLength(3);
+      expect(screen.queryByText('+ Add Sync')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Rotate secret' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Generate secret' })).toBeNull();
+      expect(screen.queryByLabelText('Set signing secret')).toBeNull();
+      expect(
+        screen.getAllByText('No webhook secret: deliveries are refused until one is set')
+      ).toHaveLength(2);
+    });
+
+    it('tells a member who is not an admin that a workspace admin adds a sync', async () => {
+      mockGetWorkspaceMembers.mockResolvedValue(membership('viewer'));
+      mockGetSyncConfigs.mockResolvedValue([]);
+
+      await openProject();
+
+      expect(await screen.findByText(/A workspace admin can add one/)).toBeInTheDocument();
+      expect(screen.queryByText('+ Add Sync')).toBeNull();
+    });
+
+    it('offers an owner every control an admin has', async () => {
+      mockGetWorkspaceMembers.mockResolvedValue(membership('owner'));
+      mockGetSyncConfigs.mockResolvedValue([githubConfig, linearConfig]);
+
+      await openProject();
+
+      expect(await screen.findByText('+ Add Sync')).toBeInTheDocument();
+      expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
+      expect(screen.getByRole('button', { name: 'Rotate secret' })).toBeInTheDocument();
+      expect(screen.getByLabelText('Set signing secret')).toBeInTheDocument();
+    });
+
+    it('shows the server refusal when the role cannot be read and removing a sync is refused', async () => {
+      mockGetWorkspaceMembers.mockRejectedValue(new Error('Members unavailable'));
+      mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+      mockDeleteSyncConfig.mockRejectedValue(new Error('Workspace admin access required'));
+
+      await openProject();
+      fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+
+      expect((await screen.findByRole('alert')).textContent).toBe(
+        'Workspace admin access required'
+      );
+      expect(mockDeleteSyncConfig).toHaveBeenCalledWith('proj-1', 'sync-1');
     });
 
     it('tells a Linear sync that the project ID is the Linear project UUID', async () => {
