@@ -195,8 +195,12 @@ to `LITELLM_HOST`. A URL saved with no key, or a blank one, is sent no
 organization saved one is warned in AI Settings that the host gets no key.
 
 A URL is checked when it is saved: it must be `http` or `https`, name a host,
-and carry no credentials, query or fragment. Private, LAN and loopback hosts are
-allowed, since an operator may run the model next to Zone. A URL saved before
+and carry no credentials, query or fragment. Private, LAN, loopback and
+single-label hosts are allowed, since an operator may run the model next to
+Zone. Link-local addresses (`169.254.0.0/16`, `fe80::/10`) and cloud metadata
+services (`fd00:ec2::254`, `100.100.100.200`, `metadata.google.internal`,
+`metadata.goog`) never are, however the address is written, and when
+`ZONE_ENDPOINT_HOSTS` is set the host must be one it lists. A URL saved before
 this check that fails it is ignored: that provider runs on the instance
 endpoint, and the server logs a warning. Every member can read a workspace's
 settings, so such a URL is returned without its username, password, query and
@@ -223,6 +227,23 @@ instance endpoint and is ignored there. With neither saved, the task pauses
 asking you to set one, and a review that pauses for want of a model tells you
 to set the Fast/Reasoning model in AI Settings.
 
+Every request to a saved endpoint is checked again when it is sent: a host
+that resolves only to link-local or metadata addresses is refused, those
+addresses are dropped from one that also resolves elsewhere, and a redirect to
+one is not followed. When a saved endpoint refuses a request, the chat or task
+reports only the HTTP status and the provider's own error message, cut to 500
+characters and without the saved key; the rest of the response body is never
+shown.
+
+Requests to OpenAI and Anthropic are shaped for their APIs, which LiteLLM would
+otherwise do: OpenAI gets at most four stop sequences and none of the chat
+template tokens (Zone still stops on those itself), and its reasoning models
+(`o1`, `o3`, `o4` and `gpt-5` families) get `max_completion_tokens` in place of
+`max_tokens`, with no `stop`, `temperature` or, on other models,
+`reasoning_effort`. Anthropic's OpenAI-compatible endpoint gets a temperature
+of at most 1 and no whitespace-only stop sequences. Self-Hosted endpoints get
+the request exactly as the instance endpoint does.
+
 Embeddings, model captioning and LoRA training stay on the instance whatever the
 provider. A model known to lack vision gets the chat's history without its
 images and a one-line note saying so; the stored history keeps them.
@@ -232,6 +253,21 @@ or on OpenAI and Anthropic to the provider's default without one. A chat's reaso
 to a saved endpoint other than `LITELLM_HOST`, since Zone learns nothing of a
 model's capabilities there. The context estimate reads the stored history, so
 it still counts a withheld image, as an attachment of unknown size.
+
+### `ZONE_ENDPOINT_HOSTS`
+
+- **Purpose**: Limits the hosts organizations and workspaces may save endpoints
+  on in AI Settings
+- **Format**: Comma-separated hosts or suffixes. A host (`api.openai.com`,
+  `192.168.1.20`) matches only itself; a suffix (`.corp.example` or
+  `*.corp.example`) matches `corp.example` and every name under it. Case and a
+  trailing dot are ignored, and so are ports.
+- **Default**: Empty, which allows every host
+- **Note**: A URL the list does not match is refused when it is saved, and one
+  saved before the list was set is ignored, so that provider runs on the
+  instance endpoint. OpenAI and Anthropic with only a key saved still run on
+  their default URLs. Link-local and metadata addresses stay refused even when
+  listed.
 
 ### Usage credits
 

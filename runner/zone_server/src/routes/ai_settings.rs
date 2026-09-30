@@ -299,7 +299,15 @@ pub async fn upsert_org(
         Ok(user_id) => user_id,
         Err(response) => return *response,
     };
-    match ai_settings::upsert_org_authorized(state.db(), org_id, user_id, req.update()).await {
+    match ai_settings::upsert_org_authorized(
+        state.db(),
+        &state.config().endpoint_hosts,
+        org_id,
+        user_id,
+        req.update(),
+    )
+    .await
+    {
         Ok(settings) => {
             let response = AiSettingsResponse::from(settings);
             audit(
@@ -404,6 +412,7 @@ pub async fn upsert_workspace(
     };
     match ai_settings::upsert_workspace_authorized(
         state.db(),
+        &state.config().endpoint_hosts,
         path.org_id,
         path.ws_id,
         user_id,

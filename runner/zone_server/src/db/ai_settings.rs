@@ -10,6 +10,7 @@ use zone_core::SecretValue;
 use zone_core::llm::AgentKind;
 
 use crate::services::endpoint;
+use crate::services::hosts::Hosts;
 
 use super::{
     DbResult,
@@ -80,7 +81,7 @@ pub struct Update<'a> {
     pub model_audio: Option<&'a str>,
 }
 
-fn validate(update: &Update<'_>) -> AccessResult<()> {
+fn validate(update: &Update<'_>, hosts: &Hosts) -> AccessResult<()> {
     if let Some(provider) = update.provider
         && !PROVIDERS.contains(&provider)
     {
@@ -95,7 +96,7 @@ fn validate(update: &Update<'_>) -> AccessResult<()> {
         ("anthropic_base_url", update.anthropic_base_url),
     ] {
         if let Some(value) = nonempty(value) {
-            endpoint::validate_url(value)
+            endpoint::validate_url(value, hosts)
                 .map_err(|error| AccessError::Invalid(format!("{field}: {error}")))?;
         }
     }
@@ -465,13 +466,14 @@ where
 /// Upsert organization settings while holding the caller's admin membership row.
 pub async fn upsert_org_authorized(
     pool: &PgPool,
+    hosts: &Hosts,
     organization_id: Uuid,
     user_id: Uuid,
     update: Update<'_>,
 ) -> AccessResult<OrgAiSettingsRow> {
     let mut transaction = pool.begin().await?;
     authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
-    validate(&update)?;
+    validate(&update, hosts)?;
     let settings = upsert_org(&mut *transaction, organization_id, &update).await?;
     transaction.commit().await?;
     Ok(settings)
@@ -709,6 +711,7 @@ where
 /// Upsert workspace settings while holding the organization and workspace membership rows.
 pub async fn upsert_workspace_authorized(
     pool: &PgPool,
+    hosts: &Hosts,
     organization_id: Uuid,
     workspace_id: Uuid,
     user_id: Uuid,
@@ -723,7 +726,7 @@ pub async fn upsert_workspace_authorized(
         true,
     )
     .await?;
-    validate(&update)?;
+    validate(&update, hosts)?;
     let settings = upsert_workspace(&mut *transaction, workspace_id, &update).await?;
     let organization_keys = organization_keys(&mut *transaction, organization_id).await?;
     transaction.commit().await?;
@@ -1027,14 +1030,20 @@ mod tests {
                 provider: Some(provider),
                 ..Update::default()
             };
-            assert!(validate(&update).is_ok(), "{provider} must be accepted");
+            assert!(
+                validate(&update, &Hosts::default()).is_ok(),
+                "{provider} must be accepted"
+            );
         }
-        assert!(validate(&Update::default()).is_ok());
+        assert!(validate(&Update::default(), &Hosts::default()).is_ok());
 
-        let refused = validate(&Update {
-            provider: Some("gemini"),
-            ..Update::default()
-        })
+        let refused = validate(
+            &Update {
+                provider: Some("gemini"),
+                ..Update::default()
+            },
+            &Hosts::default(),
+        )
         .expect_err("gemini is not a provider");
         assert_eq!(
             refused.to_string(),
@@ -1261,10 +1270,13 @@ mod tests {
 
     #[test]
     fn validate_names_the_field_whose_url_it_refuses_and_allows_blanks() {
-        let refused = validate(&Update {
-            anthropic_base_url: Some("file:///etc/passwd"),
-            ..Update::default()
-        })
+        let refused = validate(
+            &Update {
+                anthropic_base_url: Some("file:///etc/passwd"),
+                ..Update::default()
+            },
+            &Hosts::default(),
+        )
         .expect_err("a file URL is no endpoint");
         assert_eq!(
             refused.to_string(),
@@ -1277,7 +1289,47 @@ mod tests {
             anthropic_base_url: Some(""),
             ..Update::default()
         };
-        assert!(validate(&blank).is_ok());
+        assert!(validate(&blank, &Hosts::default()).is_ok());
+    }
+
+    #[test]
+    fn validate_refuses_a_metadata_url_and_a_host_the_instance_does_not_list() {
+        let metadata = validate(
+            &Update {
+                litellm_host: Some("http://169.254.169.254/latest"),
+                ..Update::default()
+            },
+            &Hosts::default(),
+        )
+        .expect_err("the metadata service is no endpoint");
+        assert_eq!(
+            metadata.to_string(),
+            "litellm_host: The URL must not point at a link-local or cloud metadata address."
+        );
+
+        let hosts = Hosts::parse(".corp.example");
+        let unlisted = validate(
+            &Update {
+                openai_base_url: Some("https://gateway.example/v1"),
+                ..Update::default()
+            },
+            &hosts,
+        )
+        .expect_err("the instance lists only its own domain");
+        assert_eq!(
+            unlisted.to_string(),
+            "openai_base_url: The URL's host is not one this instance allows endpoints on."
+        );
+        assert!(
+            validate(
+                &Update {
+                    openai_base_url: Some("https://llm.corp.example/v1"),
+                    ..Update::default()
+                },
+                &hosts,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

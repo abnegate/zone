@@ -12,6 +12,7 @@ pub mod completion_tokens;
 pub mod embedding;
 pub mod endpoint;
 pub mod github_app;
+pub mod hosts;
 pub mod image_intent;
 pub mod knowledge;
 pub mod login;

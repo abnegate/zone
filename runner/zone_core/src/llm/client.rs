@@ -1,18 +1,19 @@
 //! LLM client for OpenAI-compatible APIs
 
 use futures::{Stream, StreamExt};
-use reqwest::{Client, Url};
+use reqwest::{Client, ClientBuilder, Url};
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::runtime;
 
-use crate::secret::conceal;
+use crate::secret::{conceal, redact};
 
 use super::dialect::{Budget, Dialect};
 use super::finish_reason::STOP;
+use super::metadata;
 use super::provider::{
     AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Completion,
     CompletionProvider, CompletionRequest, Toolset,
@@ -22,14 +23,28 @@ use super::types::{
     ToolDefinition,
 };
 
-fn pool() -> Client {
-    Client::builder()
+const REPORTED_LIMIT: usize = 500;
+const ELLIPSIS: char = '…';
+
+fn guarded(builder: ClientBuilder, trust: Trust) -> ClientBuilder {
+    match trust {
+        Trust::Operator => builder,
+        Trust::Tenant => builder
+            .dns_resolver(Arc::new(metadata::Resolver))
+            .redirect(metadata::redirects()),
+    }
+}
+
+fn pool(trust: Trust) -> Client {
+    let tuned = Client::builder()
         .pool_max_idle_per_host(16)
         .pool_idle_timeout(Duration::from_secs(90))
         .connect_timeout(Duration::from_secs(10))
-        .tcp_nodelay(true)
+        .tcp_nodelay(true);
+    guarded(tuned, trust)
         .build()
-        .unwrap_or_else(|_| Client::new())
+        .or_else(|_| guarded(Client::builder(), trust).build())
+        .unwrap_or_else(|error| panic!("no HTTP client can be built: {error}"))
 }
 
 /// One connection pool per runtime. Building a `reqwest::Client` per turn
@@ -41,15 +56,18 @@ fn pool() -> Client {
 /// from a second runtime hands out connections whose driver died with the
 /// first, and the send fails with "runtime dropped the dispatch task" without
 /// ever reaching the server.
-static HTTP: LazyLock<Mutex<HashMap<runtime::Id, Client>>> =
+static HTTP: LazyLock<Mutex<HashMap<(runtime::Id, Trust), Client>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn http() -> Client {
+fn http(trust: Trust) -> Client {
     let Ok(runtime) = runtime::Handle::try_current() else {
-        return pool();
+        return pool(trust);
     };
     let mut pools = HTTP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    pools.entry(runtime.id()).or_insert_with(pool).clone()
+    pools
+        .entry((runtime.id(), trust))
+        .or_insert_with(|| pool(trust))
+        .clone()
 }
 
 /// LLM client error
@@ -117,6 +135,18 @@ impl LlmBackend {
     }
 }
 
+/// Who chose [`LlmConfig::base_url`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Trust {
+    /// The operator, in the instance's own configuration.
+    #[default]
+    Operator,
+    /// A tenant, in settings saved through the API. Its endpoint is never
+    /// sent to a link-local or cloud metadata address, and what it answers a
+    /// refused request with is reported only as its status and error message.
+    Tenant,
+}
+
 /// Configuration for the LLM client
 #[derive(Clone)]
 pub struct LlmConfig {
@@ -133,6 +163,7 @@ pub struct LlmConfig {
     /// Where completions are fetched from. Defaults to the endpoint above.
     pub backend: LlmBackend,
     pub dialect: Dialect,
+    pub trust: Trust,
 }
 
 impl LlmConfig {
@@ -155,6 +186,7 @@ impl std::fmt::Debug for LlmConfig {
             .field("max_tokens", &self.max_tokens)
             .field("backend", &self.backend)
             .field("dialect", &self.dialect)
+            .field("trust", &self.trust)
             .finish()
     }
 }
@@ -169,6 +201,7 @@ impl Default for LlmConfig {
             max_tokens: 4096,
             backend: LlmBackend::Http,
             dialect: Dialect::Compatible,
+            trust: Trust::Operator,
         }
     }
 }
@@ -224,6 +257,25 @@ fn validate_outbound_url(url: &str) -> Result<Url, LlmError> {
     }
 
     Ok(parsed)
+}
+
+/// The error message a refusal's body carries, as OpenAI, Anthropic, LiteLLM
+/// and Ollama each shape it.
+fn reported(body: &str) -> Option<String> {
+    let body = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    ["/error/message", "/error", "/message"]
+        .iter()
+        .find_map(|pointer| body.pointer(pointer).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_string)
+}
+
+fn capped(message: &str) -> String {
+    match message.char_indices().nth(REPORTED_LIMIT) {
+        Some((end, _)) => format!("{}{ELLIPSIS}", &message[..end]),
+        None => message.to_string(),
+    }
 }
 
 /// Refuse a turn that expects zone's tools to be callable.
@@ -343,7 +395,7 @@ impl LlmClient {
     /// Create a new LLM client
     pub fn new(config: LlmConfig) -> Self {
         Self {
-            client: http(),
+            client: http(config.trust),
             config,
             stop: Vec::new(),
             ollama: None,
@@ -459,6 +511,11 @@ impl LlmClient {
         body: &serde_json::Value,
     ) -> Result<reqwest::Response, LlmError> {
         let url = validate_outbound_url(url)?;
+        if self.config.trust == Trust::Tenant && metadata::is_url(&url) {
+            return Err(LlmError::InvalidConfig(
+                "LLM base_url must not point at a link-local or cloud metadata address".to_string(),
+            ));
+        }
         let mut request = self
             .client
             .post(url)
@@ -469,13 +526,25 @@ impl LlmClient {
         Ok(request.json(body).send().await?)
     }
 
-    /// The endpoint's refusal, without the key this client sent it.
+    /// The endpoint's refusal, without the key this client sent it. A
+    /// tenant's endpoint is reported only by its status and its own error
+    /// message, in OpenAI's error envelope, so whatever else a host answers
+    /// is never reflected back.
     async fn rejected(&self, response: reqwest::Response) -> LlmError {
-        let status = response.status().as_u16();
+        let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        let message = match self.config.trust {
+            Trust::Operator => conceal(&body, &self.config.api_key),
+            Trust::Tenant => {
+                let reported = reported(&body)
+                    .unwrap_or_else(|| status.canonical_reason().unwrap_or_default().to_string());
+                let message = capped(&redact(&conceal(&reported, &self.config.api_key)));
+                serde_json::json!({ "error": { "message": message } }).to_string()
+            }
+        };
         LlmError::Api {
-            status,
-            message: conceal(&body, &self.config.api_key),
+            status: status.as_u16(),
+            message,
         }
     }
 
@@ -808,6 +877,188 @@ mod tests {
                 matches!(&error, LlmError::Api { status: 401, message } if message == body),
                 "{error:?}"
             );
+        }
+    }
+
+    mod tenant {
+        use super::*;
+        use serde_json::json;
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const KEY: &str = "sk-tenant-AbCdEfGh1234567890wxyz";
+
+        fn client(base_url: &str) -> LlmClient {
+            LlmClient::new(LlmConfig {
+                base_url: base_url.to_string(),
+                api_key: KEY.to_string(),
+                trust: Trust::Tenant,
+                ..LlmConfig::default()
+            })
+        }
+
+        async fn refusal(response: ResponseTemplate) -> LlmError {
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            client(&server.uri())
+                .chat(&[Message::user("hi")], None)
+                .await
+                .expect_err("the endpoint refused the turn")
+        }
+
+        fn reported(error: &LlmError) -> (u16, String) {
+            let LlmError::Api { status, message } = error else {
+                panic!("{error:?}");
+            };
+            let envelope: serde_json::Value =
+                serde_json::from_str(message).expect("an error envelope");
+            let text = envelope["error"]["message"]
+                .as_str()
+                .expect("an error message")
+                .to_string();
+            assert_eq!(
+                envelope,
+                json!({ "error": { "message": text } }),
+                "{message}"
+            );
+            (*status, text)
+        }
+
+        #[tokio::test]
+        async fn a_tenant_endpoint_is_never_sent_to_a_metadata_address() {
+            for base_url in [
+                "http://169.254.169.254/latest",
+                "http://169.254.170.2/v1",
+                "http://[fe80::1]:8080/v1",
+                "http://[fd00:ec2::254]/v1",
+                "http://[::ffff:169.254.169.254]/v1",
+                "http://metadata.google.internal/computeMetadata/v1",
+                "http://METADATA.GOOGLE.INTERNAL./v1",
+            ] {
+                let refused = client(base_url).chat(&[Message::user("hi")], None).await;
+
+                assert!(
+                    matches!(&refused, Err(LlmError::InvalidConfig(message)) if message.contains("metadata")),
+                    "{base_url}: {refused:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_tenant_endpoint_is_never_redirected_to_a_metadata_address() {
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(
+                    ResponseTemplate::new(307)
+                        .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let refused = client(&server.uri())
+                .chat(&[Message::user("hi")], None)
+                .await;
+
+            assert!(
+                matches!(&refused, Err(LlmError::Http(error)) if error.is_redirect()),
+                "{refused:?}"
+            );
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn a_tenant_endpoint_still_reaches_loopback() {
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "completion",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "test",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "stop"
+                    }]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let localhost = server.uri().replace("127.0.0.1", "localhost");
+
+            let answered = client(&localhost).chat(&[Message::user("hi")], None).await;
+
+            assert!(answered.is_ok(), "{answered:?}");
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn a_tenant_refusal_reports_only_its_status_and_error_message() {
+            let error = refusal(ResponseTemplate::new(400).set_body_json(json!({
+                "error": {
+                    "message": "The model `gpt-9` does not exist",
+                    "type": "invalid_request_error",
+                },
+                "reflected": "ami-id: i-0123456789abcdef0",
+            })))
+            .await;
+
+            assert_eq!(
+                reported(&error),
+                (400, "The model `gpt-9` does not exist".to_string())
+            );
+            assert!(!error.to_string().contains("ami-id"), "{error}");
+        }
+
+        #[tokio::test]
+        async fn a_tenant_refusal_without_an_error_message_reports_its_status_alone() {
+            for body in [
+                "<html><body>instance-id: i-0123456789abcdef0</body></html>",
+                r#"{"Code":"Success","AccessKeyId":"ASIAEXAMPLE"}"#,
+                "",
+            ] {
+                let error = refusal(ResponseTemplate::new(502).set_body_string(body)).await;
+
+                assert_eq!(reported(&error), (502, "Bad Gateway".to_string()), "{body}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_tenant_refusal_is_capped_and_never_carries_the_key() {
+            let long = format!("{}{KEY} sk-tenant-****wxyz", "x".repeat(2_000));
+            let error = refusal(
+                ResponseTemplate::new(401)
+                    .set_body_json(json!({ "error": { "message": format!("bad key {KEY}") } })),
+            )
+            .await;
+            let (_, message) = reported(&error);
+            assert!(!message.contains(KEY), "{message}");
+
+            let error = refusal(
+                ResponseTemplate::new(400).set_body_json(json!({ "error": { "message": long } })),
+            )
+            .await;
+            let (_, message) = reported(&error);
+
+            assert_eq!(message.chars().count(), REPORTED_LIMIT + 1);
+            assert!(message.ends_with(ELLIPSIS), "{message}");
+            assert!(!message.contains("wxyz"), "{message}");
+        }
+
+        #[tokio::test]
+        async fn a_tenant_refusal_still_says_when_a_model_takes_no_tools() {
+            for body in [
+                json!({ "error": "llava:7b does not support tools" }),
+                json!({ "error": { "message": "llava:7b does not support tools" } }),
+            ] {
+                let error = refusal(ResponseTemplate::new(400).set_body_json(body)).await;
+
+                assert!(error.unsupported_tools(), "{error:?}");
+            }
         }
     }
 

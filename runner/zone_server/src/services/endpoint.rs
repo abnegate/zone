@@ -10,11 +10,12 @@ use reqwest::Url;
 use uuid::Uuid;
 use zone_chat::capacity::Resolver;
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
-use zone_core::llm::{Dialect, LlmBackend, LlmConfig};
+use zone_core::llm::{Dialect, LlmBackend, LlmConfig, Trust, metadata};
 use zone_core::secret::{REDACTED, SecretValue, conceal, redact};
 
 use crate::config::Config;
 use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC};
+use crate::services::hosts::Hosts;
 use crate::services::route;
 use crate::services::stages::{self, Catalog};
 use crate::state::AppState;
@@ -48,6 +49,10 @@ pub enum UrlError {
     Query,
     #[error("The URL must not include a fragment.")]
     Fragment,
+    #[error("The URL must not point at a link-local or cloud metadata address.")]
+    Metadata,
+    #[error("The URL's host is not one this instance allows endpoints on.")]
+    Unlisted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -58,10 +63,12 @@ pub enum Error {
     ModelUnset,
 }
 
-/// Check the shape of an endpoint URL an organization or workspace saves.
+/// Check an endpoint URL an organization or workspace saves.
 ///
 /// Private, LAN and loopback hosts pass: a self-hosted Zone points at them.
-pub fn validate_url(raw: &str) -> Result<Url, UrlError> {
+/// Link-local and cloud metadata addresses never do, and when the instance
+/// lists `hosts`, only those pass.
+pub fn validate_url(raw: &str, hosts: &Hosts) -> Result<Url, UrlError> {
     let url = Url::parse(raw.trim()).map_err(|_| UrlError::Unparseable)?;
     if !SCHEMES.contains(&url.scheme()) {
         return Err(UrlError::Scheme);
@@ -77,6 +84,12 @@ pub fn validate_url(raw: &str) -> Result<Url, UrlError> {
     }
     if url.fragment().is_some() {
         return Err(UrlError::Fragment);
+    }
+    if metadata::is_url(&url) {
+        return Err(UrlError::Metadata);
+    }
+    if !hosts.permits(&url) {
+        return Err(UrlError::Unlisted);
     }
     Ok(url)
 }
@@ -123,12 +136,14 @@ impl Endpoint {
                 settings.litellm_key.as_ref(),
             ),
             PROVIDER_OPENAI => Self::provider(
+                config,
                 settings.openai_base_url.as_deref(),
                 settings.openai_api_key.as_ref(),
                 OPENAI_URL,
                 Dialect::OpenAI,
             ),
             PROVIDER_ANTHROPIC => Self::provider(
+                config,
                 settings.anthropic_base_url.as_deref(),
                 settings.anthropic_api_key.as_ref(),
                 ANTHROPIC_URL,
@@ -190,6 +205,10 @@ impl Endpoint {
             max_tokens,
             backend,
             dialect: self.dialect,
+            trust: match self.origin {
+                Origin::Instance => Trust::Operator,
+                Origin::Settings => Trust::Tenant,
+            },
         }
     }
 
@@ -238,7 +257,7 @@ impl Endpoint {
         host: Option<&str>,
         key: Option<&SecretValue>,
     ) -> Result<Option<Self>, UrlError> {
-        let Some(url) = saved_url(host)? else {
+        let Some(url) = saved_url(host, &config.endpoint_hosts)? else {
             return Ok(None);
         };
         let key = saved_key(key);
@@ -254,12 +273,13 @@ impl Endpoint {
     }
 
     fn provider(
+        config: &Config,
         base: Option<&str>,
         key: Option<&SecretValue>,
         default: &str,
         dialect: Dialect,
     ) -> Result<Option<Self>, UrlError> {
-        let url = saved_url(base)?;
+        let url = saved_url(base, &config.endpoint_hosts)?;
         match (saved_key(key), url) {
             (Some(key), Some(url)) => Ok(Some(Self::settings(url, Some(key), dialect))),
             (Some(key), None) => Ok(Some(Self {
@@ -288,11 +308,11 @@ struct SavedUrl<'a> {
     raw: &'a str,
 }
 
-fn saved_url(raw: Option<&str>) -> Result<Option<SavedUrl<'_>>, UrlError> {
+fn saved_url<'a>(raw: Option<&'a str>, hosts: &Hosts) -> Result<Option<SavedUrl<'a>>, UrlError> {
     let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
         return Ok(None);
     };
-    let parsed = validate_url(raw)?;
+    let parsed = validate_url(raw, hosts)?;
     Ok(Some(SavedUrl { parsed, raw }))
 }
 
@@ -856,7 +876,10 @@ mod tests {
             "https://api.openai.com/v1",
             "  https://api.anthropic.com/v1/  ",
         ] {
-            assert!(validate_url(accepted).is_ok(), "{accepted}");
+            assert!(
+                validate_url(accepted, &Hosts::default()).is_ok(),
+                "{accepted}"
+            );
         }
         for (refused, error) in [
             ("", UrlError::Unparseable),
@@ -871,9 +894,176 @@ mod tests {
             ("https://gateway.example/v1?api_key=1", UrlError::Query),
             ("https://gateway.example/v1?", UrlError::Query),
             ("https://gateway.example/v1#fragment", UrlError::Fragment),
+            ("http://169.254.169.254/latest", UrlError::Metadata),
+            ("http://169.254.170.2", UrlError::Metadata),
+            ("http://[fe80::1]:4000", UrlError::Metadata),
+            ("http://[fd00:ec2::254]", UrlError::Metadata),
+            ("http://[::ffff:169.254.169.254]", UrlError::Metadata),
+            ("http://2852039166/", UrlError::Metadata),
+            ("http://metadata.google.internal", UrlError::Metadata),
+            ("http://Metadata.Google.Internal./v1", UrlError::Metadata),
         ] {
-            assert_eq!(validate_url(refused).err(), Some(error), "{refused}");
+            assert_eq!(
+                validate_url(refused, &Hosts::default()).err(),
+                Some(error),
+                "{refused}"
+            );
         }
+    }
+
+    #[test]
+    fn validate_url_accepts_only_the_hosts_the_instance_lists() {
+        let hosts = Hosts::parse("api.openai.com, .corp.example, 192.168.1.10");
+
+        for accepted in [
+            "https://api.openai.com/v1",
+            "https://llm.corp.example/v1",
+            "http://192.168.1.10:4000",
+        ] {
+            assert!(validate_url(accepted, &hosts).is_ok(), "{accepted}");
+        }
+        for refused in [
+            "https://api.anthropic.com/v1",
+            "https://corp.example.evil/v1",
+            "http://192.168.1.11:4000",
+            "http://localhost:11434",
+        ] {
+            assert_eq!(
+                validate_url(refused, &hosts).err(),
+                Some(UrlError::Unlisted),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            validate_url("http://169.254.169.254", &Hosts::parse("169.254.169.254")).err(),
+            Some(UrlError::Metadata),
+            "a listed metadata address is still refused"
+        );
+    }
+
+    #[test]
+    fn a_saved_url_the_instance_does_not_list_runs_on_the_instance() {
+        let config = Config {
+            endpoint_hosts: Hosts::parse(".corp.example"),
+            ..config()
+        };
+        let unlisted = Endpoint::resolve(
+            &config,
+            &saved(
+                PROVIDER_OPENAI,
+                Saved {
+                    url: Some("https://gateway.example/v1"),
+                    key: Some(SAVED_KEY),
+                },
+            ),
+        );
+        let listed = Endpoint::resolve(
+            &config,
+            &saved(
+                PROVIDER_OPENAI,
+                Saved {
+                    url: Some("https://llm.corp.example/v1"),
+                    key: Some(SAVED_KEY),
+                },
+            ),
+        );
+        let hosted = Endpoint::resolve(
+            &config,
+            &saved(
+                PROVIDER_ANTHROPIC,
+                Saved {
+                    url: None,
+                    key: Some(SAVED_KEY),
+                },
+            ),
+        );
+
+        assert_eq!(unlisted.origin(), Origin::Instance);
+        assert_eq!(unlisted.key().expose(), INSTANCE_KEY);
+        assert_eq!(listed.url(), "https://llm.corp.example/v1");
+        assert_eq!(listed.origin(), Origin::Settings);
+        assert_eq!(hosted.url(), ANTHROPIC_URL);
+        assert_eq!(hosted.origin(), Origin::Settings);
+    }
+
+    #[test]
+    fn a_saved_metadata_url_runs_on_the_instance() {
+        let config = config();
+        for url in [
+            "http://169.254.169.254",
+            "http://metadata.google.internal",
+            "http://[fe80::1]:11434",
+        ] {
+            for provider in [PROVIDER_SELF_HOSTED, PROVIDER_OPENAI, PROVIDER_ANTHROPIC] {
+                let endpoint = Endpoint::resolve(
+                    &config,
+                    &saved(
+                        provider,
+                        Saved {
+                            url: Some(url),
+                            key: Some(SAVED_KEY),
+                        },
+                    ),
+                );
+
+                assert_eq!(endpoint.url(), INSTANCE_HOST, "{provider} {url}");
+                assert_eq!(endpoint.origin(), Origin::Instance, "{provider} {url}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_settings_endpoint_is_trusted_as_a_tenant() {
+        let config = config();
+        let settings = Endpoint::resolve(
+            &config,
+            &saved(
+                PROVIDER_OPENAI,
+                Saved {
+                    url: None,
+                    key: Some(SAVED_KEY),
+                },
+            ),
+        );
+
+        assert_eq!(
+            settings.llm("gpt-4o", 0.2, 64, LlmBackend::Http).trust,
+            Trust::Tenant
+        );
+        assert_eq!(
+            Endpoint::instance(&config)
+                .llm("alias", 0.2, 64, LlmBackend::Http)
+                .trust,
+            Trust::Operator
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settings_endpoint_refusal_reports_only_its_status_and_error_message() {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": { "message": format!("no route for key {SAVED_KEY}") },
+                "reflected": "instance-id: i-0123456789abcdef0",
+            })))
+            .mount(&server)
+            .await;
+        let mut settings = settings(PROVIDER_SELF_HOSTED);
+        settings.litellm_host = Some(server.uri());
+        settings.litellm_key = Some(SecretValue::new(SAVED_KEY));
+        let endpoint = Endpoint::resolve(&config(), &settings);
+
+        let failure =
+            zone_core::llm::LlmClient::new(endpoint.llm("model", 0.2, 64, LlmBackend::Http))
+                .chat(&[zone_core::llm::Message::user("hi")], None)
+                .await
+                .expect_err("the endpoint refused the turn")
+                .to_string();
+
+        assert!(failure.contains("404"), "{failure}");
+        assert!(failure.contains("no route for key"), "{failure}");
+        assert!(!failure.contains("instance-id"), "{failure}");
+        assert!(!failure.contains(SAVED_KEY), "{failure}");
     }
 
     #[test]

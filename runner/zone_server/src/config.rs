@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zone_core::llm::{AgentKind, CodexSandbox};
 
+use crate::services::hosts::Hosts;
 use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME, ROOT_PATH};
 
 /// Settings live with the clients that consume them.
@@ -94,6 +95,9 @@ pub struct Config {
     pub train_upload_limit_mb: u64,
     /// Auto projects: what the driver admits, how it reviews, when it merges.
     pub auto: AutoProjectConfig,
+    /// The hosts organizations and workspaces may save endpoints on
+    /// (`ZONE_ENDPOINT_HOSTS`); every host when empty.
+    pub endpoint_hosts: Hosts,
 }
 
 /// The instance-wide default backend.
@@ -1035,6 +1039,7 @@ impl Config {
             monitoring: MonitoringConfig::from_env(),
             train_upload_limit_mb: env_u64("TRAIN_UPLOAD_LIMIT_MB", 512, 4, 8192),
             auto: AutoProjectConfig::from_env(),
+            endpoint_hosts: Hosts::from_env(),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1076,6 +1081,7 @@ impl std::fmt::Debug for Config {
             .field("source_index", &self.source_index)
             .field("monitoring", &self.monitoring)
             .field("auto", &self.auto)
+            .field("endpoint_hosts", &self.endpoint_hosts)
             .finish()
     }
 }
@@ -1177,6 +1183,7 @@ mod tests {
             monitoring: MonitoringConfig::default(),
             chat: Default::default(),
             train_upload_limit_mb: 512,
+            endpoint_hosts: Default::default(),
             auto: Default::default(),
         }
     }
