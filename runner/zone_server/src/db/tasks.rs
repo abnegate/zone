@@ -684,7 +684,9 @@ async fn run_is_active(
     Ok(active.is_none() || (changes_status && active.flatten().is_some()))
 }
 
-async fn update_task_in(
+/// Apply `input` inside the caller's transaction; `None` when the task is
+/// gone, or when `input` sets a status that a live run owns.
+pub(crate) async fn update_task_in(
     connection: &mut PgConnection,
     input: &Patch<'_>,
 ) -> DbResult<Option<TaskRow>> {

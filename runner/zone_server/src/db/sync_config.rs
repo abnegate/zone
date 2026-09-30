@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use chrono::NaiveDateTime;
 use serde_json::Value as JsonValue;
-use sqlx::PgPool;
+use sqlx::{Acquire, PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::{DbResult, tasks};
@@ -56,15 +56,18 @@ pub enum SyncEventType {
     Create,
     Update,
     Close,
+    /// An external issue deleted, so its task no longer follows it
+    Unlink,
     WebhookReceived,
     SyncError,
 }
 
 impl SyncEventType {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Create,
         Self::Update,
         Self::Close,
+        Self::Unlink,
         Self::WebhookReceived,
         Self::SyncError,
     ];
@@ -74,6 +77,7 @@ impl SyncEventType {
             Self::Create => "create",
             Self::Update => "update",
             Self::Close => "close",
+            Self::Unlink => "unlink",
             Self::WebhookReceived => "webhook_received",
             Self::SyncError => "sync_error",
         }
@@ -475,13 +479,14 @@ pub struct NewSyncedTask<'a> {
     pub last_external_state: Option<JsonValue>,
 }
 
-/// Create a non-agentic task for an external issue and link the two, or
-/// nothing when another delivery linked that issue first.
+/// Create a non-agentic task for an external issue and link the two inside
+/// the caller's transaction, or nothing when another delivery linked that
+/// issue first.
 pub async fn create_synced_task(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     input: NewSyncedTask<'_>,
 ) -> DbResult<Option<SyncedItemRow>> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = connection.begin().await?;
     let task = tasks::create_in(
         &mut transaction,
         &tasks::Create {
@@ -536,12 +541,90 @@ pub async fn create_synced_task(
     Ok(Some(item))
 }
 
+/// The synced item linking `external_id`, locked until the caller's
+/// transaction ends so deliveries for one issue apply one at a time.
+pub async fn lock_synced_item_by_external_id(
+    connection: &mut PgConnection,
+    sync_config_id: Uuid,
+    external_id: &str,
+) -> DbResult<Option<SyncedItemRow>> {
+    let record: Option<SyncedItemRecord> = sqlx::query_as(
+        r#"
+        SELECT id, sync_config_id, task_id, external_id, external_url,
+               last_synced_at, sync_direction, last_external_state, created_at
+        FROM synced_items
+        WHERE sync_config_id = $1 AND external_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(sync_config_id)
+    .bind(external_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    record.map(SyncedItemRecord::into_row).transpose()
+}
+
+#[derive(sqlx::FromRow)]
+struct SyncedItemRecord {
+    id: Uuid,
+    sync_config_id: Uuid,
+    task_id: Uuid,
+    external_id: String,
+    external_url: Option<String>,
+    last_synced_at: Option<NaiveDateTime>,
+    sync_direction: String,
+    last_external_state: Option<JsonValue>,
+    created_at: Option<NaiveDateTime>,
+}
+
+impl SyncedItemRecord {
+    fn into_row(self) -> DbResult<SyncedItemRow> {
+        Ok(SyncedItemRow {
+            id: self.id,
+            sync_config_id: self.sync_config_id,
+            task_id: self.task_id,
+            external_id: self.external_id,
+            external_url: self.external_url,
+            last_synced_at: self.last_synced_at,
+            sync_direction: decode("sync_direction", &self.sync_direction)?,
+            last_external_state: self.last_external_state,
+            created_at: self.created_at,
+        })
+    }
+}
+
+/// Record that a sync received the delivery `delivery_id`; `false` when it
+/// already had, so the delivery is a retry or a replay to skip.
+pub async fn record_delivery(
+    connection: &mut PgConnection,
+    sync_config_id: Uuid,
+    delivery_id: &str,
+) -> DbResult<bool> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO sync_deliveries (sync_config_id, delivery_id)
+        VALUES ($1, $2)
+        ON CONFLICT (sync_config_id, delivery_id) DO NOTHING
+        "#,
+    )
+    .bind(sync_config_id)
+    .bind(delivery_id)
+    .execute(&mut *connection)
+    .await?;
+
+    Ok(result.rows_affected() == 1)
+}
+
 /// Update synced item
-pub async fn update_synced_item(
-    pool: &PgPool,
+pub async fn update_synced_item<'connection, E>(
+    executor: E,
     id: Uuid,
     last_external_state: Option<JsonValue>,
-) -> DbResult<Option<SyncedItemRow>> {
+) -> DbResult<Option<SyncedItemRow>>
+where
+    E: sqlx::Executor<'connection, Database = sqlx::Postgres>,
+{
     let row = sqlx::query!(
         r#"
         UPDATE synced_items
@@ -554,7 +637,7 @@ pub async fn update_synced_item(
         id,
         last_external_state
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     row.map(|r| {
@@ -574,24 +657,30 @@ pub async fn update_synced_item(
 }
 
 /// Delete synced item
-pub async fn delete_synced_item(pool: &PgPool, id: Uuid) -> DbResult<bool> {
+pub async fn delete_synced_item<'connection, E>(executor: E, id: Uuid) -> DbResult<bool>
+where
+    E: sqlx::Executor<'connection, Database = sqlx::Postgres>,
+{
     let result = sqlx::query!("DELETE FROM synced_items WHERE id = $1", id)
-        .execute(pool)
+        .execute(executor)
         .await?;
 
     Ok(result.rows_affected() > 0)
 }
 
 /// Create a sync event
-pub async fn create_sync_event(
-    pool: &PgPool,
+pub async fn create_sync_event<'connection, E>(
+    executor: E,
     sync_config_id: Uuid,
     synced_item_id: Option<Uuid>,
     event_type: SyncEventType,
     direction: SyncEventDirection,
     payload: Option<JsonValue>,
     error_message: Option<&str>,
-) -> DbResult<SyncEventRow> {
+) -> DbResult<SyncEventRow>
+where
+    E: sqlx::Executor<'connection, Database = sqlx::Postgres>,
+{
     let row = sqlx::query!(
         r#"
         INSERT INTO sync_events (sync_config_id, synced_item_id, event_type, direction, payload, error_message)
@@ -605,7 +694,7 @@ pub async fn create_sync_event(
         payload,
         error_message
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(SyncEventRow {
@@ -665,8 +754,9 @@ mod tests {
             SyncEventType::Create => 0,
             SyncEventType::Update => 1,
             SyncEventType::Close => 2,
-            SyncEventType::WebhookReceived => 3,
-            SyncEventType::SyncError => 4,
+            SyncEventType::Unlink => 3,
+            SyncEventType::WebhookReceived => 4,
+            SyncEventType::SyncError => 5,
         }
     }
 
@@ -685,7 +775,7 @@ mod tests {
             .collect();
         assert_eq!(
             positions,
-            (0..5).collect::<Vec<_>>(),
+            (0..6).collect::<Vec<_>>(),
             "a new SyncEventType must join ALL, which the sync_events drift test inserts"
         );
     }

@@ -8,24 +8,30 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::crypto;
 use crate::db::sync_config::{
     self, NewSyncedTask, SyncConfigRow, SyncDirection, SyncEventDirection, SyncEventType,
+    SyncedItemRow,
 };
 use crate::db::{projects, tasks};
 use crate::state::AppState;
-use crate::sync::{Delivery, IssueState, Settings, SyncError, WebhookEvent, github, linear};
+use crate::sync::{
+    Delivery, IssueState, Settings, SyncError, WebhookEvent, WebhookPayload, github, linear,
+};
 
-/// Maximum allowed webhook body size (1MB)
-const MAX_WEBHOOK_BODY_SIZE: usize = 1024 * 1024;
+/// The largest delivery body either webhook route reads (1 MB)
+pub const MAX_WEBHOOK_BODY_SIZE: usize = 1024 * 1024;
 
 /// Maximum allowed title length
 const MAX_TITLE_LENGTH: usize = 500;
 
 /// Maximum allowed description length
 const MAX_DESCRIPTION_LENGTH: usize = 50_000;
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
@@ -46,19 +52,82 @@ struct WebhookResponse {
     message: String,
 }
 
-fn error(status: StatusCode, message: &str) -> Response {
-    (status, Json(ErrorResponse::new(message))).into_response()
-}
-
-fn success(message: String) -> Response {
+fn success(message: &str) -> Response {
     (
         StatusCode::OK,
         Json(WebhookResponse {
             success: true,
-            message,
+            message: message.to_string(),
         }),
     )
         .into_response()
+}
+
+/// Why a delivery was refused before anything in it was applied
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rejection {
+    /// Not shown to come from the sync's provider. Every such refusal answers
+    /// alike, so a caller without the secret cannot tell a missing, disabled
+    /// or secretless sync from a bad signature.
+    Unverified,
+    InvalidPayload,
+    Unprocessed,
+    Internal,
+}
+
+impl IntoResponse for Rejection {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            Self::Unverified => (StatusCode::UNAUTHORIZED, "Webhook verification failed"),
+            Self::InvalidPayload => (StatusCode::BAD_REQUEST, "Invalid webhook payload"),
+            Self::Unprocessed => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to process webhook",
+            ),
+            Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
+        };
+        (status, Json(ErrorResponse::new(message))).into_response()
+    }
+}
+
+/// What a verified issue delivery did
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Created,
+    AlreadyLinked,
+    Updated,
+    Unlinked,
+    AlreadyProcessed,
+    Stale,
+    NotLinked,
+    OutboundOnly,
+    OtherSource,
+    NotEligible,
+    NoWorkspace,
+}
+
+impl Outcome {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Created => "Task created from the issue",
+            Self::AlreadyLinked => "Issue is already linked to a task",
+            Self::Updated => "Task updated from the issue",
+            Self::Unlinked => "Issue unlinked from its task",
+            Self::AlreadyProcessed => "Delivery already processed",
+            Self::Stale => "Delivery is no newer than the last one applied",
+            Self::NotLinked => "Issue is not linked to a task",
+            Self::OutboundOnly => "Sync is outbound-only, ignoring inbound event",
+            Self::OtherSource => "Issue is not in the configured repository or project",
+            Self::NotEligible => "Issue is not one this sync creates tasks for",
+            Self::NoWorkspace => "Project has no workspace to hold a task",
+        }
+    }
+}
+
+/// Whether an issue no task is linked to yet would become one, and where
+enum Admission {
+    Admitted { workspace_id: Uuid },
+    Refused(Outcome),
 }
 
 /// POST /api/webhooks/sync/{sync_config_id}/github
@@ -102,84 +171,107 @@ async fn receive(
     headers: &HeaderMap,
     body: &[u8],
 ) -> Response {
-    if body.len() > MAX_WEBHOOK_BODY_SIZE {
-        return error(StatusCode::PAYLOAD_TOO_LARGE, "Request body too large");
-    }
+    let (config, delivery) = match verify(state, sync_config_id, provider_name, headers, body).await
+    {
+        Ok(verified) => verified,
+        Err(rejection) => return rejection.into_response(),
+    };
 
-    let sync_config_row = match sync_config::get_sync_config(state.db(), sync_config_id).await {
-        Ok(Some(config)) => config,
-        Ok(None) => return error(StatusCode::NOT_FOUND, "Sync config not found"),
-        Err(e) => {
-            tracing::error!(
-                "Database error looking up sync config {}: {}",
-                sync_config_id,
-                e
-            );
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+    log_received(state, sync_config_id, &delivery).await;
+
+    let event = match delivery {
+        Delivery::Issue(event) => event,
+        Delivery::Ignored(ignored) => {
+            tracing::info!("Ignoring {provider_name} webhook for {sync_config_id}: {ignored:?}");
+            return success(&ignored.message());
         }
     };
 
-    if !sync_config_row.enabled {
-        return error(StatusCode::BAD_REQUEST, "Sync config is disabled");
-    }
-
-    if sync_config_row.provider != provider_name {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Invalid provider for this endpoint",
-        );
-    }
-
-    let webhook_secret = match &sync_config_row.webhook_secret_encrypted {
-        Some(encrypted) => match crypto::decrypt(state.encryption_key(), encrypted) {
-            Ok(secret) => secret,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to decrypt webhook secret for {}: {}",
-                    sync_config_id,
-                    e
-                );
-                return error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+    match process(state, &config, event).await {
+        Ok(outcome) => success(outcome.message()),
+        Err(error) => {
+            tracing::error!(
+                "Failed to process {provider_name} webhook for {sync_config_id}: {error}"
+            );
+            if let Err(logging) = sync_config::create_sync_event(
+                state.db(),
+                sync_config_id,
+                None,
+                SyncEventType::SyncError,
+                SyncEventDirection::Inbound,
+                None,
+                Some(&error.to_string()),
+            )
+            .await
+            {
+                tracing::error!("Failed to log sync error event for {sync_config_id}: {logging}");
             }
-        },
-        None => return error(StatusCode::BAD_REQUEST, "Webhook secret not configured"),
+            Rejection::Unprocessed.into_response()
+        }
+    }
+}
+
+/// The sync a delivery is addressed to and what the delivery holds, once its
+/// signature proves it came from that sync's provider.
+async fn verify(
+    state: &AppState,
+    sync_config_id: Uuid,
+    provider_name: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(SyncConfigRow, Delivery), Rejection> {
+    let unverified = |reason: &str| {
+        tracing::warn!("Refused {provider_name} webhook for {sync_config_id}: {reason}");
+        Rejection::Unverified
     };
 
-    let provider = match state.sync_registry().get_provider(provider_name) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("Failed to get {} provider: {}", provider_name, e);
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+    let config = match sync_config::get_sync_config(state.db(), sync_config_id).await {
+        Ok(Some(config)) => config,
+        Ok(None) => return Err(unverified("no such sync")),
+        Err(error) => {
+            tracing::error!("Database error looking up sync config {sync_config_id}: {error}");
+            return Err(Rejection::Internal);
         }
     };
+    if !config.enabled {
+        return Err(unverified("the sync is disabled"));
+    }
+    if config.provider != provider_name {
+        return Err(unverified("the sync is for another provider"));
+    }
+    let Some(encrypted) = config.webhook_secret_encrypted.as_deref() else {
+        return Err(unverified("the sync has no webhook secret"));
+    };
+    let secret = crypto::decrypt(state.encryption_key(), encrypted).map_err(|error| {
+        tracing::error!("Failed to decrypt webhook secret for {sync_config_id}: {error}");
+        Rejection::Internal
+    })?;
+    let provider = state
+        .sync_registry()
+        .get_provider(provider_name)
+        .map_err(|error| {
+            tracing::error!("Failed to get {provider_name} provider: {error}");
+            Rejection::Internal
+        })?;
 
-    let delivery = match provider.parse_webhook(headers, body, &webhook_secret) {
-        Ok(delivery) => delivery,
-        Err(SyncError::WebhookVerificationFailed(msg)) => {
-            tracing::warn!(
-                "{} webhook verification failed for {}: {}",
-                provider_name,
-                sync_config_id,
-                msg
-            );
-            return error(StatusCode::UNAUTHORIZED, "Webhook verification failed");
-        }
-        Err(e) => {
+    match provider.parse_webhook(headers, body, &secret) {
+        Ok(delivery) => Ok((config, delivery)),
+        Err(SyncError::WebhookVerificationFailed(reason)) => Err(unverified(&reason)),
+        Err(error) => {
             tracing::error!(
-                "Failed to parse {} webhook for {}: {}",
-                provider_name,
-                sync_config_id,
-                e
+                "Failed to parse {provider_name} webhook for {sync_config_id}: {error}"
             );
-            return error(StatusCode::BAD_REQUEST, "Invalid webhook payload");
+            Err(Rejection::InvalidPayload)
         }
-    };
+    }
+}
 
-    let logged_payload = match &delivery {
+async fn log_received(state: &AppState, sync_config_id: Uuid, delivery: &Delivery) {
+    let logged_payload = match delivery {
         Delivery::Issue(event) => serde_json::to_value(&event.payload),
         Delivery::Ignored(ignored) => serde_json::to_value(ignored),
     };
-    if let Err(e) = sync_config::create_sync_event(
+    if let Err(error) = sync_config::create_sync_event(
         state.db(),
         sync_config_id,
         None,
@@ -190,88 +282,137 @@ async fn receive(
     )
     .await
     {
-        tracing::error!("Failed to log webhook event for {}: {}", sync_config_id, e);
-    }
-
-    let webhook_event = match delivery {
-        Delivery::Issue(event) => event,
-        Delivery::Ignored(ignored) => {
-            tracing::info!(
-                "Ignoring {} webhook for {}: {:?}",
-                provider_name,
-                sync_config_id,
-                ignored
-            );
-            return success(ignored.message());
-        }
-    };
-
-    match process_webhook_event(state, &sync_config_row, webhook_event).await {
-        Ok(message) => success(message),
-        Err(e) => {
-            tracing::error!(
-                "Failed to process {} webhook for {}: {}",
-                provider_name,
-                sync_config_id,
-                e
-            );
-
-            if let Err(log_err) = sync_config::create_sync_event(
-                state.db(),
-                sync_config_id,
-                None,
-                SyncEventType::SyncError,
-                SyncEventDirection::Inbound,
-                None,
-                Some(&e.to_string()),
-            )
-            .await
-            {
-                tracing::error!(
-                    "Failed to log sync error event for {}: {}",
-                    sync_config_id,
-                    log_err
-                );
-            }
-
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to process webhook",
-            )
-        }
+        tracing::error!("Failed to log webhook event for {sync_config_id}: {error}");
     }
 }
 
-/// Apply a webhook event to the task its issue is linked to, or link a new
-/// issue to a task of its own
-async fn process_webhook_event(
+/// Apply an issue delivery from the configured source once: to the task its
+/// issue is linked to, or as a new linked task. Everything it writes,
+/// including the record that it was received, commits together or not at all.
+async fn process(
     state: &AppState,
     config: &SyncConfigRow,
     event: WebhookEvent,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let sync_config_id = config.id;
+) -> Result<Outcome, BoxError> {
     let settings = Settings::from_config(&config.config);
     if !event.origin.is_configured_source(&settings) {
         tracing::info!(
-            "Ignoring issue {} for {sync_config_id}: not in the configured repository or project",
-            event.external_id
+            "Ignoring issue {} for {}: not in the configured repository or project",
+            event.external_id,
+            config.id
         );
-        return Ok(format!(
-            "Issue {} is not in the configured repository or project",
-            event.external_id
-        ));
+        return Ok(Outcome::OtherSource);
     }
-    let synced_item =
-        sync_config::get_synced_item_by_external_id(state.db(), sync_config_id, &event.external_id)
-            .await?;
+    let admission = admit(state, config, &settings, &event).await?;
 
-    let Some(synced_item) = synced_item else {
-        return link_new_issue(state, config, event).await;
+    let mut transaction = state.db().begin().await?;
+    if let Some(delivery_id) = event.delivery_id.as_deref()
+        && !sync_config::record_delivery(&mut transaction, config.id, delivery_id).await?
+    {
+        tracing::info!(
+            "Ignoring delivery {delivery_id} for {}: already processed",
+            config.id
+        );
+        return Ok(Outcome::AlreadyProcessed);
+    }
+    let linked = sync_config::lock_synced_item_by_external_id(
+        &mut transaction,
+        config.id,
+        &event.external_id,
+    )
+    .await?;
+    let outcome = match (linked, admission) {
+        (Some(item), _) => apply_to_linked(&mut transaction, config.id, item, event).await?,
+        (None, Admission::Admitted { workspace_id }) => {
+            link_new_issue(&mut transaction, config, &settings, workspace_id, event).await?
+        }
+        (None, Admission::Refused(outcome)) => outcome,
     };
+    transaction.commit().await?;
+    Ok(outcome)
+}
 
-    if synced_item.sync_direction == SyncDirection::Outbound {
+/// Whether the delivery's issue would become a task if no task is linked to
+/// it yet: only a newly opened issue, from someone the sync takes new issues
+/// from, into a project with a workspace to hold it.
+async fn admit(
+    state: &AppState,
+    config: &SyncConfigRow,
+    settings: &Settings,
+    event: &WebhookEvent,
+) -> Result<Admission, BoxError> {
+    if event.event_type != SyncEventType::Create {
+        return Ok(Admission::Refused(Outcome::NotLinked));
+    }
+    if settings.direction()? == SyncDirection::Outbound {
+        return Ok(Admission::Refused(Outcome::OutboundOnly));
+    }
+    if !event.origin.may_become_task(settings) {
+        tracing::info!(
+            "Ignoring new issue {} for {}: not opened by someone with write access",
+            event.external_id,
+            config.id
+        );
+        return Ok(Admission::Refused(Outcome::NotEligible));
+    }
+    let workspace_id = projects::get_project(state.db(), config.project_id)
+        .await?
+        .and_then(|project| project.workspace_id);
+    Ok(
+        workspace_id.map_or(Admission::Refused(Outcome::NoWorkspace), |workspace_id| {
+            Admission::Admitted { workspace_id }
+        }),
+    )
+}
+
+/// Follow the linked issue: a deletion unlinks it and leaves its task as it
+/// is; anything else newer than what was last applied updates the task's
+/// title and description, and its status when the issue changed state.
+async fn apply_to_linked(
+    connection: &mut PgConnection,
+    sync_config_id: Uuid,
+    item: SyncedItemRow,
+    event: WebhookEvent,
+) -> Result<Outcome, BoxError> {
+    if item.sync_direction == SyncDirection::Outbound {
         tracing::info!("Ignoring inbound webhook for outbound-only sync");
-        return Ok("Sync is outbound-only, ignoring inbound event".to_string());
+        return Ok(Outcome::OutboundOnly);
+    }
+    let payload = serde_json::to_value(&event.payload)?;
+
+    if event.event_type == SyncEventType::Unlink {
+        sync_config::create_sync_event(
+            &mut *connection,
+            sync_config_id,
+            None,
+            SyncEventType::Unlink,
+            SyncEventDirection::Inbound,
+            Some(payload),
+            None,
+        )
+        .await?;
+        sync_config::delete_synced_item(&mut *connection, item.id).await?;
+        tracing::info!(
+            "Unlinked deleted issue {} from task {} for {sync_config_id}",
+            item.external_id,
+            item.task_id
+        );
+        return Ok(Outcome::Unlinked);
+    }
+
+    let previous = item
+        .last_external_state
+        .as_ref()
+        .and_then(WebhookPayload::from_stored);
+    if previous
+        .as_ref()
+        .is_some_and(|previous| event.payload.is_no_newer_than(previous))
+    {
+        tracing::info!(
+            "Ignoring a delivery for issue {} of {sync_config_id} no newer than the last one applied",
+            item.external_id
+        );
+        return Ok(Outcome::Stale);
     }
 
     let title = event
@@ -284,92 +425,57 @@ async fn process_webhook_event(
         .description
         .as_deref()
         .map(|description| truncate("description", description, MAX_DESCRIPTION_LENGTH));
-    let status = event.payload.state.map(|state| match state {
-        IssueState::Closed => "complete",
-        IssueState::InProgress => "in_progress",
-        IssueState::Open => "created",
-    });
+    let status = event
+        .state_change
+        .target(
+            event.payload.state,
+            previous.and_then(|previous| previous.state),
+        )
+        .map(task_status);
 
-    tasks::update_task(
-        state.db(),
-        synced_item.task_id,
-        title,
-        description,
-        None, // acceptance_criteria
-        status,
-        None, // priority
-        None, // project_ids
+    tasks::update_task_in(
+        &mut *connection,
+        &tasks::Patch {
+            id: item.task_id,
+            title,
+            description,
+            acceptance_criteria: None,
+            status,
+            priority: None,
+            project_ids: None,
+            require_plan_approval: None,
+        },
     )
     .await?;
-
-    sync_config::update_synced_item(
-        state.db(),
-        synced_item.id,
-        Some(serde_json::to_value(&event.payload)?),
-    )
-    .await?;
-
+    sync_config::update_synced_item(&mut *connection, item.id, Some(payload.clone())).await?;
     sync_config::create_sync_event(
-        state.db(),
+        &mut *connection,
         sync_config_id,
-        Some(synced_item.id),
+        Some(item.id),
         event.event_type,
         SyncEventDirection::Inbound,
-        Some(serde_json::to_value(&event.payload)?),
+        Some(payload),
         None,
     )
     .await?;
 
-    Ok(format!("Task {} updated from webhook", synced_item.task_id))
+    Ok(Outcome::Updated)
 }
 
-/// Turn a newly opened external issue into a linked, non-agentic task, when
-/// the sync takes issues in and this one is from where it is configured to.
+/// Turn a newly opened external issue into a linked, non-agentic task.
 async fn link_new_issue(
-    state: &AppState,
+    connection: &mut PgConnection,
     config: &SyncConfigRow,
+    settings: &Settings,
+    workspace_id: Uuid,
     event: WebhookEvent,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Outcome, BoxError> {
     let external_id = &event.external_id;
-    if event.event_type != SyncEventType::Create {
-        tracing::info!("Received webhook for external ID {external_id} but no synced item found");
-        return Ok(format!(
-            "No synced item found for external ID {external_id}"
-        ));
-    }
-
-    let settings = Settings::from_config(&config.config);
-    let direction = settings.direction()?;
-    if direction == SyncDirection::Outbound {
-        return Ok(format!(
-            "Sync is outbound-only, ignoring new issue {external_id}"
-        ));
-    }
-
-    let workspace_id = projects::get_project(state.db(), config.project_id)
-        .await?
-        .and_then(|project| project.workspace_id);
-    let Some(workspace_id) = workspace_id else {
-        return Ok(format!(
-            "Project has no workspace to hold a task, ignoring new issue {external_id}"
-        ));
-    };
-
-    if !event.origin.may_become_task(&settings) {
-        tracing::info!(
-            "Ignoring new issue {external_id} for {}: not from the configured source, or not opened by a writer",
-            config.id
-        );
-        return Ok(format!(
-            "Issue {external_id} is not one this sync creates tasks for"
-        ));
-    }
-
     let title = event.payload.title.as_deref().unwrap_or(external_id);
     let description = event.payload.description.as_deref().unwrap_or_default();
     let external_state = serde_json::to_value(&event.payload)?;
     let item = sync_config::create_synced_task(
-        state.db(),
+        &mut *connection,
         NewSyncedTask {
             sync_config_id: config.id,
             workspace_id,
@@ -378,17 +484,17 @@ async fn link_new_issue(
             description: truncate("description", description, MAX_DESCRIPTION_LENGTH),
             external_id,
             external_url: event.url.as_deref(),
-            sync_direction: direction,
+            sync_direction: settings.direction()?,
             last_external_state: Some(external_state.clone()),
         },
     )
     .await?;
     let Some(item) = item else {
-        return Ok(format!("Issue {external_id} is already linked to a task"));
+        return Ok(Outcome::AlreadyLinked);
     };
 
     sync_config::create_sync_event(
-        state.db(),
+        &mut *connection,
         config.id,
         Some(item.id),
         SyncEventType::Create,
@@ -398,7 +504,15 @@ async fn link_new_issue(
     )
     .await?;
 
-    Ok(format!("Task {} created from webhook", item.task_id))
+    Ok(Outcome::Created)
+}
+
+fn task_status(state: IssueState) -> &'static str {
+    match state {
+        IssueState::Closed => "complete",
+        IssueState::InProgress => "in_progress",
+        IssueState::Open => "created",
+    }
 }
 
 fn truncate<'a>(field: &str, text: &'a str, limit: usize) -> &'a str {

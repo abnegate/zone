@@ -2,13 +2,14 @@
 
 use async_trait::async_trait;
 use axum::http::HeaderMap;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 
 use super::{
-    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, SyncConfig, SyncError,
-    SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
+    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, StateChange, SyncConfig,
+    SyncError, SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
 };
 use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
@@ -17,6 +18,7 @@ pub const PROVIDER_NAME: &str = "github";
 
 const SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
 const EVENT_HEADER: &str = "X-GitHub-Event";
+const DELIVERY_HEADER: &str = "X-GitHub-Delivery";
 const ISSUES_EVENT: &str = "issues";
 const PING_EVENT: &str = "ping";
 
@@ -44,20 +46,53 @@ struct GitHubIssue {
     body: Option<String>,
     #[serde(default)]
     author_association: AuthorAssociation,
+    #[serde(default)]
+    updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GitHubRepository {
     full_name: String,
 }
 
 /// GitHub webhook event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GitHubWebhookPayload {
-    action: String,
+    action: Action,
     issue: GitHubIssue,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     repository: Option<GitHubRepository>,
+}
+
+/// What happened to an issue, as an `issues` delivery's `action` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Action {
+    Opened,
+    Closed,
+    Reopened,
+    Deleted,
+    #[serde(other)]
+    Other,
+}
+
+impl Action {
+    fn event_type(self) -> SyncEventType {
+        match self {
+            Self::Opened => SyncEventType::Create,
+            Self::Closed => SyncEventType::Close,
+            Self::Deleted => SyncEventType::Unlink,
+            Self::Reopened | Self::Other => SyncEventType::Update,
+        }
+    }
+
+    fn state_change(self) -> StateChange {
+        match self {
+            Self::Closed => StateChange::MovedTo(IssueState::Closed),
+            Self::Reopened => StateChange::MovedTo(IssueState::Open),
+            Self::Opened | Self::Deleted | Self::Other => StateChange::Kept,
+        }
+    }
 }
 
 /// How an issue's author is related to its repository, as GitHub reports it
@@ -173,14 +208,6 @@ impl GitHubSyncProvider {
             "closed" => IssueState::Closed,
             "open" => IssueState::Open,
             _ => IssueState::Open,
-        }
-    }
-
-    fn map_action_to_event_type(action: &str) -> SyncEventType {
-        match action {
-            "opened" => SyncEventType::Create,
-            "closed" | "deleted" => SyncEventType::Close,
-            _ => SyncEventType::Update,
         }
     }
 }
@@ -372,12 +399,21 @@ impl SyncProvider for GitHubSyncProvider {
             }
         }
 
-        let payload: GitHubWebhookPayload = serde_json::from_slice(body).map_err(|e| {
-            SyncError::InvalidWebhookPayload(format!("Failed to parse JSON: {}", e))
+        let raw: serde_json::Value = serde_json::from_slice(body).map_err(|error| {
+            SyncError::InvalidWebhookPayload(format!("Failed to parse JSON: {error}"))
         })?;
+        let payload: GitHubWebhookPayload =
+            serde_json::from_value(raw.clone()).map_err(|error| {
+                SyncError::InvalidWebhookPayload(format!("Failed to parse JSON: {error}"))
+            })?;
+        let delivery_id = headers
+            .get(DELIVERY_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
 
         Ok(Delivery::Issue(WebhookEvent {
-            event_type: Self::map_action_to_event_type(&payload.action),
+            event_type: payload.action.event_type(),
             external_id: payload.issue.number.to_string(),
             url: Some(payload.issue.html_url.clone()),
             origin: IssueOrigin::GitHub {
@@ -387,11 +423,14 @@ impl SyncProvider for GitHubSyncProvider {
                     .map(|repository| repository.full_name.clone()),
                 author_association: payload.issue.author_association,
             },
+            delivery_id,
+            state_change: payload.action.state_change(),
             payload: WebhookPayload {
-                title: Some(payload.issue.title.clone()),
-                description: payload.issue.body.clone(),
+                title: Some(payload.issue.title),
+                description: payload.issue.body,
                 state: Some(Self::map_github_state_to_issue_state(&payload.issue.state)),
-                raw: Some(serde_json::to_value(&payload).unwrap_or_default()),
+                updated_at: payload.issue.updated_at,
+                raw: Some(raw),
             },
         }))
     }
@@ -496,7 +535,7 @@ mod tests {
         serde_json::json!({ "zen": "Keep it logically awesome.", "hook_id": 1 })
     }
 
-    fn parse_signed_action(action: &str) -> SyncEventType {
+    fn parse_signed_issue(action: &str) -> WebhookEvent {
         let body = serde_json::json!({
             "action": action,
             "issue": {
@@ -509,9 +548,72 @@ mod tests {
         });
 
         match parse_signed(Some(ISSUES_EVENT), &body).expect("a signed webhook parses") {
-            Delivery::Issue(event) => event.event_type,
+            Delivery::Issue(event) => event,
             Delivery::Ignored(reason) => panic!("an issues delivery was ignored: {reason:?}"),
         }
+    }
+
+    fn parse_signed_action(action: &str) -> SyncEventType {
+        parse_signed_issue(action).event_type
+    }
+
+    #[test]
+    fn only_a_close_or_a_reopen_moves_the_issue_state() {
+        assert_eq!(
+            parse_signed_issue("closed").state_change,
+            StateChange::MovedTo(IssueState::Closed)
+        );
+        assert_eq!(
+            parse_signed_issue("reopened").state_change,
+            StateChange::MovedTo(IssueState::Open)
+        );
+        for action in [
+            "opened",
+            "edited",
+            "labeled",
+            "assigned",
+            "deleted",
+            "transferred",
+        ] {
+            assert_eq!(
+                parse_signed_issue(action).state_change,
+                StateChange::Kept,
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_issues_delivery_carries_its_delivery_id_and_when_the_issue_last_changed() {
+        let body = serde_json::json!({
+            "action": "edited",
+            "issue": {
+                "number": 123,
+                "html_url": "https://github.com/owner/repo/issues/123",
+                "state": "open",
+                "title": "Title",
+                "body": null,
+                "updated_at": "2026-01-01T00:00:10Z"
+            }
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut headers = signed_headers(&bytes, Some(ISSUES_EVENT));
+        headers.insert(DELIVERY_HEADER, "delivery-1".parse().unwrap());
+
+        let Delivery::Issue(event) = GitHubSyncProvider::new()
+            .parse_webhook(&headers, &bytes, SECRET)
+            .unwrap()
+        else {
+            panic!("an issues delivery is an issue");
+        };
+
+        assert_eq!(event.delivery_id.as_deref(), Some("delivery-1"));
+        assert_eq!(
+            event.payload.updated_at,
+            Some("2026-01-01T00:00:10Z".parse().unwrap())
+        );
+        assert_eq!(event.payload.raw, Some(body));
+        assert_eq!(parse_signed_issue("edited").delivery_id, None);
     }
 
     #[test]
@@ -558,7 +660,7 @@ mod tests {
     fn webhook_actions_map_to_sync_event_types() {
         assert_eq!(parse_signed_action("opened"), SyncEventType::Create);
         assert_eq!(parse_signed_action("closed"), SyncEventType::Close);
-        assert_eq!(parse_signed_action("deleted"), SyncEventType::Close);
+        assert_eq!(parse_signed_action("deleted"), SyncEventType::Unlink);
         for action in ["edited", "reopened", "labeled", "assigned"] {
             assert_eq!(
                 parse_signed_action(action),

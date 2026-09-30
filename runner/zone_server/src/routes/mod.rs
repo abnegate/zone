@@ -99,11 +99,13 @@ pub fn create_router(state: AppState) -> Router {
         // Webhook routes (public - verified via HMAC signature)
         .route(
             "/api/webhooks/sync/{sync_config_id}/github",
-            post(webhooks::github_webhook),
+            post(webhooks::github_webhook)
+                .layer(DefaultBodyLimit::max(webhooks::MAX_WEBHOOK_BODY_SIZE)),
         )
         .route(
             "/api/webhooks/sync/{sync_config_id}/linear",
-            post(webhooks::linear_webhook),
+            post(webhooks::linear_webhook)
+                .layer(DefaultBodyLimit::max(webhooks::MAX_WEBHOOK_BODY_SIZE)),
         )
         // Zone's tools, served to a spawned coding agent (auth: the turn's
         // own bearer token, which no other route accepts)

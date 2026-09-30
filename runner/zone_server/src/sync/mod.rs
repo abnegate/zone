@@ -8,6 +8,7 @@ pub mod linear;
 
 use async_trait::async_trait;
 use axum::http::HeaderMap;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -119,8 +120,42 @@ pub struct WebhookEvent {
     /// The issue's page in the external system
     pub url: Option<String>,
     pub origin: IssueOrigin,
+    /// The provider's ID for this delivery, which each retry of it repeats
+    pub delivery_id: Option<String>,
+    pub state_change: StateChange,
     /// Event payload
     pub payload: WebhookPayload,
+}
+
+/// Whether a delivery moves its issue between states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateChange {
+    /// The event is the move itself, like GitHub's `closed` or `reopened`
+    MovedTo(IssueState),
+    /// The event leaves the state alone, like a GitHub label or edit
+    Kept,
+    /// The event carries the issue's current state, which moved only if it
+    /// differs from the last one seen, like any Linear update
+    Reported,
+}
+
+impl StateChange {
+    /// The state a linked task follows the issue to, given the state this
+    /// delivery reports and the last one seen before it.
+    pub fn target(
+        self,
+        reported: Option<IssueState>,
+        previous: Option<IssueState>,
+    ) -> Option<IssueState> {
+        match self {
+            Self::MovedTo(state) => Some(state),
+            Self::Kept => None,
+            Self::Reported => match (reported, previous) {
+                (Some(reported), Some(previous)) if reported != previous => Some(reported),
+                _ => None,
+            },
+        }
+    }
 }
 
 /// Where an issue lives and who opened it, as far as its delivery says.
@@ -218,9 +253,29 @@ pub struct WebhookPayload {
     pub description: Option<String>,
     /// Issue state
     pub state: Option<IssueState>,
+    /// When the issue last changed, as the external system reports it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
     /// Raw event data for debugging
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<serde_json::Value>,
+}
+
+impl WebhookPayload {
+    /// The payload a synced item last stored, or `None` when what it stored
+    /// does not read as one.
+    pub fn from_stored(stored: &serde_json::Value) -> Option<Self> {
+        serde_json::from_value(stored.clone()).ok()
+    }
+
+    /// Whether this payload describes the issue no later than `previous`
+    /// did, when both say when the issue last changed.
+    pub fn is_no_newer_than(&self, previous: &Self) -> bool {
+        matches!(
+            (self.updated_at, previous.updated_at),
+            (Some(current), Some(previous)) if current <= previous
+        )
+    }
 }
 
 /// Sync provider trait
@@ -438,6 +493,75 @@ mod tests {
         assert!(
             !github_origin(Some("acme/widgets"), reader).is_configured_source(&Settings::default())
         );
+    }
+
+    #[test]
+    fn a_move_is_followed_whatever_the_state_was_before() {
+        let moved = StateChange::MovedTo(IssueState::Closed);
+
+        assert_eq!(moved.target(None, None), Some(IssueState::Closed));
+        assert_eq!(
+            moved.target(Some(IssueState::Open), Some(IssueState::Closed)),
+            Some(IssueState::Closed)
+        );
+    }
+
+    #[test]
+    fn a_kept_state_is_never_followed() {
+        assert_eq!(
+            StateChange::Kept.target(Some(IssueState::Closed), Some(IssueState::Open)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_reported_state_is_followed_only_when_it_differs_from_the_last_one_seen() {
+        let reported = StateChange::Reported;
+
+        assert_eq!(
+            reported.target(Some(IssueState::Closed), Some(IssueState::InProgress)),
+            Some(IssueState::Closed)
+        );
+        assert_eq!(
+            reported.target(Some(IssueState::InProgress), Some(IssueState::InProgress)),
+            None
+        );
+        assert_eq!(reported.target(Some(IssueState::Closed), None), None);
+        assert_eq!(reported.target(None, Some(IssueState::Open)), None);
+    }
+
+    fn payload_at(updated_at: Option<&str>) -> WebhookPayload {
+        WebhookPayload {
+            title: None,
+            description: None,
+            state: None,
+            updated_at: updated_at.map(|time| time.parse().unwrap()),
+            raw: None,
+        }
+    }
+
+    #[test]
+    fn a_payload_is_no_newer_only_when_both_times_are_known_and_it_is_not_later() {
+        let stored = payload_at(Some("2026-01-01T00:00:10Z"));
+
+        assert!(payload_at(Some("2026-01-01T00:00:05Z")).is_no_newer_than(&stored));
+        assert!(payload_at(Some("2026-01-01T00:00:10Z")).is_no_newer_than(&stored));
+        assert!(!payload_at(Some("2026-01-01T00:00:11Z")).is_no_newer_than(&stored));
+        assert!(!payload_at(None).is_no_newer_than(&stored));
+        assert!(!stored.is_no_newer_than(&payload_at(None)));
+    }
+
+    #[test]
+    fn a_stored_state_from_before_payloads_had_times_still_reads() {
+        let stored = WebhookPayload::from_stored(&serde_json::json!({
+            "state": "open",
+            "number": 123
+        }))
+        .expect("an older stored state reads as a payload");
+
+        assert_eq!(stored.state, Some(IssueState::Open));
+        assert_eq!(stored.updated_at, None);
+        assert!(WebhookPayload::from_stored(&serde_json::json!({ "state": "sideways" })).is_none());
     }
 
     #[test]

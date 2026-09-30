@@ -30,7 +30,9 @@ type HmacSha256 = Hmac<Sha256>;
 const GITHUB_SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
 const GITHUB_EVENT_HEADER: &str = "X-GitHub-Event";
 const GITHUB_ISSUES_EVENT: &str = "issues";
+const GITHUB_DELIVERY_HEADER: &str = "X-GitHub-Delivery";
 const LINEAR_SIGNATURE_HEADER: &str = "Linear-Signature";
+const LINEAR_DELIVERY_HEADER: &str = "Linear-Delivery";
 
 fn now_milliseconds() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -670,6 +672,31 @@ async fn test_linear_webhook_signature_verification() {
     cleanup_project(state.db(), project.id).await;
 }
 
+async fn deliver_to(
+    state: &AppState,
+    sync_config_id: Uuid,
+    provider: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> (StatusCode, serde_json::Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/webhooks/sync/{sync_config_id}/{provider}"))
+        .header("Content-Type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = create_router(state.clone())
+        .oneshot(request.body(Body::from(body.to_vec())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
 struct SyncedTask {
     state: AppState,
     project_id: Uuid,
@@ -755,25 +782,7 @@ impl SyncedTask {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> (StatusCode, serde_json::Value) {
-        let mut request = Request::builder()
-            .method("POST")
-            .uri(format!(
-                "/api/webhooks/sync/{}/{}",
-                self.sync_config_id, provider
-            ))
-            .header("Content-Type", "application/json");
-        for (name, value) in headers {
-            request = request.header(*name, *value);
-        }
-        let response = create_router(self.state.clone())
-            .oneshot(request.body(Body::from(body.to_vec())).unwrap())
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+        deliver_to(&self.state, self.sync_config_id, provider, headers, body).await
     }
 
     async fn post(&self, provider: &str, headers: &[(&str, &str)], body: &[u8]) -> StatusCode {
@@ -781,10 +790,21 @@ impl SyncedTask {
     }
 
     async fn post_linear(&self, body: &serde_json::Value) -> StatusCode {
+        self.send_linear(body, None).await.0
+    }
+
+    async fn send_linear(
+        &self,
+        body: &serde_json::Value,
+        delivery: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
         let body = serde_json::to_vec(body).unwrap();
         let signature = self.sign(&body);
-        self.post("linear", &[(LINEAR_SIGNATURE_HEADER, &signature)], &body)
-            .await
+        let mut headers = vec![(LINEAR_SIGNATURE_HEADER, signature.as_str())];
+        if let Some(delivery) = delivery {
+            headers.push((LINEAR_DELIVERY_HEADER, delivery));
+        }
+        self.deliver("linear", &headers, &body).await
     }
 
     async fn event_types(&self) -> Vec<SyncEventType> {
@@ -809,17 +829,24 @@ impl SyncedTask {
     }
 
     async fn post_github(&self, body: &serde_json::Value) -> StatusCode {
+        self.send_github(body, None).await.0
+    }
+
+    async fn send_github(
+        &self,
+        body: &serde_json::Value,
+        delivery: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
         let body = serde_json::to_vec(body).unwrap();
         let signature = format!("sha256={}", self.sign(&body));
-        self.post(
-            "github",
-            &[
-                (GITHUB_SIGNATURE_HEADER, &signature),
-                (GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT),
-            ],
-            &body,
-        )
-        .await
+        let mut headers = vec![
+            (GITHUB_SIGNATURE_HEADER, signature.as_str()),
+            (GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT),
+        ];
+        if let Some(delivery) = delivery {
+            headers.push((GITHUB_DELIVERY_HEADER, delivery));
+        }
+        self.deliver("github", &headers, &body).await
     }
 
     async fn task(&self) -> tasks::TaskRow {
@@ -827,6 +854,22 @@ impl SyncedTask {
             .await
             .expect("Failed to read task")
             .expect("Task disappeared")
+    }
+
+    async fn set_task(&self, title: &str, status: &str) {
+        tasks::update_task(
+            self.state.db(),
+            self.task_id,
+            Some(title),
+            None,
+            None,
+            Some(status),
+            None,
+            None,
+        )
+        .await
+        .expect("Failed to update task")
+        .expect("Task disappeared");
     }
 
     async fn new_tasks(&self) -> Vec<tasks::TaskRow> {
@@ -912,15 +955,270 @@ async fn a_signed_github_edit_updates_the_task_and_answers_ok() {
 }
 
 #[tokio::test]
-async fn a_signed_github_delete_logs_a_close_event() {
+async fn a_signed_github_delete_unlinks_the_issue_and_leaves_the_task_as_it_was() {
     let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    synced.set_task("Original", "in_progress").await;
 
     let status = synced
-        .post_github(&github_issue("deleted", "Original"))
+        .post_github(&github_issue("deleted", "Renamed"))
         .await;
 
     assert_eq!(status, StatusCode::OK);
+    let task = synced.task().await;
+    assert_eq!(task.title, "Original");
+    assert_eq!(task.status, "in_progress");
+    assert!(
+        synced.linked("123").await.is_none(),
+        "a deleted issue is no longer linked to the task"
+    );
+    let logged: Vec<&str> = synced
+        .event_types()
+        .await
+        .into_iter()
+        .map(SyncEventType::as_str)
+        .collect();
+    assert!(logged.contains(&"unlink"), "{logged:?}");
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_event_from_another_repository_leaves_the_task_linked_to_the_same_number_unchanged() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let mut foreign = github_issue("edited", "Renamed");
+    foreign["repository"]["full_name"] = json!("someone-else/test-repo");
+    foreign["issue"]["state"] = json!("closed");
+
+    for action in ["edited", "closed", "deleted"] {
+        foreign["action"] = json!(action);
+        assert_eq!(
+            synced.post_github(&foreign).await,
+            StatusCode::OK,
+            "{action}"
+        );
+    }
+    let mut unplaced = github_issue("edited", "Renamed");
+    unplaced.as_object_mut().unwrap().remove("repository");
+    assert_eq!(synced.post_github(&unplaced).await, StatusCode::OK);
+
+    let task = synced.task().await;
+    assert_eq!(task.title, "Original");
+    assert_eq!(task.status, "created");
+    assert!(synced.linked("123").await.is_some());
+    assert!(synced.item_event_types().await.is_empty());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_github_label_assignment_or_edit_leaves_the_task_status_alone() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    synced.set_task("Original", "in_progress").await;
+
+    for action in ["labeled", "assigned", "edited"] {
+        let status = synced.post_github(&github_issue(action, "Renamed")).await;
+        assert_eq!(status, StatusCode::OK, "{action}");
+    }
+
+    let task = synced.task().await;
+    assert_eq!(task.title, "Renamed");
+    assert_eq!(task.status, "in_progress");
+
+    synced.cleanup().await;
+}
+
+fn github_issue_at(action: &str, title: &str, state: &str, updated_at: &str) -> serde_json::Value {
+    let mut issue = github_issue(action, title);
+    issue["issue"]["state"] = json!(state);
+    issue["issue"]["updated_at"] = json!(updated_at);
+    issue
+}
+
+#[tokio::test]
+async fn a_github_close_completes_the_task_and_a_reopen_brings_it_back() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    synced.set_task("Original", "in_progress").await;
+
+    let closed = github_issue_at("closed", "Original", "closed", "2026-01-01T00:00:10Z");
+    assert_eq!(synced.post_github(&closed).await, StatusCode::OK);
+    assert_eq!(synced.task().await.status, "complete");
+
+    let reopened = github_issue_at("reopened", "Original", "open", "2026-01-01T00:00:20Z");
+    assert_eq!(synced.post_github(&reopened).await, StatusCode::OK);
+    assert_eq!(synced.task().await.status, "created");
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_edit_delivered_after_a_later_close_neither_reopens_nor_renames_the_task() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let closed = github_issue_at("closed", "Closed title", "closed", "2026-01-01T00:00:10Z");
+    assert_eq!(synced.post_github(&closed).await, StatusCode::OK);
+
+    let late = github_issue_at("edited", "Stale title", "open", "2026-01-01T00:00:05Z");
+    let (status, response) = synced.send_github(&late, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let simultaneous = github_issue_at(
+        "edited",
+        "Same-moment title",
+        "open",
+        "2026-01-01T00:00:10Z",
+    );
+    assert_eq!(synced.post_github(&simultaneous).await, StatusCode::OK);
+
+    let task = synced.task().await;
+    assert_eq!(task.title, "Closed title");
+    assert_eq!(task.status, "complete");
     assert_eq!(synced.item_event_types().await, vec![SyncEventType::Close]);
+
+    synced.cleanup().await;
+}
+
+const DELIVERY: &str = "72d3162e-cc78-11e3-81ab-4c9367dc0958";
+
+fn says_already_processed(response: &serde_json::Value) -> bool {
+    response["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("already processed"))
+}
+
+#[tokio::test]
+async fn a_repeated_github_delivery_is_answered_already_processed_and_applied_once() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let body = github_issue("edited", "Renamed");
+
+    let (status, response) = synced.send_github(&body, Some(DELIVERY)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(synced.task().await.title, "Renamed");
+    synced.set_task("Renamed in Zone", "created").await;
+
+    let (status, response) = synced.send_github(&body, Some(DELIVERY)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(says_already_processed(&response), "{response}");
+    let (first, second) = tokio::join!(
+        synced.send_github(&body, Some(DELIVERY)),
+        synced.send_github(&body, Some(DELIVERY))
+    );
+    assert_eq!((first.0, second.0), (StatusCode::OK, StatusCode::OK));
+
+    assert_eq!(synced.task().await.title, "Renamed in Zone");
+    assert_eq!(synced.item_event_types().await, vec![SyncEventType::Update]);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_repeated_linear_delivery_is_answered_already_processed_and_applied_once() {
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+    let body = linear_issue_update();
+
+    let (status, response) = synced.send_linear(&body, Some(DELIVERY)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    synced.set_task("Renamed in Zone", "created").await;
+
+    let (status, response) = synced.send_linear(&body, Some(DELIVERY)).await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(says_already_processed(&response), "{response}");
+    assert_eq!(synced.task().await.title, "Renamed in Zone");
+    assert_eq!(synced.item_event_types().await, vec![SyncEventType::Update]);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_delivery_over_a_megabyte_is_refused_as_too_large() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let body = vec![b' '; 1024 * 1024 + 1];
+    let signature = format!("sha256={}", synced.sign(&body));
+
+    let status = synced
+        .post(
+            "github",
+            &[
+                (GITHUB_SIGNATURE_HEADER, &signature),
+                (GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT),
+            ],
+            &body,
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn every_delivery_refused_before_its_signature_is_checked_gets_the_same_answer() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let body = serde_json::to_vec(&github_issue("edited", "Renamed")).unwrap();
+    let signature = format!("sha256={}", synced.sign(&body));
+    let github_headers = [
+        (GITHUB_SIGNATURE_HEADER, signature.as_str()),
+        (GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT),
+    ];
+    let linear_signature = synced.sign(&body);
+    let linear_headers = [(LINEAR_SIGNATURE_HEADER, linear_signature.as_str())];
+    let forged = synced
+        .deliver(
+            "github",
+            &[
+                (GITHUB_SIGNATURE_HEADER, "sha256=forged"),
+                (GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT),
+            ],
+            &body,
+        )
+        .await;
+    assert_eq!(forged.0, StatusCode::UNAUTHORIZED);
+
+    let unknown = deliver_to(
+        &synced.state,
+        Uuid::new_v4(),
+        "github",
+        &github_headers,
+        &body,
+    )
+    .await;
+    let wrong_provider = synced.deliver("linear", &linear_headers, &body).await;
+    let secretless = sync_config::create_sync_config(
+        synced.state.db(),
+        synced.project_id,
+        "linear",
+        true,
+        linear_config(),
+        None,
+    )
+    .await
+    .expect("Failed to create sync config");
+    let unsecured = deliver_to(
+        &synced.state,
+        secretless.id,
+        "linear",
+        &linear_headers,
+        &body,
+    )
+    .await;
+    sync_config::update_sync_config(
+        synced.state.db(),
+        synced.sync_config_id,
+        Some(false),
+        None,
+        None,
+    )
+    .await
+    .expect("Failed to disable sync config");
+    let disabled = synced.deliver("github", &github_headers, &body).await;
+
+    for (name, answer) in [
+        ("unknown", unknown),
+        ("wrong provider", wrong_provider),
+        ("no secret", unsecured),
+        ("disabled", disabled),
+    ] {
+        assert_eq!(answer, forged, "{name}");
+    }
+    assert_eq!(synced.task().await.title, "Original");
 
     synced.cleanup().await;
 }
@@ -977,34 +1275,6 @@ fn github_issue(action: &str, title: &str) -> serde_json::Value {
         },
         "repository": { "full_name": "test-owner/test-repo" }
     })
-}
-
-#[tokio::test]
-async fn an_event_from_another_repository_leaves_the_task_linked_to_the_same_number_unchanged() {
-    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
-    let mut foreign = github_issue("edited", "Renamed");
-    foreign["repository"]["full_name"] = json!("someone-else/test-repo");
-    foreign["issue"]["state"] = json!("closed");
-
-    for action in ["edited", "closed", "deleted"] {
-        foreign["action"] = json!(action);
-        assert_eq!(
-            synced.post_github(&foreign).await,
-            StatusCode::OK,
-            "{action}"
-        );
-    }
-    let mut unplaced = github_issue("edited", "Renamed");
-    unplaced.as_object_mut().unwrap().remove("repository");
-    assert_eq!(synced.post_github(&unplaced).await, StatusCode::OK);
-
-    let task = synced.task().await;
-    assert_eq!(task.title, "Original");
-    assert_eq!(task.status, "created");
-    assert!(synced.linked("123").await.is_some());
-    assert!(synced.item_event_types().await.is_empty());
-
-    synced.cleanup().await;
 }
 
 #[tokio::test]
@@ -1140,6 +1410,51 @@ async fn a_linear_delivery_sent_over_a_minute_ago_is_unauthorized() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(synced.task().await.title, "Original");
     assert!(synced.event_types().await.is_empty());
+
+    synced.cleanup().await;
+}
+
+fn linear_issue_at(title: &str, state: &str, updated_at: &str) -> serde_json::Value {
+    let mut update = linear_issue_update();
+    update["data"]["title"] = json!(title);
+    update["data"]["state"] = json!({ "type": state, "name": state });
+    update["data"]["updatedAt"] = json!(updated_at);
+    update
+}
+
+#[tokio::test]
+async fn a_linear_update_moves_the_task_only_when_the_issue_state_changes() {
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+    let first = linear_issue_at("Renamed", "started", "2026-01-01T00:00:01.000Z");
+    assert_eq!(synced.post_linear(&first).await, StatusCode::OK);
+    synced.set_task("Renamed", "complete").await;
+
+    let same_state = linear_issue_at("Renamed again", "started", "2026-01-01T00:00:02.000Z");
+    assert_eq!(synced.post_linear(&same_state).await, StatusCode::OK);
+    let task = synced.task().await;
+    assert_eq!(task.title, "Renamed again");
+    assert_eq!(task.status, "complete");
+
+    let moved = linear_issue_at("Renamed again", "backlog", "2026-01-01T00:00:03.000Z");
+    assert_eq!(synced.post_linear(&moved).await, StatusCode::OK);
+    assert_eq!(synced.task().await.status, "created");
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_linear_update_older_than_the_last_one_applied_is_dropped() {
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+    let newer = linear_issue_at("Newer", "started", "2026-01-01T00:00:02.000Z");
+    assert_eq!(synced.post_linear(&newer).await, StatusCode::OK);
+    synced.set_task("Newer", "in_progress").await;
+
+    let older = linear_issue_at("Older", "completed", "2026-01-01T00:00:01.000Z");
+    assert_eq!(synced.post_linear(&older).await, StatusCode::OK);
+
+    let task = synced.task().await;
+    assert_eq!(task.title, "Newer");
+    assert_eq!(task.status, "in_progress");
 
     synced.cleanup().await;
 }
@@ -1368,9 +1683,15 @@ async fn linking_an_issue_another_delivery_already_linked_leaves_no_orphan_task(
     )
     .await;
     let workspace_id = synced.task().await.workspace_id;
+    let mut connection = synced
+        .state
+        .db()
+        .acquire()
+        .await
+        .expect("Failed to acquire a connection");
 
     let item = sync_config::create_synced_task(
-        synced.state.db(),
+        &mut connection,
         sync_config::NewSyncedTask {
             sync_config_id: synced.sync_config_id,
             workspace_id,
@@ -1547,6 +1868,83 @@ async fn a_later_edit_of_a_new_issue_updates_the_task_it_became() {
     assert_eq!(task.title, "Crash on save as");
     assert_eq!(task.description, NEW_ISSUE_BODY);
     assert!(!task.is_agentic);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_webhook_answer_never_names_the_task_it_touched() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+
+    let (status, created) = synced
+        .send_github(&opened_issue("MEMBER", "test-owner/test-repo"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, updated) = synced
+        .send_github(&github_issue("edited", "Renamed"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+
+    let new_task = synced.new_task().await.id.to_string();
+    assert!(!created.to_string().contains(&new_task), "{created}");
+    assert!(
+        !updated.to_string().contains(&synced.task_id.to_string()),
+        "{updated}"
+    );
+    assert_eq!(synced.task().await.title, "Renamed");
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_new_issue_whose_create_event_cannot_be_logged_leaves_no_task_behind() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let function = format!("refuse_create_event_{}", synced.sync_config_id.simple());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+           IF NEW.event_type = 'create' AND NEW.sync_config_id = '{}' THEN \
+             RAISE EXCEPTION 'create events are refused'; \
+           END IF; RETURN NEW; END $$; \
+         CREATE TRIGGER {function} BEFORE INSERT ON sync_events \
+           FOR EACH ROW EXECUTE FUNCTION {function}();",
+        synced.sync_config_id
+    )))
+    .execute(synced.state.db())
+    .await
+    .expect("Failed to install the refusing trigger");
+    let opened = opened_issue("MEMBER", "test-owner/test-repo");
+
+    let status = synced.post_github(&opened).await;
+
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER {function} ON sync_events; DROP FUNCTION {function}();"
+    )))
+    .execute(synced.state.db())
+    .await
+    .expect("Failed to remove the refusing trigger");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        synced.new_tasks().await.is_empty(),
+        "no task outlives its failed delivery"
+    );
+    assert!(synced.linked(NEW_ISSUE).await.is_none());
+
+    assert_eq!(synced.post_github(&opened).await, StatusCode::OK);
+    assert_eq!(
+        synced.new_tasks().await.len(),
+        1,
+        "a retry creates the task"
+    );
 
     synced.cleanup().await;
 }

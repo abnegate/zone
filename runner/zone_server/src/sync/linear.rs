@@ -2,14 +2,14 @@
 
 use async_trait::async_trait;
 use axum::http::HeaderMap;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 
 use super::{
-    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, SyncConfig, SyncError,
-    SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
+    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, StateChange, SyncConfig,
+    SyncError, SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
 };
 use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
@@ -17,6 +17,7 @@ use crate::db::tasks::TaskRow;
 pub const PROVIDER_NAME: &str = "linear";
 
 const SIGNATURE_HEADER: &str = "Linear-Signature";
+const DELIVERY_HEADER: &str = "Linear-Delivery";
 const ISSUE_TYPE: &str = "Issue";
 const TIMESTAMP_TOLERANCE_MILLISECONDS: u64 = 60_000;
 
@@ -73,13 +74,33 @@ struct LinearState {
 /// Linear webhook event
 #[derive(Debug, Clone, Deserialize)]
 struct LinearWebhookPayload {
-    action: String,
+    action: Action,
     #[serde(rename = "type")]
     event_type: String,
     #[serde(default)]
     data: serde_json::Value,
     #[serde(rename = "webhookTimestamp")]
     webhook_timestamp: Option<i64>,
+}
+
+/// What happened to an entity, as a delivery's `action` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Action {
+    Create,
+    Remove,
+    #[serde(other)]
+    Other,
+}
+
+impl Action {
+    fn event_type(self) -> SyncEventType {
+        match self {
+            Self::Create => SyncEventType::Create,
+            Self::Remove => SyncEventType::Close,
+            Self::Other => SyncEventType::Update,
+        }
+    }
 }
 
 /// Linear sync provider
@@ -162,14 +183,6 @@ impl LinearSyncProvider {
             )));
         }
         Ok(())
-    }
-
-    fn map_action_to_event_type(action: &str) -> SyncEventType {
-        match action {
-            "create" => SyncEventType::Create,
-            "remove" => SyncEventType::Close,
-            _ => SyncEventType::Update,
-        }
     }
 
     /// Execute a GraphQL query
@@ -414,6 +427,12 @@ impl SyncProvider for LinearSyncProvider {
         let description = text("description");
         let url = text("url");
         let project_id = text("projectId");
+        let updated_at = text("updatedAt").and_then(|time| time.parse::<DateTime<Utc>>().ok());
+        let delivery_id = headers
+            .get(DELIVERY_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
 
         // Parse state
         let state = payload
@@ -424,14 +443,17 @@ impl SyncProvider for LinearSyncProvider {
             .map(Self::map_linear_state_to_issue_state);
 
         Ok(Delivery::Issue(WebhookEvent {
-            event_type: Self::map_action_to_event_type(&payload.action),
+            event_type: payload.action.event_type(),
             external_id: issue_id.to_string(),
             url,
             origin: IssueOrigin::Linear { project_id },
+            delivery_id,
+            state_change: StateChange::Reported,
             payload: WebhookPayload {
                 title,
                 description,
                 state,
+                updated_at,
                 raw: Some(payload.data),
             },
         }))
@@ -615,6 +637,38 @@ mod tests {
             IssueOrigin::Linear {
                 project_id: Some("project-1".to_string())
             }
+        );
+    }
+
+    #[test]
+    fn an_issue_delivery_reports_its_state_delivery_id_and_when_the_issue_last_changed() {
+        use hmac::{Hmac, KeyInit, Mac};
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut body = delivery(ISSUE_TYPE, "update");
+        body["data"]["updatedAt"] = serde_json::json!("2026-01-01T00:00:10.500Z");
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut mac = HmacSha256::new_from_slice(SECRET.as_bytes()).unwrap();
+        mac.update(&bytes);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            SIGNATURE_HEADER,
+            hex::encode(mac.finalize().into_bytes()).parse().unwrap(),
+        );
+        headers.insert(DELIVERY_HEADER, "delivery-1".parse().unwrap());
+
+        let Delivery::Issue(event) = LinearSyncProvider::new()
+            .parse_webhook(&headers, &bytes, SECRET)
+            .unwrap()
+        else {
+            panic!("an issue delivery is an issue");
+        };
+
+        assert_eq!(event.state_change, StateChange::Reported);
+        assert_eq!(event.delivery_id.as_deref(), Some("delivery-1"));
+        assert_eq!(
+            event.payload.updated_at,
+            Some("2026-01-01T00:00:10.500Z".parse().unwrap())
         );
     }
 

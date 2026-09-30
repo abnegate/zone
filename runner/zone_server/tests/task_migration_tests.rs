@@ -1195,6 +1195,7 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
             "046_invitations_pending_unique.sql",
             "048_agent_logins.sql",
             "049_task_reviews_failed_verdict.sql",
+            "050_sync_deliveries.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );
