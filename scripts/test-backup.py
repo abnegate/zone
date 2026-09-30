@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tarfile
 import tempfile
@@ -32,6 +33,7 @@ DATE = '20260930_000000'
 RUN_NAME = re.compile(rf'^zone_backup_{DATE}-[0-9]+$')
 ARCHIVE_NAME = re.compile(rf'^zone_backup_{DATE}-[0-9]+\.tar\.gz$')
 PREVIOUS = '.zone-restore-previous'
+DELIVERED_SIGNALS = [signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT]
 
 FAKE_DOCKER = '''#!/usr/bin/env python3
 import json, os, signal, subprocess, sys, time
@@ -197,6 +199,13 @@ class Fake:
     tar_block: str = ''
     tar_collide: bool = False
     interrupted: str = ''
+    inherited_ignored: str = ''
+
+    def dispositions(self) -> Callable[[], None]:
+        def apply() -> None:
+            for number in DELIVERED_SIGNALS:
+                signal.signal(number, signal.SIG_IGN if number.name == self.inherited_ignored else signal.SIG_DFL)
+        return apply
 
 
 class Sandbox:
@@ -248,18 +257,21 @@ class MakeTarget(unittest.TestCase):
             if fake.closed_output:
                 handshake = sandbox.folder / 'handshake'
                 environment['FAKE_DOCKER_HANDSHAKE'] = str(handshake)
-                returncode, output = self.run_with_output_closed_on_signal(command, environment, handshake)
+                returncode, output = self.run_with_output_closed_on_signal(command, environment, handshake,
+                                                                           fake.dispositions())
             else:
-                result = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=30)
+                result = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=30,
+                                        preexec_fn=fake.dispositions())
                 returncode, output = result.returncode, result.stdout + result.stderr
             mode = sandbox.backups.stat().st_mode & 0o777 if sandbox.backups.exists() else None
             return Run(returncode, output, read_calls(log), mode, read_files(sandbox.backups))
 
-    def run_with_output_closed_on_signal(self, command: list[str], environment: dict[str, str],
-                                         handshake: Path) -> tuple[int, str]:
+    def run_with_output_closed_on_signal(self, command: list[str], environment: dict[str, str], handshake: Path,
+                                         dispositions: Callable[[], None]) -> tuple[int, str]:
         reader, writer = os.pipe()
         with tempfile.TemporaryFile(mode='w+') as errors:
-            process = subprocess.Popen(command, env=environment, text=True, stdout=writer, stderr=errors)
+            process = subprocess.Popen(command, env=environment, text=True, stdout=writer, stderr=errors,
+                                       preexec_fn=dispositions)
             os.close(writer)
             ready = handshake.with_name(handshake.name + '.ready')
             try:
@@ -388,6 +400,23 @@ class Backup(MakeTarget):
                 run = self.make('backup', Fake(signal_on='cp -a', signal='SIGQUIT'), shell)
                 self.assertRestartedAndStageRemoved(run, is_stage_copy)
                 self.assertEqual(run.indexes(is_archive), [])
+
+    def test_quit_ignored_by_the_caller_still_starts_postgres_and_removes_the_stage(self) -> None:
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                run = self.make('backup', Fake(signal_on='cp -a', signal='SIGQUIT', inherited_ignored='SIGQUIT'), shell)
+                self.assertEqual(run.calls[run.first(is_start)], ['start', POSTGRES])
+                self.assertEqual(len(run.indexes(is_start)), 1)
+                self.assertLess(run.first(is_stage_copy), run.first(is_start))
+                self.assertEqual(run.calls[run.first(is_stage_remove)], ['volume', 'rm', run.stage()])
+                self.assertLess(run.first(is_stage_copy), run.first(is_stage_remove))
+                if run.returncode == 0:
+                    self.assertLess(run.first(is_start), run.first(is_archive))
+                    self.assertIn('Backup created', run.output)
+                else:
+                    self.assertEqual(run.indexes(is_archive), [], 'a quit the recipe trapped must not archive')
+                    self.assertNotIn('Backup created', run.output)
+                    self.assertEqual(run.files, {})
 
     def test_failed_archive_removes_the_stage(self) -> None:
         for shell in SHELLS:

@@ -86,5 +86,11 @@ jobs:
           ZONE_TEST_DOCKER: '1'
         run: python3 scripts/test-backup.py
 
+      - name: Verify backup and restore Make commands under busybox sh, as an Alpine host runs them
+        run: >-
+          docker run --rm -v "$PWD:/zone:ro" -w /zone
+          alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+          sh -c 'apk add --no-cache make python3 >/dev/null && python3 scripts/test-backup.py'
+
       - name: Verify the manager Dockerfile copies every workspace member
         run: sh scripts/test-dockerfile-members.sh
