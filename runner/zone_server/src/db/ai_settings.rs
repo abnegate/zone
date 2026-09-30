@@ -81,6 +81,127 @@ pub struct Update<'a> {
     pub model_audio: Option<&'a str>,
 }
 
+/// An endpoint URL and the key saved beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pair {
+    Litellm,
+    OpenAI,
+    Anthropic,
+}
+
+impl Pair {
+    const ALL: [Self; 3] = [Self::Litellm, Self::OpenAI, Self::Anthropic];
+
+    fn url_field(self) -> &'static str {
+        match self {
+            Self::Litellm => "litellm_host",
+            Self::OpenAI => "openai_base_url",
+            Self::Anthropic => "anthropic_base_url",
+        }
+    }
+
+    fn key_field(self) -> &'static str {
+        match self {
+            Self::Litellm => "litellm_key",
+            Self::OpenAI => "openai_api_key",
+            Self::Anthropic => "anthropic_api_key",
+        }
+    }
+
+    /// Where a key saved without a URL is sent. A LiteLLM key without a host
+    /// is never sent: the instance runs on its own key.
+    fn default_url(self) -> Option<&'static str> {
+        match self {
+            Self::Litellm => None,
+            Self::OpenAI => Some(endpoint::OPENAI_URL),
+            Self::Anthropic => Some(endpoint::ANTHROPIC_URL),
+        }
+    }
+
+    fn url<'a>(self, update: &Update<'a>) -> Option<&'a str> {
+        match self {
+            Self::Litellm => update.litellm_host,
+            Self::OpenAI => update.openai_base_url,
+            Self::Anthropic => update.anthropic_base_url,
+        }
+    }
+
+    fn key<'a>(self, update: &Update<'a>) -> Option<&'a str> {
+        match self {
+            Self::Litellm => update.litellm_key,
+            Self::OpenAI => update.openai_api_key,
+            Self::Anthropic => update.anthropic_api_key,
+        }
+    }
+}
+
+/// The endpoint URLs a row saves, and whether a key is saved beside each.
+#[derive(Debug, Clone, Default, sqlx::FromRow)]
+struct SavedEndpoints {
+    litellm_host: Option<String>,
+    litellm_key: bool,
+    openai_base_url: Option<String>,
+    openai_api_key: bool,
+    anthropic_base_url: Option<String>,
+    anthropic_api_key: bool,
+}
+
+impl SavedEndpoints {
+    fn url(&self, pair: Pair) -> Option<&str> {
+        nonempty(match pair {
+            Pair::Litellm => self.litellm_host.as_deref(),
+            Pair::OpenAI => self.openai_base_url.as_deref(),
+            Pair::Anthropic => self.anthropic_base_url.as_deref(),
+        })
+    }
+
+    fn keyed(&self, pair: Pair) -> bool {
+        match pair {
+            Pair::Litellm => self.litellm_key,
+            Pair::OpenAI => self.openai_api_key,
+            Pair::Anthropic => self.anthropic_api_key,
+        }
+    }
+}
+
+const ORGANIZATION_ENDPOINTS: &str = r#"
+    SELECT litellm_host, litellm_key IS NOT NULL AS litellm_key,
+           openai_base_url, openai_api_key IS NOT NULL AS openai_api_key,
+           anthropic_base_url, anthropic_api_key IS NOT NULL AS anthropic_api_key
+    FROM organization_ai_settings
+    WHERE organization_id = $1
+    FOR UPDATE
+"#;
+
+const WORKSPACE_ENDPOINTS: &str = r#"
+    SELECT litellm_host, litellm_key IS NOT NULL AS litellm_key,
+           openai_base_url, openai_api_key IS NOT NULL AS openai_api_key,
+           anthropic_base_url, anthropic_api_key IS NOT NULL AS anthropic_api_key
+    FROM workspace_ai_settings
+    WHERE workspace_id = $1
+    FOR UPDATE
+"#;
+
+const ROUTED_ORGANIZATION_ENDPOINTS: &str = r#"
+    SELECT litellm_host, litellm_key IS NOT NULL AS litellm_key,
+           openai_base_url, openai_api_key IS NOT NULL AS openai_api_key,
+           anthropic_base_url, anthropic_api_key IS NOT NULL AS anthropic_api_key
+    FROM organization_ai_settings
+    WHERE organization_id = $1 AND completions_routed
+"#;
+
+async fn saved_endpoints(
+    connection: &mut PgConnection,
+    query: &'static str,
+    id: Uuid,
+) -> DbResult<SavedEndpoints> {
+    let saved: Option<SavedEndpoints> = sqlx::query_as(query)
+        .bind(id)
+        .fetch_optional(connection)
+        .await?;
+    Ok(saved.unwrap_or_default())
+}
+
 fn validate(update: &Update<'_>, hosts: &Hosts) -> AccessResult<()> {
     if let Some(provider) = update.provider
         && !PROVIDERS.contains(&provider)
@@ -90,17 +211,59 @@ fn validate(update: &Update<'_>, hosts: &Hosts) -> AccessResult<()> {
             PROVIDERS.join(", ")
         )));
     }
-    for (field, value) in [
-        ("litellm_host", update.litellm_host),
-        ("openai_base_url", update.openai_base_url),
-        ("anthropic_base_url", update.anthropic_base_url),
-    ] {
-        if let Some(value) = nonempty(value) {
+    for pair in Pair::ALL {
+        if let Some(value) = nonempty(pair.url(update)) {
             endpoint::validate_url(value, hosts)
-                .map_err(|error| AccessError::Invalid(format!("{field}: {error}")))?;
+                .map_err(|error| AccessError::Invalid(format!("{}: {error}", pair.url_field())))?;
         }
     }
     Ok(())
+}
+
+/// Refuse an update that would send a saved key to a provider's default host
+/// the instance does not list.
+/// `saved` is the row being updated and `inherited` the URLs it falls back
+/// to, which a workspace takes from its organization.
+fn validate_keys(
+    update: &Update<'_>,
+    saved: &SavedEndpoints,
+    inherited: &SavedEndpoints,
+    hosts: &Hosts,
+) -> AccessResult<()> {
+    for pair in Pair::ALL {
+        let (url, key) = (pair.url(update), pair.key(update));
+        if url.is_none() && key.is_none() {
+            continue;
+        }
+        let next_url = match url {
+            Some(url) => nonempty(Some(url)),
+            None => saved.url(pair),
+        };
+        let keyed = match key {
+            Some(key) => nonempty(Some(key)).is_some(),
+            None => saved.keyed(pair),
+        };
+        if keyed
+            && next_url.is_none()
+            && inherited.url(pair).is_none()
+            && let Some(default) = pair.default_url()
+            && endpoint::validate_url(default, hosts).is_err()
+        {
+            return Err(AccessError::Invalid(format!(
+                "{}: a key saved without a base URL goes to {}, which is not a host this instance allows endpoints on. Save a base URL on a host it allows.",
+                pair.key_field(),
+                host(default)
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn host(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| url.to_string())
 }
 
 /// The organization's own settings carry its provider credentials, so reading
@@ -474,6 +637,8 @@ pub async fn upsert_org_authorized(
     let mut transaction = pool.begin().await?;
     authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
     validate(&update, hosts)?;
+    let saved = saved_endpoints(&mut transaction, ORGANIZATION_ENDPOINTS, organization_id).await?;
+    validate_keys(&update, &saved, &SavedEndpoints::default(), hosts)?;
     let settings = upsert_org(&mut *transaction, organization_id, &update).await?;
     transaction.commit().await?;
     Ok(settings)
@@ -727,6 +892,14 @@ pub async fn upsert_workspace_authorized(
     )
     .await?;
     validate(&update, hosts)?;
+    let saved = saved_endpoints(&mut transaction, WORKSPACE_ENDPOINTS, workspace_id).await?;
+    let inherited = saved_endpoints(
+        &mut transaction,
+        ROUTED_ORGANIZATION_ENDPOINTS,
+        organization_id,
+    )
+    .await?;
+    validate_keys(&update, &saved, &inherited, hosts)?;
     let settings = upsert_workspace(&mut *transaction, workspace_id, &update).await?;
     let organization_keys = organization_keys(&mut *transaction, organization_id).await?;
     transaction.commit().await?;
@@ -1290,6 +1463,55 @@ mod tests {
             ..Update::default()
         };
         assert!(validate(&blank, &Hosts::default()).is_ok());
+    }
+
+    #[test]
+    fn a_key_without_a_url_is_refused_only_when_its_default_host_is_not_listed() {
+        const KEY: &str = "sk-never-echoed";
+        let nothing = SavedEndpoints::default();
+        let restricted = Hosts::parse("llm.corp.example");
+        for (update, field, host) in [
+            (
+                Update {
+                    openai_api_key: Some(KEY),
+                    ..Update::default()
+                },
+                "openai_api_key",
+                "api.openai.com",
+            ),
+            (
+                Update {
+                    anthropic_api_key: Some(KEY),
+                    ..Update::default()
+                },
+                "anthropic_api_key",
+                "api.anthropic.com",
+            ),
+        ] {
+            let refused = validate_keys(&update, &nothing, &nothing, &restricted)
+                .expect_err("the key would go to an unlisted default host")
+                .to_string();
+            assert!(refused.starts_with(field), "{refused}");
+            assert!(refused.contains(host), "{refused}");
+            assert!(!refused.contains(KEY), "{refused}");
+
+            assert!(validate_keys(&update, &nothing, &nothing, &Hosts::default()).is_ok());
+            let organization = SavedEndpoints {
+                openai_base_url: Some("https://llm.corp.example/v1".to_string()),
+                anthropic_base_url: Some("https://llm.corp.example/v1".to_string()),
+                ..SavedEndpoints::default()
+            };
+            assert!(
+                validate_keys(&update, &nothing, &organization, &restricted).is_ok(),
+                "a workspace key alone goes to its organization's URL"
+            );
+        }
+
+        let litellm = Update {
+            litellm_key: Some(KEY),
+            ..Update::default()
+        };
+        assert!(validate_keys(&litellm, &nothing, &nothing, &restricted).is_ok());
     }
 
     #[test]

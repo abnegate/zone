@@ -1866,3 +1866,77 @@ async fn test_a_legacy_url_carrying_credentials_is_returned_without_them() {
         "http://workspace.example:4000/"
     );
 }
+
+fn settings_paths(org_id: &str, ws_id: &str) -> [String; 2] {
+    [
+        format!("/api/organizations/{org_id}/settings/ai"),
+        format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai"),
+    ]
+}
+
+#[tokio::test]
+async fn test_a_key_saved_without_a_url_is_refused_when_the_default_host_is_not_listed() {
+    const SECRET: &str = "sk-default-host-9d41c7";
+    let mut config = common::test_config();
+    config.endpoint_hosts = zone_server::services::hosts::Hosts::parse("llm.corp.example");
+    let client = TestClient::with_config(config).await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let [organization, workspace] = settings_paths(&org_id, &ws_id);
+
+    for path in [workspace, organization] {
+        for (provider, url, key, has_key, host) in [
+            (
+                "openai",
+                "openai_base_url",
+                "openai_api_key",
+                "has_openai_api_key",
+                "api.openai.com",
+            ),
+            (
+                "anthropic",
+                "anthropic_base_url",
+                "anthropic_api_key",
+                "has_anthropic_api_key",
+                "api.anthropic.com",
+            ),
+        ] {
+            let refused = client
+                .put_json_auth(&path, &json!({ "provider": provider, key: SECRET }), &token)
+                .await;
+            assert_eq!(
+                refused.status,
+                StatusCode::BAD_REQUEST,
+                "{path} saved a {provider} key for {host}: {}",
+                refused.text()
+            );
+            assert!(
+                refused.text().contains(host),
+                "the refusal does not name {host}: {}",
+                refused.text()
+            );
+            assert!(
+                !refused.text().contains(SECRET),
+                "the refusal echoed the key: {}",
+                refused.text()
+            );
+            let stored = client.get_auth(&path, &token).await;
+            stored.assert_status(StatusCode::OK);
+            assert_eq!(stored.json_value()[has_key], false, "{path} kept {key}");
+
+            client
+                .put_json_auth(
+                    &path,
+                    &json!({
+                        "provider": provider,
+                        url: "https://llm.corp.example/v1",
+                        key: SECRET,
+                    }),
+                    &token,
+                )
+                .await
+                .assert_status(StatusCode::OK);
+        }
+    }
+}

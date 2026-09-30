@@ -267,12 +267,15 @@ impl Endpoint {
         let url = saved_url(base, &config.endpoint_hosts)?;
         match (saved_key(key), url) {
             (Some(key), Some(url)) => Ok(Some(Self::settings(url, Some(key), dialect))),
-            (Some(key), None) => Ok(Some(Self {
-                url: default.to_string(),
-                key,
-                origin: Origin::Settings,
-                dialect,
-            })),
+            (Some(key), None) => {
+                validate_url(default, &config.endpoint_hosts)?;
+                Ok(Some(Self {
+                    url: default.to_string(),
+                    key,
+                    origin: Origin::Settings,
+                    dialect,
+                }))
+            }
             (None, Some(url)) => Ok(Some(Self::settings(url, None, dialect))),
             (None, None) => Ok(None),
         }
@@ -941,6 +944,35 @@ mod tests {
         assert_eq!(unlisted.err(), Some(UrlError::Unlisted));
         assert_eq!(listed.url(), "https://llm.corp.example/v1");
         assert_eq!(listed.origin(), Origin::Settings);
+    }
+
+    #[test]
+    fn a_key_saved_without_a_url_never_goes_to_a_default_host_the_instance_does_not_list() {
+        let restricted = Config {
+            endpoint_hosts: Hosts::parse("llm.corp.example"),
+            ..config()
+        };
+        let listed = Config {
+            endpoint_hosts: Hosts::parse("api.openai.com, api.anthropic.com"),
+            ..config()
+        };
+        let key_only = Saved {
+            url: None,
+            key: Some(SAVED_KEY),
+        };
+
+        for (provider, default) in [
+            (PROVIDER_OPENAI, OPENAI_URL),
+            (PROVIDER_ANTHROPIC, ANTHROPIC_URL),
+        ] {
+            let refused = Endpoint::try_resolve(&restricted, &saved(provider, key_only));
+            let permitted = Endpoint::try_resolve(&listed, &saved(provider, key_only))
+                .unwrap_or_else(|error| panic!("{provider} on a listed default host: {error}"));
+
+            assert_eq!(refused.err(), Some(UrlError::Unlisted), "{provider}");
+            assert_eq!(permitted.url(), default, "{provider}");
+            assert_eq!(permitted.origin(), Origin::Settings, "{provider}");
+        }
     }
 
     #[test]

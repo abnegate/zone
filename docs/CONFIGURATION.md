@@ -174,7 +174,11 @@ of the organization's, and inherits the ones it leaves blank.
   OpenAI-compatible endpoint, which Anthropic describes as meant for testing and
   "not considered a long-term or production-ready solution for most use cases".
 - **OpenAI** or **Anthropic** with neither a base URL nor a key saved runs on
-  the instance endpoint.
+  the instance endpoint. With only a key saved, the provider's default host
+  (`api.openai.com` or `api.anthropic.com`) must be one `ZONE_ENDPOINT_HOSTS`
+  lists when that is set: AI Settings refuses such a save naming the host, and
+  a row saved before the host was left out of the list is unusable (see
+  below).
 - **AWS Bedrock** is not routed yet: it runs on the instance default.
 
 Settings saved before completions were routed keep running on the instance
@@ -232,8 +236,8 @@ A saved endpoint that can no longer be used fails closed: its completions are
 never sent to the instance endpoint instead, since that would hand an
 organization's data to a provider it did not choose. That happens when a URL
 saved before these checks fails them, when `ZONE_ENDPOINT_HOSTS` is later
-tightened to leave out a saved host, or when the AI settings cannot be read at
-all. Chats then end in an error, *This
+tightened to leave out a saved host or a key-only row's default host, or when
+the AI settings cannot be read at all. Chats then end in an error, *This
 workspace's AI endpoint can't be used: <reason>. Check AI Settings.*, a task run
 fails with that message, and an auto-project task pauses with it; chat titles,
 pull request subjects and merge summaries fall back to their plain versions,
@@ -275,10 +279,11 @@ as an attachment of unknown size.
   `*.corp.example`) matches `corp.example` and every name under it. Case and a
   trailing dot are ignored, and so are ports.
 - **Default**: Empty, which allows every host
-- **Note**: A URL the list does not match is refused when it is saved. A row
-  saved before the list was set that it does not match can no longer be used:
-  its completions fail with the reason rather than going to the instance
-  endpoint (see *Saved endpoints*).
+- **Note**: A URL the list does not match is refused when it is saved, and so
+  is an OpenAI or Anthropic key saved without a URL when the list does not
+  match that provider's default host. A row saved before the list was set that
+  it does not match can no longer be used: its completions fail with the reason
+  rather than going to the instance endpoint (see *Saved endpoints*).
   Link-local and metadata addresses stay refused even when listed.
 
 ### Usage credits
