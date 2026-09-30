@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check the Prometheus scrape config and Grafana alert rules with PyYAML and promtool."""
 
+import json
 import re
 import shutil
 import subprocess
@@ -13,10 +14,12 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 PROMETHEUS_CONFIG = ROOT / 'prometheus' / 'prometheus.yml'
 ALERT_RULES = ROOT / 'grafana' / 'provisioning' / 'alerting' / 'rules.yml'
+DASHBOARDS = ROOT / 'grafana' / 'dashboards'
 COMPOSE = ROOT / 'docker-compose.yml'
 GLUETUN_METRICS = 'gluetun:8001'
 SEARXNG_TARGET = 'http://gluetun:8080/'
 BUDGET_RECORD = 'litellm_budget_low:minimum'
+BUDGET_METRIC = 'litellm_remaining_api_key_budget_metric'
 
 
 def load(path: Path) -> dict:
@@ -37,6 +40,15 @@ def prometheus_queries(rule: dict) -> list[str]:
         for query in rule['data']
         if query['datasourceUid'] == 'prometheus'
     ]
+
+
+def dashboard_queries(node: object) -> list[str]:
+    if isinstance(node, dict):
+        own = [node['expr']] if isinstance(node.get('expr'), str) else []
+        return own + [query for value in node.values() for query in dashboard_queries(value)]
+    if isinstance(node, list):
+        return [query for value in node for query in dashboard_queries(value)]
+    return []
 
 
 def jobs() -> dict[str, dict]:
@@ -84,6 +96,14 @@ class BudgetRuleTests(unittest.TestCase):
 
     def test_no_data_is_ok(self) -> None:
         self.assertEqual(rules()['litellm-budget-low']['noDataState'], 'OK')
+
+    def test_dashboards_ignore_unlimited_keys(self) -> None:
+        for dashboard in sorted(DASHBOARDS.glob('*.json')):
+            for query in dashboard_queries(json.loads(dashboard.read_text())):
+                if BUDGET_METRIC not in query:
+                    continue
+                with self.subTest(dashboard=dashboard.name, query=query):
+                    self.assertIn(f'{BUDGET_METRIC} < +Inf', query, 'an unlimited key reports +Inf, which swamps any sum or min')
 
 
 class GluetunScrapeTests(unittest.TestCase):
