@@ -697,7 +697,7 @@ test.describe('agent tools from chat', () => {
         tools.includes('web_search') &&
         searchResults.some((r) => !/not configured|unavailable|error/i.test(r))
           ? undefined
-          : 'environment: no SEARCH_* backend on the rig server; re-checked against SearXNG in row 61',
+          : 'web_search was not called, or answered only with an error or "not configured"',
       chat_id: chatId,
       fetch_reply: fetched.slice(0, 200),
       search_reply: searched.slice(0, 200),
@@ -707,6 +707,74 @@ test.describe('agent tools from chat', () => {
     });
     expect(tools).toContain('fetch_url');
     expect(fetched).toMatch(/example domain/i);
+  });
+
+  test('53 and 61: the Prometheus and Grafana tools, and web search through SearXNG', async ({
+    page,
+  }) => {
+    const searxng = process.env.ZONE_LIVE_SEARXNG_CONTAINER ?? '';
+    test.skip(!searxng, 'set ZONE_LIVE_SEARXNG_CONTAINER to the SearXNG the rig queries');
+    const since = new Date().toISOString();
+    await signIn(page);
+    const chatId = await agentChat(page);
+    const searched = await ask(
+      page,
+      'Search the web for the current stable version of the Rust programming language and tell me the version and the page you found it on.',
+      { replies: 1, timeout: 600_000 },
+    );
+    await shot(page, '61-web-search');
+    const prometheus = await ask(
+      page,
+      'Ask Prometheus how many scrape targets are up right now, and tell me the number.',
+      { replies: 2, timeout: 600_000 },
+    );
+    await shot(page, '53-query-prometheus');
+    const grafana = await ask(
+      page,
+      'List the Grafana dashboards that exist in this deployment.',
+      { replies: 3, timeout: 600_000 },
+    );
+    await shot(page, '53-list-grafana-dashboards');
+    const tools = toolNames(chatId);
+    const searches = execFileSync('docker', ['logs', '--since', since, searxng], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+      .split('\n')
+      .filter((line) => /search|GET/.test(line));
+    const searchResults = toolResults(chatId, 'web_search');
+    const monitoringTools = tools.filter((name) =>
+      /prometheus|grafana/i.test(name),
+    );
+    record(61, {
+      result:
+        tools.includes('web_search') &&
+        searchResults.some((r) => /^Web search results \(via SearXNG\)/.test(r)) &&
+        /1\.\d\d/.test(searched)
+          ? 'WORKS'
+          : 'FAILS',
+      chat_id: chatId,
+      search_reply: searched.slice(0, 300),
+      web_search_results: searchResults.slice(0, 2),
+      searxng_requests: searches.slice(-3).map((line) => line.slice(0, 200)),
+      screenshots: ['61-web-search.png'],
+    });
+    record(53, {
+      result:
+        tools.includes('query_prometheus') &&
+        tools.includes('list_grafana_dashboards') &&
+        /\d/.test(prometheus) &&
+        /overview|manager|dashboard/i.test(grafana)
+          ? 'WORKS'
+          : 'FAILS',
+      chat_id: chatId,
+      prometheus_reply: prometheus.slice(0, 300),
+      grafana_reply: grafana.slice(0, 400),
+      tools,
+      screenshots: ['53-query-prometheus.png', '53-list-grafana-dashboards.png'],
+    });
+    expect(tools).toContain('web_search');
+    expect(monitoringTools.length).toBeGreaterThan(0);
   });
 
   test('50: the GitHub tools against the scratch repository', async ({
