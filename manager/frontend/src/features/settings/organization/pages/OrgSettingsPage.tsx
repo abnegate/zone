@@ -53,6 +53,7 @@ export default function OrgSettingsPage() {
   const [credentials, setCredentials] = useState<ProviderCredentials>(emptyCredentials);
   const [configured, setConfigured] = useState<ProviderConfigured>(nothingConfigured);
   const [models, setModels] = useState<ModelSelection>(emptyModels);
+  const [saved, setSaved] = useState<AiSettings | null>(null);
 
   const agent = agentOf(provider);
   const agents = useAgentStatuses(currentOrganization?.id ?? null, agent !== null);
@@ -63,6 +64,7 @@ export default function OrgSettingsPage() {
     setCredentials(credentialsFromSettings(settings));
     setConfigured(configuredFromSettings(settings));
     setModels(modelsFromSettings(settings));
+    setSaved(settings);
   }, []);
 
   const loadSettings = useCallback(async () => {
@@ -209,6 +211,7 @@ export default function OrgSettingsPage() {
               onChange={(key, value) =>
                 setCredentials((previous) => ({ ...previous, [key]: value }))
               }
+              saved={saved}
             />
             {agent && (
               <AgentSignIn

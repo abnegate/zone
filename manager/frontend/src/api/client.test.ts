@@ -1516,8 +1516,13 @@ describe('Client', () => {
       model_image: 'flux1-schnell-fp8.safetensors',
       model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
       model_audio: 'ace_step_v1_3.5b.safetensors',
+      completions_routed: true,
     };
-    const mockWorkspaceAiSettings = { ...mockAiSettings, overrides: true };
+    const mockWorkspaceAiSettings = {
+      ...mockAiSettings,
+      overrides: true,
+      organization_keys: { litellm: false, openai: false, anthropic: false },
+    };
 
     describe('Organization AI Settings', () => {
       it('getOrgAiSettings fetches org AI settings', async () => {
@@ -1626,7 +1631,7 @@ describe('Client', () => {
       it('resetWorkspaceAiSettings resets workspace AI settings and reads the defaults back', async () => {
         mockFetch.mockResolvedValueOnce({ ok: true, status: 204 }).mockResolvedValueOnce({
           ok: true,
-          json: async () => ({ ...mockAiSettings, overrides: false }),
+          json: async () => ({ ...mockWorkspaceAiSettings, overrides: false }),
         });
 
         const result = await client.resetWorkspaceAiSettings('org-1', 'ws-1');

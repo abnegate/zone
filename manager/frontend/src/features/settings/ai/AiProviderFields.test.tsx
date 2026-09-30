@@ -1,17 +1,22 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { AiProviderSchema } from '../workspace/schemas';
-import type { AiProvider } from '../workspace/types';
-import { AiProviderFields } from './AiProviderFields';
+import type { AiProvider, AiSettings, OrganizationKeys } from '../workspace/types';
+import { AiProviderFields, KEYLESS_WORKSPACE_WARNING, UNROUTED_NOTICE } from './AiProviderFields';
 import {
   agentAccess,
   agentOf,
   buildAiSettingsRequest,
+  configuredFromSettings,
+  credentialsFromSettings,
   emptyCredentials,
   emptyModels,
   isAgentProvider,
   nothingConfigured,
+  type ProviderConfigured,
+  type ProviderCredentials,
   providerOptions,
+  routingOf,
 } from './options';
 import type { SettingsLevel } from './types';
 
@@ -205,6 +210,132 @@ describe('AiProviderFields endpoint copy', () => {
       expect(screen.queryByText(bedrockDefault)).toBeNull();
     }
   );
+});
+
+const nothingSaved: AiSettings = {
+  provider: 'self_hosted',
+  has_litellm_key: false,
+  litellm_host: null,
+  has_openai_api_key: false,
+  openai_base_url: null,
+  has_anthropic_api_key: false,
+  anthropic_base_url: null,
+  bedrock_region: null,
+  bedrock_use_iam_role: false,
+  has_bedrock_credentials: false,
+  model_fast: null,
+  model_reasoning: null,
+  model_embedding: null,
+  model_image: null,
+  model_video: null,
+  model_audio: null,
+  completions_routed: false,
+};
+const unroutedHost: AiSettings = { ...nothingSaved, litellm_host: 'http://localhost:11434' };
+const noOrganizationKeys: OrganizationKeys = { litellm: false, openai: false, anthropic: false };
+
+describe('routingOf', () => {
+  it('holds a row saved before routing until it is saved again', () => {
+    expect(routingOf(unroutedHost, 'self_hosted')).toBe('pending');
+    expect(routingOf({ ...nothingSaved, has_openai_api_key: true }, 'openai')).toBe('pending');
+    expect(routingOf({ ...unroutedHost, completions_routed: true }, 'self_hosted')).toBe('routed');
+  });
+
+  it('routes nothing when the provider saved no endpoint or takes none', () => {
+    expect(routingOf(null, 'self_hosted')).toBe('none');
+    expect(routingOf(nothingSaved, 'self_hosted')).toBe('none');
+    expect(routingOf({ ...unroutedHost, litellm_host: '  ' }, 'self_hosted')).toBe('none');
+    expect(routingOf(unroutedHost, 'openai')).toBe('none');
+    expect(routingOf({ ...unroutedHost, provider: 'bedrock' }, 'bedrock')).toBe('none');
+    expect(routingOf(unroutedHost, 'claude_code')).toBe('none');
+  });
+});
+
+describe('AiProviderFields routing notice', () => {
+  function renderSaved(
+    saved: AiSettings | null,
+    provider: AiProvider = 'self_hosted',
+    level: SettingsLevel = 'organization'
+  ) {
+    return render(
+      <AiProviderFields
+        level={level}
+        provider={provider}
+        onProviderChange={() => undefined}
+        credentials={credentialsFromSettings(saved ?? nothingSaved)}
+        configured={configuredFromSettings(saved ?? nothingSaved)}
+        onChange={() => undefined}
+        saved={saved}
+      />
+    );
+  }
+
+  it.each(['organization', 'workspace'] as const)(
+    'tells a %s whose endpoint was saved before routing that saving routes it',
+    (level) => {
+      renderSaved(unroutedHost, 'self_hosted', level);
+      expect(screen.getByRole('status')).toHaveTextContent(UNROUTED_NOTICE);
+      expect(screen.getByText(UNROUTED_NOTICE)).toHaveClass('alert', 'alert-warning');
+    }
+  );
+
+  it('says nothing once the row is routed, when nothing is saved, or for another provider', () => {
+    const { unmount } = renderSaved({ ...unroutedHost, completions_routed: true });
+    expect(screen.queryByText(UNROUTED_NOTICE)).toBeNull();
+    unmount();
+    const second = renderSaved(nothingSaved);
+    expect(screen.queryByText(UNROUTED_NOTICE)).toBeNull();
+    second.unmount();
+    renderSaved(unroutedHost, 'openai');
+    expect(screen.queryByText(UNROUTED_NOTICE)).toBeNull();
+  });
+});
+
+describe('AiProviderFields keyless workspace host', () => {
+  function renderWorkspace(
+    credentials: ProviderCredentials,
+    organizationKeys: OrganizationKeys,
+    options: { configured?: ProviderConfigured; level?: SettingsLevel } = {}
+  ) {
+    return render(
+      <AiProviderFields
+        level={options.level ?? 'workspace'}
+        provider="openai"
+        onProviderChange={() => undefined}
+        credentials={credentials}
+        configured={options.configured ?? nothingConfigured}
+        onChange={() => undefined}
+        organizationKeys={organizationKeys}
+      />
+    );
+  }
+  const keylessHost = { ...emptyCredentials, openaiBaseUrl: 'http://gateway.example:4000' };
+  const organizationOpenai = { ...noOrganizationKeys, openai: true };
+
+  it('warns a workspace host without a key while the organization saved one', () => {
+    renderWorkspace(keylessHost, organizationOpenai);
+    expect(screen.getByText(KEYLESS_WORKSPACE_WARNING)).toHaveClass('alert', 'alert-warning');
+  });
+
+  it('stays quiet once the host has a key, or when the organization has none to miss', () => {
+    const cases: [ProviderCredentials, OrganizationKeys, ProviderConfigured, SettingsLevel][] = [
+      [
+        { ...keylessHost, openaiApiKey: 'sk-workspace' },
+        organizationOpenai,
+        nothingConfigured,
+        'workspace',
+      ],
+      [keylessHost, organizationOpenai, { ...nothingConfigured, openai: true }, 'workspace'],
+      [keylessHost, { ...noOrganizationKeys, litellm: true }, nothingConfigured, 'workspace'],
+      [emptyCredentials, organizationOpenai, nothingConfigured, 'workspace'],
+      [keylessHost, organizationOpenai, nothingConfigured, 'organization'],
+    ];
+    for (const [credentials, organizationKeys, configured, level] of cases) {
+      const { unmount } = renderWorkspace(credentials, organizationKeys, { configured, level });
+      expect(screen.queryByText(KEYLESS_WORKSPACE_WARNING)).toBeNull();
+      unmount();
+    }
+  });
 });
 
 describe('buildAiSettingsRequest', () => {

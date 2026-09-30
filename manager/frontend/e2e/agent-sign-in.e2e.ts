@@ -84,6 +84,7 @@ function settings(provider: string) {
     model_image: null,
     model_video: null,
     model_audio: null,
+    completions_routed: true,
   };
 }
 

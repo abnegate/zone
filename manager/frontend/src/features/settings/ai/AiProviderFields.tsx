@@ -1,10 +1,12 @@
 import type { ReactNode } from 'react';
-import type { AiProvider } from '../workspace/types';
+import type { AiProvider, AiSettings, OrganizationKeys } from '../workspace/types';
 import {
   awsRegions,
+  missesOrganizationKey,
   type ProviderConfigured,
   type ProviderCredentials,
   providerOptions,
+  routingOf,
 } from './options';
 import type { SettingsLevel } from './types';
 
@@ -15,6 +17,8 @@ interface AiProviderFieldsProps {
   credentials: ProviderCredentials;
   configured: ProviderConfigured;
   onChange: <K extends keyof ProviderCredentials>(key: K, value: ProviderCredentials[K]) => void;
+  saved?: AiSettings | null;
+  organizationKeys?: OrganizationKeys;
 }
 
 const MASK = '••••••••';
@@ -47,9 +51,40 @@ function Field({
   );
 }
 
-function EndpointHints({ level, provider }: { level: SettingsLevel; provider: AiProvider }) {
+export const UNROUTED_NOTICE =
+  'Saved before completions were routed; save to start sending completions here.';
+export const KEYLESS_WORKSPACE_WARNING =
+  "This workspace host has no key of its own, and the organization's key never goes to it. Enter a key if the host needs one.";
+
+interface EndpointHintsProps {
+  level: SettingsLevel;
+  provider: AiProvider;
+  credentials: ProviderCredentials;
+  configured: ProviderConfigured;
+  saved: AiSettings | null;
+  organizationKeys: OrganizationKeys | undefined;
+}
+
+function EndpointHints({
+  level,
+  provider,
+  credentials,
+  configured,
+  saved,
+  organizationKeys,
+}: EndpointHintsProps) {
+  const pending = routingOf(saved, provider) === 'pending';
+  const keyless =
+    level === 'workspace' &&
+    organizationKeys !== undefined &&
+    missesOrganizationKey(provider, credentials, configured, organizationKeys);
   return (
     <div id={ENDPOINT_HINT_ID} className="form-group form-group--full">
+      {pending && (
+        <div className="alert alert-warning" role="status">
+          {UNROUTED_NOTICE}
+        </div>
+      )}
       <p className="form-hint">
         Chats, task runs and background work in this {level} send completions here.
       </p>
@@ -60,6 +95,11 @@ function EndpointHints({ level, provider }: { level: SettingsLevel; provider: Ai
         <p className="form-hint">
           A workspace host needs its own key; it never receives the organization's.
         </p>
+      )}
+      {keyless && (
+        <div className="alert alert-warning" role="status">
+          {KEYLESS_WORKSPACE_WARNING}
+        </div>
       )}
     </div>
   );
@@ -72,7 +112,19 @@ export function AiProviderFields({
   credentials,
   configured,
   onChange,
+  saved = null,
+  organizationKeys,
 }: AiProviderFieldsProps) {
+  const hints = (
+    <EndpointHints
+      level={level}
+      provider={provider}
+      credentials={credentials}
+      configured={configured}
+      saved={saved}
+      organizationKeys={organizationKeys}
+    />
+  );
   return (
     <div className="form-grid">
       <Field id="ai-provider" label="AI Provider" full>
@@ -113,7 +165,7 @@ export function AiProviderFields({
               className="form-input"
             />
           </Field>
-          <EndpointHints level={level} provider={provider} />
+          {hints}
         </>
       )}
 
@@ -140,7 +192,7 @@ export function AiProviderFields({
               className="form-input"
             />
           </Field>
-          <EndpointHints level={level} provider={provider} />
+          {hints}
         </>
       )}
 
@@ -167,7 +219,7 @@ export function AiProviderFields({
               className="form-input"
             />
           </Field>
-          <EndpointHints level={level} provider={provider} />
+          {hints}
           <div className="alert alert-warning">
             Anthropic does not provide embedding models. Use a different provider for embeddings.
           </div>

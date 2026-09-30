@@ -2,7 +2,12 @@ import type { InstalledModel } from '../../models/types';
 import { mergeStageOptions } from '../../models/utils/stageOptions';
 import type { OrgRole } from '../organization/types';
 import { AiProviderSchema } from '../workspace/schemas';
-import type { AiProvider, AiSettings, UpdateAiSettingsRequest } from '../workspace/types';
+import type {
+  AiProvider,
+  AiSettings,
+  OrganizationKeys,
+  UpdateAiSettingsRequest,
+} from '../workspace/types';
 import { type Agent, type AgentProvider, AgentProviderSchema } from './schemas';
 import type { AgentAccess } from './types';
 
@@ -212,6 +217,74 @@ export function configuredFromSettings(settings: AiSettings): ProviderConfigured
     anthropic: settings.has_anthropic_api_key,
     bedrock: settings.has_bedrock_credentials,
   };
+}
+
+export type EndpointProvider = Extract<AiProvider, 'self_hosted' | 'openai' | 'anthropic'>;
+
+interface EndpointFields {
+  url: 'litellmHost' | 'openaiBaseUrl' | 'anthropicBaseUrl';
+  key: 'litellmKey' | 'openaiApiKey' | 'anthropicApiKey';
+  configured: keyof OrganizationKeys;
+  savedUrl: 'litellm_host' | 'openai_base_url' | 'anthropic_base_url';
+  savedKey: 'has_litellm_key' | 'has_openai_api_key' | 'has_anthropic_api_key';
+}
+
+const endpointFields: Record<EndpointProvider, EndpointFields> = {
+  self_hosted: {
+    url: 'litellmHost',
+    key: 'litellmKey',
+    configured: 'litellm',
+    savedUrl: 'litellm_host',
+    savedKey: 'has_litellm_key',
+  },
+  openai: {
+    url: 'openaiBaseUrl',
+    key: 'openaiApiKey',
+    configured: 'openai',
+    savedUrl: 'openai_base_url',
+    savedKey: 'has_openai_api_key',
+  },
+  anthropic: {
+    url: 'anthropicBaseUrl',
+    key: 'anthropicApiKey',
+    configured: 'anthropic',
+    savedUrl: 'anthropic_base_url',
+    savedKey: 'has_anthropic_api_key',
+  },
+};
+
+export function isEndpointProvider(provider: AiProvider): provider is EndpointProvider {
+  return provider in endpointFields;
+}
+
+function savesEndpoint(settings: AiSettings, provider: EndpointProvider): boolean {
+  const fields = endpointFields[provider];
+  return Boolean(settings[fields.savedUrl]?.trim()) || settings[fields.savedKey];
+}
+
+export type Routing = 'none' | 'pending' | 'routed';
+
+export function routingOf(settings: AiSettings | null, provider: AiProvider): Routing {
+  if (!settings || !isEndpointProvider(provider) || !savesEndpoint(settings, provider)) {
+    return 'none';
+  }
+  return settings.completions_routed ? 'routed' : 'pending';
+}
+
+export function missesOrganizationKey(
+  provider: AiProvider,
+  credentials: ProviderCredentials,
+  configured: ProviderConfigured,
+  organizationKeys: OrganizationKeys
+): boolean {
+  if (!isEndpointProvider(provider)) return false;
+  const fields = endpointFields[provider];
+  return (
+    Boolean(credentials[fields.url].trim()) &&
+    !credentials[fields.key].trim() &&
+    !configured[fields.configured] &&
+    organizationKeys[fields.configured]
+  );
 }
 
 export function modelsFromSettings(settings: AiSettings): ModelSelection {

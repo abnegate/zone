@@ -157,9 +157,16 @@ const mockAiSettings: AiSettings = {
   model_image: 'flux1-schnell-fp8.safetensors',
   model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
   model_audio: 'ace_step_v1_3.5b.safetensors',
+  completions_routed: true,
 };
 
-const savedAiSettings: WorkspaceAiSettings = { ...mockAiSettings, overrides: true };
+const noOrganizationKeys = { litellm: false, openai: false, anthropic: false };
+
+const savedAiSettings: WorkspaceAiSettings = {
+  ...mockAiSettings,
+  overrides: true,
+  organization_keys: noOrganizationKeys,
+};
 
 const inheritedAiSettings: WorkspaceAiSettings = {
   ...mockAiSettings,
@@ -170,6 +177,7 @@ const inheritedAiSettings: WorkspaceAiSettings = {
   model_video: null,
   model_audio: null,
   overrides: false,
+  organization_keys: noOrganizationKeys,
 };
 
 describe('WorkspaceSettingsPage', () => {
