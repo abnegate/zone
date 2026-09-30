@@ -78,14 +78,67 @@ pub struct Update<'a> {
     pub model_audio: Option<&'a str>,
 }
 
+const ENDPOINT_SCHEMES: [&str; 2] = ["http", "https"];
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum EndpointUrlError {
+    #[error("must be a valid URL")]
+    Unparseable,
+    #[error("must use http or https")]
+    Scheme,
+    #[error("must name a host")]
+    MissingHost,
+    #[error("must not carry a username or password")]
+    Credentials,
+    #[error("must not carry a query")]
+    Query,
+    #[error("must not carry a fragment")]
+    Fragment,
+}
+
+/// Checks the shape of an endpoint an organization or workspace saved. Hosts
+/// are not filtered: private, loopback and single-label hosts are legitimate
+/// operator config.
+pub fn check_endpoint_url(value: &str) -> Result<reqwest::Url, EndpointUrlError> {
+    let url = reqwest::Url::parse(value.trim()).map_err(|_| EndpointUrlError::Unparseable)?;
+    if !ENDPOINT_SCHEMES.contains(&url.scheme()) {
+        return Err(EndpointUrlError::Scheme);
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(EndpointUrlError::MissingHost);
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(EndpointUrlError::Credentials);
+    }
+    if url.query().is_some() {
+        return Err(EndpointUrlError::Query);
+    }
+    if url.fragment().is_some() {
+        return Err(EndpointUrlError::Fragment);
+    }
+    Ok(url)
+}
+
 fn validate(update: &Update<'_>) -> AccessResult<()> {
-    match update.provider {
-        Some(provider) if !PROVIDERS.contains(&provider) => Err(AccessError::Invalid(format!(
+    if let Some(provider) = update.provider
+        && !PROVIDERS.contains(&provider)
+    {
+        return Err(AccessError::Invalid(format!(
             "Invalid provider. Must be one of: {}",
             PROVIDERS.join(", ")
-        ))),
-        _ => Ok(()),
+        )));
     }
+    for (field, value) in [
+        ("litellm_host", update.litellm_host),
+        ("openai_base_url", update.openai_base_url),
+        ("anthropic_base_url", update.anthropic_base_url),
+    ] {
+        if let Some(value) = nonempty(value) {
+            check_endpoint_url(value)
+                .map_err(|error| AccessError::Invalid(format!("{field} {error}")))?;
+        }
+    }
+    Ok(())
 }
 
 /// The organization's own settings carry its provider credentials, so reading
@@ -134,11 +187,12 @@ async fn authorize_workspace(
 
     let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
 
-    // These settings override the organization's, and a base URL written here
-    // is paired with whatever credential the organization set, so writing them
-    // takes the workspace's own administrators -- the rank the organization
-    // route demands for the settings this one overrides. Every member still
-    // reads them, because their chats run under them.
+    // These settings override the organization's for every chat in the
+    // workspace, so writing them takes the workspace's own administrators --
+    // the rank the organization route demands for the settings this one
+    // overrides. A base URL written here never receives the organization's
+    // credential (see `overlay_endpoint`). Every member still reads them,
+    // because their chats run under them.
     match role {
         Some(WorkspaceRole::Owner | WorkspaceRole::Admin) => Ok(()),
         Some(_) if !write => Ok(()),
@@ -688,24 +742,24 @@ fn effective(
             }
             effective.provider = provider;
         }
-        if ws.litellm_host.is_some() {
-            effective.litellm_host = ws.litellm_host;
-        }
-        if ws.litellm_key.is_some() {
-            effective.litellm_key = ws.litellm_key;
-        }
-        if ws.openai_api_key.is_some() {
-            effective.openai_api_key = ws.openai_api_key;
-        }
-        if ws.openai_base_url.is_some() {
-            effective.openai_base_url = ws.openai_base_url;
-        }
-        if ws.anthropic_api_key.is_some() {
-            effective.anthropic_api_key = ws.anthropic_api_key;
-        }
-        if ws.anthropic_base_url.is_some() {
-            effective.anthropic_base_url = ws.anthropic_base_url;
-        }
+        overlay_endpoint(
+            &mut effective.litellm_host,
+            &mut effective.litellm_key,
+            ws.litellm_host,
+            ws.litellm_key,
+        );
+        overlay_endpoint(
+            &mut effective.openai_base_url,
+            &mut effective.openai_api_key,
+            ws.openai_base_url,
+            ws.openai_api_key,
+        );
+        overlay_endpoint(
+            &mut effective.anthropic_base_url,
+            &mut effective.anthropic_api_key,
+            ws.anthropic_base_url,
+            ws.anthropic_api_key,
+        );
         if ws.bedrock_region.is_some() {
             effective.bedrock_region = ws.bedrock_region;
         }
@@ -739,6 +793,24 @@ fn effective(
     }
 
     effective
+}
+
+/// A workspace that names its own endpoint brings its own key, even none: the
+/// organization's key never leaves for a host the workspace chose. A key saved
+/// without an endpoint keeps the organization's host, and a blank endpoint
+/// inherits the organization's pair.
+fn overlay_endpoint(
+    url: &mut Option<String>,
+    key: &mut Option<SecretValue>,
+    workspace_url: Option<String>,
+    workspace_key: Option<SecretValue>,
+) {
+    if nonempty(workspace_url.as_deref()).is_some() {
+        *url = workspace_url;
+        *key = workspace_key;
+    } else if workspace_key.is_some() {
+        *key = workspace_key;
+    }
 }
 
 /// Get effective AI settings for a workspace (workspace overrides organization).
@@ -809,6 +881,7 @@ pub async fn effective_comfyui(
 mod tests {
     use super::*;
     use crate::config::ComfyUiConfig;
+    use zone_core::OptionalSecretExt;
 
     fn settings(fast: Option<&str>, image: Option<&str>) -> EffectiveAiSettings {
         EffectiveAiSettings {
@@ -886,6 +959,229 @@ mod tests {
             refused.to_string(),
             "Invalid provider. Must be one of: self_hosted, openai, anthropic, bedrock, claude_code, codex"
         );
+    }
+
+    fn organization_row() -> OrgAiSettingsRow {
+        OrgAiSettingsRow {
+            id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
+            provider: PROVIDER_SELF_HOSTED.to_string(),
+            litellm_host: Some("http://organization-litellm:4000".to_string()),
+            litellm_key: Some(SecretValue::new("organization-litellm-key")),
+            openai_api_key: Some(SecretValue::new("organization-openai-key")),
+            openai_base_url: Some("https://organization-openai.example/v1".to_string()),
+            anthropic_api_key: Some(SecretValue::new("organization-anthropic-key")),
+            anthropic_base_url: Some("https://organization-anthropic.example/v1".to_string()),
+            bedrock_region: None,
+            bedrock_access_key: None,
+            bedrock_secret_key: None,
+            bedrock_use_iam_role: None,
+            model_fast: None,
+            model_reasoning: None,
+            model_embedding: None,
+            model_image: None,
+            model_video: None,
+            model_audio: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    fn workspace_row() -> WorkspaceAiSettingsRow {
+        WorkspaceAiSettingsRow {
+            id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            provider: None,
+            litellm_host: None,
+            litellm_key: None,
+            openai_api_key: None,
+            openai_base_url: None,
+            anthropic_api_key: None,
+            anthropic_base_url: None,
+            bedrock_region: None,
+            bedrock_access_key: None,
+            bedrock_secret_key: None,
+            bedrock_use_iam_role: None,
+            model_fast: None,
+            model_reasoning: None,
+            model_embedding: None,
+            model_image: None,
+            model_video: None,
+            model_audio: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn a_workspace_endpoint_never_inherits_the_organization_key() {
+        let workspace = WorkspaceAiSettingsRow {
+            litellm_host: Some("http://workspace-litellm:4000".to_string()),
+            openai_base_url: Some("https://workspace-openai.example/v1".to_string()),
+            anthropic_base_url: Some("https://workspace-anthropic.example/v1".to_string()),
+            ..workspace_row()
+        };
+
+        let settings = effective(Some(organization_row()), Some(workspace));
+
+        assert_eq!(
+            settings.litellm_host.as_deref(),
+            Some("http://workspace-litellm:4000")
+        );
+        assert_eq!(settings.litellm_key.expose_as_deref(), None);
+        assert_eq!(
+            settings.openai_base_url.as_deref(),
+            Some("https://workspace-openai.example/v1")
+        );
+        assert_eq!(settings.openai_api_key.expose_as_deref(), None);
+        assert_eq!(
+            settings.anthropic_base_url.as_deref(),
+            Some("https://workspace-anthropic.example/v1")
+        );
+        assert_eq!(settings.anthropic_api_key.expose_as_deref(), None);
+    }
+
+    #[test]
+    fn a_workspace_endpoint_uses_the_workspace_key() {
+        let workspace = WorkspaceAiSettingsRow {
+            litellm_host: Some("http://workspace-litellm:4000".to_string()),
+            litellm_key: Some(SecretValue::new("workspace-litellm-key")),
+            openai_base_url: Some("https://workspace-openai.example/v1".to_string()),
+            openai_api_key: Some(SecretValue::new("workspace-openai-key")),
+            anthropic_base_url: Some("https://workspace-anthropic.example/v1".to_string()),
+            anthropic_api_key: Some(SecretValue::new("workspace-anthropic-key")),
+            ..workspace_row()
+        };
+
+        let settings = effective(Some(organization_row()), Some(workspace));
+
+        assert_eq!(
+            settings.litellm_key.expose_as_deref(),
+            Some("workspace-litellm-key")
+        );
+        assert_eq!(
+            settings.openai_api_key.expose_as_deref(),
+            Some("workspace-openai-key")
+        );
+        assert_eq!(
+            settings.anthropic_api_key.expose_as_deref(),
+            Some("workspace-anthropic-key")
+        );
+    }
+
+    #[test]
+    fn a_workspace_key_alone_keeps_the_organization_endpoint() {
+        let workspace = WorkspaceAiSettingsRow {
+            litellm_key: Some(SecretValue::new("workspace-litellm-key")),
+            openai_api_key: Some(SecretValue::new("workspace-openai-key")),
+            anthropic_base_url: Some("  ".to_string()),
+            anthropic_api_key: Some(SecretValue::new("workspace-anthropic-key")),
+            ..workspace_row()
+        };
+
+        let settings = effective(Some(organization_row()), Some(workspace));
+
+        assert_eq!(
+            settings.litellm_host.as_deref(),
+            Some("http://organization-litellm:4000")
+        );
+        assert_eq!(
+            settings.litellm_key.expose_as_deref(),
+            Some("workspace-litellm-key")
+        );
+        assert_eq!(
+            settings.openai_base_url.as_deref(),
+            Some("https://organization-openai.example/v1")
+        );
+        assert_eq!(
+            settings.openai_api_key.expose_as_deref(),
+            Some("workspace-openai-key")
+        );
+        assert_eq!(
+            settings.anthropic_base_url.as_deref(),
+            Some("https://organization-anthropic.example/v1")
+        );
+        assert_eq!(
+            settings.anthropic_api_key.expose_as_deref(),
+            Some("workspace-anthropic-key")
+        );
+    }
+
+    #[test]
+    fn a_workspace_without_endpoints_or_keys_inherits_the_organization_pairs() {
+        let settings = effective(Some(organization_row()), Some(workspace_row()));
+
+        assert_eq!(
+            settings.litellm_key.expose_as_deref(),
+            Some("organization-litellm-key")
+        );
+        assert_eq!(
+            settings.openai_api_key.expose_as_deref(),
+            Some("organization-openai-key")
+        );
+        assert_eq!(
+            settings.anthropic_api_key.expose_as_deref(),
+            Some("organization-anthropic-key")
+        );
+    }
+
+    #[test]
+    fn check_endpoint_url_accepts_private_loopback_and_single_label_hosts() {
+        for url in [
+            "http://127.0.0.1:4000",
+            "http://192.168.1.10:4000",
+            "http://litellm:4000",
+            "http://[::1]:4000/v1",
+            "https://api.openai.com/v1",
+            "https://api.anthropic.com/v1/",
+        ] {
+            assert!(check_endpoint_url(url).is_ok(), "{url} must be accepted");
+        }
+    }
+
+    #[test]
+    fn check_endpoint_url_refuses_every_malformed_shape() {
+        for (url, refusal) in [
+            ("litellm:4000", EndpointUrlError::Scheme),
+            ("not a url", EndpointUrlError::Unparseable),
+            ("", EndpointUrlError::Unparseable),
+            ("file:///etc/passwd", EndpointUrlError::Scheme),
+            ("ftp://litellm:4000", EndpointUrlError::Scheme),
+            (
+                "http://user:secret@litellm:4000",
+                EndpointUrlError::Credentials,
+            ),
+            ("http://user@litellm:4000", EndpointUrlError::Credentials),
+            ("http://litellm:4000/?key=x", EndpointUrlError::Query),
+            ("http://litellm:4000/#key", EndpointUrlError::Fragment),
+        ] {
+            assert_eq!(
+                check_endpoint_url(url).err(),
+                Some(refusal),
+                "{url} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_names_the_field_whose_url_it_refuses_and_allows_blanks() {
+        let refused = validate(&Update {
+            anthropic_base_url: Some("file:///etc/passwd"),
+            ..Update::default()
+        })
+        .expect_err("a file URL is no endpoint");
+        assert_eq!(
+            refused.to_string(),
+            "anthropic_base_url must use http or https"
+        );
+
+        let blank = Update {
+            litellm_host: Some(""),
+            openai_base_url: Some("  "),
+            anthropic_base_url: Some(""),
+            ..Update::default()
+        };
+        assert!(validate(&blank).is_ok());
     }
 
     #[test]
