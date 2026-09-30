@@ -10,7 +10,9 @@ import {
   shot,
   signIn,
   sql,
+  stamp,
   state,
+  type Tenant,
   test,
   tokenFor,
 } from './rig';
@@ -21,9 +23,11 @@ import {
  * of the compose stack's, so the stack is only read, never written. The rig's
  * LITELLM_HOST has to lead to that LiteLLM for the row: the organization's
  * LiteLLM host is saved below as a person would set it, but completions do not
- * read it. The second tenant's organization names a fast and a reasoning model,
- * and an Automatic chat asks a trivial question and then a hard one; LiteLLM's
- * log (LITELLM_LOG=INFO) says which deployment served each.
+ * read it. The second tenant opens a throwaway organization for the row, which
+ * names a fast and a reasoning model and is deleted afterwards, so no shared
+ * tenant's settings are ever changed. An Automatic chat asks a trivial question
+ * and then a hard one; LiteLLM's log (LITELLM_LOG=INFO) says which deployment
+ * served each.
  */
 
 const LITELLM = process.env.ZONE_LIVE_LITELLM_URL ?? '';
@@ -31,7 +35,6 @@ const KEY = process.env.ZONE_LIVE_LITELLM_KEY ?? '';
 const CONTAINER = process.env.ZONE_LIVE_LITELLM_CONTAINER ?? '';
 const FAST = process.env.ZONE_LIVE_LITELLM_FAST ?? 'llama3.2:3b';
 const REASON = process.env.ZONE_LIVE_LITELLM_REASON ?? 'qwen3.8:27b-ctx32k';
-const BACKUP = 'live_pass_ai_settings_backup';
 
 function litellmLog(since: string): string {
   return execFileSync(
@@ -51,40 +54,46 @@ function modelsIn(text: string): string[] {
   ];
 }
 
-const ROW_HASH = `md5((to_jsonb(s) - 'updated_at')::text)`;
-
 /**
- * Save the organization's AI settings before the lane writes its own. A backup
- * left by an interrupted pass is restored first only when the row still hashes
- * to what that pass wrote; anything else means the settings changed since, and
- * the leftover is discarded. A leftover with no hash (a pass that stopped
- * between its PUT and recording the hash) is discarded too: keeping a row the
- * lane may have written is recoverable, restoring over a person's change is not.
+ * Earlier revisions of this lane backed the second tenant's own settings up in
+ * this table around the row. An interrupted run could leave that tenant holding
+ * the lane's settings, so a leftover backup is put back once and the table
+ * dropped, in one statement.
  */
-function backupQuery(organization: string): string {
-  return `begin;
-    create table if not exists ${BACKUP} (organization_id uuid primary key, settings jsonb);
-    alter table ${BACKUP} drop column if exists written, add column if not exists written_hash text;
-    create temp table interrupted on commit drop as
-      select b.settings from ${BACKUP} b join organization_ai_settings s using (organization_id)
-      where b.organization_id = '${organization}' and b.written_hash = ${ROW_HASH};
-    delete from organization_ai_settings where organization_id = '${organization}' and exists (select 1 from interrupted);
-    insert into organization_ai_settings select (jsonb_populate_record(null::organization_ai_settings, settings)).* from interrupted where settings is not null;
-    delete from ${BACKUP} where organization_id = '${organization}';
-    insert into ${BACKUP} (organization_id, settings) values ('${organization}', (select to_jsonb(s) from organization_ai_settings s where organization_id = '${organization}'));
-    commit;`;
-}
+const RETIRE_BACKUP = `do $$
+begin
+  if to_regclass('live_pass_ai_settings_backup') is not null then
+    delete from organization_ai_settings s using live_pass_ai_settings_backup b where s.organization_id = b.organization_id;
+    insert into organization_ai_settings select (jsonb_populate_record(null::organization_ai_settings, settings)).* from live_pass_ai_settings_backup where settings is not null;
+    drop table live_pass_ai_settings_backup;
+  end if;
+end $$`;
 
-function writtenQuery(organization: string): string {
-  return `update ${BACKUP} b set written_hash = ${ROW_HASH} from organization_ai_settings s where b.organization_id = '${organization}' and s.organization_id = b.organization_id`;
-}
-
-function restoreQuery(organization: string): string {
-  return `begin;
-    delete from organization_ai_settings where organization_id = '${organization}';
-    insert into organization_ai_settings select (jsonb_populate_record(null::organization_ai_settings, settings)).* from ${BACKUP} where organization_id = '${organization}' and settings is not null;
-    delete from ${BACKUP} where organization_id = '${organization}';
-    commit;`;
+async function throwawayTenant(owner: Tenant, token: string): Promise<Tenant> {
+  const s = stamp();
+  const created = await api('POST', '/api/organizations', {
+    token,
+    body: {
+      name: `LiteLLM routing ${s}`,
+      slug: `litellm-routing-${s}`,
+      description: 'throwaway tenant for live row 58',
+    },
+  });
+  expect(created.status, JSON.stringify(created.body)).toBe(201);
+  const { organization } = created.body as {
+    organization: Tenant['organization'];
+  };
+  const space = await api(
+    'POST',
+    `/api/organizations/${organization.id}/workspaces`,
+    {
+      token,
+      body: { name: 'Routing', slug: 'routing', description: 'live row 58' },
+    },
+  );
+  expect(space.status, JSON.stringify(space.body)).toBe(201);
+  const { workspace } = space.body as { workspace: Tenant['workspace'] };
+  return { ...owner, organization, workspace };
 }
 
 test.describe('LiteLLM routing', () => {
@@ -98,24 +107,22 @@ test.describe('LiteLLM routing', () => {
   test('58: automatic routing sends a trivial question to the fast model and a hard one to the reasoning model', async ({
     page,
   }) => {
-    const tenant = state.intruder;
-    const token = await tokenFor(tenant);
-    const organization = tenant.organization.id;
-    const settingsPath = `/api/organizations/${organization}/settings/ai`;
-    sql(backupQuery(organization));
-    const saved = await api('PUT', settingsPath, {
-      token,
-      body: {
-        provider: 'self_hosted',
-        litellm_host: `${LITELLM}/v1`,
-        litellm_key: KEY,
-        model_fast: FAST,
-        model_reasoning: REASON,
-      },
-    });
-    sql(writtenQuery(organization));
-    expect(saved.status).toBe(200);
+    sql(RETIRE_BACKUP);
+    const token = await tokenFor(state.intruder);
+    const tenant = await throwawayTenant(state.intruder, token);
+    const organizationPath = `/api/organizations/${tenant.organization.id}`;
     try {
+      const saved = await api('PUT', `${organizationPath}/settings/ai`, {
+        token,
+        body: {
+          provider: 'self_hosted',
+          litellm_host: `${LITELLM}/v1`,
+          litellm_key: KEY,
+          model_fast: FAST,
+          model_reasoning: REASON,
+        },
+      });
+      expect(saved.status).toBe(200);
       await signIn(page, tenant);
       const since = new Date().toISOString();
       const chatId = await newChat(page, { model: 'Automatic' });
@@ -162,7 +169,7 @@ test.describe('LiteLLM routing', () => {
       });
       expect(routed).toBe(true);
     } finally {
-      sql(restoreQuery(organization));
+      await api('DELETE', organizationPath, { token }).catch(() => undefined);
     }
   });
 });
