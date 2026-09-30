@@ -250,6 +250,17 @@ async fn process_webhook_event(
     event: WebhookEvent,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let sync_config_id = config.id;
+    let settings = Settings::from_config(&config.config);
+    if !event.origin.is_configured_source(&settings) {
+        tracing::info!(
+            "Ignoring issue {} for {sync_config_id}: not in the configured repository or project",
+            event.external_id
+        );
+        return Ok(format!(
+            "Issue {} is not in the configured repository or project",
+            event.external_id
+        ));
+    }
     let synced_item =
         sync_config::get_synced_item_by_external_id(state.db(), sync_config_id, &event.external_id)
             .await?;

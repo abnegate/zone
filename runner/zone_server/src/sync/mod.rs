@@ -141,21 +141,30 @@ impl IssueOrigin {
     /// GitHub issue in the configured repository opened by someone with write
     /// access to it, or a Linear issue in the configured project.
     pub fn may_become_task(&self, settings: &Settings) -> bool {
-        match self {
+        let opened_by_writer = match self {
             Self::GitHub {
-                repository,
-                author_association,
-            } => {
+                author_association, ..
+            } => author_association.can_write(),
+            Self::Linear { .. } => true,
+        };
+        opened_by_writer && self.is_configured_source(settings)
+    }
+
+    /// Whether the issue lives where `settings` point: the configured GitHub
+    /// repository or Linear project. A sync configured with neither matches
+    /// nothing.
+    pub fn is_configured_source(&self, settings: &Settings) -> bool {
+        match self {
+            Self::GitHub { repository, .. } => {
                 let configured = settings
                     .external_repo_url
                     .as_deref()
                     .and_then(github::repository_name);
-                author_association.can_write()
-                    && matches!(
-                        (repository, configured),
-                        (Some(repository), Some(configured))
-                            if repository.to_lowercase() == configured
-                    )
+                matches!(
+                    (repository, configured),
+                    (Some(repository), Some(configured))
+                        if repository.to_lowercase() == configured
+                )
             }
             Self::Linear { project_id } => matches!(
                 (project_id.as_deref(), settings.external_project_id.as_deref()),
@@ -414,6 +423,21 @@ mod tests {
         assert!(!origin(Some("")).may_become_task(&Settings::from_config(
             &serde_json::json!({ "external_project_id": "" })
         )));
+    }
+
+    #[test]
+    fn an_update_to_a_linked_issue_counts_only_from_the_configured_source_whoever_wrote_it() {
+        let settings = github_settings("https://github.com/acme/widgets");
+        let reader = github::AuthorAssociation::None;
+
+        assert!(github_origin(Some("Acme/Widgets"), reader).is_configured_source(&settings));
+        assert!(
+            !github_origin(Some("someone-else/widgets"), reader).is_configured_source(&settings)
+        );
+        assert!(!github_origin(None, reader).is_configured_source(&settings));
+        assert!(
+            !github_origin(Some("acme/widgets"), reader).is_configured_source(&Settings::default())
+        );
     }
 
     #[test]

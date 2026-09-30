@@ -957,7 +957,12 @@ async fn an_overlong_multibyte_title_and_description_are_cut_on_a_character_boun
 }
 
 fn github_config() -> serde_json::Value {
-    json!({ "owner": "test-owner", "repo": "test-repo", "token": "ghp_test123" })
+    json!({
+        "owner": "test-owner",
+        "repo": "test-repo",
+        "token": "ghp_test123",
+        "external_repo_url": "https://github.com/test-owner/test-repo"
+    })
 }
 
 fn github_issue(action: &str, title: &str) -> serde_json::Value {
@@ -969,8 +974,37 @@ fn github_issue(action: &str, title: &str) -> serde_json::Value {
             "body": "Edited body",
             "state": "open",
             "html_url": "https://github.com/test-owner/test-repo/issues/123"
-        }
+        },
+        "repository": { "full_name": "test-owner/test-repo" }
     })
+}
+
+#[tokio::test]
+async fn an_event_from_another_repository_leaves_the_task_linked_to_the_same_number_unchanged() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let mut foreign = github_issue("edited", "Renamed");
+    foreign["repository"]["full_name"] = json!("someone-else/test-repo");
+    foreign["issue"]["state"] = json!("closed");
+
+    for action in ["edited", "closed", "deleted"] {
+        foreign["action"] = json!(action);
+        assert_eq!(
+            synced.post_github(&foreign).await,
+            StatusCode::OK,
+            "{action}"
+        );
+    }
+    let mut unplaced = github_issue("edited", "Renamed");
+    unplaced.as_object_mut().unwrap().remove("repository");
+    assert_eq!(synced.post_github(&unplaced).await, StatusCode::OK);
+
+    let task = synced.task().await;
+    assert_eq!(task.title, "Original");
+    assert_eq!(task.status, "created");
+    assert!(synced.linked("123").await.is_some());
+    assert!(synced.item_event_types().await.is_empty());
+
+    synced.cleanup().await;
 }
 
 #[tokio::test]
@@ -1110,8 +1144,26 @@ async fn a_linear_delivery_sent_over_a_minute_ago_is_unauthorized() {
     synced.cleanup().await;
 }
 
+#[tokio::test]
+async fn a_linear_update_from_another_project_leaves_the_linked_task_unchanged() {
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+    let mut foreign = linear_issue_update();
+    foreign["data"]["projectId"] = json!("7d1f2a9b-0000-4c3e-8f6a-1b2c3d4e5f60");
+
+    assert_eq!(synced.post_linear(&foreign).await, StatusCode::OK);
+
+    assert_eq!(synced.task().await.title, "Original");
+    assert!(synced.item_event_types().await.is_empty());
+
+    synced.cleanup().await;
+}
+
 fn linear_config() -> serde_json::Value {
-    json!({ "api_key": "lin_api_test123", "team_id": "TEAM-123" })
+    json!({
+        "api_key": "lin_api_test123",
+        "team_id": "TEAM-123",
+        "external_project_id": LINEAR_PROJECT
+    })
 }
 
 fn linear_issue_update() -> serde_json::Value {
@@ -1122,6 +1174,7 @@ fn linear_issue_update() -> serde_json::Value {
             "id": "123",
             "title": "Renamed",
             "description": "Edited description",
+            "projectId": LINEAR_PROJECT,
             "state": { "type": "started", "name": "In Progress" }
         },
         "webhookTimestamp": now_milliseconds()
