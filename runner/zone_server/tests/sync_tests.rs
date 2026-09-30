@@ -2556,3 +2556,196 @@ async fn a_read_only_member_cannot_set_a_webhook_secret() {
 
     assert_verified(&deliver_github(&client, &config, &secret).await);
 }
+
+// Rotating or setting a secret: admins only, atomically, on the record.
+
+const INTERVENING_SECRET: &str = "intervening-secret-written-meanwhile";
+
+async fn joined(
+    client: &common::TestClient,
+    workspace: &str,
+    role: zone_server::db::workspace_members::WorkspaceRole,
+) -> (String, Uuid) {
+    let (token, user) = registered(client).await;
+    zone_server::db::workspace_members::add_member(
+        client.state().db(),
+        Uuid::parse_str(workspace).unwrap(),
+        user,
+        role,
+        None,
+    )
+    .await
+    .expect("the workspace takes the member");
+    (token, user)
+}
+
+/// Wait until another connection's UPDATE of `sync_configs` is queued behind
+/// a row lock, so the transaction holding that lock can commit under it.
+async fn until_an_update_waits_on_a_sync_config(pool: &sqlx::PgPool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND pid <> pg_backend_pid()
+               AND wait_event_type = 'Lock'
+               AND query ILIKE '%UPDATE sync_configs%'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("pg_stat_activity is readable");
+        if waiting > 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the rotation never reached its UPDATE"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+async fn updated_at(pool: &sqlx::PgPool, config: &str) -> chrono::NaiveDateTime {
+    sqlx::query_scalar("SELECT updated_at FROM sync_configs WHERE id = $1")
+        .bind(Uuid::parse_str(config).unwrap())
+        .fetch_one(pool)
+        .await
+        .expect("the configuration has an updated_at")
+}
+
+async fn audited(
+    pool: &sqlx::PgPool,
+    config: &str,
+) -> Vec<(String, Option<Uuid>, serde_json::Value)> {
+    sqlx::query_as(
+        "SELECT action, actor_id, COALESCE(new_values, 'null'::jsonb)
+         FROM audit_logs WHERE resource_id = $1 ORDER BY created_at",
+    )
+    .bind(Uuid::parse_str(config).unwrap())
+    .fetch_all(pool)
+    .await
+    .expect("audit_logs is readable")
+}
+
+#[tokio::test]
+async fn a_member_who_is_not_an_admin_cannot_set_or_rotate_a_webhook_secret() {
+    use zone_server::db::workspace_members::WorkspaceRole;
+
+    let client = common::TestClient::with_db().await;
+    let (owner, _owner_id) = registered(&client).await;
+    let (workspace, project) = workspace_project(&client, &owner).await;
+    let created = configure(&client, &owner, &project, &github_sync()).await;
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+    let secret = created["webhook_secret"].as_str().unwrap().to_string();
+    let (member, _member_id) = joined(&client, &workspace, WorkspaceRole::Member).await;
+
+    listed_config(&client, &member, &project).await;
+    for body in [json!({}), json!({ "secret": "member-chosen-secret-123" })] {
+        let response = set_secret(&client, &member, &project, &config, &body).await;
+        response.assert_status(StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.json_value()["error"],
+            "Workspace admin access required"
+        );
+    }
+    assert!(audited(client.state().db(), &config).await.is_empty());
+    assert_verified(&deliver_github(&client, &config, &secret).await);
+
+    let (admin, _admin_id) = joined(&client, &workspace, WorkspaceRole::Admin).await;
+    set_secret(&client, &admin, &project, &config, &json!({}))
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_rotation_that_read_a_secret_replaced_meanwhile_answers_conflict_and_shows_nothing() {
+    let client = common::TestClient::with_db().await;
+    let token = signed_in(&client).await;
+    let (_workspace, project) = workspace_project(&client, &token).await;
+    let created = configure(&client, &token, &project, &github_sync()).await;
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+    let pool = client.state().db().clone();
+    let intervening = crypto::encrypt(client.state().encryption_key(), INTERVENING_SECRET)
+        .expect("the secret encrypts");
+
+    let mut transaction = pool.begin().await.expect("a transaction begins");
+    sqlx::query("UPDATE sync_configs SET webhook_secret_encrypted = $2 WHERE id = $1")
+        .bind(Uuid::parse_str(&config).unwrap())
+        .bind(&intervening)
+        .execute(&mut *transaction)
+        .await
+        .expect("the intervening secret is written");
+    let generate = json!({});
+    let rotation = set_secret(&client, &token, &project, &config, &generate);
+    let intervention = async {
+        until_an_update_waits_on_a_sync_config(&pool).await;
+        transaction
+            .commit()
+            .await
+            .expect("the intervening secret commits");
+    };
+    let (response, ()) = tokio::join!(rotation, intervention);
+
+    response.assert_status(StatusCode::CONFLICT);
+    let body = response.json_value();
+    assert!(
+        body.get("webhook_secret").is_none() && body.get("config").is_none(),
+        "a refused rotation shows no secret: {body}"
+    );
+    assert_eq!(
+        body["error"],
+        "The sync configuration changed while this request was replacing its webhook secret; reload and try again"
+    );
+    assert_verified(&deliver_github(&client, &config, INTERVENING_SECRET).await);
+    assert!(audited(&pool, &config).await.is_empty());
+}
+
+#[tokio::test]
+async fn setting_or_rotating_a_webhook_secret_moves_updated_at_and_records_who_did_it() {
+    let client = common::TestClient::with_db().await;
+    let (token, user) = registered(&client).await;
+    let (_workspace, project) = workspace_project(&client, &token).await;
+    let pool = client.state().db().clone();
+
+    let github = configure(&client, &token, &project, &github_sync()).await;
+    let github = github["config"]["id"].as_str().unwrap().to_string();
+    let before = updated_at(&pool, &github).await;
+    let response = set_secret(&client, &token, &project, &github, &json!({})).await;
+    response.assert_status(StatusCode::OK);
+    let rotated = response.json_value()["webhook_secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(updated_at(&pool, &github).await > before);
+    let entries = audited(&pool, &github).await;
+    assert_eq!(entries.len(), 1, "one rotation, one entry: {entries:?}");
+    let (action, actor, values) = &entries[0];
+    assert_eq!(action, "sync.webhook_secret_rotated");
+    assert_eq!(*actor, Some(user));
+    assert_eq!(values["provider"], "github");
+    assert!(
+        !values.to_string().contains(&rotated),
+        "the audit log never holds the secret: {values}"
+    );
+
+    let linear = configure(&client, &token, &project, &linear_sync()).await;
+    let linear = linear["config"]["id"].as_str().unwrap().to_string();
+    let before = updated_at(&pool, &linear).await;
+    set_secret(
+        &client,
+        &token,
+        &project,
+        &linear,
+        &json!({ "secret": LINEAR_SIGNING_SECRET }),
+    )
+    .await
+    .assert_status(StatusCode::OK);
+    assert!(updated_at(&pool, &linear).await > before);
+    let entries = audited(&pool, &linear).await;
+    assert_eq!(entries.len(), 1, "one change, one entry: {entries:?}");
+    let (action, actor, values) = &entries[0];
+    assert_eq!(action, "sync.webhook_secret_set");
+    assert_eq!(*actor, Some(user));
+    assert_eq!(values["provider"], "linear");
+    assert!(!values.to_string().contains(LINEAR_SIGNING_SECRET));
+}

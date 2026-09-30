@@ -26,8 +26,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
+use super::common::{AuditEvent, audit};
 use crate::auth::AuthUser;
 use crate::crypto;
+use crate::db::audit::{actions, resources};
 use crate::db::sync_config::{self, SyncConfigRow};
 use crate::db::{projects, workspace_members};
 use crate::error::ServerError;
@@ -157,6 +159,13 @@ impl WebhookSecret {
             .map_err(|_| ServerError::Internal("Failed to encrypt webhook secret".to_string()))
     }
 
+    fn audit_action(&self) -> &'static str {
+        match self {
+            Self::Generated(_) => actions::SYNC_WEBHOOK_SECRET_ROTATED,
+            Self::Supplied(_) => actions::SYNC_WEBHOOK_SECRET_SET,
+        }
+    }
+
     /// The secret to show the caller: one Zone generated, never one they
     /// supplied.
     fn shown(self) -> Option<String> {
@@ -213,14 +222,35 @@ fn config_not_found() -> ServerError {
     ServerError::NotFound("Sync configuration not found".to_string())
 }
 
-/// Confirm the caller is a member of project `id`'s workspace; with `write`,
-/// a member who may change it.
+fn secret_changed_meanwhile() -> ServerError {
+    ServerError::Conflict(
+        "The sync configuration changed while this request was replacing its webhook secret; reload and try again"
+            .to_string(),
+    )
+}
+
+/// What a caller must be allowed to do in a project's workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Read,
+    Write,
+    Admin,
+}
+
+/// Who is asking, and the workspace the project they asked about is in.
+struct Caller {
+    user_id: Uuid,
+    workspace_id: Uuid,
+}
+
+/// Confirm the caller is a member of project `id`'s workspace holding the
+/// `access` the request needs.
 async fn authorize(
     state: &AppState,
     auth: &AuthUser,
     id: Uuid,
-    write: bool,
-) -> Result<(), ServerError> {
+    access: Access,
+) -> Result<Caller, ServerError> {
     let user_id = user_id(auth)?;
     let workspace_id = projects::get_project(state.db(), id)
         .await?
@@ -229,12 +259,20 @@ async fn authorize(
     if !workspace_members::is_member(state.db(), user_id, workspace_id).await? {
         return Err(project_not_found());
     }
-    if write && !workspace_members::can_write(state.db(), workspace_id, user_id).await? {
-        return Err(ServerError::Forbidden(
-            "Workspace write access required".to_string(),
-        ));
+    let refusal = match access {
+        Access::Read => None,
+        Access::Write => (!workspace_members::can_write(state.db(), workspace_id, user_id).await?)
+            .then_some("Workspace write access required"),
+        Access::Admin => (!workspace_members::can_admin(state.db(), workspace_id, user_id).await?)
+            .then_some("Workspace admin access required"),
+    };
+    match refusal {
+        Some(message) => Err(ServerError::Forbidden(message.to_string())),
+        None => Ok(Caller {
+            user_id,
+            workspace_id,
+        }),
     }
-    Ok(())
 }
 
 /// Configuration `config_id`, provided it belongs to project `id`.
@@ -319,7 +357,7 @@ pub async fn list(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ServerError> {
-    authorize(&state, &auth, id, false).await?;
+    authorize(&state, &auth, id, Access::Read).await?;
     let rows = sync_config::list_sync_configs(state.db(), id).await?;
     Ok(Json(SyncConfigsListResponse {
         configs: rows.into_iter().map(SyncConfigData::from).collect(),
@@ -334,7 +372,7 @@ pub async fn create(
     Path(id): Path<Uuid>,
     Json(req): Json<CreateSyncConfigRequest>,
 ) -> Result<Response, ServerError> {
-    authorize(&state, &auth, id, true).await?;
+    authorize(&state, &auth, id, Access::Write).await?;
     let (provider, config) = validate(&req)?;
     let provider_name = provider.as_str();
     if sync_config::get_sync_config_by_project_provider(state.db(), id, provider_name)
@@ -379,23 +417,46 @@ pub async fn create(
 ///
 /// Sets the secret deliveries are verified with: the one supplied, or a new
 /// one Zone generates. Either replaces the old, whose signatures stop
-/// verifying.
+/// verifying. Only an admin may: whoever knows the secret can sign deliveries
+/// as the provider, and replacing it breaks the webhook until the provider
+/// is given the new one. A replacement that raced another answers 409 and
+/// shows nothing, since its secret was never the one kept.
 pub async fn set_webhook_secret(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((id, config_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<WebhookSecretRequest>,
 ) -> Result<Response, ServerError> {
-    authorize(&state, &auth, id, true).await?;
+    let caller = authorize(&state, &auth, id, Access::Admin).await?;
     let secret = match req.secret.as_deref() {
         Some(supplied) => WebhookSecret::supplied(supplied)?,
         None => WebhookSecret::generate(),
     };
     let row = owned_config(&state, id, config_id).await?;
     let encrypted = secret.encrypt(&state)?;
-    let row = sync_config::update_sync_config(state.db(), row.id, None, None, Some(&encrypted))
-        .await?
-        .ok_or_else(config_not_found)?;
+    let row = sync_config::replace_webhook_secret(
+        state.db(),
+        row.id,
+        row.webhook_secret_encrypted.as_deref(),
+        &encrypted,
+    )
+    .await?
+    .ok_or_else(secret_changed_meanwhile)?;
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: None,
+            workspace_id: Some(caller.workspace_id),
+            actor_id: caller.user_id,
+            actor_email: &auth.0.email,
+            action: secret.audit_action(),
+            resource_type: resources::SYNC_CONFIG,
+            resource_id: Some(row.id),
+            old_values: None,
+            new_values: Some(json!({ "project_id": id, "provider": row.provider })),
+        },
+    )
+    .await;
     Ok(Json(SyncConfigResponse {
         config: SyncConfigData::from(row),
         webhook_secret: secret.shown(),
@@ -409,7 +470,7 @@ pub async fn delete(
     auth: AuthUser,
     Path((id, config_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, ServerError> {
-    authorize(&state, &auth, id, true).await?;
+    authorize(&state, &auth, id, Access::Write).await?;
     let row = owned_config(&state, id, config_id).await?;
     if sync_config::delete_sync_config(state.db(), row.id).await? {
         Ok(StatusCode::NO_CONTENT.into_response())

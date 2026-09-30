@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::{DbResult, tasks};
 
 /// Sync configuration row from database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SyncConfigRow {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -344,6 +344,33 @@ pub async fn update_sync_config(
         created_at: r.created_at,
         updated_at: r.updated_at,
     }))
+}
+
+/// Replace a configuration's webhook secret, provided it still holds `prior`,
+/// the ciphertext the caller read. `None` when another change landed first or
+/// the configuration is gone, so no caller is shown a secret that was
+/// overwritten before it could be used.
+pub async fn replace_webhook_secret(
+    pool: &PgPool,
+    id: Uuid,
+    prior: Option<&str>,
+    webhook_secret_encrypted: &str,
+) -> DbResult<Option<SyncConfigRow>> {
+    sqlx::query_as(
+        r#"
+        UPDATE sync_configs
+        SET webhook_secret_encrypted = $3,
+            updated_at = NOW()
+        WHERE id = $1 AND webhook_secret_encrypted IS NOT DISTINCT FROM $2
+        RETURNING id, project_id, provider, enabled, config, webhook_secret_encrypted,
+                  created_at, updated_at
+        "#,
+    )
+    .bind(id)
+    .bind(prior)
+    .bind(webhook_secret_encrypted)
+    .fetch_optional(pool)
+    .await
 }
 
 /// Delete sync config
