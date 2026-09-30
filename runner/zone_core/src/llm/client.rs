@@ -30,6 +30,7 @@ fn guarded(builder: ClientBuilder, trust: Trust) -> ClientBuilder {
     match trust {
         Trust::Operator => builder,
         Trust::Tenant => builder
+            .no_proxy()
             .dns_resolver(Arc::new(metadata::Resolver))
             .redirect(metadata::redirects()),
     }
@@ -968,6 +969,45 @@ mod tests {
                 "{refused:?}"
             );
             server.verify().await;
+        }
+
+        async fn proxied(trust: Trust) -> (usize, usize) {
+            let proxy = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&proxy)
+                .await;
+            let endpoint = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&endpoint)
+                .await;
+            let builder =
+                Client::builder().proxy(reqwest::Proxy::all(proxy.uri()).expect("a proxy URL"));
+            let client = guarded(builder, trust).build().expect("a client");
+
+            let sent = client.post(endpoint.uri()).send().await;
+
+            assert!(sent.is_ok(), "{trust:?}: {sent:?}");
+            (reached(&proxy).await, reached(&endpoint).await)
+        }
+
+        async fn reached(server: &MockServer) -> usize {
+            server.received_requests().await.unwrap_or_default().len()
+        }
+
+        #[tokio::test]
+        async fn a_tenant_endpoint_is_never_sent_through_a_proxy() {
+            assert_eq!(
+                proxied(Trust::Operator).await,
+                (1, 0),
+                "the operator's client goes through the proxy it was given"
+            );
+            assert_eq!(
+                proxied(Trust::Tenant).await,
+                (0, 1),
+                "a proxy resolves the tenant's host itself, past the metadata guard"
+            );
         }
 
         #[tokio::test]
