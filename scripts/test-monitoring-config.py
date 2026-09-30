@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PROMETHEUS_CONFIG = ROOT / 'prometheus' / 'prometheus.yml'
 ALERT_RULES = ROOT / 'grafana' / 'provisioning' / 'alerting' / 'rules.yml'
 COMPOSE = ROOT / 'docker-compose.yml'
+GLUETUN_METRICS = 'gluetun:8001'
+SEARXNG_TARGET = 'http://gluetun:8080/'
 
 
 def load(path: Path) -> dict:
@@ -33,6 +35,18 @@ def prometheus_queries(rule: dict) -> list[str]:
         query['model']['expr']
         for query in rule['data']
         if query['datasourceUid'] == 'prometheus'
+    ]
+
+
+def jobs() -> dict[str, dict]:
+    return {job['job_name']: job for job in load(PROMETHEUS_CONFIG)['scrape_configs']}
+
+
+def relabelled(job: dict, label: str) -> list[str]:
+    return [
+        rule['replacement']
+        for rule in job.get('relabel_configs', [])
+        if rule.get('target_label') == label and 'replacement' in rule
     ]
 
 
@@ -65,6 +79,48 @@ class BudgetRuleTests(unittest.TestCase):
 
     def test_no_data_is_ok(self) -> None:
         self.assertEqual(rules()['litellm-budget-low']['noDataState'], 'OK')
+
+
+class GluetunScrapeTests(unittest.TestCase):
+    def test_no_static_target_points_at_gluetun(self) -> None:
+        for name, job in jobs().items():
+            for group in job.get('static_configs', []):
+                for target in group['targets']:
+                    self.assertNotIn('gluetun', target, f'job {name} scrapes gluetun without the vpn profile')
+
+    def test_gluetun_job_is_discovered_by_dns(self) -> None:
+        job = jobs()['gluetun']
+        self.assertEqual(job['dns_sd_configs'], [{'names': ['gluetun'], 'type': 'A', 'port': 8001}])
+
+    def test_gluetun_job_scrapes_by_name(self) -> None:
+        job = jobs()['gluetun']
+        self.assertEqual(relabelled(job, '__address__'), [GLUETUN_METRICS])
+        self.assertEqual(relabelled(job, 'instance'), [GLUETUN_METRICS])
+
+
+class SearxngProbeTests(unittest.TestCase):
+    def test_probe_is_discovered_by_dns(self) -> None:
+        job = jobs()['searxng']
+        self.assertEqual(job['dns_sd_configs'], [{'names': ['gluetun'], 'type': 'A', 'port': 8080}])
+        self.assertNotIn('static_configs', job)
+
+    def test_probe_targets_searxng_through_blackbox(self) -> None:
+        job = jobs()['searxng']
+        blackbox = jobs()['blackbox']
+        self.assertEqual(relabelled(job, 'probe'), ['searxng'])
+        self.assertEqual(relabelled(job, '__param_target'), [SEARXNG_TARGET])
+        self.assertEqual(relabelled(job, 'instance'), [SEARXNG_TARGET])
+        self.assertEqual(relabelled(job, '__address__'), relabelled(blackbox, '__address__'))
+        self.assertEqual(job['metrics_path'], blackbox['metrics_path'])
+        self.assertEqual(job['params'], blackbox['params'])
+
+    def test_blackbox_keeps_only_host_probes(self) -> None:
+        probes = [group['labels']['probe'] for group in jobs()['blackbox']['static_configs']]
+        self.assertEqual(probes, ['ollama', 'comfyui'])
+
+    def test_rule_does_not_ask_to_be_ignored(self) -> None:
+        description = rules()['probe-searxng-down']['annotations']['description']
+        self.assertNotIn('Ignore', description)
 
 
 @unittest.skipUnless(docker_available(), 'docker is not available')

@@ -1349,7 +1349,7 @@ groups:
         for: 5m
         annotations:
           summary: SearXNG through Gluetun is not reachable
-          description: Blackbox probe of gluetun:8080 failed for 5 minutes. Ignore if the vpn profile is off.
+          description: Blackbox probe of gluetun:8080 failed for 5 minutes. The probe only exists while the gluetun name resolves, so a stopped or crashed gluetun reports no data instead of firing.
         labels:
           severity: warning
           service: searxng

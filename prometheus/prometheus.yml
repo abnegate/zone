@@ -44,11 +44,19 @@ scrape_configs:
     static_configs:
       - targets: ['manager:8000']
 
-  # Gluetun metrics via bundled exporter (vpn profile only)
-  # Bundled mode provides VPN status + traffic metrics via netlink
+  # Gluetun runs only with the vpn profile. DNS discovery yields no target
+  # while the name does not resolve; once it does, the scrape goes by name so
+  # one address per network still collapses to a single target.
   - job_name: 'gluetun'
-    static_configs:
-      - targets: ['gluetun:8001']
+    dns_sd_configs:
+      - names: ['gluetun']
+        type: A
+        port: 8001
+    relabel_configs:
+      - target_label: __address__
+        replacement: gluetun:8001
+      - target_label: instance
+        replacement: gluetun:8001
 
   # Container RSS/CPU (manager embeddings are the memory hog)
   - job_name: 'cadvisor'
@@ -62,7 +70,7 @@ scrape_configs:
         regex: '^/$'
         action: drop
 
-  # Host Ollama, host ComfyUI, and SearXNG-through-Gluetun
+  # Host Ollama and host ComfyUI
   - job_name: 'blackbox'
     metrics_path: /probe
     params:
@@ -76,14 +84,29 @@ scrape_configs:
           - http://host.docker.internal:8188/system_stats
         labels:
           probe: comfyui
-      - targets:
-          - http://gluetun:8080/
-        labels:
-          probe: searxng
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
       - source_labels: [__param_target]
         target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  # SearXNG through Gluetun, discovered the same way as the gluetun job
+  - job_name: 'searxng'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    dns_sd_configs:
+      - names: ['gluetun']
+        type: A
+        port: 8080
+    relabel_configs:
+      - target_label: __param_target
+        replacement: http://gluetun:8080/
+      - target_label: instance
+        replacement: http://gluetun:8080/
+      - target_label: probe
+        replacement: searxng
       - target_label: __address__
         replacement: blackbox:9115
