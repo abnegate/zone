@@ -60,14 +60,30 @@ the name the script printed: `docker volume rm <64-hex-name>`.
 steps above when it does not; `ALLOW_EMPTY_POSTGRES=1` archives the other
 volumes regardless.
 
+A running postgres is stopped while the cluster is archived, so the archive
+holds a cleanly shut down, point-in-time copy rather than files read while
+Postgres wrote them. It stays stopped only as long as the cluster takes to
+archive, usually seconds, but the stack has no database meanwhile: requests
+that need it fail until postgres is back. The stop allows Postgres 120 seconds to shut down, and the backup
+refuses to archive a cluster that did not exit cleanly. Postgres starts again
+as soon as its pass ends, including when that pass fails or the backup is
+interrupted. The other volumes are archived afterwards, live. A postgres that
+was not running stays stopped, and nothing is stopped when the volume holds no
+cluster.
+
 It creates `backups/` with mode 0700 when the directory does not exist yet,
 and writes each archive with mode 0600. Docker runs the archiving container as
 root, so on a Linux host whose Docker daemon runs as root the archive belongs
-to root: read or copy it with `sudo`.
+to root: read or copy it with `sudo`. The archive is first built uncompressed
+as `backups/.zone_backup_<date>.tar` and compressed at the end, so the backup
+temporarily needs free disk for the whole uncompressed archive, the Ollama
+models included, on top of the compressed one. A failed backup removes it.
 
 `make restore BACKUP=<archive>` extracts into the same volumes and warns when
 the archive carried no cluster, which is what every archive taken before the
-mount moved looks like. Restore with the stack down and start it afterwards.
+mount moved looks like. It refuses to start while any running container
+mounts one of those volumes: stop the stack first (`make stop`), and start it
+afterwards. Archives from before the postgres pass restore the same way.
 
 ### Coding agent sign-ins in an archive
 

@@ -34,6 +34,11 @@ NC := \033[0m
 DOCKER_COMPOSE := $(shell which docker-compose 2>/dev/null || echo "docker compose")
 # Maps Compose profiles to overlay files (dev, vpn) and --profile flags.
 COMPOSE := ./scripts/compose.sh
+# GNU tar, because busybox tar cannot append and backup archives the postgres cluster in a pass of its own.
+BACKUP_IMAGE := debian:stable-slim
+BACKUP_VOLUMES := zone_ollama_data zone_postgres_data zone_valkey_data zone_manager_repos \
+	zone_manager_artifacts zone_manager_agent_state zone_prometheus_data zone_grafana_data \
+	zone_traefik_letsencrypt
 
 ##@ Setup & Configuration
 
@@ -354,19 +359,52 @@ prune: ## Remove unused Docker resources
 
 ##@ Backup & Restore
 
-backup: ## Backup volumes to ./backups directory (the postgres cluster lives in zone_postgres_data; see migrate-pgdata for installs from before it did)
+backup: ## Backup volumes to ./backups, stopping postgres while its cluster is archived (see migrate-pgdata for installs from before zone_postgres_data held it)
 	@echo "$(BLUE)Creating backup...$(NC)"
-	@if ! docker run --rm -v zone_postgres_data:/postgres:ro alpine test -f /postgres/PG_VERSION; then \
+	@cluster=1; \
+	if ! docker run --rm -v zone_postgres_data:/postgres:ro alpine test -f /postgres/PG_VERSION; then \
 		echo "$(RED)zone_postgres_data holds no database cluster, so this archive would carry no data.$(NC)"; \
 		echo "An install from before the PGDATA mount keeps its cluster in an anonymous volume: run 'make stop && make migrate-pgdata && make up' first."; \
 		echo "Set ALLOW_EMPTY_POSTGRES=1 to archive the other volumes anyway."; \
 		[ -n "$(ALLOW_EMPTY_POSTGRES)" ] || exit 1; \
-	fi
-	@mkdir -m 700 -p backups
-	@DATE=$$(date +%Y%m%d_%H%M%S); \
+		cluster=; \
+	fi; \
+	running=; \
+	if [ -n "$$cluster" ]; then \
+		running=$$(docker ps -q --filter volume=zone_postgres_data) || exit 1; \
+	fi; \
+	umask 077; \
+	mkdir -m 700 -p backups || exit 1; \
+	DATE=$$(date +%Y%m%d_%H%M%S); \
+	partial=backups/.zone_backup_$$DATE.tar; \
+	status=0; \
+	restart() { \
+		[ -n "$$running" ] || return 0; \
+		stopped=$$running; \
+		running=; \
+		echo "$(BLUE)Starting postgres again...$(NC)"; \
+		docker start $$stopped >/dev/null && return 0; \
+		echo "$(RED)postgres did not start again: run 'make up'.$(NC)" >&2; \
+		return 1; \
+	}; \
+	trap 'restart; rm -f "$$partial" "$$partial.gz"' EXIT; \
+	trap 'exit 130' INT TERM HUP; \
+	if [ -n "$$running" ]; then \
+		echo "$(YELLOW)Stopping postgres while its cluster is archived; the stack has no database until it starts again.$(NC)"; \
+		docker stop -t 120 $$running >/dev/null || exit 1; \
+		codes=$$(docker inspect -f '{{.State.ExitCode}}' $$running) || exit 1; \
+		if printf '%s\n' "$$codes" | grep -qvx 0; then \
+			echo "$(RED)postgres did not shut down cleanly (exit code $$codes), so its cluster would need crash recovery; not archiving it.$(NC)" >&2; \
+			exit 1; \
+		fi; \
+	fi; \
+	docker run --rm \
+		-v zone_postgres_data:/data/postgres:ro \
+		-v "$$(pwd)/backups:/backup" \
+		$(BACKUP_IMAGE) sh -c "umask 077 && tar --numeric-owner -cf /backup/.zone_backup_$$DATE.tar -C /data ./postgres" || exit 1; \
+	restart || status=1; \
 	docker run --rm \
 		-v zone_ollama_data:/data/ollama:ro \
-		-v zone_postgres_data:/data/postgres:ro \
 		-v zone_valkey_data:/data/valkey:ro \
 		-v zone_manager_repos:/data/manager_repos:ro \
 		-v zone_manager_artifacts:/data/manager_artifacts:ro \
@@ -374,14 +412,24 @@ backup: ## Backup volumes to ./backups directory (the postgres cluster lives in 
 		-v zone_prometheus_data:/data/prometheus:ro \
 		-v zone_grafana_data:/data/grafana:ro \
 		-v zone_traefik_letsencrypt:/data/traefik:ro \
-		-v $$(pwd)/backups:/backup \
-		alpine sh -c "umask 077 && tar czf /backup/zone_backup_$$DATE.tar.gz -C /data ." && \
-	echo "$(GREEN)Backup created: backups/zone_backup_$$DATE.tar.gz$(NC)"
+		-v "$$(pwd)/backups:/backup" \
+		$(BACKUP_IMAGE) sh -c "umask 077 && cd /backup \
+			&& tar --numeric-owner -rf .zone_backup_$$DATE.tar -C /data ./ollama ./valkey ./manager_repos ./manager_artifacts ./manager_agent_state ./prometheus ./grafana ./traefik \
+			&& gzip -c .zone_backup_$$DATE.tar > .zone_backup_$$DATE.tar.gz \
+			&& mv .zone_backup_$$DATE.tar.gz zone_backup_$$DATE.tar.gz \
+			&& rm .zone_backup_$$DATE.tar" || exit 1; \
+	echo "$(GREEN)Backup created: backups/zone_backup_$$DATE.tar.gz$(NC)"; \
+	exit $$status
 
-restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_YYYYMMDD_HHMMSS.tar.gz)
+restore: ## Restore from backup with the stack stopped (usage: make restore BACKUP=backups/zone_backup_YYYYMMDD_HHMMSS.tar.gz)
 	@if [ -z "$(BACKUP)" ]; then \
 		echo "$(RED)Error: Please specify BACKUP file$(NC)"; \
 		echo "Usage: make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz"; \
+		exit 1; \
+	fi
+	@running=$$(docker ps -q $(foreach volume,$(BACKUP_VOLUMES),--filter volume=$(volume))) || exit 1; \
+	if [ -n "$$running" ]; then \
+		echo "$(RED)Running containers use the volumes a restore overwrites. Stop the stack first: make stop$(NC)" >&2; \
 		exit 1; \
 	fi
 	@echo "$(YELLOW)Restoring from $(BACKUP)...$(NC)"
