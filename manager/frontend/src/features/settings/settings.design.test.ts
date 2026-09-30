@@ -18,6 +18,18 @@ function rule(css: string, selector: string): string {
   return match[2];
 }
 
+function media(css: string, query: string): string {
+  const start = css.indexOf(`@media ${query} {`);
+  if (start === -1) throw new Error(`@media ${query} is not defined`);
+  const open = css.indexOf('{', start);
+  let depth = 0;
+  for (let index = open; index < css.length; index++) {
+    if (css[index] === '{') depth++;
+    if (css[index] === '}' && --depth === 0) return css.slice(open + 1, index);
+  }
+  throw new Error(`@media ${query} is not closed`);
+}
+
 describe('settings surfaces', () => {
   const shell = read(join(settings, 'workspace', 'pages', 'WorkspaceSettingsPage.css'));
 
@@ -71,6 +83,13 @@ describe('settings surfaces', () => {
     expect(
       rule(shell, '.form-grid + .form-grid,\n.toggle-row + .form-grid,\n.form-grid + .alert')
     ).toContain('margin-top: var(--ui-field-gap)');
+  });
+
+  it('stacks a section row on a phone without widening the body past the viewport', () => {
+    const phone = media(shell, '(max-width: 768px)');
+    expect(phone).toContain('  .section-row-copy {\n    align-self: stretch;\n  }');
+    expect(rule(phone, '  .settings-page .section-description')).toContain('max-width: 100%');
+    expect(rule(shell, '.settings-page .section-description')).toContain('text-overflow: ellipsis');
   });
 
   it('keeps the save row in view as a 48px sticky footer', () => {

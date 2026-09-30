@@ -573,6 +573,14 @@
     align-items: flex-start;
   }
 
+  .section-row-copy {
+    align-self: stretch;
+  }
+
+  .settings-page .section-description {
+    max-width: 100%;
+  }
+
   .settings-page .section-description::before {
     content: none;
   }

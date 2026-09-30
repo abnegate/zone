@@ -4,8 +4,13 @@ import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 const screens = [
-  { path: '/org-settings', title: 'Organization Settings', content: '.settings-form' },
-  { path: '/settings', title: 'Workspace Settings', content: '#font-family' },
+  {
+    path: '/org-settings',
+    title: 'Organization Settings',
+    content: '.settings-form',
+    body: '.page-body',
+  },
+  { path: '/settings', title: 'Workspace Settings', content: '#font-family', body: '.page-body' },
   { path: '/models', title: 'Models', content: '.model-item' },
   { path: '/projects', title: 'Projects', content: '.project-card' },
   { path: '/wiki', title: 'Knowledge Base', content: '.knowledge-card' },
@@ -21,12 +26,26 @@ async function open(page: Page, screen: (typeof screens)[number]): Promise<void>
   await page.evaluate(() => document.fonts.ready);
 }
 
-function width(page: Page): Promise<{ scroll: number; client: number; left: number }> {
-  return page.locator('main.main-content').evaluate((main) => ({
-    scroll: main.scrollWidth,
-    client: main.clientWidth,
-    left: main.scrollLeft,
+function width(
+  page: Page,
+  selector = 'main.main-content'
+): Promise<{ scroll: number; client: number; left: number }> {
+  return page.locator(selector).evaluate((element) => ({
+    scroll: element.scrollWidth,
+    client: element.clientWidth,
+    left: element.scrollLeft,
   }));
+}
+
+async function expectNoSidewaysScroll(
+  page: Page,
+  screen: (typeof screens)[number]
+): Promise<void> {
+  const main = await width(page);
+  expect(main.scroll).toBeLessThanOrEqual(main.client);
+  if (!screen.body) return;
+  const body = await width(page, screen.body);
+  expect(body.scroll, `${screen.body} scrolls sideways`).toBeLessThanOrEqual(body.client);
 }
 
 test.beforeEach(async ({ context, page }) => {
@@ -44,8 +63,7 @@ test.describe('Page bar on a 375px phone', () => {
 
   test('organization settings never scrolls sideways', async ({ page }) => {
     await open(page, screens[0]);
-    const main = await width(page);
-    expect(main.scroll).toBeLessThanOrEqual(main.client);
+    await expectNoSidewaysScroll(page, screens[0]);
   });
 
   test('the last organization tab scrolls the tab list, not the page', async ({ page }) => {
@@ -70,8 +88,7 @@ test.describe('Page bar on a 375px phone', () => {
   for (const screen of screens.slice(1)) {
     test(`${screen.title} never scrolls sideways`, async ({ page }) => {
       await open(page, screen);
-      const main = await width(page);
-      expect(main.scroll).toBeLessThanOrEqual(main.client);
+      await expectNoSidewaysScroll(page, screen);
     });
   }
 });
