@@ -234,8 +234,9 @@ mod tests {
                 .await
                 .expect("a workspace");
         sqlx::query(
-            "INSERT INTO organization_ai_settings (organization_id, provider, openai_base_url) \
-             VALUES ($1, $2, 'https://proxy.example/v1?key=leak')",
+            "INSERT INTO organization_ai_settings \
+             (organization_id, provider, openai_base_url, completions_routed) \
+             VALUES ($1, $2, 'https://proxy.example/v1?key=leak', true)",
         )
         .bind(organization.id)
         .bind(PROVIDER_OPENAI)

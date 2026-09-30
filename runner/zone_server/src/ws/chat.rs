@@ -4167,8 +4167,8 @@ mod tests {
                 .await;
             let organization = Organization::on(PROVIDER_SELF_HOSTED).await;
             sqlx::query(
-                "UPDATE organization_ai_settings SET litellm_host = $2, model_fast = $3 \
-                 WHERE organization_id = $1",
+                "UPDATE organization_ai_settings SET litellm_host = $2, model_fast = $3, \
+                 completions_routed = true WHERE organization_id = $1",
             )
             .bind(organization.id)
             .bind("http://gateway.example:4000")
