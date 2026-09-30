@@ -69,4 +69,7 @@ pub const EMBEDDED: &[Source] = &[
     source!("046_invitations_pending_unique.sql"),
     source!("047_chat_attached_sources.sql"),
     source!("048_agent_logins.sql"),
+    source!("049_task_reviews_failed_verdict.sql"),
+    source!("050_task_reviews_failed_verdict_validation.sql"),
+    source!("051_sync_deliveries.sql"),
 ];
