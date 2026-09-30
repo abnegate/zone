@@ -18,7 +18,7 @@ use zone_server::{
     crypto,
     db::{
         DbPool, projects,
-        sync_config::{self, SyncEventDirection, SyncEventType},
+        sync_config::{self, SyncDirection, SyncEventDirection, SyncEventType},
         tasks,
     },
     routes::create_router,
@@ -230,7 +230,7 @@ async fn test_synced_item_lifecycle() {
         task.id,
         "123",
         Some("https://github.com/test-owner/test-repo/issues/123"),
-        "bidirectional",
+        SyncDirection::Bidirectional,
         Some(external_state.clone()),
     )
     .await
@@ -238,7 +238,7 @@ async fn test_synced_item_lifecycle() {
 
     assert_eq!(synced_item.external_id, "123");
     assert_eq!(synced_item.task_id, task.id);
-    assert_eq!(synced_item.sync_direction, "bidirectional");
+    assert_eq!(synced_item.sync_direction, SyncDirection::Bidirectional);
 
     // Test getting by task
     let by_task = sync_config::get_synced_item_by_task(state.db(), sync_config_row.id, task.id)
@@ -325,8 +325,8 @@ async fn test_sync_event_logging() {
     .await
     .expect("Failed to create sync event");
 
-    assert_eq!(event.event_type, "webhook_received");
-    assert_eq!(event.direction, "inbound");
+    assert_eq!(event.event_type, SyncEventType::WebhookReceived);
+    assert_eq!(event.direction, SyncEventDirection::Inbound);
     assert_eq!(event.payload, Some(payload));
     assert!(event.error_message.is_none());
 
@@ -378,11 +378,88 @@ async fn every_sync_event_type_and_direction_satisfies_the_sync_events_constrain
                     direction.as_str()
                 )
             });
-            assert_eq!(event.event_type, event_type.as_str());
-            assert_eq!(event.direction, direction.as_str());
+            assert_eq!(event.event_type, event_type);
+            assert_eq!(event.direction, direction);
         }
     }
 
+    let listed = sync_config::list_sync_events(state.db(), sync_config_row.id, 100)
+        .await
+        .expect("every logged sync event reads back into its enums");
+    assert_eq!(
+        listed.len(),
+        SyncEventType::ALL.len() * SyncEventDirection::ALL.len()
+    );
+
+    cleanup_project(state.db(), project.id).await;
+}
+
+#[tokio::test]
+async fn every_sync_direction_satisfies_the_synced_items_constraint() {
+    let state = setup_test_state().await;
+    let (_organization_id, workspace_id, _user_id) = common::setup_test_data(state.db()).await;
+    let project = projects::create_project(
+        state.db(),
+        "Synced Item Drift Project",
+        None,
+        Some(workspace_id),
+    )
+    .await
+    .expect("Failed to create project");
+    let task = tasks::create_task(
+        state.db(),
+        workspace_id,
+        &[project.id],
+        "Drift Task",
+        "Drift description",
+        None,
+        None,
+        false,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+    let sync_config_row = sync_config::create_sync_config(
+        state.db(),
+        project.id,
+        "github",
+        true,
+        json!({ "owner": "test-owner", "repo": "test-repo", "token": "ghp_test123" }),
+        None,
+    )
+    .await
+    .expect("Failed to create sync config");
+
+    for direction in SyncDirection::ALL {
+        let created = sync_config::create_synced_item(
+            state.db(),
+            sync_config_row.id,
+            task.id,
+            "123",
+            None,
+            direction,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("synced_items rejected {}: {error}", direction.as_str()));
+        assert_eq!(created.sync_direction, direction);
+
+        let found =
+            sync_config::get_synced_item_by_external_id(state.db(), sync_config_row.id, "123")
+                .await
+                .expect("a synced item reads back into its direction")
+                .expect("the synced item exists");
+        assert_eq!(found.sync_direction, direction);
+
+        sync_config::delete_synced_item(state.db(), created.id)
+            .await
+            .expect("Failed to delete synced item");
+    }
+
+    let _ = state
+        .db()
+        .execute(sqlx::query("DELETE FROM tasks WHERE id = $1").bind(task.id))
+        .await;
     cleanup_project(state.db(), project.id).await;
 }
 
@@ -586,7 +663,7 @@ struct SyncedTask {
 }
 
 impl SyncedTask {
-    async fn create(provider: &str, config: serde_json::Value) -> Self {
+    async fn create(provider: &str, config: serde_json::Value, direction: SyncDirection) -> Self {
         let state = setup_test_state().await;
         let (_organization_id, workspace_id, _user_id) = common::setup_test_data(state.db()).await;
         let project = projects::create_project(
@@ -632,7 +709,7 @@ impl SyncedTask {
             task.id,
             "123",
             None,
-            "bidirectional",
+            direction,
             None,
         )
         .await
@@ -673,14 +750,23 @@ impl SyncedTask {
             .status()
     }
 
-    async fn item_event_types(&self) -> Vec<String> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT event_type FROM sync_events WHERE synced_item_id = $1 ORDER BY created_at",
-        )
-        .bind(self.synced_item_id)
-        .fetch_all(self.state.db())
-        .await
-        .expect("Failed to read sync events")
+    async fn item_event_types(&self) -> Vec<SyncEventType> {
+        let mut events = sync_config::list_sync_events(self.state.db(), self.sync_config_id, 100)
+            .await
+            .expect("Failed to read sync events");
+        events.reverse();
+        events
+            .into_iter()
+            .filter(|event| event.synced_item_id == Some(self.synced_item_id))
+            .map(|event| event.event_type)
+            .collect()
+    }
+
+    async fn post_github(&self, body: &serde_json::Value) -> StatusCode {
+        let body = serde_json::to_vec(body).unwrap();
+        let signature = format!("sha256={}", self.sign(&body));
+        self.post("github", "X-Hub-Signature-256", &signature, &body)
+            .await
     }
 
     async fn task_title(&self) -> String {
@@ -703,34 +789,22 @@ impl SyncedTask {
 
 #[tokio::test]
 async fn a_signed_github_edit_updates_the_task_and_answers_ok() {
-    let synced = SyncedTask::create(
-        "github",
-        json!({ "owner": "test-owner", "repo": "test-repo", "token": "ghp_test123" }),
-    )
-    .await;
-    let body = serde_json::to_vec(&json!({
-        "action": "edited",
-        "issue": {
-            "number": 123,
-            "title": "Renamed",
-            "body": "Edited body",
-            "state": "open",
-            "html_url": "https://github.com/test-owner/test-repo/issues/123"
-        }
-    }))
-    .unwrap();
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let body = github_issue("edited", "Renamed");
 
-    let signature = format!("sha256={}", synced.sign(&body));
-    let status = synced
-        .post("github", "X-Hub-Signature-256", &signature, &body)
-        .await;
+    let status = synced.post_github(&body).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(synced.item_event_types().await, vec!["update".to_string()]);
+    assert_eq!(synced.item_event_types().await, vec![SyncEventType::Update]);
     assert_eq!(synced.task_title().await, "Renamed");
 
     let status = synced
-        .post("github", "X-Hub-Signature-256", "sha256=invalid", &body)
+        .post(
+            "github",
+            "X-Hub-Signature-256",
+            "sha256=invalid",
+            &serde_json::to_vec(&body).unwrap(),
+        )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
@@ -738,10 +812,55 @@ async fn a_signed_github_edit_updates_the_task_and_answers_ok() {
 }
 
 #[tokio::test]
+async fn a_signed_github_delete_logs_a_close_event() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+
+    let status = synced
+        .post_github(&github_issue("deleted", "Original"))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(synced.item_event_types().await, vec![SyncEventType::Close]);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_outbound_only_item_ignores_a_signed_inbound_edit() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Outbound).await;
+
+    let status = synced.post_github(&github_issue("edited", "Renamed")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(synced.task_title().await, "Original");
+    assert!(synced.item_event_types().await.is_empty());
+
+    synced.cleanup().await;
+}
+
+fn github_config() -> serde_json::Value {
+    json!({ "owner": "test-owner", "repo": "test-repo", "token": "ghp_test123" })
+}
+
+fn github_issue(action: &str, title: &str) -> serde_json::Value {
+    json!({
+        "action": action,
+        "issue": {
+            "number": 123,
+            "title": title,
+            "body": "Edited body",
+            "state": "open",
+            "html_url": "https://github.com/test-owner/test-repo/issues/123"
+        }
+    })
+}
+
+#[tokio::test]
 async fn a_signed_linear_update_updates_the_task_and_answers_ok() {
     let synced = SyncedTask::create(
         "linear",
         json!({ "api_key": "lin_api_test123", "team_id": "TEAM-123" }),
+        SyncDirection::Bidirectional,
     )
     .await;
     let body = serde_json::to_vec(&json!({
@@ -762,7 +881,7 @@ async fn a_signed_linear_update_updates_the_task_and_answers_ok() {
         .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(synced.item_event_types().await, vec!["update".to_string()]);
+    assert_eq!(synced.item_event_types().await, vec![SyncEventType::Update]);
     assert_eq!(synced.task_title().await, "Renamed");
 
     let status = synced

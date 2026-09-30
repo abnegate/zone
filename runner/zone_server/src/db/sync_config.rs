@@ -1,5 +1,7 @@
 //! Sync configuration database queries
 
+use std::str::FromStr;
+
 use chrono::NaiveDateTime;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
@@ -29,7 +31,7 @@ pub struct SyncedItemRow {
     pub external_id: String,
     pub external_url: Option<String>,
     pub last_synced_at: Option<NaiveDateTime>,
-    pub sync_direction: String,
+    pub sync_direction: SyncDirection,
     pub last_external_state: Option<JsonValue>,
     pub created_at: Option<NaiveDateTime>,
 }
@@ -40,8 +42,8 @@ pub struct SyncEventRow {
     pub id: Uuid,
     pub sync_config_id: Uuid,
     pub synced_item_id: Option<Uuid>,
-    pub event_type: String,
-    pub direction: String,
+    pub event_type: SyncEventType,
+    pub direction: SyncEventDirection,
     pub payload: Option<JsonValue>,
     pub error_message: Option<String>,
     pub created_at: Option<NaiveDateTime>,
@@ -78,6 +80,17 @@ impl SyncEventType {
     }
 }
 
+impl FromStr for SyncEventType {
+    type Err = UnknownSyncValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|variant| variant.as_str() == value)
+            .ok_or_else(|| UnknownSyncValue::new("sync event type", value))
+    }
+}
+
 /// Which way a logged sync event travelled; each value is one the
 /// `sync_events.direction` CHECK constraint accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +108,76 @@ impl SyncEventDirection {
             Self::Outbound => "outbound",
         }
     }
+}
+
+impl FromStr for SyncEventDirection {
+    type Err = UnknownSyncValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|variant| variant.as_str() == value)
+            .ok_or_else(|| UnknownSyncValue::new("sync event direction", value))
+    }
+}
+
+/// Which way a synced item may move; each value is one the
+/// `synced_items.sync_direction` CHECK constraint accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncDirection {
+    Inbound,
+    Outbound,
+    Bidirectional,
+}
+
+impl SyncDirection {
+    pub const ALL: [Self; 3] = [Self::Inbound, Self::Outbound, Self::Bidirectional];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+            Self::Bidirectional => "bidirectional",
+        }
+    }
+}
+
+impl FromStr for SyncDirection {
+    type Err = UnknownSyncValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|variant| variant.as_str() == value)
+            .ok_or_else(|| UnknownSyncValue::new("sync direction", value))
+    }
+}
+
+/// A stored sync value that none of its enum's variants spell.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{value:?} is not a known {kind}")]
+pub struct UnknownSyncValue {
+    pub kind: &'static str,
+    pub value: String,
+}
+
+impl UnknownSyncValue {
+    fn new(kind: &'static str, value: &str) -> Self {
+        Self {
+            kind,
+            value: value.to_string(),
+        }
+    }
+}
+
+fn decode<T>(column: &str, value: &str) -> DbResult<T>
+where
+    T: FromStr<Err = UnknownSyncValue>,
+{
+    value.parse().map_err(|error| sqlx::Error::ColumnDecode {
+        index: column.to_string(),
+        source: Box::new(error),
+    })
 }
 
 /// Get sync config by ID
@@ -287,17 +370,20 @@ pub async fn get_synced_item_by_task(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| SyncedItemRow {
-        id: r.id,
-        sync_config_id: r.sync_config_id,
-        task_id: r.task_id,
-        external_id: r.external_id,
-        external_url: r.external_url,
-        last_synced_at: r.last_synced_at,
-        sync_direction: r.sync_direction,
-        last_external_state: r.last_external_state,
-        created_at: r.created_at,
-    }))
+    row.map(|r| {
+        Ok(SyncedItemRow {
+            id: r.id,
+            sync_config_id: r.sync_config_id,
+            task_id: r.task_id,
+            external_id: r.external_id,
+            external_url: r.external_url,
+            last_synced_at: r.last_synced_at,
+            sync_direction: decode("sync_direction", &r.sync_direction)?,
+            last_external_state: r.last_external_state,
+            created_at: r.created_at,
+        })
+    })
+    .transpose()
 }
 
 /// Get synced item by external ID
@@ -319,17 +405,20 @@ pub async fn get_synced_item_by_external_id(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| SyncedItemRow {
-        id: r.id,
-        sync_config_id: r.sync_config_id,
-        task_id: r.task_id,
-        external_id: r.external_id,
-        external_url: r.external_url,
-        last_synced_at: r.last_synced_at,
-        sync_direction: r.sync_direction,
-        last_external_state: r.last_external_state,
-        created_at: r.created_at,
-    }))
+    row.map(|r| {
+        Ok(SyncedItemRow {
+            id: r.id,
+            sync_config_id: r.sync_config_id,
+            task_id: r.task_id,
+            external_id: r.external_id,
+            external_url: r.external_url,
+            last_synced_at: r.last_synced_at,
+            sync_direction: decode("sync_direction", &r.sync_direction)?,
+            last_external_state: r.last_external_state,
+            created_at: r.created_at,
+        })
+    })
+    .transpose()
 }
 
 /// Create a synced item
@@ -339,7 +428,7 @@ pub async fn create_synced_item(
     task_id: Uuid,
     external_id: &str,
     external_url: Option<&str>,
-    sync_direction: &str,
+    sync_direction: SyncDirection,
     last_external_state: Option<JsonValue>,
 ) -> DbResult<SyncedItemRow> {
     let row = sqlx::query!(
@@ -354,7 +443,7 @@ pub async fn create_synced_item(
         task_id,
         external_id,
         external_url,
-        sync_direction,
+        sync_direction.as_str(),
         last_external_state
     )
     .fetch_one(pool)
@@ -367,7 +456,7 @@ pub async fn create_synced_item(
         external_id: row.external_id,
         external_url: row.external_url,
         last_synced_at: row.last_synced_at,
-        sync_direction: row.sync_direction,
+        sync_direction: decode("sync_direction", &row.sync_direction)?,
         last_external_state: row.last_external_state,
         created_at: row.created_at,
     })
@@ -394,17 +483,20 @@ pub async fn update_synced_item(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| SyncedItemRow {
-        id: r.id,
-        sync_config_id: r.sync_config_id,
-        task_id: r.task_id,
-        external_id: r.external_id,
-        external_url: r.external_url,
-        last_synced_at: r.last_synced_at,
-        sync_direction: r.sync_direction,
-        last_external_state: r.last_external_state,
-        created_at: r.created_at,
-    }))
+    row.map(|r| {
+        Ok(SyncedItemRow {
+            id: r.id,
+            sync_config_id: r.sync_config_id,
+            task_id: r.task_id,
+            external_id: r.external_id,
+            external_url: r.external_url,
+            last_synced_at: r.last_synced_at,
+            sync_direction: decode("sync_direction", &r.sync_direction)?,
+            last_external_state: r.last_external_state,
+            created_at: r.created_at,
+        })
+    })
+    .transpose()
 }
 
 /// Delete synced item
@@ -446,8 +538,8 @@ pub async fn create_sync_event(
         id: row.id,
         sync_config_id: row.sync_config_id,
         synced_item_id: row.synced_item_id,
-        event_type: row.event_type,
-        direction: row.direction,
+        event_type: decode("event_type", &row.event_type)?,
+        direction: decode("direction", &row.direction)?,
         payload: row.payload,
         error_message: row.error_message,
         created_at: row.created_at,
@@ -474,19 +566,20 @@ pub async fn list_sync_events(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| SyncEventRow {
-            id: r.id,
-            sync_config_id: r.sync_config_id,
-            synced_item_id: r.synced_item_id,
-            event_type: r.event_type,
-            direction: r.direction,
-            payload: r.payload,
-            error_message: r.error_message,
-            created_at: r.created_at,
+    rows.into_iter()
+        .map(|r| {
+            Ok(SyncEventRow {
+                id: r.id,
+                sync_config_id: r.sync_config_id,
+                synced_item_id: r.synced_item_id,
+                event_type: decode("event_type", &r.event_type)?,
+                direction: decode("direction", &r.direction)?,
+                payload: r.payload,
+                error_message: r.error_message,
+                created_at: r.created_at,
+            })
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -533,6 +626,68 @@ mod tests {
             positions,
             (0..2).collect::<Vec<_>>(),
             "a new SyncEventDirection must join ALL, which the sync_events drift test inserts"
+        );
+    }
+
+    fn sync_direction_position(direction: SyncDirection) -> usize {
+        match direction {
+            SyncDirection::Inbound => 0,
+            SyncDirection::Outbound => 1,
+            SyncDirection::Bidirectional => 2,
+        }
+    }
+
+    #[test]
+    fn all_lists_every_sync_direction_once_in_order() {
+        let positions: Vec<usize> = SyncDirection::ALL
+            .into_iter()
+            .map(sync_direction_position)
+            .collect();
+        assert_eq!(
+            positions,
+            (0..3).collect::<Vec<_>>(),
+            "a new SyncDirection must join ALL, which the synced_items drift test inserts"
+        );
+    }
+
+    #[test]
+    fn every_sync_value_parses_back_from_its_stored_spelling() {
+        for event_type in SyncEventType::ALL {
+            assert_eq!(event_type.as_str().parse(), Ok(event_type));
+        }
+        for direction in SyncEventDirection::ALL {
+            assert_eq!(direction.as_str().parse(), Ok(direction));
+        }
+        for direction in SyncDirection::ALL {
+            assert_eq!(direction.as_str().parse(), Ok(direction));
+        }
+    }
+
+    #[test]
+    fn an_unknown_sync_value_names_its_kind_and_spelling() {
+        assert_eq!(
+            "issue_closed".parse::<SyncEventType>(),
+            Err(UnknownSyncValue::new("sync event type", "issue_closed"))
+        );
+        assert_eq!(
+            "bidirectional".parse::<SyncEventDirection>(),
+            Err(UnknownSyncValue::new(
+                "sync event direction",
+                "bidirectional"
+            ))
+        );
+        assert_eq!(
+            "sideways".parse::<SyncDirection>(),
+            Err(UnknownSyncValue::new("sync direction", "sideways"))
+        );
+    }
+
+    #[test]
+    fn decoding_an_unknown_sync_value_reports_its_column() {
+        let error = decode::<SyncDirection>("sync_direction", "sideways").unwrap_err();
+        assert!(
+            matches!(&error, sqlx::Error::ColumnDecode { index, .. } if index == "sync_direction"),
+            "{error}"
         );
     }
 }

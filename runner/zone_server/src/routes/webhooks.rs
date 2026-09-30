@@ -11,7 +11,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::crypto;
-use crate::db::sync_config::{self, SyncEventDirection, SyncEventType};
+use crate::db::sync_config::{self, SyncDirection, SyncEventDirection, SyncEventType};
 use crate::db::tasks;
 use crate::state::AppState;
 use crate::sync::{IssueState, SyncError};
@@ -466,8 +466,7 @@ async fn process_webhook_event(
         }
     };
 
-    // Check sync direction
-    if synced_item.sync_direction == "outbound" {
+    if synced_item.sync_direction == SyncDirection::Outbound {
         tracing::info!("Ignoring inbound webhook for outbound-only sync");
         return Ok("Sync is outbound-only, ignoring inbound event".to_string());
     }

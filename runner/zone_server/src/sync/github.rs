@@ -125,7 +125,7 @@ impl GitHubSyncProvider {
     fn map_action_to_event_type(action: &str) -> SyncEventType {
         match action {
             "opened" => SyncEventType::Create,
-            "closed" => SyncEventType::Close,
+            "closed" | "deleted" => SyncEventType::Close,
             _ => SyncEventType::Update,
         }
     }
@@ -428,6 +428,7 @@ mod tests {
     fn webhook_actions_map_to_sync_event_types() {
         assert_eq!(parse_signed_action("opened"), SyncEventType::Create);
         assert_eq!(parse_signed_action("closed"), SyncEventType::Close);
+        assert_eq!(parse_signed_action("deleted"), SyncEventType::Close);
         for action in ["edited", "reopened", "labeled", "assigned"] {
             assert_eq!(
                 parse_signed_action(action),
