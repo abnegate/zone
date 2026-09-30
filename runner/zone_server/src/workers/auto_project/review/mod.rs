@@ -627,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_review_round_goes_to_the_organization_endpoint_with_its_key() {
-        use super::model::{Author, Route};
+        use super::model::{Author, Venue};
         use super::testing::{
             INSTANCE_KEY, ORGANIZATION_KEY, Organization, SAVED_MODEL, Saved, authorization,
             completing, received,
@@ -643,18 +643,18 @@ mod tests {
         })
         .await;
         let state = organization.state(&instance.uri());
-        let route = Route::for_workspace(&state, organization.workspace).await;
+        let venue = Venue::for_workspace(&state, organization.workspace).await;
         organization.remove().await;
-        let route = route.expect("an endpoint needs no sign-in");
-        let reviewers = route
+        let venue = venue.expect("an endpoint needs no sign-in");
+        let reviewers = venue
             .lineup(&Author::Unrecorded, &["instance-reviewer".to_string()], 1)
             .expect("the saved model reviews");
         let task = task();
         let pull = pull();
 
         let verdict = run(
-            &route.endpoint,
-            route.backend,
+            &venue.endpoint,
+            venue.backend,
             PrService::new(),
             request(&task, &pull, &reviewers[0].model),
         )

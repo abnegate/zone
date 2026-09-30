@@ -14,8 +14,8 @@ use zone_core::llm::{LlmBackend, LlmConfig};
 use zone_core::secret::{REDACTED, SecretValue, redact};
 
 use crate::config::Config;
-use crate::db::ai_settings::{self, EffectiveAiSettings, PROVIDER_ANTHROPIC};
-use crate::db::workspaces;
+use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC};
+use crate::services::route;
 use crate::services::stages::{self, Catalog};
 use crate::state::AppState;
 
@@ -152,31 +152,9 @@ impl Endpoint {
     /// The endpoint a workspace's settings name, or the instance's when the
     /// workspace or its settings cannot be read.
     pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Self {
-        let organization = match workspaces::get_workspace(state.db(), workspace).await {
-            Ok(Some(row)) => row.organization_id,
-            Ok(None) => {
-                tracing::warn!(%workspace, "No such workspace; using the instance's endpoint");
-                return Self::instance(state.config());
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %workspace,
-                    %error,
-                    "Could not read the workspace; using the instance's endpoint"
-                );
-                return Self::instance(state.config());
-            }
-        };
-        match ai_settings::get_effective_ai_settings(state.db(), organization, workspace).await {
-            Ok(settings) => Self::resolve(state.config(), &settings),
-            Err(error) => {
-                tracing::warn!(
-                    %workspace,
-                    %error,
-                    "Could not read the AI settings; using the instance's endpoint"
-                );
-                Self::instance(state.config())
-            }
+        match route::saved(state, workspace).await {
+            Some((_, settings)) => Self::resolve(state.config(), &settings),
+            None => Self::instance(state.config()),
         }
     }
 

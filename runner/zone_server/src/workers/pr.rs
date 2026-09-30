@@ -15,12 +15,12 @@ use crate::db::{projects, tasks};
 use crate::services::backend;
 use crate::services::checkout::{Baseline, Repository};
 use crate::services::endpoint::{Endpoint, Error as EndpointError};
+use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
 use crate::workers::conflict::agent::ModelRepairAgent;
 use crate::workers::conflict::{RepairOutcome, RepairRequest, repair};
 use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
-use crate::workers::task::Resolution;
 use zone_core::llm::{LlmBackend, LlmClient, Message};
 use zone_vcs::conflict::{BranchName, ConflictService};
 use zone_vcs::git::GitService;
@@ -574,15 +574,13 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         _ => return RepairOutcome::Failed("Branch names are not repairable".to_string()),
     };
 
-    let resolution = Resolution::for_workspace(state, task.workspace_id).await;
-    let Some((backend, endpoint)) = repair_route(
-        &resolution,
-        backend::instance(state.config()),
-        state.config(),
-    ) else {
+    let route = Route::for_workspace(state, task.workspace_id).await;
+    let Some((backend, endpoint)) =
+        repair_route(&route, backend::instance(state.config()), state.config())
+    else {
         return RepairOutcome::Failed(NO_REPAIR_BACKEND.to_string());
     };
-    let preferences = resolution.preferences(&endpoint, &state.config().comfyui.classifier_model);
+    let preferences = route.preferences(&endpoint, &state.config().comfyui.classifier_model);
     let model = match repair_model(state, &task, &backend, &endpoint, &preferences).await {
         Ok(model) => model,
         Err(error) => return RepairOutcome::Failed(error.to_string()),
@@ -679,13 +677,10 @@ async fn subject(state: &AppState, task: &tasks::TaskRow, report: &str) -> Subje
 }
 
 async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Option<Subject> {
-    let resolution = Resolution::for_workspace(state, task.workspace_id).await;
-    let preferences = resolution.preferences(
-        &resolution.endpoint,
-        &state.config().comfyui.classifier_model,
-    );
-    let backend = resolution.backend.ok()?;
-    let endpoint = resolution.endpoint;
+    let route = Route::for_workspace(state, task.workspace_id).await;
+    let preferences = route.preferences(&route.endpoint, &state.config().comfyui.classifier_model);
+    let backend = route.backend.ok()?;
+    let endpoint = route.endpoint;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
@@ -711,12 +706,12 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
 /// else the instance's own endpoint, when the instance runs over HTTP. The
 /// instance's key only ever goes to the instance's host.
 fn repair_route(
-    resolution: &Resolution,
+    route: &Route,
     instance: LlmBackend,
     config: &Config,
 ) -> Option<(LlmBackend, Endpoint)> {
-    match resolution.backend {
-        Ok(LlmBackend::Http) => Some((LlmBackend::Http, resolution.endpoint.clone())),
+    match route.backend {
+        Ok(LlmBackend::Http) => Some((LlmBackend::Http, route.endpoint.clone())),
         Ok(LlmBackend::Cli { .. }) | Err(_) => {
             matches!(instance, LlmBackend::Http).then(|| (instance, Endpoint::instance(config)))
         }
@@ -850,7 +845,7 @@ mod tests {
 
     /// A workspace whose organization saved an OpenAI endpoint, resolved to
     /// `backend`.
-    fn saved(config: &Config, backend: Result<LlmBackend, backend::Error>) -> Resolution {
+    fn saved(config: &Config, backend: Result<LlmBackend, backend::Error>) -> Route {
         let mut settings = crate::services::endpoint::testing::settings(
             zone_context::embeddings::providers::PROVIDER_OPENAI,
         );
@@ -858,7 +853,7 @@ mod tests {
         settings.openai_api_key = Some(zone_core::secret::SecretValue::new(
             ORGANIZATION_KEY.to_string(),
         ));
-        Resolution {
+        Route {
             backend,
             endpoint: Endpoint::resolve(config, &settings),
             settings: Some(settings),

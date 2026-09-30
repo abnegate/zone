@@ -27,13 +27,13 @@ use crate::agent::prompt::{self, Environment, Vcs};
 use crate::agent::question::{self, Question};
 use crate::agent::wait::{self, Waited, Waiting};
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
-use crate::config::{Config, ModelBackend};
-use crate::db::ai_settings::{self, EffectiveAiSettings};
-use crate::db::{task_tool_calls, tasks, workspaces};
+use crate::config::ModelBackend;
+use crate::db::{ai_settings, task_tool_calls, tasks, workspaces};
 use crate::services::backend;
 use crate::services::chat::session::{self, RunContext};
 use crate::services::endpoint::Endpoint;
 use crate::services::login::credential::{self, Login};
+use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
 use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
@@ -1008,12 +1008,12 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
         .is_some_and(|mode| mode.unattended);
     let plan_approval = task.require_plan_approval && !unattended;
     let workspace_id = task.workspace_id;
-    let resolution = Resolution::for_workspace(state, workspace_id).await;
+    let route = Route::for_workspace(state, workspace_id).await;
     let Prepared {
         backend,
         endpoint,
         model,
-    } = match prepare(state, &task, resolution, plan_approval).await {
+    } = match prepare(state, &task, route, plan_approval).await {
         Ok(prepared) => prepared,
         Err(message) => {
             obs.set_status(RUN_FAILED);
@@ -1282,76 +1282,6 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     }
 }
 
-/// What a workspace's AI settings choose for its runs: the backend its turns
-/// run on, the endpoint an HTTP backend sends them to, and the settings
-/// themselves, read once. A workspace or settings that cannot be read leave the
-/// run on the instance.
-pub(crate) struct Resolution {
-    pub(crate) backend: Result<LlmBackend, backend::Error>,
-    pub(crate) endpoint: Endpoint,
-    pub(crate) settings: Option<EffectiveAiSettings>,
-}
-
-impl Resolution {
-    pub(crate) async fn for_workspace(state: &AppState, workspace: Uuid) -> Self {
-        let Some((organization, settings)) = settings_of(state, workspace).await else {
-            return Self::instance(state.config());
-        };
-        Self {
-            backend: backend::for_settings(state, organization, &settings).await,
-            endpoint: Endpoint::resolve(state.config(), &settings),
-            settings: Some(settings),
-        }
-    }
-
-    pub(crate) fn instance(config: &Config) -> Self {
-        Self {
-            backend: Ok(backend::instance(config)),
-            endpoint: Endpoint::instance(config),
-            settings: None,
-        }
-    }
-
-    /// The models these settings prefer for completions sent to `endpoint`.
-    pub(crate) fn preferences(&self, endpoint: &Endpoint, classifier: &str) -> stages::Preferences {
-        match &self.settings {
-            Some(settings) => stages::Preferences::for_endpoint(settings, classifier, endpoint),
-            None => stages::Preferences::from_optional_settings(None, classifier),
-        }
-    }
-}
-
-/// The organization `workspace` belongs to and its effective AI settings, or
-/// nothing when either cannot be read, with the reason logged.
-async fn settings_of(state: &AppState, workspace: Uuid) -> Option<(Uuid, EffectiveAiSettings)> {
-    let organization = match workspaces::get_workspace(state.db(), workspace).await {
-        Ok(Some(row)) => row.organization_id,
-        Ok(None) => {
-            tracing::warn!(%workspace, "No such workspace; the run uses the instance's provider");
-            return None;
-        }
-        Err(error) => {
-            tracing::warn!(
-                %workspace,
-                %error,
-                "Could not read the workspace; the run uses the instance's provider"
-            );
-            return None;
-        }
-    };
-    ai_settings::get_effective_ai_settings(state.db(), organization, workspace)
-        .await
-        .inspect_err(|error| {
-            tracing::warn!(
-                %workspace,
-                %error,
-                "Could not read the AI settings; the run uses the instance's provider"
-            )
-        })
-        .ok()
-        .map(|settings| (organization, settings))
-}
-
 /// Where a run's turns go and the model they run on.
 struct Prepared {
     backend: LlmBackend,
@@ -1360,7 +1290,7 @@ struct Prepared {
 }
 
 /// What a run runs on, or why it cannot start. The backend, endpoint and model
-/// all come from one resolution, so the model is always one that backend can
+/// all come from one route, so the model is always one that backend can
 /// run at that endpoint.
 ///
 /// A plan waits for approval on a card only zone's own loop raises, so a run
@@ -1368,14 +1298,11 @@ struct Prepared {
 async fn prepare(
     state: &AppState,
     task: &tasks::TaskRow,
-    resolution: Resolution,
+    route: Route,
     plan_approval: bool,
 ) -> Result<Prepared, String> {
-    let preferences = resolution.preferences(
-        &resolution.endpoint,
-        &state.config().comfyui.classifier_model,
-    );
-    let backend = resolution.backend.map_err(|error| error.to_string())?;
+    let preferences = route.preferences(&route.endpoint, &state.config().comfyui.classifier_model);
+    let backend = route.backend.map_err(|error| error.to_string())?;
     if plan_approval && matches!(backend, LlmBackend::Cli { .. }) {
         return Err(match state.config().model_backend() {
             ModelBackend::LiteLlm => PLAN_APPROVAL_UNAVAILABLE,
@@ -1383,10 +1310,10 @@ async fn prepare(
         }
         .to_string());
     }
-    let model = resolve_model(state, task, &backend, &resolution.endpoint, &preferences).await?;
+    let model = resolve_model(state, task, &backend, &route.endpoint, &preferences).await?;
     Ok(Prepared {
         backend,
-        endpoint: resolution.endpoint,
+        endpoint: route.endpoint,
         model,
     })
 }
@@ -3185,24 +3112,24 @@ mod tests {
     }
 
     impl AgentTask {
-        async fn resolution(&self, backend: Result<LlmBackend, backend::Error>) -> Resolution {
-            Resolution {
+        async fn route(&self, backend: Result<LlmBackend, backend::Error>) -> Route {
+            Route {
                 backend,
-                ..Resolution::for_workspace(&self.state, self.task.workspace_id).await
+                ..Route::for_workspace(&self.state, self.task.workspace_id).await
             }
         }
 
         async fn model(&self, backend: &LlmBackend) -> Result<String, String> {
-            let resolution = Resolution::for_workspace(&self.state, self.task.workspace_id).await;
-            let preferences = resolution.preferences(
-                &resolution.endpoint,
+            let route = Route::for_workspace(&self.state, self.task.workspace_id).await;
+            let preferences = route.preferences(
+                &route.endpoint,
                 &self.state.config().comfyui.classifier_model,
             );
             resolve_model(
                 &self.state,
                 &self.task,
                 backend,
-                &resolution.endpoint,
+                &route.endpoint,
                 &preferences,
             )
             .await
@@ -3248,8 +3175,8 @@ mod tests {
         let fixture =
             AgentTask::new("llama3.2:3b", "qwen3.8:27b", "Rename the settings page").await;
 
-        let resolution = fixture.resolution(Ok(claude())).await;
-        let prepared = prepare(&fixture.state, &fixture.task, resolution, false).await;
+        let route = fixture.route(Ok(claude())).await;
+        let prepared = prepare(&fixture.state, &fixture.task, route, false).await;
         fixture.remove().await;
 
         let Prepared { backend, model, .. } =
@@ -3271,8 +3198,8 @@ mod tests {
             agent: zone_core::llm::AgentKind::Claude,
         };
 
-        let resolution = fixture.resolution(Err(signed_out())).await;
-        let prepared = prepare(&fixture.state, &fixture.task, resolution, false).await;
+        let route = fixture.route(Err(signed_out())).await;
+        let prepared = prepare(&fixture.state, &fixture.task, route, false).await;
         fixture.remove().await;
 
         assert_eq!(prepared.err(), Some(signed_out().to_string()));
@@ -3294,9 +3221,9 @@ mod tests {
         .await
         .unwrap();
 
-        let resolution = fixture.resolution(Ok(LlmBackend::Http)).await;
-        let origin = resolution.endpoint.origin();
-        let prepared = prepare(&fixture.state, &fixture.task, resolution, false).await;
+        let route = fixture.route(Ok(LlmBackend::Http)).await;
+        let origin = route.endpoint.origin();
+        let prepared = prepare(&fixture.state, &fixture.task, route, false).await;
         let consulted = fixture
             .ollama
             .received_requests()

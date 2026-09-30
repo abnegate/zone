@@ -27,7 +27,7 @@ use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception
 
 use super::driver::Drive;
 use super::notification::{self, MergeReport};
-use super::review::model::{self, Author, Route, Unavailable};
+use super::review::model::{self, Author, Unavailable, Venue};
 use super::review::outage::Outages;
 use super::review::{self, Outcome, ReviewError, ReviewRequest, bots, verdict};
 use super::summary;
@@ -662,16 +662,16 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 .map_or(Author::Unrecorded, |mode| Author::recorded(mode.model)),
             None => Author::Unrecorded,
         };
-        let resolved = Route::for_workspace(step.drive.state, step.drive.workspace_id).await;
-        let route = match resolved {
-            Ok(route) => route,
+        let resolved = Venue::for_workspace(step.drive.state, step.drive.workspace_id).await;
+        let venue = match resolved {
+            Ok(venue) => venue,
             Err(error) => return step.pause(&error.to_string()).await,
         };
         let round = auto_projects::latest_round(pool, step.task.task_id)
             .await
             .map_err(|error| error.to_string())?
             + 1;
-        let lineup = match route.lineup(
+        let lineup = match venue.lineup(
             &author,
             &config.review_models,
             u32::try_from(round).unwrap_or(1),
@@ -704,8 +704,8 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .unwrap_or_default();
         let open = auto_projects::open_findings_of(&rows);
         let outcome = review::run(
-            &route.endpoint,
-            route.backend,
+            &venue.endpoint,
+            venue.backend,
             pr.clone(),
             ReviewRequest {
                 task: &step.row,
@@ -781,7 +781,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                         task: step.task.task_id,
                         lineup: &names,
                         now: Utc::now(),
-                        origin: route.endpoint.origin(),
+                        origin: venue.endpoint.origin(),
                     },
                 );
                 if let Some(missed) = &recovery.missed {

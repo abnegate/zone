@@ -7,9 +7,9 @@ use uuid::Uuid;
 use zone_core::llm::{LlmClient, Message};
 
 use crate::db::chats;
+use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
-use crate::workers::task::Resolution;
 
 const TEMPERATURE: f32 = 0.2;
 const MAX_TOKENS: u32 = 64;
@@ -48,16 +48,13 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
         return None;
     }
     let chat = chats::get_chat(state.db(), message.chat_id).await.ok()??;
-    let resolution = match chat.workspace_id {
-        Some(workspace) => Resolution::for_workspace(state, workspace).await,
-        None => Resolution::instance(state.config()),
+    let route = match chat.workspace_id {
+        Some(workspace) => Route::for_workspace(state, workspace).await,
+        None => Route::instance(state.config()),
     };
-    let preferences = resolution.preferences(
-        &resolution.endpoint,
-        &state.config().comfyui.classifier_model,
-    );
-    let backend = resolution.backend.ok()?;
-    let endpoint = resolution.endpoint;
+    let preferences = route.preferences(&route.endpoint, &state.config().comfyui.classifier_model);
+    let backend = route.backend.ok()?;
+    let endpoint = route.endpoint;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;

@@ -18,6 +18,7 @@ pub mod login;
 pub mod media_source;
 pub mod model;
 pub mod prioritisation;
+pub mod route;
 pub mod runner;
 pub mod schedule;
 pub mod stages;

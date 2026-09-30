@@ -1,9 +1,8 @@
 //! Which model reviews a change: one that did not write it, when there is one.
 
-use crate::db::ai_settings::{self, EffectiveAiSettings};
-use crate::db::workspaces;
 use crate::services::backend;
 use crate::services::endpoint::{self, Endpoint, Origin};
+use crate::services::route::Route;
 use crate::services::stages::{self, Catalog, Preferences};
 use crate::state::AppState;
 use uuid::Uuid;
@@ -185,36 +184,25 @@ pub fn objection(author: &Author, reviewer: &Reviewer) -> Option<&'static str> {
 
 /// Where a workspace's reviews and merge summaries run, and what they may run
 /// there, read from its settings once.
-pub struct Route {
+pub struct Venue {
     pub backend: LlmBackend,
     pub endpoint: Endpoint,
     pub prefs: Preferences,
     pub catalog: Catalog,
 }
 
-impl Route {
-    /// The route the workspace's settings name, or the instance's when the
+impl Venue {
+    /// The venue the workspace's settings name, or the instance's when the
     /// workspace or its settings cannot be read.
     pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Result<Self, backend::Error> {
         let config = state.config();
-        let classifier = &config.comfyui.classifier_model;
-        let Some((organization, settings)) = saved(state, workspace).await else {
-            let backend = backend::instance(config);
-            let catalog = Catalog::for_backend(&config.ollama_host, &backend).await;
-            return Ok(Self {
-                backend,
-                endpoint: Endpoint::instance(config),
-                prefs: Preferences::from_optional_settings(None, classifier),
-                catalog,
-            });
-        };
-        let backend = backend::for_settings(state, organization, &settings).await?;
-        let endpoint = Endpoint::resolve(config, &settings);
-        let prefs = Preferences::for_endpoint(&settings, classifier, &endpoint);
-        let catalog = endpoint.catalog(&config.ollama_host, &backend).await;
+        let route = Route::for_workspace(state, workspace).await;
+        let prefs = route.preferences(&route.endpoint, &config.comfyui.classifier_model);
+        let backend = route.backend?;
+        let catalog = route.endpoint.catalog(&config.ollama_host, &backend).await;
         Ok(Self {
             backend,
-            endpoint,
+            endpoint: route.endpoint,
             prefs,
             catalog,
         })
@@ -252,32 +240,10 @@ impl Route {
     }
 }
 
-/// The workspace's organization and effective settings, or `None` when either
-/// cannot be read.
-async fn saved(state: &AppState, workspace: Uuid) -> Option<(Uuid, EffectiveAiSettings)> {
-    let organization = match workspaces::get_workspace(state.db(), workspace).await {
-        Ok(Some(row)) => row.organization_id,
-        Ok(None) => {
-            tracing::warn!(%workspace, "No such workspace; using the instance's endpoint");
-            return None;
-        }
-        Err(error) => {
-            tracing::warn!(%workspace, %error, "Could not read the workspace; using the instance's endpoint");
-            return None;
-        }
-    };
-    match ai_settings::get_effective_ai_settings(state.db(), organization, workspace).await {
-        Ok(settings) => Some((organization, settings)),
-        Err(error) => {
-            tracing::warn!(%workspace, %error, "Could not read the AI settings; using the instance's endpoint");
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::ai_settings::EffectiveAiSettings;
     use crate::services::stages::Installed;
     use zone_core::llm::AgentKind;
 
@@ -720,13 +686,13 @@ mod tests {
         };
         let endpoint = Endpoint::resolve(&crate::state::test_config(), &settings);
         assert_eq!(endpoint.origin(), Origin::Settings);
-        let route = Route {
+        let venue = Venue {
             backend: LlmBackend::Http,
             prefs: Preferences::for_endpoint(&settings, "instance-classifier", &endpoint),
             endpoint,
             catalog: Catalog::default(),
         };
-        route.lineup(&Author::Unrecorded, configured, 1)
+        venue.lineup(&Author::Unrecorded, configured, 1)
     }
 
     #[test]

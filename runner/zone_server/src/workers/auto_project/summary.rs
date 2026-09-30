@@ -10,7 +10,7 @@ use crate::db::tasks::TaskRow;
 use crate::services::stages;
 use crate::state::AppState;
 
-use super::review::model::Route;
+use super::review::model::Venue;
 
 const SUMMARY_TEMPERATURE: f32 = 0.0;
 const SUMMARY_TOKENS: u32 = 1024;
@@ -45,17 +45,17 @@ async fn generate(
     pull: &PullRequestDetail,
     review_summary: &str,
 ) -> Option<String> {
-    let route = Route::for_workspace(state, task.workspace_id).await.ok()?;
+    let venue = Venue::for_workspace(state, task.workspace_id).await.ok()?;
     let model = stages::summary_model(
-        &route.prefs,
-        &route.catalog,
+        &venue.prefs,
+        &venue.catalog,
         task.model_name.as_deref().unwrap_or(stages::AUTO),
     )?;
-    let client = LlmClient::new(route.endpoint.llm(
+    let client = LlmClient::new(venue.endpoint.llm(
         model,
         SUMMARY_TEMPERATURE,
         SUMMARY_TOKENS,
-        route.backend,
+        venue.backend,
     ));
     let body = pull.body.as_deref().unwrap_or_default();
     let body: String = body.chars().take(BODY_CHARS).collect();
@@ -71,7 +71,7 @@ async fn generate(
         Err(error) => {
             tracing::debug!(
                 task_id = %task.id,
-                error = %route.endpoint.scrub(&error.to_string()),
+                error = %venue.endpoint.scrub(&error.to_string()),
                 "The merge summary model failed; using the pull request's own summary"
             );
             return None;

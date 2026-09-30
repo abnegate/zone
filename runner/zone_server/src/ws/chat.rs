@@ -42,7 +42,7 @@ use crate::agent::{
 use crate::auth::validate_access_token;
 use crate::db::{
     self, ai_settings, chat_attached_sources, chat_sources, chats, knowledge, sessions,
-    workspace_members, workspaces,
+    workspace_members,
 };
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
@@ -406,34 +406,12 @@ struct WorkspaceSettings {
 
 impl WorkspaceSettings {
     async fn read(state: &AppState, workspace_id: Uuid) -> Option<Self> {
-        let pool = state.db();
-        let organization = match workspaces::get_workspace(pool, workspace_id).await {
-            Ok(Some(workspace)) => workspace.organization_id,
-            Ok(None) => return None,
-            Err(error) => {
-                tracing::warn!(
-                    %workspace_id,
-                    %error,
-                    "Could not read the workspace for its AI settings"
-                );
-                return None;
-            }
-        };
-        match ai_settings::get_effective_ai_settings(pool, organization, workspace_id).await {
-            Ok(effective) => Some(Self {
-                organization,
-                endpoint: Endpoint::resolve(state.config(), &effective),
-                effective,
-            }),
-            Err(error) => {
-                tracing::warn!(
-                    %workspace_id,
-                    %error,
-                    "Could not read the workspace's AI settings"
-                );
-                None
-            }
-        }
+        let (organization, effective) = crate::services::route::saved(state, workspace_id).await?;
+        Some(Self {
+            organization,
+            endpoint: Endpoint::resolve(state.config(), &effective),
+            effective,
+        })
     }
 
     /// The backend `settings` choose, or the instance's default when they
@@ -3833,6 +3811,7 @@ const fn citation_kind(kind: agent::identifier::Kind) -> Option<agent::CitationK
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::workspaces;
     use sqlx::PgPool;
 
     #[test]
