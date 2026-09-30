@@ -298,6 +298,10 @@ test.describe('follow-ups', () => {
     );
     await page.goto('/tasks');
     const card = page.locator('.task-card', { hasText: `Chat-run ${s}` });
+    await card
+      .first()
+      .waitFor({ timeout: 30_000 })
+      .catch(() => undefined);
     const onPage = await card.count();
     if (onPage) await shot(page, '51-task-on-tasks-page');
     record(51.5, {
