@@ -1290,7 +1290,7 @@ On Claude Code, an auto project's runs, reviews and summaries run with no one wa
 
 ### `ZONE_AUTO_REVIEW_MODELS`
 - **Default**: *empty*
-- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the installed catalogue. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers.
+- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the tool-capable installed models. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers. A review session offers tools, so a model Ollama lists without the `tools` capability (such as `llava:7b`) is never picked, even when named here; a model Ollama lists without any capabilities, or does not list at all, is still tried.
 
 ### `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL`
 - **Default**: `false`

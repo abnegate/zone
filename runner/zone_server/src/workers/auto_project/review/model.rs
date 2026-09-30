@@ -52,9 +52,11 @@ impl Author {
 ///
 /// Candidates in order: the operator's configured reviewers, the workspace's
 /// reasoning and fast models, then everything installed, largest first. The
-/// author is dropped, and successive rounds rotate through what is left so a
-/// change that keeps coming back is read by different eyes. With nothing left
-/// the author reviews itself, and says so.
+/// author is dropped, and so is any model the catalog lists as unable to call
+/// tools, since a review session offers them; a name the catalog does not
+/// list, or lists without its capabilities, stays. Successive rounds rotate
+/// through what is left so a change that keeps coming back is read by
+/// different eyes. With nothing left the author reviews itself, and says so.
 ///
 /// On an agent, a candidate is a model the agent knows, and the agent's own
 /// models stand in for what is installed, less those it runs only when named.
@@ -71,7 +73,11 @@ pub fn select(
     let mut candidates: Vec<String> = Vec::new();
     let mut push = |name: &str| {
         let name = name.trim();
-        if name.is_empty() || stages::is_auto(name) || !catalog.accepts(name) {
+        if name.is_empty()
+            || stages::is_auto(name)
+            || !catalog.accepts(name)
+            || catalog.refuses_tools(name)
+        {
             return;
         }
         if named.is_some_and(|author| stages::same_model(author, name)) {
@@ -169,6 +175,21 @@ mod tests {
             embedding: false,
             vision: false,
             reranker: false,
+            tools: None,
+        }
+    }
+
+    fn without_tools(model: Installed) -> Installed {
+        Installed {
+            tools: Some(false),
+            ..model
+        }
+    }
+
+    fn with_tools(model: Installed) -> Installed {
+        Installed {
+            tools: Some(true),
+            ..model
         }
     }
 
@@ -368,5 +389,73 @@ mod tests {
         assert_eq!(Author::recorded(None), Author::Unrecorded);
         assert_eq!(Author::Chosen.model(), None);
         assert_eq!(Author::Model("sonnet".into()).model(), Some("sonnet"));
+    }
+
+    const LLAVA: &str = "llava:7b";
+    const NOROMAID: &str = "hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest";
+
+    fn catalog_with_models_that_cannot_call_tools() -> Catalog {
+        Catalog {
+            models: vec![
+                without_tools(Installed {
+                    vision: true,
+                    ..installed(LLAVA, 4_733_363_377)
+                }),
+                with_tools(installed("qwen2.5:7b-instruct", 4_683_087_332)),
+                without_tools(installed(NOROMAID, 4_140_374_100)),
+                with_tools(installed("llama3.2:3b", 2_019_393_189)),
+            ],
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn reviewers_rotate_only_onto_models_that_can_call_tools() {
+        let author = Author::Model("qwen2.5:7b-instruct".into());
+        let catalog = catalog_with_models_that_cannot_call_tools();
+
+        let rotation: Vec<String> = (1..=4)
+            .map(|round| select(&author, &Preferences::default(), &catalog, &[], round).model)
+            .collect();
+
+        assert_eq!(rotation, ["llama3.2:3b"; 4]);
+    }
+
+    #[test]
+    fn a_configured_or_preferred_model_that_cannot_call_tools_is_skipped() {
+        let author = Author::Model("qwen2.5:7b-instruct".into());
+        let prefs = Preferences {
+            reasoning: Some(LLAVA.into()),
+            fast: Some(NOROMAID.into()),
+            ..Preferences::default()
+        };
+
+        let reviewer = select(
+            &author,
+            &prefs,
+            &catalog_with_models_that_cannot_call_tools(),
+            &[LLAVA.into(), "ops-reviewer".into()],
+            1,
+        );
+
+        assert_eq!(reviewer.model, "ops-reviewer");
+    }
+
+    #[test]
+    fn a_model_whose_capabilities_are_unknown_still_reviews() {
+        let author = Author::Model("author".into());
+        let catalog = Catalog {
+            models: vec![
+                without_tools(installed(LLAVA, 9)),
+                installed("unlisted-capabilities", 5),
+                installed("author", 1),
+            ],
+            agent: None,
+        };
+
+        let reviewer = select(&author, &Preferences::default(), &catalog, &[], 1);
+
+        assert_eq!(reviewer.model, "unlisted-capabilities");
+        assert!(!reviewer.same_model);
     }
 }

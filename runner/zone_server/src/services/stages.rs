@@ -73,11 +73,18 @@ pub struct Installed {
     pub embedding: bool,
     pub vision: bool,
     pub reranker: bool,
+    /// Whether the model can call tools, or `None` when the endpoint did not
+    /// say, as Ollama before capabilities and some proxies do not.
+    pub tools: Option<bool>,
 }
 
 impl Installed {
     pub fn completion(&self) -> bool {
         !self.embedding && !self.reranker
+    }
+
+    pub fn refuses_tools(&self) -> bool {
+        self.tools == Some(false)
     }
 }
 
@@ -120,6 +127,7 @@ impl Catalog {
                     embedding: false,
                     vision: false,
                     reranker: false,
+                    tools: Some(true),
                 })
                 .collect(),
             agent: Some(agent),
@@ -159,6 +167,12 @@ impl Catalog {
         self.models
             .iter()
             .find(|model| same_model(&model.name, name))
+    }
+
+    /// Whether `name` is listed as a model that cannot call tools. A name the
+    /// catalog does not list, or lists without its capabilities, may.
+    pub fn refuses_tools(&self, name: &str) -> bool {
+        self.find(name).is_some_and(Installed::refuses_tools)
     }
 
     /// Every installed model that completes chats, in catalog order.
@@ -394,17 +408,24 @@ fn env_optional(name: &str) -> Option<String> {
 impl From<Tag> for Installed {
     fn from(tag: Tag) -> Self {
         let lower = tag.name.to_ascii_lowercase();
+        let has = |capability: Capability| {
+            tag.capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.contains(&capability))
+        };
         Self {
             million_params: tag
                 .details
                 .as_ref()
                 .and_then(|details| parse_params(details.parameter_size.as_deref()))
                 .or_else(|| parse_params(Some(&tag.name))),
-            embedding: lower.contains("embed"),
-            vision: lower.contains("llava")
+            embedding: has(Capability::Embedding) || lower.contains("embed"),
+            vision: has(Capability::Vision)
+                || lower.contains("llava")
                 || lower.contains("vision")
                 || lower.contains("minicpm-v"),
             reranker: lower.contains("rerank"),
+            tools: tag.capabilities.as_ref().map(|_| has(Capability::Tools)),
             name: tag.name,
             bytes: tag.size,
         }
@@ -448,11 +469,25 @@ struct Tag {
     #[serde(default)]
     size: u64,
     details: Option<TagDetails>,
+    capabilities: Option<Vec<Capability>>,
 }
 
 #[derive(Deserialize)]
 struct TagDetails {
     parameter_size: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Capability {
+    Completion,
+    Tools,
+    Vision,
+    Embedding,
+    Thinking,
+    Insert,
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
@@ -468,6 +503,7 @@ mod tests {
             embedding: lower.contains("embed"),
             vision: lower.contains("llava"),
             reranker: lower.contains("rerank"),
+            tools: None,
         }
     }
 
@@ -837,6 +873,73 @@ mod tests {
         assert!(claude.accepts("opus"));
         assert!(!claude.accepts("llama3.2:3b"));
         assert!(claude.chooses());
+    }
+
+    #[test]
+    fn tags_report_what_each_model_can_do_and_a_tag_without_capabilities_is_left_unknown() {
+        let tags: Tags = serde_json::from_value(serde_json::json!({"models": [
+            {
+                "name": "llava:7b",
+                "size": 4_733_363_377_u64,
+                "details": {"parameter_size": "7B"},
+                "capabilities": ["completion", "vision"]
+            },
+            {
+                "name": "qwen3.8:27b",
+                "size": 17_741_872_154_u64,
+                "details": {"parameter_size": "27.3B"},
+                "capabilities": ["completion", "tools", "thinking", "vision"]
+            },
+            {
+                "name": "hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M",
+                "size": 491_413_571,
+                "capabilities": ["completion", "tools", "insert", "audio"]
+            },
+            {
+                "name": "qwen3-embedding:0.6b",
+                "size": 639_150_858,
+                "capabilities": ["embedding"]
+            },
+            {"name": "llama3.2:3b", "size": 2_019_393_189_u64}
+        ]}))
+        .expect("the tags Ollama lists");
+        let catalog = Catalog {
+            models: tags.models.into_iter().map(Installed::from).collect(),
+            agent: None,
+        };
+        let model = |name: &str| catalog.find(name).expect(name).clone();
+
+        let llava = model("llava:7b");
+        assert_eq!(llava.tools, Some(false));
+        assert!(llava.vision);
+        let qwen = model("qwen3.8:27b");
+        assert_eq!(qwen.tools, Some(true));
+        assert!(
+            qwen.vision,
+            "vision comes from the capabilities, not the name"
+        );
+        assert_eq!(
+            model("hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M").tools,
+            Some(true),
+            "a capability Zone does not know is ignored"
+        );
+        assert!(model("qwen3-embedding:0.6b").embedding);
+        assert_eq!(model("llama3.2:3b").tools, None);
+
+        assert!(catalog.refuses_tools("llava:7b"));
+        assert!(!catalog.refuses_tools("qwen3.8:27b"));
+        assert!(!catalog.refuses_tools("llama3.2:3b"), "unknown is allowed");
+        assert!(
+            !catalog.refuses_tools("gpt-4o"),
+            "an unlisted name is allowed"
+        );
+    }
+
+    #[test]
+    fn every_model_an_agent_offers_can_call_tools() {
+        let claude = Catalog::agent(AgentKind::Claude);
+
+        assert!(claude.models.iter().all(|model| model.tools == Some(true)));
     }
 
     #[tokio::test]
