@@ -591,6 +591,7 @@ mod tests {
             task: Uuid::nil(),
             lineup: &lineup,
             now: chrono::Utc::now(),
+            origin: crate::services::endpoint::Origin::Instance,
         };
         assert_eq!(recover(&error, "qwen3:32b", 0, &attempt).missed, None);
     }

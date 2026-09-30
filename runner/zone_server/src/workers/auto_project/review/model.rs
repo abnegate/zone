@@ -16,19 +16,36 @@ const CHOSEN_AUTHOR: &str = "the agent chose its own model to write the change, 
      the agent knows in AI settings";
 const NO_OTHER_MODEL: &str = "no model other than the one that wrote the change is available to \
      review it, and no review bot answered";
+const NO_INSTALLED_TOOL_MODEL: &str = "no installed model can call tools, which a review session \
+     offers; install one that can, or name one in ZONE_AUTO_REVIEW_MODELS";
+const NO_SAVED_TOOL_MODEL: &str = "no model can call tools, which a review session offers; set \
+     the Fast/Reasoning model in AI Settings to one that can";
 
 /// Why no model can review a change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Unavailable {
     #[error("no completion model is installed to review with")]
     NoModel,
-    #[error(
-        "no installed model can call tools, which a review session offers; install one that \
-         can, or name one in ZONE_AUTO_REVIEW_MODELS"
-    )]
-    NoToolModel,
+    #[error("{}", no_tool_model(*.0))]
+    NoToolModel(Origin),
     #[error(transparent)]
     Unset(#[from] endpoint::Error),
+}
+
+fn no_tool_model(origin: Origin) -> &'static str {
+    match origin {
+        Origin::Instance => NO_INSTALLED_TOOL_MODEL,
+        Origin::Settings => NO_SAVED_TOOL_MODEL,
+    }
+}
+
+/// How a person gives the reviews on an endpoint of `origin` another model:
+/// `ZONE_AUTO_REVIEW_MODELS` names models on the instance's endpoint alone.
+pub fn remedy(origin: Origin) -> &'static str {
+    match origin {
+        Origin::Instance => "name another in ZONE_AUTO_REVIEW_MODELS",
+        Origin::Settings => "set the Fast/Reasoning model in AI Settings",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,8 +98,10 @@ impl Author {
 /// On an agent, a candidate is a model the agent knows, and the agent's own
 /// models stand in for what is installed, less those it runs only when named.
 /// A change the agent wrote on a model of its own choosing may have come from
-/// any of them.
+/// any of them. `origin` is the endpoint the reviews run on, which decides
+/// where a person is told to name a model when none can review.
 pub fn lineup(
+    origin: Origin,
     author: &Author,
     prefs: &Preferences,
     catalog: &Catalog,
@@ -140,7 +159,7 @@ pub fn lineup(
                 same_model: true,
             }]),
             None if !fallbacks.is_empty() || catalog.completions().next().is_some() => {
-                Err(Unavailable::NoToolModel)
+                Err(Unavailable::NoToolModel(origin))
             }
             None => Err(Unavailable::NoModel),
         };
@@ -222,7 +241,14 @@ impl Route {
                 &[]
             }
         };
-        lineup(author, &self.prefs, &self.catalog, configured, round)
+        lineup(
+            self.endpoint.origin(),
+            author,
+            &self.prefs,
+            &self.catalog,
+            configured,
+            round,
+        )
     }
 }
 
@@ -288,7 +314,7 @@ mod tests {
         configured: &[String],
         round: u32,
     ) -> Reviewer {
-        lineup(author, prefs, catalog, configured, round)
+        lineup(Origin::Instance, author, prefs, catalog, configured, round)
             .expect("a model can review")
             .swap_remove(0)
     }
@@ -336,6 +362,7 @@ mod tests {
         let configured = ["gemma3:27b".to_string(), "qwen3:32b".to_string()];
         let names = |round| -> Vec<String> {
             lineup(
+                Origin::Instance,
                 &author,
                 &Preferences::default(),
                 &catalog(),
@@ -610,7 +637,7 @@ mod tests {
         };
         let author = Author::Model("llama3.2:3b".into());
 
-        let reviewers = lineup(&author, &prefs, &catalog, &[], 1);
+        let reviewers = lineup(Origin::Instance, &author, &prefs, &catalog, &[], 1);
 
         assert_eq!(
             reviewers,
@@ -642,13 +669,21 @@ mod tests {
             (Author::Model(NOROMAID.into()), Preferences::default()),
         ] {
             assert_eq!(
-                lineup(&author, &prefs, &refusing, &[LLAVA.into()], 1),
-                Err(Unavailable::NoToolModel),
+                lineup(
+                    Origin::Instance,
+                    &author,
+                    &prefs,
+                    &refusing,
+                    &[LLAVA.into()],
+                    1
+                ),
+                Err(Unavailable::NoToolModel(Origin::Instance)),
                 "{author:?} {prefs:?}"
             );
         }
         assert_eq!(
             lineup(
+                Origin::Instance,
                 &Author::Unrecorded,
                 &Preferences::default(),
                 &Catalog::default(),
@@ -658,6 +693,16 @@ mod tests {
             Err(Unavailable::NoModel),
             "an endpoint that lists nothing has nothing to review with"
         );
+    }
+
+    #[test]
+    fn a_missing_tool_model_is_named_where_the_endpoint_takes_one() {
+        let instance = Unavailable::NoToolModel(Origin::Instance).to_string();
+        let saved = Unavailable::NoToolModel(Origin::Settings).to_string();
+
+        assert!(instance.contains("ZONE_AUTO_REVIEW_MODELS"), "{instance}");
+        assert!(saved.contains("AI Settings"), "{saved}");
+        assert!(!saved.contains("ZONE_AUTO_REVIEW_MODELS"), "{saved}");
     }
 
     fn saved_endpoint(
