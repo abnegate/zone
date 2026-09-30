@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::credential::Credential;
-use crate::secret::SecretValue;
+use abnegate_secret::SecretValue;
 
 /// Thirty minutes is the chat turn's own budget, which is what a coding agent
 /// driven as a provider has to fit inside. [`tool_runner`]'s five minutes is

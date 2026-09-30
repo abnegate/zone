@@ -4,9 +4,9 @@ use std::borrow::Cow;
 use std::fmt;
 use std::sync::LazyLock;
 
+use abnegate_secret::REDACTED;
 use chrono::{DateTime, TimeDelta, Utc};
 use regex::Regex;
-use zone_core::secret::REDACTED;
 
 pub(super) const NO_LINK: &str = "no sign-in link";
 pub(super) const NO_CODE: &str = "no one-time code";

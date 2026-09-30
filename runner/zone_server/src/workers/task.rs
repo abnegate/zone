@@ -3263,7 +3263,7 @@ mod tests {
             zone_context::embeddings::providers::PROVIDER_OPENAI,
         );
         settings.openai_base_url = Some("https://provider.example/v1".to_string());
-        settings.openai_api_key = Some(zone_core::secret::SecretValue::new(
+        settings.openai_api_key = Some(abnegate_secret::SecretValue::new(
             "sk-organization-0123456789".to_string(),
         ));
         let endpoint = Endpoint::resolve(&crate::state::test_config(), &settings);
@@ -6352,6 +6352,7 @@ mod cli_tests {
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, users, workspace_members, workspaces};
     use crate::services::login::claude::Tokens;
+    use abnegate_secret::SecretValue;
     use axum::http::{HeaderMap, HeaderValue, header};
     use chrono::{TimeDelta, Utc};
     use http_body_util::BodyExt;
@@ -6360,7 +6361,6 @@ mod cli_tests {
     use tempfile::TempDir;
     use wiremock::MockServer;
     use zone_core::llm::{AgentKind, CliSettings, LlmConfig, Toolset};
-    use zone_core::secret::SecretValue;
 
     const ANSWER: &str = "Wrote it.";
     const EXECUTABLE: &str = "claude";

@@ -1296,7 +1296,7 @@ mod tests {
         let mut settings = crate::services::endpoint::testing::settings(
             zone_context::embeddings::providers::PROVIDER_OPENAI,
         );
-        settings.openai_api_key = Some(zone_core::SecretValue::new("sk-organization-key"));
+        settings.openai_api_key = Some(abnegate_secret::SecretValue::new("sk-organization-key"));
         settings.model_fast = fast.map(str::to_string);
         settings.model_reasoning = reasoning.map(str::to_string);
         settings

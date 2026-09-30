@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use crate::secret::redact;
+use abnegate_secret::redact;
 
 const ESCAPE: u8 = 0x1B;
 const BELL: u8 = 0x07;
@@ -150,7 +150,7 @@ fn control_sequence(bytes: &[u8], from: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secret::REDACTED;
+    use abnegate_secret::REDACTED;
 
     #[test]
     fn leaves_plain_text_alone() {

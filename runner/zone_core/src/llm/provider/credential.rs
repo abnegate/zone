@@ -1,6 +1,6 @@
 //! How a provider is authenticated.
 
-use crate::secret::SecretValue;
+use abnegate_secret::SecretValue;
 
 /// The credential a provider authenticates with.
 ///

@@ -6,11 +6,11 @@
 
 use std::fmt;
 
+use abnegate_secret::{REDACTED, SecretValue, conceal, redact};
 use reqwest::Url;
 use zone_chat::capacity::Resolver;
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
 use zone_core::llm::{Dialect, LlmBackend, LlmConfig, Trust, metadata};
-use zone_core::secret::{REDACTED, SecretValue, conceal, redact};
 
 use crate::config::Config;
 use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC};
@@ -334,8 +334,8 @@ fn same_origin(url: &Url, instance: &str) -> bool {
 pub(crate) mod testing {
     use super::{Endpoint, Origin};
     use crate::db::ai_settings::EffectiveAiSettings;
+    use abnegate_secret::SecretValue;
     use zone_core::llm::Dialect;
-    use zone_core::secret::SecretValue;
 
     /// The instance's endpoint at `url` under `key`.
     pub fn endpoint(url: &str, key: &str) -> Endpoint {

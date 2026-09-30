@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use abnegate_secret::SecretValue;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
@@ -29,7 +30,6 @@ use tempfile::TempDir;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::SecretValue;
 use zone_core::llm::AgentKind;
 use zone_server::config::{AgentConfig, Callback, Config, ModelBackend};
 use zone_server::services::login::claude::{AUTHORIZE_URL, CLIENT_ID, REDIRECT_URL, Tokens};

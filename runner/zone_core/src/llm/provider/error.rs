@@ -5,7 +5,7 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::llm::LlmError;
-use crate::secret::redact;
+use abnegate_secret::redact;
 
 /// A provider failure.
 ///

@@ -57,8 +57,8 @@ impl TokenCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_secret::SecretValue;
     use chrono::TimeDelta;
-    use zone_core::secret::SecretValue;
 
     use crate::services::github_app::testing::at;
 

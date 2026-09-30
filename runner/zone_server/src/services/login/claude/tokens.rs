@@ -1,8 +1,8 @@
 //! A Claude sign-in's tokens, and the sealed form they are stored in.
 
+use abnegate_secret::SecretValue;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
-use zone_core::secret::SecretValue;
 
 use super::{Error, label};
 
@@ -49,7 +49,7 @@ impl Tokens {
 
 #[cfg(test)]
 mod tests {
-    use zone_core::secret::REDACTED;
+    use abnegate_secret::REDACTED;
 
     use super::*;
 

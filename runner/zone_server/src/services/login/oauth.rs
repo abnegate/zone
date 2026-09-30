@@ -386,11 +386,11 @@ fn unreadable(error: claude::Error) -> Error {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    use abnegate_secret::SecretValue;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use reqwest::Url;
     use sha2::{Digest, Sha256};
-    use zone_core::secret::SecretValue;
 
     use super::*;
     use crate::config::{AgentConfig, Callback};

@@ -4372,11 +4372,11 @@ mod tests {
     #[tokio::test]
     async fn a_provider_rejecting_the_saved_key_reaches_the_reader_without_it() {
         use crate::services::endpoint::testing::settings;
+        use abnegate_secret::{REDACTED, SecretValue};
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
         use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
         use zone_core::llm::LlmClient;
-        use zone_core::secret::{REDACTED, SecretValue};
 
         const KEY: &str = "sk-organization-0123456789abcdef";
         const MASKED: &str = "sk-org************cdef";

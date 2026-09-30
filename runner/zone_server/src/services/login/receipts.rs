@@ -67,7 +67,7 @@ fn claim(
 mod tests {
     use std::time::Duration;
 
-    use zone_core::secret::SecretValue;
+    use abnegate_secret::SecretValue;
 
     use super::*;
     use crate::services::login::claude::{Redirect, Scope};

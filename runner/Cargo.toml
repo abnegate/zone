@@ -24,7 +24,6 @@ bytes = "=1.12.1"
 base64 = "=0.23.1"
 aes-gcm = "=0.11.1"
 subtle = "=2.6.1"
-zeroize = "=1.9.0"
 dashmap = "=6.2.1"
 once_cell = "=1.21.4"
 tokio-stream = "=0.1.19"
@@ -33,6 +32,10 @@ uuid = { version = "=1.26.0", features = ["v4", "serde"] }
 reqwest = { version = "=0.13.4", features = ["json", "stream"] }
 async-trait = "=0.1.92"
 rmcp = { version = "=3.2.0", default-features = false }
+
+# Shared crates, published from abnegate/crates. Caret ranges, unlike every
+# other dependency here, so a patch release of a crate reaches zone on update.
+abnegate-secret = "0.1"
 
 # Server dependencies
 axum = { version = "=0.8.9", features = ["ws", "macros"] }

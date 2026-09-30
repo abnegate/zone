@@ -6,6 +6,7 @@ mod kind;
 mod receipt_request;
 mod status_query;
 
+use abnegate_secret::SecretValue;
 use axum::{
     Json,
     extract::{Path, Query, State, rejection::JsonRejection},
@@ -15,7 +16,6 @@ use chrono::{DateTime, Utc};
 use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zone_core::SecretValue;
 use zone_core::llm::AgentKind;
 
 use crate::auth::jwt::Claims;

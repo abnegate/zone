@@ -9,11 +9,11 @@ mod refresh;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use abnegate_secret::{REDACTED, SecretValue, redact};
 use chrono::Utc;
 use reqwest::header::ACCEPT;
 use reqwest::{StatusCode, Url};
 use serde::Serialize;
-use zone_core::secret::{REDACTED, SecretValue, redact};
 
 use super::{CLIENT_ID, Code, Error, Redirect, Scope, Tokens};
 use exchange::Exchange;

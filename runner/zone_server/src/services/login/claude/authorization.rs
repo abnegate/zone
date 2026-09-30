@@ -1,10 +1,10 @@
 //! The PKCE authorization a Claude sign-in starts from.
 
+use abnegate_secret::SecretValue;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::Url;
 use sha2::{Digest, Sha256};
-use zone_core::secret::SecretValue;
 
 use super::{AUTHORIZE_URL, CLIENT_ID, Redirect, Scope};
 

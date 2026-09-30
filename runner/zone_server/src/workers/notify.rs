@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use zone_core::SecretValue;
+use abnegate_secret::SecretValue;
 use zone_notify::{Discord, Email, Fanout, Notifier, NotifyError, Slack, SmtpConfig};
 
 const SLACK_VARIABLE: &str = "ZONE_NOTIFY_SLACK_WEBHOOK";

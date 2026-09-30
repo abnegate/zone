@@ -31,7 +31,7 @@
 //! # Credentials
 //!
 //! A webhook URL is a bearer credential: anyone holding it can post to the
-//! channel. [`Endpoint`] keeps one in a [`SecretValue`](zone_core::SecretValue)
+//! channel. [`Endpoint`] keeps one in a [`SecretValue`](abnegate_secret::SecretValue)
 //! and no error, `Debug` or log line in this crate reproduces it. That
 //! includes errors from `reqwest`, whose own `Display` appends the request
 //! URL and is stripped before it is ever rendered.

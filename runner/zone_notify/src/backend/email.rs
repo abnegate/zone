@@ -164,7 +164,7 @@ fn describe(error: lettre::transport::smtp::Error) -> String {
 mod tests {
     use super::*;
     use crate::severity::Severity;
-    use zone_core::SecretValue;
+    use abnegate_secret::SecretValue;
 
     fn config() -> SmtpConfig {
         SmtpConfig {

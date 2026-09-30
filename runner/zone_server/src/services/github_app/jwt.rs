@@ -1,8 +1,8 @@
 //! Signing the JWT that authenticates as the App itself.
 
+use abnegate_secret::SecretValue;
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use zone_core::secret::SecretValue;
 
 use super::claims::Claims;
 use super::configuration::AppConfiguration;

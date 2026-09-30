@@ -3,8 +3,8 @@
 
 use std::str::FromStr;
 
+use abnegate_secret::SecretValue;
 use reqwest::Url;
-use zone_core::secret::SecretValue;
 
 use super::{CALLBACK_PATH, Error, LOOPBACK_HOST, LOOPBACK_SCHEME, REDIRECT_URL};
 
