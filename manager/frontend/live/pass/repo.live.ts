@@ -455,7 +455,7 @@ test.describe('sources, projects and tasks', () => {
       outcomes,
       screenshots: [
         '21-gitlab-verify.png',
-        '21-web-url-refused.png',
+        '21-web-url-verify.png',
         '21-text-verify.png',
       ],
     });
