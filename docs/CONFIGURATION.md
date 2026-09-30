@@ -192,7 +192,14 @@ Emptying a host or base URL and saving clears it, and the API clears an
 endpoint field sent as an empty string. A field left out of the request keeps
 its saved value, which is how the console keeps a key it never shows.
 
-Keys stay with the URL they were saved beside. A URL a workspace saves never
+Keys stay with the URL they were saved beside. Changing a saved URL, including
+giving a key saved for the provider's default host a URL of its own, or
+clearing the URL a key was saved beside, takes the key again: without one the
+save is refused with *Re-enter the key when changing the endpoint URL*, so a
+key someone else saved never goes to a host an admin has since typed in. Send
+an empty key to change the URL and clear the key instead. AI Settings marks
+the key field required, saying *Changing the URL needs the key again*, as soon
+as the URL differs from the saved one. A URL a workspace saves never
 receives the organization's key, and the instance's `LITELLM_KEY` only ever goes
 to `LITELLM_HOST`. A key a workspace saves without a URL goes to the URL its
 organization saved, or on OpenAI and Anthropic to the provider's default

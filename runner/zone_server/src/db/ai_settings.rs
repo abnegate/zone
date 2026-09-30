@@ -81,6 +81,8 @@ pub struct Update<'a> {
     pub model_audio: Option<&'a str>,
 }
 
+const RE_ENTER_KEY: &str = "Re-enter the key when changing the endpoint URL.";
+
 /// An endpoint URL and the key saved beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pair {
@@ -220,8 +222,9 @@ fn validate(update: &Update<'_>, hosts: &Hosts) -> AccessResult<()> {
     Ok(())
 }
 
-/// Refuse an update that would send a saved key to a provider's default host
-/// the instance does not list.
+/// Refuse an update that would send a saved key somewhere it was not saved
+/// for: to a URL other than the one beside it, unless the update brings the
+/// key again, or to a provider's default host the instance does not list.
 /// `saved` is the row being updated and `inherited` the URLs it falls back
 /// to, which a workspace takes from its organization.
 fn validate_keys(
@@ -235,10 +238,17 @@ fn validate_keys(
         if url.is_none() && key.is_none() {
             continue;
         }
+        let saved_url = saved.url(pair);
         let next_url = match url {
             Some(url) => nonempty(Some(url)),
-            None => saved.url(pair),
+            None => saved_url,
         };
+        if url.is_some() && next_url != saved_url && key.is_none() && saved.keyed(pair) {
+            return Err(AccessError::Invalid(format!(
+                "{}: {RE_ENTER_KEY}",
+                pair.url_field()
+            )));
+        }
         let keyed = match key {
             Some(key) => nonempty(Some(key)).is_some(),
             None => saved.keyed(pair),
@@ -1463,6 +1473,104 @@ mod tests {
             ..Update::default()
         };
         assert!(validate(&blank, &Hosts::default()).is_ok());
+    }
+
+    fn keyed_beside(url: Option<&str>) -> SavedEndpoints {
+        SavedEndpoints {
+            litellm_host: url.map(str::to_string),
+            litellm_key: true,
+            openai_base_url: url.map(str::to_string),
+            openai_api_key: true,
+            anthropic_base_url: url.map(str::to_string),
+            anthropic_api_key: true,
+        }
+    }
+
+    fn url_update(pair: Pair, url: &str) -> Update<'_> {
+        match pair {
+            Pair::Litellm => Update {
+                litellm_host: Some(url),
+                ..Update::default()
+            },
+            Pair::OpenAI => Update {
+                openai_base_url: Some(url),
+                ..Update::default()
+            },
+            Pair::Anthropic => Update {
+                anthropic_base_url: Some(url),
+                ..Update::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_saved_key_never_follows_a_new_url_it_was_not_saved_beside() {
+        let nothing = SavedEndpoints::default();
+        let open = Hosts::default();
+        for pair in Pair::ALL {
+            for (saved, url) in [
+                (Some("http://first.example"), "http://second.example"),
+                (Some("http://first.example"), ""),
+                (None, "http://second.example"),
+            ] {
+                let refused = validate_keys(
+                    &url_update(pair, url),
+                    &keyed_beside(saved),
+                    &nothing,
+                    &open,
+                )
+                .expect_err("the key followed the URL");
+                assert_eq!(
+                    refused.to_string(),
+                    format!("{}: {RE_ENTER_KEY}", pair.url_field()),
+                    "{pair:?} {saved:?} -> {url:?}"
+                );
+            }
+
+            let unchanged = url_update(pair, " http://first.example ");
+            assert!(
+                validate_keys(
+                    &unchanged,
+                    &keyed_beside(Some("http://first.example")),
+                    &nothing,
+                    &open
+                )
+                .is_ok()
+            );
+            let keyless = url_update(pair, "http://second.example");
+            let without_key = SavedEndpoints {
+                litellm_host: Some("http://first.example".to_string()),
+                openai_base_url: Some("http://first.example".to_string()),
+                anthropic_base_url: Some("http://first.example".to_string()),
+                ..SavedEndpoints::default()
+            };
+            assert!(
+                validate_keys(&keyless, &without_key, &nothing, &open).is_ok(),
+                "{pair:?}"
+            );
+        }
+
+        let re_entered = Update {
+            openai_base_url: Some("http://second.example"),
+            openai_api_key: Some("sk-again"),
+            ..Update::default()
+        };
+        let cleared = Update {
+            openai_base_url: Some("http://second.example"),
+            openai_api_key: Some(""),
+            ..Update::default()
+        };
+        for update in [re_entered, cleared] {
+            assert!(
+                validate_keys(
+                    &update,
+                    &keyed_beside(Some("http://first.example")),
+                    &nothing,
+                    &open
+                )
+                .is_ok()
+            );
+        }
     }
 
     #[test]

@@ -1867,6 +1867,8 @@ async fn test_a_legacy_url_carrying_credentials_is_returned_without_them() {
     );
 }
 
+const RE_ENTER_KEY: &str = "Re-enter the key when changing the endpoint URL.";
+
 fn settings_paths(org_id: &str, ws_id: &str) -> [String; 2] {
     [
         format!("/api/organizations/{org_id}/settings/ai"),
@@ -1937,6 +1939,110 @@ async fn test_a_key_saved_without_a_url_is_refused_when_the_default_host_is_not_
                 )
                 .await
                 .assert_status(StatusCode::OK);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_changing_an_endpoint_url_without_its_key_is_refused() {
+    const KEY: &str = "sk-saved-beside-a-4b1e0f";
+    const RE_ENTERED: &str = "sk-re-entered-for-b";
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+
+    for path in settings_paths(&org_id, &ws_id) {
+        for (url, key, has_key) in ENDPOINT_PAIRS {
+            let first = format!("http://first-{url}.example:4000");
+            let second = format!("http://second-{url}.example:4000");
+            client
+                .put_json_auth(&path, &json!({ url: first, key: KEY }), &token)
+                .await
+                .assert_status(StatusCode::OK);
+
+            let refused = client
+                .put_json_auth(&path, &json!({ url: second }), &token)
+                .await;
+            assert_eq!(
+                refused.status,
+                StatusCode::BAD_REQUEST,
+                "{path} moved the key beside {url} to {second}: {}",
+                refused.text()
+            );
+            assert!(refused.text().contains(RE_ENTER_KEY), "{}", refused.text());
+            assert!(!refused.text().contains(KEY), "{}", refused.text());
+
+            let stored = client.get_auth(&path, &token).await;
+            stored.assert_status(StatusCode::OK);
+            assert_eq!(
+                stored.json_value()[url],
+                first,
+                "{path} took {second} without its key"
+            );
+            assert_eq!(stored.json_value()[has_key], true);
+
+            client
+                .put_json_auth(&path, &json!({ url: format!(" {first} ") }), &token)
+                .await
+                .assert_status(StatusCode::OK);
+            client
+                .put_json_auth(&path, &json!({ url: second, key: RE_ENTERED }), &token)
+                .await
+                .assert_status(StatusCode::OK);
+        }
+    }
+
+    let settings = ai_settings::get_effective_ai_settings(
+        client.state().db(),
+        org_id.parse().expect("organization id"),
+        ws_id.parse().expect("workspace id"),
+    )
+    .await
+    .expect("effective settings");
+    assert_eq!(
+        settings.openai_base_url.as_deref(),
+        Some("http://second-openai_base_url.example:4000")
+    );
+    assert_eq!(settings.openai_api_key.expose_as_deref(), Some(RE_ENTERED));
+}
+
+#[tokio::test]
+async fn test_a_key_saved_for_the_default_host_does_not_follow_a_new_url() {
+    const KEY: &str = "sk-default-host-7f20aa";
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+
+    for path in settings_paths(&org_id, &ws_id) {
+        for (provider, url, key) in [
+            ("openai", "openai_base_url", "openai_api_key"),
+            ("anthropic", "anthropic_base_url", "anthropic_api_key"),
+        ] {
+            client
+                .put_json_auth(&path, &json!({ "provider": provider, key: KEY }), &token)
+                .await
+                .assert_status(StatusCode::OK);
+
+            let refused = client
+                .put_json_auth(
+                    &path,
+                    &json!({ "provider": provider, url: "http://collector.example:4000" }),
+                    &token,
+                )
+                .await;
+            assert_eq!(
+                refused.status,
+                StatusCode::BAD_REQUEST,
+                "{path} sent the {provider} key saved for its default host to a new URL: {}",
+                refused.text()
+            );
+            assert!(refused.text().contains(RE_ENTER_KEY), "{}", refused.text());
+
+            let stored = client.get_auth(&path, &token).await;
+            stored.assert_status(StatusCode::OK);
+            assert!(stored.json_value()[url].is_null(), "{path} took the URL");
         }
     }
 }
