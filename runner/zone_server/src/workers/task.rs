@@ -16,7 +16,7 @@ use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
 use zone_core::llm::provider::{OUTGROWN, SignIn, UNFUNDED, UNFUNDED_CONTEXT};
 use zone_core::llm::{
-    AgentKind, BuiltinTools, Credential, LlmBackend, LlmClient, LlmConfig, Message as LlmMessage,
+    AgentKind, BuiltinTools, Credential, LlmBackend, LlmClient, Message as LlmMessage,
 };
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
@@ -27,17 +27,18 @@ use crate::agent::prompt::{self, Environment, Vcs};
 use crate::agent::question::{self, Question};
 use crate::agent::wait::{self, Waited, Waiting};
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
-use crate::config::ModelBackend;
-use crate::db::{ai_settings, task_tool_calls, tasks, workspaces};
+use crate::config::{Config, ModelBackend};
+use crate::db::ai_settings::{self, EffectiveAiSettings};
+use crate::db::{task_tool_calls, tasks, workspaces};
 use crate::services::backend;
 use crate::services::chat::session::{self, RunContext};
+use crate::services::endpoint::Endpoint;
 use crate::services::login::credential::{self, Login};
 use crate::services::stages;
 use crate::state::AppState;
 use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
 use crate::workers::instructions;
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
-use zone_chat::capacity::Resolver;
 use zone_context::context::SearchResultWithAnalysis;
 
 // Max concurrent task executions
@@ -228,6 +229,14 @@ impl Fault {
             failure,
             status: RUN_FAILED,
             message: error.to_string(),
+        }
+    }
+
+    /// This fault, with any key `endpoint` carries taken out of what it says.
+    fn scrubbed(self, endpoint: &Endpoint) -> Self {
+        Self {
+            message: endpoint.scrub(&self.message),
+            ..self
         }
     }
 
@@ -999,8 +1008,12 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
         .is_some_and(|mode| mode.unattended);
     let plan_approval = task.require_plan_approval && !unattended;
     let workspace_id = task.workspace_id;
-    let resolved = backend::for_workspace(state, workspace_id).await;
-    let (backend, model) = match prepare(state, &task, resolved, plan_approval).await {
+    let resolution = Resolution::for_workspace(state, workspace_id).await;
+    let Prepared {
+        backend,
+        endpoint,
+        model,
+    } = match prepare(state, &task, resolution, plan_approval).await {
         Ok(prepared) => prepared,
         Err(message) => {
             obs.set_status(RUN_FAILED);
@@ -1109,6 +1122,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let pool = state.db();
     let workspace = workspace_path.as_path();
     let backend = &backend;
+    let endpoint = &endpoint;
     let model = model.as_str();
     let task_prompt = task_prompt.as_str();
     let guidance = guidance.as_str();
@@ -1130,6 +1144,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 workspace_id,
                 actor,
                 &backend,
+                endpoint,
                 model,
                 task_prompt,
                 guidance,
@@ -1142,6 +1157,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 tokio::time::Instant::now() + TASK_TIMEOUT,
             )
             .await
+            .map_err(|fault| fault.scrubbed(endpoint))
         },
         move |attempt| record_attempt(pool, run_id, policy, attempt),
     )
@@ -1266,19 +1282,100 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     }
 }
 
-/// Where a run's turns go and the model they run on, or why the run cannot
-/// start. Both come from one resolution, so the model is always one that
-/// backend can run.
+/// What a workspace's AI settings choose for its runs: the backend its turns
+/// run on, the endpoint an HTTP backend sends them to, and the settings
+/// themselves, read once. A workspace or settings that cannot be read leave the
+/// run on the instance.
+pub(crate) struct Resolution {
+    pub(crate) backend: Result<LlmBackend, backend::Error>,
+    pub(crate) endpoint: Endpoint,
+    pub(crate) settings: Option<EffectiveAiSettings>,
+}
+
+impl Resolution {
+    pub(crate) async fn for_workspace(state: &AppState, workspace: Uuid) -> Self {
+        let Some((organization, settings)) = settings_of(state, workspace).await else {
+            return Self::instance(state.config());
+        };
+        Self {
+            backend: backend::for_settings(state, organization, &settings).await,
+            endpoint: Endpoint::resolve(state.config(), &settings),
+            settings: Some(settings),
+        }
+    }
+
+    pub(crate) fn instance(config: &Config) -> Self {
+        Self {
+            backend: Ok(backend::instance(config)),
+            endpoint: Endpoint::instance(config),
+            settings: None,
+        }
+    }
+
+    /// The models these settings prefer for completions sent to `endpoint`.
+    pub(crate) fn preferences(&self, endpoint: &Endpoint, classifier: &str) -> stages::Preferences {
+        match &self.settings {
+            Some(settings) => stages::Preferences::for_endpoint(settings, classifier, endpoint),
+            None => stages::Preferences::from_optional_settings(None, classifier),
+        }
+    }
+}
+
+/// The organization `workspace` belongs to and its effective AI settings, or
+/// nothing when either cannot be read, with the reason logged.
+async fn settings_of(state: &AppState, workspace: Uuid) -> Option<(Uuid, EffectiveAiSettings)> {
+    let organization = match workspaces::get_workspace(state.db(), workspace).await {
+        Ok(Some(row)) => row.organization_id,
+        Ok(None) => {
+            tracing::warn!(%workspace, "No such workspace; the run uses the instance's provider");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(
+                %workspace,
+                %error,
+                "Could not read the workspace; the run uses the instance's provider"
+            );
+            return None;
+        }
+    };
+    ai_settings::get_effective_ai_settings(state.db(), organization, workspace)
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(
+                %workspace,
+                %error,
+                "Could not read the AI settings; the run uses the instance's provider"
+            )
+        })
+        .ok()
+        .map(|settings| (organization, settings))
+}
+
+/// Where a run's turns go and the model they run on.
+struct Prepared {
+    backend: LlmBackend,
+    endpoint: Endpoint,
+    model: String,
+}
+
+/// What a run runs on, or why it cannot start. The backend, endpoint and model
+/// all come from one resolution, so the model is always one that backend can
+/// run at that endpoint.
 ///
 /// A plan waits for approval on a card only zone's own loop raises, so a run
 /// that needs one cannot start on a coding agent at all.
 async fn prepare(
     state: &AppState,
     task: &tasks::TaskRow,
-    resolved: Result<LlmBackend, backend::Error>,
+    resolution: Resolution,
     plan_approval: bool,
-) -> Result<(LlmBackend, String), String> {
-    let backend = resolved.map_err(|error| error.to_string())?;
+) -> Result<Prepared, String> {
+    let preferences = resolution.preferences(
+        &resolution.endpoint,
+        &state.config().comfyui.classifier_model,
+    );
+    let backend = resolution.backend.map_err(|error| error.to_string())?;
     if plan_approval && matches!(backend, LlmBackend::Cli { .. }) {
         return Err(match state.config().model_backend() {
             ModelBackend::LiteLlm => PLAN_APPROVAL_UNAVAILABLE,
@@ -1286,10 +1383,12 @@ async fn prepare(
         }
         .to_string());
     }
-    let model = resolve_model(state, task, &backend)
-        .await
-        .ok_or_else(|| NO_MODEL.to_string())?;
-    Ok((backend, model))
+    let model = resolve_model(state, task, &backend, &resolution.endpoint, &preferences).await?;
+    Ok(Prepared {
+        backend,
+        endpoint: resolution.endpoint,
+        model,
+    })
 }
 
 /// The backend an attempt runs on: the one the run was prepared on, with the
@@ -1364,41 +1463,34 @@ async fn organization_on(state: &AppState, workspace: Uuid, agent: AgentKind) ->
 }
 
 /// Resolves the run's model the way a chat resolves its own: workspace settings
-/// over org settings, then what the backend can run, never a hardcoded name.
-/// `None` when nothing is left to run: an agent chooses its own model when
-/// given none, the endpoint cannot.
+/// over org settings, then what the backend can run at `endpoint`, never a
+/// hardcoded name. Fails when nothing is left to run: an agent chooses its own
+/// model when given none, an endpoint cannot, and one the settings name runs
+/// only a model they save.
 async fn resolve_model(
     state: &AppState,
     task: &tasks::TaskRow,
     backend: &LlmBackend,
-) -> Option<String> {
-    let catalog = stages::Catalog::for_backend(&state.config().ollama_host, backend).await;
-    let settings = match workspaces::get_workspace(state.db(), task.workspace_id).await {
-        Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
-            state.db(),
-            workspace.organization_id,
-            task.workspace_id,
-        )
-        .await
-        .ok(),
-        Ok(None) => None,
-        Err(error) => {
-            tracing::warn!(%error, "Could not load workspace for task model selection");
-            None
-        }
-    };
+    endpoint: &Endpoint,
+    preferences: &stages::Preferences,
+) -> Result<String, String> {
+    let catalog = endpoint.catalog(&state.config().ollama_host, backend).await;
     let model = stages::chat_model(
         task.model_name.as_deref().unwrap_or(stages::AUTO),
-        &stages::Preferences::from_optional_settings(
-            settings.as_ref(),
-            &state.config().comfyui.classifier_model,
-        ),
+        preferences,
         &catalog,
         &format!("{}\n\n{}", task.title, task.description),
         false,
         true,
     );
-    (!stages::is_auto(&model) || catalog.chooses()).then_some(model)
+    if catalog.chooses() {
+        return Ok(model);
+    }
+    endpoint.model(&model).map_err(|error| error.to_string())?;
+    if stages::is_auto(&model) {
+        return Err(NO_MODEL.to_string());
+    }
+    Ok(model)
 }
 
 /// What a run appends after `prompt::task`, once each source has been read.
@@ -2090,6 +2182,7 @@ async fn attempt_run(
     workspace_id: Uuid,
     actor: Option<Uuid>,
     backend: &LlmBackend,
+    endpoint: &Endpoint,
     model: &str,
     task_prompt: &str,
     guidance: &str,
@@ -2127,23 +2220,10 @@ async fn attempt_run(
         .await,
     );
 
-    let capacity = Resolver::with_context(
-        &state.config().litellm_host,
-        &state.config().litellm_key,
-        &state.config().ollama_host,
-        Some(state.config().chat.context),
-    )
-    .resolve(model)
-    .await;
+    let capacity = endpoint.capacity(state.config()).resolve(model).await;
     let policy = session::policy(&state.config().chat, &capacity);
-    let mut llm = LlmClient::new(LlmConfig {
-        base_url: state.config().litellm_host.clone(),
-        api_key: state.config().litellm_key.clone(),
-        default_model: model.to_string(),
-        temperature: TASK_TEMPERATURE,
-        max_tokens: policy.reserved,
-        backend: backend.clone(),
-    });
+    let mut llm =
+        LlmClient::new(endpoint.llm(model, TASK_TEMPERATURE, policy.reserved, backend.clone()));
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(model, limit);
     }
@@ -2990,6 +3070,7 @@ async fn run_task_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zone_core::llm::LlmConfig;
 
     #[test]
     fn test_semaphore_initialization() {
@@ -3103,6 +3184,31 @@ mod tests {
         }
     }
 
+    impl AgentTask {
+        async fn resolution(&self, backend: Result<LlmBackend, backend::Error>) -> Resolution {
+            Resolution {
+                backend,
+                ..Resolution::for_workspace(&self.state, self.task.workspace_id).await
+            }
+        }
+
+        async fn model(&self, backend: &LlmBackend) -> Result<String, String> {
+            let resolution = Resolution::for_workspace(&self.state, self.task.workspace_id).await;
+            let preferences = resolution.preferences(
+                &resolution.endpoint,
+                &self.state.config().comfyui.classifier_model,
+            );
+            resolve_model(
+                &self.state,
+                &self.task,
+                backend,
+                &resolution.endpoint,
+                &preferences,
+            )
+            .await
+        }
+    }
+
     fn claude() -> LlmBackend {
         LlmBackend::cli(
             zone_core::llm::AgentKind::Claude,
@@ -3115,16 +3221,16 @@ mod tests {
         let fixture =
             AgentTask::new("haiku", "opus", "Find the root cause of the flaky login").await;
 
-        let agent = resolve_model(&fixture.state, &fixture.task, &claude()).await;
+        let agent = fixture.model(&claude()).await;
         let consulted = fixture
             .ollama
             .received_requests()
             .await
             .map(|requests| requests.len());
-        let endpoint = resolve_model(&fixture.state, &fixture.task, &LlmBackend::Http).await;
+        let endpoint = fixture.model(&LlmBackend::Http).await;
         fixture.remove().await;
 
-        assert_eq!(agent.as_deref(), Some("opus"));
+        assert_eq!(agent.as_deref(), Ok("opus"));
         assert_eq!(
             consulted,
             Some(0),
@@ -3132,7 +3238,7 @@ mod tests {
         );
         assert_eq!(
             endpoint.as_deref(),
-            Some("qwen3.8:27b"),
+            Ok("qwen3.8:27b"),
             "the endpoint still runs on what is installed"
         );
     }
@@ -3142,10 +3248,12 @@ mod tests {
         let fixture =
             AgentTask::new("llama3.2:3b", "qwen3.8:27b", "Rename the settings page").await;
 
-        let prepared = prepare(&fixture.state, &fixture.task, Ok(claude()), false).await;
+        let resolution = fixture.resolution(Ok(claude())).await;
+        let prepared = prepare(&fixture.state, &fixture.task, resolution, false).await;
         fixture.remove().await;
 
-        let (backend, model) = prepared.expect("an agent chooses its own model, so the run starts");
+        let Prepared { backend, model, .. } =
+            prepared.expect("an agent chooses its own model, so the run starts");
         assert_eq!(model, stages::AUTO);
         assert!(matches!(
             backend,
@@ -3163,10 +3271,84 @@ mod tests {
             agent: zone_core::llm::AgentKind::Claude,
         };
 
-        let prepared = prepare(&fixture.state, &fixture.task, Err(signed_out()), false).await;
+        let resolution = fixture.resolution(Err(signed_out())).await;
+        let prepared = prepare(&fixture.state, &fixture.task, resolution, false).await;
         fixture.remove().await;
 
         assert_eq!(prepared.err(), Some(signed_out().to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_run_on_an_endpoint_the_settings_name_without_a_model_asks_for_one() {
+        let fixture = AgentTask::new("haiku", "opus", "Rename the settings page").await;
+        let provider = wiremock::MockServer::start().await;
+        sqlx::query(
+            "UPDATE organization_ai_settings SET provider = $2, openai_base_url = $3, \
+             openai_api_key = 'sk-organization', model_fast = NULL, model_reasoning = NULL \
+             WHERE organization_id = $1",
+        )
+        .bind(fixture.organization)
+        .bind(zone_context::embeddings::providers::PROVIDER_OPENAI)
+        .bind(format!("{}/v1", provider.uri()))
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+        let resolution = fixture.resolution(Ok(LlmBackend::Http)).await;
+        let origin = resolution.endpoint.origin();
+        let prepared = prepare(&fixture.state, &fixture.task, resolution, false).await;
+        let consulted = fixture
+            .ollama
+            .received_requests()
+            .await
+            .map(|requests| requests.len());
+        let sent = provider
+            .received_requests()
+            .await
+            .map(|requests| requests.len());
+        fixture.remove().await;
+
+        assert_eq!(origin, crate::services::endpoint::Origin::Settings);
+        assert_eq!(
+            prepared.err(),
+            Some(crate::services::endpoint::Error::ModelUnset.to_string()),
+            "the run says to set a model rather than sending the provider one it never named"
+        );
+        assert_eq!(
+            consulted,
+            Some(0),
+            "the instance's Ollama lists nothing the endpoint runs"
+        );
+        assert_eq!(sent, Some(0), "the provider is sent nothing");
+    }
+
+    #[test]
+    fn a_fault_an_endpoint_reported_never_carries_its_key() {
+        let mut settings = crate::services::endpoint::testing::settings(
+            zone_context::embeddings::providers::PROVIDER_OPENAI,
+        );
+        settings.openai_base_url = Some("https://provider.example/v1".to_string());
+        settings.openai_api_key = Some(zone_core::secret::SecretValue::new(
+            "sk-organization-0123456789".to_string(),
+        ));
+        let endpoint = Endpoint::resolve(&crate::state::test_config(), &settings);
+
+        let fault = Fault::agent(
+            &LlmBackend::Http,
+            "401 Unauthorized: Incorrect API key provided: sk-organization-0123456789".to_string(),
+        )
+        .scrubbed(&endpoint);
+
+        assert!(
+            !fault.message.contains("sk-organization-0123456789"),
+            "the key reached the run's log: {}",
+            fault.message
+        );
+        assert_eq!(
+            fault.failure,
+            Failure::Terminal,
+            "scrubbing keeps the fault's class"
+        );
     }
 
     #[tokio::test]
@@ -5206,6 +5388,7 @@ mod watchdog_tests {
                 workspace_id,
                 None,
                 &LlmBackend::Http,
+                &Endpoint::instance(state.config()),
                 "gpt-4",
                 "# Task: Budget\n\nKeep asking until something stops you",
                 "",
@@ -6186,6 +6369,7 @@ mod watchdog_tests {
             workspace_id,
             None,
             &LlmBackend::Http,
+            &Endpoint::instance(state.config()),
             "gpt-4",
             "# Task: Retry\n\nFinish without waiting",
             "",
@@ -6239,7 +6423,7 @@ mod cli_tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
     use wiremock::MockServer;
-    use zone_core::llm::{AgentKind, CliSettings, Toolset};
+    use zone_core::llm::{AgentKind, CliSettings, LlmConfig, Toolset};
     use zone_core::secret::SecretValue;
 
     const ANSWER: &str = "Wrote it.";
@@ -7096,6 +7280,7 @@ mod cli_tests {
             fixture.workspace,
             None,
             backend,
+            &Endpoint::instance(state.config()),
             "sonnet",
             "# Task: Agent run\n\nWrite the file",
             "",
