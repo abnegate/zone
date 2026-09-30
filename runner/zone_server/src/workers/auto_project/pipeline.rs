@@ -8,10 +8,11 @@
 use chrono::Utc;
 use zone_vcs::conflict::{BranchName, ConflictError, ConflictRequest};
 use zone_vcs::pull_request::{
-    ChecksOutcome, MergeMethod, MergedPr, PrError, PullRequestDetail, PullRequestReference,
-    ReviewEvent,
+    ChecksOutcome, MergeMethod, MergedPr, PrError, PrService, PullRequestDetail,
+    PullRequestReference, ReviewEvent, SubmittedReviewRecord,
 };
 
+use crate::agent::readiness::SignalKind;
 use crate::db::auto_projects::{
     self, Finding, Kind, ReviewInsert, ReviewRow, ReviewerKind, Stage, TaskAutomation,
     Verdict as Recorded,
@@ -524,16 +525,14 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
         .fetch_issue_comments(&step.reference, &step.token)
         .await
         .map_err(|error| error.to_string())?;
-    let reviews = pr
-        .fetch_reviews(&step.reference, &step.token)
-        .await
-        .map_err(|error| error.to_string())?;
     let threads = pr
         .fetch_review_threads(&step.reference, &step.token)
         .await
         .map_err(|error| error.to_string())?;
+    let expected = bots::expected(config, &rows, &comments, &threads);
+    let reviews = submitted_reviews(pr, &step.reference, &step.token, &expected).await;
     let mut waiting: Vec<_> = Vec::new();
-    for kind in bots::expected(config, &rows, &comments, &threads) {
+    for kind in expected {
         // A bot's verdict on a head moves as its threads get resolved, so it
         // is read again every tick and recorded again only when it changed;
         // a thread that is gone from the new reading counts as addressed.
@@ -846,6 +845,31 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             step.set(Stage::Fixing, Some(&reason)).await
         }
     }
+}
+
+/// The reviews submitted on the pull request, read only when an `expected`
+/// bot can score in one. A failed read counts as none, as the changed files do.
+async fn submitted_reviews(
+    pr: &PrService,
+    reference: &PullRequestReference,
+    token: &str,
+    expected: &[SignalKind],
+) -> Vec<SubmittedReviewRecord> {
+    if !expected.iter().any(|kind| kind.scores_in_reviews()) {
+        return Vec::new();
+    }
+    pr.fetch_reviews(reference, token)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                owner = %reference.owner,
+                repository = %reference.repository,
+                number = reference.number,
+                %error,
+                "Could not read the pull request's reviews; reading bot scores from summaries alone"
+            );
+            Vec::new()
+        })
 }
 
 /// Reply on, and resolve, every bot thread the reviewer found addressed.
@@ -1652,5 +1676,76 @@ mod tests {
             row(3, false, "big", "approve", false, head),
         ];
         assert_eq!(reviewer_names(&rows), ["big (Zone)"]);
+    }
+
+    fn reference() -> PullRequestReference {
+        PullRequestReference {
+            owner: "acme".into(),
+            repository: "shop".into(),
+            number: 7,
+        }
+    }
+
+    async fn github(status: u16) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn requests(server: &wiremock::MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .expect("the mock records requests")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn reviews_are_read_only_when_an_expected_bot_scores_in_them() {
+        let server = github(200).await;
+        let pr = PrService::standing_in_for("github.com", server.uri());
+
+        for expected in [&[][..], &[SignalKind::Greptile][..]] {
+            assert!(
+                submitted_reviews(&pr, &reference(), "token", expected)
+                    .await
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            requests(&server).await,
+            0,
+            "Greptile scores only in its summary"
+        );
+
+        submitted_reviews(
+            &pr,
+            &reference(),
+            "token",
+            &[SignalKind::Greptile, SignalKind::CodeRabbit],
+        )
+        .await;
+        assert_eq!(requests(&server).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_read_of_the_reviews_counts_as_none_rather_than_failing_the_tick() {
+        for status in [403, 429, 502] {
+            let server = github(status).await;
+            let pr = PrService::standing_in_for("github.com", server.uri());
+
+            let reviews =
+                submitted_reviews(&pr, &reference(), "token", &[SignalKind::CodeRabbit]).await;
+
+            assert!(reviews.is_empty(), "{status}");
+            assert!(requests(&server).await >= 1, "{status}");
+        }
     }
 }
