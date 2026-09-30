@@ -140,10 +140,14 @@ next tick asks the next reviewer, and a second round on the same head without
 a verdict pauses the task with the error, pointing at
 `ZONE_AUTO_REVIEW_MODELS`. A reviewer endpoint that does not answer (a refused
 connection, a timeout, a 5xx while Ollama restarts, or a 429) records nothing
-and is asked again on the next tick, with a warning logged each time; after at
-least 5 such ticks over 10 minutes the task pauses, naming the reviewer and
-the last error. The count lives in the driver's memory, so a restart starts it
-over.
+and is asked again on the next tick, with a warning logged each time. After 5
+unanswered attempts the task asks the next reviewer in its rotation instead,
+still without recording a round, and once every reviewer has gone unanswered
+at least 5 times over 10 minutes the task pauses, naming each reviewer and the
+last error. Only an answer, or the task leaving review, ends a reviewer's
+count; however far apart its attempts land while sibling tasks are reviewed,
+they still add up. The counts live in the driver's memory, so a restart starts
+them over and the task asks its round's own reviewer first again.
 
 ## Upgrading to migration 051
 

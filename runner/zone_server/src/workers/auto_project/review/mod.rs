@@ -558,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reviewer_endpoint_nothing_listens_on_is_unreachable_and_records_no_round() {
-        use crate::workers::auto_project::pipeline::recover;
+        use crate::workers::auto_project::pipeline::{Attempt, recover};
 
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .expect("a free port")
@@ -569,7 +569,15 @@ mod tests {
         let error = review_on(&endpoint(format!("http://127.0.0.1:{port}"))).await;
 
         assert!(matches!(error, ReviewError::Unreachable(_)), "{error:?}");
-        assert_eq!(recover(&error, "qwen3:32b", 0).missed, None);
+        let lineup = ["qwen3:32b".to_string()];
+        let attempt = Attempt {
+            outages: &outage::Outages::default(),
+            project: Uuid::nil(),
+            task: Uuid::nil(),
+            lineup: &lineup,
+            now: chrono::Utc::now(),
+        };
+        assert_eq!(recover(&error, "qwen3:32b", 0, &attempt).missed, None);
     }
 
     #[tokio::test]

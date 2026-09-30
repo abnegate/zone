@@ -7,7 +7,8 @@
 
 use std::collections::HashSet;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 use zone_vcs::conflict::{BranchName, ConflictError, ConflictRequest};
 use zone_vcs::pull_request::{
     ChecksOutcome, MergeMethod, MergedPr, PrError, PrService, PullRequestDetail,
@@ -26,7 +27,8 @@ use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception
 
 use super::driver::Drive;
 use super::notification::{self, MergeReport};
-use super::review::model::{self, Author};
+use super::review::model::{self, Author, Unavailable};
+use super::review::outage::Outages;
 use super::review::{self, Outcome, ReviewError, ReviewRequest, bots, verdict};
 use super::summary;
 
@@ -671,15 +673,24 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?
             + 1;
-        let reviewer = match model::select(
+        let lineup = match model::lineup(
             &author,
             &prefs,
             &catalog,
             &config.review_models,
             u32::try_from(round).unwrap_or(1),
         ) {
-            Ok(reviewer) => reviewer,
+            Ok(lineup) => lineup,
             Err(unavailable) => return step.pause(&unavailable.to_string()).await,
+        };
+        let names: Vec<String> = lineup
+            .iter()
+            .map(|reviewer| reviewer.model.clone())
+            .collect();
+        let outages = &step.drive.services.outages;
+        let index = outages.next(step.task.task_id, &names).unwrap_or(0);
+        let Some(reviewer) = lineup.get(index).cloned() else {
+            return step.pause(&Unavailable::NoModel.to_string()).await;
         };
         if config.require_distinct_reviewer
             && !bot_on_head
@@ -716,22 +727,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             },
         )
         .await;
-        let outages = &step.drive.services.outages;
-        if let Err(ReviewError::Unreachable(failure)) = &outcome {
-            let streak = outages.record(step.task.task_id, Utc::now());
-            tracing::warn!(
-                task_id = %step.task.task_id,
-                reviewer = %reviewer.model,
-                attempts = streak.attempts,
-                since = %streak.since,
-                %failure,
-                "The reviewer model could not be reached"
-            );
-            if streak.outlasted() {
-                outages.clear(step.task.task_id);
-                return step.pause(&streak.reason(&reviewer.model, failure)).await;
-            }
-        } else {
+        if !matches!(outcome, Err(ReviewError::Unreachable(_))) {
             outages.clear(step.task.task_id);
         }
         match outcome {
@@ -779,7 +775,18 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 answer_bot_threads(step, &open, &verdict.addressed, &threads, &head).await;
             }
             Err(error) => {
-                let recovery = recover(&error, &reviewer.model, verdictless);
+                let recovery = recover(
+                    &error,
+                    &reviewer.model,
+                    verdictless,
+                    &Attempt {
+                        outages,
+                        project: step.drive.project.project_id,
+                        task: step.task.task_id,
+                        lineup: &names,
+                        now: Utc::now(),
+                    },
+                );
                 if let Some(missed) = &recovery.missed {
                     tracing::warn!(task_id = %step.task.task_id, reviewer = %missed.reviewer, %error, "A review round ended without a verdict");
                     auto_projects::record_review(
@@ -939,7 +946,8 @@ pub struct Missed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {
     /// Stay in review; the next tick asks again, the next reviewer in the
-    /// rotation when this round was recorded and the same one when it was not.
+    /// rotation when this round was recorded, and when it was not the same one
+    /// until it has gone unanswered too often.
     Retry(String),
     /// Hand the task to a person.
     Pause(String),
@@ -953,23 +961,36 @@ pub struct Recovery {
     pub next: Next,
 }
 
+/// The reviewers a round could ask, and where to count those that do not
+/// answer.
+pub struct Attempt<'a> {
+    pub outages: &'a Outages,
+    pub project: Uuid,
+    pub task: Uuid,
+    pub lineup: &'a [String],
+    pub now: DateTime<Utc>,
+}
+
 /// What follows a review by `reviewer` that ended in `error`, when `earlier`
 /// rounds on the same head also ended without a verdict. An endpoint that did
-/// not answer judged nothing, so its tick is not a round; [`review::outage`]
-/// bounds how long that goes on.
-pub fn recover(error: &ReviewError, reviewer: &str, earlier: usize) -> Recovery {
+/// not answer judged nothing, so its tick is not a round: [`review::outage`]
+/// moves the task along its lineup and bounds how long that goes on.
+pub fn recover(
+    error: &ReviewError,
+    reviewer: &str,
+    earlier: usize,
+    attempt: &Attempt<'_>,
+) -> Recovery {
     if let Some(reason) = error.stalled() {
         return Recovery {
             missed: None,
             next: Next::Pause(reason),
         };
     }
-    if matches!(error, ReviewError::Unreachable(_)) {
+    if let ReviewError::Unreachable(failure) = error {
         return Recovery {
             missed: None,
-            next: Next::Retry(format!(
-                "the reviewer model {reviewer} could not be reached; asking it again"
-            )),
+            next: unanswered(attempt, reviewer, failure),
         };
     }
     let (verdict, summary, retry) = if let ReviewError::Unparseable(message) = error {
@@ -1001,6 +1022,41 @@ pub fn recover(error: &ReviewError, reviewer: &str, earlier: usize) -> Recovery 
             summary,
         }),
         next,
+    }
+}
+
+/// Count `reviewer`'s silence and say who the task asks next, or why nobody
+/// is left to ask.
+fn unanswered(attempt: &Attempt<'_>, reviewer: &str, failure: &str) -> Next {
+    let Attempt {
+        outages,
+        project,
+        task,
+        lineup,
+        now,
+    } = *attempt;
+    let streak = outages.record(project, task, reviewer, now);
+    tracing::warn!(
+        task_id = %task,
+        reviewer,
+        attempts = streak.attempts,
+        since = %streak.since,
+        failure,
+        "The reviewer model could not be reached"
+    );
+    match outages.next(task, lineup) {
+        Some(index) if lineup[index] == reviewer => Next::Retry(format!(
+            "the reviewer model {reviewer} could not be reached; asking it again"
+        )),
+        Some(index) => Next::Retry(format!(
+            "the reviewer model {reviewer} could not be reached on {} attempts; asking {} instead",
+            streak.attempts, lineup[index]
+        )),
+        None => {
+            let reason = outages.reason(task, lineup, failure);
+            outages.clear(task);
+            Next::Pause(reason)
+        }
     }
 }
 
@@ -1586,7 +1642,7 @@ mod tests {
     fn a_reviewer_model_error_is_recorded_as_a_failed_round_and_the_next_tick_tries_another() {
         let error = ReviewError::Model("Ollama returned 400: model does not support tools".into());
 
-        let recovery = recover(&error, "gemma3:27b", 0);
+        let recovery = recover(&error, "gemma3:27b", 0, &unwatched());
 
         assert_eq!(
             recovery.missed,
@@ -1607,7 +1663,7 @@ mod tests {
 
     #[test]
     fn a_review_that_timed_out_is_a_failed_round() {
-        let recovery = recover(&ReviewError::TimedOut, "qwen3:32b", 0);
+        let recovery = recover(&ReviewError::TimedOut, "qwen3:32b", 0, &unwatched());
 
         let missed = recovery.missed.expect("a timed-out round is recorded");
         assert_eq!(missed.verdict, Recorded::Failed);
@@ -1619,7 +1675,7 @@ mod tests {
     fn an_unreadable_reply_is_recorded_as_unparseable_and_asked_again() {
         let error = ReviewError::Unparseable("the reply carries no <zone-review> marker".into());
 
-        let recovery = recover(&error, "big", 0);
+        let recovery = recover(&error, "big", 0, &unwatched());
 
         let missed = recovery.missed.expect("an unreadable round is recorded");
         assert_eq!(missed.verdict, Recorded::Unparseable);
@@ -1634,7 +1690,7 @@ mod tests {
     fn a_second_round_without_a_verdict_pauses_the_task_with_the_last_error() {
         let error = ReviewError::Model("the model returned no choices".into());
 
-        let recovery = recover(&error, "small", MAX_VERDICTLESS_ROUNDS - 1);
+        let recovery = recover(&error, "small", MAX_VERDICTLESS_ROUNDS - 1, &unwatched());
 
         assert_eq!(
             recovery.missed.map(|missed| missed.verdict),
@@ -1649,22 +1705,172 @@ mod tests {
         assert!(reason.contains("ZONE_AUTO_REVIEW_MODELS"), "{reason}");
     }
 
+    fn names(reviewers: &[&str]) -> Vec<String> {
+        reviewers.iter().map(ToString::to_string).collect()
+    }
+
+    fn attempt<'a>(outages: &'a Outages, lineup: &'a [String], minute: i64) -> Attempt<'a> {
+        Attempt {
+            outages,
+            project: Uuid::nil(),
+            task: Uuid::nil(),
+            lineup,
+            now: DateTime::UNIX_EPOCH + chrono::TimeDelta::minutes(minute),
+        }
+    }
+
+    fn unwatched() -> Attempt<'static> {
+        static OUTAGES: std::sync::LazyLock<Outages> = std::sync::LazyLock::new(Outages::default);
+        attempt(&OUTAGES, &[], 0)
+    }
+
+    fn unreachable() -> ReviewError {
+        ReviewError::Unreachable("HTTP error: connection refused".into())
+    }
+
     #[test]
     fn an_unreachable_reviewer_records_nothing_and_is_asked_again_whatever_came_before() {
-        let error = ReviewError::Unreachable("HTTP error: connection refused".into());
+        let lineup = names(&["qwen3:32b", "gemma3:27b"]);
 
         for earlier in [0, MAX_VERDICTLESS_ROUNDS] {
+            let outages = Outages::default();
             assert_eq!(
-                recover(&error, "qwen3:32b", earlier),
+                recover(
+                    &unreachable(),
+                    "qwen3:32b",
+                    earlier,
+                    &attempt(&outages, &lineup, 0)
+                ),
                 Recovery {
                     missed: None,
                     next: Next::Retry(
                         "the reviewer model qwen3:32b could not be reached; asking it again".into()
                     ),
                 },
-                "a restarting server judged nothing, so it neither rotates nor counts"
+                "a restarting server judged nothing, so it neither rotates at once nor counts"
             );
         }
+    }
+
+    #[test]
+    fn a_task_whose_siblings_space_its_attempts_a_window_apart_pauses_instead_of_retrying_forever()
+    {
+        let outages = Outages::default();
+        let lineup = names(&["qwen3:32b"]);
+        let spacing = 11;
+
+        let paused = (0..50).find_map(|tick| {
+            match recover(
+                &unreachable(),
+                "qwen3:32b",
+                0,
+                &attempt(&outages, &lineup, tick * spacing),
+            ) {
+                Recovery {
+                    missed: None,
+                    next: Next::Pause(reason),
+                } => Some((tick + 1, reason)),
+                Recovery {
+                    missed: None,
+                    next: Next::Retry(_),
+                } => None,
+                recovery => panic!("an unanswered attempt recorded a round: {recovery:?}"),
+            }
+        });
+
+        let (attempts, reason) = paused.expect("the task retried the silent reviewer forever");
+        assert_eq!(attempts, i64::from(review::outage::ATTEMPTS));
+        assert_eq!(
+            reason,
+            "the reviewer model qwen3:32b could not be reached on 5 attempts over 44 minutes; the \
+             last: HTTP error: connection refused. Check that the model server is running"
+        );
+        assert_eq!(
+            outages.streak(Uuid::nil(), "qwen3:32b"),
+            None,
+            "a person was told, so the streak ends"
+        );
+    }
+
+    #[test]
+    fn a_task_asks_its_next_reviewer_once_one_goes_unanswered_and_pauses_when_none_answer() {
+        let outages = Outages::default();
+        let lineup = names(&["gemma3:27b", "qwen3:32b"]);
+        let attempts = i64::from(review::outage::ATTEMPTS);
+
+        let mut asked = Vec::new();
+        let mut next = Next::Retry(String::new());
+        for tick in 0..4 * attempts {
+            let index = outages.next(Uuid::nil(), &lineup).unwrap_or(0);
+            asked.push(lineup[index].clone());
+            let recovery = recover(
+                &unreachable(),
+                &lineup[index],
+                0,
+                &attempt(&outages, &lineup, tick * 3),
+            );
+            assert_eq!(recovery.missed, None, "tick {tick} recorded a round");
+            next = recovery.next;
+            if matches!(next, Next::Pause(_)) {
+                break;
+            }
+            if tick + 1 == attempts {
+                assert_eq!(
+                    next,
+                    Next::Retry(
+                        "the reviewer model gemma3:27b could not be reached on 5 attempts; \
+                         asking qwen3:32b instead"
+                            .into()
+                    )
+                );
+            }
+        }
+
+        let gemma = asked
+            .iter()
+            .take_while(|name| *name == "gemma3:27b")
+            .count();
+        assert_eq!(gemma, usize::try_from(attempts).unwrap());
+        assert_eq!(asked[gemma], "qwen3:32b", "the silent reviewer hands over");
+        let Next::Pause(reason) = next else {
+            panic!("the task kept retrying two silent reviewers: {asked:?}");
+        };
+        assert!(
+            reason.starts_with("no reviewer model could be reached: gemma3:27b on "),
+            "{reason}"
+        );
+        assert!(reason.contains(", qwen3:32b on "), "{reason}");
+        assert!(reason.contains("ZONE_AUTO_REVIEW_MODELS"), "{reason}");
+    }
+
+    #[test]
+    fn a_reviewer_that_answers_after_another_went_unanswered_is_the_one_asked() {
+        let outages = Outages::default();
+        let lineup = names(&["gemma3:27b", "qwen3:32b"]);
+        for tick in 0..i64::from(review::outage::ATTEMPTS) {
+            recover(
+                &unreachable(),
+                "gemma3:27b",
+                0,
+                &attempt(&outages, &lineup, tick),
+            );
+        }
+
+        assert_eq!(
+            outages.next(Uuid::nil(), &lineup),
+            Some(1),
+            "the reachable reviewer is asked without a round being recorded"
+        );
+        let recovery = recover(
+            &ReviewError::Model("the model returned no choices".into()),
+            "qwen3:32b",
+            0,
+            &attempt(&outages, &lineup, 6),
+        );
+        assert!(
+            recovery.missed.is_some(),
+            "an answer without a verdict is still a round"
+        );
     }
 
     #[test]
@@ -1674,7 +1880,7 @@ mod tests {
             reason: "claude: out of usage credits".into(),
         };
 
-        let recovery = recover(&error, "fable", 0);
+        let recovery = recover(&error, "fable", 0, &unwatched());
 
         assert_eq!(recovery.missed, None);
         assert_eq!(recovery.next, Next::Pause(error.to_string()));

@@ -60,7 +60,9 @@ impl Author {
     }
 }
 
-/// Pick a reviewer for `round` of a change `author` wrote.
+/// The reviewers for `round` of a change `author` wrote, in the order the
+/// round asks them: the first is the round's own, and each after it stands in
+/// when those before it do not answer. Never empty.
 ///
 /// Candidates in order: the operator's configured reviewers, the workspace's
 /// reasoning and fast models, then everything installed, largest first. The
@@ -75,13 +77,13 @@ impl Author {
 /// models stand in for what is installed, less those it runs only when named.
 /// A change the agent wrote on a model of its own choosing may have come from
 /// any of them.
-pub fn select(
+pub fn lineup(
     author: &Author,
     prefs: &Preferences,
     catalog: &Catalog,
     configured: &[String],
     round: u32,
-) -> Result<Reviewer, Unavailable> {
+) -> Result<Vec<Reviewer>, Unavailable> {
     let named = author.model();
     let mut candidates: Vec<String> = Vec::new();
     let mut push = |name: &str| {
@@ -128,10 +130,10 @@ pub fn select(
             .filter(|name| !stages::is_auto(name))
             .collect();
         return match fallbacks.iter().find(|name| !catalog.refuses_tools(name)) {
-            Some(model) => Ok(Reviewer {
+            Some(model) => Ok(vec![Reviewer {
                 model: (*model).to_string(),
                 same_model: true,
-            }),
+            }]),
             None if !fallbacks.is_empty() || catalog.completions().next().is_some() => {
                 Err(Unavailable::NoToolModel)
             }
@@ -139,10 +141,12 @@ pub fn select(
         };
     }
     let index = usize::try_from(round.saturating_sub(1)).unwrap_or(0) % candidates.len();
-    Ok(Reviewer {
-        model: candidates[index].clone(),
-        same_model: *author == Author::Chosen && catalog.chooses(),
-    })
+    candidates.rotate_left(index);
+    let same_model = *author == Author::Chosen && catalog.chooses();
+    Ok(candidates
+        .into_iter()
+        .map(|model| Reviewer { model, same_model })
+        .collect())
 }
 
 /// Why a review by `reviewer` cannot count as independent of `author`, or
@@ -221,7 +225,9 @@ mod tests {
         configured: &[String],
         round: u32,
     ) -> Reviewer {
-        select(author, prefs, catalog, configured, round).expect("a model can review")
+        lineup(author, prefs, catalog, configured, round)
+            .expect("a model can review")
+            .swap_remove(0)
     }
 
     fn catalog() -> Catalog {
@@ -259,6 +265,34 @@ mod tests {
         let next = pick(&author, &Preferences::default(), &catalog(), &configured, 2);
         assert_eq!(failed.model, "gemma3:27b");
         assert_eq!(next.model, "qwen3:32b");
+    }
+
+    #[test]
+    fn a_round_s_lineup_starts_at_its_own_reviewer_and_goes_on_through_the_rest() {
+        let author = Author::Model("author".into());
+        let configured = ["gemma3:27b".to_string(), "qwen3:32b".to_string()];
+        let names = |round| -> Vec<String> {
+            lineup(
+                &author,
+                &Preferences::default(),
+                &catalog(),
+                &configured,
+                round,
+            )
+            .expect("a model can review")
+            .into_iter()
+            .map(|reviewer| reviewer.model)
+            .collect()
+        };
+
+        assert_eq!(
+            names(1),
+            ["gemma3:27b", "qwen3:32b", "big:latest", "small:latest"]
+        );
+        assert_eq!(
+            names(2),
+            ["qwen3:32b", "big:latest", "small:latest", "gemma3:27b"]
+        );
     }
 
     #[test]
@@ -513,14 +547,14 @@ mod tests {
         };
         let author = Author::Model("llama3.2:3b".into());
 
-        let reviewer = select(&author, &prefs, &catalog, &[], 1);
+        let reviewers = lineup(&author, &prefs, &catalog, &[], 1);
 
         assert_eq!(
-            reviewer,
-            Ok(Reviewer {
+            reviewers,
+            Ok(vec![Reviewer {
                 model: "llama3.2:3b".into(),
                 same_model: true,
-            }),
+            }]),
             "the author reviews itself rather than handing the review to a model that cannot"
         );
     }
@@ -545,13 +579,13 @@ mod tests {
             (Author::Model(NOROMAID.into()), Preferences::default()),
         ] {
             assert_eq!(
-                select(&author, &prefs, &refusing, &[LLAVA.into()], 1),
+                lineup(&author, &prefs, &refusing, &[LLAVA.into()], 1),
                 Err(Unavailable::NoToolModel),
                 "{author:?} {prefs:?}"
             );
         }
         assert_eq!(
-            select(
+            lineup(
                 &Author::Unrecorded,
                 &Preferences::default(),
                 &Catalog::default(),
