@@ -169,8 +169,9 @@ Events other than issue events are acknowledged and ignored.
 For GitHub, open the repository's Settings → Webhooks and add a webhook with
 that Payload URL, content type `application/json`, the secret shown once when
 the sync is created, and only the "Issues" event. If the secret is lost, use
-"Rotate secret" and paste the new one into GitHub. GitHub's first `ping` is
-acknowledged.
+"Rotate secret" and paste the new one into GitHub. A GitHub sync created
+before Zone issued secrets has none and refuses every delivery; use
+"Generate secret" on it. GitHub's first `ping` is acknowledged.
 
 For Linear, create a webhook for Issues with the same URL, then paste Linear's
 signing secret into the sync with "Set signing secret". The sync's project ID
