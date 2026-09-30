@@ -1,25 +1,27 @@
 //! CLI configuration
 //!
-//! Manages CLI configuration stored in ~/.zone/config.toml
+//! Settings live in `~/.zone/config.toml`. `ZONE_CONFIG_DIRECTORY` moves the
+//! directory, and the sessions kept in it, and `ZONE_CONFIG_PATH` names the
+//! file outright.
 
+use abnegate_config::{Application, Loader};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Names the `~/.zone` directory and the `ZONE_CONFIG_*` variables.
+const APPLICATION: &str = "zone";
+
+const SESSIONS: &str = "sessions";
+
 /// Configuration error
 #[derive(Error, Debug)]
 pub enum ConfigError {
+    #[error(transparent)]
+    Config(#[from] abnegate_config::Error),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-
-    #[error("TOML parse error: {0}")]
-    TomlParse(#[from] toml::de::Error),
-
-    #[error("TOML serialize error: {0}")]
-    TomlSerialize(#[from] toml::ser::Error),
-
-    #[error("Home directory not found")]
-    NoHomeDir,
 }
 
 /// CLI configuration
@@ -73,54 +75,51 @@ impl Default for Config {
     }
 }
 
+fn application() -> Result<Application, ConfigError> {
+    Ok(Application::new(APPLICATION).map_err(abnegate_config::Error::from)?)
+}
+
 impl Config {
-    /// Get the config directory path (~/.zone)
-    pub fn config_dir() -> Result<PathBuf, ConfigError> {
-        let home = dirs::home_dir().ok_or(ConfigError::NoHomeDir)?;
-        Ok(home.join(".zone"))
+    /// The directory the CLI keeps its files in
+    pub fn directory() -> Result<PathBuf, ConfigError> {
+        Ok(abnegate_config::directory(&application()?)?)
     }
 
-    /// Get the config file path (~/.zone/config.toml)
-    pub fn config_path() -> Result<PathBuf, ConfigError> {
-        Ok(Self::config_dir()?.join("config.toml"))
+    /// The configuration file
+    pub fn path() -> Result<PathBuf, ConfigError> {
+        Ok(abnegate_config::path(&application()?)?)
     }
 
-    /// Get the sessions directory path (~/.zone/sessions)
-    pub fn sessions_dir() -> Result<PathBuf, ConfigError> {
-        Ok(Self::config_dir()?.join("sessions"))
+    /// The directory saved sessions are kept in
+    pub fn sessions_directory() -> Result<PathBuf, ConfigError> {
+        Ok(Self::directory()?.join(SESSIONS))
     }
 
     /// Load configuration from file, creating default if it doesn't exist
     pub fn load() -> Result<Self, ConfigError> {
-        let path = Self::config_path()?;
+        Self::load_from(&Loader::new(&application()?)?)
+    }
 
-        if !path.exists() {
-            let config = Self::default();
-            config.save()?;
-            return Ok(config);
+    fn load_from(loader: &Loader<'_>) -> Result<Self, ConfigError> {
+        if loader.exists() {
+            return Ok(loader.load()?.into_value());
         }
 
-        let content = std::fs::read_to_string(&path)?;
-        Ok(toml::from_str(&content)?)
+        let config = abnegate_config::Config::new(loader.path(), Self::default());
+        config.save()?;
+        Ok(config.into_value())
     }
 
     /// Save configuration to file
     pub fn save(&self) -> Result<(), ConfigError> {
-        let dir = Self::config_dir()?;
-        std::fs::create_dir_all(&dir)?;
-
-        let path = Self::config_path()?;
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
-
-        Ok(())
+        Ok(abnegate_config::Config::new(Self::path()?, self).save()?)
     }
 
     /// Ensure sessions directory exists
-    pub fn ensure_sessions_dir() -> Result<PathBuf, ConfigError> {
-        let dir = Self::sessions_dir()?;
-        std::fs::create_dir_all(&dir)?;
-        Ok(dir)
+    pub fn ensure_sessions_directory() -> Result<PathBuf, ConfigError> {
+        let directory = Self::sessions_directory()?;
+        std::fs::create_dir_all(&directory)?;
+        Ok(directory)
     }
 }
 
@@ -247,16 +246,15 @@ mod tests {
 
     #[test]
     fn test_config_dir() {
-        // Should return a path ending in .zone
-        if let Ok(dir) = Config::config_dir() {
+        assert_eq!(application().unwrap().directory(), ".zone");
+        if let Ok(dir) = Config::directory() {
             assert!(dir.to_string_lossy().ends_with(".zone"));
         }
     }
 
     #[test]
     fn test_config_path() {
-        // Should return a path ending in config.toml
-        if let Ok(path) = Config::config_path() {
+        if let Ok(path) = Config::path() {
             assert!(path.to_string_lossy().ends_with("config.toml"));
             assert!(path.to_string_lossy().contains(".zone"));
         }
@@ -264,8 +262,7 @@ mod tests {
 
     #[test]
     fn test_sessions_dir() {
-        // Should return a path ending in sessions
-        if let Ok(dir) = Config::sessions_dir() {
+        if let Ok(dir) = Config::sessions_directory() {
             assert!(dir.to_string_lossy().ends_with("sessions"));
             assert!(dir.to_string_lossy().contains(".zone"));
         }
@@ -279,7 +276,7 @@ mod tests {
         ));
         assert!(io_err.to_string().contains("IO error"));
 
-        let no_home = ConfigError::NoHomeDir;
+        let no_home = ConfigError::from(abnegate_config::Error::NoHomeDirectory);
         assert_eq!(no_home.to_string(), "Home directory not found");
     }
 
@@ -291,11 +288,104 @@ mod tests {
     }
 
     #[test]
-    fn test_config_error_from_toml_parse() {
-        let result: Result<Config, toml::de::Error> = toml::from_str("invalid { toml");
-        let toml_err = result.unwrap_err();
-        let config_err: ConfigError = toml_err.into();
-        assert!(matches!(config_err, ConfigError::TomlParse(_)));
+    fn a_file_that_is_not_toml_fails_the_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "invalid { toml").unwrap();
+
+        let error = Config::load_from(&Loader::at(&path)).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                ConfigError::Config(abnegate_config::Error::Parse { .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// `zone config` opens the file in an editor, so the first load has to
+    /// leave one there.
+    #[test]
+    fn the_first_load_writes_the_defaults_for_the_editor_to_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nested").join("config.toml");
+
+        let config = Config::load_from(&Loader::at(&path)).unwrap();
+
+        assert_eq!(config.model, "gpt-4o");
+        let written: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written.max_iterations, 50);
+    }
+
+    #[test]
+    fn a_saved_file_keeps_what_an_earlier_cli_wrote() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "model = \"claude-3\"\nhost = \"https://api.example.com\"\nmax_iterations = 25\neditor = \"code\"\nllm_api_key = \"ollama\"\n",
+        )
+        .unwrap();
+
+        let loaded = Config::load_from(&Loader::at(&path)).unwrap();
+
+        assert_eq!(loaded.model, "claude-3");
+        assert_eq!(loaded.host.as_deref(), Some("https://api.example.com"));
+        assert_eq!(loaded.max_iterations, 25);
+        assert_eq!(loaded.llm_api_key.as_deref(), Some("ollama"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_written_file_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+
+        Config::load_from(&Loader::at(&path)).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// The variables are read from the process environment, which every test
+    /// shares, so this runs again in a child that sets one.
+    #[test]
+    fn the_config_directory_variable_moves_the_file_and_the_sessions() {
+        const NAME: &str =
+            "config::tests::the_config_directory_variable_moves_the_file_and_the_sessions";
+        const CHILD: &str = "ZONE_CLI_CONFIG_TEST_CHILD";
+        const MOVED: &str = "/nonexistent/zone-moved";
+
+        if std::env::var(CHILD).as_deref() != Ok(NAME) {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads", "1"])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env(CHILD, NAME)
+                .env("ZONE_CONFIG_DIRECTORY", MOVED)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        assert_eq!(Config::directory().unwrap(), PathBuf::from(MOVED));
+        assert_eq!(
+            Config::path().unwrap(),
+            PathBuf::from(MOVED).join("config.toml")
+        );
+        assert_eq!(
+            Config::sessions_directory().unwrap(),
+            PathBuf::from(MOVED).join("sessions")
+        );
     }
 
     #[test]

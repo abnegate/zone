@@ -127,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Login { host } => {
-            let auth = AuthManager::new();
+            let auth = AuthManager::new()?;
 
             // Prompt for credentials
             let email: String = dialoguer::Input::new()
@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
                     println!(
                         "{} Logged in as {} to {}",
                         style("✓").green(),
-                        style(&metadata.email).cyan(),
+                        style(metadata.email.as_deref().unwrap_or_default()).cyan(),
                         style(&metadata.host).cyan()
                     );
                 }
@@ -156,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Logout => {
-            let auth = AuthManager::new();
+            let auth = AuthManager::new()?;
             auth.logout()?;
             println!("{} Logged out", style("✓").green());
         }
@@ -180,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Config => {
             let config = config::Config::load()?;
-            let path = config::Config::config_path()?;
+            let path = config::Config::path()?;
 
             // Open in editor
             let editor = &config.editor;

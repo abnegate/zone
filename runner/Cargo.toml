@@ -35,6 +35,7 @@ rmcp = { version = "=3.2.0", default-features = false }
 
 # Shared crates, published from abnegate/crates. Caret ranges, unlike every
 # other dependency here, so a patch release of a crate reaches zone on update.
+abnegate-config = "0.1"
 abnegate-exec = "0.1"
 abnegate-http = "0.1"
 abnegate-secret = "0.1"
@@ -53,7 +54,6 @@ metrics = "=0.24.6"
 metrics-exporter-prometheus = "=0.18.3"
 
 # CLI dependencies
-keyring = "=4.2.0"
 dirs = "=6.0.0"
 toml = "=1.1.5"
 dialoguer = "=0.12.0"

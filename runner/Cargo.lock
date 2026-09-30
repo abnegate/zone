@@ -3,6 +3,24 @@
 version = 4
 
 [[package]]
+name = "abnegate-config"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "324a38fe02d1c1715c8091d0f32534b0e2ee2b0f4d229220c25bf6ee3c01db08"
+dependencies = [
+ "abnegate-secret",
+ "chrono",
+ "dirs 7.0.0",
+ "keyring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "toml 1.1.5+spec-1.1.0",
+ "zeroize",
+]
+
+[[package]]
 name = "abnegate-exec"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9643,19 +9661,20 @@ dependencies = [
 name = "zone_cli"
 version = "0.1.0"
 dependencies = [
+ "abnegate-config",
+ "abnegate-secret",
  "anyhow",
  "base64 0.23.1",
  "chrono",
  "clap",
  "console",
  "dialoguer",
- "dirs 6.0.0",
  "indicatif",
- "keyring",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "toml 1.1.5+spec-1.1.0",

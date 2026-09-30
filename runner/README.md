@@ -56,9 +56,13 @@ runner/
 ├── zone_runner/     # CLI daemon/one-shot execution
 ├── zone_cli/        # User-facing CLI tool
 ├── zone_installer/  # Desktop/mobile client HTTP shell
-├── zone_desktop/    # Tauri desktop, Android, and iOS client
-└── tool_runner/     # Sandboxed command execution
+└── zone_desktop/    # Tauri desktop, Android, and iOS client
 ```
+
+Sandboxed command execution (`abnegate-exec`), credential handling
+(`abnegate-secret`), outbound URL guarding and rate limiting (`abnegate-http`)
+and CLI configuration (`abnegate-config`) come from the shared
+[abnegate crates](https://github.com/abnegate/crates) on crates.io.
 
 ### Data Flow
 
@@ -70,7 +74,7 @@ zone_server (REST/WebSocket)
 zone_core (Agent Loop)
     ↓
 ├── LLM Client (Claude, GPT, etc.)
-├── Tool Execution (via tool_runner + MCP servers such as magents)
+├── Tool Execution (via abnegate-exec + MCP servers such as magents)
 └── Context Injection (via zone_context)
     ↓
 zone_context
