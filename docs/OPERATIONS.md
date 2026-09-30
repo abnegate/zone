@@ -156,10 +156,13 @@ tasks.
 
 A new external issue becomes a non-agentic task in the project, so it never
 runs an agent on its own. Later edits and closes flow to the linked task, and
-a GitHub `deleted` event closes it. GitHub creates tasks only for issues in the
-configured repository opened by the repository's owner, members or
-collaborators; Linear creates them only for issues in the configured project.
-Titles are cut to 500 characters and descriptions to 50,000.
+a GitHub `deleted` event closes it. GitHub creates a task only for an issue in
+the sync's configured repository whose author is the repository's owner, a
+member of the organization that owns it, or a collaborator (`author_association`
+`OWNER`, `MEMBER` or `COLLABORATOR`). Linear creates one only for an issue whose
+`projectId` is the sync's project ID. A sync with no repository or project ID
+set, or one that is outbound only, creates no tasks. Titles are cut to 500 bytes
+and descriptions to 50,000 bytes, never mid-character.
 
 Each sync has its own endpoint, `/api/webhooks/sync/{id}/github` or
 `/api/webhooks/sync/{id}/linear`, shown as the Payload URL in the project's
