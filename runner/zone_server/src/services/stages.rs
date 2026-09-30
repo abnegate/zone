@@ -12,6 +12,7 @@ use std::time::Duration;
 use zone_core::llm::{AgentKind, LlmBackend};
 
 use crate::db::ai_settings::EffectiveAiSettings;
+use crate::services::endpoint::{Endpoint, Origin};
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -35,19 +36,56 @@ pub struct Preferences {
     pub classifier: Option<String>,
 }
 
+/// What a stage runs when the saved settings name no model.
+#[derive(Debug, Clone, Default)]
+struct Fallbacks {
+    fast: Option<String>,
+    reasoning: Option<String>,
+    embedding: Option<String>,
+    vision: Option<String>,
+    classifier: Option<String>,
+}
+
+impl Fallbacks {
+    fn environment(classifier: &str) -> Self {
+        Self {
+            fast: env_optional("OLLAMA_MODEL_FAST"),
+            reasoning: env_optional("OLLAMA_MODEL_REASON"),
+            embedding: env_optional("OLLAMA_MODEL_EMBED"),
+            vision: env_optional("OLLAMA_MODEL_VISION"),
+            classifier: nonempty(Some(classifier))
+                .or_else(|| env_optional("COMFYUI_CLASSIFIER_MODEL")),
+        }
+    }
+}
+
 impl Preferences {
     pub fn from_settings(settings: &EffectiveAiSettings, classifier: &str) -> Self {
+        Self::layered(settings, Fallbacks::environment(classifier))
+    }
+
+    /// The preferences for completions sent to `endpoint`. The instance's
+    /// `OLLAMA_MODEL_*` and classifier models name models on the instance's
+    /// own endpoint, so an endpoint the settings name runs only the models the
+    /// settings save.
+    pub fn for_endpoint(
+        settings: &EffectiveAiSettings,
+        classifier: &str,
+        endpoint: &Endpoint,
+    ) -> Self {
+        match endpoint.origin() {
+            Origin::Instance => Self::from_settings(settings, classifier),
+            Origin::Settings => Self::layered(settings, Fallbacks::default()),
+        }
+    }
+
+    fn layered(settings: &EffectiveAiSettings, fallbacks: Fallbacks) -> Self {
         Self {
-            fast: nonempty(settings.model_fast.as_deref())
-                .or_else(|| env_optional("OLLAMA_MODEL_FAST")),
-            reasoning: nonempty(settings.model_reasoning.as_deref())
-                .or_else(|| env_optional("OLLAMA_MODEL_REASON")),
-            embedding: nonempty(settings.model_embedding.as_deref())
-                .or_else(|| env_optional("OLLAMA_MODEL_EMBED")),
-            vision: env_optional("OLLAMA_MODEL_VISION"),
-            classifier: nonempty(settings.model_fast.as_deref())
-                .or_else(|| nonempty(Some(classifier)))
-                .or_else(|| env_optional("COMFYUI_CLASSIFIER_MODEL")),
+            fast: nonempty(settings.model_fast.as_deref()).or(fallbacks.fast),
+            reasoning: nonempty(settings.model_reasoning.as_deref()).or(fallbacks.reasoning),
+            embedding: nonempty(settings.model_embedding.as_deref()).or(fallbacks.embedding),
+            vision: fallbacks.vision,
+            classifier: nonempty(settings.model_fast.as_deref()).or(fallbacks.classifier),
         }
     }
 
@@ -1147,5 +1185,99 @@ mod tests {
             ),
             AUTO
         );
+    }
+
+    fn openai(fast: Option<&str>, reasoning: Option<&str>) -> EffectiveAiSettings {
+        let mut settings = crate::services::endpoint::testing::settings(
+            zone_context::embeddings::providers::PROVIDER_OPENAI,
+        );
+        settings.openai_api_key = Some(zone_core::SecretValue::new("sk-organization-key"));
+        settings.model_fast = fast.map(str::to_string);
+        settings.model_reasoning = reasoning.map(str::to_string);
+        settings
+    }
+
+    fn instance_models() -> Fallbacks {
+        Fallbacks {
+            fast: Some("qwen2.5:7b-instruct".to_string()),
+            reasoning: Some("deepseek-r1:14b".to_string()),
+            embedding: Some("nomic-embed-text".to_string()),
+            vision: Some("llava:7b".to_string()),
+            classifier: Some("qwen2.5:3b".to_string()),
+        }
+    }
+
+    #[test]
+    fn unsaved_stages_fall_back_to_the_instances_models() {
+        let prefs = Preferences::layered(&openai(None, None), instance_models());
+
+        assert_eq!(prefs.fast.as_deref(), Some("qwen2.5:7b-instruct"));
+        assert_eq!(prefs.reasoning.as_deref(), Some("deepseek-r1:14b"));
+        assert_eq!(prefs.embedding.as_deref(), Some("nomic-embed-text"));
+        assert_eq!(prefs.vision.as_deref(), Some("llava:7b"));
+        assert_eq!(prefs.classifier.as_deref(), Some("qwen2.5:3b"));
+    }
+
+    #[test]
+    fn an_endpoint_the_settings_name_runs_no_model_of_the_instances() {
+        let settings = openai(None, None);
+        let endpoint =
+            crate::services::endpoint::Endpoint::resolve(&crate::state::test_config(), &settings);
+        assert_eq!(endpoint.origin(), Origin::Settings);
+
+        let prefs = Preferences::for_endpoint(&settings, "qwen2.5:3b", &endpoint);
+
+        assert_eq!(prefs.fast, None);
+        assert_eq!(prefs.reasoning, None);
+        assert_eq!(prefs.embedding, None);
+        assert_eq!(prefs.vision, None);
+        assert_eq!(
+            prefs.classifier, None,
+            "the instance's classifier is no model here"
+        );
+        let chosen = chat_model(AUTO, &prefs, &Catalog::default(), "hello", false, false);
+        assert_eq!(
+            endpoint.model(&chosen),
+            Err(crate::services::endpoint::Error::ModelUnset),
+            "an unset model is refused before a provider is asked for {chosen}"
+        );
+    }
+
+    #[test]
+    fn an_endpoint_the_settings_name_runs_the_models_they_save() {
+        let settings = openai(Some("gpt-4o-mini"), Some("o3"));
+        let endpoint =
+            crate::services::endpoint::Endpoint::resolve(&crate::state::test_config(), &settings);
+
+        let prefs = Preferences::for_endpoint(&settings, "qwen2.5:3b", &endpoint);
+
+        assert_eq!(prefs.fast.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(prefs.reasoning.as_deref(), Some("o3"));
+        assert_eq!(prefs.classifier.as_deref(), Some("gpt-4o-mini"));
+        let catalog = Catalog::default();
+        assert_eq!(
+            chat_model(AUTO, &prefs, &catalog, "hello", false, false),
+            "gpt-4o-mini"
+        );
+        assert_eq!(
+            chat_model(AUTO, &prefs, &catalog, "find the root cause", false, false),
+            "o3"
+        );
+        assert_eq!(
+            summary_model(&prefs, &catalog, AUTO).as_deref(),
+            Some("gpt-4o-mini")
+        );
+    }
+
+    #[test]
+    fn the_instances_endpoint_keeps_the_instances_classifier() {
+        let settings = crate::services::endpoint::testing::settings(
+            zone_context::embeddings::providers::PROVIDER_SELF_HOSTED,
+        );
+        let endpoint = crate::services::endpoint::Endpoint::instance(&crate::state::test_config());
+
+        let prefs = Preferences::for_endpoint(&settings, "qwen2.5:3b", &endpoint);
+
+        assert_eq!(prefs.classifier.as_deref(), Some("qwen2.5:3b"));
     }
 }

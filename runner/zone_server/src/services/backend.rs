@@ -10,6 +10,7 @@ use zone_core::llm::{AgentKind, CliSettings, Credential, LlmBackend};
 use crate::config::Config;
 use crate::db::ai_settings::{self, EffectiveAiSettings};
 use crate::db::workspaces;
+use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::login::credential::{self, Login};
 use crate::state::AppState;
 
@@ -119,7 +120,8 @@ pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Result<LlmBacke
 ///
 /// A coding agent provider runs that agent in the organization's own working
 /// directory, under the organization's sign-in, else under the host's when the
-/// instance allows that. Every other provider runs on the instance default.
+/// instance allows that. A provider whose settings name an endpoint runs over
+/// HTTP to it, and every other provider runs on the instance default.
 pub async fn for_settings(
     state: &AppState,
     organization: Uuid,
@@ -127,7 +129,10 @@ pub async fn for_settings(
 ) -> Result<LlmBackend, Error> {
     let config = state.config();
     let Some(agent) = settings.agent() else {
-        return Ok(instance(config));
+        return Ok(match Endpoint::resolve(config, settings).origin() {
+            Origin::Settings => LlmBackend::Http,
+            Origin::Instance => instance(config),
+        });
     };
     let login = credential::resolve(state, organization, agent)
         .await
@@ -276,7 +281,7 @@ mod tests {
     use chrono::{TimeDelta, Utc};
     use sqlx::PgPool;
     use tempfile::TempDir;
-    use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+    use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
     use zone_core::llm::CodexSandbox;
     use zone_core::llm::provider::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
     use zone_core::secret::{SecretValue, redact};
@@ -285,6 +290,7 @@ mod tests {
     use crate::db::agent_logins::{self, Upsert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::organizations;
+    use crate::services::endpoint::testing::settings;
     use crate::services::login::claude::Tokens;
 
     const ACCESS: &str = "fake-claude-access-token";
@@ -688,6 +694,45 @@ mod tests {
 
         assert_eq!(cli(same).1.executable, Some(claude));
         assert_eq!(cli(other).1.executable, None);
+    }
+
+    #[tokio::test]
+    async fn an_organizations_own_endpoint_runs_over_http_on_an_instance_that_defaults_to_a_cli() {
+        let pool = PgPool::connect_lazy("postgres://localhost/unused")
+            .expect("a lazy pool that is never connected");
+        let state = AppState::new(
+            Config {
+                model_backend: ModelBackend::Cli {
+                    agent: AgentKind::Claude,
+                    executable: None,
+                },
+                ..crate::state::test_config()
+            },
+            pool,
+            None,
+        );
+        let mut own = settings(PROVIDER_OPENAI);
+        own.openai_api_key = Some(SecretValue::new("sk-organization-key"));
+        let mut instance_endpoint = settings(PROVIDER_SELF_HOSTED);
+        instance_endpoint.litellm_host = Some(state.config().litellm_host.clone());
+
+        let own = for_settings(&state, Uuid::new_v4(), &own).await;
+        let unsaved = for_settings(&state, Uuid::new_v4(), &settings(PROVIDER_OPENAI)).await;
+        let instances = for_settings(&state, Uuid::new_v4(), &instance_endpoint).await;
+
+        assert!(matches!(own, Ok(LlmBackend::Http)), "{own:?}");
+        for resolved in [unsaved, instances] {
+            assert!(
+                matches!(
+                    resolved,
+                    Ok(LlmBackend::Cli {
+                        agent: AgentKind::Claude,
+                        ..
+                    })
+                ),
+                "an endpoint the settings do not name stays on the instance's CLI: {resolved:?}"
+            );
+        }
     }
 
     #[tokio::test]

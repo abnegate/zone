@@ -21,6 +21,8 @@ use std::time::Duration;
 /// Production callers supply validated typed configuration through `with_context`.
 pub const DEFAULT_CONTEXT: u64 = 32_768;
 
+const UNDISCLOSED: &str = "The endpoint publishes no deployment metadata.";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -62,6 +64,7 @@ pub struct Resolver {
     key: String,
     ollama: String,
     configured: Option<u64>,
+    disclosed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -104,10 +107,23 @@ impl Resolver {
             key: key.into(),
             ollama: ollama.trim_end_matches('/').into(),
             configured: configured.filter(|value| *value > 0),
+            disclosed: true,
+        }
+    }
+
+    /// For an endpoint that is not a LiteLLM deployment of this instance: every
+    /// model's capacity is unknown, and nothing is requested to learn it.
+    pub fn undisclosed() -> Self {
+        Self {
+            disclosed: false,
+            ..Self::with_context("", "", "", None)
         }
     }
 
     pub async fn resolve(&self, model: &str) -> Capacity {
+        if !self.disclosed {
+            return Capacity::unknown(model, UNDISCLOSED);
+        }
         let Some(mut routes) = self.routes(model).await else {
             return Capacity::unknown(
                 model,
@@ -429,6 +445,17 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn an_undisclosed_endpoint_reports_an_unknown_capacity_without_asking() {
+        let capacity = Resolver::undisclosed().resolve("gpt-4o").await;
+
+        assert_eq!(capacity.source, Source::Unknown);
+        assert_eq!(capacity.limit, None);
+        assert_eq!(capacity.ollama, None, "no num_ctx may reach a third party");
+        assert!(!capacity.reasoning);
+        assert_eq!(capacity.identity, "gpt-4o");
+    }
 
     async fn fixture(parameters: Value, running: Value, shown: Value) -> (MockServer, Resolver) {
         let server = MockServer::start().await;

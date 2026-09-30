@@ -10,6 +10,7 @@ pub mod chat;
 pub mod checkout;
 pub mod completion_tokens;
 pub mod embedding;
+pub mod endpoint;
 pub mod github_app;
 pub mod image_intent;
 pub mod knowledge;

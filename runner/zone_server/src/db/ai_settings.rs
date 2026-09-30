@@ -15,7 +15,7 @@ use super::{
     workspace_members::{self, WorkspaceRole},
 };
 
-const PROVIDER_ANTHROPIC: &str = "anthropic";
+pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_CLAUDE_CODE: &str = "claude_code";
 pub const PROVIDER_CODEX: &str = "codex";
 

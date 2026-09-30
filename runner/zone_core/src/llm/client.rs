@@ -429,14 +429,14 @@ impl LlmClient {
         body: &serde_json::Value,
     ) -> Result<reqwest::Response, LlmError> {
         let url = validate_outbound_url(url)?;
-        Ok(self
+        let mut request = self
             .client
             .post(url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .json(body)
-            .send()
-            .await?)
+            .header("Content-Type", "application/json");
+        if !self.config.api_key.trim().is_empty() {
+            request = request.bearer_auth(&self.config.api_key);
+        }
+        Ok(request.json(body).send().await?)
     }
 
     /// Make a chat completion request
@@ -647,6 +647,82 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod authorization {
+        use super::*;
+        use serde_json::json;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
+
+        struct Unauthorized;
+
+        impl Match for Unauthorized {
+            fn matches(&self, request: &Request) -> bool {
+                !request.headers.contains_key(reqwest::header::AUTHORIZATION)
+            }
+        }
+
+        fn completion() -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop"
+                }]
+            }))
+        }
+
+        async fn turn(server: &MockServer, api_key: &str) -> Result<ChatResponse, LlmError> {
+            LlmClient::new(LlmConfig {
+                base_url: server.uri(),
+                api_key: api_key.to_string(),
+                default_model: "test".to_string(),
+                ..LlmConfig::default()
+            })
+            .chat(&[Message::user("hi")], None)
+            .await
+        }
+
+        #[tokio::test]
+        async fn an_endpoint_without_a_key_is_sent_no_authorization_header() {
+            for blank in ["", "   "] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/chat/completions"))
+                    .and(Unauthorized)
+                    .respond_with(completion())
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let answered = turn(&server, blank).await;
+
+                assert!(answered.is_ok(), "{blank:?}: {answered:?}");
+                server.verify().await;
+            }
+        }
+
+        #[tokio::test]
+        async fn an_endpoint_with_a_key_is_sent_it_as_a_bearer_token() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(header("authorization", "Bearer sk-endpoint-key"))
+                .respond_with(completion())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let answered = turn(&server, "sk-endpoint-key").await;
+
+            assert!(answered.is_ok(), "{answered:?}");
+            server.verify().await;
+        }
+    }
     use crate::llm::Effort;
     use crate::llm::provider::ProviderError;
     use crate::llm::types::{ChatRequest, FunctionCall, Message, ToolCall, Usage};
