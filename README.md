@@ -558,7 +558,7 @@ docker compose restart <service-name>
 make backup
 
 # Restore from backup
-make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz
+make restore BACKUP=backups/zone_backup_20250101_120000-4242.tar.gz
 ```
 
 The postgres cluster lives in the `zone_postgres_data` volume, mounted at
