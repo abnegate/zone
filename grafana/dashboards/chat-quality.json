@@ -1447,7 +1447,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "litellm_remaining_api_key_budget_metric",
+          "expr": "litellm_remaining_api_key_budget_metric < +Inf",
           "refId": "A",
           "legendFormat": "{{api_key_alias}}"
         }

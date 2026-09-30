@@ -45,7 +45,8 @@ scrape_configs:
       - targets: ['manager:8000']
 
   # Gluetun runs only with the vpn profile. DNS discovery yields no target
-  # while the name does not resolve; once it does, the scrape goes by name so
+  # while the name answers NXDOMAIN, but keeps the last target through a
+  # SERVFAIL or timeout. Once the name resolves, the scrape goes by name so
   # one address per network still collapses to a single target.
   - job_name: 'gluetun'
     dns_sd_configs:

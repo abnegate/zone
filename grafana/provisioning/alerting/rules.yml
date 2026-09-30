@@ -1134,8 +1134,7 @@ groups:
               expression: A
               reducer: last
               settings:
-                mode: replaceNN
-                replaceWithValue: 0
+                mode: dropNN
               intervalMs: 1000
               maxDataPoints: 43200
               refId: B
@@ -1349,7 +1348,7 @@ groups:
         for: 5m
         annotations:
           summary: SearXNG through Gluetun is not reachable
-          description: Blackbox probe of gluetun:8080 failed for 5 minutes. The probe only exists while the gluetun name resolves, so a stopped or crashed gluetun reports no data instead of firing.
+          description: Blackbox probe of gluetun:8080 failed for 5 minutes. The probe target comes from DNS discovery of the gluetun name. A stopped gluetun answers NXDOMAIN, which drops the target, so it reports no data instead of firing; a DNS timeout or SERVFAIL keeps the last target, whose failing probe can still fire this.
         labels:
           severity: warning
           service: searxng

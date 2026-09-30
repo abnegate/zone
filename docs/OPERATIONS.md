@@ -152,8 +152,22 @@ containers: the next `make up` pulls the images again and recreates the
 containers. The containerd copies stay on disk and come back if the setting
 is turned on again.
 
-The Gluetun scrape target and the blackbox SearXNG probe only resolve while
-the `vpn` profile runs. A stack started with `monitoring` alone shows neither
-and fires no "SearXNG Probe Down" alert. With `vpn` on, a crashed `gluetun`
-takes SearXNG's address with it, so the probe goes quiet instead of firing:
-the rule treats no data as OK.
+The Gluetun scrape target and the blackbox SearXNG probe come from DNS
+discovery of the `gluetun` name, so they exist only while the `vpn` profile
+runs. A stack started with `monitoring` alone shows neither and fires no
+"SearXNG Probe Down" alert. Prometheus drops the targets only when the name
+answers NXDOMAIN, which is what Docker's DNS returns for a stopped container.
+A SERVFAIL or a timeout keeps the last targets, and their failing scrapes and
+probes can still fire "SearXNG Probe Down".
+
+A dead `gluetun` therefore raises no Gluetun or SearXNG alert: both rules
+treat no data as OK. With `vpn` on, nothing else reaches you either. Grafana,
+the manager, and LiteLLM share Gluetun's network namespace, and when Gluetun
+stops or restarts they are left with loopback only. Prometheus still records
+`up{job="manager"}` and `up{job="litellm"}` as 0, and "Manager Service Down"
+and "LiteLLM API Gateway Down" still go to Alerting, because Grafana's failed
+query to Prometheus counts as an error and those rules alert on errors. But
+Grafana has no route out, so no email or Discord notification leaves, and the
+dashboards go dark as well, since Traefik reaches Grafana through Gluetun. The
+attached containers stay cut off after Gluetun comes back on its own, so run
+`make restart` to rejoin them to its network.

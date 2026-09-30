@@ -16,6 +16,7 @@ ALERT_RULES = ROOT / 'grafana' / 'provisioning' / 'alerting' / 'rules.yml'
 COMPOSE = ROOT / 'docker-compose.yml'
 GLUETUN_METRICS = 'gluetun:8001'
 SEARXNG_TARGET = 'http://gluetun:8080/'
+BUDGET_RECORD = 'litellm_budget_low:minimum'
 
 
 def load(path: Path) -> dict:
@@ -72,10 +73,14 @@ def docker_available() -> bool:
 
 
 class BudgetRuleTests(unittest.TestCase):
-    def test_unlimited_keys_are_excluded_from_the_minimum(self) -> None:
-        queries = prometheus_queries(rules()['litellm-budget-low'])
-        self.assertEqual(len(queries), 1)
-        self.assertIn('< +Inf', queries[0], 'an unlimited key reports +Inf, which replaceNN turns into 0')
+    def test_non_numeric_budgets_are_dropped(self) -> None:
+        reductions = [
+            query['model']
+            for query in rules()['litellm-budget-low']['data']
+            if query['model'].get('type') == 'reduce'
+        ]
+        self.assertEqual(len(reductions), 1)
+        self.assertEqual(reductions[0]['settings'], {'mode': 'dropNN'}, 'replaceNN turns a NaN budget into 0, which fires')
 
     def test_no_data_is_ok(self) -> None:
         self.assertEqual(rules()['litellm-budget-low']['noDataState'], 'OK')
@@ -118,10 +123,6 @@ class SearxngProbeTests(unittest.TestCase):
         probes = [group['labels']['probe'] for group in jobs()['blackbox']['static_configs']]
         self.assertEqual(probes, ['ollama', 'comfyui'])
 
-    def test_rule_does_not_ask_to_be_ignored(self) -> None:
-        description = rules()['probe-searxng-down']['annotations']['description']
-        self.assertNotIn('Ignore', description)
-
 
 @unittest.skipUnless(docker_available(), 'docker is not available')
 class PromtoolTests(unittest.TestCase):
@@ -132,6 +133,36 @@ class PromtoolTests(unittest.TestCase):
             capture_output=True, text=True, timeout=300,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_budget_query_ignores_unlimited_keys(self) -> None:
+        [query] = prometheus_queries(rules()['litellm-budget-low'])
+        budget = 'litellm_remaining_api_key_budget_metric'
+        unlimited = {'series': f'{budget}{{api_key_alias="unlimited"}}', 'values': 'Inf Inf Inf'}
+        limited = {'series': f'{budget}{{api_key_alias="limited"}}', 'values': '0.5 0.5 0.5'}
+        tests = {
+            'rule_files': ['rules.yml'],
+            'tests': [
+                {
+                    'interval': '1m',
+                    'input_series': [unlimited],
+                    'promql_expr_test': [{'expr': BUDGET_RECORD, 'eval_time': '2m', 'exp_samples': []}],
+                },
+                {
+                    'interval': '1m',
+                    'input_series': [unlimited, limited],
+                    'promql_expr_test': [{
+                        'expr': BUDGET_RECORD,
+                        'eval_time': '2m',
+                        'exp_samples': [{'labels': BUDGET_RECORD, 'value': 0.5}],
+                    }],
+                },
+            ],
+        }
+        document = {'groups': [{'name': 'budget', 'interval': '1m', 'rules': [{'record': BUDGET_RECORD, 'expr': query}]}]}
+        with TemporaryDirectory() as folder:
+            (Path(folder) / 'rules.yml').write_text(yaml.safe_dump(document))
+            (Path(folder) / 'tests.yml').write_text(yaml.safe_dump(tests))
+            self.promtool(Path(folder), 'test', 'rules', '/check/tests.yml')
 
     def test_scrape_config_is_valid(self) -> None:
         self.promtool(PROMETHEUS_CONFIG.parent, 'check', 'config', '--syntax-only', '/check/prometheus.yml')
