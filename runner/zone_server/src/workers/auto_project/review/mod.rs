@@ -423,7 +423,8 @@ mod tests {
         );
     }
 
-    /// A model that fails for any other reason may answer on the next tick.
+    /// A model that fails for any other reason is a failed round, and the next
+    /// tick asks another reviewer.
     #[tokio::test]
     async fn a_reviewer_that_hit_its_plans_window_is_a_model_failure() {
         let directory = TempDir::new().expect("a temporary directory");
@@ -447,7 +448,7 @@ mod tests {
         .expect_err("a refused review");
 
         assert!(matches!(error, ReviewError::Model(_)), "{error:?}");
-        assert_eq!(error.stalled(), None, "the next tick asks again");
+        assert_eq!(error.stalled(), None, "the next tick asks another reviewer");
     }
 
     /// An endpoint's failure is never read for a coding agent's wording.

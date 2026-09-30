@@ -128,18 +128,7 @@ pub fn user(
             prompt.push_str(&line);
         }
     }
-    let summaries: Vec<String> = prior
-        .iter()
-        .filter(|row| !row.summary.trim().is_empty())
-        .map(|row| {
-            format!(
-                "- round {} by {}: {}",
-                row.round,
-                row.reviewer,
-                row.summary.trim()
-            )
-        })
-        .collect();
+    let summaries = summaries(prior);
     if !summaries.is_empty() {
         let _ = write!(
             prompt,
@@ -149,6 +138,23 @@ pub fn user(
     }
     let _ = write!(prompt, "\n\n# Diff\n\n```diff\n{}\n```", diff.trim_end());
     prompt
+}
+
+/// What each earlier round concluded. A round that ended without a verdict
+/// concluded nothing, and its summary is the error that ended it.
+fn summaries(prior: &[ReviewRow]) -> Vec<String> {
+    prior
+        .iter()
+        .filter(|row| row.reviewed() && !row.summary.trim().is_empty())
+        .map(|row| {
+            format!(
+                "- round {} by {}: {}",
+                row.round,
+                row.reviewer,
+                row.summary.trim()
+            )
+        })
+        .collect()
 }
 
 /// Text cut to a limit, with the cut marked.
@@ -165,6 +171,10 @@ fn excerpt(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::auto_projects::{ReviewerKind, Verdict};
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
 
     #[test]
     fn only_a_reviewer_offered_the_tools_is_told_of_them() {
@@ -180,5 +190,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn row(round: i32, reviewer: &str, verdict: Verdict, summary: &str) -> ReviewRow {
+        ReviewRow {
+            id: Uuid::new_v4(),
+            task_id: Uuid::nil(),
+            run_id: None,
+            round,
+            head: "h1".into(),
+            reviewer_kind: ReviewerKind::Model.as_str().into(),
+            reviewer: reviewer.into(),
+            author_model: None,
+            same_model: false,
+            verdict,
+            summary: summary.into(),
+            findings: json!([]),
+            addressed: json!([]),
+            external_id: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_round_without_a_verdict_is_left_out_of_the_earlier_summaries() {
+        let prior = [
+            row(
+                1,
+                "gemma",
+                Verdict::Failed,
+                "the reviewer model failed: 400",
+            ),
+            row(2, "tiny", Verdict::Unparseable, "no <zone-review> marker"),
+            row(
+                3,
+                "big",
+                Verdict::RequestChanges,
+                "the migration is missing",
+            ),
+        ];
+
+        assert_eq!(
+            summaries(&prior),
+            ["- round 3 by big: the migration is missing"]
+        );
     }
 }

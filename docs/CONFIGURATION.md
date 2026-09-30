@@ -772,11 +772,12 @@ happens when the agent gives no usable answer within
   the workspace's CLI cannot be set up (signed out with the host login off, a
   sign-in that cannot be read, a Claude token that cannot be renewed, or an
   unwritable state directory), that task pauses with the reason and the
-  project continues. A CLI that starts and then fails is retried on the next
-  tick, except when claude says it refuses the reviewer model, or the review's
-  context, because the signed-in account cannot spend usage credits on it:
-  every tick would be refused the same way, so the task pauses with claude's
-  words. *Naming a model* says when claude names a context as the reason.
+  project continues. A CLI that starts and then fails records a failed round,
+  and the next tick asks the next reviewer; a second round on the same head
+  without a verdict pauses the task with the error. When claude says it
+  refuses the reviewer model, or the review's context, because the signed-in
+  account cannot spend usage credits on it, every tick would be refused the
+  same way, so the task pauses at once with claude's words. *Naming a model* says when claude names a context as the reason.
   The reviewer's model is one the agent knows, taken from
   `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else one of the agent's own
   models, never an installed Ollama model. Zone does not pick `fable` on its
@@ -1290,7 +1291,7 @@ On Claude Code, an auto project's runs, reviews and summaries run with no one wa
 
 ### `ZONE_AUTO_REVIEW_MODELS`
 - **Default**: *empty*
-- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the tool-capable installed models. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers. A review session offers tools, so a model Ollama lists without the `tools` capability (such as `llava:7b`) is never picked, even when named here; a model Ollama lists without any capabilities, or does not list at all, is still tried.
+- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the tool-capable installed models. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers, and a round whose reviewer errors or gives no readable verdict moves to the next. Two such rounds on one head pause the task. A review session offers tools, so a model Ollama lists without the `tools` capability (such as `llava:7b`) is never picked, even when named here; a model Ollama lists without any capabilities, or does not list at all, is still tried.
 
 ### `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL`
 - **Default**: `false`

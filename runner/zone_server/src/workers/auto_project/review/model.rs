@@ -221,6 +221,16 @@ mod tests {
     }
 
     #[test]
+    fn the_round_after_a_failed_one_goes_to_the_next_configured_reviewer() {
+        let author = Author::Model("author".into());
+        let configured = ["gemma3:27b".to_string(), "qwen3:32b".to_string()];
+        let failed = select(&author, &Preferences::default(), &catalog(), &configured, 1);
+        let next = select(&author, &Preferences::default(), &catalog(), &configured, 2);
+        assert_eq!(failed.model, "gemma3:27b");
+        assert_eq!(next.model, "qwen3:32b");
+    }
+
+    #[test]
     fn configured_and_workspace_models_come_first_and_the_author_reviews_itself_last() {
         let prefs = Preferences {
             reasoning: Some("reasoner".into()),

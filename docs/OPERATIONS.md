@@ -124,6 +124,20 @@ against the migrated database: it stops with
 upgrade. Going back to an older image means restoring that backup, and losing
 whatever changed after it was taken.
 
+## Upgrading to migration 049
+
+The first start of a server that records failed reviewer rounds applies
+migration 049, which lets `task_reviews` store the `failed` verdict. An image
+built before it cannot start against the migrated database: it stops with
+`Failed to run migrations: VersionMissing(49)`. Run `make backup` before the
+upgrade. Going back to an older image means restoring that backup, and losing
+whatever changed after it was taken.
+
+An auto-project reviewer model that errors, a transient network error
+included, now records a failed round: the next tick asks the next reviewer,
+and a second round on the same head without a verdict pauses the task with
+the error, pointing at `ZONE_AUTO_REVIEW_MODELS`.
+
 ## Pulling models into the bundled Ollama
 
 With `PROFILES=bundled-ollama`, `ollama-init` pulls `OLLAMA_MODEL_FAST`,
