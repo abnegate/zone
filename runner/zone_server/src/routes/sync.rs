@@ -30,47 +30,12 @@ use super::common::{AuditEvent, audit};
 use crate::auth::AuthUser;
 use crate::crypto;
 use crate::db::audit::{actions, resources};
-use crate::db::sync_config::{self, SyncConfigRow};
+use crate::db::sync_config::{self, SyncConfigRow, SyncDirection};
 use crate::db::{projects, workspace_members};
 use crate::error::ServerError;
 use crate::state::AppState;
+use crate::sync::Provider;
 use crate::utils::crypto::generate_token;
-
-/// The providers `sync_configs.provider` accepts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Provider {
-    GitHub,
-    Linear,
-}
-
-impl Provider {
-    pub const ALL: [Self; 2] = [Self::GitHub, Self::Linear];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::GitHub => "github",
-            Self::Linear => "linear",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|provider| provider.as_str() == value)
-    }
-
-    /// Whether Zone issues the secret deliveries are signed with, rather than
-    /// the provider.
-    pub fn issues_zone_secret(self) -> bool {
-        match self {
-            Self::GitHub => true,
-            Self::Linear => false,
-        }
-    }
-}
-
-/// The directions items may move in.
-pub const DIRECTIONS: [&str; 3] = ["inbound", "outbound", "bidirectional"];
 
 /// What a configuration reports until a sync engine has run it.
 pub const STATUS_CONFIGURED: &str = "configured";
@@ -110,6 +75,9 @@ pub struct SyncConfigData {
     last_synced_at: Option<String>,
     webhook_path: String,
     webhook_secret_configured: bool,
+    /// Whether Zone generates this configuration's secret, so the console
+    /// offers to rotate it, rather than the provider issuing one to paste in.
+    webhook_secret_issued_by_zone: bool,
 }
 
 /// A configuration, and the webhook secret Zone just generated for it, which
@@ -191,10 +159,15 @@ impl From<SyncConfigRow> for SyncConfigData {
         };
         Self {
             webhook_path: webhook_path(row.id, &row.provider),
-            direction: field("direction").unwrap_or_else(|| "bidirectional".to_string()),
+            direction: field("direction")
+                .unwrap_or_else(|| SyncDirection::Bidirectional.as_str().to_string()),
             external_repo_url: field("external_repo_url"),
             external_project_id: field("external_project_id"),
             webhook_secret_configured: row.webhook_secret_encrypted.is_some(),
+            webhook_secret_issued_by_zone: row
+                .provider
+                .parse::<Provider>()
+                .is_ok_and(Provider::issues_zone_secret),
             id: row.id,
             project_id: row.project_id,
             provider: row.provider,
@@ -290,20 +263,20 @@ async fn owned_config(
 /// The provider and configuration a request asks for, or why they cannot be
 /// stored.
 fn validate(req: &CreateSyncConfigRequest) -> Result<(Provider, serde_json::Value), ServerError> {
-    let provider = Provider::parse(&req.provider).ok_or_else(|| {
+    let provider = req.provider.parse::<Provider>().map_err(|_| {
         ServerError::BadRequest(format!(
             "Invalid provider \"{}\". Must be one of: {}",
             req.provider,
             Provider::ALL.map(Provider::as_str).join(", ")
         ))
     })?;
-    if !DIRECTIONS.contains(&req.direction.as_str()) {
-        return Err(ServerError::BadRequest(format!(
+    let direction = req.direction.parse::<SyncDirection>().map_err(|_| {
+        ServerError::BadRequest(format!(
             "Invalid direction \"{}\". Must be one of: {}",
             req.direction,
-            DIRECTIONS.join(", ")
-        )));
-    }
+            SyncDirection::ALL.map(SyncDirection::as_str).join(", ")
+        ))
+    })?;
     let repo_url = req
         .external_repo_url
         .as_deref()
@@ -330,7 +303,7 @@ fn validate(req: &CreateSyncConfigRequest) -> Result<(Provider, serde_json::Valu
     Ok((
         provider,
         json!({
-            "direction": req.direction,
+            "direction": direction.as_str(),
             "external_repo_url": repo_url,
             "external_project_id": project_id,
         }),
@@ -547,9 +520,20 @@ mod tests {
     }
 
     #[test]
-    fn only_github_is_issued_a_secret_by_zone() {
-        assert!(Provider::GitHub.issues_zone_secret());
-        assert!(!Provider::Linear.issues_zone_secret());
+    fn an_unknown_direction_is_refused_with_the_ones_accepted() {
+        let Err(ServerError::BadRequest(message)) = validate(&request("github", "sideways")) else {
+            panic!("an unknown direction is a bad request");
+        };
+        assert_eq!(
+            message,
+            "Invalid direction \"sideways\". Must be one of: inbound, outbound, bidirectional"
+        );
+    }
+
+    #[test]
+    fn a_configuration_says_whether_zone_issues_its_secret() {
+        assert!(SyncConfigData::from(row(Provider::GitHub, None)).webhook_secret_issued_by_zone);
+        assert!(!SyncConfigData::from(row(Provider::Linear, None)).webhook_secret_issued_by_zone);
     }
 
     #[test]

@@ -2395,6 +2395,7 @@ async fn a_github_sync_is_issued_a_secret_its_deliveries_verify_against() {
         "the secret is 32 random bytes in hex: {secret:?}"
     );
     assert_eq!(created["config"]["webhook_secret_configured"], true);
+    assert_eq!(created["config"]["webhook_secret_issued_by_zone"], true);
 
     let listed = listed_config(&client, &token, &project).await;
     assert_eq!(
@@ -2420,6 +2421,7 @@ async fn a_linear_sync_verifies_deliveries_with_the_signing_secret_linear_issued
         "Linear issues its own signing secret, so Zone generates none: {created}"
     );
     assert_eq!(created["config"]["webhook_secret_configured"], false);
+    assert_eq!(created["config"]["webhook_secret_issued_by_zone"], false);
     let config = created["config"]["id"].as_str().unwrap().to_string();
 
     let response = set_secret(

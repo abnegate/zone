@@ -11,6 +11,7 @@ use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
@@ -52,6 +53,48 @@ pub enum SyncError {
 }
 
 pub type SyncResult<T> = Result<T, SyncError>;
+
+/// The issue trackers a project can sync with; each value is one the
+/// `sync_configs.provider` CHECK constraint accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    GitHub,
+    Linear,
+}
+
+impl Provider {
+    pub const ALL: [Self; 2] = [Self::GitHub, Self::Linear];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GitHub => "github",
+            Self::Linear => "linear",
+        }
+    }
+
+    /// Whether Zone issues the secret deliveries are signed with, rather than
+    /// the provider.
+    pub fn issues_zone_secret(self) -> bool {
+        match self {
+            Self::GitHub => true,
+            Self::Linear => false,
+        }
+    }
+}
+
+impl FromStr for Provider {
+    type Err = UnknownSyncValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|provider| provider.as_str() == value)
+            .ok_or_else(|| UnknownSyncValue {
+                kind: "sync provider",
+                value: value.to_string(),
+            })
+    }
+}
 
 /// Configuration for a sync provider
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +393,37 @@ impl Default for SyncRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_provider_reads_back_from_its_name() {
+        for provider in Provider::ALL {
+            assert_eq!(provider.as_str().parse::<Provider>(), Ok(provider));
+        }
+    }
+
+    #[test]
+    fn an_unknown_provider_names_itself_in_the_error() {
+        assert_eq!(
+            "jira".parse::<Provider>().unwrap_err().to_string(),
+            "\"jira\" is not a known sync provider"
+        );
+    }
+
+    #[test]
+    fn the_registry_serves_exactly_the_named_providers() {
+        let registry = SyncRegistry::new();
+        let mut registered = registry.list_providers();
+        registered.sort();
+        let mut named = Provider::ALL.map(|provider| provider.as_str().to_string());
+        named.sort();
+        assert_eq!(registered, named);
+    }
+
+    #[test]
+    fn only_github_is_issued_a_secret_by_zone() {
+        assert!(Provider::GitHub.issues_zone_secret());
+        assert!(!Provider::Linear.issues_zone_secret());
+    }
 
     #[test]
     fn test_sync_registry_creates_with_providers() {
