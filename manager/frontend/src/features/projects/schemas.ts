@@ -1,9 +1,5 @@
 import { z } from 'zod';
 
-// =============================================================================
-// Project Schemas
-// =============================================================================
-
 export const ProjectStatusSchema = z.enum(['active', 'on_hold', 'cancelled']);
 
 export const ProjectSchema = z.object({
@@ -110,10 +106,6 @@ export const ProjectResponseSchema = z.object({
   project: ProjectSchema,
 });
 
-// =============================================================================
-// Sync Configuration Schemas
-// =============================================================================
-
 export const SyncProviderSchema = z.enum(['github', 'linear']);
 export const SyncDirectionSchema = z.enum(['inbound', 'outbound', 'bidirectional']);
 
@@ -129,6 +121,7 @@ export const SyncConfigSchema = z.object({
   status: z.string().optional(),
   last_synced_at: z.string().nullable().optional(),
   webhook_path: z.string().optional(),
+  webhook_secret_configured: z.boolean().optional(),
 });
 
 export const CreateSyncConfigRequestSchema = z
@@ -162,8 +155,15 @@ export const SyncConfigsResponseSchema = z.object({
   configs: z.array(SyncConfigSchema),
 });
 
-export const SyncConfigResponseSchema = z.object({
+export const SyncConfigSecretResponseSchema = z.object({
   success: z.boolean().optional(),
   error: z.string().optional(),
   config: SyncConfigSchema,
+  webhook_secret: z.string().nullable(),
 });
+
+export const WebhookSecretSchema = z
+  .string()
+  .trim()
+  .min(16, 'A signing secret has at least 16 characters')
+  .max(256, 'A signing secret has at most 256 characters');
