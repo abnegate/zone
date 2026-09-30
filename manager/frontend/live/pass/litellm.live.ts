@@ -64,6 +64,9 @@ test.describe('LiteLLM routing', () => {
     const tenant = state.intruder;
     const token = await tokenFor(tenant);
     const settingsPath = `/api/organizations/${tenant.organization.id}/settings/ai`;
+    const prior = sql(
+      `select row_to_json(s) from organization_ai_settings s where organization_id = '${tenant.organization.id}'`,
+    )[0];
     const saved = await api('PUT', settingsPath, {
       token,
       body: {
@@ -83,22 +86,22 @@ test.describe('LiteLLM routing', () => {
       await settled(page, 1, 900_000);
       await shot(page, '58-trivial-question');
       const afterTrivial = litellmLog(since);
+      const boundary = new Date().toISOString();
       await send(
         page,
         'Prove step by step that the sum of the first n odd numbers is n squared, and analyze the edge cases of the proof.',
       );
       await settled(page, 2, 1_500_000);
       await shot(page, '58-hard-question');
-      const afterHard = litellmLog(since);
+      const afterHard = litellmLog(boundary);
       const trivialModels = modelsIn(afterTrivial);
-      const hardModels = modelsIn(afterHard).filter(
-        (name) => !trivialModels.includes(name),
-      );
+      const hardModels = modelsIn(afterHard);
       const replies = sql(
         `select left(replace(message->>'content', E'\\n', ' '), 200) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'assistant' order by position`,
       );
       const routed =
         trivialModels.some((name) => name.includes(FAST)) &&
+        !trivialModels.some((name) => name.includes(REASON)) &&
         hardModels.some((name) => name.includes(REASON));
       record(58, {
         result: routed ? 'WORKS' : 'FAILS',
@@ -113,7 +116,7 @@ test.describe('LiteLLM routing', () => {
         replies,
         litellm_models_after_trivial: trivialModels,
         litellm_models_new_after_hard: hardModels,
-        litellm_log: afterHard
+        litellm_log: `${afterTrivial}\n${afterHard}`
           .split('\n')
           .filter((line) => /completion\(\)|POST \/v1\/chat/.test(line))
           .slice(-6)
@@ -123,6 +126,11 @@ test.describe('LiteLLM routing', () => {
       expect(routed).toBe(true);
     } finally {
       await api('DELETE', settingsPath, { token });
+      if (prior) {
+        sql(
+          `insert into organization_ai_settings select * from json_populate_record(null::organization_ai_settings, $prior$${prior}$prior$::json)`,
+        );
+      }
     }
   });
 });
