@@ -30,6 +30,8 @@ const FACT =
   'The Borealis build cache listens on port 7070 and keeps build artifacts for 14 days.';
 const QUESTION =
   'Which port does the Borealis build cache listen on, and how long does it keep build artifacts?';
+const OCCURRENCES = 4;
+const DISTINCT_CHATS = 3;
 
 test.describe('answer promotion', () => {
   test.skip(!enabled, 'set ZONE_LIVE_REAL_PASS=1 against the real rig');
@@ -59,35 +61,45 @@ test.describe('answer promotion', () => {
     }
     replies.push(await ask(page, QUESTION, { replies: 2, timeout: 600_000 }));
     await shot(page, '133-question-asked-again');
+    const inChats = chats.map((c) => `'${c}'`).join(',');
+    const embeddedQuestions = () => {
+      const [questions = '0', distinct = '0'] = (
+        sql(
+          `select count(*), count(distinct m.chat_id) from messages m join message_embeddings e on e.message_id = m.id where m.chat_id in (${inChats}) and m.role = 'user'`,
+        )[0] ?? ''
+      ).split('|');
+      return { questions: Number(questions), chats: Number(distinct) };
+    };
     const embedded = await expect
       .poll(
-        () =>
-          sql(
-            `select count(*) from message_embeddings where chat_id in (${chats.map((c) => `'${c}'`).join(',')})`,
-          )[0] ?? '0',
+        () => {
+          const { questions, chats: distinct } = embeddedQuestions();
+          return questions >= OCCURRENCES && distinct >= DISTINCT_CHATS;
+        },
         { timeout: 120_000, intervals: [3_000] },
       )
-      .not.toBe('0')
+      .toBe(true)
       .then(() => true)
       .catch(() => false);
     const embeddings = sql(
-      `select count(*) from message_embeddings where chat_id in (${chats.map((c) => `'${c}'`).join(',')})`,
+      `select count(*) from message_embeddings where chat_id in (${inChats})`,
     );
+    const answered = replies.every((r) => r.includes('7070'));
+    const seeded = embedded && answered;
     record(133.1, {
       list: 'features',
       feature: 'Answer promotion: exchanges seeded',
-      result:
-        embedded && replies.every((r) => r.includes('7070'))
-          ? 'SEEDED'
-          : 'FAILS',
+      result: seeded ? 'SEEDED' : 'FAILS',
       stamp: s,
       knowledge_entry: (entry.body as { id?: string }).id,
       workspace_id: state.owner.workspace.id,
       chats,
       replies: replies.map((r) => r.replace(/\s+/g, ' ').slice(0, 200)),
       message_embeddings: embeddings,
+      question_embeddings: embeddedQuestions(),
       screenshots: ['133-question-asked-again.png'],
     });
-    expect(embedded).toBe(true);
+    expect(embedded, JSON.stringify(embeddedQuestions())).toBe(true);
+    expect(answered, replies.join(' || ').slice(0, 600)).toBe(true);
   });
 });
