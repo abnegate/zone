@@ -1798,3 +1798,66 @@ async fn test_an_empty_endpoint_value_clears_the_saved_one_and_an_absent_one_kee
         }
     }
 }
+
+#[tokio::test]
+async fn test_a_legacy_url_carrying_credentials_is_returned_without_them() {
+    const SECRET: &str = "legacy-secret";
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization: Uuid = org_id.parse().expect("organization id");
+    let workspace: Uuid = ws_id.parse().expect("workspace id");
+    let pool = client.state().db();
+    sqlx::query(
+        "INSERT INTO organization_ai_settings \
+         (organization_id, provider, litellm_host, openai_base_url, anthropic_base_url, completions_routed) \
+         VALUES ($1, 'self_hosted', $2, $3, $4, true)",
+    )
+    .bind(organization)
+    .bind(format!("http://admin:{SECRET}@gateway.example:4000"))
+    .bind(format!("https://proxy.example/v1?api_key={SECRET}"))
+    .bind(format!("https://{SECRET}@proxy.example/v1#{SECRET}"))
+    .execute(pool)
+    .await
+    .expect("an organization row saved before URLs were checked");
+    sqlx::query("INSERT INTO workspace_ai_settings (workspace_id, litellm_host) VALUES ($1, $2)")
+        .bind(workspace)
+        .bind(format!("http://admin:{SECRET}@workspace.example:4000/"))
+        .execute(pool)
+        .await
+        .expect("a workspace row saved before URLs were checked");
+
+    let organization_path = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace_path = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let effective_path = format!("{workspace_path}/effective");
+    for path in [&organization_path, &workspace_path, &effective_path] {
+        let response = client.get_auth(path, &token).await;
+        response.assert_status(StatusCode::OK);
+        assert!(
+            !response.text().contains(SECRET),
+            "{path} returned a credential saved in a URL: {}",
+            response.text()
+        );
+    }
+    let organization_body = client
+        .get_auth(&organization_path, &token)
+        .await
+        .json_value();
+    assert_eq!(
+        organization_body["litellm_host"],
+        "http://gateway.example:4000"
+    );
+    assert_eq!(
+        organization_body["openai_base_url"],
+        "https://proxy.example/v1"
+    );
+    assert_eq!(
+        organization_body["anthropic_base_url"],
+        "https://proxy.example/v1"
+    );
+    assert_eq!(
+        client.get_auth(&workspace_path, &token).await.json_value()["litellm_host"],
+        "http://workspace.example:4000/"
+    );
+}

@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
@@ -109,11 +110,11 @@ impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
         Self {
             provider: row.provider,
             has_litellm_key: row.litellm_key.is_some(),
-            litellm_host: row.litellm_host,
+            litellm_host: row.litellm_host.map(without_credentials),
             has_openai_api_key: row.openai_api_key.is_some(),
-            openai_base_url: row.openai_base_url,
+            openai_base_url: row.openai_base_url.map(without_credentials),
             has_anthropic_api_key: row.anthropic_api_key.is_some(),
-            anthropic_base_url: row.anthropic_base_url,
+            anthropic_base_url: row.anthropic_base_url.map(without_credentials),
             bedrock_region: row.bedrock_region,
             bedrock_use_iam_role: row.bedrock_use_iam_role.unwrap_or(false),
             has_bedrock_credentials: row.bedrock_access_key.is_some()
@@ -136,11 +137,11 @@ impl From<ai_settings::WorkspaceAiSettingsRow> for AiSettingsResponse {
                 .provider
                 .unwrap_or_else(|| PROVIDER_SELF_HOSTED.to_string()),
             has_litellm_key: row.litellm_key.is_some(),
-            litellm_host: row.litellm_host,
+            litellm_host: row.litellm_host.map(without_credentials),
             has_openai_api_key: row.openai_api_key.is_some(),
-            openai_base_url: row.openai_base_url,
+            openai_base_url: row.openai_base_url.map(without_credentials),
             has_anthropic_api_key: row.anthropic_api_key.is_some(),
-            anthropic_base_url: row.anthropic_base_url,
+            anthropic_base_url: row.anthropic_base_url.map(without_credentials),
             bedrock_region: row.bedrock_region,
             bedrock_use_iam_role: row.bedrock_use_iam_role.unwrap_or(false),
             has_bedrock_credentials: row.bedrock_access_key.is_some()
@@ -161,11 +162,11 @@ impl From<ai_settings::EffectiveAiSettings> for AiSettingsResponse {
         Self {
             provider: settings.provider,
             has_litellm_key: settings.litellm_key.is_some(),
-            litellm_host: settings.litellm_host,
+            litellm_host: settings.litellm_host.map(without_credentials),
             has_openai_api_key: settings.openai_api_key.is_some(),
-            openai_base_url: settings.openai_base_url,
+            openai_base_url: settings.openai_base_url.map(without_credentials),
             has_anthropic_api_key: settings.anthropic_api_key.is_some(),
-            anthropic_base_url: settings.anthropic_base_url,
+            anthropic_base_url: settings.anthropic_base_url.map(without_credentials),
             bedrock_region: settings.bedrock_region,
             bedrock_use_iam_role: settings.bedrock_use_iam_role,
             has_bedrock_credentials: settings.bedrock_access_key.is_some()
@@ -179,6 +180,24 @@ impl From<ai_settings::EffectiveAiSettings> for AiSettingsResponse {
             completions_routed: true,
         }
     }
+}
+
+/// `saved` as every member may read it. A URL saved before URLs were checked
+/// can carry a username, password, query or fragment, any of which may hold a
+/// credential; none of them is returned.
+fn without_credentials(saved: String) -> String {
+    let end = saved.find(['?', '#']).unwrap_or(saved.len());
+    let kept = &saved[..end];
+    if Url::parse(kept)
+        .is_ok_and(|url| url.has_host() && url.username().is_empty() && url.password().is_none())
+    {
+        return kept.to_string();
+    }
+    let (scheme, rest) = kept
+        .find("://")
+        .map_or(("", kept), |index| kept.split_at(index + "://".len()));
+    let host = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    format!("{scheme}{host}")
 }
 
 /// Update AI settings request
@@ -474,5 +493,61 @@ pub async fn get_effective(
     {
         Ok(settings) => Json(AiSettingsResponse::from(settings)).into_response(),
         Err(error) => *access_error(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn without_credentials_keeps_a_clean_url_exactly_as_saved() {
+        for saved in [
+            "http://localhost:11434",
+            "http://gateway.example:4000/",
+            "https://proxy.example/openai/v1/",
+            "http://[::1]:4000/v1",
+            "not a url",
+            "",
+        ] {
+            assert_eq!(without_credentials(saved.to_string()), saved);
+        }
+    }
+
+    #[test]
+    fn without_credentials_drops_every_part_that_can_carry_a_credential() {
+        for (saved, shown) in [
+            (
+                "http://user:secret@gateway.example:4000",
+                "http://gateway.example:4000",
+            ),
+            (
+                "http://user:secret@gateway.example:4000/",
+                "http://gateway.example:4000/",
+            ),
+            ("https://token@proxy.example/v1", "https://proxy.example/v1"),
+            (
+                "http://user:se/cret@gateway.example/v1",
+                "http://gateway.example/v1",
+            ),
+            ("http://user:p@ss@gateway.example", "http://gateway.example"),
+            ("user:secret@gateway.example:4000", "gateway.example:4000"),
+            (
+                "https://proxy.example/v1?api_key=secret",
+                "https://proxy.example/v1",
+            ),
+            (
+                "https://proxy.example/v1#secret",
+                "https://proxy.example/v1",
+            ),
+            (
+                "https://user:secret@proxy.example/v1?key=secret#secret",
+                "https://proxy.example/v1",
+            ),
+        ] {
+            let returned = without_credentials(saved.to_string());
+            assert_eq!(returned, shown, "{saved}");
+            assert!(!returned.contains("secret"), "{saved}");
+        }
     }
 }
