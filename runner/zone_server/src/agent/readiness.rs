@@ -270,6 +270,16 @@ impl SignalKind {
         }
     }
 
+    /// Whether the bot can post its score in a pull request review instead of
+    /// its summary comment. CodeRabbit on a paid plan does; Greptile never
+    /// does.
+    pub fn scores_in_reviews(self) -> bool {
+        match self {
+            Self::CodeRabbit => true,
+            Self::Greptile => false,
+        }
+    }
+
     /// The one signal, for a caller that reads bots one at a time.
     pub fn as_signal(self) -> Box<dyn ReviewSignal> {
         self.signal()
@@ -862,7 +872,7 @@ fn account(login: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn published_at(value: &str) -> i64 {
+pub(crate) fn published_at(value: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|moment| moment.timestamp_millis())
         .unwrap_or(i64::MIN)

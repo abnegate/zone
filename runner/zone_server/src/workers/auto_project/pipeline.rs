@@ -525,6 +525,10 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
         .fetch_issue_comments(&step.reference, &step.token)
         .await
         .map_err(|error| error.to_string())?;
+    let reviews = pr
+        .fetch_reviews(&step.reference, &step.token)
+        .await
+        .map_err(|error| error.to_string())?;
     let threads = pr
         .fetch_review_threads(&step.reference, &step.token)
         .await
@@ -538,7 +542,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .iter()
             .filter(|row| row.is_bot() && row.reviewer == kind.reviewer() && row.head == head)
             .max_by_key(|row| (row.round, row.created_at));
-        let Some(round) = bots::round(kind, &comments, &threads, &head) else {
+        let Some(round) = bots::round(kind, &comments, &reviews, &threads, &head) else {
             if previous.is_none() {
                 waiting.push(kind);
             }

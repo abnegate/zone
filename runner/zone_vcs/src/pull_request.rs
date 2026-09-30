@@ -266,11 +266,17 @@ struct GitHubUser {
 #[derive(Debug, Clone, Deserialize)]
 struct GitHubReview {
     #[serde(default)]
+    id: u64,
+    #[serde(default)]
     state: Option<String>,
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
     user: Option<GitHubUser>,
+    #[serde(default)]
+    commit_id: Option<String>,
+    #[serde(default)]
+    submitted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1426,6 +1432,16 @@ pub struct IssueComment {
     pub created_at: String,
 }
 
+/// A review submitted on the pull request, and the commit it was submitted on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmittedReviewRecord {
+    pub id: u64,
+    pub author: String,
+    pub body: String,
+    pub commit_id: String,
+    pub submitted_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadComment {
     pub database_id: Option<u64>,
@@ -1956,6 +1972,34 @@ impl PrService {
             .collect())
     }
 
+    /// Every review submitted on the pull request, where a bot on a paid plan
+    /// posts its score.
+    pub async fn fetch_reviews(
+        &self,
+        reference: &PullRequestReference,
+        token: &str,
+    ) -> PrResult<Vec<SubmittedReviewRecord>> {
+        let reviews: Vec<GitHubReview> = self
+            .get_all(
+                &format!(
+                    "repos/{}/{}/pulls/{}/reviews",
+                    reference.owner, reference.repository, reference.number
+                ),
+                token,
+            )
+            .await?;
+        Ok(reviews
+            .into_iter()
+            .map(|review| SubmittedReviewRecord {
+                id: review.id,
+                author: review.user.and_then(|user| user.login).unwrap_or_default(),
+                body: review.body.unwrap_or_default(),
+                commit_id: review.commit_id.unwrap_or_default(),
+                submitted_at: review.submitted_at.unwrap_or_default(),
+            })
+            .collect())
+    }
+
     /// Every review thread on the diff, with the comments in it.
     pub async fn fetch_review_threads(
         &self,
@@ -2239,6 +2283,58 @@ mod automation_tests {
             repository: "project".to_string(),
             number: 7,
         }
+    }
+
+    #[tokio::test]
+    async fn reviews_carry_the_commit_they_were_submitted_on_and_their_body() {
+        let server = MockServer::start().await;
+        let service = PrService::standing_in_for("github.com", server.uri());
+        let head = "39edddf0d1abc06b84ebb74e8213c1fd41ec333e";
+
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/project/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "id": 5333502514u64,
+                    "user": {"login": "coderabbitai[bot]"},
+                    "body": "**Actionable comments posted: 1**",
+                    "state": "COMMENTED",
+                    "commit_id": head,
+                    "submitted_at": "2026-09-28T02:51:09Z"
+                },
+                {
+                    "id": 5333523878u64,
+                    "user": null,
+                    "body": null,
+                    "state": "COMMENTED",
+                    "commit_id": head,
+                    "submitted_at": "2026-09-28T02:55:47Z"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let reviews = service.fetch_reviews(&reference(), "token").await.unwrap();
+        assert_eq!(
+            reviews,
+            vec![
+                SubmittedReviewRecord {
+                    id: 5333502514,
+                    author: "coderabbitai[bot]".to_string(),
+                    body: "**Actionable comments posted: 1**".to_string(),
+                    commit_id: head.to_string(),
+                    submitted_at: "2026-09-28T02:51:09Z".to_string(),
+                },
+                SubmittedReviewRecord {
+                    id: 5333523878,
+                    author: String::new(),
+                    body: String::new(),
+                    commit_id: head.to_string(),
+                    submitted_at: "2026-09-28T02:55:47Z".to_string(),
+                },
+            ],
+            "a review from a deleted account with no body still names its commit"
+        );
     }
 
     #[tokio::test]
