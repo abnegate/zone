@@ -162,15 +162,27 @@ impl ImageIntentClassifier {
         }
     }
 
-    /// Whether there is a model to ask at all: the endpoint needs a host, and
-    /// an agent a model named for it.
+    /// Whether there is a model to ask at all: the endpoint needs a host and a
+    /// model it can run, and an agent a model named for it.
     fn reachable(&self) -> bool {
         match self.backend {
-            LlmBackend::Http => !self.endpoint.url().trim().is_empty(),
+            LlmBackend::Http => {
+                !self.endpoint.url().trim().is_empty()
+                    && self.endpoint.model(&self.config.classifier_model).is_ok()
+            }
             LlmBackend::Cli { .. } => {
                 !crate::services::stages::is_auto(&self.config.classifier_model)
             }
         }
+    }
+
+    fn client(&self, temperature: f32, max_tokens: u32) -> LlmClient {
+        LlmClient::new(self.endpoint.llm(
+            self.config.classifier_model.clone(),
+            temperature,
+            max_tokens,
+            self.backend.clone(),
+        ))
     }
 
     /// Classify a message. Any unavailable, timed-out, or malformed model result
@@ -202,12 +214,7 @@ impl ImageIntentClassifier {
         if !self.reachable() {
             return AmbiguousVerdict::Chat;
         }
-        let client = LlmClient::new(self.endpoint.llm(
-            self.config.classifier_model.clone(),
-            0.0,
-            3,
-            self.backend.clone(),
-        ));
+        let client = self.client(0.0, 3);
         let prompt = if has_source_image {
             format!(
                 "Return exactly IMAGE, AUDIO, or CHAT. IMAGE when the user wants a new image \
@@ -257,12 +264,7 @@ impl ImageIntentClassifier {
         if !self.reachable() {
             return fallback;
         }
-        let client = LlmClient::new(self.endpoint.llm(
-            self.config.classifier_model.clone(),
-            0.2,
-            160,
-            self.backend.clone(),
-        ));
+        let client = self.client(0.2, 160);
         let prompt = format!(
             "Rewrite the user's request as a positive prompt for an image model that starts from \
              the attached photo. Describe the finished photograph, not the editing instruction. \
@@ -1798,6 +1800,58 @@ mod tests {
             heuristic_edit_prompt(EDIT),
             "an agent with no model named for it was asked to rewrite the edit"
         );
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_the_settings_name_is_never_asked_to_run_auto() {
+        const SOFT_AUDIO: &str = "generate ambient rain sounds";
+        const EDIT: &str = "Remove this object from an image";
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "classification",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "auto",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "IMAGE"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .expect(0)
+            .mount(&provider)
+            .await;
+        let mut saved = crate::services::endpoint::testing::settings(
+            zone_context::embeddings::providers::PROVIDER_SELF_HOSTED,
+        );
+        saved.litellm_host = Some(provider.uri());
+        let endpoint = Endpoint::resolve(&crate::state::test_config(), &saved);
+        assert_eq!(
+            endpoint.origin(),
+            crate::services::endpoint::Origin::Settings
+        );
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                classifier_model: crate::services::stages::AUTO.to_string(),
+                classifier_timeout_secs: 20,
+                ..Default::default()
+            },
+            endpoint,
+            LlmBackend::Http,
+        );
+
+        assert_eq!(
+            classifier.classify(SOFT_AUDIO, None).await,
+            GenerationIntent::Chat
+        );
+        assert_eq!(
+            classifier.edit_prompt(EDIT).await,
+            heuristic_edit_prompt(EDIT),
+            "the saved endpoint was asked to rewrite the edit on auto"
+        );
+        provider.verify().await;
     }
 
     #[tokio::test]

@@ -1752,7 +1752,7 @@ async fn handle_image_generation(
     {
         crate::services::image_intent::ImageIntentClassifier::new(
             image_config.clone(),
-            endpoint.clone(),
+            endpoint,
             backend,
         )
         .edit_prompt(prompt)
@@ -2580,17 +2580,13 @@ async fn prepare_message(
         crate::services::image_intent::Reading::Settled(intent) => intent,
         crate::services::image_intent::Reading::Unsettled(lanes) => {
             let resolved = classifying(state, workspace_id, &chat, &route, &mut image_config).await;
-            let intent = if route.endpoint.model(&image_config.classifier_model).is_ok() {
-                crate::services::image_intent::ImageIntentClassifier::new(
-                    image_config.clone(),
-                    route.endpoint.clone(),
-                    resolved.clone(),
-                )
-                .settle(content, lanes)
-                .await
-            } else {
-                crate::services::image_intent::GenerationIntent::Chat
-            };
+            let intent = crate::services::image_intent::ImageIntentClassifier::new(
+                image_config.clone(),
+                route.endpoint.clone(),
+                resolved.clone(),
+            )
+            .settle(content, lanes)
+            .await;
             backend = Some(resolved);
             intent
         }
