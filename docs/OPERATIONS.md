@@ -16,12 +16,12 @@ data in that anonymous volume.
 ## Moving an existing install's cluster
 
 Do this once, with the stack stopped but its containers kept, before the
-first `make up` on the new mount:
+stack first starts on the new mount:
 
 ```bash
-make stop            # docker compose stop: containers and anonymous volumes stay
-make migrate-pgdata  # copies the cluster into zone_postgres_data
-make up
+make stop                   # docker compose stop: containers and anonymous volumes stay
+make migrate-pgdata         # copies the cluster into zone_postgres_data
+./scripts/compose.sh up -d  # starts the stack again with its saved profiles
 ```
 
 `make migrate-pgdata` runs `scripts/migrate-pgdata.sh`, which

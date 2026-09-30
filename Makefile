@@ -458,7 +458,7 @@ restore: ## Restore from backup with the stack stopped, replacing each volume th
 			tar xzf "/backup/$$1" -C /data' sh "$$(basename $(BACKUP))"
 	@echo "$(GREEN)Restore complete!$(NC)"
 
-migrate-pgdata: ## Move an existing install's postgres cluster out of the anonymous PGDATA volume into zone_postgres_data (run after 'make stop', before 'make up')
+migrate-pgdata: ## Move an existing install's postgres cluster out of the anonymous PGDATA volume into zone_postgres_data (run after 'make stop', before './scripts/compose.sh up -d')
 	@sh scripts/migrate-pgdata.sh
 
 ##@ Development

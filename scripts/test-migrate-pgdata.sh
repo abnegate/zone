@@ -40,4 +40,9 @@ if grep -q 'volume ls' "$FAKE_DOCKER_LOG"; then
     echo "a named source must not scan the dangling volumes" >&2
     exit 1
 fi
+if ! grep -q '(./scripts/compose.sh up -d)' "$fake/out" || grep -q 'make up' "$fake/out"; then
+    echo "the restart hint must keep the saved profiles, which a plain make up would retire" >&2
+    cat "$fake/out" >&2
+    exit 1
+fi
 echo "migrate-pgdata: ZONE_PGDATA_SOURCE bypasses discovery"
