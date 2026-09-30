@@ -332,7 +332,7 @@ describe('AiProviderFields routing notice', () => {
   }
 
   it.each(['organization', 'workspace'] as const)(
-    'tells a %s whose endpoint was saved before routing that saving routes it',
+    'tells the %s admin whose endpoint was saved before routing that saving routes it',
     (level) => {
       renderSaved(unroutedHost, 'self_hosted', level);
       expect(screen.getByRole('status')).toHaveTextContent(UNROUTED_NOTICE);
