@@ -154,20 +154,45 @@ A project can take issues from a GitHub repository or a Linear project. Sync
 is inbound only: Zone does not create or update external issues from its
 tasks.
 
-A new external issue becomes a non-agentic task in the project, so it never
-runs an agent on its own. Later edits and closes flow to the linked task, and
-a GitHub `deleted` event closes it. GitHub creates a task only for an issue in
-the sync's configured repository whose author is the repository's owner, a
-member of the organization that owns it, or a collaborator (`author_association`
-`OWNER`, `MEMBER` or `COLLABORATOR`). Linear creates one only for an issue whose
-`projectId` is the sync's project ID. A sync with no repository or project ID
-set, or one that is outbound only, creates no tasks. Titles are cut to 500 bytes
-and descriptions to 50,000 bytes, never mid-character.
+A sync acts only on issues in its configured GitHub repository or Linear
+project: an event for an issue anywhere else, including an issue with the same
+number in another repository that an organization-wide webhook sends, is
+acknowledged and ignored. A sync with no repository or project ID set therefore
+acts on nothing.
+
+A newly opened issue becomes a non-agentic task in the project, so it never
+runs an agent on its own. GitHub creates a task only for an issue whose author
+is the repository's owner, a member of the organization that owns it, or a
+collaborator (`author_association` `OWNER`, `MEMBER` or `COLLABORATOR`). Linear
+creates one only when the issue is created in the configured project; an issue
+moved into the project later does not become a task. An outbound-only sync
+creates no tasks. Titles are cut to 500 bytes and descriptions to 50,000 bytes,
+never mid-character.
+
+Later events for a linked issue update its task's title and description. The
+task's status follows the issue only when the issue changes state: a GitHub
+`closed` completes the task and `reopened` sets it back to created. A Linear
+update moves it when the issue's state type maps to a different status than
+the last update applied did: `started` is in progress, `completed` or
+`canceled` is complete, and any other type is created. The first Linear update
+to a task linked some other way than by a created issue only records the
+state. Labels, assignments and edits leave the status alone. Deleting a
+GitHub issue unlinks it and leaves its task as it is.
+
+An event that says the issue last changed no later than the last event applied
+to its task is acknowledged and dropped, so a delivery arriving out of order
+cannot undo a newer one. Each delivery's ID (`X-GitHub-Delivery` or
+`Linear-Delivery`) is recorded once it is applied, and a delivery with an ID
+already recorded is answered 200 "Delivery already processed" without being
+applied again. A delivery whose processing fails applies nothing, including its
+ID, so the provider's retry is processed in full.
 
 Each sync has its own endpoint, `/api/webhooks/sync/{id}/github` or
 `/api/webhooks/sync/{id}/linear`, shown as the Payload URL in the project's
-sync settings. Deliveries without a valid signature are refused with a 401.
-Events other than issue events are acknowledged and ignored.
+sync settings. Bodies over 1 MB are refused with a 413. A delivery is refused
+with the same 401 whether its signature is wrong or the sync does not exist, is
+disabled, is for the other provider, or has no secret; the server log says
+which. Events other than issue events are acknowledged and ignored.
 
 For GitHub, open the repository's Settings → Webhooks and add a webhook with
 that Payload URL, content type `application/json`, the secret shown once when
