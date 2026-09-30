@@ -743,16 +743,17 @@ test.describe('agent tools from chat', () => {
       .split('\n')
       .filter((line) => /search|GET/.test(line));
     const searchResults = toolResults(chatId, 'web_search');
-    const monitoringTools = tools.filter((name) =>
-      /prometheus|grafana/i.test(name),
-    );
+    const searchWorks =
+      tools.includes('web_search') &&
+      searchResults.some((r) => /^Web search results \(via SearXNG\)/.test(r)) &&
+      /1\.\d\d/.test(searched);
+    const monitoringWorks =
+      tools.includes('query_prometheus') &&
+      tools.includes('list_grafana_dashboards') &&
+      /\d/.test(prometheus) &&
+      /overview|manager|dashboard/i.test(grafana);
     record(61, {
-      result:
-        tools.includes('web_search') &&
-        searchResults.some((r) => /^Web search results \(via SearXNG\)/.test(r)) &&
-        /1\.\d\d/.test(searched)
-          ? 'WORKS'
-          : 'FAILS',
+      result: searchWorks ? 'WORKS' : 'FAILS',
       chat_id: chatId,
       search_reply: searched.slice(0, 300),
       web_search_results: searchResults.slice(0, 2),
@@ -760,21 +761,15 @@ test.describe('agent tools from chat', () => {
       screenshots: ['61-web-search.png'],
     });
     record(53, {
-      result:
-        tools.includes('query_prometheus') &&
-        tools.includes('list_grafana_dashboards') &&
-        /\d/.test(prometheus) &&
-        /overview|manager|dashboard/i.test(grafana)
-          ? 'WORKS'
-          : 'FAILS',
+      result: monitoringWorks ? 'WORKS' : 'FAILS',
       chat_id: chatId,
       prometheus_reply: prometheus.slice(0, 300),
       grafana_reply: grafana.slice(0, 400),
       tools,
       screenshots: ['53-query-prometheus.png', '53-list-grafana-dashboards.png'],
     });
-    expect(tools).toContain('web_search');
-    expect(monitoringTools.length).toBeGreaterThan(0);
+    expect(searchWorks, searched.slice(0, 300)).toBe(true);
+    expect(monitoringWorks, `${tools.join(',')} || ${grafana.slice(0, 300)}`).toBe(true);
   });
 
   test('50: the GitHub tools against the scratch repository', async ({
