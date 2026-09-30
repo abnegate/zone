@@ -1256,6 +1256,29 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn an_openai_chat_variant_keeps_its_temperature_and_stops() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({ "max_tokens": RESERVED })))
+                .and(Without("max_completion_tokens"))
+                .respond_with(completion())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let body = sent(&server, Dialect::OpenAI, "gpt-5-chat-latest").await;
+
+            assert_eq!(stop_count(&body), 4, "{body}");
+            assert_eq!(
+                body["temperature"].as_f64().map(|value| value as f32),
+                Some(TEMPERATURE),
+                "{body}"
+            );
+            server.verify().await;
+        }
+
+        #[tokio::test]
         async fn an_openai_reasoning_model_streams_under_the_same_shape() {
             let server = MockServer::start().await;
             Mock::given(method("POST"))

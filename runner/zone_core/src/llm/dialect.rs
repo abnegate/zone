@@ -15,7 +15,9 @@ pub const TEMPLATE_STOPS: &[&str] = &[
 ];
 
 const OPENAI_STOP_LIMIT: usize = 4;
-const OPENAI_REASONING_PREFIXES: [&str; 4] = ["o1", "o3", "o4", "gpt-5"];
+const OPENAI_REASONING_FAMILIES: [&str; 4] = ["o1", "o3", "o4", "gpt-5"];
+const OPENAI_FAMILY_SEPARATORS: [char; 2] = ['-', '.'];
+const OPENAI_CONVERSATIONAL_VARIANTS: [&str; 1] = ["-chat"];
 const ANTHROPIC_TEMPERATURE_RANGE: (f32, f32) = (0.0, 1.0);
 
 /// Which API sits behind [`super::LlmConfig::base_url`].
@@ -39,7 +41,8 @@ pub enum Budget {
 
 impl Dialect {
     /// Whether `model` is an OpenAI reasoning model, which refuses `stop`, a
-    /// non-default `temperature` and `max_tokens`.
+    /// non-default `temperature` and `max_tokens`. A family's `-chat`
+    /// variant, such as `gpt-5-chat-latest`, does not reason.
     pub fn reasons(self, model: &str) -> bool {
         if self != Self::OpenAI {
             return false;
@@ -49,9 +52,14 @@ impl Dialect {
             .next()
             .unwrap_or(model)
             .to_ascii_lowercase();
-        OPENAI_REASONING_PREFIXES
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
+        let family = OPENAI_REASONING_FAMILIES.iter().any(|family| {
+            name.strip_prefix(family)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(OPENAI_FAMILY_SEPARATORS))
+        });
+        family
+            && !OPENAI_CONVERSATIONAL_VARIANTS
+                .iter()
+                .any(|variant| name.contains(variant))
     }
 
     /// The stops `model` accepts out of `stops`. OpenAI takes at most four,
@@ -140,6 +148,29 @@ mod tests {
         }
         assert!(!Dialect::Compatible.reasons("o3"));
         assert!(!Dialect::Anthropic.reasons("o3"));
+    }
+
+    #[test]
+    fn openai_chat_variants_and_lookalike_names_do_not_reason() {
+        for model in [
+            "gpt-5-chat-latest",
+            "gpt-5.1-chat-latest",
+            "openai/gpt-5-chat-latest",
+            "GPT-5-CHAT-LATEST",
+            "gpt-50",
+            "o10-preview",
+        ] {
+            assert!(!Dialect::OpenAI.reasons(model), "{model}");
+            assert_eq!(Dialect::OpenAI.budget(model), Budget::MaxTokens, "{model}");
+            assert_eq!(
+                Dialect::OpenAI.temperature(model, 0.2),
+                Some(0.2),
+                "{model}"
+            );
+        }
+        for model in ["gpt-5.1", "gpt-5-codex", "gpt-5-nano", "o3-pro"] {
+            assert!(Dialect::OpenAI.reasons(model), "{model}");
+        }
     }
 
     #[test]
