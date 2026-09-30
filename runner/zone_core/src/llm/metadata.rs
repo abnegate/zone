@@ -8,8 +8,14 @@ use reqwest::Url;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 const HOSTS: [&str; 2] = ["metadata.google.internal", "metadata.goog"];
-const IPV4_ADDRESSES: [Ipv4Addr; 1] = [Ipv4Addr::new(100, 100, 100, 200)];
-const IPV6_ADDRESSES: [Ipv6Addr; 1] = [Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254)];
+const IPV4_ADDRESSES: [Ipv4Addr; 2] = [
+    Ipv4Addr::new(100, 100, 100, 200),
+    Ipv4Addr::new(168, 63, 129, 16),
+];
+const IPV6_ADDRESSES: [Ipv6Addr; 2] = [
+    Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254),
+    Ipv6Addr::new(0xfd20, 0x00ce, 0, 0, 0, 0, 0, 0x0254),
+];
 
 /// Whether `address` is link-local or a cloud provider's metadata service.
 pub fn is_address(address: IpAddr) -> bool {
@@ -102,6 +108,26 @@ mod tests {
             "fd00:ec2::253",
             "100.100.100.100",
             "8.8.8.8",
+        ] {
+            let address: IpAddr = allowed.parse().expect("an address");
+            assert!(!is_address(address), "{allowed}");
+        }
+    }
+
+    #[test]
+    fn gcp_ipv6_and_azure_wireserver_metadata_addresses_are_refused() {
+        for refused in ["fd20:ce::254", "::ffff:168.63.129.16", "168.63.129.16"] {
+            let address: IpAddr = refused.parse().expect("an address");
+            assert!(is_address(address), "{refused}");
+        }
+        for refused in ["[fd20:ce::254]", "168.63.129.16"] {
+            assert!(is_host(refused), "{refused}");
+        }
+        for allowed in [
+            "fd20:ce::253",
+            "fd20::254",
+            "168.63.129.17",
+            "168.63.128.16",
         ] {
             let address: IpAddr = allowed.parse().expect("an address");
             assert!(!is_address(address), "{allowed}");

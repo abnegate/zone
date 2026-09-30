@@ -936,6 +936,8 @@ mod tests {
                 "http://[fe80::1]:8080/v1",
                 "http://[fd00:ec2::254]/v1",
                 "http://[::ffff:169.254.169.254]/v1",
+                "http://[fd20:ce::254]/computeMetadata/v1",
+                "http://168.63.129.16/machine",
                 "http://metadata.google.internal/computeMetadata/v1",
                 "http://METADATA.GOOGLE.INTERNAL./v1",
             ] {
