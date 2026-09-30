@@ -190,7 +190,9 @@ its saved value, which is how the console keeps a key it never shows.
 
 Keys stay with the URL they were saved beside. A URL a workspace saves never
 receives the organization's key, and the instance's `LITELLM_KEY` only ever goes
-to `LITELLM_HOST`. A URL saved with no key, or a blank one, is sent no
+to `LITELLM_HOST`. A key a workspace saves without a URL goes to the URL its
+organization saved, or on OpenAI and Anthropic to the provider's default
+without one. A URL saved with no key, or a blank one, is sent no
 `Authorization` header. A workspace that names a host without a key while its
 organization saved one is warned in AI Settings that the host gets no key.
 
@@ -242,17 +244,15 @@ template tokens (Zone still stops on those itself), and its reasoning models
 `max_tokens`, with no `stop`, `temperature` or, on other models,
 `reasoning_effort`. Anthropic's OpenAI-compatible endpoint gets a temperature
 of at most 1 and no whitespace-only stop sequences. Self-Hosted endpoints get
-the request exactly as the instance endpoint does.
+the request unshaped, as the instance endpoint does. A chat's reasoning effort
+is not sent to a saved endpoint other than `LITELLM_HOST`, since Zone learns
+nothing of a model's capabilities there.
 
 Embeddings, model captioning and LoRA training stay on the instance whatever the
 provider. A model known to lack vision gets the chat's history without its
-images and a one-line note saying so; the stored history keeps them.
-
-A key a workspace saves without a URL goes to the URL its organization saved,
-or on OpenAI and Anthropic to the provider's default without one. A chat's reasoning effort is not sent
-to a saved endpoint other than `LITELLM_HOST`, since Zone learns nothing of a
-model's capabilities there. The context estimate reads the stored history, so
-it still counts a withheld image, as an attachment of unknown size.
+images and a one-line note saying so; the stored history keeps them. The
+context estimate reads the stored history, so it still counts a withheld image,
+as an attachment of unknown size.
 
 ### `ZONE_ENDPOINT_HOSTS`
 
