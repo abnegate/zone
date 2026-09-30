@@ -81,7 +81,9 @@ jobs:
           docker compose version
           sh scripts/test-compose-profiles.sh
 
-      - name: Verify backup and restore Make commands without Docker
+      - name: Verify backup and restore Make commands, also against throwaway Docker volumes
+        env:
+          ZONE_TEST_DOCKER: '1'
         run: python3 scripts/test-backup.py
 
       - name: Verify the manager Dockerfile copies every workspace member
