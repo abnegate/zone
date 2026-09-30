@@ -97,8 +97,17 @@ an archive of that name already exists, the backup leaves it alone, removes
 its own partial archive and exits non-zero. The process ID keeps two backups
 started in the same second apart: each has its own temporary volume,
 container, partial archive and archive, and removes only its own when it
-ends. A volume-level `.zone-restore-previous` directory, which only an
-interrupted restore leaves behind, is never archived.
+ends.
+
+A volume-level `.zone-restore-previous` directory, which only an interrupted
+restore leaves behind, can hold the only intact copy of that volume while the
+rest of it holds a partial extraction, and an archive leaves it out. So
+`make backup` checks every volume first and, when any holds one, names it and
+exits non-zero before it stops postgres or stages anything. Recover the volume
+first, then back up: undo the restore by replacing the rest of the volume with
+the contents of `.zone-restore-previous` and removing that directory, or
+finish the restore by removing `.zone-restore-previous` and running
+`make restore` again with the same archive.
 
 `make restore BACKUP=<archive>` refuses to start while any running container
 mounts one of the nine volumes: stop the stack first (`make stop`), and start
@@ -117,11 +126,11 @@ deletes what it extracted and moves each volume's earlier contents back, so
 every volume holds what it held before. Until the restore ends, a volume
 therefore needs free space for both its earlier contents and the archived
 ones. An interrupted restore can leave a `.zone-restore-previous` directory
-behind if the container itself is killed: the next restore refuses to start
-until you delete that directory (keeping what the volume holds now) or
-replace the rest of the volume with its contents. Each directory at the top
-of the archive (`postgres/`, `valkey/` and so on) is the volume listed in the
-first paragraph. An archive that itself holds a volume-level
+behind if the container itself is killed: the next restore, and every
+backup, refuses to start until you delete that directory (keeping what the
+volume holds now) or replace the rest of the volume with its contents. Each
+directory at the top of the archive (`postgres/`, `valkey/` and so on) is the
+volume listed in the first paragraph. An archive that itself holds a volume-level
 `.zone-restore-previous` directory is refused.
 
 An archive with no cluster under `postgres/`, which is what every archive

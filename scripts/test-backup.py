@@ -50,6 +50,9 @@ if arguments[0] == 'inspect':
     sys.exit(0)
 if arguments[0] == 'run' and 'PG_VERSION' in joined:
     sys.exit(0 if os.environ['FAKE_DOCKER_CLUSTER'] == '1' else 1)
+if arguments[0] == 'run' and '.zone-restore-previous' in joined and 'tar czf' not in joined:
+    print(os.environ['FAKE_DOCKER_INTERRUPTED'])
+    sys.exit(0)
 signalled = os.environ.get('FAKE_DOCKER_SIGNAL_ON')
 if signalled and signalled in joined:
     handshake = os.environ.get('FAKE_DOCKER_HANDSHAKE')
@@ -148,6 +151,10 @@ def is_archive(call: list[str]) -> bool:
     return call[0] == 'run' and any('tar czf' in argument for argument in call)
 
 
+def is_interrupted_restore_check(call: list[str]) -> bool:
+    return call[0] == 'run' and PREVIOUS in call[-1] and 'tar czf' not in call[-1]
+
+
 def is_extract(call: list[str]) -> bool:
     return call[0] == 'run' and any('tar xzf' in argument for argument in call)
 
@@ -189,6 +196,7 @@ class Fake:
     closed_output: bool = False
     tar_block: str = ''
     tar_collide: bool = False
+    interrupted: str = ''
 
 
 class Sandbox:
@@ -217,6 +225,7 @@ class Sandbox:
             'FAKE_DOCKER_SIGNAL': fake.signal,
             'FAKE_TAR_BLOCK': fake.tar_block,
             'FAKE_TAR_COLLIDE': '1' if fake.tar_collide else '',
+            'FAKE_DOCKER_INTERRUPTED': fake.interrupted,
         }
         environment.pop('ALLOW_EMPTY_POSTGRES', None)
         return environment
@@ -427,6 +436,22 @@ class Backup(MakeTarget):
                 self.assertEqual(f'.{archive_name}', partial_of(run.calls))
                 self.assertEqual(content, 'other')
                 self.assertIn(f'backups/{archive_name} already exists; not overwriting it.', run.output)
+
+    def test_interrupted_restore_stops_the_backup_before_postgres_stops(self) -> None:
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                run = self.make('backup', Fake(interrupted='grafana\nvalkey'), shell)
+                self.assertNotEqual(run.returncode, 0)
+                check = run.calls[run.first(is_interrupted_restore_check)]
+                self.assertEqual(sorted(mounts(check)), sorted(['zone_postgres_data:/data/postgres:ro', *OTHER_MOUNTS]))
+                self.assertEqual(run.indexes(is_stop), [])
+                self.assertEqual(run.indexes(is_stage_create), [])
+                self.assertEqual(run.indexes(is_archive), [])
+                self.assertEqual(run.files, {})
+                for name in ['grafana', 'valkey']:
+                    self.assertIn(f'An interrupted restore left {name}/{PREVIOUS}', run.output)
+                self.assertIn('finish the restore', run.output)
+                self.assertNotIn('Backup created', run.output)
 
     def test_stopped_postgres_is_archived_in_place(self) -> None:
         for shell in SHELLS:
@@ -725,14 +750,12 @@ class DockerVolumes(unittest.TestCase):
 
     def test_round_trip_restores_the_archive_and_leaves_no_aside_directory(self) -> None:
         self.seed({'postgres/PG_VERSION': '16', 'postgres/base/1': 'old', 'valkey/dump.rdb': 'old',
-                   'grafana/grafana.db': 'old', f'grafana/{PREVIOUS}/grafana.db': 'older'})
+                   'grafana/grafana.db': 'old'})
         backup = self.make('backup')
         self.assertEqual(backup.returncode, 0, backup.stdout + backup.stderr)
         [archive] = self.archives()
         with tarfile.open(archive) as opened:
-            members = opened.getnames()
-        self.assertIn('./grafana/grafana.db', members)
-        self.assertFalse([member for member in members if PREVIOUS in member], members)
+            self.assertIn('./grafana/grafana.db', opened.getnames())
 
         self.seed({'postgres/PG_VERSION': '16', 'postgres/base/1': 'new', 'postgres/base/1_vm': 'new',
                    'valkey/dump.rdb': 'new', 'valkey/.hidden': 'new', 'grafana/grafana.db': 'new'})
@@ -752,6 +775,16 @@ class DockerVolumes(unittest.TestCase):
         self.assertEqual(status.st_uid, os.getuid(), 'the user who ran make backup must own the archive')
         self.assertEqual(status.st_mode & 0o777, 0o600, 'the archive must stay readable by its owner alone')
         self.assertEqual([path.name for path in (self.work / 'backups').iterdir()], [archive.name])
+
+    def test_interrupted_restore_stops_the_backup_and_leaves_every_volume_as_it_was(self) -> None:
+        self.seed({'postgres/PG_VERSION': '16', 'postgres/base/1': 'partial', 'grafana/grafana.db': 'partial',
+                   f'grafana/{PREVIOUS}/grafana.db': 'only intact copy'})
+        before = self.snapshot()
+        backup = self.make('backup')
+        self.assertNotEqual(backup.returncode, 0, backup.stdout + backup.stderr)
+        self.assertIn(f'An interrupted restore left grafana/{PREVIOUS}', backup.stderr)
+        self.assertEqual(list((self.work / 'backups').iterdir()), [])
+        self.assertEqual(self.snapshot(), before)
 
     def test_truncated_archive_leaves_every_volume_as_it_was(self) -> None:
         self.seed({'postgres/PG_VERSION': '16', 'postgres/base/1': 'old', 'valkey/dump.rdb': os.urandom(1 << 16).hex()})

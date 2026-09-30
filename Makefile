@@ -364,6 +364,16 @@ prune: ## Remove unused Docker resources
 backup: ## Backup volumes to ./backups, stopping postgres while its cluster is copied (see migrate-pgdata for installs from before zone_postgres_data held it)
 	@echo "$(BLUE)Creating backup...$(NC)"
 	@docker image inspect alpine >/dev/null 2>&1 || docker pull alpine >/dev/null || exit 1; \
+	interrupted=$$(docker run --rm \
+		$(foreach pair,$(BACKUP_VOLUMES),-v $(call backup_volume,$(pair)):$(call backup_directory,$(pair)):ro) \
+		alpine sh -c 'for directory in /data/*; do if [ -e "$$directory/$(RESTORE_PREVIOUS)" ]; then echo "$${directory#/data/}"; fi; done') || exit 1; \
+	if [ -n "$$interrupted" ]; then \
+		for name in $$interrupted; do \
+			echo "$(RED)An interrupted restore left $$name/$(RESTORE_PREVIOUS), which may hold the only intact copy of that volume, and a backup leaves it out.$(NC)" >&2; \
+		done; \
+		echo "Undo the restore by replacing the rest of each such volume with the contents of its $(RESTORE_PREVIOUS) and removing it, or finish the restore by removing $(RESTORE_PREVIOUS) and running make restore again with the same archive. Then back up." >&2; \
+		exit 1; \
+	fi; \
 	cluster=1; \
 	if ! docker run --rm -v $(POSTGRES_VOLUME):/postgres:ro alpine test -f /postgres/PG_VERSION; then \
 		echo "$(RED)$(POSTGRES_VOLUME) holds no database cluster, so this archive would carry no data.$(NC)"; \
