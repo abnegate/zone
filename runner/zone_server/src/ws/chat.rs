@@ -4344,8 +4344,8 @@ mod tests {
         };
         let reported = format!("Failed to generate response: {error}");
         assert!(
-            reported.contains(KEY) && reported.contains(MASKED),
-            "the provider's body no longer echoes the key, so this proves nothing: {reported}"
+            !reported.contains(KEY) && !reported.contains(MASKED),
+            "the client reported the key it was sent: {reported}"
         );
         let message = failure(&endpoint, &LlmBackend::Http, reported);
 

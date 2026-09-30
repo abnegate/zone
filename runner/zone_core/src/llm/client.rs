@@ -9,6 +9,8 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::runtime;
 
+use crate::secret::conceal;
+
 use super::dialect::{Budget, Dialect};
 use super::finish_reason::STOP;
 use super::provider::{
@@ -467,6 +469,16 @@ impl LlmClient {
         Ok(request.json(body).send().await?)
     }
 
+    /// The endpoint's refusal, without the key this client sent it.
+    async fn rejected(&self, response: reqwest::Response) -> LlmError {
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        LlmError::Api {
+            status,
+            message: conceal(&body, &self.config.api_key),
+        }
+    }
+
     /// Make a chat completion request
     pub async fn chat(
         &self,
@@ -521,13 +533,8 @@ impl LlmClient {
 
         let response = self.send(&url, &body).await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(LlmError::Api {
-                status: status.as_u16(),
-                message,
-            });
+        if !response.status().is_success() {
+            return Err(self.rejected(response).await);
         }
 
         let response: ChatResponse = response.json().await?;
@@ -587,13 +594,8 @@ impl LlmClient {
 
         let response = self.send(&url, &body).await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(LlmError::Api {
-                status: status.as_u16(),
-                message,
-            });
+        if !response.status().is_success() {
+            return Err(self.rejected(response).await);
         }
 
         // Parse SSE without reallocating the leftover buffer on every line.
@@ -729,6 +731,83 @@ mod tests {
 
             assert!(answered.is_ok(), "{answered:?}");
             server.verify().await;
+        }
+    }
+
+    mod refusal {
+        use super::*;
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const KEY: &str = "sk-proj-AbCdEfGh1234567890wxyz";
+
+        fn echoes() -> Vec<String> {
+            vec![
+                format!(r#"{{"error":{{"message":"bad key {KEY}"}}}}"#),
+                r#"{"error":{"message":"Incorrect API key provided: sk-proj-****************wxyz."}}"#
+                    .to_string(),
+                r#"{"error":"{\"message\":\"invalid x-api-key: ****wxyz\"}"}"#.to_string(),
+                r#"{"detail":"litellm.AuthenticationError: api_key=sk-proj-AbCd****"}"#.to_string(),
+                "rejected key:sk-proj-AbCd****".to_string(),
+            ]
+        }
+
+        async fn refused(body: &str, stream: bool) -> LlmError {
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(401).set_body_string(body))
+                .mount(&server)
+                .await;
+            let client = LlmClient::new(LlmConfig {
+                base_url: server.uri(),
+                api_key: KEY.to_string(),
+                ..LlmConfig::default()
+            });
+            let messages = [Message::user("hi")];
+            if stream {
+                client
+                    .chat_stream(&messages, None)
+                    .await
+                    .err()
+                    .expect("the endpoint refused the stream")
+            } else {
+                client
+                    .chat(&messages, None)
+                    .await
+                    .expect_err("the endpoint refused the turn")
+            }
+        }
+
+        #[tokio::test]
+        async fn a_refusal_never_carries_the_key_it_was_sent() {
+            for body in echoes() {
+                for stream in [false, true] {
+                    let error = refused(&body, stream).await;
+                    let LlmError::Api { status, message } = &error else {
+                        panic!("{error:?}");
+                    };
+                    let shown = error.to_string();
+
+                    assert_eq!(*status, 401);
+                    for leaked in [KEY, "wxyz", "sk-proj-AbCd"] {
+                        assert!(!message.contains(leaked), "{body} -> {message}");
+                        assert!(!shown.contains(leaked), "{body} -> {shown}");
+                    }
+                    assert!(message.contains(crate::secret::REDACTED), "{message}");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_refusal_without_the_key_is_reported_as_the_endpoint_sent_it() {
+            let body = r#"{"error":{"message":"The model `gpt-9` does not exist"}}"#;
+
+            let error = refused(body, false).await;
+
+            assert!(
+                matches!(&error, LlmError::Api { status: 401, message } if message == body),
+                "{error:?}"
+            );
         }
     }
 

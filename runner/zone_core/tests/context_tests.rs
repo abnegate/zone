@@ -1205,3 +1205,36 @@ async fn sustained_tool_history_keeps_full_coverage_without_an_unbounded_prompt_
     assert!(provider.requests.lock().await.is_empty());
     context::validate(&history, prepared.summary.as_ref()).unwrap();
 }
+
+#[tokio::test]
+async fn a_compaction_the_endpoint_refuses_never_reports_its_key() {
+    const KEY: &str = "sk-proj-AbCdEfGh1234567890wxyz";
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(401).set_body_string(format!(
+            r#"{{"error":{{"message":"Incorrect API key provided: {KEY}, sk-proj-****wxyz, api_key=sk-proj-AbCd****"}}}}"#
+        )))
+        .mount(&server)
+        .await;
+    let client = LlmClient::new(LlmConfig {
+        base_url: server.uri(),
+        api_key: KEY.into(),
+        default_model: "test".into(),
+        max_tokens: 1024,
+        ..Default::default()
+    });
+    let history = vec![
+        entry("old", Message::user("x".repeat(40_000)), false, true),
+        entry("current", Message::user("Current"), true, false),
+    ];
+
+    let error = context::prepare(&client, "test", &history, None, &policy(5_000), None)
+        .await
+        .expect_err("a refused compaction that no longer fits fails the turn")
+        .to_string();
+
+    assert!(error.contains("401"), "{error}");
+    assert!(!error.contains(KEY), "{error}");
+    assert!(!error.contains("wxyz"), "{error}");
+    assert!(!error.contains("sk-proj-AbCd"), "{error}");
+}

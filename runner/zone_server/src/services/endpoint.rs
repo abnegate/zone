@@ -11,7 +11,7 @@ use uuid::Uuid;
 use zone_chat::capacity::Resolver;
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
 use zone_core::llm::{Dialect, LlmBackend, LlmConfig};
-use zone_core::secret::{REDACTED, SecretValue, redact};
+use zone_core::secret::{REDACTED, SecretValue, conceal, redact};
 
 use crate::config::Config;
 use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC};
@@ -24,10 +24,6 @@ pub const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1";
 
 const VERSION_PATH: &str = "/v1";
 const SCHEMES: [&str; 2] = ["http", "https"];
-
-/// The shortest run of a key an echo must share with it to be taken for it.
-const MINIMUM_ECHO: usize = 3;
-const MASK: char = '*';
 
 /// Who chose where completions go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,12 +230,7 @@ impl Endpoint {
     /// masked the way providers echo a rejected key, or any credential
     /// [`redact`] recognises.
     pub fn scrub(&self, text: &str) -> String {
-        let key = self.key.expose().trim();
-        if key.is_empty() {
-            return redact(text).into_owned();
-        }
-        let whole = text.replace(key, REDACTED);
-        redact(&without_echoes(&whole, key)).into_owned()
+        redact(&conceal(text, self.key.expose())).into_owned()
     }
 
     fn self_hosted(
@@ -329,45 +320,6 @@ fn normalized(SavedUrl { mut parsed, raw }: SavedUrl<'_>) -> String {
 fn same_origin(url: &Url, instance: &str) -> bool {
     Url::parse(instance.trim())
         .is_ok_and(|instance| instance.origin().is_tuple() && instance.origin() == url.origin())
-}
-
-/// `text` with every masked echo of `key`, as `sk-ab****wxyz`, redacted.
-fn without_echoes(text: &str, key: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut word = String::new();
-    for character in text.chars() {
-        if separates(character) {
-            output.push_str(unechoed(&word, key));
-            word.clear();
-            output.push(character);
-        } else {
-            word.push(character);
-        }
-    }
-    output.push_str(unechoed(&word, key));
-    output
-}
-
-fn separates(character: char) -> bool {
-    character.is_whitespace()
-        || matches!(
-            character,
-            '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
-        )
-}
-
-fn unechoed<'a>(word: &'a str, key: &str) -> &'a str {
-    let (Some(first), Some(last)) = (word.find(MASK), word.rfind(MASK)) else {
-        return word;
-    };
-    let prefix = &word[..first];
-    let suffix = word[last + MASK.len_utf8()..].trim_end_matches(['.', ':', '!', '?']);
-    let echoes = |part: &str| part.len() >= MINIMUM_ECHO;
-    if (echoes(prefix) && key.starts_with(prefix)) || (echoes(suffix) && key.ends_with(suffix)) {
-        REDACTED
-    } else {
-        word
-    }
 }
 
 #[cfg(test)]
@@ -1030,15 +982,11 @@ mod tests {
         let endpoint = Endpoint::resolve(&config(), &settings);
         let stops = crate::services::completion_tokens::merge_stops(&["User:".to_string()]);
 
-        let answered = zone_core::llm::LlmClient::new(endpoint.llm(
-            model,
-            temperature,
-            512,
-            LlmBackend::Http,
-        ))
-        .with_stop(stops)
-        .chat(&[zone_core::llm::Message::user("hi")], None)
-        .await;
+        let answered =
+            zone_core::llm::LlmClient::new(endpoint.llm(model, temperature, 512, LlmBackend::Http))
+                .with_stop(stops)
+                .chat(&[zone_core::llm::Message::user("hi")], None)
+                .await;
 
         assert!(answered.is_ok(), "{provider} {model}: {answered:?}");
         let requests = server.received_requests().await.unwrap_or_default();
@@ -1051,9 +999,9 @@ mod tests {
         let stops = body["stop"].as_array().cloned().unwrap_or_default();
         assert!(stops.len() <= 4, "{body}");
         assert!(
-            stops.iter().all(|stop| stop
-                .as_str()
-                .is_some_and(|stop| !stop.starts_with("<|"))),
+            stops
+                .iter()
+                .all(|stop| stop.as_str().is_some_and(|stop| !stop.starts_with("<|"))),
             "{body}"
         );
         assert_eq!(body["max_tokens"], 512, "{body}");
@@ -1171,11 +1119,24 @@ mod tests {
                 r#"{"error":{"message":"invalid x-api-key: ****wxyz"}}"#.to_string(),
                 "****wxyz".to_string(),
             ),
+            (
+                r#"{"error":"{\"message\":\"invalid x-api-key: ****wxyz\"}"}"#.to_string(),
+                "****wxyz".to_string(),
+            ),
+            (
+                "litellm.AuthenticationError: api_key=sk-proj-AbCd****".to_string(),
+                "sk-proj-AbCd".to_string(),
+            ),
+            (
+                "rejected key:sk-proj-AbCd****".to_string(),
+                "sk-proj-AbCd".to_string(),
+            ),
         ] {
             let scrubbed = endpoint.scrub(&reported);
 
             assert!(!scrubbed.contains(&echo), "{scrubbed}");
             assert!(!scrubbed.contains("wxyz"), "{scrubbed}");
+            assert!(!scrubbed.contains("sk-proj-AbCd"), "{scrubbed}");
             assert!(scrubbed.contains(REDACTED), "{scrubbed}");
         }
     }
