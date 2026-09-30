@@ -40,7 +40,11 @@ zone_core = { path = "../zone_core" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
-keyring = "=4.2.0"
-keyring-core = "=1.0.0"
 tempfile = "=3.27.0"
 toml = { workspace = true }
+
+# The platform keychain initialises without a Secret Service only on macOS,
+# so the test that reads an earlier CLI's entries runs there.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+keyring = "=4.2.0"
+keyring-core = "=1.0.0"

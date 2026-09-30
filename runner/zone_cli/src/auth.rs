@@ -278,6 +278,9 @@ mod tests {
     /// what the shared store reads, or every signed-in user is signed out by
     /// the upgrade. The platform keychain is swapped for keyring's in-memory
     /// store, which the earlier CLI's `Entry` writes go through as well.
+    /// keyring initialises the platform store before any other, and on Linux
+    /// that needs a running Secret Service, so this runs on macOS.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_keychain_entries_an_earlier_cli_wrote_still_sign_the_user_in() {
         keyring::Entry::store_status()
