@@ -2,7 +2,12 @@ import { describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { AiProviderSchema } from '../workspace/schemas';
 import type { AiProvider, AiSettings, OrganizationKeys } from '../workspace/types';
-import { AiProviderFields, KEYLESS_WORKSPACE_WARNING, UNROUTED_NOTICE } from './AiProviderFields';
+import {
+  AiProviderFields,
+  KEYLESS_WORKSPACE_WARNING,
+  UNROUTED_NOTICE,
+  VERSION_HINT,
+} from './AiProviderFields';
 import {
   agentAccess,
   agentOf,
@@ -180,6 +185,22 @@ describe('AiProviderFields endpoint copy', () => {
       expect(screen.getByText(routing('workspace'))).toHaveClass('form-hint');
       expect(screen.getByText(workspaceKey)).toHaveClass('form-hint');
       expect(screen.queryByText(routing('organization'))).toBeNull();
+    }
+  );
+
+  it.each(['self_hosted', 'openai', 'anthropic'] as const)(
+    'tells a %s admin how a bare host, a trailing slash and a path are sent',
+    (provider) => {
+      renderFields(provider);
+      expect(screen.getByText(VERSION_HINT)).toHaveClass('form-hint');
+    }
+  );
+
+  it.each(['bedrock', 'claude_code'] as const)(
+    'gives the %s provider, which takes no URL, no versioning hint',
+    (provider) => {
+      renderFields(provider);
+      expect(screen.queryByText(VERSION_HINT)).toBeNull();
     }
   );
 

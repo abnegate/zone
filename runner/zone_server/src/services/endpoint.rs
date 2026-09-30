@@ -241,7 +241,7 @@ impl Endpoint {
             return Ok(None);
         };
         let key = saved_key(key);
-        if same_origin(&url, &config.litellm_host) {
+        if same_origin(&url.parsed, &config.litellm_host) {
             return Ok(Some(Self {
                 url: config.litellm_host.clone(),
                 key: key.unwrap_or_else(|| SecretValue::new(config.litellm_key.clone())),
@@ -269,7 +269,7 @@ impl Endpoint {
         }
     }
 
-    fn settings(url: Url, key: Option<SecretValue>) -> Self {
+    fn settings(url: SavedUrl<'_>, key: Option<SecretValue>) -> Self {
         Self {
             url: normalized(url),
             key: key.unwrap_or_else(|| SecretValue::new(String::new())),
@@ -278,11 +278,17 @@ impl Endpoint {
     }
 }
 
-fn saved_url(raw: Option<&str>) -> Result<Option<Url>, UrlError> {
-    raw.map(str::trim)
-        .filter(|raw| !raw.is_empty())
-        .map(validate_url)
-        .transpose()
+struct SavedUrl<'a> {
+    parsed: Url,
+    raw: &'a str,
+}
+
+fn saved_url(raw: Option<&str>) -> Result<Option<SavedUrl<'_>>, UrlError> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+    let parsed = validate_url(raw)?;
+    Ok(Some(SavedUrl { parsed, raw }))
 }
 
 fn saved_key(key: Option<&SecretValue>) -> Option<SecretValue> {
@@ -291,15 +297,17 @@ fn saved_key(key: Option<&SecretValue>) -> Option<SecretValue> {
         .map(SecretValue::new)
 }
 
-/// `url` without trailing slashes, versioned when it names only a server.
-fn normalized(mut url: Url) -> String {
-    let path = url.path().trim_end_matches('/').to_string();
-    if path.is_empty() {
-        url.set_path(VERSION_PATH);
-    } else {
-        url.set_path(&path);
+/// `url` without trailing slashes. A URL saved as a bare host is versioned;
+/// one saved with a trailing `/` and no path names the host's root, which
+/// `Url` cannot tell apart from a bare host once parsed.
+fn normalized(SavedUrl { mut parsed, raw }: SavedUrl<'_>) -> String {
+    let path = parsed.path().trim_end_matches('/').to_string();
+    if !path.is_empty() {
+        parsed.set_path(&path);
+    } else if !raw.ends_with('/') {
+        parsed.set_path(VERSION_PATH);
     }
-    url.into()
+    parsed.as_str().trim_end_matches('/').to_string()
 }
 
 /// Whether `url` names the server `instance` does: scheme, host and port,
@@ -575,6 +583,50 @@ mod tests {
                 },
                 url: "https://litellm:4000/v1",
                 key: "",
+                origin: Origin::Settings,
+            },
+            Case {
+                name: "self_hosted on a host saved with a trailing slash sends to its root",
+                provider: PROVIDER_SELF_HOSTED,
+                saved: Saved {
+                    url: Some(" http://gateway.example:4000/ "),
+                    key: Some(SAVED_KEY),
+                },
+                url: "http://gateway.example:4000",
+                key: SAVED_KEY,
+                origin: Origin::Settings,
+            },
+            Case {
+                name: "self_hosted on a host saved with repeated trailing slashes sends to its root",
+                provider: PROVIDER_SELF_HOSTED,
+                saved: Saved {
+                    url: Some("http://gateway.example:4000//"),
+                    key: None,
+                },
+                url: "http://gateway.example:4000",
+                key: "",
+                origin: Origin::Settings,
+            },
+            Case {
+                name: "self_hosted on a host saved with a path uses the path as saved",
+                provider: PROVIDER_SELF_HOSTED,
+                saved: Saved {
+                    url: Some("http://gateway.example:4000/api/openai"),
+                    key: None,
+                },
+                url: "http://gateway.example:4000/api/openai",
+                key: "",
+                origin: Origin::Settings,
+            },
+            Case {
+                name: "openai on a base URL saved with a trailing slash sends to its root",
+                provider: PROVIDER_OPENAI,
+                saved: Saved {
+                    url: Some("https://proxy.example/"),
+                    key: Some(SAVED_KEY),
+                },
+                url: "https://proxy.example",
+                key: SAVED_KEY,
                 origin: Origin::Settings,
             },
             Case {

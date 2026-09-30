@@ -186,9 +186,13 @@ A URL is checked when it is saved: it must be `http` or `https`, name a host,
 and carry no credentials, query or fragment. Private, LAN and loopback hosts are
 allowed, since an operator may run the model next to Zone. A URL saved before
 this check that fails it is ignored: that provider runs on the instance
-endpoint, and the server logs a warning. Trailing slashes are dropped, and a URL
-with no path gets `/v1`, so `http://10.0.0.5:4000` becomes
-`http://10.0.0.5:4000/v1`.
+endpoint, and the server logs a warning. The URL is read as it was saved:
+
+- no path gets `/v1`: `http://10.0.0.5:4000` sends to `http://10.0.0.5:4000/v1`;
+- a trailing `/` and no path is the host's root, sent as is:
+  `http://10.0.0.5:4000/` sends to `http://10.0.0.5:4000`;
+- a path is used as saved, trailing slashes dropped:
+  `https://proxy.example/openai/v1/` sends to `https://proxy.example/openai/v1`.
 
 *Automatic* on a saved endpoint uses the **Fast Model** and **Reasoning Model**
 names saved in AI Settings, never the instance's `OLLAMA_MODEL_*` defaults. With
