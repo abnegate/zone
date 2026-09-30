@@ -1131,6 +1131,33 @@ async fn agent_providers_are_refused_before_048_and_stored_after_it() {
     database.cleanup().await;
 }
 
+/// 049 swaps the verdict check under the brief lock of an unvalidated
+/// constraint, and 050 proves the rows while reviews stay writable.
+#[tokio::test]
+async fn the_failed_verdict_check_is_added_unvalidated_and_proven_after() {
+    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
+         WHERE conrelid = 'task_reviews'::regclass AND conname = 'task_reviews_verdict_check'";
+    let database = Database::new().await;
+
+    database.through(49).await;
+    let added: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("049 leaves the verdict check in place");
+    database.through(50).await;
+    let proven: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("050 keeps the verdict check");
+
+    assert!(
+        !added,
+        "049 must not scan task_reviews under its exclusive lock"
+    );
+    assert!(proven, "050 validates what 049 added");
+    database.cleanup().await;
+}
+
 /// Every lock these take on `task_runs` is one ordinary traffic already holds,
 /// and the boot holds sqlx's advisory lock while it queues for them: an
 /// unbounded wait wedges every other instance instead of failing with 55P03.
@@ -1195,7 +1222,8 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
             "046_invitations_pending_unique.sql",
             "048_agent_logins.sql",
             "049_task_reviews_failed_verdict.sql",
-            "050_sync_deliveries.sql",
+            "050_task_reviews_failed_verdict_validation.sql",
+            "051_sync_deliveries.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );
