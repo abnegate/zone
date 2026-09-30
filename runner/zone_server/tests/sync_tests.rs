@@ -2977,7 +2977,9 @@ async fn audited(
 ) -> Vec<(String, Option<Uuid>, serde_json::Value)> {
     sqlx::query_as(
         "SELECT action, actor_id, COALESCE(new_values, 'null'::jsonb)
-         FROM audit_logs WHERE resource_id = $1 ORDER BY created_at",
+         FROM audit_logs
+         WHERE resource_id = $1 AND action IN ('sync.webhook_secret_rotated', 'sync.webhook_secret_set')
+         ORDER BY created_at",
     )
     .bind(Uuid::parse_str(config).unwrap())
     .fetch_all(pool)
@@ -3106,4 +3108,111 @@ async fn setting_or_rotating_a_webhook_secret_moves_updated_at_and_records_who_d
     assert_eq!(*actor, Some(user));
     assert_eq!(values["provider"], "linear");
     assert!(!values.to_string().contains(LINEAR_SIGNING_SECRET));
+}
+
+// Adding or removing a sync: admins only, on the record.
+
+async fn remove(
+    client: &common::TestClient,
+    token: &str,
+    project: &str,
+    config: &str,
+) -> common::TestResponse {
+    client
+        .delete_auth(&format!("/api/projects/{project}/sync/{config}"), token)
+        .await
+}
+
+async fn recorded(
+    pool: &sqlx::PgPool,
+    config: &str,
+) -> Vec<(String, Option<Uuid>, serde_json::Value)> {
+    sqlx::query_as(
+        "SELECT action, actor_id, COALESCE(new_values, old_values, 'null'::jsonb)
+         FROM audit_logs WHERE resource_id = $1 ORDER BY created_at",
+    )
+    .bind(Uuid::parse_str(config).unwrap())
+    .fetch_all(pool)
+    .await
+    .expect("audit_logs is readable")
+}
+
+#[tokio::test]
+async fn a_member_who_is_not_an_admin_cannot_add_or_remove_a_sync() {
+    use zone_server::db::workspace_members::WorkspaceRole;
+
+    let client = common::TestClient::with_db().await;
+    let (owner, _owner_id) = registered(&client).await;
+    let (workspace, project) = workspace_project(&client, &owner).await;
+    let created = configure(&client, &owner, &project, &github_sync()).await;
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+    let secret = created["webhook_secret"].as_str().unwrap().to_string();
+    let (member, _member_id) = joined(&client, &workspace, WorkspaceRole::Member).await;
+    let pool = client.state().db().clone();
+    let before = recorded(&pool, &config).await;
+
+    let response = remove(&client, &member, &project, &config).await;
+    response.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.json_value()["error"],
+        "Workspace admin access required"
+    );
+    for body in [github_sync(), linear_sync()] {
+        let response = client
+            .post_json_auth(&format!("/api/projects/{project}/sync"), &body, &member)
+            .await;
+        response.assert_status(StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.json_value()["error"],
+            "Workspace admin access required"
+        );
+    }
+
+    let listed = listed_config(&client, &member, &project).await.json_value();
+    let configs = listed["configs"].as_array().unwrap();
+    assert_eq!(configs.len(), 1, "the member added nothing: {listed}");
+    assert_eq!(configs[0]["id"], config);
+    assert_eq!(recorded(&pool, &config).await, before);
+    assert_verified(&deliver_github(&client, &config, &secret).await);
+}
+
+#[tokio::test]
+async fn an_admin_adds_and_removes_a_sync_and_each_is_recorded_without_the_secret() {
+    use zone_server::db::workspace_members::WorkspaceRole;
+
+    let client = common::TestClient::with_db().await;
+    let (owner, _owner_id) = registered(&client).await;
+    let (workspace, project) = workspace_project(&client, &owner).await;
+    let (admin, admin_id) = joined(&client, &workspace, WorkspaceRole::Admin).await;
+    let pool = client.state().db().clone();
+
+    for (body, provider) in [(github_sync(), "github"), (linear_sync(), "linear")] {
+        let created = configure(&client, &admin, &project, &body).await;
+        let config = created["config"]["id"].as_str().unwrap().to_string();
+        let issued = created["webhook_secret"].as_str().map(str::to_string);
+
+        remove(&client, &admin, &project, &config)
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        let entries = recorded(&pool, &config).await;
+        let actions: Vec<&str> = entries
+            .iter()
+            .map(|(action, _, _)| action.as_str())
+            .collect();
+        assert_eq!(actions, ["sync.created", "sync.deleted"], "{entries:?}");
+        for (_action, actor, values) in &entries {
+            assert_eq!(*actor, Some(admin_id));
+            assert_eq!(values["project_id"], project);
+            assert_eq!(values["provider"], provider);
+            if let Some(issued) = &issued {
+                assert!(
+                    !values.to_string().contains(issued.as_str()),
+                    "the audit log never holds the secret: {values}"
+                );
+            }
+        }
+    }
+    let listed = listed_config(&client, &admin, &project).await.json_value();
+    assert_eq!(listed["configs"], json!([]));
 }

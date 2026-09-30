@@ -206,7 +206,6 @@ fn secret_changed_meanwhile() -> ServerError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Access {
     Read,
-    Write,
     Admin,
 }
 
@@ -232,20 +231,17 @@ async fn authorize(
     if !workspace_members::is_member(state.db(), user_id, workspace_id).await? {
         return Err(project_not_found());
     }
-    let refusal = match access {
-        Access::Read => None,
-        Access::Write => (!workspace_members::can_write(state.db(), workspace_id, user_id).await?)
-            .then_some("Workspace write access required"),
-        Access::Admin => (!workspace_members::can_admin(state.db(), workspace_id, user_id).await?)
-            .then_some("Workspace admin access required"),
-    };
-    match refusal {
-        Some(message) => Err(ServerError::Forbidden(message.to_string())),
-        None => Ok(Caller {
-            user_id,
-            workspace_id,
-        }),
+    if access == Access::Admin
+        && !workspace_members::can_admin(state.db(), workspace_id, user_id).await?
+    {
+        return Err(ServerError::Forbidden(
+            "Workspace admin access required".to_string(),
+        ));
     }
+    Ok(Caller {
+        user_id,
+        workspace_id,
+    })
 }
 
 /// Configuration `config_id`, provided it belongs to project `id`.
@@ -310,6 +306,11 @@ fn validate(req: &CreateSyncConfigRequest) -> Result<(Provider, serde_json::Valu
     ))
 }
 
+/// What the audit log keeps about a configuration: never its secret.
+fn audited_values(row: &SyncConfigRow) -> serde_json::Value {
+    json!({ "project_id": row.project_id, "provider": row.provider })
+}
+
 fn already_configured(provider: &str) -> ServerError {
     ServerError::Conflict(format!(
         "A {provider} sync is already configured for this project; remove it first"
@@ -339,13 +340,16 @@ pub async fn list(
 }
 
 /// POST /api/projects/:id/sync
+///
+/// Only an admin may: a GitHub sync is issued a fresh signing secret, so
+/// adding one is as sensitive as rotating the secret of the one it replaced.
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<CreateSyncConfigRequest>,
 ) -> Result<Response, ServerError> {
-    authorize(&state, &auth, id, Access::Write).await?;
+    let caller = authorize(&state, &auth, id, Access::Admin).await?;
     let (provider, config) = validate(&req)?;
     let provider_name = provider.as_str();
     if sync_config::get_sync_config_by_project_provider(state.db(), id, provider_name)
@@ -376,6 +380,21 @@ pub async fn create(
             ServerError::from(error)
         }
     })?;
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: None,
+            workspace_id: Some(caller.workspace_id),
+            actor_id: caller.user_id,
+            actor_email: &auth.0.email,
+            action: actions::SYNC_CREATED,
+            resource_type: resources::SYNC_CONFIG,
+            resource_id: Some(row.id),
+            old_values: None,
+            new_values: Some(audited_values(&row)),
+        },
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(SyncConfigResponse {
@@ -426,7 +445,7 @@ pub async fn set_webhook_secret(
             resource_type: resources::SYNC_CONFIG,
             resource_id: Some(row.id),
             old_values: None,
-            new_values: Some(json!({ "project_id": id, "provider": row.provider })),
+            new_values: Some(audited_values(&row)),
         },
     )
     .await;
@@ -438,18 +457,35 @@ pub async fn set_webhook_secret(
 }
 
 /// DELETE /api/projects/:id/sync/:config_id
+///
+/// Only an admin may: removing a sync drops every item it linked, and lets a
+/// GitHub sync be added again with a fresh signing secret.
 pub async fn delete(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((id, config_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, ServerError> {
-    authorize(&state, &auth, id, Access::Write).await?;
+    let caller = authorize(&state, &auth, id, Access::Admin).await?;
     let row = owned_config(&state, id, config_id).await?;
-    if sync_config::delete_sync_config(state.db(), row.id).await? {
-        Ok(StatusCode::NO_CONTENT.into_response())
-    } else {
-        Err(config_not_found())
+    if !sync_config::delete_sync_config(state.db(), row.id).await? {
+        return Err(config_not_found());
     }
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: None,
+            workspace_id: Some(caller.workspace_id),
+            actor_id: caller.user_id,
+            actor_email: &auth.0.email,
+            action: actions::SYNC_DELETED,
+            resource_type: resources::SYNC_CONFIG,
+            resource_id: Some(row.id),
+            old_values: Some(audited_values(&row)),
+            new_values: None,
+        },
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[cfg(test)]

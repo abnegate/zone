@@ -249,12 +249,15 @@ signing secret into the sync with "Set signing secret". The sync's project ID
 must be the Linear project's ID, a UUID. Deliveries more than 60 seconds old
 are refused.
 
-Any member who can write to the workspace can create or delete a sync, but
-only a workspace admin can rotate, generate or set its secret, since whoever
-holds it can sign deliveries and replacing it stops the live webhook verifying
-until the provider has the new one. The UI asks before rotating. Each change is
-written to the audit log as `sync.webhook_secret_rotated` (Zone generated it)
-or `sync.webhook_secret_set` (the admin supplied it), never with the secret. A
+Only a workspace admin can create or delete a sync, or rotate, generate or set
+its secret: whoever holds the secret can sign deliveries, replacing it stops
+the live webhook verifying until the provider has the new one, creating a
+GitHub sync issues a fresh one, and deleting a sync drops every item it linked.
+Other members see the syncs without those controls. The UI asks before
+rotating. Creating and deleting are written to the audit log as `sync.created`
+and `sync.deleted`, and each secret change as `sync.webhook_secret_rotated`
+(Zone generated it) or `sync.webhook_secret_set` (the admin supplied it),
+never with the secret. A
 change that races another is answered 409 and shows no secret, since the one it
 generated was not the one kept; load the sync again and retry.
 
