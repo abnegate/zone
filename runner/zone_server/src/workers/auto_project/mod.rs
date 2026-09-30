@@ -27,6 +27,7 @@ use zone_vcs::pull_request::PrService;
 use crate::config::{AutoProjectConfig, Config};
 use crate::db::auto_projects;
 use crate::state::AppState;
+use crate::workers::auto_project::review::outage::Outages;
 use crate::workers::notify::{self, NotifyEnvironment, NotifySettings};
 
 static WAKE: Notify = Notify::const_new();
@@ -71,6 +72,7 @@ pub struct Services {
     pub channels: Vec<Arc<dyn Notifier>>,
     /// How long a delivery may take before it is given up on.
     pub notify_timeout: std::time::Duration,
+    pub outages: Arc<Outages>,
 }
 
 impl Services {
@@ -83,6 +85,7 @@ impl Services {
             conflicts: ConflictService::new(),
             channels: notify::channels(&environment),
             notify_timeout: NotifySettings::resolve(&environment).timeout,
+            outages: Arc::default(),
         }
     }
 
@@ -94,6 +97,7 @@ impl Services {
             conflicts: ConflictService::new(),
             channels: Vec::new(),
             notify_timeout: std::time::Duration::from_secs(5),
+            outages: Arc::default(),
         }
     }
 }

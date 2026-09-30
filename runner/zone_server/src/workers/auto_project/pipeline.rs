@@ -715,6 +715,24 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             },
         )
         .await;
+        let outages = &step.drive.services.outages;
+        if let Err(ReviewError::Unreachable(failure)) = &outcome {
+            let streak = outages.record(step.task.task_id, Utc::now());
+            tracing::warn!(
+                task_id = %step.task.task_id,
+                reviewer = %reviewer.model,
+                attempts = streak.attempts,
+                since = %streak.since,
+                %failure,
+                "The reviewer model could not be reached"
+            );
+            if streak.outlasted() {
+                outages.clear(step.task.task_id);
+                return step.pause(&streak.reason(&reviewer.model, failure)).await;
+            }
+        } else {
+            outages.clear(step.task.task_id);
+        }
         match outcome {
             Ok(verdict) => {
                 let body = verdict::comment(&verdict, &reviewer.model, round, reviewer.same_model);
@@ -882,7 +900,8 @@ pub struct Missed {
 /// Where a review that returned no verdict leaves the task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {
-    /// Stay in review; the next tick asks the next reviewer in the rotation.
+    /// Stay in review; the next tick asks again, the next reviewer in the
+    /// rotation when this round was recorded and the same one when it was not.
     Retry(String),
     /// Hand the task to a person.
     Pause(String),
@@ -897,12 +916,22 @@ pub struct Recovery {
 }
 
 /// What follows a review by `reviewer` that ended in `error`, when `earlier`
-/// rounds on the same head also ended without a verdict.
+/// rounds on the same head also ended without a verdict. An endpoint that did
+/// not answer judged nothing, so its tick is not a round; [`review::outage`]
+/// bounds how long that goes on.
 pub fn recover(error: &ReviewError, reviewer: &str, earlier: usize) -> Recovery {
     if let Some(reason) = error.stalled() {
         return Recovery {
             missed: None,
             next: Next::Pause(reason),
+        };
+    }
+    if matches!(error, ReviewError::Unreachable(_)) {
+        return Recovery {
+            missed: None,
+            next: Next::Retry(format!(
+                "the reviewer model {reviewer} could not be reached; asking it again"
+            )),
         };
     }
     let (verdict, summary, retry) = if let ReviewError::Unparseable(message) = error {
@@ -1566,7 +1595,7 @@ mod tests {
 
     #[test]
     fn a_second_round_without_a_verdict_pauses_the_task_with_the_last_error() {
-        let error = ReviewError::Model("connection refused".into());
+        let error = ReviewError::Model("the model returned no choices".into());
 
         let recovery = recover(&error, "small", MAX_VERDICTLESS_ROUNDS - 1);
 
@@ -1578,9 +1607,27 @@ mod tests {
         let Next::Pause(reason) = recovery.next else {
             panic!("the task keeps retrying after {MAX_VERDICTLESS_ROUNDS} verdictless rounds");
         };
-        assert!(reason.contains("connection refused"), "{reason}");
+        assert!(reason.contains("the model returned no choices"), "{reason}");
         assert!(reason.contains("small"), "{reason}");
         assert!(reason.contains("ZONE_AUTO_REVIEW_MODELS"), "{reason}");
+    }
+
+    #[test]
+    fn an_unreachable_reviewer_records_nothing_and_is_asked_again_whatever_came_before() {
+        let error = ReviewError::Unreachable("HTTP error: connection refused".into());
+
+        for earlier in [0, MAX_VERDICTLESS_ROUNDS] {
+            assert_eq!(
+                recover(&error, "qwen3:32b", earlier),
+                Recovery {
+                    missed: None,
+                    next: Next::Retry(
+                        "the reviewer model qwen3:32b could not be reached; asking it again".into()
+                    ),
+                },
+                "a restarting server judged nothing, so it neither rotates nor counts"
+            );
+        }
     }
 
     #[test]
