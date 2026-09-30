@@ -42,6 +42,7 @@ BACKUP_VOLUMES := ollama_data:ollama postgres_data:postgres valkey_data:valkey \
 POSTGRES_VOLUME := $(VOLUME_PREFIX)_postgres_data
 backup_volume = $(VOLUME_PREFIX)_$(firstword $(subst :, ,$(1)))
 backup_directory = /data/$(lastword $(subst :, ,$(1)))
+RESTORE_PREVIOUS := .zone-restore-previous
 
 ##@ Setup & Configuration
 
@@ -427,7 +428,7 @@ backup: ## Backup volumes to ./backups, stopping postgres while its cluster is c
 	docker run --rm --name "$$worker" \
 		$(foreach pair,$(BACKUP_VOLUMES),-v $(if $(filter $(POSTGRES_VOLUME),$(call backup_volume,$(pair))),"$$source",$(call backup_volume,$(pair))):$(call backup_directory,$(pair)):ro) \
 		-v "$$(pwd)/backups:/backup" \
-		alpine sh -c "umask 077 && tar czf /backup/.$$name -C /data . && if [ -e /backup/$$name ]; then echo 'backups/$$name already exists; not overwriting it.' >&2; exit 1; fi && mv /backup/.$$name /backup/$$name" || exit 1; \
+		alpine sh -c "umask 077 && tar czf /backup/.$$name --exclude='./*/$(RESTORE_PREVIOUS)' -C /data . && if [ -e /backup/$$name ]; then echo 'backups/$$name already exists; not overwriting it.' >&2; exit 1; fi && mv /backup/.$$name /backup/$$name" || exit 1; \
 	echo "$(GREEN)Backup created: backups/$$name$(NC)"; \
 	exit $$status
 
@@ -446,18 +447,83 @@ restore: ## Restore from backup with the stack stopped, replacing each volume th
 	@docker run --rm \
 		$(foreach pair,$(BACKUP_VOLUMES),-v $(call backup_volume,$(pair)):$(call backup_directory,$(pair))) \
 		-v "$$(pwd)/backups:/backup" \
-		alpine sh -ec ' \
-			tar tzf "/backup/$$1" > /tmp/entries; \
+		alpine sh -c ' \
+			previous=$(RESTORE_PREVIOUS); \
+			tar tzf "/backup/$$1" > /tmp/entries || exit 1; \
+			if grep -Eq "^(\./)?[^/]+/\$(RESTORE_PREVIOUS)(/|\$$)" /tmp/entries; then \
+				echo "The archive holds a volume-level $$previous, the directory a restore sets the current contents aside in; not restoring it." >&2; \
+				exit 1; \
+			fi; \
+			volumes=; \
+			exclude=; \
 			for directory in /data/*; do \
 				name=$${directory#/data/}; \
 				grep -Eq "^(\./)?$$name/" /tmp/entries || continue; \
 				if [ "$$name" = postgres ] && ! grep -Eqx "(\./)?postgres/PG_VERSION" /tmp/entries; then \
 					printf "%b\n" "$(YELLOW)The archive carries no postgres cluster, so $(POSTGRES_VOLUME) keeps what it holds: backups taken before the PGDATA mount moved into $(POSTGRES_VOLUME) hold an empty postgres/ directory.$(NC)"; \
+					exclude=--exclude=./postgres; \
 					continue; \
 				fi; \
-				find "$$directory" -mindepth 1 -delete; \
+				if [ -e "$$directory/$$previous" ]; then \
+					echo "An interrupted restore left $$name/$$previous, which holds what that volume held before it. Delete it to keep what $$name/ holds now, or replace the rest of $$name/ with its contents, then restore again." >&2; \
+					exit 1; \
+				fi; \
+				volumes="$$volumes $$directory"; \
 			done; \
-			tar xzf "/backup/$$1" -C /data' sh "$$(basename $(BACKUP))"
+			set_aside() { \
+				for entry in "$$1"/* "$$1"/.[!.]* "$$1"/..?*; do \
+					[ -e "$$entry" ] || [ -L "$$entry" ] || continue; \
+					[ "$${entry##*/}" = "$$previous" ] && continue; \
+					mv "$$entry" "$$1/$$previous/" || return 1; \
+				done; \
+			}; \
+			discard_extracted() { \
+				for entry in "$$1"/* "$$1"/.[!.]* "$$1"/..?*; do \
+					[ -e "$$entry" ] || [ -L "$$entry" ] || continue; \
+					[ "$${entry##*/}" = "$$previous" ] && continue; \
+					rm -rf "$$entry" || return 1; \
+				done; \
+			}; \
+			put_back() { \
+				for entry in "$$1/$$previous"/* "$$1/$$previous"/.[!.]* "$$1/$$previous"/..?*; do \
+					[ -e "$$entry" ] || [ -L "$$entry" ] || continue; \
+					mv "$$entry" "$$1/" || return 1; \
+				done; \
+				rmdir "$$1/$$previous"; \
+			}; \
+			moved=; \
+			extracting=; \
+			extracted=; \
+			roll_back() { \
+				[ -n "$$extracted" ] && return 0; \
+				[ -n "$$moved" ] || return 0; \
+				failed=; \
+				for directory in $$moved; do \
+					if [ -n "$$extracting" ] && ! discard_extracted "$$directory"; then \
+						failed=1; \
+						continue; \
+					fi; \
+					put_back "$$directory" || failed=1; \
+				done; \
+				if [ -n "$$failed" ]; then \
+					echo "The restore failed and could not put every volume back: a volume that still has a $$previous directory holds its earlier contents there." >&2; \
+				else \
+					echo "The restore failed; every volume holds what it held before." >&2; \
+				fi; \
+			}; \
+			trap roll_back EXIT; \
+			trap "exit 130" INT TERM HUP; \
+			for directory in $$volumes; do \
+				mkdir -m 700 "$$directory/$$previous" || exit 1; \
+				moved="$$moved $$directory"; \
+				set_aside "$$directory" || exit 1; \
+			done; \
+			extracting=1; \
+			tar xzf "/backup/$$1" -C /data $$exclude || exit 1; \
+			extracted=1; \
+			for directory in $$moved; do \
+				rm -rf "$${directory:?}/$${previous:?}" || { echo "Remove $${directory#/data/}/$$previous from its volume: it holds what that volume held before the restore." >&2; exit 1; }; \
+			done' sh "$$(basename $(BACKUP))"
 	@echo "$(GREEN)Restore complete!$(NC)"
 
 migrate-pgdata: ## Move an existing install's postgres cluster out of the anonymous PGDATA volume into zone_postgres_data (run after 'make stop', before './scripts/compose.sh up -d')

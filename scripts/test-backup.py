@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""Verify make backup copies the postgres cluster stopped and archives in one pass, and make restore replaces volumes only with the stack stopped, without Docker."""
+"""Verify make backup copies the postgres cluster stopped and archives in one pass, and make restore replaces volumes only with the stack stopped, without Docker.
 
+ZONE_TEST_DOCKER=1 also runs backup and restore against throwaway Docker volumes.
+"""
+
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import time
 import unittest
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +31,7 @@ BACKUP = 'BACKUP=backups/zone_backup_20260930_000000.tar.gz'
 DATE = '20260930_000000'
 RUN_NAME = re.compile(rf'^zone_backup_{DATE}-[0-9]+$')
 ARCHIVE_NAME = re.compile(rf'^zone_backup_{DATE}-[0-9]+\.tar\.gz$')
+PREVIOUS = '.zone-restore-previous'
 
 FAKE_DOCKER = '''#!/usr/bin/env python3
 import json, os, signal, subprocess, sys, time
@@ -308,6 +315,7 @@ class Backup(MakeTarget):
                 script = run.calls[archive][-1]
                 self.assertIn('tar czf /backup/.zone_backup_', script)
                 self.assertIn('-C /data .', script)
+                self.assertIn(f"--exclude='./*/{PREVIOUS}'", script)
                 self.assertNotIn('-rf', script)
                 self.assertNotIn('gzip', script)
                 self.assertEqual(run.directory_mode, 0o700)
@@ -501,7 +509,7 @@ class Restore(MakeTarget):
                 for volume in ['zone_postgres_data', 'zone_manager_agent_state', 'zone_traefik_letsencrypt']:
                     self.assertIn(f'volume={volume}', listing)
 
-    def test_restore_clears_each_archived_volume_before_extracting(self) -> None:
+    def test_restore_sets_each_archived_volume_aside_before_extracting(self) -> None:
         for shell in SHELLS:
             with self.subTest(shell=shell):
                 run = self.make('restore', Fake(running=''), shell, BACKUP)
@@ -511,61 +519,277 @@ class Restore(MakeTarget):
                 self.assertEqual(call[-1], 'zone_backup_20260930_000000.tar.gz')
                 self.assertIn('zone_postgres_data:/data/postgres', mounts(call))
                 self.assertEqual(len(mounts(call)), 10)
-                script = call[call.index('-ec') + 1]
+                script = call[call.index('-c') + 1]
                 listing = script.index('tar tzf')
-                clearing = script.index('find "$directory" -mindepth 1 -delete')
+                aside = script.index('set_aside "$directory" || exit 1')
                 extraction = script.index('tar xzf')
-                self.assertLess(listing, clearing)
-                self.assertLess(clearing, extraction)
+                self.assertLess(listing, aside)
+                self.assertLess(aside, extraction)
+                self.assertNotIn('-delete', script)
+
+
+Tree = dict[str, str | None]
+
+
+def write_tree(root: Path, tree: Tree) -> None:
+    for path, content in tree.items():
+        if content is None:
+            (root / path).mkdir(parents=True, exist_ok=True)
+            continue
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(content)
+
+
+def read_tree(root: Path) -> Tree:
+    return {
+        str(path.relative_to(root)): None if path.is_dir() else path.read_text()
+        for path in sorted(root.rglob('*'))
+    }
+
+
+def restore_script() -> str:
+    run = subprocess.run(['make', '-n', '-f', str(MAKEFILE), 'restore', BACKUP],
+                         text=True, capture_output=True, check=True)
+    command = next(line for line in run.stdout.split('docker run')[1:] if 'tar xzf' in line)
+    return command[command.index("sh -c '") + 7:command.rindex("' sh ")].replace('\\\n', '')
+
+
+FAILING_TAR = '''#!/bin/sh
+if [ "$1" = xzf ]; then
+    "$REAL_TAR" "$@"
+    echo partial > "$FAILING_TAR_STRAY"
+    exit 1
+fi
+exec "$REAL_TAR" "$@"
+'''
 
 
 class RestoreScript(unittest.TestCase):
-    def restore(self, archive_tree: dict[str, str | None], volumes: dict[str, str]) -> tuple[Path, str]:
-        run = subprocess.run(['make', '-n', '-f', str(MAKEFILE), 'restore', BACKUP],
-                             text=True, capture_output=True, check=True)
-        command = next(line for line in run.stdout.split('docker run')[1:] if 'tar xzf' in line)
-        script = command[command.index("-ec '") + 5:command.rindex("' sh ")].replace('\\\n', '')
+    def restore(self, archive: Tree, volumes: Tree, succeeds: bool = True,
+                failing_extraction: bool = False) -> tuple[Path, str]:
         folder = Path(tempfile.mkdtemp(prefix='zone-restore-script-'))
         self.addCleanup(shutil.rmtree, folder)
         source = folder / 'source'
-        for path, content in archive_tree.items():
-            if content is None:
-                (source / path).mkdir(parents=True, exist_ok=True)
-                continue
-            (source / path).parent.mkdir(parents=True, exist_ok=True)
-            (source / path).write_text(content)
+        source.mkdir()
+        write_tree(source, archive)
         backup = folder / 'backup'
         backup.mkdir()
         subprocess.run(['tar', 'czf', str(backup / 'archive.tar.gz'), '-C', str(source), '.'], check=True)
         data = folder / 'data'
-        for path, content in volumes.items():
-            (data / path).parent.mkdir(parents=True, exist_ok=True)
-            (data / path).write_text(content)
-        script = script.replace('/backup/', f'{backup}/').replace('/data', str(data)).replace(
+        data.mkdir()
+        write_tree(data, volumes)
+        script = restore_script().replace('/backup/', f'{backup}/').replace('/data', str(data)).replace(
             '/tmp/entries', str(folder / 'entries'))
-        result = subprocess.run(['sh', '-ec', script, 'sh', 'archive.tar.gz'], text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        environment = dict(os.environ)
+        if failing_extraction:
+            bin_directory = folder / 'bin'
+            bin_directory.mkdir()
+            (bin_directory / 'tar').write_text(FAILING_TAR)
+            (bin_directory / 'tar').chmod(0o700)
+            environment |= {'PATH': f'{bin_directory}:{os.environ["PATH"]}', 'REAL_TAR': shutil.which('tar'),
+                            'FAILING_TAR_STRAY': str(data / 'valkey/partial')}
+        result = subprocess.run(['sh', '-c', script, 'sh', 'archive.tar.gz'], text=True, capture_output=True,
+                                env=environment)
+        self.assertEqual(result.returncode == 0, succeeds, result.stdout + result.stderr)
         return data, result.stdout + result.stderr
 
     def test_archived_volumes_lose_files_written_after_the_backup(self) -> None:
         data, _ = self.restore(
             {'postgres/PG_VERSION': '16', 'postgres/base/1': 'row', 'valkey/dump.rdb': 'old', 'grafana/': None},
             {'postgres/PG_VERSION': '16', 'postgres/base/1_vm': 'stale', 'valkey/dump.rdb': 'new',
-             'valkey/temp.rdb': 'stale', 'grafana/grafana.db': 'new', 'unlisted/keep': 'kept'})
-        self.assertFalse((data / 'postgres/base/1_vm').exists())
-        self.assertEqual((data / 'postgres/base/1').read_text(), 'row')
-        self.assertEqual((data / 'valkey/dump.rdb').read_text(), 'old')
-        self.assertFalse((data / 'valkey/temp.rdb').exists())
-        self.assertEqual(list((data / 'grafana').iterdir()), [])
-        self.assertEqual((data / 'unlisted/keep').read_text(), 'kept')
+             'valkey/temp.rdb': 'stale', 'valkey/.hidden': 'stale', 'grafana/grafana.db': 'new',
+             'unlisted/keep': 'kept'})
+        self.assertEqual(read_tree(data), {
+            'grafana': None,
+            'postgres': None, 'postgres/PG_VERSION': '16', 'postgres/base': None, 'postgres/base/1': 'row',
+            'unlisted': None, 'unlisted/keep': 'kept',
+            'valkey': None, 'valkey/dump.rdb': 'old',
+        })
+
+    def test_failed_extraction_puts_every_volume_back(self) -> None:
+        volumes: Tree = {'postgres/PG_VERSION': '16', 'postgres/base/1': 'new', 'valkey/dump.rdb': 'new',
+                         'valkey/.hidden': 'new', 'valkey/..double': 'new', 'grafana/grafana.db': 'new',
+                         'unlisted/keep': 'kept'}
+        data, output = self.restore(
+            {'postgres/PG_VERSION': '16', 'postgres/base/1': 'old', 'postgres/base/2': 'old',
+             'valkey/dump.rdb': 'old', 'grafana/': None},
+            volumes, succeeds=False, failing_extraction=True)
+        expected = Path(tempfile.mkdtemp(prefix='zone-restore-expected-'))
+        self.addCleanup(shutil.rmtree, expected)
+        write_tree(expected, volumes)
+        self.assertEqual(read_tree(data), read_tree(expected))
+        self.assertIn('every volume holds what it held before', output)
 
     def test_archive_without_a_cluster_keeps_the_current_one(self) -> None:
         data, output = self.restore(
-            {'postgres/data/': None, 'valkey/dump.rdb': 'old'},
-            {'postgres/PG_VERSION': '16', 'valkey/dump.rdb': 'new'})
-        self.assertEqual((data / 'postgres/PG_VERSION').read_text(), '16')
-        self.assertEqual((data / 'valkey/dump.rdb').read_text(), 'old')
+            {'postgres/data/': None, 'postgres/stray': 'old', 'valkey/dump.rdb': 'old'},
+            {'postgres/PG_VERSION': '16', 'postgres/base/1': 'row', 'valkey/dump.rdb': 'new'})
+        self.assertEqual(read_tree(data), {
+            'postgres': None, 'postgres/PG_VERSION': '16', 'postgres/base': None, 'postgres/base/1': 'row',
+            'valkey': None, 'valkey/dump.rdb': 'old',
+        })
         self.assertIn('carries no postgres cluster', output)
+
+    def test_failed_extraction_keeps_the_current_cluster_when_the_archive_has_none(self) -> None:
+        volumes: Tree = {'postgres/PG_VERSION': '16', 'valkey/dump.rdb': 'new'}
+        data, _ = self.restore({'postgres/data/': None, 'valkey/dump.rdb': 'old'}, volumes,
+                               succeeds=False, failing_extraction=True)
+        self.assertEqual(read_tree(data), {'postgres': None, 'postgres/PG_VERSION': '16',
+                                           'valkey': None, 'valkey/dump.rdb': 'new'})
+
+    def test_leftover_aside_directory_stops_the_restore_before_anything_moves(self) -> None:
+        volumes: Tree = {'postgres/PG_VERSION': '16', 'valkey/dump.rdb': 'new',
+                         f'grafana/{PREVIOUS}/grafana.db': 'older', 'grafana/grafana.db': 'new'}
+        data, output = self.restore({'postgres/PG_VERSION': '16', 'valkey/dump.rdb': 'old', 'grafana/': None},
+                                    volumes, succeeds=False)
+        expected = Path(tempfile.mkdtemp(prefix='zone-restore-expected-'))
+        self.addCleanup(shutil.rmtree, expected)
+        write_tree(expected, volumes)
+        self.assertEqual(read_tree(data), read_tree(expected))
+        self.assertIn(f'An interrupted restore left grafana/{PREVIOUS}', output)
+
+    def test_archive_carrying_an_aside_directory_is_refused(self) -> None:
+        volumes: Tree = {'postgres/PG_VERSION': '16', 'valkey/dump.rdb': 'new'}
+        data, output = self.restore({'postgres/PG_VERSION': '16', f'valkey/{PREVIOUS}/dump.rdb': 'old'},
+                                    volumes, succeeds=False)
+        self.assertEqual(read_tree(data), {'postgres': None, 'postgres/PG_VERSION': '16',
+                                           'valkey': None, 'valkey/dump.rdb': 'new'})
+        self.assertIn(PREVIOUS, output)
+
+
+DOCKER_DIRECTORIES = {'postgres': 'postgres_data', 'valkey': 'valkey_data', 'grafana': 'grafana_data'}
+
+
+@unittest.skipUnless(os.environ.get('ZONE_TEST_DOCKER') == '1',
+                     'set ZONE_TEST_DOCKER=1 to run backup and restore against throwaway Docker volumes')
+class DockerVolumes(unittest.TestCase):
+    def setUp(self) -> None:
+        self.prefix = f'zonetest{uuid.uuid4().hex[:12]}'
+        self.assertNotEqual(self.prefix, 'zone')
+        self.addCleanup(self.remove_volumes)
+        self.work = Path(tempfile.mkdtemp(prefix='zone-backup-docker-'))
+        self.addCleanup(shutil.rmtree, self.work, True)
+        (self.work / 'backups').mkdir(mode=0o700)
+        for target in ['backup', f'restore BACKUP=backups/{self.prefix}.tar.gz']:
+            planned = subprocess.run(['make', '-n', '-f', str(MAKEFILE), '-C', str(self.work), *target.split(),
+                                      f'VOLUME_PREFIX={self.prefix}'], text=True, capture_output=True, check=True)
+            self.assertNotRegex(planned.stdout, r'(?<![A-Za-z0-9_])zone_[a-z_]+_(data|repos|artifacts|state|letsencrypt)')
+
+    def remove_volumes(self) -> None:
+        listed = subprocess.run(['docker', 'volume', 'ls', '-q', '--filter', f'name={self.prefix}_'],
+                                text=True, capture_output=True, check=True).stdout.split()
+        owned = [volume for volume in listed if volume.startswith(f'{self.prefix}_')]
+        if owned:
+            subprocess.run(['docker', 'volume', 'rm', *owned], capture_output=True, check=True)
+
+    def volume(self, directory: str) -> str:
+        return f'{self.prefix}_{DOCKER_DIRECTORIES[directory]}'
+
+    def mounts(self) -> list[str]:
+        return [argument for directory in DOCKER_DIRECTORIES
+                for argument in ['-v', f'{self.volume(directory)}:/data/{directory}']]
+
+    def seed(self, tree: Tree) -> None:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w') as archive:
+            add_tree(archive, tree)
+        subprocess.run(['docker', 'run', '--rm', '-i', *self.mounts(), 'alpine', 'sh', '-c',
+                        'find /data -mindepth 2 -maxdepth 2 -exec rm -rf {} + && tar xf - -C /data'],
+                       input=buffer.getvalue(), capture_output=True, check=True)
+
+    def snapshot(self) -> Tree:
+        result = subprocess.run(['docker', 'run', '--rm', *self.mounts(), 'alpine', 'tar', 'cf', '-', '-C', '/data',
+                                 *DOCKER_DIRECTORIES], capture_output=True, check=True)
+        tree: Tree = {}
+        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
+            for member in archive.getmembers():
+                content = archive.extractfile(member) if member.isfile() else None
+                tree[member.name.rstrip('/')] = content.read().decode() if content else None
+        return tree
+
+    def make(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        environment = {key: value for key, value in os.environ.items() if not key.startswith('MAKE')}
+        environment.pop('ALLOW_EMPTY_POSTGRES', None)
+        return subprocess.run(['make', '-f', str(MAKEFILE), '-C', str(self.work), *arguments,
+                               f'VOLUME_PREFIX={self.prefix}'], text=True, capture_output=True, timeout=300,
+                              env=environment)
+
+    def archives(self) -> list[Path]:
+        return sorted((self.work / 'backups').glob('zone_backup_*.tar.gz'))
+
+    def test_round_trip_restores_the_archive_and_leaves_no_aside_directory(self) -> None:
+        self.seed({'postgres/PG_VERSION': '16', 'postgres/base/1': 'old', 'valkey/dump.rdb': 'old',
+                   'grafana/grafana.db': 'old', f'grafana/{PREVIOUS}/grafana.db': 'older'})
+        backup = self.make('backup')
+        self.assertEqual(backup.returncode, 0, backup.stdout + backup.stderr)
+        [archive] = self.archives()
+        with tarfile.open(archive) as opened:
+            members = opened.getnames()
+        self.assertIn('./grafana/grafana.db', members)
+        self.assertFalse([member for member in members if PREVIOUS in member], members)
+
+        self.seed({'postgres/PG_VERSION': '16', 'postgres/base/1': 'new', 'postgres/base/1_vm': 'new',
+                   'valkey/dump.rdb': 'new', 'valkey/.hidden': 'new', 'grafana/grafana.db': 'new'})
+        restore = self.make('restore', f'BACKUP=backups/{archive.name}')
+        self.assertEqual(restore.returncode, 0, restore.stdout + restore.stderr)
+        self.assertEqual(self.snapshot(), {
+            'postgres': None, 'postgres/PG_VERSION': '16', 'postgres/base': None, 'postgres/base/1': 'old',
+            'valkey': None, 'valkey/dump.rdb': 'old', 'grafana': None, 'grafana/grafana.db': 'old',
+        })
+
+    def test_truncated_archive_leaves_every_volume_as_it_was(self) -> None:
+        self.seed({'postgres/PG_VERSION': '16', 'postgres/base/1': 'old', 'valkey/dump.rdb': os.urandom(1 << 16).hex()})
+        backup = self.make('backup')
+        self.assertEqual(backup.returncode, 0, backup.stdout + backup.stderr)
+        [archive] = self.archives()
+        archive.write_bytes(archive.read_bytes()[:archive.stat().st_size // 2])
+        current: Tree = {'postgres/PG_VERSION': '16', 'postgres/base/1': 'new', 'valkey/dump.rdb': 'new',
+                         'grafana/grafana.db': 'new'}
+        self.seed(current)
+        before = self.snapshot()
+        restore = self.make('restore', f'BACKUP=backups/{archive.name}')
+        self.assertNotEqual(restore.returncode, 0, restore.stdout + restore.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_extraction_that_runs_out_of_space_puts_every_volume_back(self) -> None:
+        subprocess.run(['docker', 'volume', 'create', '--driver', 'local', '--opt', 'type=tmpfs',
+                        '--opt', 'device=tmpfs', '--opt', 'o=size=1m', self.volume('valkey')],
+                       capture_output=True, check=True)
+        current: Tree = {'postgres/PG_VERSION': '16', 'postgres/base/1': 'new', 'postgres/base/1_vm': 'new',
+                         'valkey/dump.rdb': 'new', 'valkey/.hidden': 'new', 'grafana/grafana.db': 'new'}
+        self.seed(current)
+        before = self.snapshot()
+        archive = self.work / 'backups' / f'zone_backup_{self.prefix}.tar.gz'
+        with tarfile.open(archive, 'w:gz') as opened:
+            add_tree(opened, {'postgres/PG_VERSION': '16', 'postgres/base/1': 'old', 'grafana/grafana.db': 'old',
+                              'valkey/dump.rdb': os.urandom(3 << 20).hex()})
+        restore = self.make('restore', f'BACKUP=backups/{archive.name}')
+        self.assertNotEqual(restore.returncode, 0, restore.stdout + restore.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assertIn('every volume holds what it held before', restore.stderr)
+
+
+def add_tree(archive: tarfile.TarFile, tree: Tree) -> None:
+    directories = {'.'} | {str(Path(path).parent) for path in tree} | {path.rstrip('/') for path, content in tree.items()
+                                                                       if content is None}
+    expanded = set()
+    for directory in directories:
+        while directory not in ('', '.'):
+            expanded.add(directory)
+            directory = str(Path(directory).parent)
+    for directory in ['.', *sorted(expanded)]:
+        member = tarfile.TarInfo('.' if directory == '.' else f'./{directory}')
+        member.type = tarfile.DIRTYPE
+        member.mode = 0o755
+        archive.addfile(member)
+    for path, content in tree.items():
+        if content is None:
+            continue
+        data = content.encode()
+        member = tarfile.TarInfo(f'./{path}')
+        member.size = len(data)
+        member.mode = 0o644
+        archive.addfile(member, io.BytesIO(data))
 
 
 if __name__ == '__main__':

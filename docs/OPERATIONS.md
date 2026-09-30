@@ -95,17 +95,37 @@ an archive of that name already exists, the backup leaves it alone, removes
 its own partial archive and exits non-zero. The process ID keeps two backups
 started in the same second apart: each has its own temporary volume,
 container, partial archive and archive, and removes only its own when it
-ends.
+ends. A volume-level `.zone-restore-previous` directory, which only an
+interrupted restore leaves behind, is never archived.
 
 `make restore BACKUP=<archive>` refuses to start while any running container
 mounts one of the nine volumes: stop the stack first (`make stop`), and start
 it afterwards. It lists the archive first, which also checks it is readable,
-and then empties each volume the archive carries before extracting into it,
-so files written after the backup, such as a table's `_vm` and `_fsm` forks,
-do not survive the restore. Volumes the archive does not carry are left alone.
+so a truncated or corrupt archive stops the restore before any volume is
+touched. It then moves what each volume the archive carries holds into a
+`.zone-restore-previous` directory inside that volume, a rename on the same
+filesystem that copies nothing, and extracts the archive. Files written after
+the backup, such as a table's `_vm` and `_fsm` forks, do not survive the
+restore. Volumes the archive does not carry are left alone.
+
+When the extraction succeeds, the restore deletes each
+`.zone-restore-previous` directory. When it fails, for example because a
+volume's disk fills up or a member of the archive is corrupt, the restore
+deletes what it extracted and moves each volume's earlier contents back, so
+every volume holds what it held before. Until the restore ends, a volume
+therefore needs free space for both its earlier contents and the archived
+ones. An interrupted restore can leave a `.zone-restore-previous` directory
+behind if the container itself is killed: the next restore refuses to start
+until you delete that directory (keeping what the volume holds now) or
+replace the rest of the volume with its contents. Each directory at the top
+of the archive (`postgres/`, `valkey/` and so on) is the volume listed in the
+first paragraph. An archive that itself holds a volume-level
+`.zone-restore-previous` directory is refused.
+
 An archive with no cluster under `postgres/`, which is what every archive
-taken before the mount moved looks like, leaves `zone_postgres_data` as it
-is and says so. Archives from before the postgres pass restore the same way.
+taken before the mount moved looks like, leaves `zone_postgres_data` exactly
+as it is, extracting nothing into it, and says so. Archives from before the
+postgres pass restore the same way.
 
 ### Coding agent sign-ins in an archive
 
