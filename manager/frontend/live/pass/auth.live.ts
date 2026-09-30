@@ -589,9 +589,14 @@ test.describe('auth and account', () => {
       hasText: state.intruder.email,
     });
     const rowShown = (await row.count()) > 0;
-    const badge = rowShown
-      ? await row.locator('.role-badge').innerText()
-      : 'no row carries the member email';
+    const roleSelect = row.locator('select.role-select');
+    const badge = !rowShown
+      ? 'no row carries the member email'
+      : (await roleSelect.count()) > 0
+        ? await roleSelect.evaluate(
+            (select: HTMLSelectElement) => select.selectedOptions[0]?.text ?? '',
+          )
+        : await row.locator('.role-badge').innerText();
     const memberRows = await page
       .locator('table.members-table tbody tr')
       .count();

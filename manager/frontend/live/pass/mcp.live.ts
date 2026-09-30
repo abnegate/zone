@@ -28,6 +28,15 @@ import {
 
 const SCRATCH_PROJECT = 'Real pass scratch';
 
+// Which agent magents should start, and where: a headless claude on a host
+// whose Claude Code runs on the desktop app's sign-in answers "Not logged
+// in", and codex refuses to start outside a git repository.
+const AGENT = process.env.ZONE_MAGENTS_AGENT;
+const AGENT_CWD = process.env.ZONE_MAGENTS_CWD;
+const which = AGENT
+  ? ` a new ${AGENT} session${AGENT_CWD ? ` in the directory ${AGENT_CWD}` : ''}`
+  : ' a new agent session';
+
 async function toggle(
   dialog: Locator,
   title: string,
@@ -76,7 +85,7 @@ test.describe('mcp', () => {
     await dialog
       .locator('#task-description')
       .fill(
-        `Hand this to another coding agent on this machine rather than doing it yourself: start a new independent agent session whose instruction is "print the words delegated-${s}", then message it asking for its result, and report back what the other agent said. Use the tools you have for talking to other agents.`,
+        `Hand this to another coding agent on this machine rather than doing it yourself: start${which.replace(' a new', ' a new independent')} whose instruction is "print the words delegated-${s}", then message it asking for its result, and report back what the other agent said. Use the tools you have for talking to other agents.`,
       );
     await dialog.getByRole('button', { name: 'Next' }).click();
     await toggle(dialog, 'Enable Agentic Mode', true);
@@ -153,7 +162,7 @@ test.describe('mcp', () => {
     });
     const reply = await ask(
       page,
-      `Using your magents tools (they are MCP tools named magents_*): spawn a new agent session whose instruction is exactly "print the words delegated-${s} and nothing else", wait for its reply or read its transcript, tell me word for word what it printed, then stop that session.`,
+      `Using your magents tools (they are MCP tools named magents_*): spawn${which} whose instruction is exactly "print the words delegated-${s} and nothing else", wait for its reply or read its transcript, tell me word for word what it printed, then stop that session.`,
       { replies: 1, timeout: 1_800_000 },
     );
     await shot(page, '32-magents-from-chat');
@@ -165,28 +174,34 @@ test.describe('mcp', () => {
       ).map((c) => `${c.function.name} ${c.function.arguments.slice(0, 120)}`),
     );
     const results = sql(
-      `select left(replace(message->>'content', E'\\n', ' '), 200) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'tool' order by created_at`,
+      `select replace(message->>'content', E'\\n', ' ') from chat_entries where chat_id = '${chatId}' and message->>'role' = 'tool' order by created_at`,
     );
+    // The spawned session's title repeats the instruction, so what it
+    // printed is read from the transcript's assistant turn, not from any
+    // mention of the words.
+    const printed = new RegExp(
+      `"(last_assistant_action|text)":\\s*"delegated-${s}`,
+    );
+    const readBack =
+      results.some((result) => printed.test(result)) &&
+      reply.includes(`delegated-${s}`);
     const magents = calls.filter((c) => c.startsWith('magents_'));
     const serverLog = logLines(mark, /mcp|magents/i)
       .slice(0, 12)
       .map((l) => l.slice(0, 200));
     const attached = logLines(mark, /Attached MCP tools/).length;
     record(32.5, {
-      result:
-        magents.length > 0 && /delegated-/.test(results.join(' '))
-          ? 'WORKS'
-          : 'FAILS',
+      result: magents.length > 0 && readBack ? 'WORKS' : 'FAILS',
       cause:
         magents.length > 0
-          ? /delegated-/.test(results.join(' '))
+          ? readBack
             ? undefined
             : 'the magents tools were called but nothing read back the delegated words'
           : `model: no magents_* call from the chat (calls: ${[...new Set(calls.map((c) => c.split(' ')[0]))].join(', ')})`,
       chat_id: chatId,
       reply: reply.slice(0, 300),
       calls,
-      tool_results: results.slice(0, 12),
+      tool_results: results.slice(0, 12).map((result) => result.slice(0, 300)),
       magents_calls: magents,
       mcp_attach_lines_since_mark: attached,
       server_log: serverLog,

@@ -100,6 +100,10 @@ test.describe('tool set seen by the model', () => {
     );
     await page.goto('/tasks');
     const card = page.locator('.task-card', { hasText: `Named-run ${s}` });
+    await card
+      .first()
+      .waitFor({ timeout: 30_000 })
+      .catch(() => undefined);
     const onPage = await card.count();
     if (onPage) await shot(page, '51-named-task-on-tasks-page');
     record(51.6, {

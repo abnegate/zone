@@ -438,10 +438,12 @@ test.describe('chats', () => {
     await shot(page, '36-text-answered');
     const stored = entries(chatId);
     const codeSeen = textReply.includes(`4471-${s}`);
-    const imageMentions =
-      /lighthouse|sea|coast|storm|rock|tower|water|wave|cliff|sky/i.test(
-        imageReply,
-      );
+    const imageWords = new RegExp(
+      process.env.ZONE_PASS_IMAGE_WORDS ??
+        'lighthouse|sea|coast|storm|rock|tower|water|wave|cliff|sky',
+      'i',
+    );
+    const imageMentions = imageWords.test(imageReply);
     record(36, {
       result: codeSeen && imageMentions ? 'WORKS' : 'FAILS',
       cause:
