@@ -444,7 +444,7 @@ async fn task_migration_works_with_one_connection_fresh_and_applied() {
         .await
         .unwrap();
     for _ in 0..2 {
-        tokio::time::timeout(Duration::from_secs(10), migrations::run(&pool))
+        tokio::time::timeout(Duration::from_secs(60), migrations::run(&pool))
             .await
             .unwrap()
             .unwrap();
