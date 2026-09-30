@@ -6,7 +6,7 @@ use std::time::Instant;
 use thiserror::Error;
 
 use crate::context::{self, ContextError, ContextSource, Entry, Policy};
-use crate::llm::{LlmClient, LlmError, Message, RequestOptions, Role, ToolCall};
+use crate::llm::{LlmClient, LlmError, Message, RequestOptions, Role, ToolCall, finish_reason};
 use crate::tools::{ToolContext, ToolRegistry, ToolResult};
 
 use super::state::{AgentConfig, AgentPhase, AgentState, AgentStep, ToolCallResult};
@@ -310,7 +310,7 @@ impl Agent {
                 state.add_step(step);
 
                 // Check finish reason
-                if choice.finish_reason.as_deref() == Some("stop") {
+                if choice.finish_reason.as_deref() == Some(finish_reason::STOP) {
                     state.phase = AgentPhase::Responding;
                     callback.on_phase_change(AgentPhase::Responding, Some(content));
                     callback.on_response(content);

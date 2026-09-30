@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use zone_core::llm::{LlmClient, Message};
+use zone_core::llm::{LlmClient, Message, finish_reason};
 use zone_vcs::pull_request::PullRequestDetail;
 
 use crate::db::tasks::TaskRow;
@@ -16,7 +16,6 @@ const SUMMARY_TEMPERATURE: f32 = 0.0;
 const SUMMARY_TOKENS: u32 = 1024;
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(45);
 const BODY_CHARS: usize = 3_000;
-const TRUNCATED: &str = "length";
 
 const INSTRUCTIONS: &str = "Summarise a merged code change for the person who commissioned the project, in two or \
      three plain sentences: what it does for the project and what they can now rely on. No \
@@ -78,7 +77,7 @@ async fn generate(
         }
     };
     let choice = response.choices.into_iter().next()?;
-    if choice.finish_reason.as_deref() == Some(TRUNCATED) {
+    if choice.finish_reason.as_deref() == Some(finish_reason::LENGTH) {
         return None;
     }
     choice.message.content
@@ -113,7 +112,6 @@ mod tests {
     use zone_vcs::pull_request::Mergeability;
 
     const SUMMARY: &str = "Shoppers can now buy several items at once.";
-    const STOPPED: &str = "stop";
 
     fn cart() -> PullRequestDetail {
         PullRequestDetail {
@@ -173,7 +171,7 @@ mod tests {
     async fn a_summary_cut_off_by_its_token_limit_falls_back_to_the_pull_request() {
         let instance = completing(
             "Shoppers can now fill a cart with several items, so the",
-            "length",
+            finish_reason::LENGTH,
         )
         .await;
         let organization = Organization::saving(Saved {
@@ -204,8 +202,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_merge_summary_goes_to_the_workspace_endpoint() {
-        let instance = completing("The instance's summary.", STOPPED).await;
-        let saved = completing(SUMMARY, STOPPED).await;
+        let instance = completing("The instance's summary.", finish_reason::STOP).await;
+        let saved = completing(SUMMARY, finish_reason::STOP).await;
         let host = saved.uri();
         let organization = Organization::saving(Saved {
             host: Some(&host),
@@ -246,8 +244,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_endpoint_the_settings_name_without_a_model_is_not_asked_for_a_summary() {
-        let instance = completing("The instance's summary.", STOPPED).await;
-        let saved = completing(SUMMARY, STOPPED).await;
+        let instance = completing("The instance's summary.", finish_reason::STOP).await;
+        let saved = completing(SUMMARY, finish_reason::STOP).await;
         let host = saved.uri();
         let organization = Organization::saving(Saved {
             host: Some(&host),

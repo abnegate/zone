@@ -9,6 +9,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::runtime;
 
+use super::finish_reason::STOP;
 use super::provider::{
     AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Completion,
     CompletionProvider, CompletionRequest, Toolset,
@@ -91,13 +92,6 @@ impl LlmError {
 
 /// A completion in pieces, whichever backend produced it.
 pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamChunk, LlmError>> + Send>>;
-
-/// OpenAI's word for a turn that ended normally.
-///
-/// Claude reports `success` and codex `completed`. The agent loop takes a
-/// reply as final only on `stop`, so a turn carrying the agent's own word
-/// would never be accepted and would run to the iteration limit instead.
-const STOP: &str = "stop";
 
 /// Where completions come from.
 #[derive(Debug, Clone, Default)]

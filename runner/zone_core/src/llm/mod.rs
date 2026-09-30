@@ -5,6 +5,7 @@
 //! handle.
 
 mod client;
+pub mod finish_reason;
 pub(crate) mod history;
 pub mod provider;
 mod reasoning;

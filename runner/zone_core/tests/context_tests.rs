@@ -10,6 +10,7 @@ use zone_core::context::{
 };
 use zone_core::llm::{
     FunctionCall, LlmClient, LlmConfig, Message, RequestOptions, Role, ToolCall, ToolDefinition,
+    finish_reason,
 };
 
 struct Provider {
@@ -92,7 +93,11 @@ fn structured() -> String {
 }
 
 fn response(content: String) -> String {
-    json!({"id":"summary", "object":"chat.completion", "created":0, "model":"test", "choices":[{"index":0,"message":{"role":"assistant","content":content},"finish_reason":"stop"}]}).to_string()
+    finished(content, finish_reason::STOP)
+}
+
+fn finished(content: String, reason: &str) -> String {
+    json!({"id":"summary", "object":"chat.completion", "created":0, "model":"test", "choices":[{"index":0,"message":{"role":"assistant","content":content},"finish_reason":reason}]}).to_string()
 }
 
 fn entry(id: &str, message: Message, preserve: bool, consumed: bool) -> Entry {
@@ -506,6 +511,25 @@ async fn invalid_summary_never_advances_coverage_or_mutates_history() {
             fingerprint
         );
     }
+}
+
+#[tokio::test]
+async fn a_summary_cut_off_by_its_token_limit_is_rejected() {
+    let provider = provider(|_| finished(structured(), finish_reason::LENGTH), false).await;
+    let error = context::prepare(
+        &provider.client,
+        "test",
+        &active_history(),
+        None,
+        &policy(5_000),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&error, ContextError::Summary(reason) if reason.contains("truncated")),
+        "{error}"
+    );
 }
 
 #[tokio::test]
