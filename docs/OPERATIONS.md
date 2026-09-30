@@ -148,6 +148,35 @@ answer, the container says so, names the `OLLAMA_BASE_URL=http://ollama:11434`
 setting that pulls into the bundled Ollama instead, and exits 0; only the
 bundled Ollama being unreachable is treated as a failure.
 
+## External sync
+
+A project can take issues from a GitHub repository or a Linear project. Sync
+is inbound only: Zone does not create or update external issues from its
+tasks.
+
+A new external issue becomes a non-agentic task in the project, so it never
+runs an agent on its own. Later edits and closes flow to the linked task, and
+a GitHub `deleted` event closes it. GitHub creates tasks only for issues in the
+configured repository opened by the repository's owner, members or
+collaborators; Linear creates them only for issues in the configured project.
+Titles are cut to 500 characters and descriptions to 50,000.
+
+Each sync has its own endpoint, `/api/webhooks/sync/{id}/github` or
+`/api/webhooks/sync/{id}/linear`, shown as the Payload URL in the project's
+sync settings. Deliveries without a valid signature are refused with a 401.
+Events other than issue events are acknowledged and ignored.
+
+For GitHub, open the repository's Settings → Webhooks and add a webhook with
+that Payload URL, content type `application/json`, the secret shown once when
+the sync is created, and only the "Issues" event. If the secret is lost, use
+"Rotate secret" and paste the new one into GitHub. GitHub's first `ping` is
+acknowledged.
+
+For Linear, create a webhook for Issues with the same URL, then paste Linear's
+signing secret into the sync with "Set signing secret". The sync's project ID
+must be the Linear project's ID, a UUID. Deliveries more than 60 seconds old
+are refused.
+
 ## Monitoring
 
 On Docker Desktop, the "Container CPU" and "Container memory" panels of the
