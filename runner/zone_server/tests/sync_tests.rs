@@ -1088,3 +1088,338 @@ async fn a_strangers_project_has_no_sync_to_read_or_write() {
         .await;
     assert_eq!(response.json_value()["configs"], json!([]));
 }
+
+// Webhook secrets: issued for GitHub, set by hand for Linear, rotated on request.
+
+const LINEAR_SIGNING_SECRET: &str = "linear-signing-secret-123";
+
+async fn registered(client: &common::TestClient) -> (String, Uuid) {
+    let response = client
+        .post_json(
+            "/api/auth/register",
+            &json!({ "email": common::test_email(), "password": common::test_password() }),
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    let body = response.json_value();
+    let token = body["access_token"].as_str().unwrap().to_string();
+    let user = Uuid::parse_str(body["user"]["id"].as_str().unwrap()).unwrap();
+    (token, user)
+}
+
+fn github_sync() -> serde_json::Value {
+    json!({
+        "provider": "github",
+        "direction": "inbound",
+        "external_repo_url": "https://github.com/abnegate/zone-tests"
+    })
+}
+
+fn linear_sync() -> serde_json::Value {
+    json!({ "provider": "linear", "direction": "inbound", "external_project_id": "LIN-1" })
+}
+
+async fn configure(
+    client: &common::TestClient,
+    token: &str,
+    project: &str,
+    body: &serde_json::Value,
+) -> serde_json::Value {
+    let response = client
+        .post_json_auth(&format!("/api/projects/{project}/sync"), body, token)
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    response.json_value()
+}
+
+async fn set_secret(
+    client: &common::TestClient,
+    token: &str,
+    project: &str,
+    config: &str,
+    body: &serde_json::Value,
+) -> common::TestResponse {
+    client
+        .put_json_auth(
+            &format!("/api/projects/{project}/sync/{config}/webhook-secret"),
+            body,
+            token,
+        )
+        .await
+}
+
+async fn listed_config(
+    client: &common::TestClient,
+    token: &str,
+    project: &str,
+) -> common::TestResponse {
+    let response = client
+        .get_auth(&format!("/api/projects/{project}/sync"), token)
+        .await;
+    response.assert_status(StatusCode::OK);
+    response
+}
+
+fn signature_for(secret: &str, body: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("Failed to create HMAC");
+    mac.update(body);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+async fn deliver_github(
+    client: &common::TestClient,
+    config: &str,
+    secret: &str,
+) -> common::TestResponse {
+    let body = serde_json::to_vec(&json!({
+        "action": "opened",
+        "issue": {
+            "number": 4242,
+            "title": "Filed on GitHub",
+            "body": null,
+            "state": "open",
+            "html_url": "https://github.com/abnegate/zone-tests/issues/4242"
+        }
+    }))
+    .unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/webhooks/sync/{config}/github"))
+        .header("Content-Type", "application/json")
+        .header("X-GitHub-Event", "issues")
+        .header(
+            "X-Hub-Signature-256",
+            format!("sha256={}", signature_for(secret, &body)),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    client.send_request(request).await
+}
+
+async fn deliver_linear(
+    client: &common::TestClient,
+    config: &str,
+    secret: &str,
+) -> common::TestResponse {
+    let body = serde_json::to_vec(&json!({
+        "action": "update",
+        "type": "Issue",
+        "data": {
+            "id": "lin-issue-4242",
+            "title": "Filed on Linear",
+            "state": { "type": "started", "name": "In Progress" }
+        }
+    }))
+    .unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/webhooks/sync/{config}/linear"))
+        .header("Content-Type", "application/json")
+        .header("Linear-Event", "Issue")
+        .header("Linear-Signature", signature_for(secret, &body))
+        .body(Body::from(body))
+        .unwrap();
+    client.send_request(request).await
+}
+
+fn assert_verified(response: &common::TestResponse) {
+    assert!(
+        !response.text().contains("Webhook secret not configured"),
+        "the sync has a secret to verify deliveries with: {}",
+        response.text()
+    );
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "a delivery signed with the configured secret is accepted: {}",
+        response.text()
+    );
+}
+
+fn is_generated_secret(secret: &str) -> bool {
+    secret.len() == 64
+        && secret
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+}
+
+#[tokio::test]
+async fn a_github_sync_is_issued_a_secret_its_deliveries_verify_against() {
+    let client = common::TestClient::with_db().await;
+    let token = signed_in(&client).await;
+    let (_workspace, project) = workspace_project(&client, &token).await;
+
+    let created = configure(&client, &token, &project, &github_sync()).await;
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+    let secret = created["webhook_secret"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    assert_verified(&deliver_github(&client, &config, &secret).await);
+    assert!(
+        is_generated_secret(&secret),
+        "the secret is 32 random bytes in hex: {secret:?}"
+    );
+    assert_eq!(created["config"]["webhook_secret_configured"], true);
+
+    let listed = listed_config(&client, &token, &project).await;
+    assert_eq!(
+        listed.json_value()["configs"][0]["webhook_secret_configured"],
+        true
+    );
+    assert!(
+        !listed.text().contains(&secret),
+        "a listing never shows the secret: {}",
+        listed.text()
+    );
+}
+
+#[tokio::test]
+async fn a_linear_sync_verifies_deliveries_with_the_signing_secret_linear_issued() {
+    let client = common::TestClient::with_db().await;
+    let token = signed_in(&client).await;
+    let (_workspace, project) = workspace_project(&client, &token).await;
+
+    let created = configure(&client, &token, &project, &linear_sync()).await;
+    assert!(
+        created["webhook_secret"].is_null(),
+        "Linear issues its own signing secret, so Zone generates none: {created}"
+    );
+    assert_eq!(created["config"]["webhook_secret_configured"], false);
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+
+    let response = set_secret(
+        &client,
+        &token,
+        &project,
+        &config,
+        &json!({ "secret": format!("  {LINEAR_SIGNING_SECRET}  ") }),
+    )
+    .await;
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert!(
+        body["webhook_secret"].is_null(),
+        "a supplied secret is never echoed back: {body}"
+    );
+    assert!(!response.text().contains(LINEAR_SIGNING_SECRET));
+    assert_eq!(body["config"]["id"], config);
+    assert_eq!(body["config"]["webhook_secret_configured"], true);
+
+    assert_verified(&deliver_linear(&client, &config, LINEAR_SIGNING_SECRET).await);
+    let listed = listed_config(&client, &token, &project).await;
+    assert_eq!(
+        listed.json_value()["configs"][0]["webhook_secret_configured"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn rotating_a_webhook_secret_retires_the_old_one() {
+    let client = common::TestClient::with_db().await;
+    let token = signed_in(&client).await;
+    let (_workspace, project) = workspace_project(&client, &token).await;
+    let created = configure(&client, &token, &project, &github_sync()).await;
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+    let old = created["webhook_secret"].as_str().unwrap().to_string();
+
+    let response = set_secret(&client, &token, &project, &config, &json!({})).await;
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    let new = body["webhook_secret"].as_str().unwrap().to_string();
+    assert!(
+        is_generated_secret(&new),
+        "a rotated secret is generated: {new:?}"
+    );
+    assert_ne!(new, old);
+    assert_eq!(body["config"]["id"], config);
+    assert_eq!(body["config"]["webhook_secret_configured"], true);
+
+    deliver_github(&client, &config, &old)
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    assert_verified(&deliver_github(&client, &config, &new).await);
+}
+
+#[tokio::test]
+async fn a_blank_or_short_webhook_secret_is_refused_and_not_stored() {
+    let client = common::TestClient::with_db().await;
+    let token = signed_in(&client).await;
+    let (_workspace, project) = workspace_project(&client, &token).await;
+    let created = configure(&client, &token, &project, &linear_sync()).await;
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+
+    for secret in ["  ", "too-short"] {
+        let response = set_secret(
+            &client,
+            &token,
+            &project,
+            &config,
+            &json!({ "secret": secret }),
+        )
+        .await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.json_value()["error"],
+            "A webhook secret must be 16 to 256 characters"
+        );
+    }
+
+    let listed = listed_config(&client, &token, &project).await;
+    assert_eq!(
+        listed.json_value()["configs"][0]["webhook_secret_configured"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn another_projects_sync_has_no_webhook_secret_to_set() {
+    let client = common::TestClient::with_db().await;
+    let token = signed_in(&client).await;
+    let (_workspace, project) = workspace_project(&client, &token).await;
+    let (_other_workspace, other_project) = workspace_project(&client, &token).await;
+    let created = configure(&client, &token, &project, &github_sync()).await;
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+    let secret = created["webhook_secret"].as_str().unwrap().to_string();
+
+    let response = set_secret(&client, &token, &other_project, &config, &json!({})).await;
+    response.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.json_value()["error"],
+        "Sync configuration not found"
+    );
+
+    assert_verified(&deliver_github(&client, &config, &secret).await);
+}
+
+#[tokio::test]
+async fn a_read_only_member_cannot_set_a_webhook_secret() {
+    use zone_server::db::workspace_members::{self, WorkspaceRole};
+
+    let client = common::TestClient::with_db().await;
+    let (owner, _owner_id) = registered(&client).await;
+    let (workspace, project) = workspace_project(&client, &owner).await;
+    let created = configure(&client, &owner, &project, &github_sync()).await;
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+    let secret = created["webhook_secret"].as_str().unwrap().to_string();
+    let (viewer, viewer_id) = registered(&client).await;
+    workspace_members::add_member(
+        client.state().db(),
+        Uuid::parse_str(&workspace).unwrap(),
+        viewer_id,
+        WorkspaceRole::Viewer,
+        None,
+    )
+    .await
+    .expect("the workspace takes the viewer");
+
+    listed_config(&client, &viewer, &project).await;
+    for body in [json!({}), json!({ "secret": "viewer-chosen-secret-123" })] {
+        set_secret(&client, &viewer, &project, &config, &body)
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
+    }
+
+    assert_verified(&deliver_github(&client, &config, &secret).await);
+}

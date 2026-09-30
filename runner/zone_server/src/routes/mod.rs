@@ -214,6 +214,10 @@ pub fn create_router(state: AppState) -> Router {
             get(sync::list).post(sync::create),
         )
         .route("/api/projects/{id}/sync/{config_id}", delete(sync::delete))
+        .route(
+            "/api/projects/{id}/sync/{config_id}/webhook-secret",
+            put(sync::set_webhook_secret),
+        )
         // Tasks (workspace-scoped)
         .route(
             "/api/workspaces/{workspace_id}/tasks",
