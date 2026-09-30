@@ -1,37 +1,41 @@
 #!/bin/sh
 set -e
 
-# =============================================================================
-# Ollama Model Initialization Script
-# =============================================================================
-# This script pulls the required models into the shared Ollama volume.
-# It only runs once during initial setup (restart: "no" in docker-compose).
-# =============================================================================
-
 readonly MAX_RETRIES=30
 readonly RETRY_INTERVAL=5
 
-# Color output for better readability
-readonly RED='\033[0;31m'
-readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[1;33m'
-readonly NC='\033[0m' # No Color
+GREEN=''
+YELLOW=''
+OUTPUT_RESET=''
+if [ -t 1 ]; then
+    GREEN=$(printf '\033[0;32m')
+    YELLOW=$(printf '\033[1;33m')
+    OUTPUT_RESET=$(printf '\033[0m')
+fi
+
+RED=''
+ERROR_RESET=''
+if [ -t 2 ]; then
+    RED=$(printf '\033[0;31m')
+    ERROR_RESET=$(printf '\033[0m')
+fi
+
+readonly GREEN YELLOW OUTPUT_RESET RED ERROR_RESET
 
 log_info() {
-    printf '%s[ollama-init]%s %s\n' "${GREEN}" "${NC}" "$1"
+    printf '%s[ollama-init]%s %s\n' "${GREEN}" "${OUTPUT_RESET}" "$1"
 }
 
 log_warn() {
-    printf '%s[ollama-init]%s %s\n' "${YELLOW}" "${NC}" "$1"
+    printf '%s[ollama-init]%s %s\n' "${YELLOW}" "${OUTPUT_RESET}" "$1"
 }
 
 log_error() {
-    printf '%s[ollama-init ERROR]%s %s\n' "${RED}" "${NC}" "$1" >&2
+    printf '%s[ollama-init ERROR]%s %s\n' "${RED}" "${ERROR_RESET}" "$1" >&2
 }
 
-# Validate environment variables
 validate_env() {
-    local missing=0
+    missing=0
 
     if [ -z "${OLLAMA_HOST}" ]; then
         log_error "OLLAMA_HOST is not set"
@@ -68,7 +72,6 @@ targets_bundled_ollama() {
     [ "${OLLAMA_HOST%/}" = "${BUNDLED_OLLAMA_HOST}" ]
 }
 
-# Wait for Ollama API to be ready
 wait_for_ollama() {
     if targets_bundled_ollama; then
         log_info "Pulling into the bundled Ollama at ${OLLAMA_HOST}"
@@ -77,7 +80,7 @@ wait_for_ollama() {
     fi
     log_info "Waiting for Ollama API at ${OLLAMA_HOST}..."
 
-    local retries=0
+    retries=0
     while [ $retries -lt $MAX_RETRIES ]; do
         if ollama list >/dev/null 2>&1; then
             log_info "Ollama API is ready!"
@@ -99,22 +102,13 @@ wait_for_ollama() {
     exit 0
 }
 
-# Check if a model is already pulled
 model_exists() {
-    local model_name="$1"
-
-    # Use grep -F for fixed string matching (no regex interpretation)
-    if ollama list | grep -qF "${model_name}"; then
-        return 0  # Model exists
-    else
-        return 1  # Model doesn't exist
-    fi
+    ollama list | grep -qF "$1"
 }
 
-# Pull a single model with error handling
 pull_model() {
-    local model_name="$1"
-    local model_type="$2"
+    model_name="$1"
+    model_type="$2"
 
     log_info "Checking ${model_type} model: ${model_name}"
 
@@ -134,25 +128,20 @@ pull_model() {
     fi
 }
 
-# Main execution
 main() {
     log_info "===== Ollama Model Initialization ====="
 
-    # Validate environment
     validate_env
 
-    # Wait for Ollama to be ready
     wait_for_ollama
 
-    # Display model configuration
     log_info "Model Configuration:"
     log_info "  Fast Model:      ${OLLAMA_MODEL_FAST}"
     log_info "  Reasoning Model: ${OLLAMA_MODEL_REASON}"
     log_info "  Embedding Model: ${OLLAMA_MODEL_EMBED}"
     printf '\n'
 
-    # Pull models
-    local failed=0
+    failed=0
 
     pull_model "${OLLAMA_MODEL_FAST}" "FAST" || failed=1
     pull_model "${OLLAMA_MODEL_REASON}" "REASONING" || failed=1

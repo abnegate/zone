@@ -164,6 +164,7 @@ validate: ## Validate configuration
 		sh scripts/test-vpn-compose.sh; \
 		sh scripts/test-compose-profiles.sh; \
 		sh scripts/test-dockerfile-members.sh; \
+		sh scripts/test-pull-models.sh; \
 	else \
 		echo "$(RED)✗ Missing .env or auth/users.htpasswd. Run 'make setup' first.$(NC)"; \
 		exit 1; \

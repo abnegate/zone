@@ -15,6 +15,8 @@ on:
       - 'scripts/test-compose-up.py'
       - 'scripts/test-backup.py'
       - 'scripts/test-dockerfile-members.sh'
+      - 'ollama/pull-models.sh'
+      - 'scripts/test-pull-models.sh'
       - 'manager/Dockerfile'
       - 'runner/Cargo.toml'
       - '.dockerignore'
@@ -32,6 +34,8 @@ on:
       - 'scripts/test-compose-up.py'
       - 'scripts/test-backup.py'
       - 'scripts/test-dockerfile-members.sh'
+      - 'ollama/pull-models.sh'
+      - 'scripts/test-pull-models.sh'
       - 'manager/Dockerfile'
       - 'runner/Cargo.toml'
       - '.dockerignore'
@@ -94,3 +98,6 @@ jobs:
 
       - name: Verify the manager Dockerfile copies every workspace member
         run: sh scripts/test-dockerfile-members.sh
+
+      - name: Verify the Ollama pull script prints plain text to logs
+        run: sh scripts/test-pull-models.sh
