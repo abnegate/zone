@@ -10,20 +10,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ALL_PROFILES = 'dev,vpn,monitoring,bundled-ollama,bundled-comfyui,comfyui-model-setup'
-ENSURED = 'dev,vpn'
 CLEARED = ('PROFILES', 'COMPOSE_PROFILES', 'COMPOSE_FILE', 'ZONE_VPN', 'COMPOSE_PATH_SEPARATOR')
 
 FAKE_COMPOSE = '''#!/usr/bin/env python3
-import json, os, sys
+import json, os, subprocess, sys
 with open(os.environ['COMPOSE_CALLS'], 'a') as output:
     output.write(json.dumps(sys.argv[1:]) + '\\n')
 if sys.argv[1:2] == ['persist']:
     if os.environ.get('COMPOSE_PERSIST_FAILS'):
         sys.exit(1)
-    if '--ensure' in sys.argv:
-        print(os.environ['COMPOSE_ENSURED'])
-    else:
-        print(sys.argv[2])
+    sys.exit(subprocess.run(['sh', os.environ['COMPOSE_SCRIPT'], *sys.argv[1:]]).returncode)
 '''
 
 FAKE_DOCKER = '''#!/usr/bin/env python3
@@ -64,18 +60,27 @@ def read_calls(log: Path) -> list[list[str]]:
     return [json.loads(line) for line in log.read_text().splitlines()]
 
 
+def saved_profiles(path: Path) -> str:
+    return next(line.split('=', 1)[1] for line in path.read_text().splitlines() if line.startswith('COMPOSE_PROFILES='))
+
+
 class MakeTargets(unittest.TestCase):
-    def run_make(self, *arguments: str, succeeds: bool = True, **extra: str) -> list[list[str]]:
+    def run_make(self, *arguments: str, succeeds: bool = True, saved: str = 'vpn',
+                 persisted: str | None = None, **extra: str) -> list[list[str]]:
         with tempfile.TemporaryDirectory(prefix='zone-compose-up-') as directory:
             folder = Path(directory)
             log = folder / 'calls.jsonl'
             command = install(folder, 'compose', FAKE_COMPOSE)
-            environment = clean_environment(COMPOSE_CALLS=str(log), COMPOSE_ENSURED=ENSURED, **extra)
+            environment_file = write_environment_file(folder, saved)
+            environment = clean_environment(COMPOSE_CALLS=str(log), COMPOSE_SCRIPT=str(ROOT / 'scripts/compose.sh'),
+                                            ZONE_ENV_FILE=str(environment_file), **extra)
             result = subprocess.run(
                 ['make', '-f', os.environ.get('ZONE_MAKEFILE', 'Makefile'), *arguments, f'COMPOSE={command}'],
                 cwd=ROOT, env=environment, text=True, capture_output=True, timeout=10,
             )
             self.assertEqual(result.returncode == 0, succeeds, result.stdout + result.stderr)
+            if persisted is not None:
+                self.assertEqual(saved_profiles(environment_file), persisted)
             return read_calls(log)
 
     def test_plain_up_retires_every_optional_profile_before_starting_core(self) -> None:
@@ -86,7 +91,7 @@ class MakeTargets(unittest.TestCase):
         ])
 
     def test_up_with_profiles_retires_services_outside_them(self) -> None:
-        self.assertEqual(self.run_make('up', 'PROFILES=monitoring'), [
+        self.assertEqual(self.run_make('up', 'PROFILES=monitoring', persisted='monitoring'), [
             ['persist', 'monitoring'],
             ['retire', 'monitoring'],
             ['--replace-profiles=monitoring', 'up', '-d'],
@@ -99,18 +104,25 @@ class MakeTargets(unittest.TestCase):
             ['--replace-profiles=vpn', 'up', '-d'],
         ])
 
-    def test_dev_retires_services_outside_the_ensured_profiles(self) -> None:
-        self.assertEqual(self.run_make('dev'), [
+    def test_dev_adds_dev_to_the_saved_profiles_and_retires_the_rest(self) -> None:
+        self.assertEqual(self.run_make('dev', persisted='dev,vpn'), [
             ['persist', '--ensure', 'dev'],
-            ['retire', ENSURED],
-            [f'--replace-profiles={ENSURED}', 'up', '--build'],
+            ['retire', 'dev,vpn'],
+            ['--replace-profiles=dev,vpn', 'up', '--build'],
         ])
 
-    def test_dev_with_profiles_retires_services_outside_the_ensured_profiles(self) -> None:
-        self.assertEqual(self.run_make('dev', 'PROFILES=monitoring'), [
+    def test_dev_with_profiles_replaces_the_saved_profiles_and_retires_the_rest(self) -> None:
+        self.assertEqual(self.run_make('dev', 'PROFILES=monitoring', persisted='dev,monitoring'), [
             ['persist', '--ensure', 'dev', 'monitoring'],
-            ['retire', ENSURED],
-            [f'--replace-profiles={ENSURED}', 'up', '--build'],
+            ['retire', 'dev,monitoring'],
+            ['--replace-profiles=dev,monitoring', 'up', '--build'],
+        ])
+
+    def test_dev_with_no_saved_profiles_runs_dev_alone(self) -> None:
+        self.assertEqual(self.run_make('dev', saved='', persisted='dev'), [
+            ['persist', '--ensure', 'dev'],
+            ['retire', 'dev'],
+            ['--replace-profiles=dev', 'up', '--build'],
         ])
 
     def test_up_stops_when_the_profiles_cannot_be_saved(self) -> None:
@@ -133,9 +145,11 @@ class MakeTargets(unittest.TestCase):
         self.assertFalse(any(call[:1] == ['retire'] for call in calls), calls)
 
 
-def write_environment_file(folder: Path) -> Path:
+def write_environment_file(folder: Path, saved: str = '') -> Path:
     path = folder / 'environment'
-    path.write_text((ROOT / '.env.example').read_text())
+    example = (ROOT / '.env.example').read_text()
+    assert '\nCOMPOSE_PROFILES=\n' in example, '.env.example must leave COMPOSE_PROFILES empty'
+    path.write_text(example.replace('\nCOMPOSE_PROFILES=\n', f'\nCOMPOSE_PROFILES={saved}\n'))
     return path
 
 
