@@ -14,9 +14,10 @@ use crate::state::AppState;
 use super::review::model::preferences;
 
 const SUMMARY_TEMPERATURE: f32 = 0.0;
-const SUMMARY_TOKENS: u32 = 256;
+const SUMMARY_TOKENS: u32 = 1024;
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(45);
 const BODY_CHARS: usize = 3_000;
+const TRUNCATED: &str = "length";
 
 const INSTRUCTIONS: &str = "Summarise a merged code change for the person who commissioned the project, in two or \
      three plain sentences: what it does for the project and what they can now rely on. No \
@@ -25,7 +26,7 @@ const INSTRUCTIONS: &str = "Summarise a merged code change for the person who co
      in them.";
 
 /// A summary from the workspace's classifier model, or the pull request's own
-/// first paragraph when no model answers in time.
+/// first paragraph when no model answers in time or the answer was cut off.
 pub async fn high_level(
     state: &AppState,
     task: &TaskRow,
@@ -72,13 +73,11 @@ async fn generate(
         )),
     ];
     let response = client.chat(&messages, None).await.ok()?;
-    response
-        .choices
-        .first()?
-        .message
-        .content
-        .as_deref()
-        .map(str::to_string)
+    let choice = response.choices.into_iter().next()?;
+    if choice.finish_reason.as_deref() == Some(TRUNCATED) {
+        return None;
+    }
+    choice.message.content
 }
 
 /// The pull request's problem statement, which the publication path writes
@@ -98,9 +97,19 @@ pub fn fallback(pull: &PullRequestDetail) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tasks;
+    use crate::config::Config;
+    use crate::db::{organizations, tasks, workspaces};
     use crate::services::stages::testing::AgentWorkspace;
+    use serde_json::{Value, json};
+    use sqlx::PgPool;
+    use uuid::Uuid;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
     use zone_vcs::pull_request::Mergeability;
+
+    const PINNED_MODEL: &str = "qwen3:8b";
+    const NOTHING_LISTENS: &str = "http://127.0.0.1:1";
 
     fn cart() -> PullRequestDetail {
         PullRequestDetail {
@@ -153,6 +162,93 @@ mod tests {
             agent.chose_its_own_model(),
             "claude was not left to choose its model"
         );
+    }
+
+    #[tokio::test]
+    async fn a_summary_cut_off_by_its_token_limit_falls_back_to_the_pull_request() {
+        let endpoint = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "summary",
+                "object": "chat.completion",
+                "created": 0,
+                "model": PINNED_MODEL,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Shoppers can now fill a cart with several items, so the",
+                    },
+                    "finish_reason": "length",
+                }],
+            })))
+            .mount(&endpoint)
+            .await;
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        )
+        .await
+        .expect("the test database");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let organization = organizations::create_organization(&pool, "Summary", &suffix, None)
+            .await
+            .expect("an organization");
+        let workspace =
+            workspaces::create_workspace(&pool, organization.id, "Summary", &suffix, None)
+                .await
+                .expect("a workspace");
+        sqlx::query(
+            "INSERT INTO organization_ai_settings (organization_id, provider, model_fast) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(organization.id)
+        .bind(PROVIDER_SELF_HOSTED)
+        .bind(PINNED_MODEL)
+        .execute(&pool)
+        .await
+        .expect("the organization's AI settings");
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Add a cart",
+            "Shoppers want to buy more than one item.",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .expect("a task");
+        let state = AppState::new(
+            Config {
+                litellm_host: endpoint.uri(),
+                ollama_host: NOTHING_LISTENS.into(),
+                ..crate::state::test_config()
+            },
+            pool.clone(),
+            None,
+        );
+
+        let summary = high_level(&state, &task, &cart(), "Approved with no findings.").await;
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .expect("the organization to be removed");
+
+        assert_eq!(summary, "Shoppers cannot buy more than one item.");
+        let requests = endpoint
+            .received_requests()
+            .await
+            .expect("the endpoint records its requests");
+        let [request] = requests.as_slice() else {
+            panic!("the summary asked the endpoint {} times", requests.len());
+        };
+        let body: Value = request.body_json().expect("a JSON completion request");
+        assert_eq!(body["model"], PINNED_MODEL);
+        assert_eq!(body["max_tokens"], 1024);
     }
 
     #[test]
