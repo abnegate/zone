@@ -24,7 +24,7 @@ use zone_search::client::SearchContext;
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
 const TEMPERATURE: f32 = 0.7;
 const SEARCH: &str = "supplement:search";
-pub const WITHHELD_IMAGE: &str = "[An image was attached but this model can't view images.]";
+pub const WITHHELD_IMAGE: &str = "[An image is omitted here because this model can't view images.]";
 
 fn parse_timeout(seconds: u64) -> Result<Duration, String> {
     let timeout = Duration::from_secs(seconds);

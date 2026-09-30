@@ -83,6 +83,12 @@ async fn a_text_only_model_gets_a_note_instead_of_a_historical_image() {
         illustrated["content"],
         format!("Here is your cat.\n\n{WITHHELD_IMAGE}")
     );
+    assert!(
+        !illustrated["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("attached")),
+        "the assistant's own image must not be described as an attachment: {illustrated}"
+    );
     assert_eq!(
         harness
             .history()
