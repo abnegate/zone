@@ -220,22 +220,33 @@ pub fn chat_model(
     if !is_auto(requested) {
         return requested.to_string();
     }
+    let tools = if agent {
+        Tools::Required
+    } else {
+        Tools::Optional
+    };
     if has_image
-        && let Some(model) = pick_installed(prefs.vision.as_deref(), catalog, Stage::Vision)
+        && let Some(model) = pick_installed(prefs.vision.as_deref(), catalog, Stage::Vision, tools)
     {
         return model;
     }
     if wants_reason(message)
-        && let Some(model) = pick_installed(prefs.reasoning.as_deref(), catalog, Stage::Reason)
+        && let Some(model) =
+            pick_installed(prefs.reasoning.as_deref(), catalog, Stage::Reason, tools)
     {
         return model;
     }
-    if agent && let Some(model) = pick_installed(prefs.fast.as_deref(), catalog, Stage::Fast) {
-        return model;
-    }
-    pick_installed(prefs.fast.as_deref(), catalog, Stage::Fast)
-        .or_else(|| pick_installed(prefs.reasoning.as_deref(), catalog, Stage::Reason))
-        .unwrap_or_else(|| fallback_name(requested, prefs.fast.as_deref()))
+    pick_installed(prefs.fast.as_deref(), catalog, Stage::Fast, tools)
+        .or_else(|| pick_installed(prefs.reasoning.as_deref(), catalog, Stage::Reason, tools))
+        .unwrap_or_else(|| {
+            fallback_name(
+                requested,
+                prefs
+                    .fast
+                    .as_deref()
+                    .filter(|name| tools.allows(catalog, name)),
+            )
+        })
 }
 
 /// The model that classifies image intent, and that [`summary_model`] runs.
@@ -254,7 +265,7 @@ pub fn classifier_model(prefs: &Preferences, catalog: &Catalog, chat_model: &str
     if !is_auto(chat_model) && catalog.contains(chat_model) {
         return chat_model.to_string();
     }
-    pick_installed(prefs.fast.as_deref(), catalog, Stage::Fast)
+    pick_installed(prefs.fast.as_deref(), catalog, Stage::Fast, Tools::Optional)
         .or_else(|| {
             catalog
                 .completions()
@@ -290,19 +301,50 @@ enum Stage {
     Vision,
 }
 
-fn pick_installed(preferred: Option<&str>, catalog: &Catalog, stage: Stage) -> Option<String> {
+/// Whether the completion will offer tools, as an agent run does.
+#[derive(Clone, Copy)]
+enum Tools {
+    Required,
+    Optional,
+}
+
+impl Tools {
+    fn admits(self, model: &Installed) -> bool {
+        match self {
+            Self::Required => !model.refuses_tools(),
+            Self::Optional => true,
+        }
+    }
+
+    /// A name the catalog does not list may call tools.
+    fn allows(self, catalog: &Catalog, name: &str) -> bool {
+        catalog.find(name).is_none_or(|model| self.admits(model))
+    }
+}
+
+fn pick_installed(
+    preferred: Option<&str>,
+    catalog: &Catalog,
+    stage: Stage,
+    tools: Tools,
+) -> Option<String> {
     if let Some(name) = preferred.filter(|name| !is_auto(name))
         && catalog_allows(catalog, name)
+        && tools.allows(catalog, name)
     {
         return Some(name.to_string());
     }
     if catalog.models.is_empty() {
         return preferred.filter(|name| !is_auto(name)).map(str::to_string);
     }
-    let mut candidates: Vec<&Installed> = match stage {
-        Stage::Vision => catalog.models.iter().filter(|model| model.vision).collect(),
-        Stage::Fast | Stage::Reason => catalog.completions().collect(),
-    };
+    let mut candidates: Vec<&Installed> = catalog
+        .completions()
+        .filter(|model| tools.admits(model))
+        .filter(|model| match stage {
+            Stage::Vision => model.vision,
+            Stage::Fast | Stage::Reason => true,
+        })
+        .collect();
     if candidates.is_empty() {
         return None;
     }
@@ -977,6 +1019,133 @@ mod tests {
                 .map(|requests| requests.len()),
             Some(1),
             "only the endpoint's catalog is read from Ollama"
+        );
+    }
+
+    fn vision(model: Installed, tools: Option<bool>) -> Installed {
+        Installed {
+            vision: true,
+            tools,
+            ..model
+        }
+    }
+
+    #[test]
+    fn an_embedding_model_that_reads_images_is_never_the_vision_pick() {
+        let catalog = catalog(&[
+            Installed {
+                embedding: true,
+                vision: true,
+                ..installed("nomic-embed-vision:v1.5", 262, 93)
+            },
+            installed("llava:7b", 4_733, 7_000),
+        ]);
+
+        assert_eq!(
+            chat_model(
+                AUTO,
+                &Preferences::default(),
+                &catalog,
+                "what is this",
+                true,
+                false
+            ),
+            "llava:7b"
+        );
+    }
+
+    #[test]
+    fn an_image_chat_takes_the_smallest_model_that_reads_images_whether_dedicated_or_general() {
+        let llava = vision(installed("llava:7b", 4_733, 7_000), Some(false));
+        let qwen = vision(installed("qwen3.8:27b", 17_741, 27_300), Some(true));
+        let gemma = vision(installed("gemma3:4b", 3_338, 4_300), Some(false));
+        let image = |models: &[Installed]| {
+            chat_model(
+                AUTO,
+                &Preferences::default(),
+                &catalog(models),
+                "what is this",
+                true,
+                false,
+            )
+        };
+
+        assert_eq!(
+            image(&[qwen.clone(), llava.clone()]),
+            "llava:7b",
+            "a general model that reads images does not displace a smaller dedicated one"
+        );
+        assert_eq!(
+            image(&[qwen.clone(), installed("llama3.2:3b", 2_019, 3_200)]),
+            "qwen3.8:27b",
+            "the only model that reads images beats a smaller one that cannot"
+        );
+        assert_eq!(
+            image(&[installed("llava:13b", 8_000, 13_000), gemma]),
+            "gemma3:4b",
+            "a smaller general model beats a larger dedicated one"
+        );
+    }
+
+    #[test]
+    fn an_agent_run_never_lands_on_a_model_that_refuses_tools() {
+        let llava = vision(installed("llava:7b", 4_733, 7_000), Some(false));
+        let qwen = vision(installed("qwen3.8:27b", 17_741, 27_300), Some(true));
+        let catalog = catalog(&[llava, qwen]);
+        let task = |prefs: &Preferences, message: &str, agent: bool| {
+            chat_model(AUTO, prefs, &catalog, message, false, agent)
+        };
+
+        assert_eq!(
+            task(&Preferences::default(), "Add a cart", true),
+            "qwen3.8:27b"
+        );
+        assert_eq!(
+            task(&Preferences::default(), "Audit the cart", true),
+            "qwen3.8:27b"
+        );
+        assert_eq!(
+            task(
+                &prefs(Some("llava:7b"), Some("llava:7b")),
+                "Add a cart",
+                true
+            ),
+            "qwen3.8:27b",
+            "a preference that cannot call tools is passed over for a run that offers them"
+        );
+        assert_eq!(
+            task(&Preferences::default(), "Add a cart", false),
+            "llava:7b",
+            "a plain chat offers no tools, so the smallest model still answers it"
+        );
+    }
+
+    #[test]
+    fn an_agent_run_keeps_a_model_whose_tools_are_unknown_and_names_none_that_refuses_them() {
+        let unknown = catalog(&[installed("llama3.2:3b", 2_019, 3_200)]);
+        let refusing = catalog(&[vision(installed("llava:7b", 4_733, 7_000), Some(false))]);
+
+        assert_eq!(
+            chat_model(
+                AUTO,
+                &Preferences::default(),
+                &unknown,
+                "Add a cart",
+                false,
+                true
+            ),
+            "llama3.2:3b"
+        );
+        assert_eq!(
+            chat_model(
+                AUTO,
+                &prefs(Some("llava:7b"), None),
+                &refusing,
+                "Add a cart",
+                false,
+                true
+            ),
+            AUTO
         );
     }
 }
