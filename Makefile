@@ -34,11 +34,14 @@ NC := \033[0m
 DOCKER_COMPOSE := $(shell which docker-compose 2>/dev/null || echo "docker compose")
 # Maps Compose profiles to overlay files (dev, vpn) and --profile flags.
 COMPOSE := ./scripts/compose.sh
-# GNU tar, because busybox tar cannot append and backup archives the postgres cluster in a pass of its own.
-BACKUP_IMAGE := debian:stable-slim
-BACKUP_VOLUMES := zone_ollama_data zone_postgres_data zone_valkey_data zone_manager_repos \
-	zone_manager_artifacts zone_manager_agent_state zone_prometheus_data zone_grafana_data \
-	zone_traefik_letsencrypt
+VOLUME_PREFIX := zone
+BACKUP_VOLUMES := ollama_data:ollama postgres_data:postgres valkey_data:valkey \
+	manager_repos:manager_repos manager_artifacts:manager_artifacts \
+	manager_agent_state:manager_agent_state prometheus_data:prometheus grafana_data:grafana \
+	traefik_letsencrypt:traefik
+POSTGRES_VOLUME := $(VOLUME_PREFIX)_postgres_data
+backup_volume = $(VOLUME_PREFIX)_$(firstword $(subst :, ,$(1)))
+backup_directory = /data/$(lastword $(subst :, ,$(1)))
 
 ##@ Setup & Configuration
 
@@ -359,95 +362,102 @@ prune: ## Remove unused Docker resources
 
 ##@ Backup & Restore
 
-backup: ## Backup volumes to ./backups, stopping postgres while its cluster is archived (see migrate-pgdata for installs from before zone_postgres_data held it)
+backup: ## Backup volumes to ./backups, stopping postgres while its cluster is copied (see migrate-pgdata for installs from before zone_postgres_data held it)
 	@echo "$(BLUE)Creating backup...$(NC)"
-	@cluster=1; \
-	if ! docker run --rm -v zone_postgres_data:/postgres:ro alpine test -f /postgres/PG_VERSION; then \
-		echo "$(RED)zone_postgres_data holds no database cluster, so this archive would carry no data.$(NC)"; \
-		echo "An install from before the PGDATA mount keeps its cluster in an anonymous volume: run 'make stop && make migrate-pgdata && make up' first."; \
+	@docker image inspect alpine >/dev/null 2>&1 || docker pull alpine >/dev/null || exit 1; \
+	cluster=1; \
+	if ! docker run --rm -v $(POSTGRES_VOLUME):/postgres:ro alpine test -f /postgres/PG_VERSION; then \
+		echo "$(RED)$(POSTGRES_VOLUME) holds no database cluster, so this archive would carry no data.$(NC)"; \
+		echo "An install from before the PGDATA mount keeps its cluster in an anonymous volume: run 'make stop && make migrate-pgdata && $(COMPOSE) up -d' first."; \
 		echo "Set ALLOW_EMPTY_POSTGRES=1 to archive the other volumes anyway."; \
 		[ -n "$(ALLOW_EMPTY_POSTGRES)" ] || exit 1; \
 		cluster=; \
 	fi; \
 	running=; \
 	if [ -n "$$cluster" ]; then \
-		running=$$(docker ps -q --filter volume=zone_postgres_data) || exit 1; \
+		running=$$(docker ps -q --filter label=com.docker.compose.service=postgres --filter volume=$(POSTGRES_VOLUME)) || exit 1; \
 	fi; \
 	umask 077; \
 	mkdir -m 700 -p backups || exit 1; \
 	DATE=$$(date +%Y%m%d_%H%M%S); \
-	partial=backups/.zone_backup_$$DATE.tar; \
+	partial=backups/.zone_backup_$$DATE.tar.gz; \
+	worker=$(VOLUME_PREFIX)_backup_$$DATE; \
+	halted=; \
+	stage=; \
+	source=$(POSTGRES_VOLUME); \
 	status=0; \
 	restart() { \
-		[ -n "$$running" ] || return 0; \
-		stopped=$$running; \
-		running=; \
+		[ -n "$$halted" ] || return 0; \
+		stopped=$$halted; \
+		halted=; \
 		echo "$(BLUE)Starting postgres again...$(NC)"; \
+		docker stop -t 120 $$stopped >/dev/null 2>&1; \
 		docker start $$stopped >/dev/null && return 0; \
-		echo "$(RED)postgres did not start again: run 'make up'.$(NC)" >&2; \
+		echo "$(RED)postgres did not start again: run 'docker start $$stopped'.$(NC)" >&2; \
 		return 1; \
 	}; \
-	trap 'restart; rm -f "$$partial" "$$partial.gz"' EXIT; \
+	cleanup() { \
+		restart; \
+		docker rm -f "$$worker" >/dev/null 2>&1; \
+		if [ -n "$$stage" ]; then \
+			docker volume rm "$$stage" >/dev/null || echo "$(RED)Remove the staged cluster copy: docker volume rm $$stage$(NC)" >&2; \
+		fi; \
+		rm -f "$$partial"; \
+	}; \
+	trap cleanup EXIT; \
 	trap 'exit 130' INT TERM HUP; \
 	if [ -n "$$running" ]; then \
-		echo "$(YELLOW)Stopping postgres while its cluster is archived; the stack has no database until it starts again.$(NC)"; \
+		stage=$(VOLUME_PREFIX)_backup_stage_$$DATE; \
+		docker volume create "$$stage" >/dev/null || exit 1; \
+		echo "$(YELLOW)Stopping postgres while its cluster is copied; the stack has no database until it starts again.$(NC)"; \
+		halted=$$running; \
 		docker stop -t 120 $$running >/dev/null || exit 1; \
 		codes=$$(docker inspect -f '{{.State.ExitCode}}' $$running) || exit 1; \
 		if printf '%s\n' "$$codes" | grep -qvx 0; then \
 			echo "$(RED)postgres did not shut down cleanly (exit code $$codes), so its cluster would need crash recovery; not archiving it.$(NC)" >&2; \
 			exit 1; \
 		fi; \
+		docker run --rm --name "$$worker" \
+			-v $(POSTGRES_VOLUME):/source:ro \
+			-v "$$stage":/stage \
+			alpine cp -a /source/. /stage/ || exit 1; \
+		source=$$stage; \
+		restart || status=1; \
 	fi; \
-	docker run --rm \
-		-v zone_postgres_data:/data/postgres:ro \
+	docker run --rm --name "$$worker" \
+		$(foreach pair,$(BACKUP_VOLUMES),-v $(if $(filter $(POSTGRES_VOLUME),$(call backup_volume,$(pair))),"$$source",$(call backup_volume,$(pair))):$(call backup_directory,$(pair)):ro) \
 		-v "$$(pwd)/backups:/backup" \
-		$(BACKUP_IMAGE) sh -c "umask 077 && tar --numeric-owner -cf /backup/.zone_backup_$$DATE.tar -C /data ./postgres" || exit 1; \
-	restart || status=1; \
-	docker run --rm \
-		-v zone_ollama_data:/data/ollama:ro \
-		-v zone_valkey_data:/data/valkey:ro \
-		-v zone_manager_repos:/data/manager_repos:ro \
-		-v zone_manager_artifacts:/data/manager_artifacts:ro \
-		-v zone_manager_agent_state:/data/manager_agent_state:ro \
-		-v zone_prometheus_data:/data/prometheus:ro \
-		-v zone_grafana_data:/data/grafana:ro \
-		-v zone_traefik_letsencrypt:/data/traefik:ro \
-		-v "$$(pwd)/backups:/backup" \
-		$(BACKUP_IMAGE) sh -c "umask 077 && cd /backup \
-			&& tar --numeric-owner -rf .zone_backup_$$DATE.tar -C /data ./ollama ./valkey ./manager_repos ./manager_artifacts ./manager_agent_state ./prometheus ./grafana ./traefik \
-			&& gzip -c .zone_backup_$$DATE.tar > .zone_backup_$$DATE.tar.gz \
-			&& mv .zone_backup_$$DATE.tar.gz zone_backup_$$DATE.tar.gz \
-			&& rm .zone_backup_$$DATE.tar" || exit 1; \
+		alpine sh -c "umask 077 && tar czf /backup/.zone_backup_$$DATE.tar.gz -C /data . && mv /backup/.zone_backup_$$DATE.tar.gz /backup/zone_backup_$$DATE.tar.gz" || exit 1; \
 	echo "$(GREEN)Backup created: backups/zone_backup_$$DATE.tar.gz$(NC)"; \
 	exit $$status
 
-restore: ## Restore from backup with the stack stopped (usage: make restore BACKUP=backups/zone_backup_YYYYMMDD_HHMMSS.tar.gz)
+restore: ## Restore from backup with the stack stopped, replacing each volume the archive carries (usage: make restore BACKUP=backups/zone_backup_YYYYMMDD_HHMMSS.tar.gz)
 	@if [ -z "$(BACKUP)" ]; then \
 		echo "$(RED)Error: Please specify BACKUP file$(NC)"; \
 		echo "Usage: make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz"; \
 		exit 1; \
 	fi
-	@running=$$(docker ps -q $(foreach volume,$(BACKUP_VOLUMES),--filter volume=$(volume))) || exit 1; \
+	@running=$$(docker ps -q $(foreach pair,$(BACKUP_VOLUMES),--filter volume=$(call backup_volume,$(pair)))) || exit 1; \
 	if [ -n "$$running" ]; then \
 		echo "$(RED)Running containers use the volumes a restore overwrites. Stop the stack first: make stop$(NC)" >&2; \
 		exit 1; \
 	fi
 	@echo "$(YELLOW)Restoring from $(BACKUP)...$(NC)"
 	@docker run --rm \
-		-v zone_ollama_data:/data/ollama \
-		-v zone_postgres_data:/data/postgres \
-		-v zone_valkey_data:/data/valkey \
-		-v zone_manager_repos:/data/manager_repos \
-		-v zone_manager_artifacts:/data/manager_artifacts \
-		-v zone_manager_agent_state:/data/manager_agent_state \
-		-v zone_prometheus_data:/data/prometheus \
-		-v zone_grafana_data:/data/grafana \
-		-v zone_traefik_letsencrypt:/data/traefik \
-		-v $$(pwd)/backups:/backup \
-		alpine tar xzf /backup/$$(basename $(BACKUP)) -C /data
-	@if ! docker run --rm -v zone_postgres_data:/postgres:ro alpine test -f /postgres/PG_VERSION; then \
-		echo "$(YELLOW)The archive carried no postgres cluster: backups taken before the PGDATA mount moved into zone_postgres_data hold an empty postgres/ directory.$(NC)"; \
-	fi
+		$(foreach pair,$(BACKUP_VOLUMES),-v $(call backup_volume,$(pair)):$(call backup_directory,$(pair))) \
+		-v "$$(pwd)/backups:/backup" \
+		alpine sh -ec ' \
+			tar tzf "/backup/$$1" > /tmp/entries; \
+			for directory in /data/*; do \
+				name=$${directory#/data/}; \
+				grep -Eq "^(\./)?$$name/" /tmp/entries || continue; \
+				if [ "$$name" = postgres ] && ! grep -Eqx "(\./)?postgres/PG_VERSION" /tmp/entries; then \
+					printf "%b\n" "$(YELLOW)The archive carries no postgres cluster, so $(POSTGRES_VOLUME) keeps what it holds: backups taken before the PGDATA mount moved into $(POSTGRES_VOLUME) hold an empty postgres/ directory.$(NC)"; \
+					continue; \
+				fi; \
+				find "$$directory" -mindepth 1 -delete; \
+			done; \
+			tar xzf "/backup/$$1" -C /data' sh "$$(basename $(BACKUP))"
 	@echo "$(GREEN)Restore complete!$(NC)"
 
 migrate-pgdata: ## Move an existing install's postgres cluster out of the anonymous PGDATA volume into zone_postgres_data (run after 'make stop', before 'make up')

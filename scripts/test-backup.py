@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify make backup archives the postgres cluster stopped, and make restore refuses a running stack, without Docker."""
+"""Verify make backup copies the postgres cluster stopped and archives in one pass, and make restore replaces volumes only with the stack stopped, without Docker."""
 
 import json
 import os
@@ -15,8 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 MAKEFILE = Path(os.environ.get('ZONE_MAKEFILE', ROOT / 'Makefile')).resolve()
 SHELLS = list(dict.fromkeys(filter(None, ['/bin/sh', shutil.which('dash')])))
 POSTGRES = 'c0ffee'
-OTHER_VOLUMES = ['./ollama', './valkey', './manager_repos', './manager_artifacts',
-                 './manager_agent_state', './prometheus', './grafana', './traefik']
+OTHER_MOUNTS = ['zone_ollama_data:/data/ollama:ro', 'zone_valkey_data:/data/valkey:ro',
+                'zone_manager_repos:/data/manager_repos:ro', 'zone_manager_artifacts:/data/manager_artifacts:ro',
+                'zone_manager_agent_state:/data/manager_agent_state:ro', 'zone_prometheus_data:/data/prometheus:ro',
+                'zone_grafana_data:/data/grafana:ro', 'zone_traefik_letsencrypt:/data/traefik:ro']
+BACKUP = 'BACKUP=backups/zone_backup_20260930_000000.tar.gz'
 
 FAKE_DOCKER = '''#!/usr/bin/env python3
 import json, os, signal, sys
@@ -24,6 +27,9 @@ arguments = sys.argv[1:]
 with open(os.environ['FAKE_DOCKER_LOG'], 'a') as output:
     output.write(json.dumps(arguments) + '\\n')
 joined = ' '.join(arguments)
+for match, code in json.loads(os.environ['FAKE_DOCKER_FAIL']).items():
+    if match in joined:
+        sys.exit(code)
 if arguments[0] == 'ps':
     print(os.environ['FAKE_DOCKER_PS'])
     sys.exit(0)
@@ -35,9 +41,6 @@ if arguments[0] == 'run' and 'PG_VERSION' in joined:
 signalled = os.environ.get('FAKE_DOCKER_SIGNAL_ON')
 if signalled and signalled in joined:
     os.kill(os.getppid(), signal.SIGTERM)
-for match, code in json.loads(os.environ['FAKE_DOCKER_FAIL']).items():
-    if match in joined:
-        sys.exit(code)
 sys.exit(0)
 '''
 
@@ -58,6 +61,20 @@ class Run:
             raise AssertionError(f'no matching docker call in {json.dumps(self.calls, indent=1)}')
         return found[0]
 
+    def last(self, predicate: Callable[[list[str]], bool]) -> int:
+        return self.indexes(predicate)[-1]
+
+    def stage(self) -> str:
+        return self.calls[self.first(is_stage_create)][2]
+
+
+def is_image_check(call: list[str]) -> bool:
+    return call[:2] == ['image', 'inspect'] and call[-1] == 'alpine'
+
+
+def is_pull(call: list[str]) -> bool:
+    return call == ['pull', 'alpine']
+
 
 def is_stop(call: list[str]) -> bool:
     return call[0] == 'stop'
@@ -71,17 +88,28 @@ def is_exit_code_check(call: list[str]) -> bool:
     return call[0] == 'inspect' and any('.State.ExitCode' in argument for argument in call)
 
 
-def is_cluster_archive(call: list[str]) -> bool:
-    return call[0] == 'run' and 'PG_VERSION' not in ' '.join(call) and any(
-        'tar' in argument and './postgres' in argument for argument in call)
+def is_stage_create(call: list[str]) -> bool:
+    return call[:2] == ['volume', 'create'] and call[2].startswith('zone_backup_stage_')
 
 
-def is_other_archive(call: list[str]) -> bool:
-    return call[0] == 'run' and any('tar' in argument and './valkey' in argument for argument in call)
+def is_stage_remove(call: list[str]) -> bool:
+    return call[:2] == ['volume', 'rm'] and call[2].startswith('zone_backup_stage_')
+
+
+def is_stage_copy(call: list[str]) -> bool:
+    return call[0] == 'run' and 'cp' in call and call[call.index('cp') + 1] == '-a'
+
+
+def is_archive(call: list[str]) -> bool:
+    return call[0] == 'run' and any('tar czf' in argument for argument in call)
 
 
 def is_extract(call: list[str]) -> bool:
-    return call[0] == 'run' and 'tar' in call and call[call.index('tar') + 1].startswith('x')
+    return call[0] == 'run' and any('tar xzf' in argument for argument in call)
+
+
+def mounts(call: list[str]) -> list[str]:
+    return [call[index + 1] for index, argument in enumerate(call) if argument == '-v']
 
 
 @dataclass
@@ -127,67 +155,139 @@ class MakeTarget(unittest.TestCase):
 
 
 class Backup(MakeTarget):
-    def test_running_postgres_is_stopped_only_while_its_cluster_is_archived(self) -> None:
+    def assertRestartedAndStageRemoved(self, run: Run, after: Callable[[list[str]], bool]) -> None:
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(run.calls[run.first(is_start)], ['start', POSTGRES])
+        self.assertLess(run.first(after), run.first(is_start))
+        self.assertEqual(len(run.indexes(is_start)), 1)
+        self.assertEqual(run.calls[run.first(is_stage_remove)], ['volume', 'rm', run.stage()])
+        self.assertLess(run.first(after), run.first(is_stage_remove))
+        self.assertNotIn('Backup created', run.output)
+
+    def test_running_postgres_is_stopped_only_while_its_cluster_is_copied(self) -> None:
         for shell in SHELLS:
             with self.subTest(shell=shell):
                 run = self.make('backup', Fake(), shell)
                 self.assertEqual(run.returncode, 0, run.output)
+                listing = run.calls[run.first(lambda call: call[0] == 'ps')]
+                self.assertIn('label=com.docker.compose.service=postgres', listing)
+                self.assertIn('volume=zone_postgres_data', listing)
+                image = run.first(is_image_check)
+                create = run.first(is_stage_create)
                 stop = run.first(is_stop)
                 self.assertEqual(run.calls[stop], ['stop', '-t', '120', POSTGRES])
                 check = run.first(is_exit_code_check)
-                archive = run.first(is_cluster_archive)
+                copy = run.first(is_stage_copy)
                 start = run.first(is_start)
                 self.assertEqual(run.calls[start], ['start', POSTGRES])
-                others = run.first(is_other_archive)
-                self.assertLess(stop, check)
-                self.assertLess(check, archive)
-                self.assertLess(archive, start)
-                self.assertLess(start, others)
+                self.assertEqual(run.calls[start - 1], ['stop', '-t', '120', POSTGRES])
+                archive = run.first(is_archive)
+                remove = run.first(is_stage_remove)
+                self.assertEqual([image, create, stop, check, copy, start, archive, remove], sorted(
+                    [image, create, stop, check, copy, start, archive, remove]))
                 self.assertEqual(len(run.indexes(is_start)), 1)
-                self.assertNotIn('zone_ollama_data:/data/ollama:ro', run.calls[archive])
-                self.assertIn('zone_postgres_data:/data/postgres:ro', run.calls[archive])
-                self.assertNotIn('zone_postgres_data:/data/postgres:ro', run.calls[others])
-                archived = ' '.join(run.calls[others])
-                for volume in OTHER_VOLUMES:
-                    self.assertIn(volume, archived)
-                self.assertIn('-rf', archived)
+                self.assertEqual(len(run.indexes(is_archive)), 1)
+                self.assertEqual(run.indexes(is_pull), [])
+                stage = run.stage()
+                self.assertEqual(mounts(run.calls[copy]), ['zone_postgres_data:/source:ro', f'{stage}:/stage'])
+                self.assertEqual(run.calls[copy][-4:], ['cp', '-a', '/source/.', '/stage/'])
+                self.assertEqual(run.calls[remove], ['volume', 'rm', stage])
+                archived = mounts(run.calls[archive])
+                self.assertIn(f'{stage}:/data/postgres:ro', archived)
+                self.assertNotIn('zone_postgres_data:/data/postgres:ro', archived)
+                for mount in OTHER_MOUNTS:
+                    self.assertIn(mount, archived)
+                script = run.calls[archive][-1]
+                self.assertIn('tar czf /backup/.zone_backup_', script)
+                self.assertIn('-C /data .', script)
+                self.assertNotIn('-rf', script)
+                self.assertNotIn('gzip', script)
                 self.assertIn('Backup created: backups/zone_backup_', run.output)
                 self.assertEqual(run.directory_mode, 0o700)
 
-    def test_failed_cluster_archive_still_starts_postgres(self) -> None:
+    def test_missing_image_is_pulled_before_postgres_stops(self) -> None:
         for shell in SHELLS:
             with self.subTest(shell=shell):
-                run = self.make('backup', Fake(fail={'./postgres': 2}), shell)
-                self.assertNotEqual(run.returncode, 0)
-                self.assertLess(run.first(is_cluster_archive), run.first(is_start))
-                self.assertEqual(run.indexes(is_other_archive), [])
-                self.assertNotIn('Backup created', run.output)
+                run = self.make('backup', Fake(fail={'image inspect': 1}), shell)
+                self.assertEqual(run.returncode, 0, run.output)
+                self.assertLess(run.first(is_image_check), run.first(is_pull))
+                self.assertLess(run.first(is_pull), run.first(is_stop))
 
-    def test_signal_during_cluster_archive_still_starts_postgres(self) -> None:
+                refused = self.make('backup', Fake(fail={'image inspect': 1, 'pull': 1}), shell)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertEqual(refused.indexes(is_stop), [])
+                self.assertEqual(refused.indexes(is_start), [])
+                self.assertEqual(refused.indexes(is_stage_create), [])
+
+    def test_failed_stage_volume_leaves_postgres_running(self) -> None:
         for shell in SHELLS:
             with self.subTest(shell=shell):
-                run = self.make('backup', Fake(signal_on='./postgres'), shell)
+                run = self.make('backup', Fake(fail={'volume create': 1}), shell)
                 self.assertNotEqual(run.returncode, 0)
-                self.assertLess(run.first(is_cluster_archive), run.first(is_start))
-                self.assertEqual(run.indexes(is_other_archive), [])
+                self.assertEqual(run.indexes(is_stop), [])
+                self.assertEqual(run.indexes(is_start), [])
+                self.assertEqual(run.indexes(is_archive), [])
 
-    def test_unclean_shutdown_is_not_archived(self) -> None:
+    def test_failed_stage_copy_still_starts_postgres_and_removes_the_stage(self) -> None:
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                run = self.make('backup', Fake(fail={'cp -a': 2}), shell)
+                self.assertRestartedAndStageRemoved(run, is_stage_copy)
+                self.assertEqual(run.indexes(is_archive), [])
+
+    def test_signal_during_stage_copy_still_starts_postgres_and_removes_the_stage(self) -> None:
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                run = self.make('backup', Fake(signal_on='cp -a'), shell)
+                self.assertRestartedAndStageRemoved(run, is_stage_copy)
+                self.assertEqual(run.calls[run.first(is_start) - 1], ['stop', '-t', '120', POSTGRES])
+                self.assertEqual(run.indexes(is_archive), [])
+
+    def test_failed_archive_removes_the_stage(self) -> None:
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                run = self.make('backup', Fake(fail={'tar czf': 2}), shell)
+                self.assertRestartedAndStageRemoved(run, is_stage_copy)
+                self.assertLess(run.first(is_start), run.first(is_archive))
+                self.assertLess(run.first(is_archive), run.first(is_stage_remove))
+
+    def test_signal_during_archive_removes_the_stage(self) -> None:
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                run = self.make('backup', Fake(signal_on='tar czf'), shell)
+                self.assertRestartedAndStageRemoved(run, is_stage_copy)
+                self.assertLess(run.first(is_archive), run.first(is_stage_remove))
+
+    def test_unclean_shutdown_is_not_copied(self) -> None:
         for shell in SHELLS:
             with self.subTest(shell=shell):
                 run = self.make('backup', Fake(exit_code='137'), shell)
-                self.assertNotEqual(run.returncode, 0)
-                self.assertLess(run.first(is_exit_code_check), run.first(is_start))
-                self.assertEqual(run.indexes(is_cluster_archive), [])
+                self.assertRestartedAndStageRemoved(run, is_exit_code_check)
+                self.assertEqual(run.indexes(is_stage_copy), [])
+                self.assertEqual(run.indexes(is_archive), [])
                 self.assertIn('did not shut down cleanly', run.output)
 
-    def test_stopped_postgres_is_neither_stopped_nor_started(self) -> None:
+    def test_failed_restart_points_at_the_container(self) -> None:
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                run = self.make('backup', Fake(fail={'start': 1}), shell)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn(f"run 'docker start {POSTGRES}'", run.output)
+                self.assertNotIn('make up', run.output)
+                self.assertEqual(len(run.indexes(is_start)), 1)
+                self.assertLess(run.first(is_start), run.first(is_archive))
+                self.assertIn('Backup created', run.output)
+
+    def test_stopped_postgres_is_archived_in_place(self) -> None:
         for shell in SHELLS:
             with self.subTest(shell=shell):
                 run = self.make('backup', Fake(running=''), shell)
                 self.assertEqual(run.returncode, 0, run.output)
                 self.assertEqual(run.indexes(is_stop), [])
                 self.assertEqual(run.indexes(is_start), [])
-                self.assertLess(run.first(is_cluster_archive), run.first(is_other_archive))
+                self.assertEqual(run.indexes(is_stage_create), [])
+                self.assertEqual(run.indexes(is_stage_remove), [])
+                self.assertIn('zone_postgres_data:/data/postgres:ro', mounts(run.calls[run.first(is_archive)]))
 
     def test_empty_cluster_volume_is_archived_without_stopping_anything(self) -> None:
         for shell in SHELLS:
@@ -195,20 +295,22 @@ class Backup(MakeTarget):
                 refused = self.make('backup', Fake(cluster=False), shell)
                 self.assertNotEqual(refused.returncode, 0)
                 self.assertEqual(refused.indexes(is_stop), [])
-                self.assertEqual(refused.indexes(is_cluster_archive), [])
+                self.assertEqual(refused.indexes(is_archive), [])
+                self.assertIn('./scripts/compose.sh up -d', refused.output)
 
                 run = self.make('backup', Fake(cluster=False), shell, 'ALLOW_EMPTY_POSTGRES=1')
                 self.assertEqual(run.returncode, 0, run.output)
                 self.assertEqual(run.indexes(is_stop), [])
                 self.assertEqual(run.indexes(is_start), [])
-                self.assertLess(run.first(is_cluster_archive), run.first(is_other_archive))
+                self.assertEqual(run.indexes(is_stage_create), [])
+                self.assertIn('zone_postgres_data:/data/postgres:ro', mounts(run.calls[run.first(is_archive)]))
 
 
 class Restore(MakeTarget):
     def test_restore_refuses_while_a_zone_volume_is_mounted(self) -> None:
         for shell in SHELLS:
             with self.subTest(shell=shell):
-                run = self.make('restore', Fake(), shell, 'BACKUP=backups/zone_backup_20260930_000000.tar.gz')
+                run = self.make('restore', Fake(), shell, BACKUP)
                 self.assertNotEqual(run.returncode, 0)
                 self.assertEqual(run.indexes(is_extract), [])
                 self.assertIn('Stop the stack first: make stop', run.output)
@@ -216,12 +318,71 @@ class Restore(MakeTarget):
                 for volume in ['zone_postgres_data', 'zone_manager_agent_state', 'zone_traefik_letsencrypt']:
                     self.assertIn(f'volume={volume}', listing)
 
-    def test_restore_extracts_with_the_stack_down(self) -> None:
+    def test_restore_clears_each_archived_volume_before_extracting(self) -> None:
         for shell in SHELLS:
             with self.subTest(shell=shell):
-                run = self.make('restore', Fake(running=''), shell, 'BACKUP=backups/zone_backup_20260930_000000.tar.gz')
+                run = self.make('restore', Fake(running=''), shell, BACKUP)
                 self.assertEqual(run.returncode, 0, run.output)
                 self.assertEqual(len(run.indexes(is_extract)), 1)
+                call = run.calls[run.first(is_extract)]
+                self.assertEqual(call[-1], 'zone_backup_20260930_000000.tar.gz')
+                self.assertIn('zone_postgres_data:/data/postgres', mounts(call))
+                self.assertEqual(len(mounts(call)), 10)
+                script = call[call.index('-ec') + 1]
+                listing = script.index('tar tzf')
+                clearing = script.index('find "$directory" -mindepth 1 -delete')
+                extraction = script.index('tar xzf')
+                self.assertLess(listing, clearing)
+                self.assertLess(clearing, extraction)
+
+
+class RestoreScript(unittest.TestCase):
+    def restore(self, archive_tree: dict[str, str | None], volumes: dict[str, str]) -> tuple[Path, str]:
+        run = subprocess.run(['make', '-n', '-f', str(MAKEFILE), 'restore', BACKUP],
+                             text=True, capture_output=True, check=True)
+        command = next(line for line in run.stdout.split('docker run')[1:] if 'tar xzf' in line)
+        script = command[command.index("-ec '") + 5:command.rindex("' sh ")].replace('\\\n', '')
+        folder = Path(tempfile.mkdtemp(prefix='zone-restore-script-'))
+        self.addCleanup(shutil.rmtree, folder)
+        source = folder / 'source'
+        for path, content in archive_tree.items():
+            if content is None:
+                (source / path).mkdir(parents=True, exist_ok=True)
+                continue
+            (source / path).parent.mkdir(parents=True, exist_ok=True)
+            (source / path).write_text(content)
+        backup = folder / 'backup'
+        backup.mkdir()
+        subprocess.run(['tar', 'czf', str(backup / 'archive.tar.gz'), '-C', str(source), '.'], check=True)
+        data = folder / 'data'
+        for path, content in volumes.items():
+            (data / path).parent.mkdir(parents=True, exist_ok=True)
+            (data / path).write_text(content)
+        script = script.replace('/backup/', f'{backup}/').replace('/data', str(data)).replace(
+            '/tmp/entries', str(folder / 'entries'))
+        result = subprocess.run(['sh', '-ec', script, 'sh', 'archive.tar.gz'], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return data, result.stdout + result.stderr
+
+    def test_archived_volumes_lose_files_written_after_the_backup(self) -> None:
+        data, _ = self.restore(
+            {'postgres/PG_VERSION': '16', 'postgres/base/1': 'row', 'valkey/dump.rdb': 'old', 'grafana/': None},
+            {'postgres/PG_VERSION': '16', 'postgres/base/1_vm': 'stale', 'valkey/dump.rdb': 'new',
+             'valkey/temp.rdb': 'stale', 'grafana/grafana.db': 'new', 'unlisted/keep': 'kept'})
+        self.assertFalse((data / 'postgres/base/1_vm').exists())
+        self.assertEqual((data / 'postgres/base/1').read_text(), 'row')
+        self.assertEqual((data / 'valkey/dump.rdb').read_text(), 'old')
+        self.assertFalse((data / 'valkey/temp.rdb').exists())
+        self.assertEqual(list((data / 'grafana').iterdir()), [])
+        self.assertEqual((data / 'unlisted/keep').read_text(), 'kept')
+
+    def test_archive_without_a_cluster_keeps_the_current_one(self) -> None:
+        data, output = self.restore(
+            {'postgres/data/': None, 'valkey/dump.rdb': 'old'},
+            {'postgres/PG_VERSION': '16', 'valkey/dump.rdb': 'new'})
+        self.assertEqual((data / 'postgres/PG_VERSION').read_text(), '16')
+        self.assertEqual((data / 'valkey/dump.rdb').read_text(), 'old')
+        self.assertIn('carries no postgres cluster', output)
 
 
 if __name__ == '__main__':

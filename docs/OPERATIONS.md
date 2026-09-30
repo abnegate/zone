@@ -60,30 +60,46 @@ the name the script printed: `docker volume rm <64-hex-name>`.
 steps above when it does not; `ALLOW_EMPTY_POSTGRES=1` archives the other
 volumes regardless.
 
-A running postgres is stopped while the cluster is archived, so the archive
+A running postgres is stopped while its cluster is copied, so the archive
 holds a cleanly shut down, point-in-time copy rather than files read while
-Postgres wrote them. It stays stopped only as long as the cluster takes to
-archive, usually seconds, but the stack has no database meanwhile: requests
-that need it fail until postgres is back. The stop allows Postgres 120 seconds to shut down, and the backup
-refuses to archive a cluster that did not exit cleanly. Postgres starts again
-as soon as its pass ends, including when that pass fails or the backup is
-interrupted. The other volumes are archived afterwards, live. A postgres that
-was not running stays stopped, and nothing is stopped when the volume holds no
-cluster.
+Postgres wrote them. The backup first makes sure the `alpine` image it runs is
+present, pulling it if needed, and creates a temporary Docker volume,
+`zone_backup_stage_<date>`. It then stops postgres, allowing it 120 seconds to
+shut down, refuses to go on when it did not exit cleanly, copies the cluster
+into that volume with `cp -a`, and starts postgres again. The stack has no
+database only while the copy runs, usually seconds, but requests that need it
+fail meanwhile. Postgres starts again when the copy fails or the backup is
+interrupted too. If it cannot start, the backup prints the
+`docker start <container>` command to run.
+
+The archive is then written in one streaming pass, the staged copy under
+`postgres/` and the other volumes read live, and the temporary volume is
+removed when the backup ends, whether it succeeded or not. The staged copy
+needs free disk the size of the cluster for as long as the backup runs; the
+archive is compressed as it is written, so nothing else is held twice. A
+postgres that was not running stays stopped and is archived in place, and
+nothing is stopped or staged when the volume holds no cluster.
+
+The live volumes may change while they are read. Files that grow or change are
+archived as read, but a file deleted or truncated mid-read (a Prometheus WAL
+segment removed at compaction, for instance) makes `tar` fail; the backup then
+removes its partial archive and exits non-zero. Run it again.
 
 It creates `backups/` with mode 0700 when the directory does not exist yet,
 and writes each archive with mode 0600. Docker runs the archiving container as
 root, so on a Linux host whose Docker daemon runs as root the archive belongs
-to root: read or copy it with `sudo`. The archive is first built uncompressed
-as `backups/.zone_backup_<date>.tar` and compressed at the end, so the backup
-temporarily needs free disk for the whole uncompressed archive, the Ollama
-models included, on top of the compressed one. A failed backup removes it.
+to root: read or copy it with `sudo`. The archive is written as
+`backups/.zone_backup_<date>.tar.gz` and renamed once complete.
 
-`make restore BACKUP=<archive>` extracts into the same volumes and warns when
-the archive carried no cluster, which is what every archive taken before the
-mount moved looks like. It refuses to start while any running container
-mounts one of those volumes: stop the stack first (`make stop`), and start it
-afterwards. Archives from before the postgres pass restore the same way.
+`make restore BACKUP=<archive>` refuses to start while any running container
+mounts one of the nine volumes: stop the stack first (`make stop`), and start
+it afterwards. It lists the archive first, which also checks it is readable,
+and then empties each volume the archive carries before extracting into it,
+so files written after the backup, such as a table's `_vm` and `_fsm` forks,
+do not survive the restore. Volumes the archive does not carry are left alone.
+An archive with no cluster under `postgres/`, which is what every archive
+taken before the mount moved looks like, leaves `zone_postgres_data` as it
+is and says so. Archives from before the postgres pass restore the same way.
 
 ### Coding agent sign-ins in an archive
 
