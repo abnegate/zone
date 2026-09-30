@@ -95,7 +95,7 @@ impl Action {
     fn event_type(self) -> SyncEventType {
         match self {
             Self::Create => SyncEventType::Create,
-            Self::Remove => SyncEventType::Close,
+            Self::Remove => SyncEventType::Unlink,
             Self::Other => SyncEventType::Update,
         }
     }
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn webhook_actions_map_to_sync_event_types() {
         assert_eq!(parse_signed_action("create"), SyncEventType::Create);
-        assert_eq!(parse_signed_action("remove"), SyncEventType::Close);
+        assert_eq!(parse_signed_action("remove"), SyncEventType::Unlink);
         for action in ["update", "restore"] {
             assert_eq!(
                 parse_signed_action(action),

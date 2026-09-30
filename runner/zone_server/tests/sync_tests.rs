@@ -984,6 +984,43 @@ async fn a_signed_github_delete_unlinks_the_issue_and_leaves_the_task_as_it_was(
 }
 
 #[tokio::test]
+async fn a_signed_linear_remove_unlinks_the_issue_and_leaves_the_task_as_it_was() {
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+    synced.set_task("Original", "in_progress").await;
+    let mut removed = linear_issue_at("Renamed", "completed", "2026-01-01T00:00:10.000Z");
+    removed["action"] = json!("remove");
+
+    let (status, response) = synced.send_linear(&removed, None).await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["message"], "Issue unlinked from its task");
+    let task = synced.task().await;
+    assert_eq!(task.title, "Original");
+    assert_eq!(task.status, "in_progress");
+    assert!(
+        synced.linked("123").await.is_none(),
+        "a removed issue is no longer linked to the task"
+    );
+    assert!(
+        synced.event_types().await.contains(&SyncEventType::Unlink),
+        "the removal is logged as an unlink"
+    );
+
+    let mut recreated = linear_issue_update();
+    recreated["action"] = json!("create");
+    let (status, response) = synced.send_linear(&recreated, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(
+        response["message"],
+        "Issue was unlinked from its task and is not linked again"
+    );
+    assert!(synced.new_tasks().await.is_empty());
+    assert!(synced.linked("123").await.is_none());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
 async fn an_event_from_another_repository_leaves_the_task_linked_to_the_same_number_unchanged() {
     let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
     let mut foreign = github_issue("edited", "Renamed");
