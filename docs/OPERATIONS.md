@@ -101,3 +101,27 @@ names. It joins the `edge` network as well as `internal`, so a host Ollama at
 answer, the container says so, names the `OLLAMA_BASE_URL=http://ollama:11434`
 setting that pulls into the bundled Ollama instead, and exits 0; only the
 bundled Ollama being unreachable is treated as a failure.
+
+## Monitoring
+
+On Docker Desktop, the "Container CPU" and "Container memory" panels of the
+Chat Quality and Zone Overview dashboards stay empty while "Use containerd for
+pulling and storing images" (Settings > General) is on, which it is by default
+from Docker Desktop 4.34. The containerd image store keeps image layers where
+cAdvisor v0.52.1, the version the compose file pins, does not look, so its log
+repeats `failed to identify the read-write layer ID for container …` and it
+exports only `machine_memory_bytes`. The upstream issue is
+[google/cadvisor#3643](https://github.com/google/cadvisor/issues/3643); the fix,
+[google/cadvisor#3709](https://github.com/google/cadvisor/pull/3709), first
+shipped in cAdvisor v0.54.0. Until the pin moves past it, turn that setting off
+to get the panels back. Docker Desktop keeps the two image stores apart and
+hides the inactive one, so the classic store starts without Zone's images and
+containers: the next `make up` pulls the images again and recreates the
+containers. The containerd copies stay on disk and come back if the setting
+is turned on again.
+
+The Gluetun scrape target and the blackbox SearXNG probe only resolve while
+the `vpn` profile runs. A stack started with `monitoring` alone shows neither
+and fires no "SearXNG Probe Down" alert. With `vpn` on, a crashed `gluetun`
+takes SearXNG's address with it, so the probe goes quiet instead of firing:
+the rule treats no data as OK.

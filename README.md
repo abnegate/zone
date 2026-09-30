@@ -231,6 +231,8 @@ Pre-built dashboards for:
 
 Access Grafana at `https://grafana.localhost`.
 
+See [Monitoring in docs/OPERATIONS.md](docs/OPERATIONS.md#monitoring) for why the container panels are empty on Docker Desktop's containerd image store, and why SearXNG and Gluetun only appear with the `vpn` profile.
+
 ## Usage
 
 ### Makefile Commands
