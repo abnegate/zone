@@ -63,7 +63,7 @@ const UNTITLED_CHAT_TITLE = 'Untitled chat';
 export default function ChatsPage() {
   const { isAuthenticated } = useAuth();
   const { currentWorkspace } = useWorkspace();
-  const { models } = useModels();
+  const { models } = useModels(currentWorkspace?.id);
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [showArchived, setShowArchived] = useState(false);

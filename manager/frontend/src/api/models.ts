@@ -48,10 +48,11 @@ export type TrainResult = z.infer<typeof TrainResultSchema>;
  */
 export const modelsApi = {
   /**
-   * Get list of installed models
+   * Get list of installed models, or the models a chat in `workspaceId` can run
    */
-  async getModels(): Promise<ModelsResponse> {
-    const response = await fetch(`${API_BASE}/api/models`, {
+  async getModels(workspaceId?: string): Promise<ModelsResponse> {
+    const query = workspaceId ? `?${new URLSearchParams({ workspace_id: workspaceId })}` : '';
+    const response = await fetch(`${API_BASE}/api/models${query}`, {
       headers: client.getHeaders(),
     });
     if (!response.ok) {

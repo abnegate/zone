@@ -116,20 +116,29 @@ mock.module('../../sources/hooks/useSources', () => ({
   }),
 }));
 
+type ListedModel = { name: string; size: number; modified_at: string } & Record<string, unknown>;
+
+const instanceModels: ListedModel[] = [
+  { name: 'llama2', size: 1, modified_at: '' },
+  { name: 'mistral', size: 1, modified_at: '', completion: true },
+  { name: 'llama3.1', size: 1, modified_at: '', completion: true, tools: true },
+  { name: 'vectors', size: 1, modified_at: '', completion: false },
+];
+let listedModels = instanceModels;
+const modelWorkspaces: (string | undefined)[] = [];
+
 // Mock useModels - include all exports from models module for proper mocking
 mock.module('../../models', () => ({
-  useModels: () => ({
-    models: [
-      { name: 'llama2', size: 1, modified_at: '' },
-      { name: 'mistral', size: 1, modified_at: '', completion: true },
-      { name: 'llama3.1', size: 1, modified_at: '', completion: true, tools: true },
-      { name: 'vectors', size: 1, modified_at: '', completion: false },
-    ],
-    loading: false,
-    error: null,
-    refresh: mock(),
-    deleteModel: mock(),
-  }),
+  useModels: (workspaceId?: string) => {
+    modelWorkspaces.push(workspaceId);
+    return {
+      models: listedModels,
+      loading: false,
+      error: null,
+      refresh: mock(),
+      deleteModel: mock(),
+    };
+  },
   useBrowse: () => ({
     browse: mock(),
     models: [],
@@ -346,6 +355,8 @@ describe('ChatsPage', () => {
     mockWsClose.mockReset();
     mockClient.getChats.mockResolvedValue(mockChats);
     mockClient.getChat.mockResolvedValue(mockChatWithMessages);
+    listedModels = instanceModels;
+    modelWorkspaces.length = 0;
   });
 
   describe('chat names', () => {
@@ -855,6 +866,28 @@ describe('ChatsPage', () => {
       expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
       expect(screen.getByRole('option', { name: 'mistral' })).toBeInTheDocument();
       expect(screen.queryByRole('option', { name: 'vectors' })).not.toBeInTheDocument();
+    });
+
+    it('offers only the models the current workspace can run', async () => {
+      listedModels = [
+        { name: 'gpt-4o-mini', size: 0, modified_at: '2026-01-01T00:00:00Z' },
+        { name: 'o3', size: 0, modified_at: '2026-01-01T00:00:00Z' },
+      ];
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(newChatButtons()[0]).toBeInTheDocument();
+      });
+      fireEvent.click(newChatButtons()[0]);
+      fireEvent.keyDown(screen.getByLabelText('Select Model'), { key: 'ArrowDown' });
+
+      expect(modelWorkspaces).toContain('ws-1');
+      expect(modelWorkspaces).not.toContain(undefined);
+      expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
+        'Automatic',
+        'gpt-4o-mini',
+        'o3',
+      ]);
     });
 
     it('closes new chat modal on cancel', async () => {

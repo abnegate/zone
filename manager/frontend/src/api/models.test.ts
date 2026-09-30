@@ -17,6 +17,24 @@ describe('Namespaced model requests', () => {
     expect(await modelsApi.getModels()).toEqual({ models: [model] });
   });
 
+  it('lists every installed model when no workspace is named', async () => {
+    const request = mock(async () => Response.json([]));
+    global.fetch = request as typeof fetch;
+
+    await modelsApi.getModels();
+
+    expect(request).toHaveBeenCalledWith('/api/models', expect.anything());
+  });
+
+  it("asks for the models a workspace's chats can run", async () => {
+    const saved = { name: 'gpt-4o-mini', size: 0, modified_at: '2026-01-01T00:00:00Z' };
+    const request = mock(async () => Response.json([saved]));
+    global.fetch = request as typeof fetch;
+
+    expect(await modelsApi.getModels('ws-1')).toEqual({ models: [saved] });
+    expect(request).toHaveBeenCalledWith('/api/models?workspace_id=ws-1', expect.anything());
+  });
+
   it('keeps the provider errors a partial inventory carries', async () => {
     const model = { name: 'flux1-dev.safetensors', size: 1, modified_at: '2024-01-01T00:00:00Z' };
     global.fetch = mock(async () =>
