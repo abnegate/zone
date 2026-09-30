@@ -127,16 +127,23 @@ whatever changed after it was taken.
 ## Upgrading to migration 049
 
 The first start of a server that records failed reviewer rounds applies
-migration 049, which lets `task_reviews` store the `failed` verdict. An image
-built before it cannot start against the migrated database: it stops with
+migrations 049 and 050, which let `task_reviews` store the `failed` verdict.
+049 swaps the verdict check without reading the table, and 050 then validates
+it while reviews stay writable. An image built before them cannot start
+against the migrated database: it stops with
 `Failed to run migrations: VersionMissing(49)`. Run `make backup` before the
 upgrade. Going back to an older image means restoring that backup, and losing
 whatever changed after it was taken.
 
-An auto-project reviewer model that errors, a transient network error
-included, now records a failed round: the next tick asks the next reviewer,
-and a second round on the same head without a verdict pauses the task with
-the error, pointing at `ZONE_AUTO_REVIEW_MODELS`.
+An auto-project reviewer model that errors now records a failed round: the
+next tick asks the next reviewer, and a second round on the same head without
+a verdict pauses the task with the error, pointing at
+`ZONE_AUTO_REVIEW_MODELS`. A reviewer endpoint that does not answer (a refused
+connection, a timeout, a 5xx while Ollama restarts, or a 429) records nothing
+and is asked again on the next tick, with a warning logged each time; after at
+least 5 such ticks over 10 minutes the task pauses, naming the reviewer and
+the last error. The count lives in the driver's memory, so a restart starts it
+over.
 
 ## Pulling models into the bundled Ollama
 

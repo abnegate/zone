@@ -98,6 +98,10 @@ For production, regenerate secrets for security.
   - `mxbai-embed-large` (1024 dimensions)
 - **Note**: Vectors written by one model do not compare with another's, so switching models means re-embedding what is indexed. With `EMBEDDING_ENGINE=local`, name a model the in-process engine can run, such as `nomic-embed-text`.
 
+### Automatic picks
+
+With no model pinned, a chat with an attached image goes to the smallest installed model that reads images and completes chats: a dedicated one such as `llava:7b` when it is the smaller, a general one such as `qwen3.8:27b` when it is the only one, and never an embedding model such as `nomic-embed-vision`. An agent-mode chat or a task run offers tools, so it skips any model Ollama lists without the `tools` capability, a pinned Fast or Reasoning model included; a model listed without capabilities is still used.
+
 ### `OLLAMA_HOST`
 - **Default**: `0.0.0.0:11434`
 - **Description**: Bind address for a bundled Ollama container
@@ -1291,7 +1295,7 @@ On Claude Code, an auto project's runs, reviews and summaries run with no one wa
 
 ### `ZONE_AUTO_REVIEW_MODELS`
 - **Default**: *empty*
-- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the tool-capable installed models. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers, and a round whose reviewer errors or gives no readable verdict moves to the next. Two such rounds on one head pause the task. A review session offers tools, so a model Ollama lists without the `tools` capability (such as `llava:7b`) is never picked, even when named here; a model Ollama lists without any capabilities, or does not list at all, is still tried.
+- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the tool-capable installed models. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers, and a round whose reviewer errors or gives no readable verdict moves to the next. Two such rounds on one head pause the task. An endpoint that does not answer (a refused connection, a timeout, a 5xx while Ollama restarts, or a 429) judged nothing, so it is not a round: the same reviewer is asked again on the next tick, and the task pauses only once the endpoint has gone unanswered on at least 5 ticks over 10 minutes. A review session offers tools, so a model Ollama lists without the `tools` capability (such as `llava:7b`) is never picked, even when named here or when it wrote the change; a model Ollama lists without any capabilities, or does not list at all, is still tried. When every model left cannot call tools, the task pauses saying so.
 
 ### `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL`
 - **Default**: `false`
