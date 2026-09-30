@@ -274,6 +274,59 @@ mod tests {
         assert_eq!(token_store().unwrap().service(), "zone-cli");
     }
 
+    /// What an earlier CLI wrote to the keychain, entry by entry, has to be
+    /// what the shared store reads, or every signed-in user is signed out by
+    /// the upgrade. The platform keychain is swapped for keyring's in-memory
+    /// store, which the earlier CLI's `Entry` writes go through as well.
+    #[test]
+    fn the_keychain_entries_an_earlier_cli_wrote_still_sign_the_user_in() {
+        keyring::Entry::store_status()
+            .as_ref()
+            .expect("the platform store initialises before it is replaced");
+        keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap());
+        let manager = AuthManager::new().unwrap();
+
+        assert!(!manager.is_logged_in());
+        assert!(matches!(
+            manager.get_metadata(),
+            Err(AuthError::NotLoggedIn)
+        ));
+
+        let access_token = concat!("eyJhbGciOiJIUzI1NiJ9", ".access");
+        let refresh_token = concat!("3f1c2b7a", "9e");
+        let metadata = r#"{"host":"https://api.zone.io","expires_at":4102444800,"user_id":"abc-456","email":"user@zone.io"}"#;
+        for (name, value) in [
+            ("access-token", access_token),
+            ("refresh-token", refresh_token),
+            ("metadata", metadata),
+        ] {
+            keyring::Entry::new("zone-cli", name)
+                .unwrap()
+                .set_password(value)
+                .unwrap();
+        }
+
+        assert!(manager.is_logged_in());
+        let read = manager.get_metadata().unwrap();
+        assert_eq!(read.host, "https://api.zone.io");
+        assert_eq!(read.email.as_deref(), Some("user@zone.io"));
+        assert_eq!(manager.store.access_token().unwrap().expose(), access_token);
+        assert_eq!(
+            manager.store.refresh_token().unwrap().expose(),
+            refresh_token
+        );
+
+        manager.logout().unwrap();
+
+        assert!(!manager.is_logged_in());
+        assert!(
+            keyring::Entry::new("zone-cli", "metadata")
+                .unwrap()
+                .get_password()
+                .is_err()
+        );
+    }
+
     /// The metadata a CLI stored before the shared token store, byte for
     /// byte, so a signed-in user stays signed in across the upgrade.
     #[test]

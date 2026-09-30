@@ -9670,6 +9670,8 @@ dependencies = [
  "console",
  "dialoguer",
  "indicatif",
+ "keyring",
+ "keyring-core",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "serde",
