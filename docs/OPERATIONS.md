@@ -87,9 +87,11 @@ segment removed at compaction, for instance) makes `tar` fail; the backup then
 removes its partial archive and exits non-zero. Run it again.
 
 It creates `backups/` with mode 0700 when the directory does not exist yet,
-and writes each archive with mode 0600. Docker runs the archiving container as
-root, so on a Linux host whose Docker daemon runs as root the archive belongs
-to root: read or copy it with `sudo`. The archive is written as
+and writes each archive with mode 0600, owned by the user who ran
+`make backup`. The archiving container runs as root, so the backup creates the
+empty partial archive itself before the container starts and `tar` writes
+into that file; on a Linux host the archive would otherwise belong to root and
+be unreadable without `sudo`. The archive is written as
 `backups/.zone_backup_<date>-<process>.tar.gz` and renamed once complete; if
 an archive of that name already exists, the backup leaves it alone, removes
 its own partial archive and exits non-zero. The process ID keeps two backups

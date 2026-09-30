@@ -425,6 +425,7 @@ backup: ## Backup volumes to ./backups, stopping postgres while its cluster is c
 		source=$$stage; \
 		restart || status=1; \
 	fi; \
+	(set -C && : > "$$partial") || exit 1; \
 	docker run --rm --name "$$worker" \
 		$(foreach pair,$(BACKUP_VOLUMES),-v $(if $(filter $(POSTGRES_VOLUME),$(call backup_volume,$(pair))),"$$source",$(call backup_volume,$(pair))):$(call backup_directory,$(pair)):ro) \
 		-v "$$(pwd)/backups:/backup" \
@@ -446,7 +447,7 @@ restore: ## Restore from backup with the stack stopped, replacing each volume th
 	@echo "$(YELLOW)Restoring from $(BACKUP)...$(NC)"
 	@docker run --rm \
 		$(foreach pair,$(BACKUP_VOLUMES),-v $(call backup_volume,$(pair)):$(call backup_directory,$(pair))) \
-		-v "$$(pwd)/backups:/backup" \
+		-v "$$(pwd)/backups:/backup:ro" \
 		alpine sh -c ' \
 			previous=$(RESTORE_PREVIOUS); \
 			tar tzf "/backup/$$1" > /tmp/entries || exit 1; \

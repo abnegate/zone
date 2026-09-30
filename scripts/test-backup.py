@@ -75,6 +75,8 @@ import os, pathlib, sys, time
 if sys.argv[1] != 'czf':
     sys.exit(64)
 partial = pathlib.Path(sys.argv[2])
+if not partial.exists() or partial.stat().st_mode & 0o777 != 0o600:
+    sys.exit('tar runs as root in the container, so the user running make backup must create its 0600 partial archive')
 partial.write_text('archive')
 if os.environ.get('FAKE_TAR_COLLIDE'):
     (partial.parent / partial.name.removeprefix('.')).write_text('other')
@@ -383,6 +385,7 @@ class Backup(MakeTarget):
             with self.subTest(shell=shell):
                 run = self.make('backup', Fake(fail={'tar czf': 2}), shell)
                 self.assertRestartedAndStageRemoved(run, is_stage_copy)
+                self.assertEqual(run.files, {})
                 self.assertLess(run.first(is_start), run.first(is_archive))
                 self.assertLess(run.first(is_archive), run.first(is_stage_remove))
 
@@ -391,6 +394,7 @@ class Backup(MakeTarget):
             with self.subTest(shell=shell):
                 run = self.make('backup', Fake(signal_on='tar czf'), shell)
                 self.assertRestartedAndStageRemoved(run, is_stage_copy)
+                self.assertEqual(run.files, {})
                 self.assertLess(run.first(is_archive), run.first(is_stage_remove))
 
     def test_unclean_shutdown_is_not_copied(self) -> None:
@@ -519,6 +523,8 @@ class Restore(MakeTarget):
                 self.assertEqual(call[-1], 'zone_backup_20260930_000000.tar.gz')
                 self.assertIn('zone_postgres_data:/data/postgres', mounts(call))
                 self.assertEqual(len(mounts(call)), 10)
+                self.assertEqual(len([mount for mount in mounts(call) if mount.endswith('/backups:/backup:ro')]), 1,
+                                 'restore only reads the archive, so it must not be able to write to the host')
                 script = call[call.index('-c') + 1]
                 listing = script.index('tar tzf')
                 aside = script.index('set_aside "$directory" || exit 1')
@@ -736,6 +742,16 @@ class DockerVolumes(unittest.TestCase):
             'postgres': None, 'postgres/PG_VERSION': '16', 'postgres/base': None, 'postgres/base/1': 'old',
             'valkey': None, 'valkey/dump.rdb': 'old', 'grafana': None, 'grafana/grafana.db': 'old',
         })
+
+    def test_archive_belongs_to_the_user_who_ran_the_backup_and_stays_private(self) -> None:
+        self.seed({'postgres/PG_VERSION': '16', 'valkey/dump.rdb': 'old'})
+        backup = self.make('backup')
+        self.assertEqual(backup.returncode, 0, backup.stdout + backup.stderr)
+        [archive] = self.archives()
+        status = archive.stat()
+        self.assertEqual(status.st_uid, os.getuid(), 'the user who ran make backup must own the archive')
+        self.assertEqual(status.st_mode & 0o777, 0o600, 'the archive must stay readable by its owner alone')
+        self.assertEqual([path.name for path in (self.work / 'backups').iterdir()], [archive.name])
 
     def test_truncated_archive_leaves_every_volume_as_it_was(self) -> None:
         self.seed({'postgres/PG_VERSION': '16', 'postgres/base/1': 'old', 'valkey/dump.rdb': os.urandom(1 << 16).hex()})
