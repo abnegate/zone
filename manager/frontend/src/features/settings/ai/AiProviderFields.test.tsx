@@ -4,6 +4,7 @@ import { AiProviderSchema } from '../workspace/schemas';
 import type { AiProvider, AiSettings, OrganizationKeys } from '../workspace/types';
 import {
   AiProviderFields,
+  AUTOMATIC_HINT,
   KEYLESS_WORKSPACE_WARNING,
   UNROUTED_NOTICE,
   VERSION_HINT,
@@ -143,7 +144,11 @@ const workspaceKey = "A workspace host needs its own key; it never receives the 
 const anthropicCompatible = "Completions go through Anthropic's OpenAI-compatible endpoint.";
 const bedrockDefault = "Bedrock completions still use the server's default endpoint for now.";
 
-function renderFields(provider: AiProvider, level: SettingsLevel = 'organization') {
+function renderFields(
+  provider: AiProvider,
+  level: SettingsLevel = 'organization',
+  saved: AiSettings | null = null
+) {
   return render(
     <AiProviderFields
       level={level}
@@ -152,8 +157,19 @@ function renderFields(provider: AiProvider, level: SettingsLevel = 'organization
       credentials={emptyCredentials}
       configured={nothingConfigured}
       onChange={() => undefined}
+      saved={saved}
     />
   );
+}
+
+const savedUrls = {
+  self_hosted: { litellm_host: 'http://gateway.example:4000' },
+  openai: { openai_base_url: 'https://proxy.example/v1' },
+  anthropic: { anthropic_base_url: 'https://gateway.example' },
+} as const;
+
+function routedFor(provider: keyof typeof savedUrls): AiSettings {
+  return { ...nothingSaved, ...savedUrls[provider], provider, completions_routed: true };
 }
 
 describe('AiProviderFields endpoint copy', () => {
@@ -162,26 +178,49 @@ describe('AiProviderFields endpoint copy', () => {
     ['openai', 'Base URL', 'https://api.openai.com/v1'],
     ['anthropic', 'Base URL', 'https://api.anthropic.com/v1'],
   ] as const)(
-    'suggests the %s endpoint by its real address and describes it with the routing line',
+    'suggests the %s endpoint by its real address and describes how it is sent',
     (provider, label, placeholder) => {
-      renderFields(provider);
+      renderFields(provider, 'organization', routedFor(provider));
       const endpoint = screen.getByLabelText(new RegExp(label));
       expect(endpoint).toHaveAttribute('placeholder', placeholder);
       const description = document.getElementById(endpoint.getAttribute('aria-describedby') ?? '');
       expect(description?.textContent).toStartWith(routing('organization'));
+      expect(description?.textContent).toContain(VERSION_HINT);
+      expect(description?.textContent).toContain(AUTOMATIC_HINT);
     }
   );
 
   it('tells an organization admin where its saved endpoint sends completions without the workspace key rule', () => {
-    renderFields('self_hosted');
+    renderFields('self_hosted', 'organization', routedFor('self_hosted'));
     expect(screen.getByText(routing('organization'))).toHaveClass('form-hint');
     expect(screen.queryByText(workspaceKey)).toBeNull();
   });
 
   it.each(['self_hosted', 'openai', 'anthropic'] as const)(
+    'says nothing is sent to the %s endpoint when it is not saved, or saved but not yet routed',
+    (provider) => {
+      for (const saved of [
+        null,
+        nothingSaved,
+        { ...routedFor(provider), completions_routed: false },
+      ]) {
+        const { unmount } = renderFields(provider, 'organization', saved);
+        expect(screen.queryByText(routing('organization'))).toBeNull();
+        expect(screen.getByText(AUTOMATIC_HINT)).toHaveClass('form-hint');
+        unmount();
+      }
+    }
+  );
+
+  it('says nothing is sent to an endpoint whose saved values belong to another provider', () => {
+    renderFields('openai', 'organization', routedFor('self_hosted'));
+    expect(screen.queryByText(routing('organization'))).toBeNull();
+  });
+
+  it.each(['self_hosted', 'openai', 'anthropic'] as const)(
     'warns a workspace %s endpoint that it never receives the organization key',
     (provider) => {
-      renderFields(provider, 'workspace');
+      renderFields(provider, 'workspace', routedFor(provider));
       expect(screen.getByText(routing('workspace'))).toHaveClass('form-hint');
       expect(screen.getByText(workspaceKey)).toHaveClass('form-hint');
       expect(screen.queryByText(routing('organization'))).toBeNull();
@@ -219,6 +258,7 @@ describe('AiProviderFields endpoint copy', () => {
       expect(screen.getByText(bedrockDefault)).toHaveClass('alert', 'alert-warning');
       expect(screen.queryByText(routing(level))).toBeNull();
       expect(screen.queryByText(workspaceKey)).toBeNull();
+      expect(screen.queryByText(AUTOMATIC_HINT)).toBeNull();
     }
   );
 

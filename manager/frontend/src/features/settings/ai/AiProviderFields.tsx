@@ -55,6 +55,8 @@ export const UNROUTED_NOTICE =
   'Saved before completions were routed; save to start sending completions here.';
 export const VERSION_HINT =
   "A URL naming only a host gets /v1 added. End it with / to use the host's root, or give a path to use it as saved.";
+export const AUTOMATIC_HINT =
+  'Automatic needs a Fast or Reasoning model when completions go to a saved endpoint.';
 export const KEYLESS_WORKSPACE_WARNING =
   "This workspace host has no key of its own, and the organization's key never goes to it. Enter a key if the host needs one.";
 
@@ -75,22 +77,25 @@ function EndpointHints({
   saved,
   organizationKeys,
 }: EndpointHintsProps) {
-  const pending = routingOf(saved, provider) === 'pending';
+  const routing = routingOf(saved, provider);
   const keyless =
     level === 'workspace' &&
     organizationKeys !== undefined &&
     missesOrganizationKey(provider, credentials, configured, organizationKeys);
   return (
     <div id={ENDPOINT_HINT_ID} className="form-group form-group--full">
-      {pending && (
+      {routing === 'pending' && (
         <div className="alert alert-warning" role="status">
           {UNROUTED_NOTICE}
         </div>
       )}
-      <p className="form-hint">
-        Chats, task runs and background work in this {level} send completions here.
-      </p>
+      {routing === 'routed' && (
+        <p className="form-hint">
+          Chats, task runs and background work in this {level} send completions here.
+        </p>
+      )}
       <p className="form-hint">{VERSION_HINT}</p>
+      <p className="form-hint">{AUTOMATIC_HINT}</p>
       {provider === 'anthropic' && (
         <p className="form-hint">Completions go through Anthropic's OpenAI-compatible endpoint.</p>
       )}
