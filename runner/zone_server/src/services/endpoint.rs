@@ -214,7 +214,8 @@ impl Endpoint {
 
     /// Where a model's context capacity is learned. Only the instance's own
     /// LiteLLM deployment is asked: a third party publishes no deployment
-    /// metadata and must never be sent an Ollama `num_ctx`.
+    /// metadata, so its models are given the configured context, and it must
+    /// never be sent an Ollama `num_ctx`.
     pub fn capacity(&self, config: &Config) -> Resolver {
         match self.origin {
             Origin::Instance => Resolver::with_context(
@@ -223,7 +224,7 @@ impl Endpoint {
                 &config.ollama_host,
                 Some(config.chat.context),
             ),
-            Origin::Settings => Resolver::undisclosed(),
+            Origin::Settings => Resolver::undisclosed(Some(config.chat.context)),
         }
     }
 
@@ -1212,8 +1213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_settings_endpoint_lists_no_models_and_reports_an_unknown_capacity_without_a_request()
-    {
+    async fn a_settings_endpoint_lists_no_models_and_assumes_the_configured_context() {
         let server = MockServer::start().await;
         Mock::given(any())
             .respond_with(ResponseTemplate::new(404))
@@ -1235,9 +1235,15 @@ mod tests {
 
         assert!(catalog.models.is_empty());
         assert_eq!(catalog.agent, None);
-        assert_eq!(capacity.source, Source::Unknown);
-        assert_eq!(capacity.limit, None);
-        assert_eq!(capacity.ollama, None);
+        assert_eq!(capacity.source, Source::Configured);
+        assert_eq!(capacity.limit, Some(config.chat.context));
+        assert_eq!(capacity.ollama, None, "no num_ctx may reach a third party");
+        assert!(
+            crate::services::chat::session::policy(&config.chat, &capacity)
+                .threshold()
+                .is_some(),
+            "a saved endpoint's history is never compacted"
+        );
         server.verify().await;
     }
 

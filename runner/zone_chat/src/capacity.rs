@@ -23,6 +23,8 @@ pub const DEFAULT_CONTEXT: u64 = 32_768;
 
 const THINKING: &str = "thinking";
 const UNDISCLOSED: &str = "The endpoint publishes no deployment metadata.";
+const ASSUMED: &str =
+    "The endpoint publishes no deployment metadata, so the configured context is assumed.";
 const VISION: &str = "vision";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,12 +66,16 @@ impl Capacity {
 
 /// Refreshed per preparation: no stale cross-provider or unloaded-runtime cache.
 pub struct Resolver {
+    configured: Option<u64>,
+    deployment: Option<Deployment>,
+}
+
+/// A LiteLLM deployment of this instance and the Ollama behind it.
+struct Deployment {
     client: Client,
     host: String,
     key: String,
     ollama: String,
-    configured: Option<u64>,
-    disclosed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -103,32 +109,55 @@ impl Resolver {
 
     pub fn with_context(host: &str, key: &str, ollama: &str, configured: Option<u64>) -> Self {
         Self {
-            client: Client::builder()
-                .connect_timeout(Duration::from_secs(2))
-                .timeout(Duration::from_secs(2))
-                .build()
-                .expect("Valid metadata HTTP client"),
-            host: host.trim_end_matches('/').into(),
-            key: key.into(),
-            ollama: ollama.trim_end_matches('/').into(),
             configured: configured.filter(|value| *value > 0),
-            disclosed: true,
+            deployment: Some(Deployment {
+                client: Client::builder()
+                    .connect_timeout(Duration::from_secs(2))
+                    .timeout(Duration::from_secs(2))
+                    .build()
+                    .expect("Valid metadata HTTP client"),
+                host: host.trim_end_matches('/').into(),
+                key: key.into(),
+                ollama: ollama.trim_end_matches('/').into(),
+            }),
         }
     }
 
-    /// For an endpoint that is not a LiteLLM deployment of this instance: every
-    /// model's capacity is unknown, and nothing is requested to learn it.
-    pub fn undisclosed() -> Self {
+    /// For an endpoint that is not a LiteLLM deployment of this instance.
+    /// Nothing is requested to learn a model's capacity: every model is given
+    /// `configured`, and no Ollama `num_ctx` is ever set for it.
+    pub fn undisclosed(configured: Option<u64>) -> Self {
         Self {
-            disclosed: false,
-            ..Self::with_context("", "", "", None)
+            configured: configured.filter(|value| *value > 0),
+            deployment: None,
         }
     }
 
     pub async fn resolve(&self, model: &str) -> Capacity {
-        if !self.disclosed {
-            return Capacity::unknown(model, UNDISCLOSED);
+        match &self.deployment {
+            Some(deployment) => deployment.resolve(model, self.configured).await,
+            None => assumed(model, self.configured),
         }
+    }
+}
+
+fn assumed(model: &str, configured: Option<u64>) -> Capacity {
+    let Some(limit) = configured else {
+        return Capacity::unknown(model, UNDISCLOSED);
+    };
+    Capacity {
+        limit: Some(limit),
+        source: Source::Configured,
+        ollama: None,
+        reasoning: false,
+        vision: None,
+        reason: Some(ASSUMED.into()),
+        identity: model.into(),
+    }
+}
+
+impl Deployment {
+    async fn resolve(&self, model: &str, configured: Option<u64>) -> Capacity {
         let Some(mut routes) = self.routes(model).await else {
             return Capacity::unknown(
                 model,
@@ -270,7 +299,7 @@ impl Resolver {
                     .and_then(Value::as_str)
                     .and_then(configured_limit)
             })
-            .or(self.configured)
+            .or(configured)
         else {
             return Capacity::unknown(
                 model,
@@ -466,14 +495,28 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
-    async fn an_undisclosed_endpoint_reports_an_unknown_capacity_without_asking() {
-        let capacity = Resolver::undisclosed().resolve("gpt-4o").await;
+    async fn an_undisclosed_endpoint_is_given_the_configured_context_without_a_num_ctx() {
+        let capacity = Resolver::undisclosed(Some(DEFAULT_CONTEXT))
+            .resolve("gpt-4o")
+            .await;
 
-        assert_eq!(capacity.source, Source::Unknown);
-        assert_eq!(capacity.limit, None);
+        assert_eq!(capacity.limit, Some(DEFAULT_CONTEXT));
+        assert_eq!(capacity.source, Source::Configured);
         assert_eq!(capacity.ollama, None, "no num_ctx may reach a third party");
         assert!(!capacity.reasoning);
+        assert_eq!(capacity.vision, None);
         assert_eq!(capacity.identity, "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn an_undisclosed_endpoint_without_a_configured_context_is_unknown() {
+        for configured in [None, Some(0)] {
+            let capacity = Resolver::undisclosed(configured).resolve("gpt-4o").await;
+
+            assert_eq!(capacity.source, Source::Unknown, "{configured:?}");
+            assert_eq!(capacity.limit, None, "{configured:?}");
+            assert_eq!(capacity.ollama, None, "{configured:?}");
+        }
     }
 
     async fn fixture(parameters: Value, running: Value, shown: Value) -> (MockServer, Resolver) {
