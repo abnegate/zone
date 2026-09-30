@@ -158,26 +158,37 @@ organization whose tasks run unattended.
 
 Self-Hosted, OpenAI and Anthropic send completions over HTTP to the endpoint
 saved in AI Settings, even when `ZONE_LLM_BACKEND` names a CLI. A workspace
-with **Override organization AI settings** on uses its own settings in place of
-the organization's.
+with **Override organization AI settings** on uses the fields it saves in place
+of the organization's, and inherits the ones it leaves blank.
 
-- **Self-Hosted**: the saved LiteLLM host, with the saved key.
-- **OpenAI**: the saved base URL, or OpenAI's API without one, with the saved
-  key.
-- **Anthropic**: Anthropic's OpenAI-compatible endpoint,
-  `https://api.anthropic.com/v1/`, with the saved key as a Bearer token.
-  Anthropic describes that endpoint as meant for testing and "not considered a
-  long-term or production-ready solution for most use cases".
+- **Self-Hosted**: the saved LiteLLM host, with the saved key. A host on the
+  same origin as `LITELLM_HOST` (scheme, host and port, with each scheme's
+  default port filled in) is the instance's own: Zone sends to `LITELLM_HOST`
+  as configured, with the saved key or `LITELLM_KEY` without one, and it
+  follows `ZONE_LLM_BACKEND` like the instance endpoint. With no host saved,
+  the instance endpoint runs, and a key saved without a host is not used.
+- **OpenAI**: the saved base URL, or `https://api.openai.com/v1` without one,
+  with the saved key.
+- **Anthropic**: the saved base URL, or `https://api.anthropic.com/v1` without
+  one, with the saved key as a Bearer token. That default is Anthropic's
+  OpenAI-compatible endpoint, which Anthropic describes as meant for testing and
+  "not considered a long-term or production-ready solution for most use cases".
+- **OpenAI** or **Anthropic** with neither a base URL nor a key saved runs on
+  the instance endpoint.
 - **AWS Bedrock** is not routed yet: it runs on the instance default.
 
 Keys stay with the URL they were saved beside. A URL a workspace saves never
 receives the organization's key, and the instance's `LITELLM_KEY` only ever goes
-to `LITELLM_HOST`.
+to `LITELLM_HOST`. A URL saved with no key, or a blank one, is sent no
+`Authorization` header.
 
 A URL is checked when it is saved: it must be `http` or `https`, name a host,
 and carry no credentials, query or fragment. Private, LAN and loopback hosts are
-allowed, since an operator may run the model next to Zone. A base URL with no
-path gets `/v1`, so `http://10.0.0.5:4000` becomes `http://10.0.0.5:4000/v1`.
+allowed, since an operator may run the model next to Zone. A URL saved before
+this check that fails it is ignored: that provider runs on the instance
+endpoint, and the server logs a warning. Trailing slashes are dropped, and a URL
+with no path gets `/v1`, so `http://10.0.0.5:4000` becomes
+`http://10.0.0.5:4000/v1`.
 
 *Automatic* on a saved endpoint uses the **Fast Model** and **Reasoning Model**
 names saved in AI Settings, never the instance's `OLLAMA_MODEL_*` defaults. With
@@ -223,7 +234,9 @@ setting a monthly cap, at claude.ai/settings/usage.
 ### `ZONE_LLM_BACKEND`
 - **Default**: `litellm`
 - **Description**: The instance-wide default, for organizations and workspaces
-  whose provider is not Claude Code or Codex
+  whose provider is not Claude Code or Codex and that save no endpoint of their
+  own (see *Saved endpoints*): a saved endpoint runs over HTTP whatever this
+  says
 - **Options**:
   - `litellm` (the endpoint `LITELLM_HOST` names)
   - `claude` (runs the `claude` CLI)
