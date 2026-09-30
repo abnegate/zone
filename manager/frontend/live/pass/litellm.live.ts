@@ -51,6 +51,38 @@ function modelsIn(text: string): string[] {
   ];
 }
 
+/**
+ * Save the organization's AI settings before the lane writes its own, with a
+ * fingerprint of that write. A backup left by an interrupted pass is restored
+ * first when the row still holds that pass's write, and discarded as stale when
+ * the settings have changed since. No value is spliced into the SQL as text.
+ */
+function backupQuery(
+  organization: string,
+  written: Record<string, string>,
+): string {
+  const fingerprint = `convert_from(decode('${Buffer.from(JSON.stringify(written)).toString('base64')}', 'base64'), 'utf8')::jsonb`;
+  return `begin;
+    create table if not exists ${BACKUP} (organization_id uuid primary key, settings jsonb, written jsonb not null);
+    create temp table interrupted on commit drop as
+      select b.settings from ${BACKUP} b join organization_ai_settings s using (organization_id)
+      where b.organization_id = '${organization}'
+        and jsonb_build_object('provider', s.provider, 'litellm_host', s.litellm_host, 'model_fast', s.model_fast, 'model_reasoning', s.model_reasoning) = b.written;
+    delete from organization_ai_settings where organization_id = '${organization}' and exists (select 1 from interrupted);
+    insert into organization_ai_settings select (jsonb_populate_record(null::organization_ai_settings, settings)).* from interrupted where settings is not null;
+    delete from ${BACKUP} where organization_id = '${organization}';
+    insert into ${BACKUP} values ('${organization}', (select to_jsonb(s) from organization_ai_settings s where organization_id = '${organization}'), ${fingerprint});
+    commit;`;
+}
+
+function restoreQuery(organization: string): string {
+  return `begin;
+    delete from organization_ai_settings where organization_id = '${organization}';
+    insert into organization_ai_settings select (jsonb_populate_record(null::organization_ai_settings, settings)).* from ${BACKUP} where organization_id = '${organization}' and settings is not null;
+    delete from ${BACKUP} where organization_id = '${organization}';
+    commit;`;
+}
+
 test.describe('LiteLLM routing', () => {
   test.skip(!enabled, 'set ZONE_LIVE_REAL_PASS=1 against the real rig');
   test.skip(
@@ -66,21 +98,16 @@ test.describe('LiteLLM routing', () => {
     const token = await tokenFor(tenant);
     const organization = tenant.organization.id;
     const settingsPath = `/api/organizations/${organization}/settings/ai`;
-    sql(
-      `create table if not exists ${BACKUP} (organization_id uuid primary key, settings jsonb)`,
-    );
-    sql(
-      `insert into ${BACKUP} values ('${organization}', (select to_jsonb(s) from organization_ai_settings s where organization_id = '${organization}')) on conflict (organization_id) do nothing`,
-    );
+    const written = {
+      provider: 'self_hosted',
+      litellm_host: `${LITELLM}/v1`,
+      model_fast: FAST,
+      model_reasoning: REASON,
+    };
+    sql(backupQuery(organization, written));
     const saved = await api('PUT', settingsPath, {
       token,
-      body: {
-        provider: 'self_hosted',
-        litellm_host: `${LITELLM}/v1`,
-        litellm_key: KEY,
-        model_fast: FAST,
-        model_reasoning: REASON,
-      },
+      body: { ...written, litellm_key: KEY },
     });
     expect(saved.status).toBe(200);
     try {
@@ -130,9 +157,7 @@ test.describe('LiteLLM routing', () => {
       });
       expect(routed).toBe(true);
     } finally {
-      sql(
-        `begin; delete from organization_ai_settings where organization_id = '${organization}'; insert into organization_ai_settings select (jsonb_populate_record(null::organization_ai_settings, settings)).* from ${BACKUP} where organization_id = '${organization}' and settings is not null; delete from ${BACKUP} where organization_id = '${organization}'; commit;`,
-      );
+      sql(restoreQuery(organization));
     }
   });
 });
