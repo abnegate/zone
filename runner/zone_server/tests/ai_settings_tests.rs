@@ -1513,7 +1513,11 @@ async fn test_ai_settings_accept_private_and_loopback_hosts() {
                     "{path} refused {field} = {url:?}: {}",
                     response.text()
                 );
-                let saved = if url.is_empty() { json!(null) } else { json!(url) };
+                let saved = if url.is_empty() {
+                    json!(null)
+                } else {
+                    json!(url)
+                };
                 assert_eq!(response.json_value()[field], saved, "{path} {field}");
             }
         }
