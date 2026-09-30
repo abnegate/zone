@@ -472,10 +472,12 @@ impl LlmClient {
             Budget::MaxTokens => (Some(reserved), None),
             Budget::MaxCompletionTokens => (None, Some(reserved)),
         };
+        let messages = dialect.messages(messages);
+        let tools = dialect.tools(tools);
         self.request(ChatRequest {
             model,
-            messages,
-            tools,
+            messages: &messages,
+            tools: tools.as_deref(),
             tool_choice: None,
             temperature: dialect.temperature(model, self.config.temperature),
             max_tokens,
@@ -1355,6 +1357,214 @@ mod tests {
                 "{body}"
             );
             server.verify().await;
+        }
+
+        const UPLOAD: &str = "data:image/png;base64,dXBsb2Fk";
+        const SCREENSHOT: &str = "data:image/png;base64,c2NyZWVu";
+        const GENERATED: &str = "data:image/png;base64,Z2VuZXJhdGVk";
+        const DRAWN: &str = "data:image/png;base64,ZHJhd24=";
+
+        fn call(id: &str, name: &str, arguments: &str) -> crate::llm::ToolCall {
+            crate::llm::ToolCall {
+                id: id.to_string(),
+                call_type: "function".to_string(),
+                function: crate::llm::FunctionCall {
+                    name: name.to_string(),
+                    arguments: arguments.to_string(),
+                },
+            }
+        }
+
+        fn history() -> Vec<Message> {
+            let mut asked = Message::user("What is on screen?");
+            asked.images = vec![UPLOAD.to_string()];
+            let mut requested = Message::assistant_with_tools(vec![
+                call("call_1", "screenshot", ""),
+                call("call_2", "list", r#"{"path":"."}"#),
+            ]);
+            requested.reasoning_content = Some("I should look first".to_string());
+            requested.thinking_blocks =
+                vec![json!({ "type": "thinking", "thinking": "look", "signature": "c2ln" })];
+            let mut captured = Message::tool_result("call_1", "captured");
+            captured.images = vec![SCREENSHOT.to_string()];
+            let listed = Message::tool_result("call_2", "a.rs");
+            let mut answered = Message::assistant("Here it is");
+            answered.images = vec![GENERATED.to_string()];
+            answered.reasoning_content = Some("the screen shows a.rs".to_string());
+            let mut drawn = Message::assistant("");
+            drawn.images = vec![DRAWN.to_string()];
+            vec![
+                Message::system("Be brief."),
+                asked,
+                requested,
+                captured,
+                listed,
+                answered,
+                drawn,
+                Message::user("Again."),
+            ]
+        }
+
+        fn tools() -> Vec<ToolDefinition> {
+            vec![
+                ToolDefinition::function("screenshot", "Capture the screen", json!({})),
+                ToolDefinition::function(
+                    "list",
+                    "List a directory",
+                    json!({ "type": "object", "properties": { "path": { "type": "string" } } }),
+                ),
+            ]
+        }
+
+        fn image(url: &str) -> Value {
+            json!({ "type": "image_url", "image_url": { "url": url } })
+        }
+
+        fn forwarded(label: &str, url: &str) -> Value {
+            json!({ "role": "user", "content": [{ "type": "text", "text": label }, image(url)] })
+        }
+
+        fn provider_contract() -> (Value, Value) {
+            let messages = json!([
+                { "role": "system", "content": "Be brief." },
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "What is on screen?" }, image(UPLOAD)],
+                },
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": { "name": "screenshot", "arguments": "{}" },
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": { "name": "list", "arguments": r#"{"path":"."}"# },
+                        },
+                    ],
+                },
+                { "role": "tool", "content": "captured", "tool_call_id": "call_1" },
+                { "role": "tool", "content": "a.rs", "tool_call_id": "call_2" },
+                forwarded("[Image from the tool result for call_1]", SCREENSHOT),
+                { "role": "assistant", "content": "Here it is" },
+                forwarded("[Image from the previous assistant message]", GENERATED),
+                forwarded("[Image from the previous assistant message]", DRAWN),
+                { "role": "user", "content": "Again." },
+            ]);
+            let tools = json!([
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "screenshot",
+                        "description": "Capture the screen",
+                        "parameters": { "type": "object", "properties": {} },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list",
+                        "description": "List a directory",
+                        "parameters": {
+                            "type": "object",
+                            "properties": { "path": { "type": "string" } },
+                        },
+                    },
+                },
+            ]);
+            (messages, tools)
+        }
+
+        async fn contract(dialect: Dialect, stream: bool) -> Value {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(if stream { streamed() } else { completion() })
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = client(&server, dialect);
+            let (messages, tools) = (history(), tools());
+            if stream {
+                let mut chunks = client
+                    .chat_stream_with_model("model", &messages, Some(&tools))
+                    .await
+                    .expect("the stream opens");
+                while let Some(chunk) = chunks.next().await {
+                    assert!(chunk.is_ok(), "{dialect:?}: {chunk:?}");
+                }
+            } else {
+                let answered = client
+                    .chat_with_model("model", &messages, Some(&tools))
+                    .await;
+                assert!(answered.is_ok(), "{dialect:?}: {answered:?}");
+            }
+            server.verify().await;
+            let requests = server.received_requests().await.unwrap_or_default();
+            serde_json::from_slice(&requests[0].body).expect("a JSON body")
+        }
+
+        #[tokio::test]
+        async fn a_provider_api_is_sent_only_the_message_shapes_it_accepts() {
+            let (messages, tools) = provider_contract();
+            for dialect in [Dialect::OpenAI, Dialect::Anthropic] {
+                for stream in [false, true] {
+                    let body = contract(dialect, stream).await;
+
+                    assert_eq!(body["messages"], messages, "{dialect:?} stream={stream}");
+                    assert_eq!(body["tools"], tools, "{dialect:?} stream={stream}");
+                    assert_eq!(body["stream"], json!(stream), "{dialect:?}");
+                    assert!(body.get("tool_choice").is_none(), "{dialect:?}: {body}");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_provider_api_is_never_sent_an_empty_tool_list() {
+            for dialect in [Dialect::OpenAI, Dialect::Anthropic] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(Without("tools"))
+                    .respond_with(completion())
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let answered = client(&server, dialect)
+                    .chat_with_model("model", &[Message::user("hi")], Some(&[]))
+                    .await;
+
+                assert!(answered.is_ok(), "{dialect:?}: {answered:?}");
+                server.verify().await;
+            }
+        }
+
+        #[tokio::test]
+        async fn a_compatible_endpoint_is_sent_the_history_as_it_always_was() {
+            let history = history();
+            let tools = tools();
+            for stream in [false, true] {
+                let body = contract(Dialect::Compatible, stream).await;
+
+                assert_eq!(
+                    body["messages"],
+                    serde_json::to_value(&history).expect("a history"),
+                    "stream={stream}"
+                );
+                assert_eq!(
+                    body["tools"],
+                    serde_json::to_value(&tools).expect("tools"),
+                    "stream={stream}"
+                );
+                assert_eq!(
+                    body["messages"][3]["content"][1],
+                    image(SCREENSHOT),
+                    "LiteLLM translates a tool result's image itself"
+                );
+            }
         }
 
         #[tokio::test]
