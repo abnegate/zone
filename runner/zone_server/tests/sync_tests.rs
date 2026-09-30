@@ -1354,9 +1354,9 @@ async fn deliver_github(
         .method("POST")
         .uri(format!("/api/webhooks/sync/{config}/github"))
         .header("Content-Type", "application/json")
-        .header("X-GitHub-Event", "issues")
+        .header(GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT)
         .header(
-            "X-Hub-Signature-256",
+            GITHUB_SIGNATURE_HEADER,
             format!("sha256={}", signature_for(secret, &body)),
         )
         .body(Body::from(body))
@@ -1376,7 +1376,8 @@ async fn deliver_linear(
             "id": "lin-issue-4242",
             "title": "Filed on Linear",
             "state": { "type": "started", "name": "In Progress" }
-        }
+        },
+        "webhookTimestamp": now_milliseconds()
     }))
     .unwrap();
     let request = Request::builder()
@@ -1384,7 +1385,7 @@ async fn deliver_linear(
         .uri(format!("/api/webhooks/sync/{config}/linear"))
         .header("Content-Type", "application/json")
         .header("Linear-Event", "Issue")
-        .header("Linear-Signature", signature_for(secret, &body))
+        .header(LINEAR_SIGNATURE_HEADER, signature_for(secret, &body))
         .body(Body::from(body))
         .unwrap();
     client.send_request(request).await
