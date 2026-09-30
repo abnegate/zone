@@ -703,3 +703,85 @@ async fn reading_a_chat_on_a_saved_endpoint_asks_the_instance_ollama_nothing() {
         );
     }
 }
+
+/// Make the instance's Ollama call every model it is asked about an embedding
+/// model, which a chat cannot be created on.
+async fn embeds_everything(ollama: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path(SHOW))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"capabilities": ["embedding"]})),
+        )
+        .mount(ollama)
+        .await;
+}
+
+/// A client on a configuration whose instance Ollama is `ollama`, with a
+/// member's token and the workspace they own.
+async fn member_on(
+    endpoints: &Endpoints,
+    ollama: &MockServer,
+    tune: impl FnOnce(&mut Config),
+) -> (TestClient, String, Uuid) {
+    let mut config = endpoints.config();
+    config.ollama_host = ollama.uri();
+    tune(&mut config);
+    let client = TestClient::with_config(config).await;
+    let (token, _, workspace) = chat_on(&client, CHAT_MODEL).await;
+    (client, token, workspace)
+}
+
+#[tokio::test]
+async fn creating_a_chat_on_a_saved_endpoint_asks_the_instance_ollama_nothing() {
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    let (client, token, workspace) = member_on(&endpoints, &ollama, |_| {}).await;
+    let pool = client.state().db().clone();
+    save_for_organization(
+        &pool,
+        workspace,
+        &Saved::litellm(&endpoints.organization, Some(ORGANIZATION_KEY)),
+    )
+    .await;
+    embeds_everything(&ollama).await;
+    let before = shown(&ollama).await;
+
+    let response = client
+        .post_json_auth(
+            "/api/chats",
+            &json!({"workspace_id": workspace, "title": "Saved", "model_name": CHAT_MODEL}),
+            &token,
+        )
+        .await;
+    let asked = shown(&ollama).await - before;
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    response.assert_status(axum::http::StatusCode::CREATED);
+    assert_eq!(
+        asked, 0,
+        "the instance's Ollama was asked about a model the saved endpoint runs"
+    );
+    assert_eq!(response.json_value()["chat"]["model_name"], CHAT_MODEL);
+}
+
+#[tokio::test]
+async fn creating_a_chat_on_the_instance_still_refuses_a_model_that_cannot_chat() {
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    let (client, token, workspace) = member_on(&endpoints, &ollama, |_| {}).await;
+    let pool = client.state().db().clone();
+    embeds_everything(&ollama).await;
+
+    let response = client
+        .post_json_auth(
+            "/api/chats",
+            &json!({"workspace_id": workspace, "title": "Instance", "model_name": CHAT_MODEL}),
+            &token,
+        )
+        .await;
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    response.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}

@@ -5,6 +5,8 @@ use serde::Deserialize;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use crate::services::endpoint::Origin;
+
 static CLIENT: LazyLock<Client> = LazyLock::new(|| {
     Client::builder()
         .connect_timeout(Duration::from_secs(2))
@@ -49,6 +51,15 @@ impl Model {
         match Self::show(host, name).await {
             Some(model) => model.into_profile(name),
             None => Self::unshown(name),
+        }
+    }
+
+    /// What is known of `name` where `origin` sends its completions. The
+    /// instance's Ollama is asked only about a model it serves.
+    pub async fn profile_on(origin: Origin, host: &str, name: &str) -> ModelProfile {
+        match origin {
+            Origin::Instance => Self::profile(host, name).await,
+            Origin::Settings => Self::unshown(name),
         }
     }
 

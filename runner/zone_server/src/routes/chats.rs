@@ -237,10 +237,20 @@ async fn chat_with_messages(
         Some(workspace) => Some(Route::for_workspace(state, workspace).await),
         None => None,
     };
-    let profile = match route.as_ref().map(|route| route.endpoint.origin()) {
-        Some(Origin::Settings) => Model::unshown(&chat.model_name),
-        _ => Model::profile(&state.config().ollama_host, &chat.model_name).await,
-    };
+    chat_on_route(state, auth, chat, route).await
+}
+
+/// [`chat_with_messages`] for a chat whose workspace's route is already read.
+async fn chat_on_route(
+    state: &AppState,
+    auth: &AuthUser,
+    chat: chats::ChatRow,
+    route: Option<Route>,
+) -> ChatWithMessagesResponse {
+    let origin = route
+        .as_ref()
+        .map_or(Origin::Instance, |route| route.endpoint.origin());
+    let profile = Model::profile_on(origin, &state.config().ollama_host, &chat.model_name).await;
     let messages = chats::list_messages(state.db(), chat.id)
         .await
         .unwrap_or_default()
@@ -431,7 +441,10 @@ pub async fn create(
         return e.into_response();
     }
 
-    if Model::completion(&state.config().ollama_host, &req.model_name).await == Some(false) {
+    let route = Route::for_workspace(&state, req.workspace_id).await;
+    let origin = route.endpoint.origin();
+    let profile = Model::profile_on(origin, &state.config().ollama_host, &req.model_name).await;
+    if profile.completion == Some(false) {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(crate::services::model::UNSUPPORTED)),
@@ -460,7 +473,7 @@ pub async fn create(
             (
                 StatusCode::CREATED,
                 Json(SingleChatResponse {
-                    chat: chat_with_messages(&state, &auth, chat).await,
+                    chat: chat_on_route(&state, &auth, chat, Some(route)).await,
                 }),
             )
                 .into_response()
