@@ -7,6 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use chrono::{TimeDelta, Utc};
 use serde::Serialize;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -30,6 +31,9 @@ const MAX_TITLE_LENGTH: usize = 500;
 
 /// Maximum allowed description length
 const MAX_DESCRIPTION_LENGTH: usize = 50_000;
+
+/// The oldest issue a delivery can still turn into a new task
+const MAX_NEW_ISSUE_AGE: TimeDelta = TimeDelta::hours(24);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -104,6 +108,8 @@ enum Outcome {
     OtherSource,
     NotEligible,
     NoWorkspace,
+    OpenedLongAgo,
+    PreviouslyUnlinked,
 }
 
 impl Outcome {
@@ -120,6 +126,8 @@ impl Outcome {
             Self::OtherSource => "Issue is not in the configured repository or project",
             Self::NotEligible => "Issue is not one this sync creates tasks for",
             Self::NoWorkspace => "Project has no workspace to hold a task",
+            Self::OpenedLongAgo => "Issue was opened too long ago to become a task",
+            Self::PreviouslyUnlinked => "Issue was unlinked from its task and is not linked again",
         }
     }
 }
@@ -293,6 +301,7 @@ async fn process(
     let admission = admit(state, config, &settings, &event).await?;
 
     let mut transaction = state.db().begin().await?;
+    sync_config::lock_external_issue(&mut transaction, config.id, &event.external_id).await?;
     if let Some(delivery_id) = event.delivery_id.as_deref()
         && !sync_config::record_delivery(&mut transaction, config.id, delivery_id).await?
     {
@@ -311,7 +320,16 @@ async fn process(
     let outcome = match (linked, admission) {
         (Some(item), _) => apply_to_linked(&mut transaction, config.id, item, event).await?,
         (None, Admission::Admitted { workspace_id }) => {
-            link_new_issue(&mut transaction, config, &settings, workspace_id, event).await?
+            if sync_config::was_unlinked(&mut transaction, config.id, &event.external_id).await? {
+                tracing::info!(
+                    "Ignoring new issue {} for {}: it was unlinked from its task before",
+                    event.external_id,
+                    config.id
+                );
+                Outcome::PreviouslyUnlinked
+            } else {
+                link_new_issue(&mut transaction, config, &settings, workspace_id, event).await?
+            }
         }
         (None, Admission::Refused(outcome)) => outcome,
     };
@@ -321,7 +339,8 @@ async fn process(
 
 /// Whether the delivery's issue would become a task if no task is linked to
 /// it yet: only a newly opened issue, from someone the sync takes new issues
-/// from, into a project with a workspace to hold it.
+/// from, into a project with a workspace to hold it, opened within the last
+/// day so a captured body cannot be replayed into a task later.
 async fn admit(
     state: &AppState,
     config: &SyncConfigRow,
@@ -330,6 +349,17 @@ async fn admit(
 ) -> Result<Admission, BoxError> {
     if event.event_type != SyncEventType::Create {
         return Ok(Admission::Refused(Outcome::NotLinked));
+    }
+    if event
+        .created_at
+        .is_some_and(|created_at| Utc::now() - created_at > MAX_NEW_ISSUE_AGE)
+    {
+        tracing::info!(
+            "Ignoring new issue {} for {}: opened more than a day ago",
+            event.external_id,
+            config.id
+        );
+        return Ok(Admission::Refused(Outcome::OpenedLongAgo));
     }
     if settings.direction()? == SyncDirection::Outbound {
         return Ok(Admission::Refused(Outcome::OutboundOnly));
@@ -352,9 +382,11 @@ async fn admit(
     )
 }
 
-/// Follow the linked issue: a deletion unlinks it and leaves its task as it
-/// is; anything else newer than what was last applied updates the task's
-/// title and description, and its status when the issue changed state.
+/// Follow the linked issue: a deletion unlinks it for good and leaves its
+/// task as it is; anything else newer than what was last applied updates the
+/// task's title and description, and its status when the issue changed state.
+/// A status a live run owns is left for a later delivery to catch up, so the
+/// state stored for the issue stays the one the task last followed.
 async fn apply_to_linked(
     connection: &mut PgConnection,
     sync_config_id: Uuid,
@@ -365,7 +397,24 @@ async fn apply_to_linked(
         tracing::info!("Ignoring inbound webhook for outbound-only sync");
         return Ok(Outcome::OutboundOnly);
     }
-    let payload = serde_json::to_value(&event.payload)?;
+    let previous = item
+        .last_external_state
+        .as_ref()
+        .and_then(WebhookPayload::from_stored);
+    let stale = previous.as_ref().is_some_and(|previous| {
+        if event.event_type == SyncEventType::Unlink {
+            event.payload.is_older_than(previous)
+        } else {
+            event.payload.is_stale_against(previous)
+        }
+    });
+    if stale {
+        tracing::info!(
+            "Ignoring a delivery for issue {} of {sync_config_id} no newer than the last one applied",
+            item.external_id
+        );
+        return Ok(Outcome::Stale);
+    }
 
     if event.event_type == SyncEventType::Unlink {
         sync_config::create_sync_event(
@@ -374,32 +423,17 @@ async fn apply_to_linked(
             None,
             SyncEventType::Unlink,
             SyncEventDirection::Inbound,
-            Some(payload),
+            Some(serde_json::to_value(&event.payload)?),
             None,
         )
         .await?;
-        sync_config::delete_synced_item(&mut *connection, item.id).await?;
+        sync_config::unlink_synced_item(&mut *connection, &item).await?;
         tracing::info!(
             "Unlinked deleted issue {} from task {} for {sync_config_id}",
             item.external_id,
             item.task_id
         );
         return Ok(Outcome::Unlinked);
-    }
-
-    let previous = item
-        .last_external_state
-        .as_ref()
-        .and_then(WebhookPayload::from_stored);
-    if previous
-        .as_ref()
-        .is_some_and(|previous| event.payload.is_no_newer_than(previous))
-    {
-        tracing::info!(
-            "Ignoring a delivery for issue {} of {sync_config_id} no newer than the last one applied",
-            item.external_id
-        );
-        return Ok(Outcome::Stale);
     }
 
     let title = event
@@ -414,32 +448,43 @@ async fn apply_to_linked(
         .map(|description| truncate("description", description, MAX_DESCRIPTION_LENGTH));
     let status = event
         .state_change
-        .target(
-            event.payload.state,
-            previous.and_then(|previous| previous.state),
-        )
+        .target(&event.payload, previous.as_ref())
         .map(task_status);
+    let mut patch = tasks::Patch {
+        id: item.task_id,
+        title,
+        description,
+        acceptance_criteria: None,
+        status,
+        priority: None,
+        project_ids: None,
+        require_plan_approval: None,
+    };
+    let mut applied = event.payload.clone();
+    let mut event_type = event.event_type;
+    if tasks::update_task_in(&mut *connection, &patch)
+        .await?
+        .is_none()
+        && patch.status.is_some()
+    {
+        tracing::info!(
+            "Task {} of issue {} for {sync_config_id} has a live run, so its status waits for a later delivery",
+            item.task_id,
+            item.external_id
+        );
+        patch.status = None;
+        tasks::update_task_in(&mut *connection, &patch).await?;
+        applied.state = previous.and_then(|previous| previous.state);
+        event_type = SyncEventType::Update;
+    }
 
-    tasks::update_task_in(
-        &mut *connection,
-        &tasks::Patch {
-            id: item.task_id,
-            title,
-            description,
-            acceptance_criteria: None,
-            status,
-            priority: None,
-            project_ids: None,
-            require_plan_approval: None,
-        },
-    )
-    .await?;
+    let payload = serde_json::to_value(&applied)?;
     sync_config::update_synced_item(&mut *connection, item.id, Some(payload.clone())).await?;
     sync_config::create_sync_event(
         &mut *connection,
         sync_config_id,
         Some(item.id),
-        event.event_type,
+        event_type,
         SyncEventDirection::Inbound,
         Some(payload),
         None,

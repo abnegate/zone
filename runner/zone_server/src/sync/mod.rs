@@ -165,6 +165,8 @@ pub struct WebhookEvent {
     pub origin: IssueOrigin,
     /// The provider's ID for this delivery, which each retry of it repeats
     pub delivery_id: Option<String>,
+    /// When the issue was opened, as the signed body says
+    pub created_at: Option<DateTime<Utc>>,
     pub state_change: StateChange,
     /// Event payload
     pub payload: WebhookPayload,
@@ -175,7 +177,10 @@ pub struct WebhookEvent {
 pub enum StateChange {
     /// The event is the move itself, like GitHub's `closed` or `reopened`
     MovedTo(IssueState),
-    /// The event leaves the state alone, like a GitHub label or edit
+    /// The event leaves the state alone, like a GitHub label or edit. The
+    /// state it carries is followed only when it is later than the last one
+    /// seen and differs from it, which catches a task up with a move it could
+    /// not follow while a run owned its status.
     Kept,
     /// The event carries the issue's current state, which moved only if it
     /// differs from the last one seen, like any Linear update
@@ -183,20 +188,23 @@ pub enum StateChange {
 }
 
 impl StateChange {
-    /// The state a linked task follows the issue to, given the state this
-    /// delivery reports and the last one seen before it.
+    /// The state a linked task follows the issue to, given this delivery's
+    /// payload and the last one seen before it.
     pub fn target(
         self,
-        reported: Option<IssueState>,
-        previous: Option<IssueState>,
+        current: &WebhookPayload,
+        previous: Option<&WebhookPayload>,
     ) -> Option<IssueState> {
+        let differing = |previous: &WebhookPayload| match (current.state, previous.state) {
+            (Some(reported), Some(seen)) if reported != seen => Some(reported),
+            _ => None,
+        };
         match self {
             Self::MovedTo(state) => Some(state),
-            Self::Kept => None,
-            Self::Reported => match (reported, previous) {
-                (Some(reported), Some(previous)) if reported != previous => Some(reported),
-                _ => None,
-            },
+            Self::Kept => previous
+                .filter(|previous| current.is_later_than(previous))
+                .and_then(differing),
+            Self::Reported => previous.and_then(differing),
         }
     }
 }
@@ -311,12 +319,34 @@ impl WebhookPayload {
         serde_json::from_value(stored.clone()).ok()
     }
 
-    /// Whether this payload describes the issue no later than `previous`
-    /// did, when both say when the issue last changed.
-    pub fn is_no_newer_than(&self, previous: &Self) -> bool {
+    /// Whether this payload adds nothing to `previous`: the issue last changed
+    /// before `previous` says it did, or in the same second into the same
+    /// state, title and body. GitHub reports whole seconds, so two changes in
+    /// one second are told apart only by what they changed.
+    pub fn is_stale_against(&self, previous: &Self) -> bool {
+        self.is_older_than(previous)
+            || (self.updated_at.is_some()
+                && self.updated_at == previous.updated_at
+                && self.state == previous.state
+                && self.title == previous.title
+                && self.description == previous.description)
+    }
+
+    /// Whether the issue last changed before `previous` says it did, when
+    /// both say.
+    pub fn is_older_than(&self, previous: &Self) -> bool {
         matches!(
             (self.updated_at, previous.updated_at),
-            (Some(current), Some(previous)) if current <= previous
+            (Some(current), Some(previous)) if current < previous
+        )
+    }
+
+    /// Whether the issue last changed after `previous` says it did, when
+    /// both say.
+    pub fn is_later_than(&self, previous: &Self) -> bool {
+        matches!(
+            (self.updated_at, previous.updated_at),
+            (Some(current), Some(previous)) if current > previous
         )
     }
 }
@@ -569,21 +599,64 @@ mod tests {
         );
     }
 
+    fn payload(state: Option<IssueState>, updated_at: Option<&str>) -> WebhookPayload {
+        WebhookPayload {
+            title: Some("Title".to_string()),
+            description: Some("Body".to_string()),
+            state,
+            updated_at: updated_at.map(|time| time.parse().unwrap()),
+            raw: None,
+        }
+    }
+
+    const EARLIER: &str = "2026-01-01T00:00:05Z";
+    const SEEN: &str = "2026-01-01T00:00:10Z";
+    const LATER: &str = "2026-01-01T00:00:20Z";
+
     #[test]
     fn a_move_is_followed_whatever_the_state_was_before() {
         let moved = StateChange::MovedTo(IssueState::Closed);
+        let open = payload(Some(IssueState::Open), Some(SEEN));
+        let closed_later = payload(Some(IssueState::Closed), Some(LATER));
 
-        assert_eq!(moved.target(None, None), Some(IssueState::Closed));
         assert_eq!(
-            moved.target(Some(IssueState::Open), Some(IssueState::Closed)),
+            moved.target(&payload(None, None), None),
+            Some(IssueState::Closed)
+        );
+        assert_eq!(
+            moved.target(&open, Some(&closed_later)),
             Some(IssueState::Closed)
         );
     }
 
     #[test]
-    fn a_kept_state_is_never_followed() {
+    fn a_kept_state_is_followed_only_when_it_is_later_than_and_differs_from_the_last_one_seen() {
+        let kept = StateChange::Kept;
+        let seen = payload(Some(IssueState::Open), Some(SEEN));
+
         assert_eq!(
-            StateChange::Kept.target(Some(IssueState::Closed), Some(IssueState::Open)),
+            kept.target(&payload(Some(IssueState::Closed), Some(LATER)), Some(&seen)),
+            Some(IssueState::Closed),
+            "a later edit catches the task up with a close it could not follow"
+        );
+        assert_eq!(
+            kept.target(&payload(Some(IssueState::Closed), Some(SEEN)), Some(&seen)),
+            None,
+            "an edit in the same second may have come before the move it disagrees with"
+        );
+        assert_eq!(
+            kept.target(&payload(Some(IssueState::Open), Some(LATER)), Some(&seen)),
+            None
+        );
+        assert_eq!(
+            kept.target(&payload(Some(IssueState::Closed), Some(LATER)), None),
+            None
+        );
+        assert_eq!(
+            kept.target(
+                &payload(Some(IssueState::Closed), None),
+                Some(&payload(Some(IssueState::Open), None))
+            ),
             None
         );
     }
@@ -591,38 +664,71 @@ mod tests {
     #[test]
     fn a_reported_state_is_followed_only_when_it_differs_from_the_last_one_seen() {
         let reported = StateChange::Reported;
+        let in_progress = payload(Some(IssueState::InProgress), Some(SEEN));
 
         assert_eq!(
-            reported.target(Some(IssueState::Closed), Some(IssueState::InProgress)),
+            reported.target(
+                &payload(Some(IssueState::Closed), Some(SEEN)),
+                Some(&in_progress)
+            ),
             Some(IssueState::Closed)
         );
         assert_eq!(
-            reported.target(Some(IssueState::InProgress), Some(IssueState::InProgress)),
+            reported.target(
+                &payload(Some(IssueState::InProgress), Some(LATER)),
+                Some(&in_progress)
+            ),
             None
         );
-        assert_eq!(reported.target(Some(IssueState::Closed), None), None);
-        assert_eq!(reported.target(None, Some(IssueState::Open)), None);
-    }
-
-    fn payload_at(updated_at: Option<&str>) -> WebhookPayload {
-        WebhookPayload {
-            title: None,
-            description: None,
-            state: None,
-            updated_at: updated_at.map(|time| time.parse().unwrap()),
-            raw: None,
-        }
+        assert_eq!(
+            reported.target(&payload(Some(IssueState::Closed), Some(SEEN)), None),
+            None
+        );
+        assert_eq!(
+            reported.target(
+                &payload(None, Some(SEEN)),
+                Some(&payload(Some(IssueState::Open), Some(SEEN)))
+            ),
+            None
+        );
     }
 
     #[test]
-    fn a_payload_is_no_newer_only_when_both_times_are_known_and_it_is_not_later() {
-        let stored = payload_at(Some("2026-01-01T00:00:10Z"));
+    fn a_payload_from_an_earlier_second_is_stale_and_one_from_a_later_second_is_not() {
+        let seen = payload(Some(IssueState::Open), Some(SEEN));
 
-        assert!(payload_at(Some("2026-01-01T00:00:05Z")).is_no_newer_than(&stored));
-        assert!(payload_at(Some("2026-01-01T00:00:10Z")).is_no_newer_than(&stored));
-        assert!(!payload_at(Some("2026-01-01T00:00:11Z")).is_no_newer_than(&stored));
-        assert!(!payload_at(None).is_no_newer_than(&stored));
-        assert!(!stored.is_no_newer_than(&payload_at(None)));
+        assert!(payload(Some(IssueState::Closed), Some(EARLIER)).is_stale_against(&seen));
+        assert!(!payload(Some(IssueState::Open), Some(LATER)).is_stale_against(&seen));
+        assert!(!payload(Some(IssueState::Open), None).is_stale_against(&seen));
+        assert!(!seen.is_stale_against(&payload(Some(IssueState::Open), None)));
+    }
+
+    #[test]
+    fn a_payload_from_the_same_second_is_stale_only_when_it_changes_nothing() {
+        let seen = payload(Some(IssueState::Open), Some(SEEN));
+        let mut renamed = seen.clone();
+        renamed.title = Some("Renamed".to_string());
+        let mut rewritten = seen.clone();
+        rewritten.description = Some("Rewritten".to_string());
+        let timeless = payload(Some(IssueState::Open), None);
+
+        assert!(seen.clone().is_stale_against(&seen));
+        assert!(!payload(Some(IssueState::Closed), Some(SEEN)).is_stale_against(&seen));
+        assert!(!renamed.is_stale_against(&seen));
+        assert!(!rewritten.is_stale_against(&seen));
+        assert!(!timeless.is_stale_against(&timeless));
+    }
+
+    #[test]
+    fn only_a_strictly_earlier_or_later_time_orders_two_payloads() {
+        let seen = payload(Some(IssueState::Open), Some(SEEN));
+
+        assert!(payload(None, Some(EARLIER)).is_older_than(&seen));
+        assert!(!payload(None, Some(SEEN)).is_older_than(&seen));
+        assert!(payload(None, Some(LATER)).is_later_than(&seen));
+        assert!(!payload(None, Some(SEEN)).is_later_than(&seen));
+        assert!(!payload(None, None).is_older_than(&seen));
+        assert!(!payload(None, None).is_later_than(&seen));
     }
 
     #[test]

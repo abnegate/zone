@@ -643,6 +643,60 @@ pub async fn record_delivery(
     Ok(result.rows_affected() == 1)
 }
 
+/// Hold the external issue `external_id` of a sync until the caller's
+/// transaction ends. Locking its synced item row cannot serialize deliveries
+/// for an issue no task is linked to yet, since there is no row to lock.
+pub async fn lock_external_issue(
+    connection: &mut PgConnection,
+    sync_config_id: Uuid,
+    external_id: &str,
+) -> DbResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2, 0))")
+        .bind(sync_config_id)
+        .bind(external_id)
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
+/// Unlink the issue `item` links to its task, and remember that it was
+/// unlinked so no later delivery links it again.
+pub async fn unlink_synced_item(
+    connection: &mut PgConnection,
+    item: &SyncedItemRow,
+) -> DbResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO sync_unlinked_items (sync_config_id, external_id)
+        VALUES ($1, $2)
+        ON CONFLICT (sync_config_id, external_id) DO UPDATE SET unlinked_at = NOW()
+        "#,
+    )
+    .bind(item.sync_config_id)
+    .bind(&item.external_id)
+    .execute(&mut *connection)
+    .await?;
+    delete_synced_item(&mut *connection, item.id).await?;
+    Ok(())
+}
+
+/// Whether the issue `external_id` of a sync was once unlinked from its task.
+pub async fn was_unlinked(
+    connection: &mut PgConnection,
+    sync_config_id: Uuid,
+    external_id: &str,
+) -> DbResult<bool> {
+    let unlinked = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sync_unlinked_items \
+         WHERE sync_config_id = $1 AND external_id = $2)",
+    )
+    .bind(sync_config_id)
+    .bind(external_id)
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(unlinked)
+}
+
 /// Update synced item
 pub async fn update_synced_item<'connection, E>(
     executor: E,

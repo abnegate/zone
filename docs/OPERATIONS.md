@@ -148,9 +148,12 @@ over.
 ## Upgrading to migration 051
 
 The first start of a server that skips repeated sync deliveries applies
-migration 051, which adds the `sync_deliveries` table and lets `sync_events`
-record the `unlink` event of a deleted GitHub issue. An image built before it
-cannot start against the migrated database: it stops with
+migrations 051, 052 and 053. 051 adds the `sync_deliveries` table and lets
+`sync_events` record the `unlink` event of a deleted GitHub issue, swapping the
+event type check without reading the table; 052 then validates it while sync
+events stay writable; 053 adds the `sync_unlinked_items` table that keeps a
+deleted issue from becoming a task again. An image built before them cannot
+start against the migrated database: it stops with
 `Failed to run migrations: VersionMissing(51)`. Run `make backup` before the
 upgrade. Going back to an older image means restoring that backup, and losing
 whatever changed after it was taken.
@@ -183,8 +186,10 @@ is the repository's owner, a member of the organization that owns it, or a
 collaborator (`author_association` `OWNER`, `MEMBER` or `COLLABORATOR`). Linear
 creates one only when the issue is created in the configured project; an issue
 moved into the project later does not become a task. An outbound-only sync
-creates no tasks. Titles are cut to 500 bytes and descriptions to 50,000 bytes,
-never mid-character.
+creates no tasks. A GitHub `opened` event for an issue opened more than 24
+hours ago creates no task, so a captured delivery cannot be replayed into one
+later. Titles are cut to 500 bytes and descriptions to 50,000 bytes, never
+mid-character.
 
 Later events for a linked issue update its task's title and description. The
 task's status follows the issue only when the issue changes state: a GitHub
@@ -194,15 +199,32 @@ the last update applied did: `started` is in progress, `completed` or
 `canceled` is complete, and any other type is created. The first Linear update
 to a task linked some other way than by a created issue only records the
 state. Labels, assignments and edits leave the status alone. Deleting a
-GitHub issue unlinks it and leaves its task as it is.
+GitHub issue unlinks it and leaves its task as it is, and that issue never
+becomes a task again.
 
-An event that says the issue last changed no later than the last event applied
-to its task is acknowledged and dropped, so a delivery arriving out of order
-cannot undo a newer one. Each delivery's ID (`X-GitHub-Delivery` or
-`Linear-Delivery`) is recorded once it is applied, and a delivery with an ID
-already recorded is answered 200 "Delivery already processed" without being
-applied again. A delivery whose processing fails applies nothing, including its
-ID, so the provider's retry is processed in full.
+While a run owns a task's status, an event that would move it updates only the
+title and description, and the state stored for the issue stays the one the
+task last followed. The next later event for the issue, once the run has
+ended, moves the status to match: for GitHub, a label, assignment or edit
+reporting a state the task has not followed does so.
+
+An event that says the issue last changed before the last event applied to its
+task, or in the same second with the same state, title and body, is
+acknowledged and dropped, so a delivery arriving out of order cannot undo a
+newer one. GitHub reports these times to the second, so two changes within one
+second, such as a bot opening and closing an issue, both apply in the order
+they arrive. A deletion is dropped only when it is older than the last event
+applied. Deliveries for one issue apply one at a time, including the first
+ones for a newly opened issue.
+
+Each delivery's ID (`X-GitHub-Delivery` or `Linear-Delivery`) is recorded once
+it is applied, and a delivery with an ID already recorded is answered 200
+"Delivery already processed" without being applied again. A delivery whose
+processing fails applies nothing, including its ID, so the provider's retry is
+processed in full. Neither the ID nor GitHub's `X-GitHub-Event` header is
+signed, so the ID only catches the provider's own retries; a signed `issues`
+delivery whose body carries a `comment`, and so came from another event, is
+refused with a 400.
 
 Each sync has its own endpoint, `/api/webhooks/sync/{id}/github` or
 `/api/webhooks/sync/{id}/linear`, shown as the Payload URL in the project's

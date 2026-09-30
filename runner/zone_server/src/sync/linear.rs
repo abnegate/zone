@@ -446,6 +446,7 @@ impl SyncProvider for LinearSyncProvider {
             url,
             origin: IssueOrigin::Linear { project_id },
             delivery_id,
+            created_at: None,
             state_change: StateChange::Reported,
             payload: WebhookPayload {
                 title,

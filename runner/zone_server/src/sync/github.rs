@@ -19,6 +19,7 @@ const EVENT_HEADER: &str = "X-GitHub-Event";
 const DELIVERY_HEADER: &str = "X-GitHub-Delivery";
 const ISSUES_EVENT: &str = "issues";
 const PING_EVENT: &str = "ping";
+const COMMENT_FIELD: &str = "comment";
 
 /// GitHub-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +47,8 @@ struct GitHubIssue {
     author_association: AuthorAssociation,
     #[serde(default)]
     updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -400,6 +403,11 @@ impl SyncProvider for GitHubSyncProvider {
         let raw: serde_json::Value = serde_json::from_slice(body).map_err(|error| {
             SyncError::InvalidWebhookPayload(format!("Failed to parse JSON: {error}"))
         })?;
+        if raw.get(COMMENT_FIELD).is_some() {
+            return Err(SyncError::InvalidWebhookPayload(format!(
+                "An {ISSUES_EVENT} delivery carries a {COMMENT_FIELD}, so its body is from another event"
+            )));
+        }
         let payload: GitHubWebhookPayload =
             serde_json::from_value(raw.clone()).map_err(|error| {
                 SyncError::InvalidWebhookPayload(format!("Failed to parse JSON: {error}"))
@@ -422,6 +430,7 @@ impl SyncProvider for GitHubSyncProvider {
                 author_association: payload.issue.author_association,
             },
             delivery_id,
+            created_at: payload.issue.created_at,
             state_change: payload.action.state_change(),
             payload: WebhookPayload {
                 title: Some(payload.issue.title),
@@ -612,6 +621,53 @@ mod tests {
         );
         assert_eq!(event.payload.raw, Some(body));
         assert_eq!(parse_signed_issue("edited").delivery_id, None);
+    }
+
+    #[test]
+    fn an_issues_delivery_carries_when_the_issue_was_opened() {
+        let body = serde_json::json!({
+            "action": "opened",
+            "issue": {
+                "number": 123,
+                "html_url": "https://github.com/owner/repo/issues/123",
+                "state": "open",
+                "title": "Title",
+                "body": null,
+                "created_at": "2026-01-01T00:00:01Z"
+            }
+        });
+
+        let Delivery::Issue(event) = parse_signed(Some(ISSUES_EVENT), &body).unwrap() else {
+            panic!("an issues delivery is an issue");
+        };
+
+        assert_eq!(
+            event.created_at,
+            Some("2026-01-01T00:00:01Z".parse().unwrap())
+        );
+        assert_eq!(parse_signed_issue("opened").created_at, None);
+    }
+
+    #[test]
+    fn a_signed_comment_body_sent_as_an_issues_delivery_is_an_invalid_payload() {
+        let body = serde_json::json!({
+            "action": "deleted",
+            "issue": {
+                "number": 123,
+                "html_url": "https://github.com/owner/repo/issues/123",
+                "state": "open",
+                "title": "Title",
+                "body": null
+            },
+            "comment": { "id": 1, "body": "Thanks" }
+        });
+
+        let result = parse_signed(Some(ISSUES_EVENT), &body);
+
+        assert!(
+            matches!(result, Err(SyncError::InvalidWebhookPayload(_))),
+            "{result:?}"
+        );
     }
 
     #[test]

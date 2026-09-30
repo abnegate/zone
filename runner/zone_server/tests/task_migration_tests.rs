@@ -1173,6 +1173,33 @@ async fn the_failed_verdict_check_is_added_unvalidated_and_proven_after() {
     database.cleanup().await;
 }
 
+/// 051 swaps the sync event type check under the brief lock of an unvalidated
+/// constraint, and 052 proves the rows while sync events stay writable.
+#[tokio::test]
+async fn the_unlink_event_check_is_added_unvalidated_and_proven_after() {
+    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
+         WHERE conrelid = 'sync_events'::regclass AND conname = 'sync_events_event_type_check'";
+    let database = Database::new().await;
+
+    database.through(51).await;
+    let added: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("051 leaves the event type check in place");
+    database.through(52).await;
+    let proven: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("052 keeps the event type check");
+
+    assert!(
+        !added,
+        "051 must not scan sync_events under its exclusive lock"
+    );
+    assert!(proven, "052 validates what 051 added");
+    database.cleanup().await;
+}
+
 /// Every lock these take on `task_runs` is one ordinary traffic already holds,
 /// and the boot holds sqlx's advisory lock while it queues for them: an
 /// unbounded wait wedges every other instance instead of failing with 55P03.
@@ -1239,6 +1266,7 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
             "049_task_reviews_failed_verdict.sql",
             "050_task_reviews_failed_verdict_validation.sql",
             "051_sync_deliveries.sql",
+            "052_sync_events_unlink_validation.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );

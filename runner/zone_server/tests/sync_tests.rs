@@ -1059,6 +1059,23 @@ async fn an_edit_delivered_after_a_later_close_neither_reopens_nor_renames_the_t
     let late = github_issue_at("edited", "Stale title", "open", "2026-01-01T00:00:05Z");
     let (status, response) = synced.send_github(&late, None).await;
     assert_eq!(status, StatusCode::OK, "{response}");
+    let repeated = github_issue_at("edited", "Closed title", "closed", "2026-01-01T00:00:10Z");
+    assert_eq!(synced.post_github(&repeated).await, StatusCode::OK);
+
+    let task = synced.task().await;
+    assert_eq!(task.title, "Closed title");
+    assert_eq!(task.status, "complete");
+    assert_eq!(synced.item_event_types().await, vec![SyncEventType::Close]);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_edit_in_the_same_second_as_a_close_renames_the_task_without_reopening_it() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let closed = github_issue_at("closed", "Closed title", "closed", "2026-01-01T00:00:10Z");
+    assert_eq!(synced.post_github(&closed).await, StatusCode::OK);
+
     let simultaneous = github_issue_at(
         "edited",
         "Same-moment title",
@@ -1068,9 +1085,150 @@ async fn an_edit_delivered_after_a_later_close_neither_reopens_nor_renames_the_t
     assert_eq!(synced.post_github(&simultaneous).await, StatusCode::OK);
 
     let task = synced.task().await;
-    assert_eq!(task.title, "Closed title");
+    assert_eq!(task.title, "Same-moment title");
     assert_eq!(task.status, "complete");
-    assert_eq!(synced.item_event_types().await, vec![SyncEventType::Close]);
+    assert_eq!(
+        synced.item_event_types().await,
+        vec![SyncEventType::Close, SyncEventType::Update]
+    );
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_close_and_a_reopen_in_the_same_second_leave_the_task_created() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let closed = github_issue_at("closed", "Original", "closed", "2026-01-01T00:00:10Z");
+    assert_eq!(synced.post_github(&closed).await, StatusCode::OK);
+    assert_eq!(synced.task().await.status, "complete");
+
+    let reopened = github_issue_at("reopened", "Original", "open", "2026-01-01T00:00:10Z");
+    let (status, response) = synced.send_github(&reopened, None).await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(synced.task().await.status, "created", "{response}");
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_deletion_older_than_the_last_change_applied_leaves_the_issue_linked() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let edited = github_issue_at("edited", "Renamed", "open", "2026-01-01T00:00:10Z");
+    assert_eq!(synced.post_github(&edited).await, StatusCode::OK);
+
+    let deleted = github_issue_at("deleted", "Renamed", "open", "2026-01-01T00:00:05Z");
+    let (status, response) = synced.send_github(&deleted, None).await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(
+        synced.linked("123").await.is_some(),
+        "a deletion older than the edit applied is stale: {response}"
+    );
+    let current = github_issue_at("deleted", "Renamed", "open", "2026-01-01T00:00:10Z");
+    assert_eq!(synced.post_github(&current).await, StatusCode::OK);
+    assert!(synced.linked("123").await.is_none());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_signed_comment_deletion_sent_as_an_issues_event_leaves_the_issue_linked() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let mut comment_deleted = github_issue("deleted", "Original");
+    comment_deleted["comment"] = json!({ "id": 1, "body": "Never mind" });
+
+    let (status, response) = synced.send_github(&comment_deleted, None).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert!(
+        synced.linked("123").await.is_some(),
+        "a comment's deletion is not the issue's"
+    );
+    assert!(synced.item_event_types().await.is_empty());
+
+    synced.cleanup().await;
+}
+
+async fn start_run(synced: &SyncedTask) -> Uuid {
+    let run: Uuid = sqlx::query_scalar(
+        "INSERT INTO task_runs(task_id,status) VALUES($1,'running') RETURNING id",
+    )
+    .bind(synced.task_id)
+    .fetch_one(synced.state.db())
+    .await
+    .expect("Failed to start a run");
+    sqlx::query("UPDATE tasks SET active_run_id = $2 WHERE id = $1")
+        .bind(synced.task_id)
+        .bind(run)
+        .execute(synced.state.db())
+        .await
+        .expect("Failed to make the run active");
+    run
+}
+
+async fn end_run(synced: &SyncedTask) {
+    sqlx::query("UPDATE tasks SET active_run_id = NULL WHERE id = $1")
+        .bind(synced.task_id)
+        .execute(synced.state.db())
+        .await
+        .expect("Failed to end the run");
+}
+
+#[tokio::test]
+async fn a_close_while_a_run_owns_the_status_renames_the_task_and_a_later_edit_completes_it() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let edited = github_issue_at("edited", "Original", "open", "2026-01-01T00:00:05Z");
+    assert_eq!(synced.post_github(&edited).await, StatusCode::OK);
+    synced.set_task("Original", "in_progress").await;
+    start_run(&synced).await;
+
+    let closed = github_issue_at("closed", "Closed title", "closed", "2026-01-01T00:00:10Z");
+    let (status, response) = synced.send_github(&closed, None).await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let task = synced.task().await;
+    assert_eq!(
+        task.title, "Closed title",
+        "the rest of the patch still applies"
+    );
+    assert_eq!(task.status, "in_progress", "the live run keeps its status");
+    assert_eq!(
+        synced
+            .linked("123")
+            .await
+            .and_then(|item| item.last_external_state)
+            .map(|state| state["state"].clone()),
+        Some(json!("open")),
+        "the stored state stays the one the task followed"
+    );
+
+    end_run(&synced).await;
+    let labeled = github_issue_at("labeled", "Closed title", "closed", "2026-01-01T00:00:20Z");
+    assert_eq!(synced.post_github(&labeled).await, StatusCode::OK);
+    assert_eq!(synced.task().await.status, "complete");
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_linear_move_while_a_run_owns_the_status_renames_the_task_and_catches_up_after() {
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+    let started = linear_issue_at("Original", "started", "2026-01-01T00:00:01.000Z");
+    assert_eq!(synced.post_linear(&started).await, StatusCode::OK);
+    synced.set_task("Original", "in_progress").await;
+    start_run(&synced).await;
+
+    let completed = linear_issue_at("Done title", "completed", "2026-01-01T00:00:02.000Z");
+    assert_eq!(synced.post_linear(&completed).await, StatusCode::OK);
+    let task = synced.task().await;
+    assert_eq!(task.title, "Done title");
+    assert_eq!(task.status, "in_progress");
+
+    end_run(&synced).await;
+    let again = linear_issue_at("Done title", "completed", "2026-01-01T00:00:03.000Z");
+    assert_eq!(synced.post_linear(&again).await, StatusCode::OK);
+    assert_eq!(synced.task().await.status, "complete");
 
     synced.cleanup().await;
 }
@@ -1670,6 +1828,204 @@ async fn issues_opened_at_the_same_moment_race_to_one_task_and_one_link() {
     );
     assert_eq!(synced.new_tasks().await.len(), 1);
     assert_eq!(synced.link_count().await, 2);
+
+    synced.cleanup().await;
+}
+
+fn opened_issue_at(updated_at: &str) -> serde_json::Value {
+    let mut issue = opened_issue("MEMBER", "test-owner/test-repo");
+    issue["issue"]["created_at"] = json!(chrono::Utc::now().to_rfc3339());
+    issue["issue"]["updated_at"] = json!(updated_at);
+    issue
+}
+
+fn with_action(issue: &serde_json::Value, action: &str) -> serde_json::Value {
+    let mut changed = issue.clone();
+    changed["action"] = json!(action);
+    changed
+}
+
+#[tokio::test]
+async fn an_issue_opened_and_closed_in_the_same_second_becomes_a_complete_task() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let opened = opened_issue_at("2026-01-01T00:00:10Z");
+    let mut closed = with_action(&opened, "closed");
+    closed["issue"]["state"] = json!("closed");
+
+    assert_eq!(synced.post_github(&opened).await, StatusCode::OK);
+    let (status, response) = synced.send_github(&closed, None).await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(synced.new_task().await.status, "complete", "{response}");
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_replayed_opened_body_after_the_issue_was_deleted_creates_no_task() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let opened = opened_issue_at("2026-01-01T00:00:10Z");
+    let (status, response) = synced.send_github(&opened, Some("opened-delivery")).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let deleted = with_action(&opened, "deleted");
+    let (status, response) = synced.send_github(&deleted, Some("deleted-delivery")).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(synced.linked(NEW_ISSUE).await.is_none(), "{response}");
+
+    let (status, response) = synced.send_github(&opened, Some("replayed-delivery")).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let (status, response) = synced.send_github(&opened, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    assert_eq!(
+        synced.new_tasks().await.len(),
+        1,
+        "only the first opening made a task: {response}"
+    );
+    assert!(synced.linked(NEW_ISSUE).await.is_none());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_opened_body_for_an_issue_opened_over_a_day_ago_creates_no_task() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let mut opened = opened_issue_at("2026-01-01T00:00:10Z");
+    let long_ago = chrono::Utc::now() - chrono::TimeDelta::hours(25);
+    opened["issue"]["created_at"] = json!(long_ago.to_rfc3339());
+
+    let (status, response) = synced.send_github(&opened, None).await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(synced.new_tasks().await.is_empty(), "{response}");
+    assert!(synced.linked(NEW_ISSUE).await.is_none());
+
+    synced.cleanup().await;
+}
+
+async fn until_waiting_on_an_issue_or_done<T>(
+    pool: &sqlx::PgPool,
+    delivery: &tokio::task::JoinHandle<T>,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if delivery.is_finished() {
+            return;
+        }
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND pid <> pg_backend_pid()
+               AND wait_event_type = 'Lock'
+               AND wait_event = 'advisory'
+               AND query ILIKE '%pg_advisory_xact_lock%'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("pg_stat_activity is readable");
+        if waiting > 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the edit neither finished nor waited on its issue"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn an_edit_racing_the_delivery_that_opens_its_issue_waits_for_the_link_and_applies() {
+    let synced = SyncedTask::create(
+        "github",
+        configured_github("inbound"),
+        SyncDirection::Bidirectional,
+    )
+    .await;
+    let workspace_id = synced.task().await.workspace_id;
+    let mut opening = synced
+        .state
+        .db()
+        .begin()
+        .await
+        .expect("Failed to begin the opening delivery");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2, 0))")
+        .bind(synced.sync_config_id)
+        .bind(NEW_ISSUE)
+        .execute(&mut *opening)
+        .await
+        .expect("Failed to hold the issue as its opening delivery does");
+    sync_config::create_synced_task(
+        &mut opening,
+        sync_config::NewSyncedTask {
+            sync_config_id: synced.sync_config_id,
+            workspace_id,
+            project_id: synced.project_id,
+            title: NEW_ISSUE_TITLE,
+            description: NEW_ISSUE_BODY,
+            external_id: NEW_ISSUE,
+            external_url: Some(NEW_ISSUE_URL),
+            sync_direction: SyncDirection::Inbound,
+            last_external_state: Some(json!({
+                "title": NEW_ISSUE_TITLE,
+                "description": NEW_ISSUE_BODY,
+                "state": "open",
+                "updated_at": "2026-01-01T00:00:10Z"
+            })),
+        },
+    )
+    .await
+    .expect("Failed to link the new issue")
+    .expect("nothing else links the new issue");
+
+    let mut edited = with_action(&opened_issue_at("2026-01-01T00:00:20Z"), "edited");
+    edited["issue"]["title"] = json!("Renamed while opening");
+    let body = serde_json::to_vec(&edited).unwrap();
+    let signature = format!("sha256={}", synced.sign(&body));
+    let state = synced.state.clone();
+    let sync_config_id = synced.sync_config_id;
+    let edit = tokio::spawn(async move {
+        deliver_to(
+            &state,
+            sync_config_id,
+            "github",
+            &[
+                (GITHUB_SIGNATURE_HEADER, signature.as_str()),
+                (GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT),
+                (GITHUB_DELIVERY_HEADER, "edit-delivery"),
+            ],
+            &body,
+        )
+        .await
+    });
+    until_waiting_on_an_issue_or_done(synced.state.db(), &edit).await;
+    opening
+        .commit()
+        .await
+        .expect("Failed to commit the opening delivery");
+    let (status, response) = edit.await.expect("the edit delivery panicked");
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(
+        synced.new_task().await.title,
+        "Renamed while opening",
+        "the edit waited for the link instead of finding none: {response}"
+    );
 
     synced.cleanup().await;
 }
