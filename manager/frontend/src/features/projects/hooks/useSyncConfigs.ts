@@ -41,7 +41,7 @@ export function useSyncConfigs(projectId: string | null) {
       if (!projectId) throw new Error('Project ID is required');
       return projectsApi.setWebhookSecret(projectId, configId, secret);
     },
-    onSuccess: () => {
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey });
     },
     gcTime: 0,

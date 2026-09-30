@@ -24,6 +24,7 @@ describe('Client - Sync Configuration API', () => {
           direction: 'bidirectional',
           external_repo_url: 'https://github.com/user/repo',
           is_active: true,
+          webhook_secret_issued_by_zone: true,
           created_at: '2024-01-01T00:00:00Z',
         },
       ];
@@ -70,6 +71,7 @@ describe('Client - Sync Configuration API', () => {
         project_id: 'proj-1',
         ...request,
         is_active: true,
+        webhook_secret_issued_by_zone: true,
         created_at: '2024-01-01T00:00:00Z',
       };
 
@@ -106,6 +108,7 @@ describe('Client - Sync Configuration API', () => {
         project_id: 'proj-1',
         ...request,
         is_active: true,
+        webhook_secret_issued_by_zone: false,
         created_at: '2024-01-01T00:00:00Z',
       };
 
@@ -146,6 +149,7 @@ describe('Client - Sync Configuration API', () => {
       direction: 'bidirectional',
       external_repo_url: 'https://github.com/user/repo',
       is_active: true,
+      webhook_secret_issued_by_zone: true,
       created_at: '2024-01-01T00:00:00Z',
       webhook_secret_configured: true,
     };

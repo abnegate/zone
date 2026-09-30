@@ -122,6 +122,7 @@ export const SyncConfigSchema = z.object({
   last_synced_at: z.string().nullable().optional(),
   webhook_path: z.string().optional(),
   webhook_secret_configured: z.boolean().optional(),
+  webhook_secret_issued_by_zone: z.boolean(),
 });
 
 export const CreateSyncConfigRequestSchema = z

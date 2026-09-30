@@ -180,6 +180,7 @@ test.describe('Projects Page', () => {
               is_active: true,
               created_at: new Date().toISOString(),
               webhook_secret_configured: true,
+              webhook_secret_issued_by_zone: true,
             },
             webhook_secret: 'a'.repeat(64),
           }),

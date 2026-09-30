@@ -1,7 +1,7 @@
-import { Button } from '@zone/ui';
+import { Button, Modal } from '@zone/ui';
 import { type FormEvent, useState } from 'react';
 import { WebhookSecretSchema } from '../schemas';
-import type { SyncConfig, SyncProvider } from '../types';
+import type { RevealedSecret, SyncConfig, SyncProvider } from '../types';
 import { formatDate } from '../utils/formatters';
 import { SyncSecretCallout } from './SyncSecretCallout';
 
@@ -12,9 +12,20 @@ const SETUP_HINTS: Record<SyncProvider, string> = {
     'Create an Issues webhook in Linear with the URL above and paste its signing secret below.',
 };
 
+const PROVIDER_NAMES: Record<SyncProvider, string> = {
+  github: 'GitHub',
+  linear: 'Linear',
+};
+
+const PASSWORD_MANAGER_OPT_OUT = {
+  'data-1p-ignore': true,
+  'data-lpignore': 'true',
+  'data-form-type': 'other',
+} as const;
+
 interface SyncConfigCardProps {
   config: SyncConfig;
-  secret: string | null;
+  revealed: RevealedSecret | null;
   onDismissSecret: () => void;
   onSetSecret: (secret?: string) => Promise<boolean>;
   onRemove: () => void;
@@ -22,7 +33,7 @@ interface SyncConfigCardProps {
 
 export function SyncConfigCard({
   config,
-  secret,
+  revealed,
   onDismissSecret,
   onSetSecret,
   onRemove,
@@ -31,8 +42,9 @@ export function SyncConfigCard({
   const [draftError, setDraftError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [confirmingRotation, setConfirmingRotation] = useState(false);
 
-  const issuesOwnSecret = config.provider === 'linear';
+  const zoneIssuesSecret = config.webhook_secret_issued_by_zone;
   const missing = config.webhook_secret_configured === false;
   const draftId = `sync-secret-${config.id}`;
 
@@ -42,6 +54,11 @@ export function SyncConfigCard({
     const succeeded = await onSetSecret(next);
     setSaving(false);
     return succeeded;
+  };
+
+  const rotate = async () => {
+    setConfirmingRotation(false);
+    await change();
   };
 
   const save = async (event: FormEvent) => {
@@ -78,13 +95,13 @@ export function SyncConfigCard({
           <span className="sync-external-link">{config.external_project_id}</span>
         )}
         <div className="sync-config-actions">
-          {!issuesOwnSecret && !missing && (
+          {zoneIssuesSecret && !missing && (
             <Button
               variant="ghost"
               size="sm"
               disabled={saving}
               loading={saving}
-              onClick={() => change()}
+              onClick={() => setConfirmingRotation(true)}
             >
               Rotate secret
             </Button>
@@ -109,7 +126,7 @@ export function SyncConfigCard({
       {missing && (
         <div className="sync-secret-missing" role="alert">
           <span>No webhook secret: deliveries are refused until one is set</span>
-          {!issuesOwnSecret && (
+          {zoneIssuesSecret && (
             <Button
               variant="secondary"
               size="sm"
@@ -122,30 +139,34 @@ export function SyncConfigCard({
           )}
         </div>
       )}
-      {secret && (
+      {revealed && (
         <SyncSecretCallout
-          key={secret}
-          secret={secret}
+          key={`${config.id}-${revealed.revision}`}
+          secret={revealed.secret}
           hint={SETUP_HINTS[config.provider]}
           onDismiss={onDismissSecret}
         />
       )}
-      {issuesOwnSecret && (
+      {!zoneIssuesSecret && (
         <form className="sync-secret-form" onSubmit={save} noValidate>
           <label htmlFor={draftId}>Set signing secret</label>
           <p className="sync-secret-hint">{SETUP_HINTS.linear}</p>
           <div className="sync-secret-row">
             <input
               id={draftId}
-              type="password"
+              type="text"
               autoComplete="off"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              {...PASSWORD_MANAGER_OPT_OUT}
               value={draft}
               onChange={(event) => {
                 setDraft(event.target.value);
                 setDraftError(null);
               }}
               placeholder="Linear signing secret"
-              className={draftError ? 'input-error' : ''}
+              className={`sync-secret-input${draftError ? ' input-error' : ''}`}
               aria-invalid={draftError !== null}
             />
             <Button type="submit" size="sm" disabled={saving || !draft.trim()} loading={saving}>
@@ -160,6 +181,26 @@ export function SyncConfigCard({
           )}
         </form>
       )}
+      <Modal
+        isOpen={confirmingRotation}
+        onClose={() => setConfirmingRotation(false)}
+        title="Rotate webhook secret?"
+        size="sm"
+      >
+        <p className="sync-rotate-warning">
+          Zone generates a new secret and stops accepting the current one straight away. The{' '}
+          {PROVIDER_NAMES[config.provider]} webhook keeps signing with the old secret, so its
+          deliveries are refused until you paste the new one into the webhook&apos;s settings.
+        </p>
+        <div className="modal-actions">
+          <Button variant="secondary" type="button" onClick={() => setConfirmingRotation(false)}>
+            Cancel
+          </Button>
+          <Button variant="destructive" type="button" onClick={rotate}>
+            Generate new secret
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }

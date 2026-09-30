@@ -20,6 +20,7 @@ import type {
   CreateSyncConfigRequest,
   Project,
   ProjectStatus,
+  RevealedSecret,
   SyncConfig,
   SyncConfigSecret,
   SyncDirection,
@@ -35,11 +36,6 @@ const statusLabels: Record<ProjectStatus, string> = {
   on_hold: 'On Hold',
   cancelled: 'Cancelled',
 };
-
-interface RevealedSecret {
-  configId: string;
-  secret: string;
-}
 
 const statusVariants: Record<ProjectStatus, 'success' | 'warning' | 'destructive'> = {
   active: 'success',
@@ -101,10 +97,16 @@ export default function ProjectsPage() {
     deleteSyncConfig: deleteSyncConfigMutation,
   } = useSyncConfigs(selectedProject?.id || null);
   const [revealedSecret, setRevealedSecret] = useState<RevealedSecret | null>(null);
+  const reveals = useRef(0);
 
   const reveal = ({ config, webhookSecret }: SyncConfigSecret) => {
     if (webhookSecret) {
-      setRevealedSecret({ configId: config.id, secret: webhookSecret });
+      reveals.current += 1;
+      setRevealedSecret({
+        configId: config.id,
+        secret: webhookSecret,
+        revision: reveals.current,
+      });
     }
   };
 
@@ -634,8 +636,8 @@ export default function ProjectsPage() {
                           <SyncConfigCard
                             key={config.id}
                             config={config}
-                            secret={
-                              revealedSecret?.configId === config.id ? revealedSecret.secret : null
+                            revealed={
+                              revealedSecret?.configId === config.id ? revealedSecret : null
                             }
                             onDismissSecret={() => setRevealedSecret(null)}
                             onSetSecret={(secret) => handleSetWebhookSecret(config, secret)}

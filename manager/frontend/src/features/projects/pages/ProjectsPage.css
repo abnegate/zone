@@ -507,6 +507,15 @@
   min-width: 0;
 }
 
+.sync-secret-input {
+  -webkit-text-security: disc;
+}
+
+.sync-rotate-warning {
+  margin: 0 0 var(--ui-space-3);
+  line-height: var(--ui-leading-normal);
+}
+
 .sync-secret-saved {
   font-size: var(--ui-text-2xs);
   color: var(--ui-success);

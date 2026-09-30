@@ -120,6 +120,15 @@ export interface SyncConfig {
   /** Where the provider's webhooks are received, relative to the console's origin */
   webhook_path?: string;
   webhook_secret_configured?: boolean;
+  /** Zone generates this secret and can rotate it; otherwise the provider issues it to paste in */
+  webhook_secret_issued_by_zone: boolean;
+}
+
+export interface RevealedSecret {
+  configId: string;
+  secret: string;
+  /** Counts reveals, so each new secret mounts a fresh callout */
+  revision: number;
 }
 
 export interface SyncConfigSecret {

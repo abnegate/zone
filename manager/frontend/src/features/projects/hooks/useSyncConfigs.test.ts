@@ -50,6 +50,7 @@ const mockSyncConfigs: SyncConfig[] = [
     direction: 'bidirectional',
     external_repo_url: 'https://github.com/owner/repo',
     is_active: true,
+    webhook_secret_issued_by_zone: true,
     created_at: '2024-01-01T00:00:00Z',
   },
   {
@@ -59,6 +60,7 @@ const mockSyncConfigs: SyncConfig[] = [
     direction: 'inbound',
     external_project_id: 'LINEAR-123',
     is_active: true,
+    webhook_secret_issued_by_zone: false,
     created_at: '2024-01-02T00:00:00Z',
   },
 ];
@@ -109,6 +111,7 @@ describe('useSyncConfigs', () => {
       direction: 'outbound',
       external_repo_url: 'https://github.com/owner/other-repo',
       is_active: true,
+      webhook_secret_issued_by_zone: true,
       created_at: '2024-01-03T00:00:00Z',
     };
 
@@ -194,6 +197,27 @@ describe('useSyncConfigs', () => {
     expect(set.webhookSecret).toBeNull();
     await waitFor(() => {
       expect(mockGetSyncConfigs.mock.calls.length).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  it('rereads the configs when a secret change is refused, so a stale card catches up', async () => {
+    mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
+    mockSetWebhookSecret.mockRejectedValue(
+      new Error(
+        'The sync configuration changed while this request was replacing its webhook secret; reload and try again'
+      )
+    );
+
+    const { result } = renderHook(() => useSyncConfigs('proj-1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    const reads = mockGetSyncConfigs.mock.calls.length;
+
+    await expect(result.current.setWebhookSecret('1')).rejects.toThrow('reload and try again');
+
+    await waitFor(() => {
+      expect(mockGetSyncConfigs.mock.calls.length).toBeGreaterThan(reads);
     });
   });
 

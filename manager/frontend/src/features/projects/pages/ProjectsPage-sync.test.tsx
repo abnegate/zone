@@ -123,6 +123,7 @@ const mockSyncConfigs: SyncConfig[] = [
     direction: 'bidirectional',
     external_repo_url: 'https://github.com/user/repo',
     is_active: true,
+    webhook_secret_issued_by_zone: true,
     created_at: '2024-01-01T00:00:00Z',
   },
 ];
@@ -295,6 +296,7 @@ describe('ProjectsPage - Sync Configuration', () => {
       direction: 'inbound',
       external_project_id: '2f1c1b8e-7a8d-4a55-9d53-2b5f0e0c9a11',
       is_active: true,
+      webhook_secret_issued_by_zone: false,
       created_at: '2024-01-01T00:00:00Z',
       webhook_path: '/api/webhooks/sync/sync-2/linear',
       webhook_secret_configured: false,
@@ -306,6 +308,11 @@ describe('ProjectsPage - Sync Configuration', () => {
         expect(screen.getByText('Test Project')).toBeInTheDocument();
       });
       fireEvent.click(screen.getByText('Test Project').closest('.project-card')!);
+    };
+
+    const rotateConfirmed = async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Rotate secret' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Generate new secret' }));
     };
 
     it('shows the generated secret once after creating a GitHub sync, and not after dismissing or refetching', async () => {
@@ -353,7 +360,7 @@ describe('ProjectsPage - Sync Configuration', () => {
       mockSetWebhookSecret.mockResolvedValue({ config: githubConfig, webhookSecret: rotated });
 
       await openProject();
-      fireEvent.click(await screen.findByRole('button', { name: 'Rotate secret' }));
+      await rotateConfirmed();
       await screen.findByText(rotated);
 
       fireEvent.click(screen.getByLabelText('Close'));
@@ -367,12 +374,80 @@ describe('ProjectsPage - Sync Configuration', () => {
       mockSetWebhookSecret.mockResolvedValue({ config: githubConfig, webhookSecret: rotated });
 
       await openProject();
-      fireEvent.click(await screen.findByRole('button', { name: 'Rotate secret' }));
+      await rotateConfirmed();
 
       await waitFor(() => {
         expect(screen.getByTestId('sync-secret-value').textContent).toBe(rotated);
       });
       expect(mockSetWebhookSecret).toHaveBeenCalledWith('proj-1', 'sync-1', undefined);
+    });
+
+    it('asks before rotating, warning that the live webhook breaks until the new secret is pasted', async () => {
+      mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+      mockSetWebhookSecret.mockResolvedValue({ config: githubConfig, webhookSecret: rotated });
+
+      await openProject();
+      fireEvent.click(await screen.findByRole('button', { name: 'Rotate secret' }));
+
+      const dialog = await screen.findByRole('dialog', { name: 'Rotate webhook secret?' });
+      expect(dialog.textContent).toContain('stops accepting the current one straight away');
+      expect(dialog.textContent).toContain(
+        'GitHub webhook keeps signing with the old secret, so its deliveries are refused until you paste the new one'
+      );
+      expect(mockSetWebhookSecret).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull();
+      });
+      expect(mockSetWebhookSecret).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('sync-secret')).toBeNull();
+    });
+
+    it('shows each newly rotated secret in a fresh callout', async () => {
+      const again = 'c'.repeat(64);
+      mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+      mockSetWebhookSecret
+        .mockResolvedValueOnce({ config: githubConfig, webhookSecret: rotated })
+        .mockResolvedValueOnce({ config: githubConfig, webhookSecret: again });
+
+      await openProject();
+      await rotateConfirmed();
+      await screen.findByText(rotated);
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+      });
+
+      await rotateConfirmed();
+      await screen.findByText(again);
+      expect(screen.queryByText(rotated)).toBeNull();
+      expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
+    });
+
+    it('offers rotation where the server says Zone issues the secret, whatever the provider', async () => {
+      mockGetSyncConfigs.mockResolvedValue([
+        { ...githubConfig, webhook_secret_issued_by_zone: false },
+      ]);
+
+      await openProject();
+
+      await screen.findByLabelText('Set signing secret');
+      expect(screen.queryByRole('button', { name: 'Rotate secret' })).toBeNull();
+    });
+
+    it('keeps the Linear signing secret out of password managers while masking it', async () => {
+      mockGetSyncConfigs.mockResolvedValue([linearConfig]);
+
+      await openProject();
+      const input = (await screen.findByLabelText('Set signing secret')) as HTMLInputElement;
+
+      expect(input.type).toBe('text');
+      expect(input.classList.contains('sync-secret-input')).toBe(true);
+      expect(input.getAttribute('autocomplete')).toBe('off');
+      expect(input.hasAttribute('data-1p-ignore')).toBe(true);
+      expect(input.getAttribute('data-lpignore')).toBe('true');
+      expect(input.getAttribute('data-form-type')).toBe('other');
     });
 
     it('saves the signing secret Linear issued, without echoing it', async () => {
