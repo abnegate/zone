@@ -24,23 +24,23 @@ case "$1 $2" in
 esac
 FAKE
 chmod +x "$fake/docker"
-export FAKE_DOCKER_LOG=$fake/calls.log
+export FAKE_DOCKER_LOG="$fake/calls.log"
 : >"$FAKE_DOCKER_LOG"
 
 if PATH="$fake:$PATH" sh "$here/migrate-pgdata.sh" >"$fake/out" 2>&1; then
     echo "without ZONE_PGDATA_SOURCE the ambiguity must stop the script" >&2
     exit 1
 fi
-grep -q 'more than one dangling volume' "$fake/out" || { cat "$fake/out" >&2; exit 1; }
+grep -qF 'more than one dangling volume' "$fake/out" || { cat "$fake/out" >&2; exit 1; }
 
 : >"$FAKE_DOCKER_LOG"
 PATH="$fake:$PATH" ZONE_PGDATA_SOURCE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb sh "$here/migrate-pgdata.sh" >"$fake/out" 2>&1 || { cat "$fake/out" >&2; exit 1; }
-grep -q 'copying the cluster from bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb into zone_postgres_data' "$fake/out" || { cat "$fake/out" >&2; exit 1; }
-if grep -q 'volume ls' "$FAKE_DOCKER_LOG"; then
+grep -qF 'copying the cluster from bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb into zone_postgres_data' "$fake/out" || { cat "$fake/out" >&2; exit 1; }
+if grep -qF 'volume ls' "$FAKE_DOCKER_LOG"; then
     echo "a named source must not scan the dangling volumes" >&2
     exit 1
 fi
-if ! grep -q '(./scripts/compose.sh up -d)' "$fake/out" || grep -q 'make up' "$fake/out"; then
+if ! grep -qF '(./scripts/compose.sh up -d)' "$fake/out" || grep -qF 'make up' "$fake/out"; then
     echo "the restart hint must keep the saved profiles, which a plain make up would retire" >&2
     cat "$fake/out" >&2
     exit 1
