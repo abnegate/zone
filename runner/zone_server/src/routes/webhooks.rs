@@ -417,8 +417,10 @@ async fn admit(
 /// Follow the linked issue: a deletion unlinks it for good and leaves its
 /// task as it is; anything else newer than what was last applied updates the
 /// task's title and description, and its status when the issue changed state.
-/// A status a live run owns is left for a later delivery to catch up, so the
-/// state stored for the issue stays the one the task last followed.
+/// The state stored for the issue stays the one the task last followed, so a
+/// state the task did not follow, because a live run owns its status or the
+/// delivery is not later than the last one applied, is caught up with by a
+/// later delivery.
 async fn apply_to_linked(
     connection: &mut PgConnection,
     sync_config_id: Uuid,
@@ -494,11 +496,11 @@ async fn apply_to_linked(
     };
     let mut applied = event.payload.clone();
     let mut event_type = event.event_type;
-    if tasks::update_task_in(&mut *connection, &patch)
+    let refused = tasks::update_task_in(&mut *connection, &patch)
         .await?
         .is_none()
-        && patch.status.is_some()
-    {
+        && patch.status.is_some();
+    if refused {
         tracing::info!(
             "Task {} of issue {} for {sync_config_id} has a live run, so its status waits for a later delivery",
             item.task_id,
@@ -506,8 +508,11 @@ async fn apply_to_linked(
         );
         patch.status = None;
         tasks::update_task_in(&mut *connection, &patch).await?;
-        applied.state = previous.and_then(|previous| previous.state);
         event_type = SyncEventType::Update;
+    }
+    let followed = previous.and_then(|previous| previous.state);
+    if patch.status.is_none() && (refused || followed.is_some()) {
+        applied.state = followed;
     }
 
     let payload = serde_json::to_value(&applied)?;

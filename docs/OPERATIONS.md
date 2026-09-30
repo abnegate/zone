@@ -212,7 +212,10 @@ While a run owns a task's status, an event that would move it updates only the
 title and description, and the state stored for the issue stays the one the
 task last followed. The next later event for the issue, once the run has
 ended, moves the status to match: for GitHub, a label, assignment or edit
-reporting a state the task has not followed does so.
+reporting a state the task has not followed does so. A GitHub label,
+assignment or edit in the same second as the last event applied cannot be
+ordered against it, so it leaves the status and the stored state alone too, and
+the next later event settles them.
 
 An event that says the issue last changed before the last event applied to its
 task, or in the same second with the same state, title and body, is

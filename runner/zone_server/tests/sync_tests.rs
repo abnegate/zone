@@ -923,6 +923,13 @@ impl SyncedTask {
         .expect("Failed to read unlinked issues")
     }
 
+    async fn stored_state(&self) -> Option<serde_json::Value> {
+        self.linked("123")
+            .await
+            .and_then(|item| item.last_external_state)
+            .map(|state| state["state"].clone())
+    }
+
     async fn link_count(&self) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM synced_items WHERE sync_config_id = $1")
             .bind(self.sync_config_id)
@@ -1267,11 +1274,7 @@ async fn a_close_while_a_run_owns_the_status_renames_the_task_and_a_later_edit_c
     );
     assert_eq!(task.status, "in_progress", "the live run keeps its status");
     assert_eq!(
-        synced
-            .linked("123")
-            .await
-            .and_then(|item| item.last_external_state)
-            .map(|state| state["state"].clone()),
+        synced.stored_state().await,
         Some(json!("open")),
         "the stored state stays the one the task followed"
     );
@@ -1280,6 +1283,36 @@ async fn a_close_while_a_run_owns_the_status_renames_the_task_and_a_later_edit_c
     let labeled = github_issue_at("labeled", "Closed title", "closed", "2026-01-01T00:00:20Z");
     assert_eq!(synced.post_github(&labeled).await, StatusCode::OK);
     assert_eq!(synced.task().await.status, "complete");
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_close_a_run_held_back_is_caught_up_after_a_label_in_the_same_second() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let edited = github_issue_at("edited", "Original", "open", "2026-01-01T00:00:05Z");
+    assert_eq!(synced.post_github(&edited).await, StatusCode::OK);
+    synced.set_task("Original", "in_progress").await;
+    start_run(&synced).await;
+    let closed = github_issue_at("closed", "Original", "closed", "2026-01-01T00:00:10Z");
+    assert_eq!(synced.post_github(&closed).await, StatusCode::OK);
+
+    let labeled = github_issue_at("labeled", "Original", "closed", "2026-01-01T00:00:10Z");
+    let (status, response) = synced.send_github(&labeled, None).await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(synced.task().await.status, "in_progress");
+    assert_eq!(
+        synced.stored_state().await,
+        Some(json!("open")),
+        "a state the task did not follow is not stored as followed"
+    );
+
+    end_run(&synced).await;
+    let later = github_issue_at("edited", "Original", "closed", "2026-01-01T00:00:20Z");
+    let (status, response) = synced.send_github(&later, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(synced.task().await.status, "complete", "{response}");
 
     synced.cleanup().await;
 }
