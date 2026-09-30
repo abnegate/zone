@@ -5,6 +5,8 @@
 //! decide leaves the stage alone with a reason, and a step that needs a person
 //! pauses the task with one.
 
+use std::collections::HashSet;
+
 use chrono::Utc;
 use zone_vcs::conflict::{BranchName, ConflictError, ConflictRequest};
 use zone_vcs::pull_request::{
@@ -872,6 +874,18 @@ async fn submitted_reviews(
         })
 }
 
+/// The rounds of review a change went through: each head a model or a bot
+/// judged. A round that ended without a verdict, and a bot reading a head it
+/// already judged again, add none.
+fn review_rounds(rows: &[ReviewRow]) -> u32 {
+    let heads: HashSet<&str> = rows
+        .iter()
+        .filter(|row| row.reviewed())
+        .map(|row| row.head.as_str())
+        .collect();
+    u32::try_from(heads.len()).unwrap_or(u32::MAX)
+}
+
 /// Reply on, and resolve, every bot thread the reviewer found addressed.
 async fn answer_bot_threads(
     step: &Step<'_>,
@@ -1277,7 +1291,6 @@ async fn finish_merged(
     });
     let raised: usize = rows.iter().map(|row| row.findings().len()).sum();
     let open = auto_projects::open_findings_of(rows).len();
-    let rounds = rows.iter().map(|row| row.round).max().unwrap_or(0);
     let same_model = rows
         .iter()
         .any(|row| !row.is_bot() && row.reviewed() && row.same_model)
@@ -1304,7 +1317,7 @@ async fn finish_merged(
             .take(TOP_PATHS)
             .map(|file| file.filename.clone())
             .collect(),
-        review_rounds: u32::try_from(rounds).unwrap_or(0),
+        review_rounds: review_rounds(rows),
         reviewers: reviewer_names(rows),
         same_model,
         bots_absent,
@@ -1676,6 +1689,26 @@ mod tests {
             row(3, false, "big", "approve", false, head),
         ];
         assert_eq!(reviewer_names(&rows), ["big (Zone)"]);
+    }
+
+    #[test]
+    fn the_merge_notice_counts_each_judged_head_once_and_no_round_without_a_verdict() {
+        let rows = [
+            row(1, false, "gemma", "failed", false, "h1"),
+            row(2, false, "big", "request_changes", false, "h1"),
+            row(3, true, "coderabbitai", "request_changes", false, "h1"),
+            row(4, true, "coderabbitai", "approve", false, "h2"),
+            row(5, false, "tiny", "unparseable", false, "h2"),
+            row(6, false, "big", "approve", false, "h2"),
+            row(7, true, "coderabbitai", "approve", false, "h2"),
+        ];
+
+        assert_eq!(review_rounds(&rows), 2);
+        assert_eq!(
+            review_rounds(&rows[..1]),
+            0,
+            "a failed round reviewed nothing"
+        );
     }
 
     fn reference() -> PullRequestReference {
