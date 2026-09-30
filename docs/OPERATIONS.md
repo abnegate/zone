@@ -145,6 +145,16 @@ least 5 such ticks over 10 minutes the task pauses, naming the reviewer and
 the last error. The count lives in the driver's memory, so a restart starts it
 over.
 
+## Upgrading to migration 051
+
+The first start of a server that skips repeated sync deliveries applies
+migration 051, which adds the `sync_deliveries` table and lets `sync_events`
+record the `unlink` event of a deleted GitHub issue. An image built before it
+cannot start against the migrated database: it stops with
+`Failed to run migrations: VersionMissing(51)`. Run `make backup` before the
+upgrade. Going back to an older image means restoring that backup, and losing
+whatever changed after it was taken.
+
 ## Pulling models into the bundled Ollama
 
 With `PROFILES=bundled-ollama`, `ollama-init` pulls `OLLAMA_MODEL_FAST`,
@@ -212,6 +222,15 @@ For Linear, create a webhook for Issues with the same URL, then paste Linear's
 signing secret into the sync with "Set signing secret". The sync's project ID
 must be the Linear project's ID, a UUID. Deliveries more than 60 seconds old
 are refused.
+
+Any member who can write to the workspace can create or delete a sync, but
+only a workspace admin can rotate, generate or set its secret, since whoever
+holds it can sign deliveries and replacing it stops the live webhook verifying
+until the provider has the new one. The UI asks before rotating. Each change is
+written to the audit log as `sync.webhook_secret_rotated` (Zone generated it)
+or `sync.webhook_secret_set` (the admin supplied it), never with the secret. A
+change that races another is answered 409 and shows no secret, since the one it
+generated was not the one kept; load the sync again and retry.
 
 ## Monitoring
 
