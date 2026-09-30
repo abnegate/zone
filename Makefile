@@ -402,8 +402,9 @@ backup: ## Backup volumes to ./backups, stopping postgres while its cluster is c
 		fi; \
 		rm -f "$$partial"; \
 	}; \
+	trap '' PIPE; \
 	trap cleanup EXIT; \
-	trap 'exit 130' INT TERM HUP; \
+	trap 'exit 130' INT TERM HUP QUIT; \
 	if [ -n "$$running" ]; then \
 		stage=$(VOLUME_PREFIX)_backup_stage_$$DATE; \
 		docker volume create "$$stage" >/dev/null || exit 1; \

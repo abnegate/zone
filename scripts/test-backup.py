@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,7 +23,7 @@ OTHER_MOUNTS = ['zone_ollama_data:/data/ollama:ro', 'zone_valkey_data:/data/valk
 BACKUP = 'BACKUP=backups/zone_backup_20260930_000000.tar.gz'
 
 FAKE_DOCKER = '''#!/usr/bin/env python3
-import json, os, signal, sys
+import json, os, signal, sys, time
 arguments = sys.argv[1:]
 with open(os.environ['FAKE_DOCKER_LOG'], 'a') as output:
     output.write(json.dumps(arguments) + '\\n')
@@ -40,7 +41,12 @@ if arguments[0] == 'run' and 'PG_VERSION' in joined:
     sys.exit(0 if os.environ['FAKE_DOCKER_CLUSTER'] == '1' else 1)
 signalled = os.environ.get('FAKE_DOCKER_SIGNAL_ON')
 if signalled and signalled in joined:
-    os.kill(os.getppid(), signal.SIGTERM)
+    handshake = os.environ.get('FAKE_DOCKER_HANDSHAKE')
+    if handshake:
+        open(handshake + '.ready', 'w').close()
+        while not os.path.exists(handshake + '.closed'):
+            time.sleep(0.01)
+    os.kill(os.getppid(), getattr(signal, os.environ['FAKE_DOCKER_SIGNAL']))
 sys.exit(0)
 '''
 
@@ -119,6 +125,8 @@ class Fake:
     exit_code: str = '0'
     fail: dict[str, int] = field(default_factory=dict)
     signal_on: str = ''
+    signal: str = 'SIGTERM'
+    closed_output: bool = False
 
 
 class MakeTarget(unittest.TestCase):
@@ -142,16 +150,41 @@ class MakeTarget(unittest.TestCase):
                 'FAKE_DOCKER_EXIT_CODE': fake.exit_code,
                 'FAKE_DOCKER_FAIL': json.dumps(fake.fail),
                 'FAKE_DOCKER_SIGNAL_ON': fake.signal_on,
+                'FAKE_DOCKER_SIGNAL': fake.signal,
             }
             environment.pop('ALLOW_EMPTY_POSTGRES', None)
-            result = subprocess.run(
-                ['make', '-f', str(MAKEFILE), '-C', str(work), target, f'SHELL={shell}', *variables],
-                env=environment, text=True, capture_output=True, timeout=30,
-            )
+            command = ['make', '-f', str(MAKEFILE), '-C', str(work), target, f'SHELL={shell}', *variables]
+            if fake.closed_output:
+                handshake = folder / 'handshake'
+                environment['FAKE_DOCKER_HANDSHAKE'] = str(handshake)
+                returncode, output = self.run_with_output_closed_on_signal(command, environment, handshake)
+            else:
+                result = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=30)
+                returncode, output = result.returncode, result.stdout + result.stderr
             backups = work / 'backups'
             mode = backups.stat().st_mode & 0o777 if backups.exists() else None
             calls = [json.loads(line) for line in log.read_text().splitlines()]
-            return Run(result.returncode, result.stdout + result.stderr, calls, mode)
+            return Run(returncode, output, calls, mode)
+
+    def run_with_output_closed_on_signal(self, command: list[str], environment: dict[str, str],
+                                         handshake: Path) -> tuple[int, str]:
+        reader, writer = os.pipe()
+        with tempfile.TemporaryFile(mode='w+') as errors:
+            process = subprocess.Popen(command, env=environment, text=True, stdout=writer, stderr=errors)
+            os.close(writer)
+            ready = handshake.with_name(handshake.name + '.ready')
+            try:
+                deadline = time.monotonic() + 30
+                while not ready.exists() and process.poll() is None:
+                    if time.monotonic() > deadline:
+                        raise AssertionError('the signalled docker call never ran')
+                    time.sleep(0.01)
+            finally:
+                os.close(reader)
+                handshake.with_name(handshake.name + '.closed').touch()
+            returncode = process.wait(timeout=30)
+            errors.seek(0)
+            return returncode, errors.read()
 
 
 class Backup(MakeTarget):
@@ -241,6 +274,21 @@ class Backup(MakeTarget):
                 run = self.make('backup', Fake(signal_on='cp -a'), shell)
                 self.assertRestartedAndStageRemoved(run, is_stage_copy)
                 self.assertEqual(run.calls[run.first(is_start) - 1], ['stop', '-t', '120', POSTGRES])
+                self.assertEqual(run.indexes(is_archive), [])
+
+    def test_signal_during_stage_copy_with_its_output_pipe_gone_still_starts_postgres(self) -> None:
+        for shell in SHELLS:
+            for name in ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']:
+                with self.subTest(shell=shell, signal=name):
+                    run = self.make('backup', Fake(signal_on='cp -a', signal=name, closed_output=True), shell)
+                    self.assertRestartedAndStageRemoved(run, is_stage_copy)
+                    self.assertEqual(run.indexes(is_archive), [])
+
+    def test_quit_during_stage_copy_still_starts_postgres_and_removes_the_stage(self) -> None:
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                run = self.make('backup', Fake(signal_on='cp -a', signal='SIGQUIT'), shell)
+                self.assertRestartedAndStageRemoved(run, is_stage_copy)
                 self.assertEqual(run.indexes(is_archive), [])
 
     def test_failed_archive_removes_the_stage(self) -> None:
