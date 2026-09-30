@@ -1,7 +1,7 @@
 //! LLM client for OpenAI-compatible APIs
 
 use futures::{Stream, StreamExt};
-use reqwest::{Client, ClientBuilder, Url};
+use reqwest::{Client, ClientBuilder, Url, redirect};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -32,7 +32,7 @@ fn guarded(builder: ClientBuilder, trust: Trust) -> ClientBuilder {
         Trust::Tenant => builder
             .no_proxy()
             .dns_resolver(Arc::new(metadata::Resolver))
-            .redirect(metadata::redirects()),
+            .redirect(redirect::Policy::none()),
     }
 }
 
@@ -962,13 +962,39 @@ mod tests {
 
             let refused = client(&server.uri())
                 .chat(&[Message::user("hi")], None)
+                .await
+                .expect_err("a redirect is refused");
+
+            assert_eq!(reported(&refused), (307, "Temporary Redirect".to_string()));
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn a_tenant_endpoint_is_never_followed_through_a_redirect() {
+            let elsewhere = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&elsewhere)
+                .await;
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(
+                    ResponseTemplate::new(307)
+                        .insert_header("location", format!("{}/admin", elsewhere.uri())),
+                )
+                .expect(1)
+                .mount(&server)
                 .await;
 
-            assert!(
-                matches!(&refused, Err(LlmError::Http(error)) if error.is_redirect()),
-                "{refused:?}"
-            );
+            let refused = client(&server.uri())
+                .chat(&[Message::user("hi")], None)
+                .await
+                .expect_err("a redirect is refused");
+
+            assert_eq!(reported(&refused), (307, "Temporary Redirect".to_string()));
             server.verify().await;
+            elsewhere.verify().await;
         }
 
         async fn proxied(trust: Trust) -> (usize, usize) {

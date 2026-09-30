@@ -4,14 +4,12 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use reqwest::Url;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
-use reqwest::redirect::{Attempt, Policy};
-use reqwest::{Url, redirect};
 
 const HOSTS: [&str; 2] = ["metadata.google.internal", "metadata.goog"];
 const IPV4_ADDRESSES: [Ipv4Addr; 1] = [Ipv4Addr::new(100, 100, 100, 200)];
 const IPV6_ADDRESSES: [Ipv6Addr; 1] = [Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254)];
-const REDIRECTS: usize = 10;
 
 /// Whether `address` is link-local or a cloud provider's metadata service.
 pub fn is_address(address: IpAddr) -> bool {
@@ -74,21 +72,6 @@ impl Resolve for Resolver {
             Ok(Box::new(kept.into_iter()) as Addrs)
         })
     }
-}
-
-/// Follows redirects as reqwest does, except to an address or host a
-/// tenant's endpoint must not reach. A name is resolved by [`Resolver`]; a
-/// literal address never is, so it is checked here.
-pub(super) fn redirects() -> Policy {
-    redirect::Policy::custom(|attempt: Attempt<'_>| {
-        if attempt.previous().len() >= REDIRECTS {
-            attempt.error("too many redirects")
-        } else if is_url(attempt.url()) {
-            attempt.error("redirected to a link-local or cloud metadata address")
-        } else {
-            attempt.follow()
-        }
-    })
 }
 
 #[cfg(test)]
