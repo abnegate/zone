@@ -52,8 +52,8 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
         Some(workspace) => Route::for_workspace(state, workspace).await,
         None => Route::instance(state.config()),
     };
-    let preferences = route.preferences(&route.endpoint, &state.config().comfyui.classifier_model);
-    let backend = route.backend.ok()?;
+    let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    let backend = route.backend(state).await.ok()?;
     let endpoint = route.endpoint;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)

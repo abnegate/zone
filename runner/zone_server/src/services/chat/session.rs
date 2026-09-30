@@ -281,8 +281,6 @@ pub struct Preparation {
     pub tools: ChatTools,
     pub context: RunContext,
     pub llm: LlmClient,
-    /// Where [`Self::llm`] sends completions, kept so a failure it reports
-    /// reaches the reader without the endpoint's key.
     pub endpoint: Endpoint,
     pub stop: Vec<String>,
     pub budget: LoopBudget,
@@ -307,6 +305,7 @@ pub async fn build(
     user: Uuid,
     pending: Option<(&str, Option<&Value>)>,
     mode: Mode,
+    endpoint: Endpoint,
 ) -> Result<Preparation, String> {
     let workspace = chat
         .workspace_id
@@ -326,15 +325,9 @@ pub async fn build(
             ChatTools::preview(scope).await
         }
     };
-    let endpoint = async {
-        let endpoint = Endpoint::for_workspace(state, workspace).await;
-        let capacity = endpoint
-            .capacity(state.config())
-            .resolve(&chat.model_name)
-            .await;
-        (endpoint, capacity)
-    };
-    let (history, (endpoint, capacity), tools) = tokio::join!(store.load(), endpoint, catalog);
+    let resolver = endpoint.capacity(state.config());
+    let (history, capacity, tools) =
+        tokio::join!(store.load(), resolver.resolve(&chat.model_name), catalog);
     if matches!(mode, Mode::Generation(_)) {
         endpoint
             .model(&chat.model_name)
@@ -1167,6 +1160,9 @@ mod tests {
             .expect("a chat on automatic model selection");
         let state = AppState::new(crate::state::test_config(), pool.clone(), None);
         let user = Uuid::new_v4();
+        let endpoint = crate::services::route::Route::for_workspace(&state, workspace.id)
+            .await
+            .endpoint;
 
         let turn = build(
             &state,
@@ -1174,9 +1170,10 @@ mod tests {
             user,
             None,
             Mode::Generation(LlmBackend::Http),
+            endpoint.clone(),
         )
         .await;
-        let preview = build(&state, &chat, user, None, Mode::Preview).await;
+        let preview = build(&state, &chat, user, None, Mode::Preview, endpoint).await;
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(organization.id)
             .execute(&pool)

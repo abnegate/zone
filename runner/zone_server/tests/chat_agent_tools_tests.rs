@@ -33,6 +33,7 @@ use zone_server::agent::wait::WAIT_FOR;
 use zone_server::config::ModelBackend;
 use zone_server::db::chats;
 use zone_server::services::chat::session::{self, Mode};
+use zone_server::services::route::Route;
 
 /// Longer than the thirty minutes a coding agent's turn gets by default.
 const CHAT_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -460,6 +461,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         .await
         .unwrap()
         .expect("the harness's chat");
+    let route = Route::for_workspace(&state, chat.workspace_id.unwrap()).await;
 
     let agent = session::build(
         &state,
@@ -467,6 +469,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         Uuid::new_v4(),
         None,
         Mode::Generation(LlmBackend::cli(AgentKind::Claude, CliSettings::default())),
+        route.endpoint.clone(),
     )
     .await
     .expect("a turn on an agent is prepared");
@@ -476,6 +479,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         Uuid::new_v4(),
         None,
         Mode::Generation(LlmBackend::Http),
+        route.endpoint,
     )
     .await
     .expect("a turn on the endpoint is prepared");

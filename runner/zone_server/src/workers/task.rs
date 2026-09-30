@@ -15,9 +15,7 @@ use uuid::Uuid;
 use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
 use zone_core::llm::provider::{OUTGROWN, SignIn, UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{
-    AgentKind, BuiltinTools, Credential, LlmBackend, LlmClient, Message as LlmMessage,
-};
+use zone_core::llm::{BuiltinTools, Credential, LlmBackend, LlmClient, Message as LlmMessage};
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
@@ -28,7 +26,7 @@ use crate::agent::question::{self, Question};
 use crate::agent::wait::{self, Waited, Waiting};
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
 use crate::config::ModelBackend;
-use crate::db::{ai_settings, task_tool_calls, tasks, workspaces};
+use crate::db::{task_tool_calls, tasks};
 use crate::services::backend;
 use crate::services::chat::session::{self, RunContext};
 use crate::services::endpoint::Endpoint;
@@ -1009,11 +1007,12 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let plan_approval = task.require_plan_approval && !unattended;
     let workspace_id = task.workspace_id;
     let route = Route::for_workspace(state, workspace_id).await;
+    let resolved = route.backend(state).await;
     let Prepared {
         backend,
         endpoint,
         model,
-    } = match prepare(state, &task, route, plan_approval).await {
+    } = match prepare(state, &task, route, resolved, plan_approval).await {
         Ok(prepared) => prepared,
         Err(message) => {
             obs.set_status(RUN_FAILED);
@@ -1299,10 +1298,11 @@ async fn prepare(
     state: &AppState,
     task: &tasks::TaskRow,
     route: Route,
+    resolved: Result<LlmBackend, backend::Error>,
     plan_approval: bool,
 ) -> Result<Prepared, String> {
-    let preferences = route.preferences(&route.endpoint, &state.config().comfyui.classifier_model);
-    let backend = route.backend.map_err(|error| error.to_string())?;
+    let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    let backend = resolved.map_err(|error| error.to_string())?;
     if plan_approval && matches!(backend, LlmBackend::Cli { .. }) {
         return Err(match state.config().model_backend() {
             ModelBackend::LiteLlm => PLAN_APPROVAL_UNAVAILABLE,
@@ -1340,7 +1340,10 @@ async fn refreshed(
     else {
         return Ok(prepared.clone());
     };
-    let Some(organization) = organization_on(state, workspace, *agent).await else {
+    let Some(organization) = Route::for_workspace(state, workspace)
+        .await
+        .organization_on(*agent)
+    else {
         tracing::warn!(
             %workspace,
             %agent,
@@ -1371,22 +1374,6 @@ async fn refreshed(
             .clone()
             .with_credential(Credential::key(variable.clone(), token)),
     ))
-}
-
-/// The organization `workspace` belongs to, while the workspace still runs on
-/// `agent`. A workspace or settings that cannot be read say nothing either
-/// way, and the reason is logged.
-async fn organization_on(state: &AppState, workspace: Uuid, agent: AgentKind) -> Option<Uuid> {
-    let organization = workspaces::get_workspace(state.db(), workspace)
-        .await
-        .inspect_err(|error| tracing::warn!(%workspace, %error, "Could not read the workspace"))
-        .ok()??
-        .organization_id;
-    let settings = ai_settings::get_effective_ai_settings(state.db(), organization, workspace)
-        .await
-        .inspect_err(|error| tracing::warn!(%workspace, %error, "Could not read the AI settings"))
-        .ok()?;
-    (settings.agent() == Some(agent)).then_some(organization)
 }
 
 /// Resolves the run's model the way a chat resolves its own: workspace settings
@@ -2997,6 +2984,7 @@ async fn run_task_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{ai_settings, workspaces};
     use zone_core::llm::LlmConfig;
 
     #[test]
@@ -3112,19 +3100,13 @@ mod tests {
     }
 
     impl AgentTask {
-        async fn route(&self, backend: Result<LlmBackend, backend::Error>) -> Route {
-            Route {
-                backend,
-                ..Route::for_workspace(&self.state, self.task.workspace_id).await
-            }
+        async fn route(&self) -> Route {
+            Route::for_workspace(&self.state, self.task.workspace_id).await
         }
 
         async fn model(&self, backend: &LlmBackend) -> Result<String, String> {
-            let route = Route::for_workspace(&self.state, self.task.workspace_id).await;
-            let preferences = route.preferences(
-                &route.endpoint,
-                &self.state.config().comfyui.classifier_model,
-            );
+            let route = self.route().await;
+            let preferences = route.preferences(&self.state.config().comfyui.classifier_model);
             resolve_model(
                 &self.state,
                 &self.task,
@@ -3175,8 +3157,8 @@ mod tests {
         let fixture =
             AgentTask::new("llama3.2:3b", "qwen3.8:27b", "Rename the settings page").await;
 
-        let route = fixture.route(Ok(claude())).await;
-        let prepared = prepare(&fixture.state, &fixture.task, route, false).await;
+        let route = fixture.route().await;
+        let prepared = prepare(&fixture.state, &fixture.task, route, Ok(claude()), false).await;
         fixture.remove().await;
 
         let Prepared { backend, model, .. } =
@@ -3198,8 +3180,15 @@ mod tests {
             agent: zone_core::llm::AgentKind::Claude,
         };
 
-        let route = fixture.route(Err(signed_out())).await;
-        let prepared = prepare(&fixture.state, &fixture.task, route, false).await;
+        let route = fixture.route().await;
+        let prepared = prepare(
+            &fixture.state,
+            &fixture.task,
+            route,
+            Err(signed_out()),
+            false,
+        )
+        .await;
         fixture.remove().await;
 
         assert_eq!(prepared.err(), Some(signed_out().to_string()));
@@ -3222,9 +3211,16 @@ mod tests {
         .await
         .unwrap();
 
-        let route = fixture.route(Ok(LlmBackend::Http)).await;
+        let route = fixture.route().await;
         let origin = route.endpoint.origin();
-        let prepared = prepare(&fixture.state, &fixture.task, route, false).await;
+        let prepared = prepare(
+            &fixture.state,
+            &fixture.task,
+            route,
+            Ok(LlmBackend::Http),
+            false,
+        )
+        .await;
         let consulted = fixture
             .ollama
             .received_requests()
@@ -3841,6 +3837,7 @@ mod retry_tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use zone_core::llm::AgentKind;
     use zone_core::llm::provider::{
         STDERR_HEADING, SignIn, UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT,
     };

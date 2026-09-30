@@ -38,6 +38,7 @@ use zone_server::db::memory::{
 use zone_server::db::workspace_members::{WorkspaceRole, add_member};
 use zone_server::db::{chats, tasks, users};
 use zone_server::services::chat::session::{self, Mode};
+use zone_server::services::route::Route;
 
 /// Wide enough that nothing here compacts by accident. The one test that wants
 /// a compaction asks for a budget instead.
@@ -386,9 +387,19 @@ async fn the_preview_and_the_generation_carry_the_same_memory_bytes() {
         .await
         .expect("the chat is readable")
         .expect("the chat is still there");
-    let preview = session::build(&state, &chat, remembering.user, None, Mode::Preview)
+    let endpoint = Route::for_workspace(&state, chat.workspace_id.unwrap())
         .await
-        .expect("a preview builds");
+        .endpoint;
+    let preview = session::build(
+        &state,
+        &chat,
+        remembering.user,
+        None,
+        Mode::Preview,
+        endpoint,
+    )
+    .await
+    .expect("a preview builds");
     let previewed = preview.context.entries[0]
         .message
         .content

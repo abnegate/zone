@@ -7,7 +7,6 @@
 use std::fmt;
 
 use reqwest::Url;
-use uuid::Uuid;
 use zone_chat::capacity::Resolver;
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
 use zone_core::llm::{Dialect, LlmBackend, LlmConfig, Trust, metadata};
@@ -16,9 +15,7 @@ use zone_core::secret::{REDACTED, SecretValue, conceal, redact};
 use crate::config::Config;
 use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC};
 use crate::services::hosts::Hosts;
-use crate::services::route;
 use crate::services::stages::{self, Catalog};
-use crate::state::AppState;
 
 pub const OPENAI_URL: &str = "https://api.openai.com/v1";
 pub const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1";
@@ -129,6 +126,11 @@ impl Endpoint {
     /// instance, as does any provider whose settings name no endpoint or
     /// save a URL that fails [`validate_url`].
     pub fn resolve(config: &Config, settings: &EffectiveAiSettings) -> Self {
+        Self::try_resolve(config, settings).unwrap_or_else(|_| Self::instance(config))
+    }
+
+    /// [`Self::resolve`], or why the URL the settings save cannot be used.
+    pub fn try_resolve(config: &Config, settings: &EffectiveAiSettings) -> Result<Self, UrlError> {
         let resolved = match settings.provider.as_str() {
             PROVIDER_SELF_HOSTED => Self::self_hosted(
                 config,
@@ -151,27 +153,7 @@ impl Endpoint {
             ),
             _ => Ok(None),
         };
-        match resolved {
-            Ok(Some(endpoint)) => endpoint,
-            Ok(None) => Self::instance(config),
-            Err(error) => {
-                tracing::warn!(
-                    provider = %settings.provider,
-                    %error,
-                    "The endpoint URL saved in AI Settings is invalid; using the instance's endpoint"
-                );
-                Self::instance(config)
-            }
-        }
-    }
-
-    /// The endpoint a workspace's settings name, or the instance's when the
-    /// workspace or its settings cannot be read.
-    pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Self {
-        match route::saved(state, workspace).await {
-            Some((_, settings)) => Self::resolve(state.config(), &settings),
-            None => Self::instance(state.config()),
-        }
+        Ok(resolved?.unwrap_or_else(|| Self::instance(config)))
     }
 
     pub fn url(&self) -> &str {

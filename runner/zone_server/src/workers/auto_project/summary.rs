@@ -46,7 +46,7 @@ async fn generate(
 ) -> Option<String> {
     let venue = Venue::for_workspace(state, task.workspace_id).await.ok()?;
     let model = stages::summary_model(
-        &venue.prefs,
+        &venue.preferences,
         &venue.catalog,
         task.model_name.as_deref().unwrap_or(stages::AUTO),
     )?;

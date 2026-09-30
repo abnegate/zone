@@ -20,7 +20,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 use zone_core::llm::{AgentKind, Credential, LlmBackend, LlmClient, LlmConfig, Message};
 use zone_server::config::{AgentConfig, Config};
-use zone_server::services::backend;
+use zone_server::services::route::Route;
 use zone_server::services::stages::AUTO;
 
 use common::{TestClient, test_config, test_email, test_password};
@@ -84,7 +84,9 @@ async fn an_organization_without_a_sign_in_of_its_own_runs_the_hosts_claude() {
         .await
         .assert_status(StatusCode::OK);
 
-    let backend = backend::for_workspace(client.state(), workspace)
+    let backend = Route::for_workspace(client.state(), workspace)
+        .await
+        .backend(client.state())
         .await
         .expect("the host's own sign-in to serve the organization");
 

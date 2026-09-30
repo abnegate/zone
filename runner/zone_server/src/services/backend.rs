@@ -8,9 +8,8 @@ use zone_core::llm::provider::{STDERR_HEADING, SignIn};
 use zone_core::llm::{AgentKind, CliSettings, Credential, LlmBackend};
 
 use crate::config::Config;
-use crate::db::ai_settings::{self, EffectiveAiSettings};
-use crate::db::workspaces;
-use crate::services::endpoint::{Endpoint, Origin};
+use crate::db::ai_settings::EffectiveAiSettings;
+use crate::services::endpoint::Origin;
 use crate::services::login::credential::{self, Login};
 use crate::state::AppState;
 
@@ -85,51 +84,22 @@ pub fn instance(config: &Config) -> LlmBackend {
     }
 }
 
-/// The backend a workspace's completions run on. A workspace or AI settings that
-/// cannot be read leave it on the instance default.
-pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Result<LlmBackend, Error> {
-    let organization = match workspaces::get_workspace(state.db(), workspace).await {
-        Ok(Some(row)) => row.organization_id,
-        Ok(None) => {
-            tracing::warn!(%workspace, "No such workspace; using the instance's default backend");
-            return Ok(instance(state.config()));
-        }
-        Err(error) => {
-            tracing::warn!(
-                %workspace,
-                %error,
-                "Could not read the workspace; using the instance's default backend"
-            );
-            return Ok(instance(state.config()));
-        }
-    };
-    match ai_settings::get_effective_ai_settings(state.db(), organization, workspace).await {
-        Ok(settings) => for_settings(state, organization, &settings).await,
-        Err(error) => {
-            tracing::warn!(
-                %workspace,
-                %error,
-                "Could not read the AI settings; using the instance's default backend"
-            );
-            Ok(instance(state.config()))
-        }
-    }
-}
-
 /// The backend `settings` choose for one of `organization`'s workspaces.
 ///
 /// A coding agent provider runs that agent in the organization's own working
 /// directory, under the organization's sign-in, else under the host's when the
-/// instance allows that. A provider whose settings name an endpoint runs over
-/// HTTP to it, and every other provider runs on the instance default.
+/// instance allows that. A provider whose settings resolved to an endpoint of
+/// `origin` [`Origin::Settings`] runs over HTTP to it, and every other provider
+/// runs on the instance default.
 pub async fn for_settings(
     state: &AppState,
     organization: Uuid,
     settings: &EffectiveAiSettings,
+    origin: Origin,
 ) -> Result<LlmBackend, Error> {
     let config = state.config();
     let Some(agent) = settings.agent() else {
-        return Ok(match Endpoint::resolve(config, settings).origin() {
+        return Ok(match origin {
             Origin::Settings => LlmBackend::Http,
             Origin::Instance => instance(config),
         });
@@ -289,9 +259,10 @@ mod tests {
     use crate::config::{AgentConfig, ModelBackend};
     use crate::db::agent_logins::{self, Upsert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
-    use crate::db::organizations;
+    use crate::db::{organizations, workspaces};
     use crate::services::endpoint::testing::settings;
     use crate::services::login::claude::Tokens;
+    use crate::services::route::Route;
 
     const ACCESS: &str = "fake-claude-access-token";
     const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
@@ -414,7 +385,10 @@ mod tests {
         }
 
         async fn resolve(&self, state: &AppState) -> Result<LlmBackend, Error> {
-            for_workspace(state, self.workspace).await
+            Route::for_workspace(state, self.workspace)
+                .await
+                .backend(state)
+                .await
         }
 
         async fn remove(&self) {
@@ -716,9 +690,15 @@ mod tests {
         let mut instance_endpoint = settings(PROVIDER_SELF_HOSTED);
         instance_endpoint.litellm_host = Some(state.config().litellm_host.clone());
 
-        let own = for_settings(&state, Uuid::new_v4(), &own).await;
-        let unsaved = for_settings(&state, Uuid::new_v4(), &settings(PROVIDER_OPENAI)).await;
-        let instances = for_settings(&state, Uuid::new_v4(), &instance_endpoint).await;
+        let backend = |settings: EffectiveAiSettings| {
+            let route = Route::new(state.config(), Uuid::new_v4(), Uuid::new_v4(), settings);
+            let state = state.clone();
+            async move { route.backend(&state).await }
+        };
+
+        let own = backend(own).await;
+        let unsaved = backend(settings(PROVIDER_OPENAI)).await;
+        let instances = backend(instance_endpoint).await;
 
         assert!(matches!(own, Ok(LlmBackend::Http)), "{own:?}");
         for resolved in [unsaved, instances] {
@@ -744,7 +724,10 @@ mod tests {
         .expect("the test database");
         let state = AppState::new(crate::state::test_config(), pool, None);
 
-        let resolved = for_workspace(&state, Uuid::new_v4()).await;
+        let resolved = Route::for_workspace(&state, Uuid::new_v4())
+            .await
+            .backend(&state)
+            .await;
 
         assert!(matches!(resolved, Ok(LlmBackend::Http)), "{resolved:?}");
     }

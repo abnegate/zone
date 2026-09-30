@@ -15,6 +15,7 @@ use crate::error::ServerError;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
 use crate::services::chat::session;
+use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use zone_core::context::ContextUsage;
@@ -240,9 +241,10 @@ async fn chat_with_messages(
         .collect();
 
     let context = match (chat.workspace_id, auth.0.user_id()) {
-        (Some(_), Ok(actor)) => {
+        (Some(workspace), Ok(actor)) => {
             // No draft or inference; reconstruct a fresh observation for reconnect.
-            session::build(state, &chat, actor, None, session::Mode::Preview)
+            let endpoint = Route::for_workspace(state, workspace).await.endpoint;
+            session::build(state, &chat, actor, None, session::Mode::Preview, endpoint)
                 .await
                 .ok()
                 .map(|prepared| {
@@ -1189,12 +1191,14 @@ pub async fn context(
         Ok(actor) => actor,
         Err(error) => return error.into_response(),
     };
+    let endpoint = Route::for_workspace(&state, workspace).await.endpoint;
     match session::build(
         &state,
         &chat,
         actor,
         Some((&request.content, request.metadata.as_ref())),
         session::Mode::Preview,
+        endpoint,
     )
     .await
     {

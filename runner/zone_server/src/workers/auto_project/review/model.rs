@@ -102,7 +102,7 @@ impl Author {
 pub fn lineup(
     origin: Origin,
     author: &Author,
-    prefs: &Preferences,
+    preferences: &Preferences,
     catalog: &Catalog,
     configured: &[String],
     round: u32,
@@ -132,10 +132,10 @@ pub fn lineup(
     for name in configured {
         push(name);
     }
-    if let Some(name) = prefs.reasoning.as_deref() {
+    if let Some(name) = preferences.reasoning.as_deref() {
         push(name);
     }
-    if let Some(name) = prefs.fast.as_deref() {
+    if let Some(name) = preferences.fast.as_deref() {
         push(name);
     }
     let mut installed: Vec<_> = catalog.unattended().collect();
@@ -146,12 +146,16 @@ pub fn lineup(
         }
     }
     if candidates.is_empty() {
-        let fallbacks: Vec<&str> = [named, prefs.reasoning.as_deref(), prefs.fast.as_deref()]
-            .into_iter()
-            .flatten()
-            .map(str::trim)
-            .filter(|name| !stages::is_auto(name))
-            .collect();
+        let fallbacks: Vec<&str> = [
+            named,
+            preferences.reasoning.as_deref(),
+            preferences.fast.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|name| !stages::is_auto(name))
+        .collect();
         return match fallbacks.iter().find(|name| !catalog.refuses_tools(name)) {
             Some(model) => Ok(vec![Reviewer {
                 model: (*model).to_string(),
@@ -187,7 +191,7 @@ pub fn objection(author: &Author, reviewer: &Reviewer) -> Option<&'static str> {
 pub struct Venue {
     pub backend: LlmBackend,
     pub endpoint: Endpoint,
-    pub prefs: Preferences,
+    pub preferences: Preferences,
     pub catalog: Catalog,
 }
 
@@ -197,13 +201,12 @@ impl Venue {
     pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Result<Self, backend::Error> {
         let config = state.config();
         let route = Route::for_workspace(state, workspace).await;
-        let prefs = route.preferences(&route.endpoint, &config.comfyui.classifier_model);
-        let backend = route.backend?;
+        let backend = route.backend(state).await?;
         let catalog = route.endpoint.catalog(&config.ollama_host, &backend).await;
         Ok(Self {
             backend,
+            preferences: route.preferences(&config.comfyui.classifier_model),
             endpoint: route.endpoint,
-            prefs,
             catalog,
         })
     }
@@ -220,11 +223,14 @@ impl Venue {
         let configured = match self.endpoint.origin() {
             Origin::Instance => configured,
             Origin::Settings => {
-                let saved = [self.prefs.reasoning.as_deref(), self.prefs.fast.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .find(|name| !stages::is_auto(name))
-                    .unwrap_or(stages::AUTO);
+                let saved = [
+                    self.preferences.reasoning.as_deref(),
+                    self.preferences.fast.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .find(|name| !stages::is_auto(name))
+                .unwrap_or(stages::AUTO);
                 self.endpoint.model(saved)?;
                 &[]
             }
@@ -232,7 +238,7 @@ impl Venue {
         lineup(
             self.endpoint.origin(),
             author,
-            &self.prefs,
+            &self.preferences,
             &self.catalog,
             configured,
             round,
@@ -275,14 +281,21 @@ mod tests {
 
     fn pick(
         author: &Author,
-        prefs: &Preferences,
+        preferences: &Preferences,
         catalog: &Catalog,
         configured: &[String],
         round: u32,
     ) -> Reviewer {
-        lineup(Origin::Instance, author, prefs, catalog, configured, round)
-            .expect("a model can review")
-            .swap_remove(0)
+        lineup(
+            Origin::Instance,
+            author,
+            preferences,
+            catalog,
+            configured,
+            round,
+        )
+        .expect("a model can review")
+        .swap_remove(0)
     }
 
     fn catalog() -> Catalog {
@@ -298,17 +311,17 @@ mod tests {
 
     #[test]
     fn the_author_is_never_its_own_reviewer_while_another_model_exists() {
-        let prefs = Preferences::default();
+        let preferences = Preferences::default();
         let author = Author::Model("author".into());
-        let first = pick(&author, &prefs, &catalog(), &[], 1);
+        let first = pick(&author, &preferences, &catalog(), &[], 1);
         assert_eq!(first.model, "big:latest");
         assert!(!first.same_model);
-        let second = pick(&author, &prefs, &catalog(), &[], 2);
+        let second = pick(&author, &preferences, &catalog(), &[], 2);
         assert_eq!(
             second.model, "small:latest",
             "rounds rotate through the rest"
         );
-        let third = pick(&author, &prefs, &catalog(), &[], 3);
+        let third = pick(&author, &preferences, &catalog(), &[], 3);
         assert_eq!(third.model, "big:latest");
     }
 
@@ -353,13 +366,19 @@ mod tests {
 
     #[test]
     fn configured_and_workspace_models_come_first_and_the_author_reviews_itself_last() {
-        let prefs = Preferences {
+        let preferences = Preferences {
             reasoning: Some("reasoner".into()),
             fast: Some("author".into()),
             ..Preferences::default()
         };
         let author = Author::Model("author".into());
-        let picked = pick(&author, &prefs, &catalog(), &["ops-reviewer".into()], 1);
+        let picked = pick(
+            &author,
+            &preferences,
+            &catalog(),
+            &["ops-reviewer".into()],
+            1,
+        );
         assert_eq!(picked.model, "ops-reviewer");
         let alone = pick(
             &author,
@@ -377,7 +396,7 @@ mod tests {
 
     #[test]
     fn an_agent_reviews_on_models_it_knows_and_never_an_installed_one() {
-        let prefs = Preferences {
+        let preferences = Preferences {
             reasoning: Some("llama3.1:70b".into()),
             ..Preferences::default()
         };
@@ -386,18 +405,21 @@ mod tests {
         let sonnet = Author::Model("sonnet".into());
 
         assert_eq!(
-            pick(&sonnet, &prefs, &claude, &configured, 1),
+            pick(&sonnet, &preferences, &claude, &configured, 1),
             Reviewer {
                 model: "opus".into(),
                 same_model: false,
             }
         );
         assert_eq!(
-            pick(&sonnet, &prefs, &claude, &configured, 2).model,
+            pick(&sonnet, &preferences, &claude, &configured, 2).model,
             "haiku",
             "the agent's other models follow the ones configured"
         );
-        assert_eq!(pick(&sonnet, &prefs, &claude, &configured, 3).model, "opus");
+        assert_eq!(
+            pick(&sonnet, &preferences, &claude, &configured, 3).model,
+            "opus"
+        );
     }
 
     #[test]
@@ -430,7 +452,7 @@ mod tests {
             "fable",
             "ZONE_AUTO_REVIEW_MODELS=fable"
         );
-        for prefs in [
+        for preferences in [
             Preferences {
                 reasoning: fable(),
                 ..Preferences::default()
@@ -441,9 +463,9 @@ mod tests {
             },
         ] {
             assert_eq!(
-                pick(&sonnet, &prefs, &claude, &[], 1).model,
+                pick(&sonnet, &preferences, &claude, &[], 1).model,
                 "fable",
-                "{prefs:?}"
+                "{preferences:?}"
             );
         }
     }
@@ -552,7 +574,7 @@ mod tests {
     #[test]
     fn a_configured_or_preferred_model_that_cannot_call_tools_is_skipped() {
         let author = Author::Model("qwen2.5:7b-instruct".into());
-        let prefs = Preferences {
+        let preferences = Preferences {
             reasoning: Some(LLAVA.into()),
             fast: Some(NOROMAID.into()),
             ..Preferences::default()
@@ -560,7 +582,7 @@ mod tests {
 
         let reviewer = pick(
             &author,
-            &prefs,
+            &preferences,
             &catalog_with_models_that_cannot_call_tools(),
             &[LLAVA.into(), "ops-reviewer".into()],
             1,
@@ -589,7 +611,7 @@ mod tests {
 
     #[test]
     fn the_fallback_reviewer_is_never_a_model_that_cannot_call_tools() {
-        let prefs = Preferences {
+        let preferences = Preferences {
             reasoning: Some(LLAVA.into()),
             fast: Some("llama3.2:3b".into()),
             ..Preferences::default()
@@ -603,7 +625,7 @@ mod tests {
         };
         let author = Author::Model("llama3.2:3b".into());
 
-        let reviewers = lineup(Origin::Instance, &author, &prefs, &catalog, &[], 1);
+        let reviewers = lineup(Origin::Instance, &author, &preferences, &catalog, &[], 1);
 
         assert_eq!(
             reviewers,
@@ -624,13 +646,13 @@ mod tests {
             ],
             agent: None,
         };
-        let prefs = Preferences {
+        let preferences = Preferences {
             reasoning: Some(LLAVA.into()),
             ..Preferences::default()
         };
 
-        for (author, prefs) in [
-            (Author::Unrecorded, prefs.clone()),
+        for (author, preferences) in [
+            (Author::Unrecorded, preferences.clone()),
             (Author::Unrecorded, Preferences::default()),
             (Author::Model(NOROMAID.into()), Preferences::default()),
         ] {
@@ -638,13 +660,13 @@ mod tests {
                 lineup(
                     Origin::Instance,
                     &author,
-                    &prefs,
+                    &preferences,
                     &refusing,
                     &[LLAVA.into()],
                     1
                 ),
                 Err(Unavailable::NoToolModel(Origin::Instance)),
-                "{author:?} {prefs:?}"
+                "{author:?} {preferences:?}"
             );
         }
         assert_eq!(
@@ -688,7 +710,7 @@ mod tests {
         assert_eq!(endpoint.origin(), Origin::Settings);
         let venue = Venue {
             backend: LlmBackend::Http,
-            prefs: Preferences::for_endpoint(&settings, "instance-classifier", &endpoint),
+            preferences: Preferences::for_endpoint(&settings, "instance-classifier", &endpoint),
             endpoint,
             catalog: Catalog::default(),
         };

@@ -41,14 +41,14 @@ use crate::agent::{
 };
 use crate::auth::validate_access_token;
 use crate::db::{
-    self, ai_settings, chat_attached_sources, chat_sources, chats, knowledge, sessions,
-    workspace_members,
+    self, chat_attached_sources, chat_sources, chats, knowledge, sessions, workspace_members,
 };
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
 use crate::services::chat::session::{self, Session};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::Endpoint;
+use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use zone_chat::history::ReplayMessage;
@@ -393,79 +393,7 @@ enum Routing {
     Video(crate::config::ComfyUiConfig),
     Audio(crate::config::ComfyUiConfig),
     Upscale(crate::config::ComfyUiConfig),
-    Chat(chats::ChatRow, Option<WorkspaceSettings>),
-}
-
-/// A workspace's AI settings, read once for a turn, the organization they
-/// belong to, and the endpoint they name.
-struct WorkspaceSettings {
-    organization: Uuid,
-    effective: ai_settings::EffectiveAiSettings,
-    endpoint: Endpoint,
-}
-
-impl WorkspaceSettings {
-    async fn read(state: &AppState, workspace_id: Uuid) -> Option<Self> {
-        let (organization, effective) = crate::services::route::saved(state, workspace_id).await?;
-        Some(Self {
-            organization,
-            endpoint: Endpoint::resolve(state.config(), &effective),
-            effective,
-        })
-    }
-
-    /// The backend `settings` choose, or the instance's default when they
-    /// could not be read.
-    async fn backend(
-        settings: Option<&Self>,
-        state: &AppState,
-    ) -> Result<LlmBackend, crate::services::backend::Error> {
-        match settings {
-            Some(settings) => {
-                crate::services::backend::for_settings(
-                    state,
-                    settings.organization,
-                    &settings.effective,
-                )
-                .await
-            }
-            None => Ok(crate::services::backend::instance(state.config())),
-        }
-    }
-
-    /// The endpoint `settings` name, or the instance's when they could not
-    /// be read.
-    fn endpoint(settings: Option<&Self>, state: &AppState) -> Endpoint {
-        settings.map_or_else(
-            || Endpoint::instance(state.config()),
-            |settings| settings.endpoint.clone(),
-        )
-    }
-
-    fn preferences(
-        settings: Option<&Self>,
-        classifier: &str,
-    ) -> crate::services::stages::Preferences {
-        match settings {
-            Some(settings) => crate::services::stages::Preferences::for_endpoint(
-                &settings.effective,
-                classifier,
-                &settings.endpoint,
-            ),
-            None => crate::services::stages::Preferences::from_optional_settings(None, classifier),
-        }
-    }
-
-    /// The catalog of models `backend` runs on the endpoint `settings` name.
-    async fn catalog(
-        settings: Option<&Self>,
-        state: &AppState,
-        backend: &LlmBackend,
-    ) -> crate::services::stages::Catalog {
-        Self::endpoint(settings, state)
-            .catalog(&state.config().ollama_host, backend)
-            .await
-    }
+    Chat(chats::ChatRow, Route),
 }
 
 /// What a provider reported when a turn failed, remedied for a coding agent's
@@ -2515,7 +2443,7 @@ async fn handle_send_message(
                 )
                 .await
             }
-            Routing::Chat(mut chat, settings) => {
+            Routing::Chat(mut chat, route) => {
                 // Cleared before the prompt is built rather than after it.
                 // `prepare_chat` renders the approval rules from this flag, so
                 // setting it on the preparation instead would gate the tools
@@ -2533,7 +2461,7 @@ async fn handle_send_message(
                         return Ok(());
                     }
                     _ = session.guard.lost() => { return Err(OWNERSHIP_LOST.into()); }
-                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, settings.as_ref(), web_search_requested) => result?,
+                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, route, web_search_requested) => result?,
                 };
                 handle_chat_generation(state, stream, chat_id, workspace_id, user_id, preparation, &mut request, &mut session, &mut jobs).await
             }
@@ -2642,28 +2570,20 @@ async fn prepare_message(
     if chat.workspace_id != Some(workspace_id) {
         return Err("Chat does not belong to the authenticated workspace".into());
     }
-    let settings = WorkspaceSettings::read(state, workspace_id).await;
-    let endpoint = WorkspaceSettings::endpoint(settings.as_ref(), state);
+    let route = Route::for_workspace(state, workspace_id).await;
     let mut image_config = state.config().comfyui.clone();
-    if let Some(settings) = &settings {
-        settings.effective.apply_to_comfyui(&mut image_config);
+    if let Some(settings) = route.settings() {
+        settings.apply_to_comfyui(&mut image_config);
     }
     let mut backend = None;
     let intent = match crate::services::image_intent::reading(&image_config, content, metadata) {
         crate::services::image_intent::Reading::Settled(intent) => intent,
         crate::services::image_intent::Reading::Unsettled(lanes) => {
-            let resolved = classifying(
-                state,
-                workspace_id,
-                &chat,
-                settings.as_ref(),
-                &mut image_config,
-            )
-            .await;
-            let intent = if endpoint.model(&image_config.classifier_model).is_ok() {
+            let resolved = classifying(state, workspace_id, &chat, &route, &mut image_config).await;
+            let intent = if route.endpoint.model(&image_config.classifier_model).is_ok() {
                 crate::services::image_intent::ImageIntentClassifier::new(
                     image_config.clone(),
-                    endpoint.clone(),
+                    route.endpoint.clone(),
                     resolved.clone(),
                 )
                 .settle(content, lanes)
@@ -2690,22 +2610,13 @@ async fn prepare_message(
         crate::services::image_intent::GenerationIntent::Image => {
             let backend = match backend {
                 Some(backend) => backend,
-                None => {
-                    classifying(
-                        state,
-                        workspace_id,
-                        &chat,
-                        settings.as_ref(),
-                        &mut image_config,
-                    )
-                    .await
-                }
+                None => classifying(state, workspace_id, &chat, &route, &mut image_config).await,
             };
-            Routing::Image(image_config, backend, endpoint)
+            Routing::Image(image_config, backend, route.endpoint)
         }
         crate::services::image_intent::GenerationIntent::Audio => Routing::Audio(image_config),
         crate::services::image_intent::GenerationIntent::Upscale => Routing::Upscale(image_config),
-        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat, settings),
+        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat, route),
     })
 }
 
@@ -2715,23 +2626,24 @@ async fn classifying(
     state: &AppState,
     workspace_id: Uuid,
     chat: &chats::ChatRow,
-    settings: Option<&WorkspaceSettings>,
+    route: &Route,
     config: &mut crate::config::ComfyUiConfig,
 ) -> LlmBackend {
-    let backend = WorkspaceSettings::backend(settings, state)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(
-                %workspace_id,
-                %error,
-                "Could not resolve the workspace's model backend; classifying on the instance's"
-            );
-            crate::services::backend::instance(state.config())
-        });
-    let catalog = WorkspaceSettings::catalog(settings, state, &backend).await;
-    let prefs = WorkspaceSettings::preferences(settings, &config.classifier_model);
+    let backend = route.backend(state).await.unwrap_or_else(|error| {
+        tracing::warn!(
+            %workspace_id,
+            %error,
+            "Could not resolve the workspace's model backend; classifying on the instance's"
+        );
+        crate::services::backend::instance(state.config())
+    });
+    let catalog = route
+        .endpoint
+        .catalog(&state.config().ollama_host, &backend)
+        .await;
+    let preferences = route.preferences(&config.classifier_model);
     config.classifier_model =
-        crate::services::stages::classifier_model(&prefs, &catalog, &chat.model_name);
+        crate::services::stages::classifier_model(&preferences, &catalog, &chat.model_name);
     backend
 }
 
@@ -2811,15 +2723,18 @@ async fn prepare_chat(
     content: &str,
     metadata: Option<&serde_json::Value>,
     mut chat: chats::ChatRow,
-    settings: Option<&WorkspaceSettings>,
+    route: Route,
     web_search_requested: bool,
 ) -> Result<ChatPreparation, Box<dyn std::error::Error + Send + Sync>> {
-    let backend = WorkspaceSettings::backend(settings, state).await?;
-    let catalog = WorkspaceSettings::catalog(settings, state, &backend).await;
-    let prefs = WorkspaceSettings::preferences(settings, &state.config().comfyui.classifier_model);
+    let backend = route.backend(state).await?;
+    let catalog = route
+        .endpoint
+        .catalog(&state.config().ollama_host, &backend)
+        .await;
+    let preferences = route.preferences(&state.config().comfyui.classifier_model);
     chat.model_name = crate::services::stages::chat_model(
         &chat.model_name,
-        &prefs,
+        &preferences,
         &catalog,
         content,
         crate::services::media_source::has_image_attachment(metadata),
@@ -2840,6 +2755,7 @@ async fn prepare_chat(
         user_id,
         None,
         session::Mode::Generation(backend),
+        route.endpoint,
     )
     .await?;
     let search = load_web_search(state, chat_id, content, web_search_requested).await;
@@ -4176,6 +4092,67 @@ mod tests {
             assert_eq!(
                 reads, 0,
                 "a turn that routes no media read the model catalog"
+            );
+        }
+
+        /// `prepare_message` and `prepare_chat` for one turn on `state`.
+        async fn prepare_turn(
+            state: &AppState,
+            organization: &Organization,
+        ) -> Result<ChatPreparation, String> {
+            let routing = prepare_message(
+                state,
+                organization.chat,
+                organization.workspace,
+                QUESTION,
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let Routing::Chat(chat, route) = routing else {
+                return Err("the turn routed to media".to_string());
+            };
+            prepare_chat(
+                state,
+                &ChatStream::of(organization.chat),
+                organization.chat,
+                organization.workspace,
+                Uuid::new_v4(),
+                QUESTION,
+                None,
+                chat,
+                route,
+                false,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+
+        const UNREACHABLE: &str = "http://127.0.0.1:9";
+
+        #[tokio::test]
+        async fn a_turn_reads_its_workspaces_ai_settings_once() {
+            let organization = Organization::on(PROVIDER_SELF_HOSTED).await;
+            let state = AppState::new(
+                Config {
+                    litellm_host: UNREACHABLE.to_string(),
+                    ollama_host: UNREACHABLE.to_string(),
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+
+            let prepared = prepare_turn(&state, &organization).await;
+            organization.remove().await;
+
+            if let Err(error) = prepared {
+                panic!("the turn was not prepared: {error}");
+            }
+            assert_eq!(
+                crate::services::route::reads::of(organization.workspace),
+                1,
+                "one turn read its workspace's AI settings more than once"
             );
         }
 

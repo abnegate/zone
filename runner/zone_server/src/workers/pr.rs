@@ -575,12 +575,17 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
     };
 
     let route = Route::for_workspace(state, task.workspace_id).await;
-    let Some((backend, endpoint)) =
-        repair_route(&route, backend::instance(state.config()), state.config())
-    else {
+    let resolved = route.backend(state).await;
+    let Some((backend, route)) = repair_route(
+        route,
+        resolved,
+        backend::instance(state.config()),
+        state.config(),
+    ) else {
         return RepairOutcome::Failed(NO_REPAIR_BACKEND.to_string());
     };
-    let preferences = route.preferences(&endpoint, &state.config().comfyui.classifier_model);
+    let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    let endpoint = route.endpoint;
     let model = match repair_model(state, &task, &backend, &endpoint, &preferences).await {
         Ok(model) => model,
         Err(error) => return RepairOutcome::Failed(error.to_string()),
@@ -678,8 +683,8 @@ async fn subject(state: &AppState, task: &tasks::TaskRow, report: &str) -> Subje
 
 async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Option<Subject> {
     let route = Route::for_workspace(state, task.workspace_id).await;
-    let preferences = route.preferences(&route.endpoint, &state.config().comfyui.classifier_model);
-    let backend = route.backend.ok()?;
+    let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    let backend = route.backend(state).await.ok()?;
     let endpoint = route.endpoint;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
@@ -706,14 +711,15 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
 /// else the instance's own endpoint, when the instance runs over HTTP. The
 /// instance's key only ever goes to the instance's host.
 fn repair_route(
-    route: &Route,
+    route: Route,
+    resolved: Result<LlmBackend, backend::Error>,
     instance: LlmBackend,
     config: &Config,
-) -> Option<(LlmBackend, Endpoint)> {
-    match route.backend {
-        Ok(LlmBackend::Http) => Some((LlmBackend::Http, route.endpoint.clone())),
+) -> Option<(LlmBackend, Route)> {
+    match resolved {
+        Ok(LlmBackend::Http) => Some((LlmBackend::Http, route)),
         Ok(LlmBackend::Cli { .. }) | Err(_) => {
-            matches!(instance, LlmBackend::Http).then(|| (instance, Endpoint::instance(config)))
+            matches!(instance, LlmBackend::Http).then(|| (instance, route.on_instance(config)))
         }
     }
 }
@@ -843,9 +849,8 @@ mod tests {
         }
     }
 
-    /// A workspace whose organization saved an OpenAI endpoint, resolved to
-    /// `backend`.
-    fn saved(config: &Config, backend: Result<LlmBackend, backend::Error>) -> Route {
+    /// A workspace whose organization saved an OpenAI endpoint.
+    fn saved(config: &Config) -> Route {
         let mut settings = crate::services::endpoint::testing::settings(
             zone_context::embeddings::providers::PROVIDER_OPENAI,
         );
@@ -853,31 +858,34 @@ mod tests {
         settings.openai_api_key = Some(zone_core::secret::SecretValue::new(
             ORGANIZATION_KEY.to_string(),
         ));
-        Route {
-            backend,
-            endpoint: Endpoint::resolve(config, &settings),
-            settings: Some(settings),
-        }
+        Route::new(config, Uuid::new_v4(), Uuid::new_v4(), settings)
     }
 
     #[test]
     fn a_repair_runs_over_the_workspaces_endpoint_or_the_instances_or_not_at_all() {
         let config = instance_config("http://litellm:4000");
 
-        let (backend, endpoint) = repair_route(
-            &saved(&config, Ok(LlmBackend::Http)),
+        let (backend, route) = repair_route(
+            saved(&config),
+            Ok(LlmBackend::Http),
             LlmBackend::Http,
             &config,
         )
         .expect("a workspace on an endpoint repairs over it");
         assert!(matches!(backend, LlmBackend::Http));
-        assert_eq!(endpoint.url(), "https://organization.example/v1");
-        assert_eq!(endpoint.key().expose(), ORGANIZATION_KEY);
+        assert_eq!(route.endpoint.url(), "https://organization.example/v1");
+        assert_eq!(route.endpoint.key().expose(), ORGANIZATION_KEY);
 
         for resolved in [Ok(claude()), signed_out()] {
-            let (backend, endpoint) =
-                repair_route(&saved(&config, resolved), LlmBackend::Http, &config)
+            let (backend, route) =
+                repair_route(saved(&config), resolved, LlmBackend::Http, &config)
                     .expect("the instance has an endpoint, so a repair runs on it");
+            assert_eq!(
+                route.preferences("qwen2.5:3b").scope,
+                stages::Scope::Open,
+                "a repair on the instance chose its model as if on the saved endpoint"
+            );
+            let endpoint = route.endpoint;
             assert!(matches!(backend, LlmBackend::Http));
             assert_eq!(
                 endpoint.url(),
@@ -897,7 +905,7 @@ mod tests {
 
         for resolved in [Ok(claude()), signed_out()] {
             assert!(
-                repair_route(&saved(&config, resolved), claude(), &config).is_none(),
+                repair_route(saved(&config), resolved, claude(), &config).is_none(),
                 "a repair was handed to a coding agent CLI, which cannot run its tool loop"
             );
         }
