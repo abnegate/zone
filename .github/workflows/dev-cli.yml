@@ -6,7 +6,11 @@ on:
     paths:
       - 'tools/dev-cli/**'
       - 'Makefile'
+      - 'docker-compose*.yml'
+      - '.env.example'
       - 'scripts/compose.sh'
+      - 'scripts/configure-model-proxy.sh'
+      - 'scripts/test-compose-profiles.sh'
       - 'scripts/test-migrations.py'
       - 'scripts/test-compose-up.py'
       - 'scripts/test-backup.py'
@@ -19,7 +23,11 @@ on:
     paths:
       - 'tools/dev-cli/**'
       - 'Makefile'
+      - 'docker-compose*.yml'
+      - '.env.example'
       - 'scripts/compose.sh'
+      - 'scripts/configure-model-proxy.sh'
+      - 'scripts/test-compose-profiles.sh'
       - 'scripts/test-migrations.py'
       - 'scripts/test-compose-up.py'
       - 'scripts/test-backup.py'
@@ -67,6 +75,11 @@ jobs:
 
       - name: Verify make up and make dev retire left-out profiles without Docker
         run: python3 scripts/test-compose-up.py
+
+      - name: Verify profile selection and retirement against real Compose
+        run: |
+          docker compose version
+          sh scripts/test-compose-profiles.sh
 
       - name: Verify backup and restore Make commands without Docker
         run: python3 scripts/test-backup.py

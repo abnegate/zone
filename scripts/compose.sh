@@ -287,7 +287,7 @@ retire_services() {
     # One service name per line; Compose service names never contain whitespace or globs.
     # shellcheck disable=SC2086
     set -- $services
-    run_compose_with_env_file "$ALL_OVERLAY_PROFILES" rm --stop --force "$@"
+    run_compose_with_env_file "$ALL_OVERLAY_PROFILES" stop "$@"
 }
 
 case "${1:-}" in
@@ -465,4 +465,4 @@ if [ -n "$ensure_arg" ]; then
     effective=$(ensure_profile "$ensure_arg" "$effective")
 fi
 
-run_compose "$effective" "$@"
+run_compose_with_env_file "$effective" "$@"

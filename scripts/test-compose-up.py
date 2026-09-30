@@ -22,6 +22,8 @@ if sys.argv[1:2] == ['persist']:
         sys.exit(1)
     if '--ensure' in sys.argv:
         print(os.environ['COMPOSE_ENSURED'])
+    else:
+        print(sys.argv[2])
 '''
 
 FAKE_DOCKER = '''#!/usr/bin/env python3
@@ -111,6 +113,11 @@ class MakeTargets(unittest.TestCase):
             [f'--replace-profiles={ENSURED}', 'up', '--build'],
         ])
 
+    def test_up_stops_when_the_profiles_cannot_be_saved(self) -> None:
+        self.assertEqual(self.run_make('up', 'PROFILES=monitoring', succeeds=False, COMPOSE_PERSIST_FAILS='1'), [
+            ['persist', 'monitoring'],
+        ])
+
     def test_dev_stops_when_the_profiles_cannot_be_saved(self) -> None:
         self.assertEqual(self.run_make('dev', succeeds=False, COMPOSE_PERSIST_FAILS='1'), [
             ['persist', '--ensure', 'dev'],
@@ -126,48 +133,89 @@ class MakeTargets(unittest.TestCase):
         self.assertFalse(any(call[:1] == ['retire'] for call in calls), calls)
 
 
+def write_environment_file(folder: Path) -> Path:
+    path = folder / 'environment'
+    path.write_text((ROOT / '.env.example').read_text())
+    return path
+
+
+def run_script(folder: Path, *arguments: str, **extra: str) -> list[list[str]]:
+    log = folder / 'calls.jsonl'
+    log.unlink(missing_ok=True)
+    install(folder, 'docker', FAKE_DOCKER)
+    environment = clean_environment(DOCKER_CALLS=str(log), PATH=f'{folder}:{os.environ["PATH"]}', **extra)
+    result = subprocess.run(
+        ['sh', 'scripts/compose.sh', *arguments],
+        cwd=ROOT, env=environment, text=True, capture_output=True, timeout=10,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stdout + result.stderr)
+    return [call for call in read_calls(log) if call != ['compose', 'version']]
+
+
+def env_files(call: list[str]) -> list[str]:
+    return [call[index + 1] for index, value in enumerate(call) if value == '--env-file']
+
+
 class Retire(unittest.TestCase):
     def retire(self, profiles: str) -> list[list[str]]:
         with tempfile.TemporaryDirectory(prefix='zone-compose-retire-') as directory:
             folder = Path(directory)
-            log = folder / 'calls.jsonl'
-            install(folder, 'docker', FAKE_DOCKER)
-            environment_file = folder / 'environment'
-            environment_file.write_text((ROOT / '.env.example').read_text())
-            environment = clean_environment(
-                DOCKER_CALLS=str(log),
-                PATH=f'{folder}:{os.environ["PATH"]}',
-                ZONE_ENV_FILE=str(folder / 'missing'),
-            )
-            result = subprocess.run(
-                ['sh', 'scripts/compose.sh', 'retire', '--env-file', str(environment_file), profiles],
-                cwd=ROOT, env=environment, text=True, capture_output=True, timeout=10,
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            calls = read_calls(log)
+            chosen = str(write_environment_file(folder))
+            calls = run_script(folder, 'retire', '--env-file', chosen, profiles, ZONE_ENV_FILE=str(folder / 'missing'))
             for call in calls:
-                if 'config' in call:
-                    self.assertIn(str(environment_file), call)
-            return [call for call in calls if 'rm' in call]
+                self.assertEqual(env_files(call), [chosen], call)
+            return [call for call in calls if 'config' not in call]
 
-    def assert_removes(self, profiles: str, services: list[str]) -> None:
-        removals = self.retire(profiles)
-        self.assertEqual(len(removals), 1, removals)
-        call = removals[0]
-        self.assertNotIn('-v', call)
-        self.assertNotIn('--volumes', call)
-        self.assertEqual(call[call.index('rm') + 1:], ['--stop', '--force', *services])
+    def assert_stops(self, profiles: str, services: list[str]) -> None:
+        retirements = self.retire(profiles)
+        self.assertEqual(len(retirements), 1, retirements)
+        call = retirements[0]
+        self.assertNotIn('rm', call, 'removing a container orphans the anonymous volumes its image declares')
+        self.assertNotIn('down', call)
+        self.assertEqual(call[call.index('stop') + 1:], services)
         for profile in ALL_PROFILES.split(','):
             self.assertIn(['--profile', profile], [call[index:index + 2] for index in range(len(call))])
 
-    def test_nothing_is_removed_when_every_profile_stays_active(self) -> None:
+    def test_nothing_is_stopped_when_every_profile_stays_active(self) -> None:
         self.assertEqual(self.retire(ALL_PROFILES), [])
 
-    def test_core_retires_every_optional_service(self) -> None:
-        self.assert_removes('', ['comfyui', 'gluetun', 'grafana', 'prometheus', 'searxng'])
+    def test_core_stops_every_optional_service(self) -> None:
+        self.assert_stops('', ['comfyui', 'gluetun', 'grafana', 'prometheus', 'searxng'])
 
     def test_monitoring_keeps_its_services(self) -> None:
-        self.assert_removes('monitoring', ['comfyui', 'gluetun', 'searxng'])
+        self.assert_stops('monitoring', ['comfyui', 'gluetun', 'searxng'])
+
+
+class EnvironmentFile(unittest.TestCase):
+    def test_up_reads_the_same_env_file_as_retire(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='zone-compose-env-') as directory:
+            folder = Path(directory)
+            chosen = str(write_environment_file(folder))
+            retire = run_script(folder, 'retire', '', ZONE_ENV_FILE=chosen)
+            up = run_script(folder, '--replace-profiles=', 'up', '-d', ZONE_ENV_FILE=chosen)
+            self.assertTrue(retire, 'retire must ask Compose which services are inactive')
+            self.assertEqual(len(up), 1, up)
+            for call in retire + up:
+                self.assertEqual(env_files(call), [chosen], call)
+
+    def test_up_reads_the_env_file_it_is_given(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='zone-compose-env-') as directory:
+            folder = Path(directory)
+            chosen = str(write_environment_file(folder))
+            calls = run_script(
+                folder, '--env-file', chosen, '--replace-profiles=', 'up', '-d', ZONE_ENV_FILE=str(folder / 'missing'),
+            )
+            self.assertEqual(len(calls), 1, calls)
+            self.assertEqual(env_files(calls[0]), [chosen])
+            self.assertEqual(calls[0][-2:], ['up', '-d'])
+
+    def test_a_missing_env_file_is_left_to_compose(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='zone-compose-env-') as directory:
+            folder = Path(directory)
+            calls = run_script(folder, '--replace-profiles=', 'ps', ZONE_ENV_FILE=str(folder / 'missing'))
+            self.assertEqual(len(calls), 1, calls)
+            self.assertEqual(env_files(calls[0]), [])
 
 
 if __name__ == '__main__':

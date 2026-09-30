@@ -175,24 +175,22 @@ build: ## Build all services
 	$(COMPOSE) build
 	@echo "$(GREEN)Services built!$(NC)"
 
-up: ## Start services. Combine with PROFILES=dev,vpn,monitoring
 ifeq ($(origin PROFILES),command line)
-	@echo "$(GREEN)Starting services ($(PROFILES))...$(NC)"
-	@$(COMPOSE) persist "$(PROFILES)" >/dev/null
-	@$(COMPOSE) retire "$(PROFILES)"
-	@$(COMPOSE) --replace-profiles="$(PROFILES)" up -d
+UP_PROFILES := $(PROFILES)
 else ifeq ($(origin COMPOSE_PROFILES),environment)
-	@echo "$(GREEN)Starting services ($(COMPOSE_PROFILES))...$(NC)"
-	@$(COMPOSE) persist "$(COMPOSE_PROFILES)" >/dev/null
-	@$(COMPOSE) retire "$(COMPOSE_PROFILES)"
-	@$(COMPOSE) --replace-profiles="$(COMPOSE_PROFILES)" up -d
+UP_PROFILES := $(COMPOSE_PROFILES)
 else
-	@echo "$(GREEN)Starting core services...$(NC)"
-	@$(COMPOSE) persist "" >/dev/null
-	@$(COMPOSE) retire ""
-	@$(COMPOSE) --replace-profiles= up -d
-	@echo "$(YELLOW)Optional profiles off. Combine with: make up PROFILES=dev,vpn,monitoring$(NC)"
+UP_PROFILES :=
 endif
+
+up: ## Start services. Combine with PROFILES=dev,vpn,monitoring
+	@profiles=$$($(COMPOSE) persist "$(UP_PROFILES)") && \
+	 echo "$(GREEN)Starting services ($${profiles:-core only})...$(NC)" && \
+	 $(COMPOSE) retire "$$profiles" && \
+	 $(COMPOSE) --replace-profiles="$$profiles" up -d && \
+	 if [ -z "$$profiles" ]; then \
+		echo "$(YELLOW)Optional profiles off. Combine with: make up PROFILES=dev,vpn,monitoring$(NC)"; \
+	 fi
 	@echo "$(GREEN)Services started! Check status with: make ps$(NC)"
 
 up-vpn: ## Start with full-tunnel VPN
@@ -467,17 +465,10 @@ migrate-pgdata: ## Move an existing install's postgres cluster out of the anonym
 
 dev: ## Hot reload. Combine with PROFILES=vpn,monitoring
 	@echo "$(GREEN)Console: http://localhost:3001$(NC)"
-ifeq ($(origin PROFILES),command line)
-	@profiles=$$($(COMPOSE) persist --ensure dev "$(PROFILES)") && \
+	@profiles=$$($(COMPOSE) persist --ensure dev $(if $(filter command line,$(origin PROFILES)),"$(PROFILES)")) && \
 	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)" && \
 	 $(COMPOSE) retire "$$profiles" && \
 	 $(COMPOSE) --replace-profiles="$$profiles" up --build
-else
-	@profiles=$$($(COMPOSE) persist --ensure dev) && \
-	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)" && \
-	 $(COMPOSE) retire "$$profiles" && \
-	 $(COMPOSE) --replace-profiles="$$profiles" up --build
-endif
 
 dev-console: ## Start console frontend in development mode
 	@echo "$(BLUE)Starting console frontend dev server...$(NC)"
