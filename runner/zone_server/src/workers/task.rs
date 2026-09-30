@@ -2190,6 +2190,7 @@ async fn attempt_run(
     ];
     let mut context = RunContext::from_messages(messages);
     context.policy = policy;
+    context.vision = session::sees_images(model, capacity.vision);
     context.reason = capacity.reason;
 
     // One timeout covers every turn of the attempt, waiting included: a run

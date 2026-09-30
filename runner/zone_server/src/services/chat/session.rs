@@ -22,6 +22,7 @@ use zone_search::client::SearchContext;
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
 const SEARCH: &str = "supplement:search";
+pub const WITHHELD_IMAGE: &str = "[An image was attached but this model can't view images.]";
 
 fn parse_timeout(seconds: u64) -> Result<Duration, String> {
     let timeout = Duration::from_secs(seconds);
@@ -101,6 +102,8 @@ pub struct RunContext {
     pub reason: Option<String>,
     pub incomplete: bool,
     pub artifacts: Option<(PathBuf, Uuid, Uuid)>,
+    /// False only when the engine declared the model cannot read images.
+    pub vision: bool,
 }
 
 impl RunContext {
@@ -128,6 +131,7 @@ impl RunContext {
             reason: None,
             incomplete: false,
             artifacts: None,
+            vision: true,
         }
     }
 
@@ -195,6 +199,12 @@ impl RunContext {
 
     /// Resolve protected images on a transport copy, never in canonical replay/hash fields.
     pub async fn transport(&self, messages: &mut [Message]) -> Result<(), String> {
+        if !self.vision {
+            messages
+                .iter_mut()
+                .filter(|message| !message.images.is_empty())
+                .for_each(withhold_images);
+        }
         for message in messages {
             for image in &mut message.images {
                 if !image.starts_with("/api/artifacts/") {
@@ -234,6 +244,20 @@ impl RunContext {
         }
         Ok(())
     }
+}
+
+fn withhold_images(message: &mut Message) {
+    message.images.clear();
+    message.content = Some(match message.content.take() {
+        Some(content) if !content.is_empty() => format!("{content}\n\n{WITHHELD_IMAGE}"),
+        _ => WITHHELD_IMAGE.into(),
+    });
+}
+
+/// An `auto` name is resolved later by whoever serves it, so only a concrete
+/// model the engine declared text-only loses its images.
+pub fn sees_images(model: &str, vision: Option<bool>) -> bool {
+    crate::services::stages::is_auto(model) || vision != Some(false)
 }
 
 #[derive(Clone)]
@@ -480,6 +504,7 @@ pub async fn build(
             workspace,
             chat.id,
         )),
+        vision: sees_images(&chat.model_name, capacity.vision),
     };
     context.search(&SearchContext::new(&state.config().web_search));
     Ok(Preparation {
@@ -762,6 +787,97 @@ mod tests {
         };
         assert_eq!(settings.reserved(Some(4096)), 512);
         assert_eq!(settings.budget(), LoopBudget::chat());
+    }
+
+    const PIXEL: &str = "data:image/png;base64,iVBORw0KGgo=";
+
+    fn illustrated() -> RunContext {
+        let mut described = Message::user("What is in this picture?");
+        described.images = vec![PIXEL.into()];
+        let mut bare = Message::user("");
+        bare.images = vec![PIXEL.into()];
+        let mut screenshot = Message::tool_result("call-1", "Captured the page.");
+        screenshot.images = vec![PIXEL.into()];
+        RunContext::from_messages(vec![
+            Message::system("Be helpful."),
+            described,
+            bare,
+            screenshot,
+            Message::user("Hello"),
+        ])
+    }
+
+    fn transported(context: &RunContext) -> Vec<Message> {
+        context
+            .entries
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn transport_drops_images_for_a_model_without_vision() {
+        let mut context = illustrated();
+        context.vision = false;
+        let mut messages = transported(&context);
+        context.transport(&mut messages).await.unwrap();
+
+        assert!(messages.iter().all(|message| message.images.is_empty()));
+        assert_eq!(
+            messages[1].content.as_deref(),
+            Some(format!("What is in this picture?\n\n{WITHHELD_IMAGE}").as_str())
+        );
+        assert_eq!(messages[2].content.as_deref(), Some(WITHHELD_IMAGE));
+        assert_eq!(
+            messages[3].content.as_deref(),
+            Some(format!("Captured the page.\n\n{WITHHELD_IMAGE}").as_str())
+        );
+        assert_eq!(messages[4].content.as_deref(), Some("Hello"));
+        assert_eq!(messages[0].content.as_deref(), Some("Be helpful."));
+        let body = serde_json::to_string(&messages).unwrap();
+        assert!(!body.contains("image_url"), "{body}");
+        assert!(
+            context
+                .entries
+                .iter()
+                .filter(|entry| !entry.message.images.is_empty())
+                .count()
+                == 3,
+            "Canonical history must keep its images for a later vision model"
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_keeps_images_for_a_vision_model() {
+        let context = illustrated();
+        assert!(context.vision);
+        let mut messages = transported(&context);
+        context.transport(&mut messages).await.unwrap();
+
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.images == [PIXEL])
+                .count(),
+            3
+        );
+        let body = serde_json::to_string(&messages).unwrap();
+        assert!(body.contains("image_url"), "{body}");
+        assert!(!body.contains(WITHHELD_IMAGE), "{body}");
+    }
+
+    #[test]
+    fn only_a_declared_text_only_model_loses_its_images() {
+        assert!(!sees_images("qwen3:8b", Some(false)));
+        assert!(sees_images("qwen3:8b", None));
+        assert!(sees_images("gemma3:4b", Some(true)));
+    }
+
+    #[test]
+    fn an_auto_model_keeps_its_images() {
+        assert!(sees_images(crate::services::stages::AUTO, Some(false)));
+        assert!(sees_images("", Some(false)));
+        assert!(sees_images("Auto", None));
     }
 
     /// The wiring proof for the whole builder: whichever of the four arms runs,
