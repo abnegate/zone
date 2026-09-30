@@ -1298,7 +1298,7 @@ On Claude Code, an auto project's runs, reviews and summaries run with no one wa
 
 ### `ZONE_AUTO_REVIEW_BOTS`
 - **Default**: *empty* (every bot this build knows: `coderabbit`, `greptile`)
-- **Description**: Review bots to wait for and read. A bot named here is always expected; otherwise a bot is expected once it has commented on the repository.
+- **Description**: Review bots to wait for and read. A bot named here is always expected; otherwise a bot is expected once it has commented on the repository. A summary that carries no review, such as CodeRabbit's "Review limit reached" notice, counts as no review: the bot is waited for on that head as if it had not answered.
 
 ### `ZONE_AUTO_BOT_REVIEW_GRACE_SECS`
 - **Default**: `600` (60–3600)

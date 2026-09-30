@@ -89,7 +89,11 @@ pub struct BotRound {
     pub external_id: Option<String>,
 }
 
-/// The bot's round on `head`, if it has published one for that head.
+/// The bot's round on `head`, if it has reviewed that head.
+///
+/// A summary that names the head but carries no score is not a review: a
+/// rate-limited CodeRabbit still posts a walkthrough whose commit range names
+/// the new head. Such a head is treated as one the bot has not answered yet.
 pub fn round(
     kind: SignalKind,
     comments: &[IssueComment],
@@ -112,6 +116,7 @@ pub fn round(
     if summary.reviewed_commit.as_ref() != Some(&head) {
         return None;
     }
+    let confidence = summary.confidence?;
     let findings: Vec<Finding> = threads
         .iter()
         .filter(|thread| !thread.resolved && !thread.outdated)
@@ -139,10 +144,7 @@ pub fn round(
             }
         })
         .collect();
-    let at_bar = summary
-        .confidence
-        .is_some_and(|confidence| confidence.satisfies(signal.required()));
-    let verdict = if at_bar && findings.is_empty() {
+    let verdict = if confidence.satisfies(signal.required()) && findings.is_empty() {
         Verdict::Approve
     } else {
         Verdict::RequestChanges
@@ -287,6 +289,20 @@ mod tests {
         assert!(
             round.findings.is_empty(),
             "a resolved thread is not a finding"
+        );
+    }
+
+    #[test]
+    fn a_coderabbit_summary_that_hit_its_review_limit_is_not_a_round() {
+        let head = "76ddcd8687b7a54576043a87b3c03ec48a7e9e9a";
+        let comments = vec![comment(
+            "coderabbitai[bot]",
+            include_str!("fixtures/coderabbit-review-limit-reached.md"),
+        )];
+        assert_eq!(
+            round(SignalKind::CodeRabbit, &comments, &[], head),
+            None,
+            "a summary that names the head but carries no review is not a review of the head"
         );
     }
 
