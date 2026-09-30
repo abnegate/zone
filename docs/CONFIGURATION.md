@@ -194,6 +194,17 @@ with no path gets `/v1`, so `http://10.0.0.5:4000` becomes
 names saved in AI Settings, never the instance's `OLLAMA_MODEL_*` defaults. With
 no name saved, the turn fails asking you to set one.
 
+The image-intent check, which asks a model whether an ambiguous message wants
+an image, runs on a saved endpoint's **Fast Model**, never
+`COMFYUI_CLASSIFIER_MODEL`. With *Automatic* and no Fast Model saved, the check
+is skipped and the message is answered as chat.
+
+Auto-project reviews on a saved endpoint run only on its saved **Reasoning
+Model** and **Fast Model**: `ZONE_AUTO_REVIEW_MODELS` names models on the
+instance endpoint and is ignored there. With neither saved, the task pauses
+asking you to set one, and a review that pauses for want of a model tells you
+to set the Fast/Reasoning model in AI Settings.
+
 Embeddings, model captioning and LoRA training stay on the instance whatever the
 provider. A model known to lack vision gets the chat's history without its
 images and a one-line note saying so; the stored history keeps them.
@@ -1147,7 +1158,9 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: Optional Fast LiteLLM model used when image-intent rules are
   unsure, including informal edits of an attached photo (`IMAGE` vs `CHAT`,
   3-token reply). Org/workspace Fast overrides this when set. When empty, Zone
-  uses the current chat model or a small installed completion model.
+  uses the current chat model or a small installed completion model. An
+  organization or workspace on a saved endpoint ignores it (see *Saved
+  endpoints*).
 - **Timeout**: `COMFYUI_CLASSIFIER_TIMEOUT_SECS` (default `3`, range 1–30).
   Timeouts fall back to normal chat.
 
@@ -1343,7 +1356,7 @@ On Claude Code, an auto project's runs, reviews and summaries run with no one wa
 
 ### `ZONE_AUTO_REVIEW_MODELS`
 - **Default**: *empty*
-- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the tool-capable installed models. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers, and a round whose reviewer errors or gives no readable verdict moves to the next. Two such rounds on one head pause the task. An endpoint that does not answer (a refused connection, a timeout, a 5xx while Ollama restarts, or a 429) judged nothing, so it is not a round: the same reviewer is asked again on the next tick, the next one in the rotation is asked instead once it has gone unanswered 5 times, and the task pauses only once every reviewer has gone unanswered at least 5 times over 10 minutes. A review session offers tools, so a model Ollama lists without the `tools` capability (such as `llava:7b`) is never picked, even when named here or when it wrote the change; a model Ollama lists without any capabilities, or does not list at all, is still tried. When every model left cannot call tools, the task pauses saying so.
+- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the tool-capable installed models. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers, and a round whose reviewer errors or gives no readable verdict moves to the next. Two such rounds on one head pause the task. An endpoint that does not answer (a refused connection, a timeout, a 5xx while Ollama restarts, or a 429) judged nothing, so it is not a round: the same reviewer is asked again on the next tick, the next one in the rotation is asked instead once it has gone unanswered 5 times, and the task pauses only once every reviewer has gone unanswered at least 5 times over 10 minutes. A review session offers tools, so a model Ollama lists without the `tools` capability (such as `llava:7b`) is never picked, even when named here or when it wrote the change; a model Ollama lists without any capabilities, or does not list at all, is still tried. When every model left cannot call tools, the task pauses saying so. A workspace whose AI settings save an endpoint ignores this list and reviews only on its saved Reasoning and Fast models, since these names are models on the instance endpoint; its pauses point at AI Settings instead (see *Saved endpoints*).
 
 ### `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL`
 - **Default**: `false`
