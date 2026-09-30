@@ -353,19 +353,47 @@ where
             model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
             completions_routed
         ) VALUES (
-            $1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            $1, COALESCE($2, 'self_hosted'),
+            NULLIF(BTRIM($3), ''), NULLIF(BTRIM($4), ''), NULLIF(BTRIM($5), ''),
+            NULLIF(BTRIM($6), ''), NULLIF(BTRIM($7), ''), NULLIF(BTRIM($8), ''),
+            $9, $10, $11, $12,
             NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), ''),
             true
         )
         ON CONFLICT (organization_id) DO UPDATE SET
             provider = COALESCE($2, organization_ai_settings.provider),
-            litellm_host = COALESCE($3, organization_ai_settings.litellm_host),
-            litellm_key = COALESCE($4, organization_ai_settings.litellm_key),
-            openai_api_key = COALESCE($5, organization_ai_settings.openai_api_key),
-            openai_base_url = COALESCE($6, organization_ai_settings.openai_base_url),
-            anthropic_api_key = COALESCE($7, organization_ai_settings.anthropic_api_key),
-            anthropic_base_url = COALESCE($8, organization_ai_settings.anthropic_base_url),
+            -- NULL keeps a saved endpoint value; an empty string clears it.
+            litellm_host = CASE
+                WHEN $3 IS NULL THEN organization_ai_settings.litellm_host
+                WHEN BTRIM($3) = '' THEN NULL
+                ELSE BTRIM($3)
+            END,
+            litellm_key = CASE
+                WHEN $4 IS NULL THEN organization_ai_settings.litellm_key
+                WHEN BTRIM($4) = '' THEN NULL
+                ELSE BTRIM($4)
+            END,
+            openai_api_key = CASE
+                WHEN $5 IS NULL THEN organization_ai_settings.openai_api_key
+                WHEN BTRIM($5) = '' THEN NULL
+                ELSE BTRIM($5)
+            END,
+            openai_base_url = CASE
+                WHEN $6 IS NULL THEN organization_ai_settings.openai_base_url
+                WHEN BTRIM($6) = '' THEN NULL
+                ELSE BTRIM($6)
+            END,
+            anthropic_api_key = CASE
+                WHEN $7 IS NULL THEN organization_ai_settings.anthropic_api_key
+                WHEN BTRIM($7) = '' THEN NULL
+                ELSE BTRIM($7)
+            END,
+            anthropic_base_url = CASE
+                WHEN $8 IS NULL THEN organization_ai_settings.anthropic_base_url
+                WHEN BTRIM($8) = '' THEN NULL
+                ELSE BTRIM($8)
+            END,
             bedrock_region = COALESCE($9, organization_ai_settings.bedrock_region),
             bedrock_access_key = COALESCE($10, organization_ai_settings.bedrock_access_key),
             bedrock_secret_key = COALESCE($11, organization_ai_settings.bedrock_secret_key),
@@ -569,19 +597,47 @@ where
             model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
             completions_routed
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            $1, $2,
+            NULLIF(BTRIM($3), ''), NULLIF(BTRIM($4), ''), NULLIF(BTRIM($5), ''),
+            NULLIF(BTRIM($6), ''), NULLIF(BTRIM($7), ''), NULLIF(BTRIM($8), ''),
+            $9, $10, $11, $12,
             NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), ''),
             true
         )
         ON CONFLICT (workspace_id) DO UPDATE SET
             provider = $2,
-            litellm_host = COALESCE($3, workspace_ai_settings.litellm_host),
-            litellm_key = COALESCE($4, workspace_ai_settings.litellm_key),
-            openai_api_key = COALESCE($5, workspace_ai_settings.openai_api_key),
-            openai_base_url = COALESCE($6, workspace_ai_settings.openai_base_url),
-            anthropic_api_key = COALESCE($7, workspace_ai_settings.anthropic_api_key),
-            anthropic_base_url = COALESCE($8, workspace_ai_settings.anthropic_base_url),
+            -- NULL keeps a saved endpoint value; an empty string clears it.
+            litellm_host = CASE
+                WHEN $3 IS NULL THEN workspace_ai_settings.litellm_host
+                WHEN BTRIM($3) = '' THEN NULL
+                ELSE BTRIM($3)
+            END,
+            litellm_key = CASE
+                WHEN $4 IS NULL THEN workspace_ai_settings.litellm_key
+                WHEN BTRIM($4) = '' THEN NULL
+                ELSE BTRIM($4)
+            END,
+            openai_api_key = CASE
+                WHEN $5 IS NULL THEN workspace_ai_settings.openai_api_key
+                WHEN BTRIM($5) = '' THEN NULL
+                ELSE BTRIM($5)
+            END,
+            openai_base_url = CASE
+                WHEN $6 IS NULL THEN workspace_ai_settings.openai_base_url
+                WHEN BTRIM($6) = '' THEN NULL
+                ELSE BTRIM($6)
+            END,
+            anthropic_api_key = CASE
+                WHEN $7 IS NULL THEN workspace_ai_settings.anthropic_api_key
+                WHEN BTRIM($7) = '' THEN NULL
+                ELSE BTRIM($7)
+            END,
+            anthropic_base_url = CASE
+                WHEN $8 IS NULL THEN workspace_ai_settings.anthropic_base_url
+                WHEN BTRIM($8) = '' THEN NULL
+                ELSE BTRIM($8)
+            END,
             bedrock_region = COALESCE($9, workspace_ai_settings.bedrock_region),
             bedrock_access_key = COALESCE($10, workspace_ai_settings.bedrock_access_key),
             bedrock_secret_key = COALESCE($11, workspace_ai_settings.bedrock_secret_key),

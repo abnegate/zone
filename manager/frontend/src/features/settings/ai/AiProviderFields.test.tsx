@@ -377,4 +377,35 @@ describe('buildAiSettingsRequest', () => {
       });
     }
   );
+
+  it.each([
+    ['self_hosted', 'litellm_host', { litellm_host: 'http://gateway.example:4000' }],
+    ['openai', 'openai_base_url', { openai_base_url: 'https://proxy.example/v1' }],
+    ['anthropic', 'anthropic_base_url', { anthropic_base_url: 'https://gateway.example' }],
+  ] as const)(
+    'sends an empty %s URL to clear the one saved, and none when nothing was saved',
+    (provider, field, saved) => {
+      const cleared = buildAiSettingsRequest(provider, emptyCredentials, emptyModels, {
+        ...nothingSaved,
+        ...saved,
+      });
+      expect(cleared[field]).toBe('');
+
+      for (const previous of [null, nothingSaved, { ...nothingSaved, [field]: '  ' }]) {
+        const untouched = buildAiSettingsRequest(provider, emptyCredentials, emptyModels, previous);
+        expect(untouched[field]).toBeUndefined();
+      }
+    }
+  );
+
+  it('sends the entered URL whatever was saved, and never a blank key', () => {
+    const request = buildAiSettingsRequest(
+      'openai',
+      { ...emptyCredentials, openaiBaseUrl: 'https://new.example/v1' },
+      emptyModels,
+      { ...nothingSaved, openai_base_url: 'https://old.example/v1', has_openai_api_key: true }
+    );
+    expect(request.openai_base_url).toBe('https://new.example/v1');
+    expect(request).not.toHaveProperty('openai_api_key');
+  });
 });

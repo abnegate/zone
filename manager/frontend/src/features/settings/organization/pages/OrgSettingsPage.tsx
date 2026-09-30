@@ -105,7 +105,7 @@ export default function OrgSettingsPage() {
     try {
       const settings = await client.updateOrgAiSettings(
         currentOrganization.id,
-        buildAiSettingsRequest(provider, credentials, models)
+        buildAiSettingsRequest(provider, credentials, models, saved)
       );
       applySettingsToForm(settings);
       flash('Settings saved successfully');

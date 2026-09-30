@@ -1748,3 +1748,53 @@ async fn test_workspace_settings_say_which_keys_the_organization_saved() {
     saved.assert_status(StatusCode::OK);
     assert_eq!(saved.json_value()["organization_keys"], expected);
 }
+
+#[tokio::test]
+async fn test_an_empty_endpoint_value_clears_the_saved_one_and_an_absent_one_keeps_it() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+
+    for path in [
+        format!("/api/organizations/{org_id}/settings/ai"),
+        format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai"),
+    ] {
+        client
+            .put_json_auth(&path, &organization_endpoints(), &token)
+            .await
+            .assert_status(StatusCode::OK);
+
+        let kept = client
+            .put_json_auth(&path, &json!({ "provider": "self_hosted" }), &token)
+            .await;
+        kept.assert_status(StatusCode::OK);
+        let body = kept.json_value();
+        for (url, _, has_key) in ENDPOINT_PAIRS {
+            assert_eq!(
+                body[url],
+                format!("http://organization-{url}.example:4000"),
+                "{path} dropped {url} it was not sent"
+            );
+            assert_eq!(body[has_key], true, "{path} dropped a key it was not sent");
+        }
+
+        let mut blanks = json!({ "provider": "self_hosted" });
+        for (url, key, _) in ENDPOINT_PAIRS {
+            blanks[url] = json!("");
+            blanks[key] = json!("  ");
+        }
+        client
+            .put_json_auth(&path, &blanks, &token)
+            .await
+            .assert_status(StatusCode::OK);
+
+        let cleared = client.get_auth(&path, &token).await;
+        cleared.assert_status(StatusCode::OK);
+        let body = cleared.json_value();
+        for (url, _, has_key) in ENDPOINT_PAIRS {
+            assert_eq!(body[url], serde_json::Value::Null, "{path} kept {url}");
+            assert_eq!(body[has_key], false, "{path} kept the key beside {url}");
+        }
+    }
+}

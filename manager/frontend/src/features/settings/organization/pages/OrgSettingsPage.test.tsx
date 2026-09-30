@@ -359,6 +359,24 @@ describe('OrgSettingsPage', () => {
       });
     });
 
+    it('sends an empty host to clear the one saved, so the next save cannot bring it back', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValue({ ...mockAiSettings, litellm_host: null });
+      render(<OrgSettingsPage />);
+
+      const host = await screen.findByLabelText(/LiteLLM Host/);
+      await waitFor(() => expect(host).toHaveValue('http://localhost:4000'));
+      fireEvent.change(host, { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalled());
+      const [, request] = mockClient.updateOrgAiSettings.mock.calls[0];
+      expect(request.litellm_host).toBe('');
+      await waitFor(() => expect(host).toHaveValue(''));
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+      await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalledTimes(2));
+      expect(mockClient.updateOrgAiSettings.mock.calls[1][1].litellm_host).toBeUndefined();
+    });
+
     it('sends an empty model to clear one saved before Automatic was picked', async () => {
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
       mockClient.updateOrgAiSettings.mockResolvedValue({ ...agentSettings, model_reasoning: null });

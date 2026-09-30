@@ -367,7 +367,7 @@ export default function WorkspaceSettingsPage() {
         const aiSettings = await client.updateWorkspaceAiSettings(
           orgId,
           workspaceId,
-          buildAiSettingsRequest(aiProvider, credentials, models)
+          buildAiSettingsRequest(aiProvider, credentials, models, savedAiSettings)
         );
         if (currentScope.current !== scope) return;
         applyAiSettingsToForm(aiSettings);

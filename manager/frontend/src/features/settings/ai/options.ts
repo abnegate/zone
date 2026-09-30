@@ -298,10 +298,16 @@ export function modelsFromSettings(settings: AiSettings): ModelSelection {
   };
 }
 
+function endpointUrl(entered: string, saved: string | null): string | undefined {
+  if (entered.trim()) return entered;
+  return saved?.trim() ? '' : undefined;
+}
+
 export function buildAiSettingsRequest(
   provider: AiProvider,
   credentials: ProviderCredentials,
-  models: ModelSelection
+  models: ModelSelection,
+  saved: AiSettings | null = null
 ): UpdateAiSettingsRequest {
   const request: UpdateAiSettingsRequest = {
     provider,
@@ -316,13 +322,19 @@ export function buildAiSettingsRequest(
     return request;
   }
   if (provider === 'self_hosted') {
-    request.litellm_host = credentials.litellmHost || undefined;
+    request.litellm_host = endpointUrl(credentials.litellmHost, saved?.litellm_host ?? null);
     if (credentials.litellmKey) request.litellm_key = credentials.litellmKey;
   } else if (provider === 'openai') {
-    request.openai_base_url = credentials.openaiBaseUrl || undefined;
+    request.openai_base_url = endpointUrl(
+      credentials.openaiBaseUrl,
+      saved?.openai_base_url ?? null
+    );
     if (credentials.openaiApiKey) request.openai_api_key = credentials.openaiApiKey;
   } else if (provider === 'anthropic') {
-    request.anthropic_base_url = credentials.anthropicBaseUrl || undefined;
+    request.anthropic_base_url = endpointUrl(
+      credentials.anthropicBaseUrl,
+      saved?.anthropic_base_url ?? null
+    );
     if (credentials.anthropicApiKey) request.anthropic_api_key = credentials.anthropicApiKey;
   } else if (provider === 'bedrock') {
     request.bedrock_region = credentials.bedrockRegion || undefined;
