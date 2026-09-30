@@ -446,6 +446,8 @@ impl SyncProvider for GitHubSyncProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::crypto::generate_token;
+    use std::sync::LazyLock;
     use uuid::Uuid;
 
     #[test]
@@ -456,10 +458,9 @@ mod tests {
 
     #[test]
     fn test_verify_signature_valid() {
-        let secret = "my-secret";
+        let secret = generate_token();
         let body = b"test payload";
 
-        // Compute expected signature
         use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
@@ -469,17 +470,17 @@ mod tests {
         let result = mac.finalize();
         let sig = format!("sha256={}", hex::encode(result.into_bytes()));
 
-        assert!(GitHubSyncProvider::verify_signature(secret, body, &sig));
+        assert!(GitHubSyncProvider::verify_signature(&secret, body, &sig));
     }
 
     #[test]
     fn test_verify_signature_invalid() {
-        let secret = "my-secret";
+        let secret = generate_token();
         let body = b"test payload";
         let invalid_sig = "sha256=invalid";
 
         assert!(!GitHubSyncProvider::verify_signature(
-            secret,
+            &secret,
             body,
             invalid_sig
         ));
@@ -487,36 +488,35 @@ mod tests {
 
     #[test]
     fn test_verify_signature_wrong_secret() {
-        let secret = "my-secret";
+        let secret = generate_token();
         let body = b"test payload";
 
-        // Compute signature with different secret
         use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac = HmacSha256::new_from_slice(b"wrong-secret").unwrap();
+        let mut mac = HmacSha256::new_from_slice(generate_token().as_bytes()).unwrap();
         mac.update(body);
         let result = mac.finalize();
         let sig = format!("sha256={}", hex::encode(result.into_bytes()));
 
-        assert!(!GitHubSyncProvider::verify_signature(secret, body, &sig));
+        assert!(!GitHubSyncProvider::verify_signature(&secret, body, &sig));
     }
 
     #[test]
     fn test_verify_signature_missing_prefix() {
-        let secret = "my-secret";
+        let secret = generate_token();
         let body = b"test payload";
         let sig_no_prefix = "abcdef1234567890";
 
         assert!(!GitHubSyncProvider::verify_signature(
-            secret,
+            &secret,
             body,
             sig_no_prefix
         ));
     }
 
-    const SECRET: &str = "my-secret";
+    static SECRET: LazyLock<String> = LazyLock::new(generate_token);
 
     fn signed_headers(body: &[u8], event: Option<&str>) -> HeaderMap {
         use hmac::{Hmac, KeyInit, Mac};
@@ -535,7 +535,7 @@ mod tests {
 
     fn parse_signed(event: Option<&str>, body: &serde_json::Value) -> SyncResult<Delivery> {
         let body = serde_json::to_vec(body).unwrap();
-        GitHubSyncProvider::new().parse_webhook(&signed_headers(&body, event), &body, SECRET)
+        GitHubSyncProvider::new().parse_webhook(&signed_headers(&body, event), &body, &SECRET)
     }
 
     fn ping() -> serde_json::Value {
@@ -608,7 +608,7 @@ mod tests {
         headers.insert(DELIVERY_HEADER, "delivery-1".parse().unwrap());
 
         let Delivery::Issue(event) = GitHubSyncProvider::new()
-            .parse_webhook(&headers, &bytes, SECRET)
+            .parse_webhook(&headers, &bytes, &SECRET)
             .unwrap()
         else {
             panic!("an issues delivery is an issue");
@@ -683,7 +683,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(EVENT_HEADER, PING_EVENT.parse().unwrap());
 
-        let result = GitHubSyncProvider::new().parse_webhook(&headers, &body, SECRET);
+        let result = GitHubSyncProvider::new().parse_webhook(&headers, &body, &SECRET);
 
         assert!(matches!(
             result,
@@ -862,9 +862,9 @@ mod tests {
         let provider = GitHubSyncProvider::new();
         let headers = HeaderMap::new();
         let body = b"{}";
-        let secret = "test-secret";
+        let secret = generate_token();
 
-        let result = provider.parse_webhook(&headers, body, secret);
+        let result = provider.parse_webhook(&headers, body, &secret);
         assert!(result.is_err());
         assert!(matches!(
             result,
@@ -877,7 +877,7 @@ mod tests {
         let body = b"not valid json";
         let headers = signed_headers(body, Some(ISSUES_EVENT));
 
-        let result = GitHubSyncProvider::new().parse_webhook(&headers, body, SECRET);
+        let result = GitHubSyncProvider::new().parse_webhook(&headers, body, &SECRET);
 
         assert!(matches!(result, Err(SyncError::InvalidWebhookPayload(_))));
     }

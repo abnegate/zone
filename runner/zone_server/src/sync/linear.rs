@@ -462,6 +462,8 @@ impl SyncProvider for LinearSyncProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::crypto::generate_token;
+    use std::sync::LazyLock;
     use uuid::Uuid;
 
     #[test]
@@ -472,10 +474,9 @@ mod tests {
 
     #[test]
     fn test_verify_signature_valid() {
-        let secret = "my-secret";
+        let secret = generate_token();
         let body = b"test payload";
 
-        // Compute expected signature
         use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
@@ -485,17 +486,17 @@ mod tests {
         let result = mac.finalize();
         let sig = hex::encode(result.into_bytes());
 
-        assert!(LinearSyncProvider::verify_signature(secret, body, &sig));
+        assert!(LinearSyncProvider::verify_signature(&secret, body, &sig));
     }
 
     #[test]
     fn test_verify_signature_invalid() {
-        let secret = "my-secret";
+        let secret = generate_token();
         let body = b"test payload";
         let invalid_sig = "invalid";
 
         assert!(!LinearSyncProvider::verify_signature(
-            secret,
+            &secret,
             body,
             invalid_sig
         ));
@@ -503,23 +504,22 @@ mod tests {
 
     #[test]
     fn test_verify_signature_wrong_secret() {
-        let secret = "my-secret";
+        let secret = generate_token();
         let body = b"test payload";
 
-        // Compute signature with different secret
         use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac = HmacSha256::new_from_slice(b"wrong-secret").unwrap();
+        let mut mac = HmacSha256::new_from_slice(generate_token().as_bytes()).unwrap();
         mac.update(body);
         let result = mac.finalize();
         let sig = hex::encode(result.into_bytes());
 
-        assert!(!LinearSyncProvider::verify_signature(secret, body, &sig));
+        assert!(!LinearSyncProvider::verify_signature(&secret, body, &sig));
     }
 
-    const SECRET: &str = "my-secret";
+    static SECRET: LazyLock<String> = LazyLock::new(generate_token);
 
     fn parse_signed(body: &serde_json::Value) -> SyncResult<Delivery> {
         use hmac::{Hmac, KeyInit, Mac};
@@ -534,7 +534,7 @@ mod tests {
             hex::encode(mac.finalize().into_bytes()).parse().unwrap(),
         );
 
-        LinearSyncProvider::new().parse_webhook(&headers, &body, SECRET)
+        LinearSyncProvider::new().parse_webhook(&headers, &body, &SECRET)
     }
 
     fn delivery(entity: &str, action: &str) -> serde_json::Value {
@@ -657,7 +657,7 @@ mod tests {
         headers.insert(DELIVERY_HEADER, "delivery-1".parse().unwrap());
 
         let Delivery::Issue(event) = LinearSyncProvider::new()
-            .parse_webhook(&headers, &bytes, SECRET)
+            .parse_webhook(&headers, &bytes, &SECRET)
             .unwrap()
         else {
             panic!("an issue delivery is an issue");
@@ -726,9 +726,9 @@ mod tests {
         let provider = LinearSyncProvider::new();
         let headers = HeaderMap::new();
         let body = b"{}";
-        let secret = "test-secret";
+        let secret = generate_token();
 
-        let result = provider.parse_webhook(&headers, body, secret);
+        let result = provider.parse_webhook(&headers, body, &secret);
         assert!(result.is_err());
         assert!(matches!(
             result,

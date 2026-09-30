@@ -23,6 +23,7 @@ use zone_server::{
     },
     routes::create_router,
     state::AppState,
+    utils::crypto::generate_token,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -2579,8 +2580,6 @@ async fn a_strangers_project_has_no_sync_to_read_or_write() {
 
 // Webhook secrets: issued for GitHub, set by hand for Linear, rotated on request.
 
-const LINEAR_SIGNING_SECRET: &str = "linear-signing-secret-123";
-
 async fn registered(client: &common::TestClient) -> (String, Uuid) {
     let response = client
         .post_json(
@@ -2768,6 +2767,7 @@ async fn a_github_sync_is_issued_a_secret_its_deliveries_verify_against() {
 #[tokio::test]
 async fn a_linear_sync_verifies_deliveries_with_the_signing_secret_linear_issued() {
     let client = common::TestClient::with_db().await;
+    let signing_secret = generate_token();
     let token = signed_in(&client).await;
     let (_workspace, project) = workspace_project(&client, &token).await;
 
@@ -2785,7 +2785,7 @@ async fn a_linear_sync_verifies_deliveries_with_the_signing_secret_linear_issued
         &token,
         &project,
         &config,
-        &json!({ "secret": format!("  {LINEAR_SIGNING_SECRET}  ") }),
+        &json!({ "secret": format!("  {signing_secret}  ") }),
     )
     .await;
     response.assert_status(StatusCode::OK);
@@ -2794,11 +2794,11 @@ async fn a_linear_sync_verifies_deliveries_with_the_signing_secret_linear_issued
         body["webhook_secret"].is_null(),
         "a supplied secret is never echoed back: {body}"
     );
-    assert!(!response.text().contains(LINEAR_SIGNING_SECRET));
+    assert!(!response.text().contains(&signing_secret));
     assert_eq!(body["config"]["id"], config);
     assert_eq!(body["config"]["webhook_secret_configured"], true);
 
-    assert_verified(&deliver_linear(&client, &config, LINEAR_SIGNING_SECRET).await);
+    assert_verified(&deliver_linear(&client, &config, &signing_secret).await);
     let listed = listed_config(&client, &token, &project).await;
     assert_eq!(
         listed.json_value()["configs"][0]["webhook_secret_configured"],
@@ -2917,8 +2917,6 @@ async fn a_read_only_member_cannot_set_a_webhook_secret() {
 
 // Rotating or setting a secret: admins only, atomically, on the record.
 
-const INTERVENING_SECRET: &str = "intervening-secret-written-meanwhile";
-
 async fn joined(
     client: &common::TestClient,
     workspace: &str,
@@ -3020,12 +3018,13 @@ async fn a_member_who_is_not_an_admin_cannot_set_or_rotate_a_webhook_secret() {
 #[tokio::test]
 async fn a_rotation_that_read_a_secret_replaced_meanwhile_answers_conflict_and_shows_nothing() {
     let client = common::TestClient::with_db().await;
+    let intervening_secret = generate_token();
     let token = signed_in(&client).await;
     let (_workspace, project) = workspace_project(&client, &token).await;
     let created = configure(&client, &token, &project, &github_sync()).await;
     let config = created["config"]["id"].as_str().unwrap().to_string();
     let pool = client.state().db().clone();
-    let intervening = crypto::encrypt(client.state().encryption_key(), INTERVENING_SECRET)
+    let intervening = crypto::encrypt(client.state().encryption_key(), &intervening_secret)
         .expect("the secret encrypts");
 
     let mut transaction = pool.begin().await.expect("a transaction begins");
@@ -3056,13 +3055,14 @@ async fn a_rotation_that_read_a_secret_replaced_meanwhile_answers_conflict_and_s
         body["error"],
         "The sync configuration changed while this request was replacing its webhook secret; reload and try again"
     );
-    assert_verified(&deliver_github(&client, &config, INTERVENING_SECRET).await);
+    assert_verified(&deliver_github(&client, &config, &intervening_secret).await);
     assert!(audited(&pool, &config).await.is_empty());
 }
 
 #[tokio::test]
 async fn setting_or_rotating_a_webhook_secret_moves_updated_at_and_records_who_did_it() {
     let client = common::TestClient::with_db().await;
+    let signing_secret = generate_token();
     let (token, user) = registered(&client).await;
     let (_workspace, project) = workspace_project(&client, &token).await;
     let pool = client.state().db().clone();
@@ -3096,7 +3096,7 @@ async fn setting_or_rotating_a_webhook_secret_moves_updated_at_and_records_who_d
         &token,
         &project,
         &linear,
-        &json!({ "secret": LINEAR_SIGNING_SECRET }),
+        &json!({ "secret": signing_secret }),
     )
     .await
     .assert_status(StatusCode::OK);
@@ -3107,7 +3107,7 @@ async fn setting_or_rotating_a_webhook_secret_moves_updated_at_and_records_who_d
     assert_eq!(action, "sync.webhook_secret_set");
     assert_eq!(*actor, Some(user));
     assert_eq!(values["provider"], "linear");
-    assert!(!values.to_string().contains(LINEAR_SIGNING_SECRET));
+    assert!(!values.to_string().contains(&signing_secret));
 }
 
 // Adding or removing a sync: admins only, on the record.
