@@ -18,7 +18,6 @@ use crate::db::auto_projects::{
 };
 use crate::db::tasks::{self, TaskRow};
 use crate::services::backend;
-use crate::services::stages;
 use crate::workers::conflict::RepairOutcome;
 use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception};
 
@@ -671,18 +670,16 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?
             + 1;
-        let reviewer = model::select(
+        let reviewer = match model::select(
             &author,
             &prefs,
             &catalog,
             &config.review_models,
             u32::try_from(round).unwrap_or(1),
-        );
-        if stages::is_auto(&reviewer.model) {
-            return step
-                .pause("no completion model is installed to review with")
-                .await;
-        }
+        ) {
+            Ok(reviewer) => reviewer,
+            Err(unavailable) => return step.pause(&unavailable.to_string()).await,
+        };
         if config.require_distinct_reviewer
             && !bot_on_head
             && let Some(reason) = model::objection(&author, &reviewer)
