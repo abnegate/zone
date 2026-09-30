@@ -31,7 +31,7 @@ const MAX_SEARCH_LIMIT: usize = 100;
 const MAX_QUERY_LENGTH: usize = 10_000;
 
 /// Check if user has read access to workspace
-async fn check_workspace_read_access(
+pub(crate) async fn check_workspace_read_access(
     state: &AppState,
     auth: &AuthUser,
     workspace_id: Uuid,

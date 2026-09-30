@@ -9,7 +9,7 @@ mod common;
 
 use common::{
     TestClient, create_test_pool, create_test_state, discard, next_frame, seed_chat, serve,
-    setup_test_data, setup_workspace_member, test_config,
+    setup_test_data, setup_workspace_member, test_config, test_email, test_password,
 };
 use futures_util::SinkExt;
 use serde_json::{Value, json};
@@ -34,9 +34,12 @@ const OPENAI: &str = "openai";
 const CHAT_MODEL: &str = "llama3.2:3b";
 const OPENAI_MODEL: &str = "gpt-4o-mini";
 const TASK_MODEL: &str = "gpt-4";
+const REASONING_MODEL: &str = "o3";
+const INSTANCE_MODEL: &str = "qwen3:8b";
 const COMPLETIONS: &str = "/v1/chat/completions";
 const ANY_COMPLETIONS: &str = "/chat/completions";
 const SHOW: &str = "/api/show";
+const TAGS: &str = "/api/tags";
 const UNREACHABLE: &str = "http://127.0.0.1:9";
 const REPLY: &str = "Routed reply";
 const CLASSIFIER_PROMPT: &str = "Return exactly IMAGE, AUDIO, or CHAT";
@@ -111,6 +114,7 @@ struct Saved<'a> {
     openai_api_key: Option<&'a str>,
     openai_base_url: Option<String>,
     model_fast: &'a str,
+    model_reasoning: Option<&'a str>,
     routed: bool,
 }
 
@@ -123,6 +127,7 @@ impl<'a> Saved<'a> {
             openai_api_key: None,
             openai_base_url: None,
             model_fast: CHAT_MODEL,
+            model_reasoning: None,
             routed: true,
         }
     }
@@ -135,7 +140,15 @@ impl<'a> Saved<'a> {
             openai_api_key: Some(key),
             openai_base_url: Some(format!("{}/v1", base.uri())),
             model_fast: OPENAI_MODEL,
+            model_reasoning: None,
             routed: true,
+        }
+    }
+
+    fn reasoning_on(self, model: &'a str) -> Self {
+        Self {
+            model_reasoning: Some(model),
+            ..self
         }
     }
 
@@ -151,8 +164,8 @@ impl<'a> Saved<'a> {
 async fn save_for_organization(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>) {
     let written = sqlx::query(
         "INSERT INTO organization_ai_settings
-             (organization_id, provider, litellm_host, litellm_key, openai_api_key, openai_base_url, model_fast, completions_routed)
-         SELECT organization_id, $2, $3, $4, $5, $6, $7, $8 FROM workspaces WHERE id = $1",
+             (organization_id, provider, litellm_host, litellm_key, openai_api_key, openai_base_url, model_fast, model_reasoning, completions_routed)
+         SELECT organization_id, $2, $3, $4, $5, $6, $7, $8, $9 FROM workspaces WHERE id = $1",
     )
     .bind(workspace)
     .bind(saved.provider)
@@ -161,6 +174,7 @@ async fn save_for_organization(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>
     .bind(saved.openai_api_key)
     .bind(saved.openai_base_url.as_deref())
     .bind(saved.model_fast)
+    .bind(saved.model_reasoning)
     .bind(saved.routed)
     .execute(pool)
     .await
@@ -175,8 +189,8 @@ async fn save_for_organization(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>
 async fn save_for_workspace(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>) {
     sqlx::query(
         "INSERT INTO workspace_ai_settings
-             (workspace_id, provider, litellm_host, litellm_key, openai_api_key, openai_base_url, model_fast, completions_routed)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             (workspace_id, provider, litellm_host, litellm_key, openai_api_key, openai_base_url, model_fast, model_reasoning, completions_routed)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(workspace)
     .bind(saved.provider)
@@ -185,6 +199,7 @@ async fn save_for_workspace(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>) {
     .bind(saved.openai_api_key)
     .bind(saved.openai_base_url.as_deref())
     .bind(saved.model_fast)
+    .bind(saved.model_reasoning)
     .bind(saved.routed)
     .execute(pool)
     .await
@@ -818,5 +833,142 @@ async fn starting_a_project_on_a_saved_endpoint_asks_the_instance_ollama_nothing
     assert_eq!(
         asked, 0,
         "the instance's Ollama was asked about a model the saved endpoint runs"
+    );
+}
+
+/// An instance Ollama with a model installed that no saved endpoint runs.
+async fn installs(ollama: &MockServer) {
+    let installed = |name: &str| {
+        json!({
+            "name": name,
+            "size": 1,
+            "digest": "sha256:0",
+            "modified_at": "2026-01-01T00:00:00Z",
+        })
+    };
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [installed(CHAT_MODEL), installed(INSTANCE_MODEL)]
+        })))
+        .mount(ollama)
+        .await;
+}
+
+fn names(listed: &Value) -> Vec<&str> {
+    listed
+        .as_array()
+        .unwrap_or_else(|| panic!("the models are listed, got {listed}"))
+        .iter()
+        .filter_map(|model| model["name"].as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_model_picker_offers_only_the_models_a_saved_endpoint_runs() {
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    installs(&ollama).await;
+    let (client, token, workspace) = member_on(&endpoints, &ollama, |_| {}).await;
+    let pool = client.state().db().clone();
+    save_for_organization(
+        &pool,
+        workspace,
+        &Saved::openai(&endpoints.organization, OPENAI_KEY).reasoning_on(REASONING_MODEL),
+    )
+    .await;
+
+    let scoped = client
+        .get_auth(&format!("/api/models?workspace_id={workspace}"), &token)
+        .await;
+    let unscoped = client.get_auth("/api/models", &token).await;
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    scoped.assert_status(axum::http::StatusCode::OK);
+    let listed = scoped.json_value();
+    assert_eq!(
+        names(&listed),
+        [OPENAI_MODEL, REASONING_MODEL],
+        "the picker offered models the saved endpoint does not run"
+    );
+    for model in listed.as_array().into_iter().flatten() {
+        assert!(
+            model["size"].is_u64() && model["modified_at"].is_string(),
+            "the console rejects a listed model without a size and a date: {model}"
+        );
+    }
+    unscoped.assert_status(axum::http::StatusCode::OK);
+    assert_eq!(
+        names(&unscoped.json_value()),
+        [CHAT_MODEL, INSTANCE_MODEL],
+        "the unscoped listing stopped listing the instance's models"
+    );
+}
+
+#[tokio::test]
+async fn the_model_picker_lists_the_instance_models_for_a_workspace_on_the_instance() {
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    installs(&ollama).await;
+    let (client, token, workspace) = member_on(&endpoints, &ollama, |_| {}).await;
+    let pool = client.state().db().clone();
+    save_for_organization(
+        &pool,
+        workspace,
+        &Saved::litellm(&endpoints.organization, Some(ORGANIZATION_KEY)).unrouted(),
+    )
+    .await;
+
+    let scoped = client
+        .get_auth(&format!("/api/models?workspace_id={workspace}"), &token)
+        .await;
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    scoped.assert_status(axum::http::StatusCode::OK);
+    assert_eq!(names(&scoped.json_value()), [CHAT_MODEL, INSTANCE_MODEL]);
+}
+
+#[tokio::test]
+async fn the_model_picker_refuses_a_workspace_the_caller_is_not_in() {
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    installs(&ollama).await;
+    let (client, _, workspace) = member_on(&endpoints, &ollama, |_| {}).await;
+    let pool = client.state().db().clone();
+    save_for_organization(
+        &pool,
+        workspace,
+        &Saved::openai(&endpoints.organization, OPENAI_KEY),
+    )
+    .await;
+    let registered = client
+        .post_json(
+            "/api/auth/register",
+            &json!({"email": test_email(), "password": test_password()}),
+        )
+        .await
+        .json_value();
+    let stranger = registered["access_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("registration returns an access token, got {registered}"));
+    let stranger_id: Uuid = registered["user"]["id"]
+        .as_str()
+        .and_then(|id| id.parse().ok())
+        .unwrap_or_else(|| panic!("registration returns the user, got {registered}"));
+
+    let response = client
+        .get_auth(&format!("/api/models?workspace_id={workspace}"), stranger)
+        .await;
+    let mut people = members(&pool, workspace).await;
+    people.push(stranger_id);
+    discard(&pool, workspace, &people).await;
+
+    response.assert_status(axum::http::StatusCode::FORBIDDEN);
+    assert!(
+        !response.text().contains(OPENAI_MODEL),
+        "a stranger was told the workspace's saved models: {}",
+        response.text()
     );
 }

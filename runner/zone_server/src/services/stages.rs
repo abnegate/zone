@@ -106,6 +106,20 @@ impl Preferences {
         }
     }
 
+    /// The Fast and Reasoning models, each named once.
+    pub fn completions(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = Vec::new();
+        for name in [self.fast.as_deref(), self.reasoning.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !names.iter().any(|named| same_model(named, name)) {
+                names.push(name);
+            }
+        }
+        names
+    }
+
     /// Whether a completion may be sent under `name`.
     pub fn admits(&self, name: &str) -> bool {
         match self.scope {
@@ -1435,6 +1449,19 @@ mod tests {
             None,
             "a title was asked of an instance model on the saved endpoint"
         );
+    }
+
+    #[test]
+    fn a_saved_endpoint_offers_its_fast_and_reasoning_models_once_each() {
+        assert_eq!(
+            saved_endpoint(&openai(Some("gpt-4o-mini"), Some("o3"))).completions(),
+            ["gpt-4o-mini", "o3"]
+        );
+        assert_eq!(
+            saved_endpoint(&openai(Some("o3"), Some("o3:latest"))).completions(),
+            ["o3"]
+        );
+        assert!(saved_endpoint(&openai(None, None)).completions().is_empty());
     }
 
     #[test]
