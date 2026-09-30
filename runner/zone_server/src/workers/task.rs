@@ -3211,7 +3211,8 @@ mod tests {
         let provider = wiremock::MockServer::start().await;
         sqlx::query(
             "UPDATE organization_ai_settings SET provider = $2, openai_base_url = $3, \
-             openai_api_key = 'sk-organization', model_fast = NULL, model_reasoning = NULL \
+             openai_api_key = 'sk-organization', model_fast = NULL, model_reasoning = NULL, \
+             completions_routed = true \
              WHERE organization_id = $1",
         )
         .bind(fixture.organization)

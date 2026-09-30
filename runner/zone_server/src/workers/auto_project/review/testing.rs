@@ -50,8 +50,8 @@ impl Organization {
                 .expect("a workspace");
         sqlx::query(
             "INSERT INTO organization_ai_settings \
-             (organization_id, provider, litellm_host, litellm_key, model_fast) \
-             VALUES ($1, $2, $3, $4, $5)",
+             (organization_id, provider, litellm_host, litellm_key, model_fast, completions_routed) \
+             VALUES ($1, $2, $3, $4, $5, true)",
         )
         .bind(organization.id)
         .bind(PROVIDER_SELF_HOSTED)

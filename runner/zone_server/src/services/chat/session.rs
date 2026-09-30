@@ -1154,7 +1154,7 @@ mod tests {
                 .await
                 .expect("a workspace");
         sqlx::query(
-            "INSERT INTO organization_ai_settings (organization_id, provider, litellm_host) VALUES ($1, $2, $3)",
+            "INSERT INTO organization_ai_settings (organization_id, provider, litellm_host, completions_routed) VALUES ($1, $2, $3, true)",
         )
         .bind(organization.id)
         .bind(PROVIDER_SELF_HOSTED)

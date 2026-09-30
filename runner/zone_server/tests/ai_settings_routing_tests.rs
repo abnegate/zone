@@ -110,6 +110,7 @@ struct Saved<'a> {
     openai_api_key: Option<&'a str>,
     openai_base_url: Option<String>,
     model_fast: &'a str,
+    routed: bool,
 }
 
 impl<'a> Saved<'a> {
@@ -121,6 +122,7 @@ impl<'a> Saved<'a> {
             openai_api_key: None,
             openai_base_url: None,
             model_fast: CHAT_MODEL,
+            routed: true,
         }
     }
 
@@ -132,6 +134,15 @@ impl<'a> Saved<'a> {
             openai_api_key: Some(key),
             openai_base_url: Some(format!("{}/v1", base.uri())),
             model_fast: OPENAI_MODEL,
+            routed: true,
+        }
+    }
+
+    /// The row as 054 leaves one saved before completions were routed.
+    fn unrouted(self) -> Self {
+        Self {
+            routed: false,
+            ..self
         }
     }
 }
@@ -139,8 +150,8 @@ impl<'a> Saved<'a> {
 async fn save_for_organization(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>) {
     let written = sqlx::query(
         "INSERT INTO organization_ai_settings
-             (organization_id, provider, litellm_host, litellm_key, openai_api_key, openai_base_url, model_fast)
-         SELECT organization_id, $2, $3, $4, $5, $6, $7 FROM workspaces WHERE id = $1",
+             (organization_id, provider, litellm_host, litellm_key, openai_api_key, openai_base_url, model_fast, completions_routed)
+         SELECT organization_id, $2, $3, $4, $5, $6, $7, $8 FROM workspaces WHERE id = $1",
     )
     .bind(workspace)
     .bind(saved.provider)
@@ -149,6 +160,7 @@ async fn save_for_organization(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>
     .bind(saved.openai_api_key)
     .bind(saved.openai_base_url.as_deref())
     .bind(saved.model_fast)
+    .bind(saved.routed)
     .execute(pool)
     .await
     .expect("the organization's settings are writable");
@@ -162,8 +174,8 @@ async fn save_for_organization(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>
 async fn save_for_workspace(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>) {
     sqlx::query(
         "INSERT INTO workspace_ai_settings
-             (workspace_id, provider, litellm_host, litellm_key, openai_api_key, openai_base_url, model_fast)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             (workspace_id, provider, litellm_host, litellm_key, openai_api_key, openai_base_url, model_fast, completions_routed)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(workspace)
     .bind(saved.provider)
@@ -172,6 +184,7 @@ async fn save_for_workspace(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>) {
     .bind(saved.openai_api_key)
     .bind(saved.openai_base_url.as_deref())
     .bind(saved.model_fast)
+    .bind(saved.routed)
     .execute(pool)
     .await
     .expect("the workspace's settings are writable");
@@ -417,6 +430,44 @@ async fn a_workspace_host_never_receives_the_organization_key() {
         assert!(
             !sent.contains(ORGANIZATION_KEY) && !sent.contains(INSTANCE_KEY),
             "the workspace's host was handed a key it never saved ({outcome})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rows_saved_before_completions_were_routed_keep_sending_to_the_instance() {
+    let endpoints = Endpoints::start().await;
+    let organization = Saved::litellm(&endpoints.organization, Some(ORGANIZATION_KEY)).unrouted();
+    let workspace = Saved::litellm(&endpoints.workspace, None).unrouted();
+
+    let outcome = chat_turn(
+        endpoints.config(),
+        CHAT_MODEL,
+        "Hello",
+        &organization,
+        Some(&workspace),
+    )
+    .await;
+
+    let instance = any_completions(&endpoints.instance).await;
+    assert!(
+        !instance.is_empty(),
+        "the instance's LITELLM_HOST was sent no completion ({outcome})"
+    );
+    for request in &instance {
+        assert_eq!(
+            authorization(request),
+            Some(format!("Bearer {INSTANCE_KEY}")),
+            "the instance was sent a key it does not own ({outcome})"
+        );
+    }
+    for (saved, server) in [
+        ("organization", &endpoints.organization),
+        ("workspace", &endpoints.workspace),
+    ] {
+        assert!(
+            any_completions(server).await.is_empty(),
+            "the {saved}'s unrouted host was sent a completion ({outcome})"
         );
     }
 }

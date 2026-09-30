@@ -4,6 +4,7 @@ mod common;
 
 use axum::http::StatusCode;
 use serde_json::json;
+use uuid::Uuid;
 use zone_core::OptionalSecretExt;
 use zone_server::db::ai_settings;
 
@@ -1619,4 +1620,131 @@ async fn test_a_workspace_key_alone_keeps_the_organization_host() {
         settings.anthropic_api_key.expose_as_deref(),
         Some("sk-workspace-anthropic_api_key")
     );
+}
+
+async fn save_unrouted(client: &TestClient, organization: Uuid, workspace: Uuid) {
+    let pool = client.state().db();
+    sqlx::query(
+        "INSERT INTO organization_ai_settings (organization_id, provider, litellm_host, litellm_key) \
+         VALUES ($1, 'self_hosted', 'http://localhost:11434', 'sk-organization-litellm')",
+    )
+    .bind(organization)
+    .execute(pool)
+    .await
+    .expect("an organization row saved before completions were routed");
+    sqlx::query(
+        "INSERT INTO workspace_ai_settings (workspace_id, provider, openai_base_url) \
+         VALUES ($1, 'openai', 'http://workspace-openai.example:4000')",
+    )
+    .bind(workspace)
+    .execute(pool)
+    .await
+    .expect("a workspace row saved before completions were routed");
+}
+
+async fn effective_settings(
+    client: &TestClient,
+    organization: Uuid,
+    workspace: Uuid,
+) -> ai_settings::EffectiveAiSettings {
+    ai_settings::get_effective_ai_settings(client.state().db(), organization, workspace)
+        .await
+        .expect("effective settings")
+}
+
+#[tokio::test]
+async fn test_a_row_saved_before_completions_were_routed_lends_no_endpoint_until_saved() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization: Uuid = org_id.parse().expect("organization id");
+    let workspace: Uuid = ws_id.parse().expect("workspace id");
+    let paths = [
+        format!("/api/organizations/{org_id}/settings/ai"),
+        format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai"),
+    ];
+    save_unrouted(&client, organization, workspace).await;
+
+    for path in &paths {
+        let saved = client.get_auth(path, &token).await;
+        saved.assert_status(StatusCode::OK);
+        assert_eq!(
+            saved.json_value()["completions_routed"],
+            false,
+            "{path} was saved before completions were routed"
+        );
+    }
+    let before = effective_settings(&client, organization, workspace).await;
+    assert_eq!(before.provider, "openai");
+    assert_eq!(before.litellm_host, None);
+    assert_eq!(before.litellm_key.expose_as_deref(), None);
+    assert_eq!(before.openai_base_url, None);
+
+    for path in &paths {
+        let saved = client
+            .put_json_auth(path, &json!({ "model_fast": "llama3.2:3b" }), &token)
+            .await;
+        saved.assert_status(StatusCode::OK);
+        assert_eq!(
+            saved.json_value()["completions_routed"],
+            true,
+            "saving {path} routes its completions"
+        );
+        let read = client.get_auth(path, &token).await;
+        assert_eq!(read.json_value()["completions_routed"], true, "{path}");
+    }
+    let after = effective_settings(&client, organization, workspace).await;
+    assert_eq!(
+        after.litellm_host.as_deref(),
+        Some("http://localhost:11434")
+    );
+    assert_eq!(
+        after.litellm_key.expose_as_deref(),
+        Some("sk-organization-litellm")
+    );
+    assert_eq!(
+        after.openai_base_url.as_deref(),
+        Some("http://workspace-openai.example:4000")
+    );
+    assert_eq!(after.openai_api_key.expose_as_deref(), None);
+}
+
+#[tokio::test]
+async fn test_workspace_settings_say_which_keys_the_organization_saved() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    let none = client.get_auth(&workspace, &token).await;
+    none.assert_status(StatusCode::OK);
+    assert_eq!(
+        none.json_value()["organization_keys"],
+        json!({ "litellm": false, "openai": false, "anthropic": false })
+    );
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &json!({ "openai_api_key": "sk-organization-openai" }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let expected = json!({ "litellm": false, "openai": true, "anthropic": false });
+    let read = client.get_auth(&workspace, &token).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(read.json_value()["organization_keys"], expected);
+    let saved = client
+        .put_json_auth(
+            &workspace,
+            &json!({ "provider": "openai", "openai_base_url": "http://workspace.example:4000" }),
+            &token,
+        )
+        .await;
+    saved.assert_status(StatusCode::OK);
+    assert_eq!(saved.json_value()["organization_keys"], expected);
 }

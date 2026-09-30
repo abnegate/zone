@@ -50,6 +50,7 @@ pub struct AiSettingsResponse {
     pub model_image: Option<String>,
     pub model_video: Option<String>,
     pub model_audio: Option<String>,
+    pub completions_routed: bool,
 }
 
 impl AiSettingsResponse {
@@ -71,6 +72,24 @@ impl AiSettingsResponse {
             model_image: None,
             model_video: None,
             model_audio: None,
+            completions_routed: false,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrganizationKeysResponse {
+    pub litellm: bool,
+    pub openai: bool,
+    pub anthropic: bool,
+}
+
+impl From<ai_settings::OrganizationKeys> for OrganizationKeysResponse {
+    fn from(keys: ai_settings::OrganizationKeys) -> Self {
+        Self {
+            litellm: keys.litellm,
+            openai: keys.openai,
+            anthropic: keys.anthropic,
         }
     }
 }
@@ -82,6 +101,7 @@ pub struct WorkspaceAiSettingsResponse {
     #[serde(flatten)]
     pub settings: AiSettingsResponse,
     pub overrides: bool,
+    pub organization_keys: OrganizationKeysResponse,
 }
 
 impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
@@ -104,6 +124,7 @@ impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
             model_image: row.model_image,
             model_video: row.model_video,
             model_audio: row.model_audio,
+            completions_routed: row.completions_routed,
         }
     }
 }
@@ -130,6 +151,7 @@ impl From<ai_settings::WorkspaceAiSettingsRow> for AiSettingsResponse {
             model_image: row.model_image,
             model_video: row.model_video,
             model_audio: row.model_audio,
+            completions_routed: row.completions_routed,
         }
     }
 }
@@ -154,6 +176,7 @@ impl From<ai_settings::EffectiveAiSettings> for AiSettingsResponse {
             model_image: settings.model_image,
             model_video: settings.model_video,
             model_audio: settings.model_audio,
+            completions_routed: true,
         }
     }
 }
@@ -337,9 +360,12 @@ pub async fn get_workspace(
     };
     match ai_settings::get_workspace_authorized(state.db(), path.org_id, path.ws_id, user_id).await
     {
-        Ok(settings) => Json(WorkspaceAiSettingsResponse {
-            overrides: settings.is_some(),
-            settings: settings.map_or_else(AiSettingsResponse::unsaved, AiSettingsResponse::from),
+        Ok(saved) => Json(WorkspaceAiSettingsResponse {
+            overrides: saved.settings.is_some(),
+            settings: saved
+                .settings
+                .map_or_else(AiSettingsResponse::unsaved, AiSettingsResponse::from),
+            organization_keys: saved.organization_keys.into(),
         })
         .into_response(),
         Err(error) => *access_error(error),
@@ -366,8 +392,8 @@ pub async fn upsert_workspace(
     )
     .await
     {
-        Ok(settings) => {
-            let response = AiSettingsResponse::from(settings);
+        Ok(saved) => {
+            let response = AiSettingsResponse::from(saved.settings);
             audit(
                 state.db(),
                 AuditEvent {
@@ -386,6 +412,7 @@ pub async fn upsert_workspace(
             Json(WorkspaceAiSettingsResponse {
                 settings: response,
                 overrides: true,
+                organization_keys: saved.organization_keys.into(),
             })
             .into_response()
         }

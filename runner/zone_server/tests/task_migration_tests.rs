@@ -3,7 +3,7 @@ use sqlx::{ConnectOptions, PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
-use zone_server::db::{memory, migrations, tasks};
+use zone_server::db::{ai_settings, memory, migrations, tasks};
 
 /// Every test replays the whole chain into an empty database; more at once
 /// only queue on the same disk writes, and the tests' own time bounds with them.
@@ -1200,6 +1200,83 @@ async fn the_unlink_event_check_is_added_unvalidated_and_proven_after() {
     database.cleanup().await;
 }
 
+/// 054 leaves every AI settings row saved before it unrouted, in place: a
+/// constant default rewrites neither table.
+#[tokio::test]
+async fn ai_settings_saved_before_054_stay_unrouted_without_a_rewrite() {
+    const TABLES: [&str; 2] = ["organization_ai_settings", "workspace_ai_settings"];
+    const FILENODE: &str = "SELECT pg_relation_filenode($1::regclass)::bigint";
+    let database = Database::new().await;
+    database.through(53).await;
+    let (workspace, _) = database.workspace().await;
+    let organization: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id=$1")
+            .bind(workspace)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO organization_ai_settings(organization_id,provider,openai_api_key) \
+         VALUES($1,'openai','sk-saved-long-ago')",
+    )
+    .bind(organization)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workspace_ai_settings(workspace_id,litellm_host) \
+         VALUES($1,'http://localhost:11434')",
+    )
+    .bind(workspace)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let mut before = Vec::new();
+    for table in TABLES {
+        let filenode: i64 = sqlx::query_scalar(FILENODE)
+            .bind(table)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        before.push(filenode);
+    }
+
+    database.through(54).await;
+
+    for (table, filenode) in TABLES.into_iter().zip(before) {
+        let after: i64 = sqlx::query_scalar(FILENODE)
+            .bind(table)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(after, filenode, "054 rewrote {table}");
+    }
+    let routed: (bool, bool) = sqlx::query_as(
+        "SELECT o.completions_routed, w.completions_routed \
+         FROM organization_ai_settings o, workspace_ai_settings w \
+         WHERE o.organization_id=$1 AND w.workspace_id=$2",
+    )
+    .bind(organization)
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        routed,
+        (false, false),
+        "054 routed a row nobody saved since"
+    );
+    let settings = ai_settings::get_effective_ai_settings(&database.pool, organization, workspace)
+        .await
+        .unwrap();
+    assert_eq!(settings.provider, "openai");
+    assert!(
+        settings.openai_api_key.is_none() && settings.litellm_host.is_none(),
+        "a row saved before 054 lent its endpoint to completions"
+    );
+    database.cleanup().await;
+}
+
 /// Every lock these take on `task_runs` is one ordinary traffic already holds,
 /// and the boot holds sqlx's advisory lock while it queues for them: an
 /// unbounded wait wedges every other instance instead of failing with 55P03.
@@ -1267,6 +1344,7 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
             "050_task_reviews_failed_verdict_validation.sql",
             "051_sync_deliveries.sql",
             "052_sync_events_unlink_validation.sql",
+            "054_ai_settings_completions_routed.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );

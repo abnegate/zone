@@ -186,6 +186,9 @@ pub struct OrgAiSettingsRow {
     pub model_image: Option<String>,
     pub model_video: Option<String>,
     pub model_audio: Option<String>,
+    /// Set by a save through the API. A row saved before completions were sent
+    /// to saved endpoints lends none: its URLs and keys were never used.
+    pub completions_routed: bool,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
 }
@@ -212,8 +215,27 @@ pub struct WorkspaceAiSettingsRow {
     pub model_image: Option<String>,
     pub model_video: Option<String>,
     pub model_audio: Option<String>,
+    /// Set by a save through the API. A row saved before completions were sent
+    /// to saved endpoints lends none: its URLs and keys were never used.
+    pub completions_routed: bool,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
+}
+
+/// Which endpoint keys the owning organization saved. A workspace host never
+/// receives them, so a workspace that names one without its own key sends none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, sqlx::FromRow)]
+pub struct OrganizationKeys {
+    pub litellm: bool,
+    pub openai: bool,
+    pub anthropic: bool,
+}
+
+/// A workspace's own settings beside the keys its organization saved.
+#[derive(Debug, Clone)]
+pub struct WorkspaceSettings<T> {
+    pub settings: T,
+    pub organization_keys: OrganizationKeys,
 }
 
 /// Effective AI settings (merged from org and workspace)
@@ -280,7 +302,8 @@ where
         SELECT id, organization_id, provider, litellm_host, litellm_key,
                openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-               model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio, created_at, updated_at
+               model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
+               completions_routed, created_at, updated_at
         FROM organization_ai_settings
         WHERE organization_id = $1
         "#,
@@ -327,11 +350,13 @@ where
             organization_id, provider, litellm_host, litellm_key,
             openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-            model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio
+            model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
+            completions_routed
         ) VALUES (
             $1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
             NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
-            NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), '')
+            NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), ''),
+            true
         )
         ON CONFLICT (organization_id) DO UPDATE SET
             provider = COALESCE($2, organization_ai_settings.provider),
@@ -376,11 +401,13 @@ where
                 WHEN BTRIM($18) = '' THEN NULL
                 ELSE $18
             END,
+            completions_routed = true,
             updated_at = NOW()
         RETURNING id, organization_id, provider, litellm_host, litellm_key,
                   openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                   bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-                  model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio, created_at, updated_at
+                  model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
+                  completions_routed, created_at, updated_at
         "#
     )
     .bind(organization_id)
@@ -459,7 +486,8 @@ where
         SELECT id, workspace_id, provider, litellm_host, litellm_key,
                openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-               model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio, created_at, updated_at
+               model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
+               completions_routed, created_at, updated_at
         FROM workspace_ai_settings
         WHERE workspace_id = $1
         "#,
@@ -469,6 +497,26 @@ where
     .await?;
 
     Ok(row)
+}
+
+async fn organization_keys<'e, E>(executor: E, organization_id: Uuid) -> DbResult<OrganizationKeys>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let keys: Option<OrganizationKeys> = sqlx::query_as(
+        r#"
+        SELECT litellm_key IS NOT NULL AS litellm,
+               openai_api_key IS NOT NULL AS openai,
+               anthropic_api_key IS NOT NULL AS anthropic
+        FROM organization_ai_settings
+        WHERE organization_id = $1
+        "#,
+    )
+    .bind(organization_id)
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(keys.unwrap_or_default())
 }
 
 /// Get AI settings for a workspace.
@@ -485,7 +533,7 @@ pub async fn get_workspace_authorized(
     organization_id: Uuid,
     workspace_id: Uuid,
     user_id: Uuid,
-) -> AccessResult<Option<WorkspaceAiSettingsRow>> {
+) -> AccessResult<WorkspaceSettings<Option<WorkspaceAiSettingsRow>>> {
     let mut transaction = pool.begin().await?;
     authorize_workspace(
         &mut transaction,
@@ -496,8 +544,12 @@ pub async fn get_workspace_authorized(
     )
     .await?;
     let settings = get_workspace(&mut *transaction, workspace_id).await?;
+    let organization_keys = organization_keys(&mut *transaction, organization_id).await?;
     transaction.commit().await?;
-    Ok(settings)
+    Ok(WorkspaceSettings {
+        settings,
+        organization_keys,
+    })
 }
 
 async fn upsert_workspace<'e, E>(
@@ -514,11 +566,13 @@ where
             workspace_id, provider, litellm_host, litellm_key,
             openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-            model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio
+            model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
+            completions_routed
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
             NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
-            NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), '')
+            NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), ''),
+            true
         )
         ON CONFLICT (workspace_id) DO UPDATE SET
             provider = $2,
@@ -563,11 +617,13 @@ where
                 WHEN BTRIM($18) = '' THEN NULL
                 ELSE $18
             END,
+            completions_routed = true,
             updated_at = NOW()
         RETURNING id, workspace_id, provider, litellm_host, litellm_key,
                   openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                   bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-                  model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio, created_at, updated_at
+                  model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
+                  completions_routed, created_at, updated_at
         "#,
     )
     .bind(workspace_id)
@@ -601,7 +657,7 @@ pub async fn upsert_workspace_authorized(
     workspace_id: Uuid,
     user_id: Uuid,
     update: Update<'_>,
-) -> AccessResult<WorkspaceAiSettingsRow> {
+) -> AccessResult<WorkspaceSettings<WorkspaceAiSettingsRow>> {
     let mut transaction = pool.begin().await?;
     authorize_workspace(
         &mut transaction,
@@ -613,8 +669,12 @@ pub async fn upsert_workspace_authorized(
     .await?;
     validate(&update)?;
     let settings = upsert_workspace(&mut *transaction, workspace_id, &update).await?;
+    let organization_keys = organization_keys(&mut *transaction, organization_id).await?;
     transaction.commit().await?;
-    Ok(settings)
+    Ok(WorkspaceSettings {
+        settings,
+        organization_keys,
+    })
 }
 
 async fn delete_workspace<'e, E>(executor: E, workspace_id: Uuid) -> DbResult<bool>
@@ -676,12 +736,14 @@ fn effective(
 
     if let Some(org) = organization {
         effective.provider = org.provider;
-        effective.litellm_host = org.litellm_host;
-        effective.litellm_key = org.litellm_key;
-        effective.openai_api_key = org.openai_api_key;
-        effective.openai_base_url = org.openai_base_url;
-        effective.anthropic_api_key = org.anthropic_api_key;
-        effective.anthropic_base_url = org.anthropic_base_url;
+        if org.completions_routed {
+            effective.litellm_host = org.litellm_host;
+            effective.litellm_key = org.litellm_key;
+            effective.openai_api_key = org.openai_api_key;
+            effective.openai_base_url = org.openai_base_url;
+            effective.anthropic_api_key = org.anthropic_api_key;
+            effective.anthropic_base_url = org.anthropic_base_url;
+        }
         effective.bedrock_region = org.bedrock_region;
         effective.bedrock_access_key = org.bedrock_access_key;
         effective.bedrock_secret_key = org.bedrock_secret_key;
@@ -703,24 +765,26 @@ fn effective(
             }
             effective.provider = provider;
         }
-        overlay_endpoint(
-            &mut effective.litellm_host,
-            &mut effective.litellm_key,
-            ws.litellm_host,
-            ws.litellm_key,
-        );
-        overlay_endpoint(
-            &mut effective.openai_base_url,
-            &mut effective.openai_api_key,
-            ws.openai_base_url,
-            ws.openai_api_key,
-        );
-        overlay_endpoint(
-            &mut effective.anthropic_base_url,
-            &mut effective.anthropic_api_key,
-            ws.anthropic_base_url,
-            ws.anthropic_api_key,
-        );
+        if ws.completions_routed {
+            overlay_endpoint(
+                &mut effective.litellm_host,
+                &mut effective.litellm_key,
+                ws.litellm_host,
+                ws.litellm_key,
+            );
+            overlay_endpoint(
+                &mut effective.openai_base_url,
+                &mut effective.openai_api_key,
+                ws.openai_base_url,
+                ws.openai_api_key,
+            );
+            overlay_endpoint(
+                &mut effective.anthropic_base_url,
+                &mut effective.anthropic_api_key,
+                ws.anthropic_base_url,
+                ws.anthropic_api_key,
+            );
+        }
         if ws.bedrock_region.is_some() {
             effective.bedrock_region = ws.bedrock_region;
         }
@@ -943,6 +1007,7 @@ mod tests {
             model_image: None,
             model_video: None,
             model_audio: None,
+            completions_routed: true,
             created_at: None,
             updated_at: None,
         }
@@ -969,6 +1034,7 @@ mod tests {
             model_image: None,
             model_video: None,
             model_audio: None,
+            completions_routed: true,
             created_at: None,
             updated_at: None,
         }
@@ -1079,6 +1145,57 @@ mod tests {
         assert_eq!(
             settings.openai_api_key.expose_as_deref(),
             Some("organization-openai-key")
+        );
+        assert_eq!(
+            settings.anthropic_api_key.expose_as_deref(),
+            Some("organization-anthropic-key")
+        );
+    }
+
+    #[test]
+    fn an_organization_row_saved_before_routing_lends_no_endpoint() {
+        let organization = OrgAiSettingsRow {
+            provider: PROVIDER_OPENAI.to_string(),
+            model_fast: Some("gpt-4o-mini".to_string()),
+            completions_routed: false,
+            ..organization_row()
+        };
+
+        let settings = effective(Some(organization), None);
+
+        assert_eq!(settings.provider, PROVIDER_OPENAI);
+        assert_eq!(settings.model_fast.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(settings.litellm_host, None);
+        assert_eq!(settings.litellm_key.expose_as_deref(), None);
+        assert_eq!(settings.openai_base_url, None);
+        assert_eq!(settings.openai_api_key.expose_as_deref(), None);
+        assert_eq!(settings.anthropic_base_url, None);
+        assert_eq!(settings.anthropic_api_key.expose_as_deref(), None);
+    }
+
+    #[test]
+    fn a_workspace_row_saved_before_routing_keeps_the_organization_pairs() {
+        let workspace = WorkspaceAiSettingsRow {
+            litellm_host: Some("http://localhost:11434".to_string()),
+            openai_base_url: Some("https://workspace-openai.example/v1".to_string()),
+            anthropic_api_key: Some(SecretValue::new("workspace-anthropic-key")),
+            completions_routed: false,
+            ..workspace_row()
+        };
+
+        let settings = effective(Some(organization_row()), Some(workspace));
+
+        assert_eq!(
+            settings.litellm_host.as_deref(),
+            Some("http://organization-litellm:4000")
+        );
+        assert_eq!(
+            settings.litellm_key.expose_as_deref(),
+            Some("organization-litellm-key")
+        );
+        assert_eq!(
+            settings.openai_base_url.as_deref(),
+            Some("https://organization-openai.example/v1")
         );
         assert_eq!(
             settings.anthropic_api_key.expose_as_deref(),
