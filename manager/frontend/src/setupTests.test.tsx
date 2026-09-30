@@ -3,23 +3,21 @@ import { render, screen } from '@testing-library/react';
 
 interface Failure {
   received: string | undefined;
-  elapsed: number;
+  length: number;
 }
 
 function failure(assertion: () => void): Failure {
-  const started = performance.now();
   try {
     assertion();
   } catch (error) {
-    const elapsed = performance.now() - started;
     const message = Bun.stripANSI((error as Error).message);
-    return { received: message.match(/^Received: (.*)$/m)?.[1], elapsed };
+    return { received: message.match(/^Received: (.*)$/m)?.[1], length: message.length };
   }
   throw new Error('The assertion passed');
 }
 
 describe('a failed assertion', () => {
-  it('prints an element as its HTML, quickly', () => {
+  it('prints an element as its HTML, not its object graph', () => {
     render(
       <nav>
         <a href="/chats">Chats</a>
@@ -28,11 +26,11 @@ describe('a failed assertion', () => {
       </nav>
     );
 
-    const { received, elapsed } = failure(() =>
+    const { received, length } = failure(() =>
       expect(screen.getByRole('link', { name: 'Chats' })).toBeNull()
     );
 
-    expect(elapsed).toBeLessThan(100);
+    expect(length).toBeLessThan(1_000);
     expect(received).toBe('<a href="/chats">Chats</a>');
   });
 
