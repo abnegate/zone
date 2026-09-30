@@ -1,26 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { read, rule, token } from '../test/css';
 
 const styles = join(import.meta.dir);
 const kit = join(import.meta.dir, '..', '..', '..', '..', 'packages', 'ui', 'src', 'styles');
-
-function read(path: string): string {
-  return readFileSync(path, 'utf8');
-}
-
-function token(css: string, name: string): string {
-  const match = css.match(new RegExp(`--${name}:\\s*([^;]+);`));
-  if (!match) throw new Error(`token --${name} is not defined`);
-  return match[1].trim();
-}
-
-function rule(css: string, selector: string): string {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = css.match(new RegExp(`(^|\\n)${escaped}\\s*\\{([^}]*)\\}`));
-  if (!match) throw new Error(`rule ${selector} is not defined`);
-  return match[2];
-}
 
 describe('design tokens', () => {
   const variables = read(join(kit, 'variables.css'));
@@ -128,15 +111,15 @@ describe('shared surfaces', () => {
 
   it('stacks a toggle description under its title in a 44px row: 1 + 4 + 18 + 16 + 4 + 1', () => {
     const forms = read(join(styles, 'forms.css'));
-    const label = rule(forms, '  .toggle-label');
+    const label = rule(forms, '.form-group .toggle-label, .toggle-label');
     expect(label).toContain('padding: var(--ui-space-1) var(--ui-space-3)');
     expect(label).toContain('margin: 0');
-    expect(rule(forms, '  .toggle-wrapper')).not.toContain('margin-top');
-    expect(rule(forms, '  .toggle-text')).toContain('flex-direction: column');
-    expect(rule(forms, '  .toggle-text')).not.toContain('gap');
-    expect(rule(forms, '  .toggle-title')).toContain('line-height: 1.125rem');
-    expect(rule(forms, '  .toggle-desc')).toContain('line-height: var(--ui-space-4)');
-    expect(rule(forms, '  .toggle-desc')).not.toContain('white-space');
+    expect(rule(forms, '.toggle-wrapper')).not.toContain('margin-top');
+    expect(rule(forms, '.toggle-text')).toContain('flex-direction: column');
+    expect(rule(forms, '.toggle-text')).not.toContain('gap');
+    expect(rule(forms, '.toggle-title')).toContain('line-height: 1.125rem');
+    expect(rule(forms, '.toggle-desc')).toContain('line-height: var(--ui-space-4)');
+    expect(rule(forms, '.toggle-desc')).not.toContain('white-space');
   });
 
   it('hides screen-reader text without laying it out against the page', () => {
@@ -151,11 +134,11 @@ describe('shared surfaces', () => {
 
   it('outlines every destructive button and only tints it on hover', () => {
     const globals = read(join(kit, 'globals.css'));
-    const destructive = rule(globals, '  .ui-btn-destructive');
+    const destructive = rule(globals, '.ui-btn-destructive');
     expect(destructive).toContain('border-color: var(--ui-error)');
     expect(destructive).toContain('background-color: transparent');
     expect(destructive).toContain('color: var(--ui-error-600)');
-    const hover = rule(globals, '  .ui-btn-destructive:hover');
+    const hover = rule(globals, '.ui-btn-destructive:hover');
     expect(hover).toContain('color-mix(');
     expect(hover).not.toContain('var(--ui-text-inverse)');
     expect(globals).not.toContain('.ui-btn-destructive-outline');
@@ -164,35 +147,35 @@ describe('shared surfaces', () => {
 
   it('paints the secondary button from the theme the workspace saved', () => {
     const globals = read(join(kit, 'globals.css'));
-    const secondary = rule(globals, '  .ui-btn-secondary');
+    const secondary = rule(globals, '.ui-btn-secondary');
     expect(secondary).toContain('background-color: var(--ui-secondary, var(--ui-bg-surface))');
     expect(secondary).toContain('color: var(--ui-secondary-foreground, var(--ui-text-primary))');
-    expect(rule(globals, '  .ui-btn-secondary:hover')).toContain(
+    expect(rule(globals, '.ui-btn-secondary:hover')).toContain(
       'background-color: var(--ui-secondary-hover, var(--ui-bg-hover))'
     );
   });
 
   it('gives a dialog title a 24px line so the panel lands on the grid', () => {
     const globals = read(join(kit, 'globals.css'));
-    expect(rule(globals, '  .ui-dialog-title')).toContain('line-height: var(--ui-space-6)');
+    expect(rule(globals, '.ui-dialog-title')).toContain('line-height: var(--ui-space-6)');
   });
 
   it('seats a dialog badge beside the title on one row', () => {
     const globals = read(join(kit, 'globals.css'));
-    expect(rule(globals, '  .ui-dialog-title-row')).toContain('display: flex');
-    expect(rule(globals, '  .ui-dialog-title-row')).toContain('align-items: center');
+    expect(rule(globals, '.ui-dialog-title-row')).toContain('display: flex');
+    expect(rule(globals, '.ui-dialog-title-row')).toContain('align-items: center');
   });
 
   it('gives a wizard the same 48px header bar as a page', () => {
     const globals = read(join(kit, 'globals.css'));
-    expect(rule(globals, '  .ui-wizard-header')).toContain('min-height: var(--ui-header-height)');
-    expect(rule(globals, '  .ui-wizard-header')).toContain('padding: 0 var(--ui-space-5)');
-    expect(rule(globals, '  .ui-wizard-header')).toContain('border-bottom: 1px solid');
+    expect(rule(globals, '.ui-wizard-header')).toContain('min-height: var(--ui-header-height)');
+    expect(rule(globals, '.ui-wizard-header')).toContain('padding: 0 var(--ui-space-5)');
+    expect(rule(globals, '.ui-wizard-header')).toContain('border-bottom: 1px solid');
   });
 
   it('tints badges instead of filling them', () => {
     const globals = read(join(kit, 'globals.css'));
-    expect(rule(globals, '  .ui-badge')).toContain('height: var(--ui-badge-height)');
+    expect(rule(globals, '.ui-badge')).toContain('height: var(--ui-badge-height)');
     for (const variant of ['success', 'warning', 'info', 'destructive']) {
       expect(rule(globals, `  .ui-badge-${variant}`)).toContain('color-mix(');
     }

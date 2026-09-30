@@ -1,34 +1,12 @@
 import { describe, expect, it } from 'bun:test';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { media, read, rule } from '../../test/css';
 
 const settings = join(import.meta.dir);
 const sources = join(import.meta.dir, '..', 'sources');
 const pages = join(import.meta.dir, '..', '..', 'pages');
 const styles = join(import.meta.dir, '..', '..', 'styles');
-
-function read(path: string): string {
-  return readFileSync(path, 'utf8');
-}
-
-function rule(css: string, selector: string): string {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = css.match(new RegExp(`(^|\\n)${escaped}\\s*\\{([^}]*)\\}`));
-  if (!match) throw new Error(`rule ${selector} is not defined`);
-  return match[2];
-}
-
-function media(css: string, query: string): string {
-  const start = css.indexOf(`@media ${query} {`);
-  if (start === -1) throw new Error(`@media ${query} is not defined`);
-  const open = css.indexOf('{', start);
-  let depth = 0;
-  for (let index = open; index < css.length; index++) {
-    if (css[index] === '{') depth++;
-    if (css[index] === '}' && --depth === 0) return css.slice(open + 1, index);
-  }
-  throw new Error(`@media ${query} is not closed`);
-}
 
 describe('settings surfaces', () => {
   const shell = read(join(settings, 'workspace', 'pages', 'WorkspaceSettingsPage.css'));
@@ -87,8 +65,8 @@ describe('settings surfaces', () => {
 
   it('stacks a section row on a phone without widening the body past the viewport', () => {
     const phone = media(shell, '(max-width: 768px)');
-    expect(phone).toContain('  .section-row-copy {\n    align-self: stretch;\n  }');
-    expect(rule(phone, '  .settings-page .section-description')).toContain('max-width: 100%');
+    expect(rule(phone, '.section-row-copy')).toContain('align-self: stretch');
+    expect(rule(phone, '.settings-page .section-description')).toContain('max-width: 100%');
     expect(rule(shell, '.settings-page .section-description')).toContain('text-overflow: ellipsis');
   });
 
