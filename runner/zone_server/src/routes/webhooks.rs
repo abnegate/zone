@@ -5,7 +5,7 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -14,7 +14,7 @@ use crate::crypto;
 use crate::db::sync_config::{self, SyncDirection, SyncEventDirection, SyncEventType};
 use crate::db::tasks;
 use crate::state::AppState;
-use crate::sync::{IssueState, SyncError};
+use crate::sync::{Delivery, IssueState, SyncError, github, linear};
 
 /// Maximum allowed webhook body size (1MB)
 const MAX_WEBHOOK_BODY_SIZE: usize = 1024 * 1024;
@@ -44,201 +44,36 @@ struct WebhookResponse {
     message: String,
 }
 
+fn error(status: StatusCode, message: &str) -> Response {
+    (status, Json(ErrorResponse::new(message))).into_response()
+}
+
+fn success(message: String) -> Response {
+    (
+        StatusCode::OK,
+        Json(WebhookResponse {
+            success: true,
+            message,
+        }),
+    )
+        .into_response()
+}
+
 /// POST /api/webhooks/sync/{sync_config_id}/github
 pub async fn github_webhook(
     State(state): State<AppState>,
     Path(sync_config_id): Path<Uuid>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
-    // Check body size to prevent DoS
-    if body.len() > MAX_WEBHOOK_BODY_SIZE {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(ErrorResponse::new("Request body too large")),
-        )
-            .into_response();
-    }
-
-    // Get sync config
-    let sync_config_row = match sync_config::get_sync_config(state.db(), sync_config_id).await {
-        Ok(Some(config)) => config,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Sync config not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!(
-                "Database error looking up sync config {}: {}",
-                sync_config_id,
-                e
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    // Check if enabled
-    if !sync_config_row.enabled {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("Sync config is disabled")),
-        )
-            .into_response();
-    }
-
-    // Verify provider
-    if sync_config_row.provider != "github" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("Invalid provider for this endpoint")),
-        )
-            .into_response();
-    }
-
-    // Decrypt webhook secret
-    let webhook_secret = match sync_config_row.webhook_secret_encrypted {
-        Some(encrypted) => {
-            let encryption_key_bytes = state.encryption_key();
-
-            match crypto::decrypt(encryption_key_bytes, &encrypted) {
-                Ok(secret) => secret,
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to decrypt webhook secret for {}: {}",
-                        sync_config_id,
-                        e
-                    );
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::new("Internal server error")),
-                    )
-                        .into_response();
-                }
-            }
-        }
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new("Webhook secret not configured")),
-            )
-                .into_response();
-        }
-    };
-
-    // Get GitHub provider
-    let provider = match state.sync_registry().get_provider("github") {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("Failed to get GitHub provider: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
-
-    // Parse webhook
-    let webhook_event = match provider.parse_webhook(&headers, &body, &webhook_secret) {
-        Ok(event) => event,
-        Err(SyncError::WebhookVerificationFailed(msg)) => {
-            tracing::warn!(
-                "GitHub webhook verification failed for {}: {}",
-                sync_config_id,
-                msg
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Webhook verification failed")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!(
-                "Failed to parse GitHub webhook for {}: {}",
-                sync_config_id,
-                e
-            );
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new("Invalid webhook payload")),
-            )
-                .into_response();
-        }
-    };
-
-    // Log webhook event (log errors but continue processing)
-    if let Err(e) = sync_config::create_sync_event(
-        state.db(),
-        sync_config_id,
-        None,
-        SyncEventType::WebhookReceived,
-        SyncEventDirection::Inbound,
-        Some(serde_json::to_value(&webhook_event.payload).unwrap_or_default()),
-        None,
-    )
-    .await
-    {
-        tracing::error!("Failed to log webhook event for {}: {}", sync_config_id, e);
-    }
-
-    // Process webhook event
-    match process_webhook_event(
+) -> Response {
+    receive(
         &state,
         sync_config_id,
-        &sync_config_row.project_id,
-        webhook_event,
+        github::PROVIDER_NAME,
+        &headers,
+        &body,
     )
     .await
-    {
-        Ok(message) => (
-            StatusCode::OK,
-            Json(WebhookResponse {
-                success: true,
-                message,
-            }),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!(
-                "Failed to process GitHub webhook for {}: {}",
-                sync_config_id,
-                e
-            );
-
-            // Log error event
-            if let Err(log_err) = sync_config::create_sync_event(
-                state.db(),
-                sync_config_id,
-                None,
-                SyncEventType::SyncError,
-                SyncEventDirection::Inbound,
-                None,
-                Some(&e.to_string()),
-            )
-            .await
-            {
-                tracing::error!(
-                    "Failed to log sync error event for {}: {}",
-                    sync_config_id,
-                    log_err
-                );
-            }
-
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to process webhook")),
-            )
-                .into_response()
-        }
-    }
 }
 
 /// POST /api/webhooks/sync/{sync_config_id}/linear
@@ -247,138 +82,108 @@ pub async fn linear_webhook(
     Path(sync_config_id): Path<Uuid>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
-    // Check body size to prevent DoS
+) -> Response {
+    receive(
+        &state,
+        sync_config_id,
+        linear::PROVIDER_NAME,
+        &headers,
+        &body,
+    )
+    .await
+}
+
+async fn receive(
+    state: &AppState,
+    sync_config_id: Uuid,
+    provider_name: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Response {
     if body.len() > MAX_WEBHOOK_BODY_SIZE {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(ErrorResponse::new("Request body too large")),
-        )
-            .into_response();
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "Request body too large");
     }
 
-    // Get sync config
     let sync_config_row = match sync_config::get_sync_config(state.db(), sync_config_id).await {
         Ok(Some(config)) => config,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Sync config not found")),
-            )
-                .into_response();
-        }
+        Ok(None) => return error(StatusCode::NOT_FOUND, "Sync config not found"),
         Err(e) => {
             tracing::error!(
                 "Database error looking up sync config {}: {}",
                 sync_config_id,
                 e
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
         }
     };
 
-    // Check if enabled
     if !sync_config_row.enabled {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("Sync config is disabled")),
-        )
-            .into_response();
+        return error(StatusCode::BAD_REQUEST, "Sync config is disabled");
     }
 
-    // Verify provider
-    if sync_config_row.provider != "linear" {
-        return (
+    if sync_config_row.provider != provider_name {
+        return error(
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("Invalid provider for this endpoint")),
-        )
-            .into_response();
+            "Invalid provider for this endpoint",
+        );
     }
 
-    // Decrypt webhook secret
     let webhook_secret = match sync_config_row.webhook_secret_encrypted {
-        Some(encrypted) => {
-            let encryption_key_bytes = state.encryption_key();
-
-            match crypto::decrypt(encryption_key_bytes, &encrypted) {
-                Ok(secret) => secret,
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to decrypt webhook secret for {}: {}",
-                        sync_config_id,
-                        e
-                    );
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::new("Internal server error")),
-                    )
-                        .into_response();
-                }
+        Some(encrypted) => match crypto::decrypt(state.encryption_key(), &encrypted) {
+            Ok(secret) => secret,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to decrypt webhook secret for {}: {}",
+                    sync_config_id,
+                    e
+                );
+                return error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
             }
-        }
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new("Webhook secret not configured")),
-            )
-                .into_response();
-        }
+        },
+        None => return error(StatusCode::BAD_REQUEST, "Webhook secret not configured"),
     };
 
-    // Get Linear provider
-    let provider = match state.sync_registry().get_provider("linear") {
+    let provider = match state.sync_registry().get_provider(provider_name) {
         Ok(p) => p,
         Err(e) => {
-            tracing::error!("Failed to get Linear provider: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
+            tracing::error!("Failed to get {} provider: {}", provider_name, e);
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
         }
     };
 
-    // Parse webhook
-    let webhook_event = match provider.parse_webhook(&headers, &body, &webhook_secret) {
-        Ok(event) => event,
+    let delivery = match provider.parse_webhook(headers, body, &webhook_secret) {
+        Ok(delivery) => delivery,
         Err(SyncError::WebhookVerificationFailed(msg)) => {
             tracing::warn!(
-                "Linear webhook verification failed for {}: {}",
+                "{} webhook verification failed for {}: {}",
+                provider_name,
                 sync_config_id,
                 msg
             );
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::new("Webhook verification failed")),
-            )
-                .into_response();
+            return error(StatusCode::UNAUTHORIZED, "Webhook verification failed");
         }
         Err(e) => {
             tracing::error!(
-                "Failed to parse Linear webhook for {}: {}",
+                "Failed to parse {} webhook for {}: {}",
+                provider_name,
                 sync_config_id,
                 e
             );
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new("Invalid webhook payload")),
-            )
-                .into_response();
+            return error(StatusCode::BAD_REQUEST, "Invalid webhook payload");
         }
     };
 
-    // Log webhook event (log errors but continue processing)
+    let logged_payload = match &delivery {
+        Delivery::Issue(event) => serde_json::to_value(&event.payload),
+        Delivery::Ignored(ignored) => serde_json::to_value(ignored),
+    };
     if let Err(e) = sync_config::create_sync_event(
         state.db(),
         sync_config_id,
         None,
         SyncEventType::WebhookReceived,
         SyncEventDirection::Inbound,
-        Some(serde_json::to_value(&webhook_event.payload).unwrap_or_default()),
+        Some(logged_payload.unwrap_or_default()),
         None,
     )
     .await
@@ -386,31 +191,36 @@ pub async fn linear_webhook(
         tracing::error!("Failed to log webhook event for {}: {}", sync_config_id, e);
     }
 
-    // Process webhook event
+    let webhook_event = match delivery {
+        Delivery::Issue(event) => event,
+        Delivery::Ignored(ignored) => {
+            tracing::info!(
+                "Ignoring {} webhook for {}: {:?}",
+                provider_name,
+                sync_config_id,
+                ignored
+            );
+            return success(ignored.message());
+        }
+    };
+
     match process_webhook_event(
-        &state,
+        state,
         sync_config_id,
         &sync_config_row.project_id,
         webhook_event,
     )
     .await
     {
-        Ok(message) => (
-            StatusCode::OK,
-            Json(WebhookResponse {
-                success: true,
-                message,
-            }),
-        )
-            .into_response(),
+        Ok(message) => success(message),
         Err(e) => {
             tracing::error!(
-                "Failed to process Linear webhook for {}: {}",
+                "Failed to process {} webhook for {}: {}",
+                provider_name,
                 sync_config_id,
                 e
             );
 
-            // Log error event
             if let Err(log_err) = sync_config::create_sync_event(
                 state.db(),
                 sync_config_id,
@@ -429,11 +239,10 @@ pub async fn linear_webhook(
                 );
             }
 
-            (
+            error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to process webhook")),
+                "Failed to process webhook",
             )
-                .into_response()
         }
     }
 }

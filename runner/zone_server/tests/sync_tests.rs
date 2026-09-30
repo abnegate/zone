@@ -27,6 +27,15 @@ use zone_server::{
 
 type HmacSha256 = Hmac<Sha256>;
 
+const GITHUB_SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
+const GITHUB_EVENT_HEADER: &str = "X-GitHub-Event";
+const GITHUB_ISSUES_EVENT: &str = "issues";
+const LINEAR_SIGNATURE_HEADER: &str = "Linear-Signature";
+
+fn now_milliseconds() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 async fn setup_test_state() -> AppState {
     // Use test database
     let database_url = std::env::var("TEST_DATABASE_URL")
@@ -529,7 +538,8 @@ async fn test_github_webhook_signature_verification() {
         .method("POST")
         .uri(format!("/api/webhooks/sync/{}/github", sync_config_row.id))
         .header("Content-Type", "application/json")
-        .header("X-Hub-Signature-256", signature)
+        .header(GITHUB_SIGNATURE_HEADER, signature)
+        .header(GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT)
         .body(Body::from(payload_bytes.clone()))
         .unwrap();
 
@@ -544,7 +554,8 @@ async fn test_github_webhook_signature_verification() {
         .method("POST")
         .uri(format!("/api/webhooks/sync/{}/github", sync_config_row.id))
         .header("Content-Type", "application/json")
-        .header("X-Hub-Signature-256", "sha256=invalid")
+        .header(GITHUB_SIGNATURE_HEADER, "sha256=invalid")
+        .header(GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT)
         .body(Body::from(payload_bytes))
         .unwrap();
 
@@ -606,7 +617,8 @@ async fn test_linear_webhook_signature_verification() {
                 "type": "started",
                 "name": "In Progress"
             }
-        }
+        },
+        "webhookTimestamp": now_milliseconds()
     });
 
     let payload_bytes = serde_json::to_vec(&payload).expect("Failed to serialize payload");
@@ -625,7 +637,7 @@ async fn test_linear_webhook_signature_verification() {
         .method("POST")
         .uri(format!("/api/webhooks/sync/{}/linear", sync_config_row.id))
         .header("Content-Type", "application/json")
-        .header("Linear-Signature", signature)
+        .header(LINEAR_SIGNATURE_HEADER, signature)
         .body(Body::from(payload_bytes.clone()))
         .unwrap();
 
@@ -640,7 +652,7 @@ async fn test_linear_webhook_signature_verification() {
         .method("POST")
         .uri(format!("/api/webhooks/sync/{}/linear", sync_config_row.id))
         .header("Content-Type", "application/json")
-        .header("Linear-Signature", "invalid")
+        .header(LINEAR_SIGNATURE_HEADER, "invalid")
         .body(Body::from(payload_bytes))
         .unwrap();
 
@@ -732,22 +744,51 @@ impl SyncedTask {
         hex::encode(mac.finalize().into_bytes())
     }
 
-    async fn post(&self, provider: &str, header: &str, signature: &str, body: &[u8]) -> StatusCode {
-        let request = Request::builder()
+    async fn deliver(
+        &self,
+        provider: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> (StatusCode, serde_json::Value) {
+        let mut request = Request::builder()
             .method("POST")
             .uri(format!(
                 "/api/webhooks/sync/{}/{}",
                 self.sync_config_id, provider
             ))
-            .header("Content-Type", "application/json")
-            .header(header, signature)
-            .body(Body::from(body.to_vec()))
-            .unwrap();
-        create_router(self.state.clone())
-            .oneshot(request)
+            .header("Content-Type", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = create_router(self.state.clone())
+            .oneshot(request.body(Body::from(body.to_vec())).unwrap())
             .await
-            .unwrap()
-            .status()
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    async fn post(&self, provider: &str, headers: &[(&str, &str)], body: &[u8]) -> StatusCode {
+        self.deliver(provider, headers, body).await.0
+    }
+
+    async fn post_linear(&self, body: &serde_json::Value) -> StatusCode {
+        let body = serde_json::to_vec(body).unwrap();
+        let signature = self.sign(&body);
+        self.post("linear", &[(LINEAR_SIGNATURE_HEADER, &signature)], &body)
+            .await
+    }
+
+    async fn event_types(&self) -> Vec<SyncEventType> {
+        sync_config::list_sync_events(self.state.db(), self.sync_config_id, 100)
+            .await
+            .expect("Failed to read sync events")
+            .into_iter()
+            .map(|event| event.event_type)
+            .collect()
     }
 
     async fn item_event_types(&self) -> Vec<SyncEventType> {
@@ -765,8 +806,15 @@ impl SyncedTask {
     async fn post_github(&self, body: &serde_json::Value) -> StatusCode {
         let body = serde_json::to_vec(body).unwrap();
         let signature = format!("sha256={}", self.sign(&body));
-        self.post("github", "X-Hub-Signature-256", &signature, &body)
-            .await
+        self.post(
+            "github",
+            &[
+                (GITHUB_SIGNATURE_HEADER, &signature),
+                (GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT),
+            ],
+            &body,
+        )
+        .await
     }
 
     async fn task(&self) -> tasks::TaskRow {
@@ -800,8 +848,10 @@ async fn a_signed_github_edit_updates_the_task_and_answers_ok() {
     let status = synced
         .post(
             "github",
-            "X-Hub-Signature-256",
-            "sha256=invalid",
+            &[
+                (GITHUB_SIGNATURE_HEADER, "sha256=invalid"),
+                (GITHUB_EVENT_HEADER, GITHUB_ISSUES_EVENT),
+            ],
             &serde_json::to_vec(&body).unwrap(),
         )
         .await;
@@ -874,13 +924,147 @@ fn github_issue(action: &str, title: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn a_signed_linear_update_updates_the_task_and_answers_ok() {
-    let synced = SyncedTask::create(
-        "linear",
-        json!({ "api_key": "lin_api_test123", "team_id": "TEAM-123" }),
-        SyncDirection::Bidirectional,
-    )
-    .await;
-    let body = serde_json::to_vec(&json!({
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+    let body = linear_issue_update();
+
+    let status = synced.post_linear(&body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(synced.item_event_types().await, vec![SyncEventType::Update]);
+    assert_eq!(synced.task().await.title, "Renamed");
+
+    let status = synced
+        .post(
+            "linear",
+            &[(LINEAR_SIGNATURE_HEADER, "invalid")],
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_signed_github_ping_is_acknowledged_without_touching_the_task() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let body = serde_json::to_vec(&json!({ "zen": "Design for failure.", "hook_id": 1 })).unwrap();
+    let signature = format!("sha256={}", synced.sign(&body));
+
+    let (status, response) = synced
+        .deliver(
+            "github",
+            &[
+                (GITHUB_SIGNATURE_HEADER, &signature),
+                (GITHUB_EVENT_HEADER, "ping"),
+            ],
+            &body,
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], json!(true), "{response}");
+    assert!(response["message"].is_string(), "{response}");
+    assert_eq!(synced.task().await.title, "Original");
+    assert!(synced.item_event_types().await.is_empty());
+    assert_eq!(
+        synced.event_types().await,
+        vec![SyncEventType::WebhookReceived]
+    );
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_unsigned_github_ping_is_unauthorized() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let body = serde_json::to_vec(&json!({ "zen": "Design for failure.", "hook_id": 1 })).unwrap();
+
+    let status = synced
+        .post("github", &[(GITHUB_EVENT_HEADER, "ping")], &body)
+        .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(synced.event_types().await.is_empty());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_signed_github_event_other_than_issues_leaves_the_task_unchanged() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    let body = serde_json::to_vec(&github_issue("edited", "Renamed")).unwrap();
+    let signature = format!("sha256={}", synced.sign(&body));
+
+    let status = synced
+        .post(
+            "github",
+            &[
+                (GITHUB_SIGNATURE_HEADER, &signature),
+                (GITHUB_EVENT_HEADER, "issue_comment"),
+            ],
+            &body,
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(synced.task().await.title, "Original");
+    assert!(synced.item_event_types().await.is_empty());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_signed_linear_comment_or_project_update_leaves_the_synced_task_unchanged() {
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+
+    for entity in ["Comment", "Project"] {
+        let status = synced
+            .post_linear(&json!({
+                "action": "update",
+                "type": entity,
+                "data": {
+                    "id": "123",
+                    "body": "A comment",
+                    "name": "A project",
+                    "description": "Not the task's description"
+                },
+                "webhookTimestamp": now_milliseconds()
+            }))
+            .await;
+
+        assert_eq!(status, StatusCode::OK, "{entity}");
+    }
+
+    let task = synced.task().await;
+    assert_eq!(task.title, "Original");
+    assert_eq!(task.description, "Original description");
+    assert!(synced.item_event_types().await.is_empty());
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_linear_delivery_sent_over_a_minute_ago_is_unauthorized() {
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+    let mut body = linear_issue_update();
+    body["webhookTimestamp"] = json!(now_milliseconds() - 120_000);
+
+    let status = synced.post_linear(&body).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(synced.task().await.title, "Original");
+    assert!(synced.event_types().await.is_empty());
+
+    synced.cleanup().await;
+}
+
+fn linear_config() -> serde_json::Value {
+    json!({ "api_key": "lin_api_test123", "team_id": "TEAM-123" })
+}
+
+fn linear_issue_update() -> serde_json::Value {
+    json!({
         "action": "update",
         "type": "Issue",
         "data": {
@@ -888,25 +1072,9 @@ async fn a_signed_linear_update_updates_the_task_and_answers_ok() {
             "title": "Renamed",
             "description": "Edited description",
             "state": { "type": "started", "name": "In Progress" }
-        }
-    }))
-    .unwrap();
-
-    let signature = synced.sign(&body);
-    let status = synced
-        .post("linear", "Linear-Signature", &signature, &body)
-        .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(synced.item_event_types().await, vec![SyncEventType::Update]);
-    assert_eq!(synced.task().await.title, "Renamed");
-
-    let status = synced
-        .post("linear", "Linear-Signature", "invalid", &body)
-        .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    synced.cleanup().await;
+        },
+        "webhookTimestamp": now_milliseconds()
+    })
 }
 
 // The console's External Sync section: configuration only, no engine yet.

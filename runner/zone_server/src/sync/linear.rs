@@ -2,16 +2,23 @@
 
 use async_trait::async_trait;
 use axum::http::HeaderMap;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 
 use super::{
-    ExternalIssue, IssueState, SyncConfig, SyncError, SyncProvider, SyncResult, WebhookEvent,
-    WebhookPayload,
+    Delivery, ExternalIssue, IgnoredDelivery, IssueState, SyncConfig, SyncError, SyncProvider,
+    SyncResult, WebhookEvent, WebhookPayload,
 };
 use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
+
+pub const PROVIDER_NAME: &str = "linear";
+
+const SIGNATURE_HEADER: &str = "Linear-Signature";
+const ISSUE_TYPE: &str = "Issue";
+const TIMESTAMP_TOLERANCE_MILLISECONDS: u64 = 60_000;
 
 /// Linear-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +76,10 @@ struct LinearWebhookPayload {
     action: String,
     #[serde(rename = "type")]
     event_type: String,
+    #[serde(default)]
     data: serde_json::Value,
+    #[serde(rename = "webhookTimestamp")]
+    webhook_timestamp: Option<i64>,
 }
 
 /// Linear sync provider
@@ -142,6 +152,18 @@ impl LinearSyncProvider {
         }
     }
 
+    fn verify_timestamp(sent_at: Option<i64>, now: i64) -> SyncResult<()> {
+        let sent_at = sent_at.ok_or_else(|| {
+            SyncError::WebhookVerificationFailed("Missing webhookTimestamp".to_string())
+        })?;
+        if now.abs_diff(sent_at) > TIMESTAMP_TOLERANCE_MILLISECONDS {
+            return Err(SyncError::WebhookVerificationFailed(format!(
+                "webhookTimestamp {sent_at} is more than {TIMESTAMP_TOLERANCE_MILLISECONDS} ms from now"
+            )));
+        }
+        Ok(())
+    }
+
     fn map_action_to_event_type(action: &str) -> SyncEventType {
         match action {
             "create" => SyncEventType::Create,
@@ -203,7 +225,7 @@ impl Default for LinearSyncProvider {
 #[async_trait]
 impl SyncProvider for LinearSyncProvider {
     fn provider_name(&self) -> &str {
-        "linear"
+        PROVIDER_NAME
     }
 
     async fn create_issue(&self, config: &SyncConfig, task: &TaskRow) -> SyncResult<ExternalIssue> {
@@ -349,13 +371,12 @@ impl SyncProvider for LinearSyncProvider {
         headers: &HeaderMap,
         body: &[u8],
         secret: &str,
-    ) -> SyncResult<WebhookEvent> {
-        // Verify signature
+    ) -> SyncResult<Delivery> {
         let signature = headers
-            .get("Linear-Signature")
+            .get(SIGNATURE_HEADER)
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| {
-                SyncError::WebhookVerificationFailed("Missing Linear-Signature header".to_string())
+                SyncError::WebhookVerificationFailed(format!("Missing {SIGNATURE_HEADER} header"))
             })?;
 
         if !Self::verify_signature(secret, body, signature) {
@@ -364,12 +385,18 @@ impl SyncProvider for LinearSyncProvider {
             ));
         }
 
-        // Parse payload
         let payload: LinearWebhookPayload = serde_json::from_slice(body).map_err(|e| {
             SyncError::InvalidWebhookPayload(format!("Failed to parse JSON: {}", e))
         })?;
 
-        // Extract issue data
+        Self::verify_timestamp(payload.webhook_timestamp, Utc::now().timestamp_millis())?;
+
+        if payload.event_type != ISSUE_TYPE {
+            return Ok(Delivery::Ignored(IgnoredDelivery::NotAnIssue(
+                payload.event_type,
+            )));
+        }
+
         let issue_id = payload
             .data
             .get("id")
@@ -396,7 +423,7 @@ impl SyncProvider for LinearSyncProvider {
             .and_then(|v| v.as_str())
             .map(Self::map_linear_state_to_issue_state);
 
-        Ok(WebhookEvent {
+        Ok(Delivery::Issue(WebhookEvent {
             event_type: Self::map_action_to_event_type(&payload.action),
             external_id: issue_id.to_string(),
             payload: WebhookPayload {
@@ -405,7 +432,7 @@ impl SyncProvider for LinearSyncProvider {
                 state,
                 raw: Some(payload.data),
             },
-        })
+        }))
     }
 }
 
@@ -469,29 +496,89 @@ mod tests {
         assert!(!LinearSyncProvider::verify_signature(secret, body, &sig));
     }
 
-    fn parse_signed_action(action: &str) -> SyncEventType {
+    const SECRET: &str = "my-secret";
+
+    fn parse_signed(body: &serde_json::Value) -> SyncResult<Delivery> {
         use hmac::{Hmac, KeyInit, Mac};
         type HmacSha256 = Hmac<Sha256>;
 
-        let secret = "my-secret";
-        let body = serde_json::to_vec(&serde_json::json!({
-            "action": action,
-            "type": "Issue",
-            "data": { "id": "issue-123", "title": "Title" }
-        }))
-        .unwrap();
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        let body = serde_json::to_vec(body).unwrap();
+        let mut mac = HmacSha256::new_from_slice(SECRET.as_bytes()).unwrap();
         mac.update(&body);
         let mut headers = HeaderMap::new();
         headers.insert(
-            "Linear-Signature",
+            SIGNATURE_HEADER,
             hex::encode(mac.finalize().into_bytes()).parse().unwrap(),
         );
 
-        LinearSyncProvider::new()
-            .parse_webhook(&headers, &body, secret)
-            .expect("a signed webhook parses")
-            .event_type
+        LinearSyncProvider::new().parse_webhook(&headers, &body, SECRET)
+    }
+
+    fn delivery(entity: &str, action: &str) -> serde_json::Value {
+        serde_json::json!({
+            "action": action,
+            "type": entity,
+            "data": { "id": "issue-123", "title": "Title" },
+            "webhookTimestamp": Utc::now().timestamp_millis()
+        })
+    }
+
+    fn parse_signed_action(action: &str) -> SyncEventType {
+        match parse_signed(&delivery(ISSUE_TYPE, action)).expect("a signed webhook parses") {
+            Delivery::Issue(event) => event.event_type,
+            Delivery::Ignored(reason) => panic!("an issue delivery was ignored: {reason:?}"),
+        }
+    }
+
+    #[test]
+    fn a_signed_delivery_for_another_entity_is_ignored_as_not_an_issue() {
+        for entity in ["Comment", "Project"] {
+            let delivery = parse_signed(&delivery(entity, "update")).expect("it parses");
+
+            assert!(
+                matches!(
+                    &delivery,
+                    Delivery::Ignored(IgnoredDelivery::NotAnIssue(event)) if event == entity
+                ),
+                "{entity}: {delivery:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_signed_delivery_sent_over_a_minute_ago_fails_verification() {
+        let mut body = delivery(ISSUE_TYPE, "update");
+        body["webhookTimestamp"] = serde_json::json!(Utc::now().timestamp_millis() - 61_000);
+
+        let result = parse_signed(&body);
+
+        assert!(matches!(
+            result,
+            Err(SyncError::WebhookVerificationFailed(_))
+        ));
+    }
+
+    #[test]
+    fn a_signed_delivery_without_a_timestamp_fails_verification() {
+        let mut body = delivery(ISSUE_TYPE, "update");
+        body.as_object_mut().unwrap().remove("webhookTimestamp");
+
+        let result = parse_signed(&body);
+
+        assert!(matches!(
+            result,
+            Err(SyncError::WebhookVerificationFailed(_))
+        ));
+    }
+
+    #[test]
+    fn a_timestamp_within_a_minute_either_side_of_now_is_fresh() {
+        let now = 1_700_000_000_000;
+
+        assert!(LinearSyncProvider::verify_timestamp(Some(now - 60_000), now).is_ok());
+        assert!(LinearSyncProvider::verify_timestamp(Some(now + 60_000), now).is_ok());
+        assert!(LinearSyncProvider::verify_timestamp(Some(now - 60_001), now).is_err());
+        assert!(LinearSyncProvider::verify_timestamp(Some(now + 60_001), now).is_err());
     }
 
     #[test]

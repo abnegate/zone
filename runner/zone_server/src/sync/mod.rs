@@ -85,6 +85,31 @@ pub enum IssueState {
     InProgress,
 }
 
+/// A verified webhook delivery: an issue event to apply, or one to acknowledge and skip
+#[derive(Debug, Clone)]
+pub enum Delivery {
+    Issue(WebhookEvent),
+    Ignored(IgnoredDelivery),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", content = "event", rename_all = "snake_case")]
+pub enum IgnoredDelivery {
+    Ping,
+    NotAnIssue(String),
+}
+
+impl IgnoredDelivery {
+    pub fn message(&self) -> String {
+        match self {
+            Self::Ping => "Ping acknowledged".to_string(),
+            Self::NotAnIssue(event) => {
+                format!("Ignored {event} delivery; only issue events are synced")
+            }
+        }
+    }
+}
+
 /// Webhook event from external system
 #[derive(Debug, Clone)]
 pub struct WebhookEvent {
@@ -129,14 +154,9 @@ pub trait SyncProvider: Send + Sync {
     /// Close an external issue
     async fn close_issue(&self, config: &SyncConfig, external_id: &str) -> SyncResult<()>;
 
-    /// Parse and verify webhook payload
-    /// Returns the parsed event if signature verification passes
-    fn parse_webhook(
-        &self,
-        headers: &HeaderMap,
-        body: &[u8],
-        secret: &str,
-    ) -> SyncResult<WebhookEvent>;
+    /// Verify a delivery's signature, then classify it as an issue event or one to ignore
+    fn parse_webhook(&self, headers: &HeaderMap, body: &[u8], secret: &str)
+    -> SyncResult<Delivery>;
 }
 
 /// Registry for sync providers
@@ -222,6 +242,18 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result, Err(SyncError::ProviderNotFound(_))));
+    }
+
+    #[test]
+    fn an_ignored_delivery_serializes_its_reason_and_event() {
+        assert_eq!(
+            serde_json::to_value(IgnoredDelivery::Ping).unwrap(),
+            serde_json::json!({ "reason": "ping" })
+        );
+        assert_eq!(
+            serde_json::to_value(IgnoredDelivery::NotAnIssue("Comment".to_string())).unwrap(),
+            serde_json::json!({ "reason": "not_an_issue", "event": "Comment" })
+        );
     }
 
     #[test]

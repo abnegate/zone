@@ -7,11 +7,18 @@ use sha2::Sha256;
 use std::collections::HashMap;
 
 use super::{
-    ExternalIssue, IssueState, SyncConfig, SyncError, SyncProvider, SyncResult, WebhookEvent,
-    WebhookPayload,
+    Delivery, ExternalIssue, IgnoredDelivery, IssueState, SyncConfig, SyncError, SyncProvider,
+    SyncResult, WebhookEvent, WebhookPayload,
 };
 use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
+
+pub const PROVIDER_NAME: &str = "github";
+
+const SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
+const EVENT_HEADER: &str = "X-GitHub-Event";
+const ISSUES_EVENT: &str = "issues";
+const PING_EVENT: &str = "ping";
 
 /// GitHub-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,7 +147,7 @@ impl Default for GitHubSyncProvider {
 #[async_trait]
 impl SyncProvider for GitHubSyncProvider {
     fn provider_name(&self) -> &str {
-        "github"
+        PROVIDER_NAME
     }
 
     async fn create_issue(&self, config: &SyncConfig, task: &TaskRow) -> SyncResult<ExternalIssue> {
@@ -288,15 +295,12 @@ impl SyncProvider for GitHubSyncProvider {
         headers: &HeaderMap,
         body: &[u8],
         secret: &str,
-    ) -> SyncResult<WebhookEvent> {
-        // Verify signature
+    ) -> SyncResult<Delivery> {
         let signature = headers
-            .get("X-Hub-Signature-256")
+            .get(SIGNATURE_HEADER)
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| {
-                SyncError::WebhookVerificationFailed(
-                    "Missing X-Hub-Signature-256 header".to_string(),
-                )
+                SyncError::WebhookVerificationFailed(format!("Missing {SIGNATURE_HEADER} header"))
             })?;
 
         if !Self::verify_signature(secret, body, signature) {
@@ -305,12 +309,27 @@ impl SyncProvider for GitHubSyncProvider {
             ));
         }
 
-        // Parse payload
+        let event = headers
+            .get(EVENT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                SyncError::InvalidWebhookPayload(format!("Missing {EVENT_HEADER} header"))
+            })?;
+        match event {
+            ISSUES_EVENT => {}
+            PING_EVENT => return Ok(Delivery::Ignored(IgnoredDelivery::Ping)),
+            other => {
+                return Ok(Delivery::Ignored(IgnoredDelivery::NotAnIssue(
+                    other.to_string(),
+                )));
+            }
+        }
+
         let payload: GitHubWebhookPayload = serde_json::from_slice(body).map_err(|e| {
             SyncError::InvalidWebhookPayload(format!("Failed to parse JSON: {}", e))
         })?;
 
-        Ok(WebhookEvent {
+        Ok(Delivery::Issue(WebhookEvent {
             event_type: Self::map_action_to_event_type(&payload.action),
             external_id: payload.issue.number.to_string(),
             payload: WebhookPayload {
@@ -319,7 +338,7 @@ impl SyncProvider for GitHubSyncProvider {
                 state: Some(Self::map_github_state_to_issue_state(&payload.issue.state)),
                 raw: Some(serde_json::to_value(&payload).unwrap_or_default()),
             },
-        })
+        }))
     }
 }
 
@@ -396,12 +415,34 @@ mod tests {
         ));
     }
 
-    fn parse_signed_action(action: &str) -> SyncEventType {
+    const SECRET: &str = "my-secret";
+
+    fn signed_headers(body: &[u8], event: Option<&str>) -> HeaderMap {
         use hmac::{Hmac, KeyInit, Mac};
         type HmacSha256 = Hmac<Sha256>;
 
-        let secret = "my-secret";
-        let body = serde_json::to_vec(&serde_json::json!({
+        let mut mac = HmacSha256::new_from_slice(SECRET.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        let mut headers = HeaderMap::new();
+        headers.insert(SIGNATURE_HEADER, signature.parse().unwrap());
+        if let Some(event) = event {
+            headers.insert(EVENT_HEADER, event.parse().unwrap());
+        }
+        headers
+    }
+
+    fn parse_signed(event: Option<&str>, body: &serde_json::Value) -> SyncResult<Delivery> {
+        let body = serde_json::to_vec(body).unwrap();
+        GitHubSyncProvider::new().parse_webhook(&signed_headers(&body, event), &body, SECRET)
+    }
+
+    fn ping() -> serde_json::Value {
+        serde_json::json!({ "zen": "Keep it logically awesome.", "hook_id": 1 })
+    }
+
+    fn parse_signed_action(action: &str) -> SyncEventType {
+        let body = serde_json::json!({
             "action": action,
             "issue": {
                 "number": 123,
@@ -410,18 +451,52 @@ mod tests {
                 "title": "Title",
                 "body": null
             }
-        }))
-        .unwrap();
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(&body);
-        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Hub-Signature-256", signature.parse().unwrap());
+        });
 
-        GitHubSyncProvider::new()
-            .parse_webhook(&headers, &body, secret)
-            .expect("a signed webhook parses")
-            .event_type
+        match parse_signed(Some(ISSUES_EVENT), &body).expect("a signed webhook parses") {
+            Delivery::Issue(event) => event.event_type,
+            Delivery::Ignored(reason) => panic!("an issues delivery was ignored: {reason:?}"),
+        }
+    }
+
+    #[test]
+    fn a_signed_ping_is_acknowledged_as_a_ping() {
+        let delivery = parse_signed(Some(PING_EVENT), &ping()).expect("a signed ping parses");
+
+        assert!(matches!(delivery, Delivery::Ignored(IgnoredDelivery::Ping)));
+    }
+
+    #[test]
+    fn an_unsigned_ping_fails_verification() {
+        let body = serde_json::to_vec(&ping()).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(EVENT_HEADER, PING_EVENT.parse().unwrap());
+
+        let result = GitHubSyncProvider::new().parse_webhook(&headers, &body, SECRET);
+
+        assert!(matches!(
+            result,
+            Err(SyncError::WebhookVerificationFailed(_))
+        ));
+    }
+
+    #[test]
+    fn a_signed_event_other_than_issues_is_ignored_as_not_an_issue() {
+        let body = serde_json::json!({ "action": "opened", "pull_request": { "number": 7 } });
+
+        let delivery = parse_signed(Some("pull_request"), &body).expect("a signed event parses");
+
+        assert!(matches!(
+            delivery,
+            Delivery::Ignored(IgnoredDelivery::NotAnIssue(event)) if event == "pull_request"
+        ));
+    }
+
+    #[test]
+    fn a_signed_delivery_without_an_event_header_is_an_invalid_payload() {
+        let result = parse_signed(None, &ping());
+
+        assert!(matches!(result, Err(SyncError::InvalidWebhookPayload(_))));
     }
 
     #[test]
@@ -487,25 +562,11 @@ mod tests {
 
     #[test]
     fn test_parse_webhook_invalid_json() {
-        let provider = GitHubSyncProvider::new();
         let body = b"not valid json";
-        let secret = "test-secret";
+        let headers = signed_headers(body, Some(ISSUES_EVENT));
 
-        // Compute valid signature
-        use hmac::{Hmac, KeyInit, Mac};
-        use sha2::Sha256;
-        type HmacSha256 = Hmac<Sha256>;
+        let result = GitHubSyncProvider::new().parse_webhook(&headers, body, SECRET);
 
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body);
-        let result = mac.finalize();
-        let sig = format!("sha256={}", hex::encode(result.into_bytes()));
-
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Hub-Signature-256", sig.parse().unwrap());
-
-        let result = provider.parse_webhook(&headers, body, secret);
-        assert!(result.is_err());
         assert!(matches!(result, Err(SyncError::InvalidWebhookPayload(_))));
     }
 
