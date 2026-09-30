@@ -4,18 +4,10 @@
 //! next turn. Official models already stop; this filter is the safety net so
 //! those tokens never appear in the transcript.
 
-/// Tokens that mean "end of this assistant turn" across common templates.
-pub const DEFAULT_STOPS: &[&str] = &[
-    "<|im_end|>",
-    "<|im_start|>",
-    "<|eot_id|>",
-    "<|end_of_turn|>",
-    "<|endoftext|>",
-    "<|end_of_text|>",
-];
+use zone_core::llm::TEMPLATE_STOPS;
 
 pub fn default_stop_strings() -> Vec<String> {
-    DEFAULT_STOPS
+    TEMPLATE_STOPS
         .iter()
         .map(|stop| (*stop).to_string())
         .collect()

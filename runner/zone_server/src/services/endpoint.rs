@@ -10,7 +10,7 @@ use reqwest::Url;
 use uuid::Uuid;
 use zone_chat::capacity::Resolver;
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
-use zone_core::llm::{LlmBackend, LlmConfig};
+use zone_core::llm::{Dialect, LlmBackend, LlmConfig};
 use zone_core::secret::{REDACTED, SecretValue, redact};
 
 use crate::config::Config;
@@ -90,6 +90,7 @@ pub struct Endpoint {
     url: String,
     key: SecretValue,
     origin: Origin,
+    dialect: Dialect,
 }
 
 impl fmt::Debug for Endpoint {
@@ -99,6 +100,7 @@ impl fmt::Debug for Endpoint {
             .field("url", &self.url)
             .field("key", &REDACTED)
             .field("origin", &self.origin)
+            .field("dialect", &self.dialect)
             .finish()
     }
 }
@@ -110,6 +112,7 @@ impl Endpoint {
             url: config.litellm_host.clone(),
             key: SecretValue::new(config.litellm_key.clone()),
             origin: Origin::Instance,
+            dialect: Dialect::Compatible,
         }
     }
 
@@ -127,11 +130,13 @@ impl Endpoint {
                 settings.openai_base_url.as_deref(),
                 settings.openai_api_key.as_ref(),
                 OPENAI_URL,
+                Dialect::OpenAI,
             ),
             PROVIDER_ANTHROPIC => Self::provider(
                 settings.anthropic_base_url.as_deref(),
                 settings.anthropic_api_key.as_ref(),
                 ANTHROPIC_URL,
+                Dialect::Anthropic,
             ),
             _ => Ok(None),
         };
@@ -170,6 +175,10 @@ impl Endpoint {
         self.origin
     }
 
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
     pub fn llm(
         &self,
         model: impl Into<String>,
@@ -184,6 +193,7 @@ impl Endpoint {
             temperature,
             max_tokens,
             backend,
+            dialect: self.dialect,
         }
     }
 
@@ -246,34 +256,38 @@ impl Endpoint {
                 url: config.litellm_host.clone(),
                 key: key.unwrap_or_else(|| SecretValue::new(config.litellm_key.clone())),
                 origin: Origin::Instance,
+                dialect: Dialect::Compatible,
             }));
         }
-        Ok(Some(Self::settings(url, key)))
+        Ok(Some(Self::settings(url, key, Dialect::Compatible)))
     }
 
     fn provider(
         base: Option<&str>,
         key: Option<&SecretValue>,
         default: &str,
+        dialect: Dialect,
     ) -> Result<Option<Self>, UrlError> {
         let url = saved_url(base)?;
         match (saved_key(key), url) {
-            (Some(key), Some(url)) => Ok(Some(Self::settings(url, Some(key)))),
+            (Some(key), Some(url)) => Ok(Some(Self::settings(url, Some(key), dialect))),
             (Some(key), None) => Ok(Some(Self {
                 url: default.to_string(),
                 key,
                 origin: Origin::Settings,
+                dialect,
             })),
-            (None, Some(url)) => Ok(Some(Self::settings(url, None))),
+            (None, Some(url)) => Ok(Some(Self::settings(url, None, dialect))),
             (None, None) => Ok(None),
         }
     }
 
-    fn settings(url: SavedUrl<'_>, key: Option<SecretValue>) -> Self {
+    fn settings(url: SavedUrl<'_>, key: Option<SecretValue>, dialect: Dialect) -> Self {
         Self {
             url: normalized(url),
             key: key.unwrap_or_else(|| SecretValue::new(String::new())),
             origin: Origin::Settings,
+            dialect,
         }
     }
 }
@@ -358,7 +372,20 @@ fn unechoed<'a>(word: &'a str, key: &str) -> &'a str {
 
 #[cfg(test)]
 pub(crate) mod testing {
+    use super::{Endpoint, Origin};
     use crate::db::ai_settings::EffectiveAiSettings;
+    use zone_core::llm::Dialect;
+    use zone_core::secret::SecretValue;
+
+    /// The instance's endpoint at `url` under `key`.
+    pub fn endpoint(url: &str, key: &str) -> Endpoint {
+        Endpoint {
+            url: url.to_string(),
+            key: SecretValue::new(key),
+            origin: Origin::Instance,
+            dialect: Dialect::Compatible,
+        }
+    }
 
     /// `provider` with nothing else saved.
     pub fn settings(provider: &str) -> EffectiveAiSettings {
@@ -942,6 +969,108 @@ mod tests {
         assert_eq!(llm.temperature, 0.2);
         assert_eq!(llm.max_tokens, 64);
         assert!(matches!(llm.backend, LlmBackend::Http));
+        assert_eq!(llm.dialect, Dialect::Anthropic);
+    }
+
+    #[test]
+    fn each_endpoint_speaks_the_dialect_of_the_api_behind_it() {
+        let config = config();
+        let key = Saved {
+            url: None,
+            key: Some(SAVED_KEY),
+        };
+        let gateway = Saved {
+            url: Some("https://gateway.example"),
+            key: Some(SAVED_KEY),
+        };
+        for (provider, values, dialect) in [
+            (PROVIDER_OPENAI, key, Dialect::OpenAI),
+            (PROVIDER_OPENAI, gateway, Dialect::OpenAI),
+            (PROVIDER_OPENAI, NOTHING, Dialect::Compatible),
+            (PROVIDER_ANTHROPIC, key, Dialect::Anthropic),
+            (PROVIDER_ANTHROPIC, gateway, Dialect::Anthropic),
+            (PROVIDER_ANTHROPIC, NOTHING, Dialect::Compatible),
+            (PROVIDER_SELF_HOSTED, gateway, Dialect::Compatible),
+            (PROVIDER_SELF_HOSTED, NOTHING, Dialect::Compatible),
+            (PROVIDER_BEDROCK, gateway, Dialect::Compatible),
+        ] {
+            let endpoint = Endpoint::resolve(&config, &saved(provider, values));
+
+            assert_eq!(endpoint.dialect(), dialect, "{provider} {:?}", values.url);
+            assert_eq!(
+                endpoint.llm("model", 0.2, 64, LlmBackend::Http).dialect,
+                dialect,
+                "{provider} {:?}",
+                values.url
+            );
+        }
+    }
+
+    async fn chat_turn(provider: &str, model: &str, temperature: f32) -> serde_json::Value {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let mut settings = settings(provider);
+        settings.openai_base_url = Some(server.uri());
+        settings.openai_api_key = Some(SecretValue::new(SAVED_KEY));
+        settings.anthropic_base_url = Some(server.uri());
+        settings.anthropic_api_key = Some(SecretValue::new(SAVED_KEY));
+        let endpoint = Endpoint::resolve(&config(), &settings);
+        let stops = crate::services::completion_tokens::merge_stops(&["User:".to_string()]);
+
+        let answered = zone_core::llm::LlmClient::new(endpoint.llm(
+            model,
+            temperature,
+            512,
+            LlmBackend::Http,
+        ))
+        .with_stop(stops)
+        .chat(&[zone_core::llm::Message::user("hi")], None)
+        .await;
+
+        assert!(answered.is_ok(), "{provider} {model}: {answered:?}");
+        let requests = server.received_requests().await.unwrap_or_default();
+        serde_json::from_slice(&requests[0].body).expect("a JSON body")
+    }
+
+    #[tokio::test]
+    async fn a_chat_turn_on_openai_is_sent_a_request_openai_accepts() {
+        let body = chat_turn(PROVIDER_OPENAI, "gpt-4o", 0.7).await;
+        let stops = body["stop"].as_array().cloned().unwrap_or_default();
+        assert!(stops.len() <= 4, "{body}");
+        assert!(
+            stops.iter().all(|stop| stop
+                .as_str()
+                .is_some_and(|stop| !stop.starts_with("<|"))),
+            "{body}"
+        );
+        assert_eq!(body["max_tokens"], 512, "{body}");
+
+        let body = chat_turn(PROVIDER_OPENAI, "o3-mini", 0.7).await;
+        assert!(body.get("stop").is_none(), "{body}");
+        assert!(body.get("temperature").is_none(), "{body}");
+        assert!(body.get("max_tokens").is_none(), "{body}");
+        assert_eq!(body["max_completion_tokens"], 512, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_chat_turn_on_anthropic_is_sent_a_temperature_anthropic_accepts() {
+        let body = chat_turn(PROVIDER_ANTHROPIC, "claude-sonnet-4-5", 1.5).await;
+
+        assert_eq!(body["temperature"], 1.0, "{body}");
+        assert_eq!(body["max_tokens"], 512, "{body}");
     }
 
     #[tokio::test]
@@ -1030,6 +1159,7 @@ mod tests {
             url: OPENAI_URL.to_string(),
             key: SecretValue::new(key),
             origin: Origin::Settings,
+            dialect: Dialect::Compatible,
         };
         for (reported, echo) in [
             (format!("API error (401): bad key {key}"), key.to_string()),
@@ -1056,6 +1186,7 @@ mod tests {
             url: OPENAI_URL.to_string(),
             key: SecretValue::new("plainkey-9999"),
             origin: Origin::Settings,
+            dialect: Dialect::Compatible,
         };
         let failure =
             "API error (404): The model `gpt-9` does not exist ** or you do not have access.";
@@ -1069,6 +1200,7 @@ mod tests {
             url: "http://gateway.example/v1".to_string(),
             key: SecretValue::new(""),
             origin: Origin::Settings,
+            dialect: Dialect::Compatible,
         };
 
         let scrubbed = endpoint.scrub("rejected sk-live0123456789abcdef");

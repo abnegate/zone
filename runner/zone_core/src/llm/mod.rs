@@ -5,6 +5,7 @@
 //! handle.
 
 mod client;
+mod dialect;
 pub mod finish_reason;
 pub(crate) mod history;
 pub mod provider;
@@ -12,6 +13,7 @@ mod reasoning;
 mod types;
 
 pub use client::{ChatStream, LlmBackend, LlmClient, LlmConfig, LlmError, RequestOptions};
+pub use dialect::{Budget, Dialect, TEMPLATE_STOPS};
 pub use provider::{
     AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, CodexSandbox,
     Completion, CompletionProvider, CompletionRequest, Credential, HttpProvider, ProviderError,

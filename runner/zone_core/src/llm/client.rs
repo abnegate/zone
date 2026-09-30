@@ -9,6 +9,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::runtime;
 
+use super::dialect::{Budget, Dialect};
 use super::finish_reason::STOP;
 use super::provider::{
     AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Completion,
@@ -129,6 +130,7 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     /// Where completions are fetched from. Defaults to the endpoint above.
     pub backend: LlmBackend,
+    pub dialect: Dialect,
 }
 
 impl LlmConfig {
@@ -150,6 +152,7 @@ impl std::fmt::Debug for LlmConfig {
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
             .field("backend", &self.backend)
+            .field("dialect", &self.dialect)
             .finish()
     }
 }
@@ -163,6 +166,7 @@ impl Default for LlmConfig {
             temperature: 0.7,
             max_tokens: 4096,
             backend: LlmBackend::Http,
+            dialect: Dialect::Compatible,
         }
     }
 }
@@ -399,15 +403,45 @@ impl LlmClient {
         self
     }
 
+    fn body(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        reserved: u32,
+        stream: bool,
+    ) -> Result<serde_json::Value, LlmError> {
+        let dialect = self.config.dialect;
+        let stop = dialect.stops(model, &self.stop);
+        let (max_tokens, max_completion_tokens) = match dialect.budget(model) {
+            Budget::MaxTokens => (Some(reserved), None),
+            Budget::MaxCompletionTokens => (None, Some(reserved)),
+        };
+        self.request(ChatRequest {
+            model,
+            messages,
+            tools,
+            tool_choice: None,
+            temperature: dialect.temperature(model, self.config.temperature),
+            max_tokens,
+            max_completion_tokens,
+            stream: Some(stream),
+            stop: (!stop.is_empty()).then_some(stop.as_slice()),
+        })
+    }
+
     fn request(&self, request: ChatRequest<'_>) -> Result<serde_json::Value, LlmError> {
+        let dialect = self.config.dialect;
         let mut body = serde_json::to_value(&request)?;
         if let Some((model, limit)) = &self.ollama
             && model == request.model
+            && dialect.extended()
         {
             body["num_ctx"] = (*limit).into();
         }
         if let Some((model, effort)) = &self.reasoning
             && model == request.model
+            && dialect.effort(model)
         {
             body["reasoning_effort"] = effort.as_str().into();
         }
@@ -482,20 +516,10 @@ impl LlmClient {
             return Ok(response(completion, model));
         }
 
-        let request = ChatRequest {
-            model,
-            messages,
-            tools,
-            tool_choice: None,
-            temperature: Some(self.config.temperature),
-            max_tokens: Some(options.reserved),
-            stream: Some(false),
-            stop: (!self.stop.is_empty()).then_some(self.stop.as_slice()),
-        };
-
+        let body = self.body(model, messages, tools, options.reserved, false)?;
         let url = format!("{}/chat/completions", self.config.base_url);
 
-        let response = self.send(&url, &self.request(request)?).await?;
+        let response = self.send(&url, &body).await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -558,20 +582,10 @@ impl LlmClient {
             return Ok(Box::pin(chunks(events, agent.to_string())));
         }
 
-        let request = ChatRequest {
-            model,
-            messages,
-            tools,
-            tool_choice: None,
-            temperature: Some(self.config.temperature),
-            max_tokens: Some(options.reserved),
-            stream: Some(true),
-            stop: (!self.stop.is_empty()).then_some(self.stop.as_slice()),
-        };
-
+        let body = self.body(model, messages, tools, options.reserved, true)?;
         let url = format!("{}/chat/completions", self.config.base_url);
 
-        let response = self.send(&url, &self.request(request)?).await?;
+        let response = self.send(&url, &body).await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -717,6 +731,238 @@ mod tests {
             server.verify().await;
         }
     }
+
+    mod shape {
+        use super::*;
+        use crate::llm::{Dialect, TEMPLATE_STOPS};
+        use serde_json::{Value, json};
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
+
+        const TEMPERATURE: f32 = 1.4;
+        const RESERVED: u32 = 321;
+
+        struct Without(&'static str);
+
+        impl Match for Without {
+            fn matches(&self, request: &Request) -> bool {
+                serde_json::from_slice::<Value>(&request.body)
+                    .is_ok_and(|body| body.get(self.0).is_none())
+            }
+        }
+
+        fn completion() -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop"
+                }]
+            }))
+        }
+
+        fn streamed() -> ResponseTemplate {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+        }
+
+        fn stops() -> Vec<String> {
+            TEMPLATE_STOPS
+                .iter()
+                .map(|stop| (*stop).to_string())
+                .chain(["User:", " ", "Human:", "###", "END", "STOP"].map(String::from))
+                .collect()
+        }
+
+        fn client(server: &MockServer, dialect: Dialect) -> LlmClient {
+            LlmClient::new(LlmConfig {
+                base_url: server.uri(),
+                temperature: TEMPERATURE,
+                max_tokens: RESERVED,
+                dialect,
+                ..LlmConfig::default()
+            })
+            .with_stop(stops())
+            .with_ollama_context("model", 8192)
+        }
+
+        async fn sent(server: &MockServer, dialect: Dialect, model: &str) -> Value {
+            let answered = client(server, dialect)
+                .chat_with_model(model, &[Message::user("hi")], None)
+                .await;
+            assert!(answered.is_ok(), "{dialect:?} {model}: {answered:?}");
+            let requests = server.received_requests().await.unwrap_or_default();
+            let request = requests.last().expect("a request reached the endpoint");
+            serde_json::from_slice(&request.body).expect("a JSON body")
+        }
+
+        fn stop_count(body: &Value) -> usize {
+            body.get("stop")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        }
+
+        #[tokio::test]
+        async fn openai_is_sent_at_most_four_stops_and_no_template_tokens() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({
+                    "max_tokens": RESERVED,
+                    "stop": ["User:", " ", "Human:", "###"],
+                })))
+                .and(Without("max_completion_tokens"))
+                .and(Without("num_ctx"))
+                .respond_with(completion())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let body = sent(&server, Dialect::OpenAI, "gpt-4o").await;
+
+            assert_eq!(stop_count(&body), 4, "{body}");
+            assert!(body.get("temperature").is_some(), "{body}");
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn an_openai_reasoning_model_is_sent_no_stop_no_temperature_and_a_completion_budget()
+        {
+            for model in ["o3-mini", "o1", "o4-mini", "gpt-5"] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/chat/completions"))
+                    .and(body_partial_json(
+                        json!({ "max_completion_tokens": RESERVED }),
+                    ))
+                    .and(Without("max_tokens"))
+                    .and(Without("temperature"))
+                    .and(Without("stop"))
+                    .respond_with(completion())
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let body = sent(&server, Dialect::OpenAI, model).await;
+
+                assert_eq!(stop_count(&body), 0, "{model}: {body}");
+                server.verify().await;
+            }
+        }
+
+        #[tokio::test]
+        async fn an_openai_reasoning_model_streams_under_the_same_shape() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({
+                    "max_completion_tokens": RESERVED,
+                    "stream": true,
+                })))
+                .and(Without("max_tokens"))
+                .and(Without("temperature"))
+                .and(Without("stop"))
+                .respond_with(streamed())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut stream = client(&server, Dialect::OpenAI)
+                .chat_stream_with_model("o3", &[Message::user("hi")], None)
+                .await
+                .expect("the stream opens");
+            while let Some(chunk) = stream.next().await {
+                assert!(chunk.is_ok(), "{chunk:?}");
+            }
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn openai_is_sent_reasoning_effort_only_for_a_model_that_reasons() {
+            for (model, expected) in [("o3", Some("high")), ("gpt-4o", None)] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(completion())
+                    .mount(&server)
+                    .await;
+                let answered = client(&server, Dialect::OpenAI)
+                    .with_reasoning(model, crate::llm::Effort::High)
+                    .chat_with_model(model, &[Message::user("hi")], None)
+                    .await;
+                assert!(answered.is_ok(), "{answered:?}");
+                let requests = server.received_requests().await.unwrap_or_default();
+                let body: Value = serde_json::from_slice(&requests[0].body).expect("a JSON body");
+
+                assert_eq!(
+                    body.get("reasoning_effort").and_then(Value::as_str),
+                    expected,
+                    "{model}: {body}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn anthropic_is_sent_every_non_blank_stop_and_a_temperature_of_at_most_one() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({
+                    "max_tokens": RESERVED,
+                    "temperature": 1.0,
+                })))
+                .and(Without("max_completion_tokens"))
+                .and(Without("num_ctx"))
+                .respond_with(completion())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let body = sent(&server, Dialect::Anthropic, "claude-sonnet-4-5").await;
+
+            assert_eq!(stop_count(&body), stops().len() - 1, "{body}");
+            assert!(
+                body["stop"]
+                    .as_array()
+                    .is_some_and(|stops| stops.iter().all(|stop| stop != " ")),
+                "{body}"
+            );
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn a_compatible_endpoint_is_sent_the_request_as_it_always_was() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({
+                    "max_tokens": RESERVED,
+                    "num_ctx": 8192,
+                })))
+                .and(Without("max_completion_tokens"))
+                .respond_with(completion())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let body = sent(&server, Dialect::Compatible, "model").await;
+
+            assert_eq!(stop_count(&body), stops().len(), "{body}");
+            assert_eq!(
+                body["temperature"].as_f64().map(|value| value as f32),
+                Some(TEMPERATURE),
+                "{body}"
+            );
+            server.verify().await;
+        }
+    }
+
     use crate::llm::Effort;
     use crate::llm::provider::ProviderError;
     use crate::llm::types::{ChatRequest, FunctionCall, Message, ToolCall, Usage};
@@ -1088,6 +1334,7 @@ mod tests {
                 tool_choice: None,
                 temperature: None,
                 max_tokens: Some(4096),
+                max_completion_tokens: None,
                 stream: None,
                 stop: None,
             })
@@ -1101,6 +1348,7 @@ mod tests {
                 tool_choice: None,
                 temperature: None,
                 max_tokens: Some(4096),
+                max_completion_tokens: None,
                 stream: None,
                 stop: None,
             })
@@ -1115,6 +1363,7 @@ mod tests {
                 tool_choice: None,
                 temperature: None,
                 max_tokens: Some(4096),
+                max_completion_tokens: None,
                 stream: None,
                 stop: None,
             })

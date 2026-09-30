@@ -1824,8 +1824,7 @@ async fn handle_image_generation(
     {
         crate::services::image_intent::ImageIntentClassifier::new(
             image_config.clone(),
-            endpoint.url().to_string(),
-            endpoint.key().expose().to_string(),
+            endpoint.clone(),
             backend,
         )
         .edit_prompt(prompt)
@@ -2664,8 +2663,7 @@ async fn prepare_message(
             let intent = if endpoint.model(&image_config.classifier_model).is_ok() {
                 crate::services::image_intent::ImageIntentClassifier::new(
                     image_config.clone(),
-                    endpoint.url().to_string(),
-                    endpoint.key().expose().to_string(),
+                    endpoint.clone(),
                     resolved.clone(),
                 )
                 .settle(content, lanes)
