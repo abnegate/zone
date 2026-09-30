@@ -2,6 +2,8 @@ import type { AgentLogin, ClaudeScope, SignInFlow } from './schemas';
 
 export type AgentAccess = 'manage' | 'view' | 'resolving';
 
+export type SettingsLevel = 'organization' | 'workspace';
+
 export type SignInAction = 'start' | 'restart' | 'full' | 'paste' | 'submit' | 'cancel' | 'signOut';
 
 export interface Attempt {

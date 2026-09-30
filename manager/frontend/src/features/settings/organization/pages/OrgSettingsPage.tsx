@@ -198,6 +198,7 @@ export default function OrgSettingsPage() {
           <div className="settings-card">
             <h3 className="card-title">Provider</h3>
             <AiProviderFields
+              level="organization"
               provider={provider}
               onProviderChange={(next) => {
                 setProvider(next);

@@ -679,6 +679,7 @@ export default function WorkspaceSettingsPage() {
             {overrideAiSettings ? (
               <>
                 <AiProviderFields
+                  level="workspace"
                   provider={aiProvider}
                   onProviderChange={(provider) => {
                     setAiProvider(provider);

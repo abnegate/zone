@@ -6,8 +6,10 @@ import {
   type ProviderCredentials,
   providerOptions,
 } from './options';
+import type { SettingsLevel } from './types';
 
 interface AiProviderFieldsProps {
+  level: SettingsLevel;
   provider: AiProvider;
   onProviderChange: (provider: AiProvider) => void;
   credentials: ProviderCredentials;
@@ -16,6 +18,7 @@ interface AiProviderFieldsProps {
 }
 
 const MASK = '••••••••';
+const ENDPOINT_HINT_ID = 'ai-endpoint-hint';
 
 function Field({
   id,
@@ -44,7 +47,26 @@ function Field({
   );
 }
 
+function EndpointHints({ level, provider }: { level: SettingsLevel; provider: AiProvider }) {
+  return (
+    <div id={ENDPOINT_HINT_ID} className="form-group form-group--full">
+      <p className="form-hint">
+        Chats, task runs and background work in this {level} send completions here.
+      </p>
+      {provider === 'anthropic' && (
+        <p className="form-hint">Completions go through Anthropic's OpenAI-compatible endpoint.</p>
+      )}
+      {level === 'workspace' && (
+        <p className="form-hint">
+          A workspace host needs its own key; it never receives the organization's.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function AiProviderFields({
+  level,
   provider,
   onProviderChange,
   credentials,
@@ -76,7 +98,8 @@ export function AiProviderFields({
               id="litellm-host"
               value={credentials.litellmHost}
               onChange={(event) => onChange('litellmHost', event.target.value)}
-              placeholder="http://localhost:11434"
+              placeholder="http://litellm:4000"
+              aria-describedby={ENDPOINT_HINT_ID}
               className="form-input"
             />
           </Field>
@@ -90,6 +113,7 @@ export function AiProviderFields({
               className="form-input"
             />
           </Field>
+          <EndpointHints level={level} provider={provider} />
         </>
       )}
 
@@ -112,9 +136,11 @@ export function AiProviderFields({
               value={credentials.openaiBaseUrl}
               onChange={(event) => onChange('openaiBaseUrl', event.target.value)}
               placeholder="https://api.openai.com/v1"
+              aria-describedby={ENDPOINT_HINT_ID}
               className="form-input"
             />
           </Field>
+          <EndpointHints level={level} provider={provider} />
         </>
       )}
 
@@ -136,10 +162,12 @@ export function AiProviderFields({
               id="anthropic-base-url"
               value={credentials.anthropicBaseUrl}
               onChange={(event) => onChange('anthropicBaseUrl', event.target.value)}
-              placeholder="https://api.anthropic.com"
+              placeholder="https://api.anthropic.com/v1"
+              aria-describedby={ENDPOINT_HINT_ID}
               className="form-input"
             />
           </Field>
+          <EndpointHints level={level} provider={provider} />
           <div className="alert alert-warning">
             Anthropic does not provide embedding models. Use a different provider for embeddings.
           </div>
@@ -197,6 +225,9 @@ export function AiProviderFields({
               </Field>
             </>
           )}
+          <div className="alert alert-warning">
+            Bedrock completions still use the server's default endpoint for now.
+          </div>
         </>
       )}
     </div>
