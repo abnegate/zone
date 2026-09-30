@@ -1,17 +1,27 @@
 use sqlx::migrate::MigrateError;
 use sqlx::{ConnectOptions, PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 use zone_server::db::{memory, migrations, tasks};
+
+/// Every test replays the whole chain into an empty database; more at once
+/// only queue on the same disk writes, and the tests' own time bounds with them.
+static DATABASES: Semaphore = Semaphore::const_new(4);
 
 struct Database {
     admin: PgPool,
     pool: PgPool,
     name: String,
+    _slot: SemaphorePermit<'static>,
 }
 
 impl Database {
     async fn new() -> Self {
+        let slot = DATABASES
+            .acquire()
+            .await
+            .expect("the database slots are never closed");
         let admin =
             PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("disposable database"))
                 .await
@@ -28,7 +38,12 @@ impl Database {
             .connect_with(options)
             .await
             .unwrap();
-        Self { admin, pool, name }
+        Self {
+            admin,
+            pool,
+            name,
+            _slot: slot,
+        }
     }
 
     async fn through(&self, version: i64) {
@@ -444,7 +459,7 @@ async fn task_migration_works_with_one_connection_fresh_and_applied() {
         .await
         .unwrap();
     for _ in 0..2 {
-        tokio::time::timeout(Duration::from_secs(60), migrations::run(&pool))
+        tokio::time::timeout(Duration::from_secs(10), migrations::run(&pool))
             .await
             .unwrap()
             .unwrap();
