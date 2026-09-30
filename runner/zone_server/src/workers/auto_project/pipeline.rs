@@ -21,13 +21,12 @@ use crate::db::auto_projects::{
     Verdict as Recorded,
 };
 use crate::db::tasks::{self, TaskRow};
-use crate::services::backend;
 use crate::workers::conflict::RepairOutcome;
 use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception};
 
 use super::driver::Drive;
 use super::notification::{self, MergeReport};
-use super::review::model::{self, Author, Unavailable};
+use super::review::model::{self, Author, Route, Unavailable};
 use super::review::outage::Outages;
 use super::review::{self, Outcome, ReviewError, ReviewRequest, bots, verdict};
 use super::summary;
@@ -662,21 +661,17 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 .map_or(Author::Unrecorded, |mode| Author::recorded(mode.model)),
             None => Author::Unrecorded,
         };
-        let resolved = backend::for_workspace(step.drive.state, step.drive.workspace_id).await;
-        let backend = match resolved {
-            Ok(backend) => backend,
+        let resolved = Route::for_workspace(step.drive.state, step.drive.workspace_id).await;
+        let route = match resolved {
+            Ok(route) => route,
             Err(error) => return step.pause(&error.to_string()).await,
         };
-        let (prefs, catalog) =
-            model::preferences(step.drive.state, step.drive.workspace_id, &backend).await;
         let round = auto_projects::latest_round(pool, step.task.task_id)
             .await
             .map_err(|error| error.to_string())?
             + 1;
-        let lineup = match model::lineup(
+        let lineup = match route.lineup(
             &author,
-            &prefs,
-            &catalog,
             &config.review_models,
             u32::try_from(round).unwrap_or(1),
         ) {
@@ -708,8 +703,8 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .unwrap_or_default();
         let open = auto_projects::open_findings_of(&rows);
         let outcome = review::run(
-            step.drive.state.config(),
-            backend,
+            &route.endpoint,
+            route.backend,
             pr.clone(),
             ReviewRequest {
                 task: &step.row,

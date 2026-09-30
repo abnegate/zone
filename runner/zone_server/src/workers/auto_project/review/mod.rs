@@ -9,6 +9,8 @@ pub mod bots;
 pub mod model;
 pub mod outage;
 pub mod prompt;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod tools;
 pub mod verdict;
 
@@ -19,14 +21,14 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
 use zone_core::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, LlmError, Message, ToolDefinition};
+use zone_core::llm::{LlmBackend, LlmClient, LlmError, Message, ToolDefinition};
 use zone_core::tools::{ToolContext, ToolResult};
 use zone_vcs::pull_request::{ChangedFile, PrService, PullRequestDetail, PullRequestReference};
 
-use crate::config::Config;
 use crate::db::auto_projects::{Finding, ReviewRow};
 use crate::db::tasks::TaskRow;
 use crate::services::backend;
+use crate::services::endpoint::Endpoint;
 
 pub use verdict::{Outcome, Verdict};
 
@@ -78,6 +80,21 @@ impl ReviewError {
         Self::Model(message)
     }
 
+    /// This failure, without the key `endpoint` was sent: it reaches review
+    /// rows, pause reasons and logs.
+    fn scrubbed(self, endpoint: &Endpoint) -> Self {
+        match self {
+            Self::Unparseable(message) => Self::Unparseable(endpoint.scrub(&message)),
+            Self::Model(message) => Self::Model(endpoint.scrub(&message)),
+            Self::Unreachable(message) => Self::Unreachable(endpoint.scrub(&message)),
+            Self::Unfunded { reviewer, reason } => Self::Unfunded {
+                reviewer,
+                reason: endpoint.scrub(&reason),
+            },
+            Self::TimedOut => Self::TimedOut,
+        }
+    }
+
     /// Why the task has to wait for a person, when no later tick would get
     /// past this failure.
     pub fn stalled(&self) -> Option<String> {
@@ -121,21 +138,19 @@ pub struct ReviewRequest<'a> {
     pub reference: PullRequestReference,
 }
 
-/// Run one review and return its verdict.
+/// Run one review on `endpoint` and return its verdict.
 pub async fn run(
-    config: &Config,
+    endpoint: &Endpoint,
     backend: LlmBackend,
     pr: PrService,
     request: ReviewRequest<'_>,
 ) -> Result<Verdict, ReviewError> {
-    let client = LlmClient::new(LlmConfig {
-        base_url: config.litellm_host.clone(),
-        api_key: config.litellm_key.clone(),
-        default_model: request.reviewer.clone(),
-        temperature: REVIEW_TEMPERATURE,
-        max_tokens: REVIEW_TOKENS,
+    let client = LlmClient::new(endpoint.llm(
+        request.reviewer.clone(),
+        REVIEW_TEMPERATURE,
+        REVIEW_TOKENS,
         backend,
-    });
+    ));
     let shared = Arc::new(tools::Shared {
         pr,
         reference: request.reference.clone(),
@@ -213,7 +228,7 @@ pub async fn run(
         )))
     };
     match tokio::time::timeout(REVIEW_TIMEOUT, session).await {
-        Ok(outcome) => outcome,
+        Ok(outcome) => outcome.map_err(|error| error.scrubbed(endpoint)),
         Err(_) => Err(ReviewError::TimedOut),
     }
 }
@@ -228,7 +243,7 @@ mod tests {
     use zone_core::llm::AgentKind;
     use zone_vcs::pull_request::Mergeability;
 
-    use crate::config::ModelBackend;
+    use crate::config::{Config, ModelBackend};
 
     const DIFF: &str = "diff --git a/src/cart.ts b/src/cart.ts\n+export const total = 0;";
 
@@ -391,7 +406,7 @@ mod tests {
         let pull = pull();
 
         let verdict = run(
-            &config,
+            &Endpoint::instance(&config),
             backend::instance(&config),
             PrService::new(),
             request(&task, &pull, "sonnet"),
@@ -429,7 +444,7 @@ mod tests {
         let pull = pull();
 
         let error = run(
-            &config,
+            &Endpoint::instance(&config),
             backend::instance(&config),
             PrService::new(),
             request(&task, &pull, "fable"),
@@ -467,7 +482,7 @@ mod tests {
         let pull = pull();
 
         let error = run(
-            &config,
+            &Endpoint::instance(&config),
             backend::instance(&config),
             PrService::new(),
             request(&task, &pull, "sonnet"),
@@ -521,18 +536,18 @@ mod tests {
         ));
     }
 
-    fn endpoint(url: String) -> Config {
-        Config {
+    fn endpoint(url: String) -> Endpoint {
+        Endpoint::instance(&Config {
             litellm_host: url,
             ..crate::state::test_config()
-        }
+        })
     }
 
-    async fn review_on(config: &Config) -> ReviewError {
+    async fn review_on(endpoint: &Endpoint) -> ReviewError {
         let task = task();
         let pull = pull();
         run(
-            config,
+            endpoint,
             LlmBackend::Http,
             PrService::new(),
             request(&task, &pull, "qwen3:32b"),
@@ -607,5 +622,90 @@ mod tests {
                 "{status}: {error:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_review_round_goes_to_the_organization_endpoint_with_its_key() {
+        use super::model::{Author, Route};
+        use super::testing::{
+            INSTANCE_KEY, ORGANIZATION_KEY, Organization, SAVED_MODEL, Saved, authorization,
+            completing, received,
+        };
+
+        let instance = completing(REPLY, "stop").await;
+        let saved = completing(REPLY, "stop").await;
+        let host = saved.uri();
+        let organization = Organization::saving(Saved {
+            host: Some(&host),
+            key: Some(ORGANIZATION_KEY),
+            fast: Some(SAVED_MODEL),
+        })
+        .await;
+        let state = organization.state(&instance.uri());
+        let route = Route::for_workspace(&state, organization.workspace).await;
+        organization.remove().await;
+        let route = route.expect("an endpoint needs no sign-in");
+        let reviewers = route
+            .lineup(&Author::Unrecorded, &["instance-reviewer".to_string()], 1)
+            .expect("the saved model reviews");
+        let task = task();
+        let pull = pull();
+
+        let verdict = run(
+            &route.endpoint,
+            route.backend,
+            PrService::new(),
+            request(&task, &pull, &reviewers[0].model),
+        )
+        .await
+        .expect("the saved endpoint gave a verdict");
+
+        assert_eq!(verdict.outcome, Outcome::Approve);
+        assert!(
+            received(&instance).await.is_empty(),
+            "the instance's LITELLM_HOST was sent the review with {INSTANCE_KEY}"
+        );
+        let requests = received(&saved).await;
+        let [request] = requests.as_slice() else {
+            panic!(
+                "the saved endpoint was asked for the review {} times",
+                requests.len()
+            );
+        };
+        assert_eq!(
+            authorization(request),
+            Some(format!("Bearer {ORGANIZATION_KEY}"))
+        );
+        let body: Value = request.body_json().expect("a JSON completion request");
+        assert_eq!(
+            body["model"], SAVED_MODEL,
+            "the instance's ZONE_AUTO_REVIEW_MODELS name no model on the saved endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_echoes_the_key_never_puts_it_in_the_review() {
+        use crate::services::endpoint::testing::settings;
+        use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+        use zone_core::secret::SecretValue;
+
+        const KEY: &str = "sk-organization-0a7d44e19b";
+        let server = answering(
+            401,
+            &format!("Incorrect API key provided: {KEY}. Also seen as sk-org****e19b."),
+        )
+        .await;
+        let saved = crate::db::ai_settings::EffectiveAiSettings {
+            litellm_host: Some(server.uri()),
+            litellm_key: Some(SecretValue::new(KEY.to_string())),
+            ..settings(PROVIDER_SELF_HOSTED)
+        };
+
+        let error = review_on(&Endpoint::resolve(&crate::state::test_config(), &saved)).await;
+
+        let recorded = error.to_string();
+        assert!(matches!(error, ReviewError::Model(_)), "{error:?}");
+        assert!(!recorded.contains(KEY), "{recorded}");
+        assert!(!recorded.contains("sk-org****e19b"), "{recorded}");
     }
 }

@@ -1,6 +1,9 @@
 //! Which model reviews a change: one that did not write it, when there is one.
 
-use crate::db::{ai_settings, workspaces};
+use crate::db::ai_settings::{self, EffectiveAiSettings};
+use crate::db::workspaces;
+use crate::services::backend;
+use crate::services::endpoint::{self, Endpoint, Origin};
 use crate::services::stages::{self, Catalog, Preferences};
 use crate::state::AppState;
 use uuid::Uuid;
@@ -24,6 +27,8 @@ pub enum Unavailable {
          can, or name one in ZONE_AUTO_REVIEW_MODELS"
     )]
     NoToolModel,
+    #[error(transparent)]
+    Unset(#[from] endpoint::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,31 +164,89 @@ pub fn objection(author: &Author, reviewer: &Reviewer) -> Option<&'static str> {
     }
 }
 
-/// The workspace's model preferences and what `backend` can run, read the way
-/// a run reads them.
-pub async fn preferences(
-    state: &AppState,
-    workspace_id: Uuid,
-    backend: &LlmBackend,
-) -> (Preferences, Catalog) {
-    let catalog = Catalog::for_backend(&state.config().ollama_host, backend).await;
-    let settings = match workspaces::get_workspace(state.db(), workspace_id).await {
-        Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
-            state.db(),
-            workspace.organization_id,
-            workspace_id,
-        )
-        .await
-        .ok(),
-        _ => None,
+/// Where a workspace's reviews and merge summaries run, and what they may run
+/// there, read from its settings once.
+pub struct Route {
+    pub backend: LlmBackend,
+    pub endpoint: Endpoint,
+    pub prefs: Preferences,
+    pub catalog: Catalog,
+}
+
+impl Route {
+    /// The route the workspace's settings name, or the instance's when the
+    /// workspace or its settings cannot be read.
+    pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Result<Self, backend::Error> {
+        let config = state.config();
+        let classifier = &config.comfyui.classifier_model;
+        let Some((organization, settings)) = saved(state, workspace).await else {
+            let backend = backend::instance(config);
+            let catalog = Catalog::for_backend(&config.ollama_host, &backend).await;
+            return Ok(Self {
+                backend,
+                endpoint: Endpoint::instance(config),
+                prefs: Preferences::from_optional_settings(None, classifier),
+                catalog,
+            });
+        };
+        let backend = backend::for_settings(state, organization, &settings).await?;
+        let endpoint = Endpoint::resolve(config, &settings);
+        let prefs = Preferences::for_endpoint(&settings, classifier, &endpoint);
+        let catalog = endpoint.catalog(&config.ollama_host, &backend).await;
+        Ok(Self {
+            backend,
+            endpoint,
+            prefs,
+            catalog,
+        })
+    }
+
+    /// The [`lineup`] for `round`. `configured` names models on the instance's
+    /// endpoint, so an endpoint the settings name is reviewed on the Fast and
+    /// Reasoning models the settings save, and on none when they save none.
+    pub fn lineup(
+        &self,
+        author: &Author,
+        configured: &[String],
+        round: u32,
+    ) -> Result<Vec<Reviewer>, Unavailable> {
+        let configured = match self.endpoint.origin() {
+            Origin::Instance => configured,
+            Origin::Settings => {
+                let saved = [self.prefs.reasoning.as_deref(), self.prefs.fast.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .find(|name| !stages::is_auto(name))
+                    .unwrap_or(stages::AUTO);
+                self.endpoint.model(saved)?;
+                &[]
+            }
+        };
+        lineup(author, &self.prefs, &self.catalog, configured, round)
+    }
+}
+
+/// The workspace's organization and effective settings, or `None` when either
+/// cannot be read.
+async fn saved(state: &AppState, workspace: Uuid) -> Option<(Uuid, EffectiveAiSettings)> {
+    let organization = match workspaces::get_workspace(state.db(), workspace).await {
+        Ok(Some(row)) => row.organization_id,
+        Ok(None) => {
+            tracing::warn!(%workspace, "No such workspace; using the instance's endpoint");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(%workspace, %error, "Could not read the workspace; using the instance's endpoint");
+            return None;
+        }
     };
-    (
-        Preferences::from_optional_settings(
-            settings.as_ref(),
-            &state.config().comfyui.classifier_model,
-        ),
-        catalog,
-    )
+    match ai_settings::get_effective_ai_settings(state.db(), organization, workspace).await {
+        Ok(settings) => Some((organization, settings)),
+        Err(error) => {
+            tracing::warn!(%workspace, %error, "Could not read the AI settings; using the instance's endpoint");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -595,5 +658,62 @@ mod tests {
             Err(Unavailable::NoModel),
             "an endpoint that lists nothing has nothing to review with"
         );
+    }
+
+    fn saved_endpoint(
+        fast: Option<&str>,
+        reasoning: Option<&str>,
+        configured: &[String],
+    ) -> Result<Vec<Reviewer>, Unavailable> {
+        let settings = EffectiveAiSettings {
+            litellm_host: Some("http://models.example:4000".into()),
+            model_fast: fast.map(str::to_string),
+            model_reasoning: reasoning.map(str::to_string),
+            ..crate::services::endpoint::testing::settings(
+                zone_context::embeddings::providers::PROVIDER_SELF_HOSTED,
+            )
+        };
+        let endpoint = Endpoint::resolve(&crate::state::test_config(), &settings);
+        assert_eq!(endpoint.origin(), Origin::Settings);
+        let route = Route {
+            backend: LlmBackend::Http,
+            prefs: Preferences::for_endpoint(&settings, "instance-classifier", &endpoint),
+            endpoint,
+            catalog: Catalog::default(),
+        };
+        route.lineup(&Author::Unrecorded, configured, 1)
+    }
+
+    #[test]
+    fn an_endpoint_the_settings_name_is_reviewed_only_on_the_models_they_save() {
+        let configured = ["instance-reviewer".to_string()];
+
+        let names: Vec<String> = saved_endpoint(Some("gpt-4o-mini"), Some("o3"), &configured)
+            .expect("the saved models review")
+            .into_iter()
+            .map(|reviewer| reviewer.model)
+            .collect();
+
+        assert_eq!(names, ["o3", "gpt-4o-mini"]);
+    }
+
+    #[test]
+    fn an_endpoint_the_settings_name_without_a_saved_model_has_nobody_to_review() {
+        let configured = ["instance-reviewer".to_string()];
+
+        for (fast, reasoning) in [(None, None), (Some(stages::AUTO), None)] {
+            let reviewers = saved_endpoint(fast, reasoning, &configured);
+
+            assert_eq!(
+                reviewers,
+                Err(Unavailable::Unset(endpoint::Error::ModelUnset)),
+                "{fast:?} {reasoning:?}"
+            );
+            assert_eq!(
+                reviewers.unwrap_err().to_string(),
+                endpoint::Error::ModelUnset.to_string(),
+                "the task pauses with the settings' own remedy"
+            );
+        }
     }
 }
