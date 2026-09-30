@@ -52,9 +52,13 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
         Some(workspace) => Route::for_workspace(state, workspace).await,
         None => Route::instance(state.config()),
     };
+    if let Err(unusable) = route.endpoint() {
+        tracing::warn!(chat_id = %chat.id, %unusable, "Titling the chat without a model");
+        return None;
+    }
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
     let backend = route.backend(state).await.ok()?;
-    let endpoint = route.endpoint;
+    let endpoint = route.into_endpoint().ok()?;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;

@@ -576,16 +576,20 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
 
     let route = Route::for_workspace(state, task.workspace_id).await;
     let resolved = route.backend(state).await;
-    let Some((backend, route)) = repair_route(
+    let (backend, route) = match repair_route(
         route,
         resolved,
         backend::instance(state.config()),
         state.config(),
-    ) else {
-        return RepairOutcome::Failed(NO_REPAIR_BACKEND.to_string());
+    ) {
+        Ok(chosen) => chosen,
+        Err(reason) => return RepairOutcome::Failed(reason),
     };
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
-    let endpoint = route.endpoint;
+    let endpoint = match route.into_endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(unusable) => return RepairOutcome::Failed(unusable.to_string()),
+    };
     let model = match repair_model(state, &task, &backend, &endpoint, &preferences).await {
         Ok(model) => model,
         Err(error) => return RepairOutcome::Failed(error.to_string()),
@@ -683,9 +687,13 @@ async fn subject(state: &AppState, task: &tasks::TaskRow, report: &str) -> Subje
 
 async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Option<Subject> {
     let route = Route::for_workspace(state, task.workspace_id).await;
+    if let Err(unusable) = route.endpoint() {
+        tracing::warn!(task_id = %task.id, %unusable, "Naming the change without a model");
+        return None;
+    }
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
     let backend = route.backend(state).await.ok()?;
-    let endpoint = route.endpoint;
+    let endpoint = route.into_endpoint().ok()?;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
@@ -709,18 +717,21 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
 
 /// Where a repair's turns go: the workspace's endpoint when it runs over HTTP,
 /// else the instance's own endpoint, when the instance runs over HTTP. The
-/// instance's key only ever goes to the instance's host.
+/// instance's key only ever goes to the instance's host, and a workspace whose
+/// saved endpoint cannot be used is never repaired on the instance instead.
 fn repair_route(
     route: Route,
     resolved: Result<LlmBackend, backend::Error>,
     instance: LlmBackend,
     config: &Config,
-) -> Option<(LlmBackend, Route)> {
+) -> Result<(LlmBackend, Route), String> {
     match resolved {
-        Ok(LlmBackend::Http) => Some((LlmBackend::Http, route)),
-        Ok(LlmBackend::Cli { .. }) | Err(_) => {
-            matches!(instance, LlmBackend::Http).then(|| (instance, route.on_instance(config)))
-        }
+        Ok(LlmBackend::Http) => Ok((LlmBackend::Http, route)),
+        Err(backend::Error::Unusable(unusable)) => Err(unusable.to_string()),
+        Ok(LlmBackend::Cli { .. }) | Err(_) => match instance {
+            LlmBackend::Http => Ok((instance, route.on_instance(config))),
+            LlmBackend::Cli { .. } => Err(NO_REPAIR_BACKEND.to_string()),
+        },
     }
 }
 
@@ -873,8 +884,9 @@ mod tests {
         )
         .expect("a workspace on an endpoint repairs over it");
         assert!(matches!(backend, LlmBackend::Http));
-        assert_eq!(route.endpoint.url(), "https://organization.example/v1");
-        assert_eq!(route.endpoint.key().expose(), ORGANIZATION_KEY);
+        let endpoint = route.endpoint().expect("a usable route");
+        assert_eq!(endpoint.url(), "https://organization.example/v1");
+        assert_eq!(endpoint.key().expose(), ORGANIZATION_KEY);
 
         for resolved in [Ok(claude()), signed_out()] {
             let (backend, route) =
@@ -885,7 +897,7 @@ mod tests {
                 stages::Scope::Open,
                 "a repair on the instance chose its model as if on the saved endpoint"
             );
-            let endpoint = route.endpoint;
+            let endpoint = route.into_endpoint().expect("the instance's endpoint");
             assert!(matches!(backend, LlmBackend::Http));
             assert_eq!(
                 endpoint.url(),
@@ -904,11 +916,35 @@ mod tests {
         }
 
         for resolved in [Ok(claude()), signed_out()] {
-            assert!(
-                repair_route(saved(&config), resolved, claude(), &config).is_none(),
+            assert_eq!(
+                repair_route(saved(&config), resolved, claude(), &config).err(),
+                Some(NO_REPAIR_BACKEND.to_string()),
                 "a repair was handed to a coding agent CLI, which cannot run its tool loop"
             );
         }
+    }
+
+    #[test]
+    fn a_repair_on_an_unusable_endpoint_fails_with_the_reason_rather_than_run_on_the_instance() {
+        let config = Config {
+            endpoint_hosts: crate::services::hosts::Hosts::parse("llm.corp.example"),
+            ..instance_config("http://litellm:4000")
+        };
+        let route = saved(&config);
+        let unusable = route.endpoint().expect_err("the saved host is not listed");
+
+        let refused = repair_route(
+            route,
+            Err(backend::Error::Unusable(unusable)),
+            LlmBackend::Http,
+            &config,
+        );
+
+        assert_eq!(refused.err(), Some(unusable.to_string()));
+        assert!(
+            saved(&config).on_instance(&config).endpoint().is_err(),
+            "an unusable route was moved onto the instance"
+        );
     }
 
     #[tokio::test]

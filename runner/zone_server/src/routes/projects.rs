@@ -291,11 +291,11 @@ pub async fn start_auto(
         .filter(|model| !model.is_empty())
         .unwrap_or(crate::services::stages::AUTO)
         .to_string();
-    let origin = Route::for_workspace(&state, workspace_id)
+    let endpoint = Route::for_workspace(&state, workspace_id)
         .await
-        .endpoint
-        .origin();
-    if Model::profile_on(origin, &state.config().ollama_host, &model)
+        .into_endpoint()
+        .map_err(|unusable| ServerError::Conflict(unusable.to_string()))?;
+    if Model::profile_on(endpoint.origin(), &state.config().ollama_host, &model)
         .await
         .completion
         == Some(false)

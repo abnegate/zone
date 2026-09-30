@@ -685,6 +685,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_review_on_an_endpoint_the_instance_no_longer_allows_pauses_asking_no_one() {
+        use super::model::Venue;
+        use super::testing::{
+            INSTANCE_KEY, ORGANIZATION_KEY, Organization, SAVED_MODEL, Saved, completing, received,
+        };
+        use crate::config::Config;
+        use crate::services::hosts::Hosts;
+        use crate::state::AppState;
+
+        let instance = completing(REPLY, "stop").await;
+        let saved = completing(REPLY, "stop").await;
+        let host = saved.uri();
+        let organization = Organization::saving(Saved {
+            host: Some(&host),
+            key: Some(ORGANIZATION_KEY),
+            fast: Some(SAVED_MODEL),
+        })
+        .await;
+        let state = AppState::new(
+            Config {
+                litellm_host: instance.uri(),
+                litellm_key: INSTANCE_KEY.to_string(),
+                endpoint_hosts: Hosts::parse("llm.corp.example"),
+                ..crate::state::test_config()
+            },
+            organization.pool.clone(),
+            None,
+        );
+
+        let venue = Venue::for_workspace(&state, organization.workspace).await;
+        organization.remove().await;
+
+        let Err(reason) = venue else {
+            panic!("a review venue was resolved on an endpoint the instance does not allow");
+        };
+        let reason = reason.to_string();
+        assert!(
+            reason.starts_with("This workspace's AI endpoint can't be used")
+                && reason.ends_with("Check AI Settings."),
+            "{reason}"
+        );
+        assert!(!reason.contains(ORGANIZATION_KEY), "{reason}");
+        assert!(!reason.contains(INSTANCE_KEY), "{reason}");
+        assert!(received(&instance).await.is_empty());
+        assert!(received(&saved).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_provider_that_echoes_the_key_never_puts_it_in_the_review() {
         use crate::services::endpoint::testing::settings;
         use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;

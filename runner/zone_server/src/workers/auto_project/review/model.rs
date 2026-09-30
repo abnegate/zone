@@ -196,17 +196,19 @@ pub struct Venue {
 }
 
 impl Venue {
-    /// The venue the workspace's settings name, or the instance's when the
-    /// workspace or its settings cannot be read.
+    /// The venue the workspace's settings name, the instance's when it saves
+    /// none, or why its saved endpoint cannot be used.
     pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Result<Self, backend::Error> {
         let config = state.config();
         let route = Route::for_workspace(state, workspace).await;
         let backend = route.backend(state).await?;
-        let catalog = route.endpoint.catalog(&config.ollama_host, &backend).await;
+        let preferences = route.preferences(&config.comfyui.classifier_model);
+        let endpoint = route.into_endpoint()?;
+        let catalog = endpoint.catalog(&config.ollama_host, &backend).await;
         Ok(Self {
             backend,
-            preferences: route.preferences(&config.comfyui.classifier_model),
-            endpoint: route.endpoint,
+            preferences,
+            endpoint,
             catalog,
         })
     }

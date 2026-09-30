@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::db::ai_settings::EffectiveAiSettings;
 use crate::services::endpoint::Origin;
 use crate::services::login::credential::{self, Login};
+use crate::services::route::Unusable;
 use crate::state::AppState;
 
 pub const REMEDY: &str = "Sign in again under Organization Settings > AI Settings.";
@@ -59,6 +60,8 @@ pub enum Error {
         #[source]
         source: sqlx::Error,
     },
+    #[error(transparent)]
+    Unusable(#[from] Unusable),
 }
 
 impl Error {

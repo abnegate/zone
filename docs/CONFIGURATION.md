@@ -202,11 +202,10 @@ single-label hosts are allowed, since an operator may run the model next to
 Zone. Link-local addresses (`169.254.0.0/16`, `fe80::/10`) and cloud metadata
 services (`fd00:ec2::254`, `100.100.100.200`, `metadata.google.internal`,
 `metadata.goog`) never are, however the address is written, and when
-`ZONE_ENDPOINT_HOSTS` is set the host must be one it lists. A URL saved before
-this check that fails it is ignored: that provider runs on the instance
-endpoint, and the server logs a warning. Every member can read a workspace's
-settings, so such a URL is returned without its username, password, query and
-fragment. The URL is read as it was saved:
+`ZONE_ENDPOINT_HOSTS` is set the host must be one it lists. Every member can
+read a workspace's settings, so a URL saved before this check is returned
+without its username, password, query and fragment. The URL is read as it was
+saved:
 
 - no path gets `/v1`: `http://10.0.0.5:4000` sends to `http://10.0.0.5:4000/v1`;
 - a trailing `/` and no path is the host's root, sent as is:
@@ -228,6 +227,19 @@ Model** and **Fast Model**: `ZONE_AUTO_REVIEW_MODELS` names models on the
 instance endpoint and is ignored there. With neither saved, the task pauses
 asking you to set one, and a review that pauses for want of a model tells you
 to set the Fast/Reasoning model in AI Settings.
+
+A saved endpoint that can no longer be used fails closed: its completions are
+never sent to the instance endpoint instead, since that would hand an
+organization's data to a provider it did not choose. That happens when a URL
+saved before these checks fails them, when `ZONE_ENDPOINT_HOSTS` is later
+tightened to leave out a saved host, or when the AI settings cannot be read at
+all. Chats then end in an error, *This
+workspace's AI endpoint can't be used: <reason>. Check AI Settings.*, a task run
+fails with that message, and an auto-project task pauses with it; chat titles,
+pull request subjects and merge summaries fall back to their plain versions,
+and the server logs a warning. The message never carries a key or the saved
+URL. Only a workspace with no saved settings, or with a row saved before
+completions were routed, runs on the instance endpoint.
 
 Every request to a saved endpoint is checked again when it is sent: a host
 that resolves only to link-local or metadata addresses is refused, those
@@ -263,11 +275,11 @@ as an attachment of unknown size.
   `*.corp.example`) matches `corp.example` and every name under it. Case and a
   trailing dot are ignored, and so are ports.
 - **Default**: Empty, which allows every host
-- **Note**: A URL the list does not match is refused when it is saved, and one
-  saved before the list was set is ignored, so that provider runs on the
-  instance endpoint. OpenAI and Anthropic with only a key saved still run on
-  their default URLs. Link-local and metadata addresses stay refused even when
-  listed.
+- **Note**: A URL the list does not match is refused when it is saved. A row
+  saved before the list was set that it does not match can no longer be used:
+  its completions fail with the reason rather than going to the instance
+  endpoint (see *Saved endpoints*).
+  Link-local and metadata addresses stay refused even when listed.
 
 ### Usage credits
 

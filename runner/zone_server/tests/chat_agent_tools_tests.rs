@@ -469,7 +469,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         Uuid::new_v4(),
         None,
         Mode::Generation(LlmBackend::cli(AgentKind::Claude, CliSettings::default())),
-        route.endpoint.clone(),
+        route.endpoint().expect("a usable route").clone(),
     )
     .await
     .expect("a turn on an agent is prepared");
@@ -479,7 +479,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         Uuid::new_v4(),
         None,
         Mode::Generation(LlmBackend::Http),
-        route.endpoint,
+        route.into_endpoint().expect("a usable route"),
     )
     .await
     .expect("a turn on the endpoint is prepared");

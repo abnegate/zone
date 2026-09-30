@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use super::chats::check_workspace_read_access;
 use crate::auth::AuthUser;
+use crate::error::ServerError;
 use crate::services::endpoint::Origin;
 use crate::services::model::Model;
 use crate::services::route::Route;
@@ -238,7 +239,11 @@ async fn list_workspace_models(
         return error.into_response();
     }
     let route = Route::for_workspace(&state, workspace).await;
-    match route.endpoint.origin() {
+    let origin = match route.endpoint() {
+        Ok(endpoint) => endpoint.origin(),
+        Err(unusable) => return ServerError::Conflict(unusable.to_string()).into_response(),
+    };
+    match origin {
         Origin::Instance => list_installed_models(state).await,
         Origin::Settings => {
             let preferences = route.preferences(&state.config().comfyui.classifier_model);

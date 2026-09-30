@@ -23,6 +23,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::ReasoningEffort;
 use zone_server::config::Config;
 use zone_server::db::{chats, tasks};
+use zone_server::services::hosts::Hosts;
 use zone_server::workers::{task, titles};
 
 const INSTANCE_KEY: &str = "test-key";
@@ -970,5 +971,309 @@ async fn the_model_picker_refuses_a_workspace_the_caller_is_not_in() {
         !response.text().contains(OPENAI_MODEL),
         "a stranger was told the workspace's saved models: {}",
         response.text()
+    );
+}
+
+/// The only host an instance under test allows endpoints on, which none of
+/// the mock providers listens on.
+const LISTED_HOST: &str = "llm.corp.example";
+const UNUSABLE: &str = "This workspace's AI endpoint can't be used";
+
+/// `endpoints`' configuration on an instance whose `ZONE_ENDPOINT_HOSTS` has
+/// since been tightened to leave the saved endpoints out.
+fn tightened(endpoints: &Endpoints) -> Config {
+    let mut config = endpoints.config();
+    config.endpoint_hosts = Hosts::parse(LISTED_HOST);
+    config
+}
+
+/// No completion reached any of the three endpoints.
+async fn assert_nothing_sent(endpoints: &Endpoints, outcome: &str) {
+    for (name, server) in [
+        ("instance's LITELLM_HOST", &endpoints.instance),
+        ("organization's endpoint", &endpoints.organization),
+        ("workspace's endpoint", &endpoints.workspace),
+    ] {
+        let sent = any_completions(server).await;
+        assert!(
+            sent.is_empty(),
+            "the {name} was sent {} completions, the first with {:?} ({outcome})",
+            sent.len(),
+            sent.first().map(authorization),
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_chat_turn_on_an_endpoint_the_instance_no_longer_allows_fails_sending_nothing() {
+    let endpoints = Endpoints::start().await;
+    let organization = Saved::litellm(&endpoints.organization, Some(ORGANIZATION_KEY));
+
+    let outcome = chat_turn(
+        tightened(&endpoints),
+        CHAT_MODEL,
+        "Hello",
+        &organization,
+        None,
+    )
+    .await;
+
+    assert!(
+        outcome.contains("\"error\"") && outcome.contains(UNUSABLE),
+        "the turn did not fail on its unusable endpoint: {outcome}"
+    );
+    assert!(!outcome.contains(ORGANIZATION_KEY), "{outcome}");
+    assert!(!outcome.contains(INSTANCE_KEY), "{outcome}");
+    assert_nothing_sent(&endpoints, &outcome).await;
+}
+
+#[tokio::test]
+async fn a_task_run_on_an_endpoint_the_instance_no_longer_allows_fails_with_the_reason() {
+    let endpoints = Endpoints::start().await;
+    let pool = create_test_pool().await;
+    let (_, workspace, user) = setup_workspace_member(&pool).await;
+    save_for_organization(
+        &pool,
+        workspace,
+        &Saved::openai(&endpoints.organization, OPENAI_KEY),
+    )
+    .await;
+    let created = tasks::create_task_as(
+        &pool,
+        workspace,
+        &[],
+        "Summarise the backlog",
+        "Say what is left to do",
+        None,
+        None,
+        true,
+        None,
+        Some(user),
+    )
+    .await
+    .expect("a task to run");
+    let run = tasks::create_task_run_as(&pool, created.id, Some(user))
+        .await
+        .expect("a run of it");
+    let state = create_test_state(tightened(&endpoints), pool.clone());
+
+    let finished = tokio::time::timeout(TURN, task::execute_task_run(&state, run.id, created.id))
+        .await
+        .is_ok();
+    tokio::time::sleep(SETTLE).await;
+    let ended: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT status, error_message FROM task_runs WHERE id = $1")
+            .bind(run.id)
+            .fetch_optional(&pool)
+            .await
+            .expect("the run is readable");
+    discard(&pool, workspace, &[user]).await;
+
+    let outcome = format!("the run finished: {finished}, as {ended:?}");
+    let (status, error) = ended.expect("the run is still there");
+    assert_eq!(status, "failed", "{outcome}");
+    let error = error.unwrap_or_default();
+    assert!(error.starts_with(UNUSABLE), "{outcome}");
+    assert!(!error.contains(OPENAI_KEY), "{outcome}");
+    assert_nothing_sent(&endpoints, &outcome).await;
+}
+
+#[tokio::test]
+async fn a_chat_title_on_an_endpoint_the_instance_no_longer_allows_asks_no_model() {
+    const FIRST_MESSAGE: &str = "Help me plan a holiday in Japan";
+    let endpoints = Endpoints::start().await;
+    let pool = create_test_pool().await;
+    let (_, workspace, user) = setup_test_data(&pool).await;
+    save_for_organization(
+        &pool,
+        workspace,
+        &Saved::litellm(&endpoints.organization, Some(ORGANIZATION_KEY)),
+    )
+    .await;
+    let mut config = tightened(&endpoints);
+    config.comfyui.classifier_model = CHAT_MODEL.to_string();
+    let state = create_test_state(config, pool.clone());
+    let chat = chats::create_chat_with_title(
+        &pool,
+        Some(workspace),
+        "New chat",
+        CHAT_MODEL,
+        (false, true),
+        true,
+        false,
+        ReasoningEffort::Auto,
+    )
+    .await
+    .expect("a chat awaiting its title");
+    let message = chats::create_message(&pool, chat.id, "user", FIRST_MESSAGE, None)
+        .await
+        .expect("the chat's first message");
+
+    let mut updates = titles::subscribe();
+    titles::spawn(state, &message);
+    let title = tokio::time::timeout(TURN, async {
+        loop {
+            match updates.recv().await {
+                Ok((id, title)) if id == chat.id => return Some(title),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    discard(&pool, workspace, &[user]).await;
+
+    let outcome = format!("the chat was titled {title:?}");
+    assert_eq!(title.as_deref(), Some(FIRST_MESSAGE), "{outcome}");
+    assert_nothing_sent(&endpoints, &outcome).await;
+}
+
+#[tokio::test]
+async fn reading_a_chat_on_an_endpoint_the_instance_no_longer_allows_asks_nothing() {
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(SHOW))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"capabilities": ["completion", "tools", "thinking"]})),
+        )
+        .mount(&ollama)
+        .await;
+    let mut config = tightened(&endpoints);
+    config.ollama_host = ollama.uri();
+    let client = TestClient::with_config(config).await;
+    let pool = client.state().db().clone();
+    let (token, chat, workspace) = chat_on(&client, CHAT_MODEL).await;
+    save_for_organization(
+        &pool,
+        workspace,
+        &Saved::litellm(&endpoints.organization, Some(ORGANIZATION_KEY)),
+    )
+    .await;
+    let before = shown(&ollama).await;
+
+    let response = client.get_auth(&format!("/api/chats/{chat}"), &token).await;
+    let asked = shown(&ollama).await - before;
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    response.assert_status(axum::http::StatusCode::OK);
+    let read = response.json_value();
+    assert_eq!(
+        asked, 0,
+        "the instance's Ollama was asked about a chat whose endpoint cannot be used: {read}"
+    );
+    assert!(read["chat"]["context"].is_null(), "{read}");
+    assert_nothing_sent(&endpoints, &read.to_string()).await;
+}
+
+/// A member of a workspace whose organization saved an endpoint on a host the
+/// instance has since stopped allowing, with an instance Ollama that would
+/// refuse every model if it were asked.
+async fn member_on_a_disallowed_endpoint(
+    endpoints: &Endpoints,
+    ollama: &MockServer,
+    tune: impl FnOnce(&mut Config),
+) -> (TestClient, String, Uuid) {
+    let (client, token, workspace) = member_on(endpoints, ollama, |config| {
+        config.endpoint_hosts = Hosts::parse(LISTED_HOST);
+        tune(config);
+    })
+    .await;
+    save_for_organization(
+        client.state().db(),
+        workspace,
+        &Saved::litellm(&endpoints.organization, Some(ORGANIZATION_KEY)),
+    )
+    .await;
+    embeds_everything(ollama).await;
+    installs(ollama).await;
+    (client, token, workspace)
+}
+
+#[tokio::test]
+async fn creating_a_chat_on_an_endpoint_the_instance_no_longer_allows_is_refused_with_the_reason() {
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    let (client, token, workspace) =
+        member_on_a_disallowed_endpoint(&endpoints, &ollama, |_| {}).await;
+    let pool = client.state().db().clone();
+    let before = shown(&ollama).await;
+
+    let response = client
+        .post_json_auth(
+            "/api/chats",
+            &json!({"workspace_id": workspace, "title": "Refused", "model_name": CHAT_MODEL}),
+            &token,
+        )
+        .await;
+    let asked = shown(&ollama).await - before;
+    let created: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chats WHERE title = 'Refused' AND workspace_id = $1")
+        .bind(workspace)
+        .fetch_one(&pool)
+        .await
+        .expect("the chats are readable");
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    response.assert_status(axum::http::StatusCode::CONFLICT);
+    assert!(response.text().contains(UNUSABLE), "{}", response.text());
+    assert!(!response.text().contains(ORGANIZATION_KEY), "{}", response.text());
+    assert_eq!(created, 0, "a chat was created on an unusable endpoint");
+    assert_eq!(asked, 0, "the instance's Ollama was asked about the model");
+}
+
+#[tokio::test]
+async fn starting_a_project_on_an_endpoint_the_instance_no_longer_allows_is_refused_with_the_reason()
+{
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    let (client, token, workspace) =
+        member_on_a_disallowed_endpoint(&endpoints, &ollama, |config| config.auto.enabled = true)
+            .await;
+    let pool = client.state().db().clone();
+    let before = shown(&ollama).await;
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{workspace}/projects/auto"),
+            &json!({"brief": "Plan a small landing page", "model_name": CHAT_MODEL}),
+            &token,
+        )
+        .await;
+    let asked = shown(&ollama).await - before;
+    tokio::time::sleep(SETTLE).await;
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    response.assert_status(axum::http::StatusCode::CONFLICT);
+    assert!(response.text().contains(UNUSABLE), "{}", response.text());
+    assert_eq!(asked, 0, "the instance's Ollama was asked about the model");
+    assert_nothing_sent(&endpoints, &response.text()).await;
+}
+
+#[tokio::test]
+async fn the_model_picker_says_why_an_endpoint_the_instance_no_longer_allows_offers_nothing() {
+    let endpoints = Endpoints::start().await;
+    let ollama = MockServer::start().await;
+    let (client, token, workspace) =
+        member_on_a_disallowed_endpoint(&endpoints, &ollama, |_| {}).await;
+    let pool = client.state().db().clone();
+
+    let response = client
+        .get_auth(&format!("/api/models?workspace_id={workspace}"), &token)
+        .await;
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    response.assert_status(axum::http::StatusCode::CONFLICT);
+    let body = response.text();
+    assert!(body.contains(UNUSABLE), "{body}");
+    assert!(
+        !body.contains(CHAT_MODEL) && !body.contains(INSTANCE_MODEL),
+        "the picker offered the instance's models for a workspace whose endpoint cannot be used: {body}"
     );
 }

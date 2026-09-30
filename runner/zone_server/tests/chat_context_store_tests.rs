@@ -748,7 +748,8 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
             .unwrap();
         let endpoint = Route::for_workspace(&state, row.workspace_id.unwrap())
             .await
-            .endpoint;
+            .into_endpoint()
+            .expect("a usable route");
         session::build(
             &state,
             &row,

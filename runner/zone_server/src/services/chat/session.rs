@@ -1162,7 +1162,8 @@ mod tests {
         let user = Uuid::new_v4();
         let endpoint = crate::services::route::Route::for_workspace(&state, workspace.id)
             .await
-            .endpoint;
+            .into_endpoint()
+            .expect("a usable route");
 
         let turn = build(
             &state,

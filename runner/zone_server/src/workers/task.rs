@@ -31,7 +31,7 @@ use crate::services::backend;
 use crate::services::chat::session::{self, RunContext};
 use crate::services::endpoint::Endpoint;
 use crate::services::login::credential::{self, Login};
-use crate::services::route::Route;
+use crate::services::route::{Reason, Route, Unusable};
 use crate::services::stages;
 use crate::state::AppState;
 use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
@@ -218,10 +218,14 @@ impl Fault {
     /// needs an admin, and a state directory that cannot be made, an operator.
     fn backend(error: backend::Error) -> Self {
         let failure = match error {
-            backend::Error::Database { .. } => Failure::Transient,
+            backend::Error::Database { .. }
+            | backend::Error::Unusable(Unusable {
+                reason: Reason::Unreadable,
+            }) => Failure::Transient,
             backend::Error::SignedOut { .. }
             | backend::Error::Renewal { .. }
-            | backend::Error::Home { .. } => Failure::Terminal,
+            | backend::Error::Home { .. }
+            | backend::Error::Unusable(_) => Failure::Terminal,
         };
         Self {
             failure,
@@ -1302,6 +1306,9 @@ async fn prepare(
     plan_approval: bool,
 ) -> Result<Prepared, String> {
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    let endpoint = route
+        .into_endpoint()
+        .map_err(|unusable| unusable.to_string())?;
     let backend = resolved.map_err(|error| error.to_string())?;
     if plan_approval && matches!(backend, LlmBackend::Cli { .. }) {
         return Err(match state.config().model_backend() {
@@ -1310,10 +1317,10 @@ async fn prepare(
         }
         .to_string());
     }
-    let model = resolve_model(state, task, &backend, &route.endpoint, &preferences).await?;
+    let model = resolve_model(state, task, &backend, &endpoint, &preferences).await?;
     Ok(Prepared {
         backend,
-        endpoint: route.endpoint,
+        endpoint,
         model,
     })
 }
@@ -3111,7 +3118,7 @@ mod tests {
                 &self.state,
                 &self.task,
                 backend,
-                &route.endpoint,
+                route.endpoint().expect("a usable route"),
                 &preferences,
             )
             .await
@@ -3212,7 +3219,7 @@ mod tests {
         .unwrap();
 
         let route = fixture.route().await;
-        let origin = route.endpoint.origin();
+        let origin = route.endpoint().expect("a usable route").origin();
         let prepared = prepare(
             &fixture.state,
             &fixture.task,

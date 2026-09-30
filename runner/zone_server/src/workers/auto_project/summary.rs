@@ -44,7 +44,13 @@ async fn generate(
     pull: &PullRequestDetail,
     review_summary: &str,
 ) -> Option<String> {
-    let venue = Venue::for_workspace(state, task.workspace_id).await.ok()?;
+    let venue = match Venue::for_workspace(state, task.workspace_id).await {
+        Ok(venue) => venue,
+        Err(error) => {
+            tracing::warn!(task_id = %task.id, %error, "Summarising the merge without a model");
+            return None;
+        }
+    };
     let model = stages::summary_model(
         &venue.preferences,
         &venue.catalog,

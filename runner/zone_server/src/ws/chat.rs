@@ -2571,6 +2571,7 @@ async fn prepare_message(
         return Err("Chat does not belong to the authenticated workspace".into());
     }
     let route = Route::for_workspace(state, workspace_id).await;
+    let endpoint = route.endpoint()?.clone();
     let mut image_config = state.config().comfyui.clone();
     if let Some(settings) = route.settings() {
         settings.apply_to_comfyui(&mut image_config);
@@ -2579,10 +2580,18 @@ async fn prepare_message(
     let intent = match crate::services::image_intent::reading(&image_config, content, metadata) {
         crate::services::image_intent::Reading::Settled(intent) => intent,
         crate::services::image_intent::Reading::Unsettled(lanes) => {
-            let resolved = classifying(state, workspace_id, &chat, &route, &mut image_config).await;
+            let resolved = classifying(
+                state,
+                workspace_id,
+                &chat,
+                &route,
+                &endpoint,
+                &mut image_config,
+            )
+            .await;
             let intent = crate::services::image_intent::ImageIntentClassifier::new(
                 image_config.clone(),
-                route.endpoint.clone(),
+                endpoint.clone(),
                 resolved.clone(),
             )
             .settle(content, lanes)
@@ -2594,7 +2603,7 @@ async fn prepare_message(
     .yielding_to_agent(chat.agent_enabled);
 
     if intent == crate::services::image_intent::GenerationIntent::Chat
-        && route.endpoint.origin() == Origin::Instance
+        && endpoint.origin() == Origin::Instance
         && crate::services::model::Model::completion(&state.config().ollama_host, &chat.model_name)
             .await
             == Some(false)
@@ -2607,9 +2616,19 @@ async fn prepare_message(
         crate::services::image_intent::GenerationIntent::Image => {
             let backend = match backend {
                 Some(backend) => backend,
-                None => classifying(state, workspace_id, &chat, &route, &mut image_config).await,
+                None => {
+                    classifying(
+                        state,
+                        workspace_id,
+                        &chat,
+                        &route,
+                        &endpoint,
+                        &mut image_config,
+                    )
+                    .await
+                }
             };
-            Routing::Image(image_config, backend, route.endpoint)
+            Routing::Image(image_config, backend, endpoint)
         }
         crate::services::image_intent::GenerationIntent::Audio => Routing::Audio(image_config),
         crate::services::image_intent::GenerationIntent::Upscale => Routing::Upscale(image_config),
@@ -2624,6 +2643,7 @@ async fn classifying(
     workspace_id: Uuid,
     chat: &chats::ChatRow,
     route: &Route,
+    endpoint: &Endpoint,
     config: &mut crate::config::ComfyUiConfig,
 ) -> LlmBackend {
     let backend = route.backend(state).await.unwrap_or_else(|error| {
@@ -2634,8 +2654,7 @@ async fn classifying(
         );
         crate::services::backend::instance(state.config())
     });
-    let catalog = route
-        .endpoint
+    let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
     let preferences = route.preferences(&config.classifier_model);
@@ -2724,11 +2743,11 @@ async fn prepare_chat(
     web_search_requested: bool,
 ) -> Result<ChatPreparation, Box<dyn std::error::Error + Send + Sync>> {
     let backend = route.backend(state).await?;
-    let catalog = route
-        .endpoint
+    let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    let endpoint = route.into_endpoint()?;
+    let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
-    let preferences = route.preferences(&state.config().comfyui.classifier_model);
     chat.model_name = crate::services::stages::chat_model(
         &chat.model_name,
         &preferences,
@@ -2752,7 +2771,7 @@ async fn prepare_chat(
         user_id,
         None,
         session::Mode::Generation(backend),
-        route.endpoint,
+        endpoint,
     )
     .await?;
     let search = load_web_search(state, chat_id, content, web_search_requested).await;

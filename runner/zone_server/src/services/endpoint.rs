@@ -122,14 +122,16 @@ impl Endpoint {
         }
     }
 
-    /// The endpoint `settings` name. Coding agents and Bedrock run on the
-    /// instance, as does any provider whose settings name no endpoint or
-    /// save a URL that fails [`validate_url`].
+    /// [`Self::try_resolve`] for settings a test knows are usable.
+    #[cfg(test)]
     pub fn resolve(config: &Config, settings: &EffectiveAiSettings) -> Self {
-        Self::try_resolve(config, settings).unwrap_or_else(|_| Self::instance(config))
+        Self::try_resolve(config, settings).expect("usable endpoint settings")
     }
 
-    /// [`Self::resolve`], or why the URL the settings save cannot be used.
+    /// The endpoint `settings` name, or why the URL they send to, saved or a
+    /// provider's default, fails [`validate_url`]. Coding agents and Bedrock
+    /// run on the instance, as does any provider whose settings name no
+    /// endpoint.
     pub fn try_resolve(config: &Config, settings: &EffectiveAiSettings) -> Result<Self, UrlError> {
         let resolved = match settings.provider.as_str() {
             PROVIDER_SELF_HOSTED => Self::self_hosted(
@@ -513,17 +515,6 @@ mod tests {
                 origin: Origin::Settings,
             },
             Case {
-                name: "self_hosted on a look-alike of the instance host that is no URL runs on the instance",
-                provider: PROVIDER_SELF_HOSTED,
-                saved: Saved {
-                    url: Some("http://litellm:4000.evil.example"),
-                    key: Some(SAVED_KEY),
-                },
-                url: INSTANCE_HOST,
-                key: INSTANCE_KEY,
-                origin: Origin::Instance,
-            },
-            Case {
                 name: "self_hosted on a look-alike of the instance host is another host",
                 provider: PROVIDER_SELF_HOSTED,
                 saved: Saved {
@@ -533,17 +524,6 @@ mod tests {
                 url: "http://litellm.evil.example:4000/v1",
                 key: "",
                 origin: Origin::Settings,
-            },
-            Case {
-                name: "self_hosted on the instance host behind credentials runs on the instance",
-                provider: PROVIDER_SELF_HOSTED,
-                saved: Saved {
-                    url: Some("http://litellm:4000@evil.example"),
-                    key: None,
-                },
-                url: INSTANCE_HOST,
-                key: INSTANCE_KEY,
-                origin: Origin::Instance,
             },
             Case {
                 name: "self_hosted on the instance host behind another port is another host",
@@ -623,17 +603,6 @@ mod tests {
                 origin: Origin::Settings,
             },
             Case {
-                name: "self_hosted with a URL carrying credentials runs on the instance",
-                provider: PROVIDER_SELF_HOSTED,
-                saved: Saved {
-                    url: Some("http://user:pass@gateway.example:4000"),
-                    key: Some(SAVED_KEY),
-                },
-                url: INSTANCE_HOST,
-                key: INSTANCE_KEY,
-                origin: Origin::Instance,
-            },
-            Case {
                 name: "openai with nothing saved runs on the instance",
                 provider: PROVIDER_OPENAI,
                 saved: NOTHING,
@@ -686,17 +655,6 @@ mod tests {
                 origin: Origin::Settings,
             },
             Case {
-                name: "openai with a base URL carrying a query runs on the instance",
-                provider: PROVIDER_OPENAI,
-                saved: Saved {
-                    url: Some("https://proxy.example/v1?key=leak"),
-                    key: Some(SAVED_KEY),
-                },
-                url: INSTANCE_HOST,
-                key: INSTANCE_KEY,
-                origin: Origin::Instance,
-            },
-            Case {
                 name: "anthropic with nothing saved runs on the instance",
                 provider: PROVIDER_ANTHROPIC,
                 saved: NOTHING,
@@ -736,17 +694,6 @@ mod tests {
                 url: "https://gateway.example/v1",
                 key: "",
                 origin: Origin::Settings,
-            },
-            Case {
-                name: "anthropic with a base URL carrying a fragment runs on the instance",
-                provider: PROVIDER_ANTHROPIC,
-                saved: Saved {
-                    url: Some("https://gateway.example/v1#part"),
-                    key: Some(SAVED_KEY),
-                },
-                url: INSTANCE_HOST,
-                key: INSTANCE_KEY,
-                origin: Origin::Instance,
             },
             Case {
                 name: "bedrock runs on the instance whatever is saved",
@@ -793,6 +740,51 @@ mod tests {
             assert_eq!(endpoint.url(), case.url, "{}", case.name);
             assert_eq!(endpoint.key().expose(), case.key, "{}", case.name);
             assert_eq!(endpoint.origin(), case.origin, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn a_saved_url_that_fails_validation_is_refused_never_run_on_the_instance() {
+        let config = config();
+        for (provider, url, error) in [
+            (
+                PROVIDER_SELF_HOSTED,
+                "http://litellm:4000.evil.example",
+                UrlError::Unparseable,
+            ),
+            (
+                PROVIDER_SELF_HOSTED,
+                "http://litellm:4000@evil.example",
+                UrlError::Userinfo,
+            ),
+            (
+                PROVIDER_SELF_HOSTED,
+                "http://user:pass@gateway.example:4000",
+                UrlError::Userinfo,
+            ),
+            (
+                PROVIDER_OPENAI,
+                "https://proxy.example/v1?key=leak",
+                UrlError::Query,
+            ),
+            (
+                PROVIDER_ANTHROPIC,
+                "https://gateway.example/v1#part",
+                UrlError::Fragment,
+            ),
+        ] {
+            let resolved = Endpoint::try_resolve(
+                &config,
+                &saved(
+                    provider,
+                    Saved {
+                        url: Some(url),
+                        key: Some(SAVED_KEY),
+                    },
+                ),
+            );
+
+            assert_eq!(resolved.err(), Some(error), "{provider} {url}");
         }
     }
 
@@ -925,52 +917,34 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_url_the_instance_does_not_list_runs_on_the_instance() {
+    fn a_saved_url_the_instance_does_not_list_is_refused() {
         let config = Config {
             endpoint_hosts: Hosts::parse(".corp.example"),
             ..config()
         };
-        let unlisted = Endpoint::resolve(
-            &config,
-            &saved(
-                PROVIDER_OPENAI,
-                Saved {
-                    url: Some("https://gateway.example/v1"),
-                    key: Some(SAVED_KEY),
-                },
-            ),
-        );
-        let listed = Endpoint::resolve(
-            &config,
-            &saved(
-                PROVIDER_OPENAI,
-                Saved {
-                    url: Some("https://llm.corp.example/v1"),
-                    key: Some(SAVED_KEY),
-                },
-            ),
-        );
-        let hosted = Endpoint::resolve(
-            &config,
-            &saved(
-                PROVIDER_ANTHROPIC,
-                Saved {
-                    url: None,
-                    key: Some(SAVED_KEY),
-                },
-            ),
-        );
+        let resolve = |url| {
+            Endpoint::try_resolve(
+                &config,
+                &saved(
+                    PROVIDER_OPENAI,
+                    Saved {
+                        url: Some(url),
+                        key: Some(SAVED_KEY),
+                    },
+                ),
+            )
+        };
 
-        assert_eq!(unlisted.origin(), Origin::Instance);
-        assert_eq!(unlisted.key().expose(), INSTANCE_KEY);
+        let unlisted = resolve("https://gateway.example/v1");
+        let listed = resolve("https://llm.corp.example/v1").expect("a listed host");
+
+        assert_eq!(unlisted.err(), Some(UrlError::Unlisted));
         assert_eq!(listed.url(), "https://llm.corp.example/v1");
         assert_eq!(listed.origin(), Origin::Settings);
-        assert_eq!(hosted.url(), ANTHROPIC_URL);
-        assert_eq!(hosted.origin(), Origin::Settings);
     }
 
     #[test]
-    fn a_saved_metadata_url_runs_on_the_instance() {
+    fn a_saved_metadata_url_is_refused() {
         let config = config();
         for url in [
             "http://169.254.169.254",
@@ -978,7 +952,7 @@ mod tests {
             "http://[fe80::1]:11434",
         ] {
             for provider in [PROVIDER_SELF_HOSTED, PROVIDER_OPENAI, PROVIDER_ANTHROPIC] {
-                let endpoint = Endpoint::resolve(
+                let resolved = Endpoint::try_resolve(
                     &config,
                     &saved(
                         provider,
@@ -989,8 +963,7 @@ mod tests {
                     ),
                 );
 
-                assert_eq!(endpoint.url(), INSTANCE_HOST, "{provider} {url}");
-                assert_eq!(endpoint.origin(), Origin::Instance, "{provider} {url}");
+                assert_eq!(resolved.err(), Some(UrlError::Metadata), "{provider} {url}");
             }
         }
     }

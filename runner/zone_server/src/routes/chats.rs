@@ -15,9 +15,9 @@ use crate::error::ServerError;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
 use crate::services::chat::session;
-use crate::services::endpoint::Origin;
+use crate::services::endpoint::Endpoint;
 use crate::services::model::Model;
-use crate::services::route::Route;
+use crate::services::route::{Route, Unusable};
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use zone_core::context::ContextUsage;
@@ -233,24 +233,27 @@ async fn chat_with_messages(
     auth: &AuthUser,
     chat: chats::ChatRow,
 ) -> ChatWithMessagesResponse {
-    let route = match chat.workspace_id {
-        Some(workspace) => Some(Route::for_workspace(state, workspace).await),
+    let endpoint = match chat.workspace_id {
+        Some(workspace) => Some(Route::for_workspace(state, workspace).await.into_endpoint()),
         None => None,
     };
-    chat_on_route(state, auth, chat, route).await
+    chat_on_endpoint(state, auth, chat, endpoint).await
 }
 
-/// [`chat_with_messages`] for a chat whose workspace's route is already read.
-async fn chat_on_route(
+/// [`chat_with_messages`] for a chat whose workspace's endpoint is already
+/// read.
+async fn chat_on_endpoint(
     state: &AppState,
     auth: &AuthUser,
     chat: chats::ChatRow,
-    route: Option<Route>,
+    endpoint: Option<Result<Endpoint, Unusable>>,
 ) -> ChatWithMessagesResponse {
-    let origin = route
-        .as_ref()
-        .map_or(Origin::Instance, |route| route.endpoint.origin());
-    let profile = Model::profile_on(origin, &state.config().ollama_host, &chat.model_name).await;
+    let host = &state.config().ollama_host;
+    let profile = match &endpoint {
+        None => Model::profile(host, &chat.model_name).await,
+        Some(Ok(endpoint)) => Model::profile_on(endpoint.origin(), host, &chat.model_name).await,
+        Some(Err(_)) => Model::unshown(&chat.model_name),
+    };
     let messages = chats::list_messages(state.db(), chat.id)
         .await
         .unwrap_or_default()
@@ -258,26 +261,19 @@ async fn chat_on_route(
         .map(MessageResponse::from)
         .collect();
 
-    let context = match (route, auth.0.user_id()) {
-        (Some(route), Ok(actor)) => {
+    let context = match (endpoint, auth.0.user_id()) {
+        (Some(Ok(endpoint)), Ok(actor)) => {
             // No draft or inference; reconstruct a fresh observation for reconnect.
-            session::build(
-                state,
-                &chat,
-                actor,
-                None,
-                session::Mode::Preview,
-                route.endpoint,
-            )
-            .await
-            .ok()
-            .map(|prepared| {
-                // The exposed set, not every registered tool: this is what
-                // a turn would actually send, which is the number a reader
-                // is asking for when they ask what a chat costs.
-                let exposed = prepared.agentic.then(|| prepared.tools.definitions());
-                prepared.context.usage(&prepared.model, exposed.as_deref())
-            })
+            session::build(state, &chat, actor, None, session::Mode::Preview, endpoint)
+                .await
+                .ok()
+                .map(|prepared| {
+                    // The exposed set, not every registered tool: this is what
+                    // a turn would actually send, which is the number a reader
+                    // is asking for when they ask what a chat costs.
+                    let exposed = prepared.agentic.then(|| prepared.tools.definitions());
+                    prepared.context.usage(&prepared.model, exposed.as_deref())
+                })
         }
         _ => None,
     };
@@ -441,9 +437,19 @@ pub async fn create(
         return e.into_response();
     }
 
-    let route = Route::for_workspace(&state, req.workspace_id).await;
-    let origin = route.endpoint.origin();
-    let profile = Model::profile_on(origin, &state.config().ollama_host, &req.model_name).await;
+    let endpoint = match Route::for_workspace(&state, req.workspace_id)
+        .await
+        .into_endpoint()
+    {
+        Ok(endpoint) => endpoint,
+        Err(unusable) => return ServerError::Conflict(unusable.to_string()).into_response(),
+    };
+    let profile = Model::profile_on(
+        endpoint.origin(),
+        &state.config().ollama_host,
+        &req.model_name,
+    )
+    .await;
     if profile.completion == Some(false) {
         return (
             StatusCode::BAD_REQUEST,
@@ -473,7 +479,7 @@ pub async fn create(
             (
                 StatusCode::CREATED,
                 Json(SingleChatResponse {
-                    chat: chat_on_route(&state, &auth, chat, Some(route)).await,
+                    chat: chat_on_endpoint(&state, &auth, chat, Some(Ok(endpoint))).await,
                 }),
             )
                 .into_response()
@@ -1216,7 +1222,13 @@ pub async fn context(
         Ok(actor) => actor,
         Err(error) => return error.into_response(),
     };
-    let endpoint = Route::for_workspace(&state, workspace).await.endpoint;
+    let endpoint = match Route::for_workspace(&state, workspace)
+        .await
+        .into_endpoint()
+    {
+        Ok(endpoint) => endpoint,
+        Err(unusable) => return ServerError::Conflict(unusable.to_string()).into_response(),
+    };
     match session::build(
         &state,
         &chat,
