@@ -174,6 +174,7 @@ async function mockApi(page: Page, scenario: Scenario): Promise<Captured[]> {
         json: {
           ...settings(scenario.workspaceProvider ?? 'self_hosted'),
           overrides: scenario.workspaceProvider !== undefined,
+          organization_keys: { litellm: false, openai: false, anthropic: false },
         },
       });
       return;
