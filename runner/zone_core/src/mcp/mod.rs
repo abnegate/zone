@@ -14,7 +14,7 @@
 //!
 //! Children inherit the runner environment and overlay `McpServerSpec.env`.
 //! `TOOL_RUNNER_PROXY_URL`, when set, then configures proxy-aware HTTP clients
-//! while keeping loopback and stack services direct.
+//! while keeping loopback and stack services direct; see [`crate::tools::routing`].
 //! Configure only trusted executables.
 
 mod client;

@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use abnegate_secret::redact;
 use chrono::{DateTime, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
-use zone_core::secret::redact;
 
 pub use prompt::Prompt;
 pub use source::Source;
@@ -215,11 +215,11 @@ mod name {
 
 #[cfg(test)]
 mod tests {
+    use abnegate_secret::SecretValue;
     use chrono::TimeDelta;
     use futures::future::join_all;
     use serde_json::{Value, json};
     use tempfile::TempDir;
-    use zone_core::secret::SecretValue;
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};

@@ -150,7 +150,7 @@ fn llm_config(config: &Config) -> Result<LlmConfig, RunError> {
         .map(str::trim)
         .filter(|url| !url.is_empty())
         .ok_or_else(|| RunError::LlmNotConfigured {
-            path: Config::config_path()
+            path: Config::path()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|_| "~/.zone/config.toml".to_string()),
         })?;
@@ -168,7 +168,7 @@ fn llm_config(config: &Config) -> Result<LlmConfig, RunError> {
 pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result<(), RunError> {
     let config = Config::load().map_err(|e| RunError::Config(e.to_string()))?;
 
-    let auth = AuthManager::new();
+    let auth = AuthManager::new().map_err(|_| RunError::NotLoggedIn)?;
     if !auth.is_logged_in() {
         return Err(RunError::NotLoggedIn);
     }
@@ -181,7 +181,7 @@ pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result
     println!(
         "{} {} {}",
         style("Signed in as").dim(),
-        style(&metadata.email).cyan(),
+        style(metadata.email.as_deref().unwrap_or_default()).cyan(),
         style(format!("({})", metadata.host)).dim()
     );
 
@@ -220,7 +220,7 @@ pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result
     let state = agent.run(prompt, &callback).await?;
 
     // Save session
-    let session_store = FileSessionStore::new(Config::ensure_sessions_dir()?);
+    let session_store = FileSessionStore::new(Config::ensure_sessions_directory()?);
     let title = create_session_title(prompt);
     let session = Session::new(state, title, Some(cwd.display().to_string()));
     session_store.save(&session).await?;
@@ -238,7 +238,7 @@ pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result
 /// Resume a session
 pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Result<(), RunError> {
     let config = Config::load().map_err(|e| RunError::Config(e.to_string()))?;
-    let session_store = FileSessionStore::new(Config::ensure_sessions_dir()?);
+    let session_store = FileSessionStore::new(Config::ensure_sessions_directory()?);
 
     // Load session
     let session = if last {
@@ -303,7 +303,7 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
     );
     println!();
 
-    let auth = AuthManager::new();
+    let auth = AuthManager::new().map_err(|_| RunError::NotLoggedIn)?;
     if !auth.is_logged_in() {
         return Err(RunError::NotLoggedIn);
     }
@@ -316,7 +316,7 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
     println!(
         "{} {} {}",
         style("Signed in as").dim(),
-        style(&metadata.email).cyan(),
+        style(metadata.email.as_deref().unwrap_or_default()).cyan(),
         style(format!("({})", metadata.host)).dim()
     );
 
@@ -362,7 +362,7 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
 
 /// List recent sessions
 pub async fn list_sessions(limit: usize) -> Result<(), RunError> {
-    let session_store = FileSessionStore::new(Config::ensure_sessions_dir()?);
+    let session_store = FileSessionStore::new(Config::ensure_sessions_directory()?);
     let summaries = session_store.list().await?;
 
     if summaries.is_empty() {
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_run_error_from_config_error() {
-        let config_err = ConfigError::NoHomeDir;
+        let config_err = ConfigError::from(abnegate_config::Error::NoHomeDirectory);
         let run_err: RunError = config_err.into();
         assert!(matches!(run_err, RunError::Config(_)));
     }

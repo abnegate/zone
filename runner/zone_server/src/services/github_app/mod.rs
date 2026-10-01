@@ -17,7 +17,7 @@
 //! token for those that are not. Which of the two a caller received is not
 //! visible to it.
 //!
-//! [`SecretValue`]: zone_core::secret::SecretValue
+//! [`SecretValue`]: abnegate_secret::SecretValue
 
 pub mod cache;
 pub mod claims;

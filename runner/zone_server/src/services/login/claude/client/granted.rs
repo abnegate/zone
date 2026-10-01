@@ -1,8 +1,8 @@
 //! What Claude's token endpoint grants.
 
+use abnegate_secret::SecretValue;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Deserialize;
-use zone_core::secret::SecretValue;
 
 use super::super::{Error, Tokens};
 use super::UNREADABLE;

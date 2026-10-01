@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use zone_core::SecretValue;
+use abnegate_secret::SecretValue;
 
 /// The connection details for one SMTP relay.
 ///

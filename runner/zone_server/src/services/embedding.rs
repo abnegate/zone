@@ -2,6 +2,7 @@
 //!
 //! Creates embedding service providers based on AI settings from database.
 
+use abnegate_secret::OptionalSecretExtension;
 use std::sync::Arc;
 use std::time::Instant;
 use zone_context::embeddings::{
@@ -9,7 +10,6 @@ use zone_context::embeddings::{
     providers::{AiSettings, DEFAULT_OLLAMA_EMBEDDING_MODEL, EmbeddingProviderFactory},
 };
 use zone_context::error::Result as ContextResult;
-use zone_core::OptionalSecretExt;
 
 use crate::db::ai_settings::EffectiveAiSettings;
 
@@ -136,8 +136,8 @@ pub fn embedding_engine_from_env() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_secret::SecretValue;
     use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
-    use zone_core::SecretValue;
 
     #[test]
     fn test_create_embedding_service_ollama() {

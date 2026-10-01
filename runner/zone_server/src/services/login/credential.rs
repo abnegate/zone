@@ -3,11 +3,11 @@
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
+use abnegate_secret::SecretValue;
 use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
-use zone_core::secret::SecretValue;
 
 use super::claude;
 use super::locks::Locks;

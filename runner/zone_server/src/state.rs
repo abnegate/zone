@@ -1,8 +1,10 @@
 //! Application state
 
+use abnegate_http::{RateLimitConfig, RateLimiter};
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::{OnceCell, Semaphore};
+use uuid::Uuid;
 use zone_context::adapters::{
     AdapterRegistry, FilesystemAdapter, GitHubAdapter, GitLabAdapter, TextAdapter, WebAdapter,
 };
@@ -16,7 +18,6 @@ use crate::config::{Config, ModelBackend};
 use crate::pull::PullRegistry;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
-use crate::utils::rate_limit::{RateLimitConfig, RateLimiter};
 use zone_email::EmailService;
 
 /// Maximum concurrent indexing operations
@@ -79,7 +80,7 @@ struct AppStateInner {
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
     pub context_service: Option<Arc<ContextService>>,
     pub email_service: Option<Arc<EmailService>>,
-    pub rate_limiter: Arc<RateLimiter>,
+    pub rate_limiter: Arc<RateLimiter<Uuid>>,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
     /// Derived encryption key (32 bytes) for AES-256-GCM
@@ -282,7 +283,7 @@ impl AppState {
     }
 
     /// Get the rate limiter
-    pub fn rate_limiter(&self) -> &Arc<RateLimiter> {
+    pub fn rate_limiter(&self) -> &Arc<RateLimiter<Uuid>> {
         &self.inner.rate_limiter
     }
 

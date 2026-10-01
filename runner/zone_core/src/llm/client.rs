@@ -9,7 +9,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::runtime;
 
-use crate::secret::{conceal, redact};
+use abnegate_secret::{conceal, redact};
 
 use super::dialect::{Budget, Dialect};
 use super::finish_reason::STOP;
@@ -181,7 +181,7 @@ impl std::fmt::Debug for LlmConfig {
         formatter
             .debug_struct("LlmConfig")
             .field("base_url", &self.base_url)
-            .field("api_key", &crate::secret::REDACTED)
+            .field("api_key", &abnegate_secret::REDACTED)
             .field("default_model", &self.default_model)
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
@@ -865,7 +865,7 @@ mod tests {
                         assert!(!message.contains(leaked), "{body} -> {message}");
                         assert!(!shown.contains(leaked), "{body} -> {shown}");
                     }
-                    assert!(message.contains(crate::secret::REDACTED), "{message}");
+                    assert!(message.contains(abnegate_secret::REDACTED), "{message}");
                 }
             }
         }

@@ -2,9 +2,9 @@
 
 use std::fmt;
 
+use abnegate_secret::REDACTED;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use zone_core::secret::REDACTED;
 
 use super::super::codex;
 

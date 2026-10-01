@@ -1,6 +1,6 @@
 //! What a caller receives when it asks for a source's credentials.
 
-use zone_core::secret::SecretValue;
+use abnegate_secret::SecretValue;
 
 /// A bearer credential for one source, whatever minted it.
 ///

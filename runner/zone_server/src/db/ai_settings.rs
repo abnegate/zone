@@ -1,12 +1,12 @@
 //! AI provider settings database queries
 
+use abnegate_secret::SecretValue;
 use chrono::NaiveDateTime;
 use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 use zone_context::embeddings::providers::{
     PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
 };
-use zone_core::SecretValue;
 use zone_core::llm::AgentKind;
 
 use crate::services::endpoint;
@@ -1266,7 +1266,7 @@ pub async fn effective_comfyui(
 mod tests {
     use super::*;
     use crate::config::ComfyUiConfig;
-    use zone_core::OptionalSecretExt;
+    use abnegate_secret::OptionalSecretExtension;
 
     fn settings(fast: Option<&str>, image: Option<&str>) -> EffectiveAiSettings {
         EffectiveAiSettings {

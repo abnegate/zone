@@ -2,10 +2,10 @@
 
 mod common;
 
+use abnegate_secret::OptionalSecretExtension;
 use axum::http::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
-use zone_core::OptionalSecretExt;
 use zone_server::db::ai_settings;
 
 use common::{TestClient, test_email, test_password};

@@ -49,7 +49,7 @@ fn single<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use zone_core::secret::SecretValue;
+    use abnegate_secret::SecretValue;
 
     use super::*;
 

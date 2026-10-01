@@ -1,8 +1,8 @@
 //! An installation access token and the window it may be used in.
 
+use abnegate_secret::SecretValue;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Deserialize;
-use zone_core::secret::SecretValue;
 
 use super::error::GithubAppError;
 

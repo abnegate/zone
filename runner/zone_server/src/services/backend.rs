@@ -251,13 +251,13 @@ fn homed(settings: CliSettings, agent: AgentKind, home: &Path) -> Result<CliSett
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_secret::{SecretValue, redact};
     use chrono::{TimeDelta, Utc};
     use sqlx::PgPool;
     use tempfile::TempDir;
     use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
     use zone_core::llm::CodexSandbox;
     use zone_core::llm::provider::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
-    use zone_core::secret::{SecretValue, redact};
 
     use crate::config::{AgentConfig, ModelBackend};
     use crate::db::agent_logins::{self, Upsert};

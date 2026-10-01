@@ -2,11 +2,11 @@
 
 use std::fmt;
 
+use abnegate_secret::REDACTED;
 use chrono::NaiveDateTime;
 use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_core::secret::REDACTED;
 
 use super::DbResult;
 

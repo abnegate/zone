@@ -1,5 +1,6 @@
 //! AI provider settings endpoints
 
+use abnegate_secret::{OptionalSecretExtension, SecretValue};
 use axum::{
     Json,
     extract::{Path, State},
@@ -9,7 +10,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
-use zone_core::{OptionalSecretExt, SecretValue};
 
 use crate::auth::AuthUser;
 use crate::db::ai_settings;

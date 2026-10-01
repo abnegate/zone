@@ -866,7 +866,7 @@ mod tests {
             zone_context::embeddings::providers::PROVIDER_OPENAI,
         );
         settings.openai_base_url = Some("https://organization.example/v1".to_string());
-        settings.openai_api_key = Some(zone_core::secret::SecretValue::new(
+        settings.openai_api_key = Some(abnegate_secret::SecretValue::new(
             ORGANIZATION_KEY.to_string(),
         ));
         Route::new(config, Uuid::new_v4(), Uuid::new_v4(), settings)

@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::credential::Credential;
-use crate::secret::SecretValue;
+use abnegate_secret::SecretValue;
 
 /// Thirty minutes is the chat turn's own budget, which is what a coding agent
-/// driven as a provider has to fit inside. [`tool_runner`]'s five minutes is
+/// driven as a provider has to fit inside. [`abnegate_exec`]'s five minutes is
 /// the budget for one command; an agent spends its turn running a loop of
 /// them, so a turn cut off at that mark would report a timeout on work that
 /// was still going well.
@@ -23,7 +23,7 @@ pub const DEFAULT_LINE_LIMIT: usize = 1024 * 1024;
 
 /// Whether a spawned agent keeps the tools it ships with.
 ///
-/// The agent runs as the host user and outside [`tool_runner`]'s sandbox, so
+/// The agent runs as the host user and outside [`abnegate_exec`]'s sandbox, so
 /// its own file and shell tools reach every file that user can reach, and
 /// nothing zone can see gates them. Zone's tools are gated where they run,
 /// which is zone. So a turn gets zone's tools alone unless the operator
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn an_agents_turn_gets_longer_than_a_single_command_does() {
-        let command = Duration::from_millis(tool_runner::executor::DEFAULT_TIMEOUT_MS);
+        let command = abnegate_exec::executor::DEFAULT_TIMEOUT;
 
         assert!(
             DEFAULT_TIMEOUT > command,

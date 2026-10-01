@@ -3,9 +3,9 @@
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use abnegate_secret::SecretValue;
 use dashmap::DashMap;
 use uuid::Uuid;
-use zone_core::secret::SecretValue;
 
 use super::claude::{Flow, Redirect, Scope};
 use super::console::Console;
@@ -86,7 +86,7 @@ fn take(
 
 #[cfg(test)]
 mod tests {
-    use zone_core::secret::REDACTED;
+    use abnegate_secret::REDACTED;
 
     use super::*;
 

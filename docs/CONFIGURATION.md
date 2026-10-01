@@ -1335,8 +1335,17 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ### `TOOL_RUNNER_PROXY_URL`
 - **Default**: empty (existing subprocess environment)
-- **Description**: Optional HTTP proxy for proxy-aware command tools and MCP subprocesses
+- **Description**: Optional HTTP proxy for proxy-aware command tools and MCP subprocesses. Loopback and the stack's own services stay direct. A routed process also receives `ABNEGATE_EXEC_PROXY_URL` and `ABNEGATE_EXEC_PROXY_BYPASS`, so what it starts is routed the same way.
 - **VPN value**: `http://gluetun:8888` in `.env` (Traefik). Manager's VPN overlay uses `http://127.0.0.1:8888` for the same shared-namespace reason.
+
+### `ABNEGATE_EXEC_PROXY_URL` and `ABNEGATE_EXEC_PROXY_BYPASS`
+- **Default**: empty (no routing); the bypass list defaults to loopback only
+- **Description**: The proxy for commands run by the shared executor
+  (`abnegate-exec`): evaluation tool runs and `zone-runner` jobs. These no
+  longer follow `TOOL_RUNNER_PROXY_URL`; set these to route them.
+  `ABNEGATE_EXEC_PROXY_BYPASS` is a comma-separated host list reached directly.
+  Under the `vpn` profile Manager shares Gluetun's network namespace, so these
+  commands use the tunnel either way.
 
 ### `ZONE_VPN`
 - **Default**: empty

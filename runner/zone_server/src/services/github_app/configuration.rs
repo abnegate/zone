@@ -2,9 +2,9 @@
 
 use std::fmt;
 
+use abnegate_secret::{MasterKey, SecretValue, decrypt_value, encrypt_value, is_encrypted};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use zone_core::secret::{MasterKey, SecretValue, encryption};
 
 use super::error::GithubAppError;
 use super::identifier::{ApplicationId, InstallationId};
@@ -37,21 +37,21 @@ impl StoredConfiguration {
         Ok(Self {
             application_id,
             installation_id,
-            private_key: encryption::encrypt(private_key, master_key)
+            private_key: encrypt_value(private_key, master_key)
                 .map_err(|_| GithubAppError::Sealing)?,
         })
     }
 
     /// Unseal the private key so a JWT can be signed with it.
     pub fn open(&self, master_key: &MasterKey) -> Result<AppConfiguration, GithubAppError> {
-        if !encryption::is_encrypted(&self.private_key) {
+        if !is_encrypted(&self.private_key) {
             return Err(GithubAppError::Unsealing);
         }
 
         Ok(AppConfiguration {
             application_id: self.application_id,
             installation_id: self.installation_id,
-            private_key: encryption::decrypt(&self.private_key, master_key)
+            private_key: decrypt_value(&self.private_key, master_key)
                 .map_err(|_| GithubAppError::Unsealing)?,
         })
     }
@@ -97,7 +97,7 @@ impl fmt::Debug for StoredConfiguration {
             .debug_struct("StoredConfiguration")
             .field("application_id", &self.application_id)
             .field("installation_id", &self.installation_id)
-            .field("private_key", &zone_core::secret::REDACTED)
+            .field("private_key", &abnegate_secret::REDACTED)
             .finish()
     }
 }
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn sealing_and_opening_round_trips_the_private_key() {
-        let master_key = MasterKey::generate();
+        let master_key = MasterKey::generate().expect("a master key");
         let opened = sealed(&master_key).open(&master_key).expect("open");
 
         assert_eq!(opened.private_key().expose(), TEST_PRIVATE_KEY);
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn the_stored_private_key_is_an_envelope_not_pem() {
-        let stored = sealed(&MasterKey::generate());
+        let stored = sealed(&MasterKey::generate().expect("a master key"));
         let encoded = serde_json::to_string(&stored).expect("serialise");
 
         assert!(encoded.contains("ENC[v1:"));
@@ -173,9 +173,9 @@ mod tests {
 
     #[test]
     fn opening_with_the_wrong_key_fails() {
-        let stored = sealed(&MasterKey::generate());
+        let stored = sealed(&MasterKey::generate().expect("a master key"));
         assert!(matches!(
-            stored.open(&MasterKey::generate()),
+            stored.open(&MasterKey::generate().expect("a master key")),
             Err(GithubAppError::Unsealing)
         ));
     }
@@ -190,14 +190,14 @@ mod tests {
         .expect("deserialise");
 
         assert!(matches!(
-            stored.open(&MasterKey::generate()),
+            stored.open(&MasterKey::generate().expect("a master key")),
             Err(GithubAppError::Unsealing)
         ));
     }
 
     #[test]
     fn debug_redacts_both_the_sealed_and_the_open_key() {
-        let master_key = MasterKey::generate();
+        let master_key = MasterKey::generate().expect("a master key");
         let stored = sealed(&master_key);
         let rendered = format!("{stored:?}");
 
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn writing_then_reading_preserves_the_rest_of_the_config() {
-        let master_key = MasterKey::generate();
+        let master_key = MasterKey::generate().expect("a master key");
         let mut config = serde_json::json!({ "owner": "zone-dev", "repo": "zone" });
         sealed(&master_key).write(&mut config).expect("write");
 

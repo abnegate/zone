@@ -3,14 +3,17 @@
 //! Handles login/logout via the hosted manager and stores credentials
 //! securely in the OS keychain.
 
-use keyring::Entry;
+use abnegate_config::{Application, TokenMetadata, TokenStore};
+use abnegate_secret::SecretValue;
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const SERVICE_NAME: &str = "zone-cli";
-const ACCESS_TOKEN_KEY: &str = "access-token";
-const REFRESH_TOKEN_KEY: &str = "refresh-token";
-const METADATA_KEY: &str = "metadata";
+/// The keychain service the CLI's tokens are stored under.
+const SERVICE: &str = "zone-cli";
+
+/// How long before its expiry an access token is refreshed rather than used.
+const REFRESH_LEEWAY: TimeDelta = TimeDelta::seconds(60);
 
 /// Authentication error
 #[derive(Error, Debug)]
@@ -24,8 +27,8 @@ pub enum AuthError {
     #[error("Invalid credentials")]
     InvalidCredentials,
 
-    #[error("Keyring error: {0}")]
-    Keyring(#[from] keyring::Error),
+    #[error("Credential store error: {0}")]
+    Store(abnegate_config::Error),
 
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
@@ -37,13 +40,13 @@ pub enum AuthError {
     Server(String),
 }
 
-/// Stored token metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenMetadata {
-    pub host: String,
-    pub expires_at: i64,
-    pub user_id: String,
-    pub email: String,
+impl From<abnegate_config::Error> for AuthError {
+    fn from(error: abnegate_config::Error) -> Self {
+        match error {
+            abnegate_config::Error::NoCredential { .. } => AuthError::NotLoggedIn,
+            other => AuthError::Store(other),
+        }
+    }
 }
 
 /// The body `POST /api/auth/login` and `POST /api/auth/refresh` answer with:
@@ -58,8 +61,15 @@ struct Tokens {
 }
 
 impl Tokens {
-    fn expires_at(&self, now: i64) -> i64 {
-        now + self.expires_in
+    fn expires_at(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        now + TimeDelta::seconds(self.expires_in)
+    }
+
+    fn store(self, store: &TokenStore) -> Result<SecretValue, AuthError> {
+        let access_token = SecretValue::new(self.access_token);
+        store.set_access_token(&access_token)?;
+        store.set_refresh_token(&SecretValue::new(self.refresh_token))?;
+        Ok(access_token)
     }
 }
 
@@ -89,17 +99,25 @@ fn parse_tokens(status: reqwest::StatusCode, body: &str) -> Result<Tokens, AuthE
     Ok(serde_json::from_str(body)?)
 }
 
+/// The keychain entries the CLI's tokens live in.
+fn token_store() -> Result<TokenStore, AuthError> {
+    let application = Application::new(SERVICE).map_err(abnegate_config::Error::from)?;
+    Ok(TokenStore::new(application))
+}
+
 /// Authentication manager
 pub struct AuthManager {
     client: reqwest::Client,
+    store: TokenStore,
 }
 
 impl AuthManager {
     /// Create a new auth manager
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self, AuthError> {
+        Ok(Self {
             client: reqwest::Client::new(),
-        }
+            store: token_store()?,
+        })
     }
 
     /// Log in to a Zone server
@@ -123,22 +141,19 @@ impl AuthManager {
             .send()
             .await?;
         let status = response.status();
-        let tokens = parse_tokens(status, &response.text().await?)?;
-        let expires_at = tokens.expires_at(chrono::Utc::now().timestamp());
+        let mut tokens = parse_tokens(status, &response.text().await?)?;
+        let expires_at = tokens.expires_at(Utc::now());
         let user = tokens
             .user
+            .take()
             .ok_or_else(|| AuthError::Server("The login response carried no user".to_string()))?;
 
-        self.store_token(ACCESS_TOKEN_KEY, &tokens.access_token)?;
-        self.store_token(REFRESH_TOKEN_KEY, &tokens.refresh_token)?;
+        tokens.store(&self.store)?;
 
-        let metadata = TokenMetadata {
-            host: host.to_string(),
-            expires_at,
-            user_id: user.id,
-            email: user.email,
-        };
-        self.store_token(METADATA_KEY, &serde_json::to_string(&metadata)?)?;
+        let mut metadata = TokenMetadata::new(host, expires_at);
+        metadata.user_id = Some(user.id);
+        metadata.email = Some(user.email);
+        self.store.set_metadata(&metadata)?;
 
         match crate::config::Config::load() {
             Ok(mut cfg) => {
@@ -155,29 +170,23 @@ impl AuthManager {
 
     /// Log out and clear credentials
     pub fn logout(&self) -> Result<(), AuthError> {
-        self.delete_token(ACCESS_TOKEN_KEY).ok();
-        self.delete_token(REFRESH_TOKEN_KEY).ok();
-        self.delete_token(METADATA_KEY).ok();
-        Ok(())
+        Ok(self.store.clear()?)
     }
 
     /// Get the current access token, refreshing if needed
-    pub async fn get_access_token(&self) -> Result<String, AuthError> {
+    pub async fn get_access_token(&self) -> Result<SecretValue, AuthError> {
         let metadata = self.get_metadata()?;
 
-        // Check if token is expired (with 60s buffer)
-        let now = chrono::Utc::now().timestamp();
-        if now >= metadata.expires_at - 60 {
-            return self.refresh_token().await;
+        if metadata.expires_within(REFRESH_LEEWAY) {
+            return self.refresh_token(metadata).await;
         }
 
-        self.get_token(ACCESS_TOKEN_KEY)
+        Ok(self.store.access_token()?)
     }
 
     /// Refresh the access token
-    async fn refresh_token(&self) -> Result<String, AuthError> {
-        let metadata = self.get_metadata()?;
-        let refresh_token = self.get_token(REFRESH_TOKEN_KEY)?;
+    async fn refresh_token(&self, metadata: TokenMetadata) -> Result<SecretValue, AuthError> {
+        let refresh_token = self.store.refresh_token()?;
 
         #[derive(Serialize)]
         struct RefreshRequest<'a> {
@@ -189,7 +198,7 @@ impl AuthManager {
             .client
             .post(&url)
             .json(&RefreshRequest {
-                refresh_token: &refresh_token,
+                refresh_token: refresh_token.expose(),
             })
             .send()
             .await?;
@@ -203,53 +212,22 @@ impl AuthManager {
             Err(error) => return Err(error),
         };
 
-        self.store_token(ACCESS_TOKEN_KEY, &tokens.access_token)?;
-        self.store_token(REFRESH_TOKEN_KEY, &tokens.refresh_token)?;
+        let mut refreshed = metadata;
+        refreshed.expires_at = tokens.expires_at(Utc::now());
+        let access_token = tokens.store(&self.store)?;
+        self.store.set_metadata(&refreshed)?;
 
-        let new_metadata = TokenMetadata {
-            expires_at: tokens.expires_at(chrono::Utc::now().timestamp()),
-            ..metadata
-        };
-        self.store_token(METADATA_KEY, &serde_json::to_string(&new_metadata)?)?;
-
-        Ok(tokens.access_token)
+        Ok(access_token)
     }
 
     /// Get stored metadata
     pub fn get_metadata(&self) -> Result<TokenMetadata, AuthError> {
-        let json = self.get_token(METADATA_KEY)?;
-        Ok(serde_json::from_str(&json)?)
+        Ok(self.store.metadata()?)
     }
 
     /// Check if user is logged in
     pub fn is_logged_in(&self) -> bool {
-        self.get_token(ACCESS_TOKEN_KEY).is_ok()
-    }
-
-    fn store_token(&self, key: &str, value: &str) -> Result<(), AuthError> {
-        let entry = Entry::new(SERVICE_NAME, key)?;
-        entry.set_password(value)?;
-        Ok(())
-    }
-
-    fn get_token(&self, key: &str) -> Result<String, AuthError> {
-        let entry = Entry::new(SERVICE_NAME, key)?;
-        entry.get_password().map_err(|e| match e {
-            keyring::Error::NoEntry => AuthError::NotLoggedIn,
-            _ => AuthError::Keyring(e),
-        })
-    }
-
-    fn delete_token(&self, key: &str) -> Result<(), AuthError> {
-        let entry = Entry::new(SERVICE_NAME, key)?;
-        entry.delete_credential()?;
-        Ok(())
-    }
-}
-
-impl Default for AuthManager {
-    fn default() -> Self {
-        Self::new()
+        self.store.is_authenticated()
     }
 }
 
@@ -289,154 +267,91 @@ mod tests {
         assert!(err.to_string().contains("JSON error"));
     }
 
+    /// Tokens a CLI stored before the shared token store keep working only
+    /// while the keychain service they were written under is the one read.
     #[test]
-    fn test_token_metadata_serialization() {
-        let metadata = TokenMetadata {
-            host: "https://zone.example.com".to_string(),
-            expires_at: 1700000000,
-            user_id: "user-123".to_string(),
-            email: "test@example.com".to_string(),
-        };
-
-        let json = serde_json::to_string(&metadata).unwrap();
-        assert!(json.contains("zone.example.com"));
-        assert!(json.contains("1700000000"));
-        assert!(json.contains("user-123"));
-        assert!(json.contains("test@example.com"));
+    fn tokens_are_kept_under_the_keychain_service_they_were_always_written_to() {
+        assert_eq!(token_store().unwrap().service(), "zone-cli");
     }
 
+    /// What an earlier CLI wrote to the keychain, entry by entry, has to be
+    /// what the shared store reads, or every signed-in user is signed out by
+    /// the upgrade. The platform keychain is swapped for keyring's in-memory
+    /// store, which the earlier CLI's `Entry` writes go through as well.
+    /// keyring initialises the platform store before any other, and on Linux
+    /// that needs a running Secret Service, so this runs on macOS.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn test_token_metadata_deserialization() {
-        let json = r#"{
-            "host": "https://api.zone.io",
-            "expires_at": 1800000000,
-            "user_id": "abc-456",
-            "email": "user@zone.io"
-        }"#;
+    fn the_keychain_entries_an_earlier_cli_wrote_still_sign_the_user_in() {
+        keyring::Entry::store_status()
+            .as_ref()
+            .expect("the platform store initialises before it is replaced");
+        keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap());
+        let manager = AuthManager::new().unwrap();
 
-        let metadata: TokenMetadata = serde_json::from_str(json).unwrap();
+        assert!(!manager.is_logged_in());
+        assert!(matches!(
+            manager.get_metadata(),
+            Err(AuthError::NotLoggedIn)
+        ));
+
+        let access_token = concat!("eyJhbGciOiJIUzI1NiJ9", ".access");
+        let refresh_token = concat!("3f1c2b7a", "9e");
+        let metadata = r#"{"host":"https://api.zone.io","expires_at":4102444800,"user_id":"abc-456","email":"user@zone.io"}"#;
+        for (name, value) in [
+            ("access-token", access_token),
+            ("refresh-token", refresh_token),
+            ("metadata", metadata),
+        ] {
+            keyring::Entry::new("zone-cli", name)
+                .unwrap()
+                .set_password(value)
+                .unwrap();
+        }
+
+        assert!(manager.is_logged_in());
+        let read = manager.get_metadata().unwrap();
+        assert_eq!(read.host, "https://api.zone.io");
+        assert_eq!(read.email.as_deref(), Some("user@zone.io"));
+        assert_eq!(manager.store.access_token().unwrap().expose(), access_token);
+        assert_eq!(
+            manager.store.refresh_token().unwrap().expose(),
+            refresh_token
+        );
+
+        manager.logout().unwrap();
+
+        assert!(!manager.is_logged_in());
+        assert!(
+            keyring::Entry::new("zone-cli", "metadata")
+                .unwrap()
+                .get_password()
+                .is_err()
+        );
+    }
+
+    /// The metadata a CLI stored before the shared token store, byte for
+    /// byte, so a signed-in user stays signed in across the upgrade.
+    #[test]
+    fn metadata_stored_by_an_earlier_cli_still_reads() {
+        let stored = r#"{"host":"https://api.zone.io","expires_at":1800000000,"user_id":"abc-456","email":"user@zone.io"}"#;
+
+        let metadata: TokenMetadata = serde_json::from_str(stored).unwrap();
 
         assert_eq!(metadata.host, "https://api.zone.io");
-        assert_eq!(metadata.expires_at, 1800000000);
-        assert_eq!(metadata.user_id, "abc-456");
-        assert_eq!(metadata.email, "user@zone.io");
+        assert_eq!(metadata.expires_at.timestamp(), 1_800_000_000);
+        assert_eq!(metadata.user_id.as_deref(), Some("abc-456"));
+        assert_eq!(metadata.email.as_deref(), Some("user@zone.io"));
+        assert_eq!(serde_json::to_string(&metadata).unwrap(), stored);
     }
 
     #[test]
-    fn test_token_metadata_clone() {
-        let metadata = TokenMetadata {
-            host: "https://zone.example.com".to_string(),
-            expires_at: 1700000000,
-            user_id: "user-123".to_string(),
-            email: "test@example.com".to_string(),
-        };
+    fn a_token_is_refreshed_within_a_minute_of_its_expiry() {
+        let soon = TokenMetadata::new("https://zone.test", Utc::now() + TimeDelta::seconds(59));
+        let later = TokenMetadata::new("https://zone.test", Utc::now() + TimeDelta::seconds(120));
 
-        let cloned = metadata.clone();
-
-        assert_eq!(metadata.host, cloned.host);
-        assert_eq!(metadata.expires_at, cloned.expires_at);
-        assert_eq!(metadata.user_id, cloned.user_id);
-        assert_eq!(metadata.email, cloned.email);
-    }
-
-    #[test]
-    fn test_token_metadata_debug() {
-        let metadata = TokenMetadata {
-            host: "https://zone.example.com".to_string(),
-            expires_at: 1700000000,
-            user_id: "user-123".to_string(),
-            email: "test@example.com".to_string(),
-        };
-
-        let debug_str = format!("{:?}", metadata);
-        assert!(debug_str.contains("TokenMetadata"));
-        assert!(debug_str.contains("zone.example.com"));
-    }
-
-    #[test]
-    fn test_token_metadata_roundtrip() {
-        let original = TokenMetadata {
-            host: "https://zone.test.com".to_string(),
-            expires_at: 1900000000,
-            user_id: "xyz-789".to_string(),
-            email: "admin@zone.test.com".to_string(),
-        };
-
-        let json = serde_json::to_string(&original).unwrap();
-        let deserialized: TokenMetadata = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(original.host, deserialized.host);
-        assert_eq!(original.expires_at, deserialized.expires_at);
-        assert_eq!(original.user_id, deserialized.user_id);
-        assert_eq!(original.email, deserialized.email);
-    }
-
-    #[test]
-    fn test_auth_manager_new() {
-        let manager = AuthManager::new();
-        // Just verify it can be created
-        assert!(std::mem::size_of_val(&manager) > 0);
-    }
-
-    #[test]
-    fn test_auth_manager_default() {
-        let manager = AuthManager::default();
-        // Just verify default works
-        assert!(std::mem::size_of_val(&manager) > 0);
-    }
-
-    #[test]
-    fn test_service_name_constant() {
-        assert_eq!(SERVICE_NAME, "zone-cli");
-    }
-
-    #[test]
-    fn test_token_key_constants() {
-        assert_eq!(ACCESS_TOKEN_KEY, "access-token");
-        assert_eq!(REFRESH_TOKEN_KEY, "refresh-token");
-        assert_eq!(METADATA_KEY, "metadata");
-    }
-
-    #[test]
-    fn test_token_metadata_with_different_hosts() {
-        let hosts = [
-            "http://localhost:8000",
-            "https://zone.example.com",
-            "https://api.zone.io:443",
-            "http://192.168.1.100:3000",
-        ];
-
-        for host in hosts {
-            let metadata = TokenMetadata {
-                host: host.to_string(),
-                expires_at: 1700000000,
-                user_id: "user".to_string(),
-                email: "test@test.com".to_string(),
-            };
-
-            let json = serde_json::to_string(&metadata).unwrap();
-            let parsed: TokenMetadata = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed.host, host);
-        }
-    }
-
-    #[test]
-    fn test_token_metadata_expires_at_values() {
-        // Test with various expiration timestamps
-        let timestamps = [0i64, 1000000000, 1700000000, 2000000000];
-
-        for ts in timestamps {
-            let metadata = TokenMetadata {
-                host: "https://zone.example.com".to_string(),
-                expires_at: ts,
-                user_id: "user".to_string(),
-                email: "test@test.com".to_string(),
-            };
-
-            let json = serde_json::to_string(&metadata).unwrap();
-            let parsed: TokenMetadata = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed.expires_at, ts);
-        }
+        assert!(soon.expires_within(REFRESH_LEEWAY));
+        assert!(!later.expires_within(REFRESH_LEEWAY));
     }
 
     #[test]
@@ -481,7 +396,8 @@ mod tests {
         let tokens = parse_tokens(reqwest::StatusCode::OK, LOGIN_BODY).unwrap();
         assert_eq!(tokens.access_token, "eyJhbGciOiJIUzI1NiJ9.access");
         assert_eq!(tokens.refresh_token, "3f1c2b7a9e");
-        assert_eq!(tokens.expires_at(1_000), 1_900);
+        let now = DateTime::from_timestamp(1_000, 0).unwrap();
+        assert_eq!(tokens.expires_at(now).timestamp(), 1_900);
         let user = tokens.user.unwrap();
         assert_eq!(user.id, "0d9f4a2e-6b1c-4e3a-9f2d-1a2b3c4d5e6f");
         assert_eq!(user.email, "owner@zone.test");
@@ -528,11 +444,4 @@ mod tests {
             Err(AuthError::Json(_))
         ));
     }
-
-    // Note: We can't easily test the actual keyring operations in unit tests
-    // because they require OS-specific keychain access. Those would be
-    // integration tests that run with actual keychain permissions.
-    //
-    // The login/refresh/logout methods also require a running server,
-    // so they would be tested in integration tests with a mock server.
 }

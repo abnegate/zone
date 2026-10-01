@@ -3,13 +3,13 @@
 //! the validator would have refused.
 mod common;
 
+use abnegate_http::{public_client, read_capped, validate_public_url};
 use axum::http::StatusCode;
 use common::{TestClient, test_email, test_password};
 use serde_json::json;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_server::utils::url::validate_public_url;
 
 async fn workspace(client: &TestClient) -> (String, Uuid) {
     let registered = client
@@ -162,11 +162,12 @@ async fn a_redirect_into_a_private_host_is_never_requested() {
         .mount(&public)
         .await;
 
-    let response = zone_server::utils::url::public_client(std::time::Duration::from_secs(5))
-        .expect("the validated fetch client builds")
-        .get(format!("{}/redirect", public.uri()))
-        .send()
-        .await;
+    let client = public_client(std::time::Duration::from_secs(5))
+        .expect("the validated fetch client builds");
+    let response = match client.get(&format!("{}/redirect", public.uri())) {
+        Ok(request) => request.send().await,
+        Err(refused) => Err(refused),
+    };
 
     assert!(
         private
@@ -208,7 +209,7 @@ async fn a_page_is_read_only_up_to_its_cap() {
         .send()
         .await
         .expect("the oversized page responds");
-    let huge = zone_server::utils::url::read_capped(huge, CAP).await;
+    let huge = read_capped(huge, CAP).await;
     assert!(
         huge.is_err(),
         "a {} byte page must be refused against a {CAP} byte cap",
@@ -220,7 +221,7 @@ async fn a_page_is_read_only_up_to_its_cap() {
         .send()
         .await
         .expect("the small page responds");
-    let small = zone_server::utils::url::read_capped(small, CAP)
+    let small = read_capped(small, CAP)
         .await
         .expect("a page inside the cap is read whole");
     assert_eq!(small.len(), CAP);

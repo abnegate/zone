@@ -3,6 +3,77 @@
 version = 4
 
 [[package]]
+name = "abnegate-config"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd648a5fa3968334c2eaaae6c0b85b56e5b9feb7fbb124a534ce2a82d4834905"
+dependencies = [
+ "abnegate-secret",
+ "chrono",
+ "dirs 7.0.0",
+ "keyring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "toml 1.1.5+spec-1.1.0",
+ "zeroize",
+]
+
+[[package]]
+name = "abnegate-exec"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e2d566e072306391d8e17799cc0ee1442aafcf21e06940629af5353d600e1f6"
+dependencies = [
+ "abnegate-secret",
+ "base64 0.23.1",
+ "bytes",
+ "dashmap",
+ "nix",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "abnegate-http"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "220b9ca87e0f28ab4c6658650248cc9ec8cd68c792a7c3cafe20160d472354c1"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "rand 0.10.2",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "abnegate-secret"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7aa24383e65469ff8390024afe21418dc61eb448c1abf94cc878ff9b6f9df4f7"
+dependencies = [
+ "aes-gcm",
+ "base64 0.23.1",
+ "dirs 7.0.0",
+ "getrandom 0.4.3",
+ "hex",
+ "serde",
+ "sqlx",
+ "subtle",
+ "thiserror 2.0.20",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -27,6 +98,7 @@ dependencies = [
  "cipher",
  "cpubits",
  "cpufeatures 0.3.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -41,6 +113,7 @@ dependencies = [
  "ctr",
  "ctutils",
  "ghash",
+ "zeroize",
 ]
 
 [[package]]
@@ -1773,6 +1846,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2650,6 +2732,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5"
 dependencies = [
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -2927,7 +3010,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aef3982638978efa195ff11b305f51f1f22f4f0a6cabee7af79b383ebee6a213"
 dependencies = [
- "dirs",
+ "dirs 6.0.0",
  "http",
  "indicatif",
  "libc",
@@ -3353,7 +3436,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
 dependencies = [
  "byteorder-lite",
- "quick-error 2.0.1",
+ "quick-error",
 ]
 
 [[package]]
@@ -5142,6 +5225,7 @@ dependencies = [
  "cpubits",
  "cpufeatures 0.3.1",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -5293,25 +5377,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "proptest"
-version = "1.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
-dependencies = [
- "bit-set",
- "bit-vec",
- "bitflags 2.13.1",
- "num-traits",
- "rand 0.9.5",
- "rand_chacha 0.9.0",
- "rand_xorshift",
- "regex-syntax",
- "rusty-fork",
- "tempfile",
- "unarray",
-]
-
-[[package]]
 name = "pulp"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5363,12 +5428,6 @@ dependencies = [
  "web-sys",
  "winapi",
 ]
-
-[[package]]
-name = "quick-error"
-version = "1.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
 name = "quick-error"
@@ -5555,15 +5614,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rand_xorshift"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
-dependencies = [
- "rand_core 0.9.5",
-]
-
-[[package]]
 name = "rand_xoshiro"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5625,7 +5675,7 @@ dependencies = [
  "avif-serialize",
  "imgref",
  "loop9",
- "quick-error 2.0.1",
+ "quick-error",
  "rav1e",
  "rayon",
  "rgb",
@@ -5856,6 +5906,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -6067,18 +6118,6 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
-
-[[package]]
-name = "rusty-fork"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc6bf79ff24e648f6da1f8d1f011e9cac26491b619e6b9280f2b47f1774e6ee2"
-dependencies = [
- "fnv",
- "quick-error 1.2.3",
- "tempfile",
- "wait-timeout",
-]
 
 [[package]]
 name = "ryu"
@@ -7211,7 +7250,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "cookie",
- "dirs",
+ "dirs 6.0.0",
  "dunce",
  "embed_plist",
  "getrandom 0.3.4",
@@ -7261,7 +7300,7 @@ checksum = "bc9ce40b16101cb6ea63d3e221567affd1c3a9205f95d7bc574941a10636b632"
 dependencies = [
  "anyhow",
  "cargo_toml",
- "dirs",
+ "dirs 6.0.0",
  "glob",
  "heck 0.5.0",
  "json-patch",
@@ -7422,7 +7461,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -7495,7 +7534,7 @@ dependencies = [
  "fax",
  "flate2",
  "half",
- "quick-error 2.0.1",
+ "quick-error",
  "weezl",
  "zune-jpeg",
 ]
@@ -7660,17 +7699,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
-dependencies = [
- "futures-core",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]
@@ -7857,27 +7885,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
-name = "tool_runner"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "bytes",
- "dashmap",
- "futures",
- "nix",
- "proptest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-stream",
- "tokio-test",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8033,7 +8040,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "045979e3f037cd18ad1cb2a419dfda133c5c29c9f3453370079f2255d46c257e"
 dependencies = [
  "crossbeam-channel",
- "dirs",
+ "dirs 6.0.0",
  "libappindicator",
  "muda",
  "objc2",
@@ -8295,12 +8302,6 @@ dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "unarray"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "unic-char-property"
@@ -8580,15 +8581,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb067e4cbd1ff067d1df46c9194b5de0e98efd2810bbc95c5d5e5f25a3231150"
 dependencies = [
  "cc",
- "libc",
-]
-
-[[package]]
-name = "wait-timeout"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
-dependencies = [
  "libc",
 ]
 
@@ -9367,7 +9359,7 @@ dependencies = [
  "block2",
  "cookie",
  "crossbeam-channel",
- "dirs",
+ "dirs 6.0.0",
  "dom_query",
  "dpi",
  "dunce",
@@ -9669,19 +9661,22 @@ dependencies = [
 name = "zone_cli"
 version = "0.1.0"
 dependencies = [
+ "abnegate-config",
+ "abnegate-secret",
  "anyhow",
  "base64 0.23.1",
  "chrono",
  "clap",
  "console",
  "dialoguer",
- "dirs",
  "indicatif",
  "keyring",
+ "keyring-core",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "toml 1.1.5+spec-1.1.0",
@@ -9722,7 +9717,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "chrono",
- "dirs",
+ "dirs 6.0.0",
  "fastembed",
  "futures",
  "glob",
@@ -9768,13 +9763,13 @@ dependencies = [
 name = "zone_core"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
+ "abnegate-exec",
+ "abnegate-secret",
  "async-stream",
  "async-trait",
- "base64 0.23.1",
  "chrono",
  "dashmap",
- "dirs",
+ "dirs 6.0.0",
  "futures",
  "nix",
  "once_cell",
@@ -9784,17 +9779,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sqlx",
- "subtle",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tool_runner",
  "tracing",
  "tracing-subscriber",
  "uuid",
  "wiremock",
- "zeroize",
 ]
 
 [[package]]
@@ -9826,7 +9817,7 @@ dependencies = [
  "axum",
  "bytes",
  "crc",
- "dirs",
+ "dirs 6.0.0",
  "futures",
  "rand 0.10.2",
  "reqwest 0.13.4",
@@ -9849,6 +9840,7 @@ dependencies = [
 name = "zone_notify"
 version = "0.1.0"
 dependencies = [
+ "abnegate-secret",
  "async-trait",
  "chrono",
  "futures",
@@ -9868,6 +9860,7 @@ dependencies = [
 name = "zone_runner"
 version = "0.1.0"
 dependencies = [
+ "abnegate-exec",
  "base64 0.23.1",
  "bytes",
  "clap",
@@ -9878,7 +9871,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
- "tool_runner",
  "tracing",
  "tracing-subscriber",
 ]
@@ -9901,6 +9893,9 @@ dependencies = [
 name = "zone_server"
 version = "0.1.0"
 dependencies = [
+ "abnegate-exec",
+ "abnegate-http",
+ "abnegate-secret",
  "aes-gcm",
  "argon2",
  "async-stream",
@@ -9940,7 +9935,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",
- "tool_runner",
  "tower",
  "tower-http 0.7.1",
  "tracing",

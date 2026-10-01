@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
+use abnegate_secret::SecretValue;
 use reqwest::{Client, Url};
-use zone_core::secret::SecretValue;
 
 use super::error::{GithubAppError, transport};
 use super::identifier::InstallationId;

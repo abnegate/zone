@@ -1,9 +1,9 @@
 //! The coding agent sign-ins Zone keeps for each organization.
 
+use abnegate_secret::SecretValue;
 use chrono::{DateTime, Utc};
 use sqlx::{Executor, PgConnection, Postgres};
 use uuid::Uuid;
-use zone_core::SecretValue;
 
 use super::DbResult;
 

@@ -9,6 +9,7 @@ mod file;
 mod identity;
 pub mod job;
 mod reason;
+pub mod routing;
 mod sanitize;
 pub mod tail;
 mod tier;

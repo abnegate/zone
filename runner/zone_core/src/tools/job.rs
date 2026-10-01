@@ -25,9 +25,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, watch};
-use tool_runner::Proxy;
 use uuid::Uuid;
 
+use super::routing;
 use super::{Session, WaitFor};
 use crate::llm::provider::environment;
 
@@ -399,7 +399,7 @@ impl Jobs {
         for (key, value) in env {
             process.env(key, value);
         }
-        Proxy::from_env().apply(&mut process);
+        routing::proxy().apply(&mut process);
 
         let child = process
             .spawn()

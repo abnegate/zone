@@ -6,6 +6,7 @@
 //! [`crate::workers::housekeeping`]; what is due, and what refreshing an entry
 //! means, belongs here.
 
+use abnegate_http::{public_client, read_capped, validate_public_url};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
@@ -418,17 +419,19 @@ pub async fn refresh_entry(
 ///
 /// Returns the extracted text content and its SHA-256 hash.
 async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
-    let url = crate::utils::url::validate_public_url(url)?;
-    let client = crate::utils::url::public_client(Duration::from_secs(HTTP_TIMEOUT_SECS))?;
+    let url = validate_public_url(url).map_err(|error| error.to_string())?;
+    let client =
+        public_client(Duration::from_secs(HTTP_TIMEOUT_SECS)).map_err(|error| error.to_string())?;
 
     let response = client
-        .get(url)
+        .get(url.as_str())
+        .map_err(|error| error.to_string())?
         .header("User-Agent", "Zone/1.0 (Knowledge Refresh Worker)")
         .send()
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
 
-    crate::utils::url::validate_public_url(response.url().as_str())?;
+    validate_public_url(response.url().as_str()).map_err(|error| error.to_string())?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP error: {}", response.status()));
@@ -441,9 +444,12 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    let body =
-        String::from_utf8_lossy(&crate::utils::url::read_capped(response, MAX_CONTENT_SIZE).await?)
-            .into_owned();
+    let body = String::from_utf8_lossy(
+        &read_capped(response, MAX_CONTENT_SIZE)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+    .into_owned();
 
     let text = if is_html(content_type.as_deref(), &body) {
         extract_text_from_html(&body)

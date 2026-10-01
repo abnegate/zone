@@ -2,10 +2,10 @@
 
 use std::fmt;
 
+use abnegate_secret::SecretValue;
 use reqwest::{Client, RequestBuilder};
 use thiserror::Error;
 use url::{Host, Url};
-use zone_core::SecretValue;
 
 const LOOPBACK_SUFFIX: &str = ".localhost";
 const LOOPBACK_NAME: &str = "localhost";

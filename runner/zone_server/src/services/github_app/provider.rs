@@ -2,8 +2,8 @@
 
 use std::fmt;
 
+use abnegate_secret::{MasterKey, SecretValue};
 use chrono::Utc;
-use zone_core::secret::{MasterKey, SecretValue};
 
 use crate::crypto;
 use crate::db::sources::SourceCredentialRow;

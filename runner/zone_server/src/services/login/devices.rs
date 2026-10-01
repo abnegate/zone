@@ -12,6 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use abnegate_secret::redact;
 use chrono::{DateTime, SubsecRound, Utc};
 use dashmap::DashMap;
 use futures::future::{BoxFuture, FutureExt, Shared};
@@ -20,7 +21,6 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
 use zone_core::llm::provider::environment;
-use zone_core::secret::redact;
 
 use super::codex::{self, CREDENTIALS, Device, Prompt};
 use super::error::Error;

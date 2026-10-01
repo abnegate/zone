@@ -92,7 +92,9 @@ metrics-exporter-prometheus = { workspace = true }
 rmcp = { workspace = true, default-features = false }
 
 # Internal
-tool_runner = { path = "../tool_runner" }
+abnegate-exec = { workspace = true }
+abnegate-http = { workspace = true }
+abnegate-secret = { workspace = true, features = ["sqlx"] }
 zone_chat = { path = "../zone_chat" }
 zone_comfy = { path = "../zone_comfy" }
 zone_email = { path = "../zone_email" }

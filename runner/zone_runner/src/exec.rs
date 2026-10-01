@@ -2,13 +2,14 @@
 //!
 //! This mode allows running a single command without the daemon protocol.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use tool_runner::{CommandExecutor, ExecutorConfig, InboundMessage, OutboundMessage};
+use abnegate_exec::{
+    CommandExecutor, EnvironmentPolicy, ExecutorConfig, OutboundMessage, RunStart,
+};
 
 /// Run a single command and exit.
 pub async fn run_once(
@@ -17,31 +18,19 @@ pub async fn run_once(
     args: Vec<String>,
     timeout_secs: Option<u64>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let config = if let Some(secs) = timeout_secs {
-        ExecutorConfig::default().with_timeout(Duration::from_secs(secs))
-    } else {
-        ExecutorConfig::default()
+    let config = ExecutorConfig::default().with_environment(EnvironmentPolicy::inherit());
+    let config = match timeout_secs {
+        Some(secs) => config.with_timeout(Duration::from_secs(secs)),
+        None => config,
     };
 
     let executor = CommandExecutor::with_config(config);
     let (tx, mut rx) = mpsc::channel::<OutboundMessage>(100);
 
-    let request = InboundMessage::RunStart {
-        job_id: "exec".to_string(),
-        workspace,
-        command,
-        args,
-        env: HashMap::new(),
-        timeout_ms: timeout_secs.map(|s| s * 1000),
-        max_output_bytes: None,
-        working_dir: None,
-        confinement: None,
-    };
+    let request = RunStart::new("exec", workspace, command).with_arguments(args);
 
-    // Spawn the command
     let _handle = executor.spawn(&request, tx).await?;
 
-    // Collect output and wait for exit
     let mut exit_code = ExitCode::SUCCESS;
     let stdout = tokio::io::stdout();
     let stderr = tokio::io::stderr();

@@ -735,8 +735,8 @@ mod tests {
     #[tokio::test]
     async fn a_provider_that_echoes_the_key_never_puts_it_in_the_review() {
         use crate::services::endpoint::testing::settings;
+        use abnegate_secret::SecretValue;
         use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
-        use zone_core::secret::SecretValue;
 
         const KEY: &str = "sk-organization-0a7d44e19b";
         let server = answering(
