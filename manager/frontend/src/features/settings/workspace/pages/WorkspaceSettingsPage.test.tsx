@@ -26,6 +26,7 @@ const agentsApi = {
   get: mock(),
   start: mock(),
   submitCode: mock(),
+  cancel: mock(),
   signOut: mock(),
 };
 
@@ -991,7 +992,14 @@ describe('WorkspaceSettingsPage', () => {
       describe('after the provider changes', () => {
         const [claudeStatus, codexStatus] = fixture.agents;
         const signedOut = [
-          { ...claudeStatus, state: 'signed_out', source: null, label: null, expires_at: null },
+          {
+            ...claudeStatus,
+            state: 'signed_out',
+            source: null,
+            label: null,
+            expires_at: null,
+            logins: [],
+          },
           { ...codexStatus, state: 'signed_out', pending: null },
         ];
         const later = () => new Date(Date.now() + 10 * 60_000).toISOString();
@@ -1009,7 +1017,7 @@ describe('WorkspaceSettingsPage', () => {
             user_code: 'ABCD-EFGHI',
             expires_at: later(),
           });
-          agentsApi.signOut.mockRejectedValue(new Error('Failed to sign out of codex: 500'));
+          agentsApi.cancel.mockRejectedValue(new Error('Failed to cancel the codex sign-in: 500'));
           const user = userEvent.setup();
           render(<WorkspaceSettingsPage />);
           await openAiTab(user);
@@ -1018,7 +1026,7 @@ describe('WorkspaceSettingsPage', () => {
           expect(await screen.findByText('ABCD-EFGHI')).toBeInTheDocument();
           await user.click(screen.getByRole('button', { name: 'Cancel' }));
           expect(await screen.findByRole('alert')).toHaveTextContent(
-            'Failed to sign out of codex: 500'
+            'Failed to cancel the codex sign-in: 500'
           );
 
           await user.selectOptions(screen.getByLabelText('AI Provider'), 'claude_code');
@@ -1080,6 +1088,7 @@ describe('WorkspaceSettingsPage', () => {
             source: null,
             label: null,
             expires_at: null,
+            logins: [],
           },
           fixture.agents[1],
         ]);
@@ -1125,7 +1134,9 @@ describe('WorkspaceSettingsPage', () => {
         await openAiTab(userEvent.setup());
 
         const panel = await screen.findByRole('region', { name: 'Claude Code sign-in' });
-        expect(await within(panel).findByText('Signed in')).toBeInTheDocument();
+        expect(
+          await within(within(panel).getByRole('status')).findByText('Signed in')
+        ).toBeInTheDocument();
         expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
       });
 

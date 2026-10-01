@@ -15,7 +15,7 @@ import type { Window as HappyWindow } from 'happy-dom';
 import { type ComponentProps, useCallback, useState } from 'react';
 import fixture from '../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { AgentRequestError } from '../../../api/AgentRequestError';
-import type { Agent, AgentStatus } from './schemas';
+import type { Agent, AgentAccount, AgentStatus } from './schemas';
 import type { AgentAccess, Attempt } from './types';
 
 const agentsApi = {
@@ -32,9 +32,12 @@ mock.module('../../../api/agents', () => ({ agentsApi }));
 let AgentSignIn: typeof import('./AgentSignIn').AgentSignIn;
 let POLL_INTERVAL: number;
 let POLL_INTERVAL_LIMIT: number;
+let USAGE_POLL_INTERVAL: number;
 
 beforeAll(async () => {
-  ({ AgentSignIn, POLL_INTERVAL, POLL_INTERVAL_LIMIT } = await import('./AgentSignIn'));
+  ({ AgentSignIn, POLL_INTERVAL, POLL_INTERVAL_LIMIT, USAGE_POLL_INTERVAL } = await import(
+    './AgentSignIn'
+  ));
 });
 
 afterAll(() => {
@@ -44,13 +47,43 @@ afterAll(() => {
 const organization = '00000000-0000-0000-0000-000000000001';
 const beforeTheCodeExpires = new Date('2026-09-23T04:00:00Z');
 const [claudeSignedIn, codexPending] = fixture.agents as AgentStatus[];
+const [jake] = claudeSignedIn.logins;
+const routing =
+  "New chats start on the account with the most headroom and stay on it until it runs out; the other agent's accounts take over when this one is spent.";
 const claudeSignedOut: AgentStatus = {
   ...claudeSignedIn,
   state: 'signed_out',
   source: null,
   label: null,
   expires_at: null,
+  logins: [],
 };
+const alex: AgentAccount = {
+  ...jake,
+  id: '9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a',
+  label: 'alex@example.com',
+  plan: 'Claude Pro',
+  usage: jake.usage && {
+    ...jake.usage,
+    windows: [
+      { name: '5h', used_percent: 12, used: null, limit: null, resets_at: '2026-09-23T08:00:00Z' },
+    ],
+    headroom: 88,
+  },
+  last_used_at: null,
+};
+const withAccounts = (...logins: AgentAccount[]): AgentStatus => ({ ...claudeSignedIn, logins });
+const spentUsage = (account: AgentAccount): AgentAccount => ({
+  ...account,
+  usage: account.usage && {
+    ...account.usage,
+    windows: account.usage.windows.map((window, index) =>
+      index === 0 ? { ...window, used_percent: 100 } : window
+    ),
+    headroom: 0,
+    exhausted_until: '2026-09-23T06:10:00Z',
+  },
+});
 const codexSignedOut: AgentStatus = { ...codexPending, state: 'signed_out', pending: null };
 const codexSignedIn: AgentStatus = {
   ...codexPending,
@@ -60,11 +93,11 @@ const codexSignedIn: AgentStatus = {
   pending: null,
 };
 const authorize =
-  'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=user%3Ainference&state=fake-state';
+  'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=user%3Ainference+user%3Aprofile&state=fake-state';
 const fullAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=org%3Acreate_api_key+user%3Ainference&state=fake-state-2';
 const restartAuthorize =
-  'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=user%3Ainference&state=fake-state-3';
+  'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&scope=user%3Ainference+user%3Aprofile&state=fake-state-3';
 const focused = (element: Element) => document.activeElement === element;
 const later = (minutes = 10) => new Date(Date.now() + minutes * 60_000).toISOString();
 const attempt = '6f1b1f63-5a3e-4c8e-9d0e-2b7f7c1d9a10';
@@ -181,7 +214,7 @@ describe('AgentSignIn', () => {
 
       await waitFor(() => expect(onChange).toHaveBeenCalledWith(claudeSignedIn));
       expect(agentsApi.submitCode).toHaveBeenCalledWith(organization, callback);
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
       expect(screen.queryByLabelText('Code from claude.com')).toBeNull();
       expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
     });
@@ -425,71 +458,102 @@ describe('AgentSignIn', () => {
       expect(focused(screen.getByRole('status'))).toBe(true);
     });
 
-    it('shows the plan and expiry of a sign-in this organization holds, and signs it out', async () => {
-      const held: AgentStatus = { ...claudeSignedIn, expires_at: '2027-09-23T12:00:00Z' };
+    it('lists the account this organization holds with its plan, and signs it out', async () => {
       agentsApi.signOut.mockResolvedValue(undefined);
       agentsApi.get.mockResolvedValue(claudeSignedOut);
-      const { onChange } = renderPanel('claude', held);
+      const { onChange } = renderPanel('claude', claudeSignedIn);
 
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
-      expect(screen.getByText('Claude Max · Expires Sep 23, 2027')).toBeInTheDocument();
-      fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
+      const accounts = screen.getByRole('list', { name: 'Claude Code accounts' });
+      expect(within(accounts).getByText('jake@example.com')).toBeInTheDocument();
+      expect(within(accounts).getByText('Claude Max')).toBeInTheDocument();
+      expect(within(accounts).getByText(/Expires Sep 23, 2027/)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out jake@example.com' }));
 
-      const dialog = await screen.findByRole('dialog', { name: 'Sign out of Claude Code?' });
+      const dialog = await screen.findByRole('dialog', { name: 'Sign out jake@example.com?' });
       expect(dialog).toHaveTextContent(
-        'This signs Claude Code out for every workspace in this organization.'
+        'This signs jake@example.com out of Claude Code for every workspace in this organization. Chats on it move to another account.'
       );
       expect(agentsApi.signOut).not.toHaveBeenCalled();
       fireEvent.click(within(dialog).getByRole('button', { name: 'Sign out' }));
       expect(screen.queryByRole('dialog')).toBeNull();
 
       await waitFor(() => expect(onChange).toHaveBeenCalledWith(claudeSignedOut));
-      expect(agentsApi.signOut).toHaveBeenCalledWith(organization, 'claude');
+      expect(agentsApi.signOut).toHaveBeenCalledWith(organization, 'claude', jake.id);
       expect(agentsApi.get).toHaveBeenCalledWith(organization, 'claude');
       expect(await screen.findByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+      expect(screen.queryByRole('list', { name: 'Claude Code accounts' })).toBeNull();
+      expect(focused(screen.getByRole('status'))).toBe(true);
     });
 
-    it('keeps the sign-in when the sign-out is not confirmed', async () => {
+    it('keeps the account when the sign-out is not confirmed', async () => {
       renderPanel('claude', claudeSignedIn);
 
-      fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
-      const dialog = await screen.findByRole('dialog', { name: 'Sign out of Claude Code?' });
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out jake@example.com' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Sign out jake@example.com?' });
       fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
 
       expect(screen.queryByRole('dialog')).toBeNull();
       expect(agentsApi.signOut).not.toHaveBeenCalled();
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(screen.getByText('jake@example.com')).toBeInTheDocument();
     });
 
-    it('leaves out an expiry that has passed while the sign-in still holds', () => {
-      renderPanel('claude', { ...claudeSignedIn, expires_at: '2020-01-01T00:00:00Z' });
+    it('shows why signing an account out failed, and keeps it', async () => {
+      agentsApi.signOut.mockRejectedValue(new Error('Failed to sign out of claude: 500'));
+      const { onChange } = renderPanel('claude', claudeSignedIn);
 
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out jake@example.com' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Sign out jake@example.com?' });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Sign out' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Failed to sign out of claude: 500'
+      );
+      expect(onChange).not.toHaveBeenCalled();
+      expect(agentsApi.get).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: 'Sign out jake@example.com' })).toBeEnabled();
+    });
+
+    it('leaves out an expiry that has passed while the account still holds', () => {
+      renderPanel('claude', withAccounts({ ...jake, expires_at: '2020-01-01T00:00:00Z' }));
+
+      expect(screen.getByText('jake@example.com')).toBeInTheDocument();
       expect(screen.getByText('Claude Max')).toBeInTheDocument();
       expect(screen.queryByText(/Expires/)).toBeNull();
     });
 
-    it('names only the plan of a sign-in that renews itself', () => {
-      renderPanel('claude', { ...claudeSignedIn, expires_at: null });
+    it('names no expiry for an account that renews itself', () => {
+      renderPanel('claude', withAccounts({ ...jake, expires_at: null }));
 
       expect(screen.getByText('Claude Max')).toBeInTheDocument();
       expect(screen.queryByText(/Expires/)).toBeNull();
     });
 
     it("names this server's own sign-in and offers an organization sign-in instead of sign-out", () => {
-      renderPanel('claude', { ...claudeSignedIn, source: 'host', label: 'max', expires_at: null });
+      renderPanel('claude', {
+        ...claudeSignedIn,
+        source: 'host',
+        label: 'max',
+        expires_at: null,
+        logins: [],
+      });
 
       expect(screen.getByText(/Using this server's own Claude Code sign-in/)).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull();
+      expect(screen.queryByRole('button', { name: /Sign out/ })).toBeNull();
       expect(screen.getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
     });
 
     it('offers to sign in again when the sign-in expired', () => {
-      renderPanel('claude', { ...claudeSignedIn, state: 'expired' });
+      renderPanel('claude', {
+        ...claudeSignedIn,
+        state: 'expired',
+        logins: [{ ...jake, state: 'expired' }],
+      });
 
-      expect(screen.getByText('Sign-in expired')).toBeInTheDocument();
+      expect(screen.getAllByText('Sign-in expired')).toHaveLength(2);
       expect(screen.getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
-      expect(screen.getByRole('button', { name: 'Sign out' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Sign out jake@example.com' })).toBeEnabled();
     });
   });
 
@@ -497,7 +561,12 @@ describe('AgentSignIn', () => {
     const approve = 'Approve on claude.com; Zone finishes the sign-in automatically.';
     const scopeRefused =
       'claude.com would not grant the access Zone asked for. Try again with full access.';
-    const hostSignedIn: AgentStatus = { ...claudeSignedIn, source: 'host', label: 'team' };
+    const hostSignedIn: AgentStatus = {
+      ...claudeSignedIn,
+      source: 'host',
+      label: 'team',
+      logins: [],
+    };
 
     afterEach(() => {
       vi.useRealTimers();
@@ -545,7 +614,7 @@ describe('AgentSignIn', () => {
       await wait(POLL_INTERVAL);
       expect(agentsApi.get).toHaveBeenCalledTimes(2);
       expect(onChange).toHaveBeenLastCalledWith(claudeSignedIn);
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
       expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
       expect(focused(screen.getByRole('status'))).toBe(true);
 
@@ -565,7 +634,9 @@ describe('AgentSignIn', () => {
 
       await wait(POLL_INTERVAL);
       expect(agentsApi.get).toHaveBeenCalledTimes(2);
-      expect(screen.getByText(/^Claude Max/)).toBeInTheDocument();
+      expect(screen.getByRole('list', { name: 'Claude Code accounts' })).toHaveTextContent(
+        'jake@example.com'
+      );
       expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
     });
 
@@ -628,7 +699,7 @@ describe('AgentSignIn', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
       });
       expect(agentsApi.submitCode).toHaveBeenCalledWith(organization, 'fake-code#fake-state-3');
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
     });
 
     it('starts a pasted sign-in again as a pasted one', async () => {
@@ -809,7 +880,7 @@ describe('AgentSignIn', () => {
       });
       expect(agentsApi.get).toHaveBeenCalledTimes(2);
       expect(onChange).toHaveBeenLastCalledWith(codexSignedIn);
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
       expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
 
       await act(async () => {
@@ -842,7 +913,7 @@ describe('AgentSignIn', () => {
         vi.advanceTimersByTime(POLL_INTERVAL);
       });
       expect(agentsApi.get).toHaveBeenCalledTimes(2);
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
     });
 
     it('resumes a sign-in already in progress and stops polling once unmounted', async () => {
@@ -875,16 +946,55 @@ describe('AgentSignIn', () => {
       expect(agentsApi.get).toHaveBeenCalledTimes(1);
     });
 
-    it('cancels a device login in progress', async () => {
-      agentsApi.signOut.mockResolvedValue(undefined);
+    it('cancels a device login in progress without signing anything out', async () => {
+      agentsApi.cancel.mockResolvedValue(undefined);
       agentsApi.get.mockResolvedValue(codexSignedOut);
       const { onChange } = renderPanel('codex', codexPending);
 
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
       await waitFor(() => expect(onChange).toHaveBeenCalledWith(codexSignedOut));
-      expect(agentsApi.signOut).toHaveBeenCalledWith(organization, 'codex');
+      expect(agentsApi.cancel).toHaveBeenCalledWith(organization, 'codex');
+      expect(agentsApi.signOut).not.toHaveBeenCalled();
       expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
+      expect(focused(screen.getByRole('status'))).toBe(true);
+    });
+
+    it('keeps the accounts already held when another device sign-in is cancelled', async () => {
+      const held: AgentAccount = { ...jake, label: 'team@example.com', plan: 'ChatGPT Plus' };
+      const holding: AgentStatus = { ...codexSignedIn, logins: [held] };
+      agentsApi.start.mockResolvedValue(prompt);
+      agentsApi.cancel.mockResolvedValue(undefined);
+      agentsApi.get.mockResolvedValue(holding);
+      const { onChange } = renderPanel('codex', holding);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Add another ChatGPT account' }));
+      expect(await screen.findByText('ABCD-EFGHI')).toBeInTheDocument();
+      expect(agentsApi.start).toHaveBeenCalledWith(organization, 'codex', {});
+      expect(screen.getByRole('status')).toHaveTextContent('Waiting for you to finish signing in.');
+      expect(screen.getByRole('status')).not.toHaveTextContent(routing);
+      expect(screen.getByText('team@example.com')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+      await waitFor(() => expect(onChange).toHaveBeenCalledWith(holding));
+      expect(agentsApi.cancel).toHaveBeenCalledWith(organization, 'codex');
+      expect(agentsApi.signOut).not.toHaveBeenCalled();
+      expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
+      expect(screen.getByText('team@example.com')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add another ChatGPT account' })).toBeEnabled();
+    });
+
+    it('keeps the device sign-in when cancelling it fails', async () => {
+      agentsApi.cancel.mockRejectedValue(new Error('Failed to cancel the codex sign-in: 500'));
+      const { onChange } = renderPanel('codex', codexPending);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Failed to cancel the codex sign-in: 500'
+      );
+      expect(onChange).not.toHaveBeenCalled();
+      expect(screen.getByText('ABCD-EFGHI')).toBeInTheDocument();
     });
 
     it('backs off while polling fails, up to a limit', async () => {
@@ -996,7 +1106,7 @@ describe('AgentSignIn', () => {
     it('hides why an earlier device login failed once the agent is signed in', () => {
       renderPanel('codex', { ...codexSignedIn, source: 'host', error: refusal });
 
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
       expect(screen.queryByRole('alert')).toBeNull();
     });
   });
@@ -1010,7 +1120,7 @@ describe('AgentSignIn', () => {
       ).toBeInTheDocument();
       const status = screen.getByRole('status');
       expect(status).toHaveTextContent('Signed in');
-      expect(status).toHaveTextContent('Claude Max');
+      expect(status).toHaveTextContent(routing);
       expect(screen.getByRole('region', { name: 'Claude Code sign-in' })).toBeInTheDocument();
     });
 
@@ -1087,7 +1197,7 @@ describe('AgentSignIn', () => {
       await act(async () => {
         vi.advanceTimersByTime(POLL_INTERVAL);
       });
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
       expect(focused(elsewhere)).toBe(true);
     });
 
@@ -1137,7 +1247,7 @@ describe('AgentSignIn', () => {
     it('asks to save once the agent is signed in', () => {
       renderPanel('claude', claudeSignedIn, 'manage', true);
 
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
       expect(screen.getByText('Save Changes to use this provider.')).toBeInTheDocument();
     });
 
@@ -1222,13 +1332,251 @@ describe('AgentSignIn', () => {
         />
       );
 
-      fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
-      const dialog = await screen.findByRole('dialog', { name: 'Sign out of Claude Code?' });
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out jake@example.com' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Sign out jake@example.com?' });
       fireEvent.click(within(dialog).getByRole('button', { name: 'Sign out' }));
       unmount();
       await act(async () => finish());
 
       await waitFor(() => expect(onStatusChange).toHaveBeenCalledWith(claudeSignedOut));
+    });
+  });
+
+  describe('accounts', () => {
+    const meters = (account: string) =>
+      within(screen.getByText(account).closest('li') as HTMLElement).getAllByRole('meter');
+    const row = (account: string) => screen.getByText(account).closest('li') as HTMLElement;
+
+    beforeEach(() => {
+      setSystemTime(beforeTheCodeExpires);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      setSystemTime();
+    });
+
+    it('lists every account with its plan, state, usage and when it was last used', () => {
+      renderPanel('claude', withAccounts(jake, alex));
+
+      const accounts = within(screen.getByRole('list', { name: 'Claude Code accounts' }));
+      expect(accounts.getAllByRole('listitem')).toHaveLength(2);
+      const first = within(row('jake@example.com'));
+      expect(first.getByText('Claude Max')).toBeInTheDocument();
+      expect(first.getByText('Signed in')).toBeInTheDocument();
+      expect(
+        first.getByText('Expires Sep 23, 2027 · Last used 3:50 AM · Usage checked 4:00 AM')
+      ).toBeInTheDocument();
+      expect(
+        meters('jake@example.com').map((meter) => [
+          meter.getAttribute('aria-label'),
+          meter.getAttribute('aria-valuenow'),
+          meter.getAttribute('aria-valuetext'),
+        ])
+      ).toEqual([
+        ['5h usage', '62', '62% used, resets in 2h 10m'],
+        ['7d usage', '31', '31% used, resets in 5d 0h'],
+      ]);
+      expect(
+        meters('alex@example.com').map((meter) => meter.getAttribute('aria-valuenow'))
+      ).toEqual(['12']);
+      expect(within(row('alex@example.com')).queryByText(/Last used/)).toBeNull();
+      expect(screen.getByRole('status')).toHaveTextContent(routing);
+      expect(screen.getByRole('button', { name: 'Add another Claude account' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Sign out jake@example.com' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Sign out alex@example.com' })).toBeEnabled();
+    });
+
+    it('signs one account out and keeps the other', async () => {
+      agentsApi.signOut.mockResolvedValue(undefined);
+      agentsApi.get.mockResolvedValue(withAccounts(jake));
+      const { onChange } = renderPanel('claude', withAccounts(jake, alex));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out alex@example.com' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Sign out alex@example.com?' });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Sign out' }));
+
+      await waitFor(() => expect(onChange).toHaveBeenCalledWith(withAccounts(jake)));
+      expect(agentsApi.signOut).toHaveBeenCalledTimes(1);
+      expect(agentsApi.signOut).toHaveBeenCalledWith(organization, 'claude', alex.id);
+      expect(screen.queryByText('alex@example.com')).toBeNull();
+      expect(screen.getByText('jake@example.com')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add another Claude account' })).toBeEnabled();
+    });
+
+    it('adds another account through the same sign-in, and lists it beside the first', async () => {
+      agentsApi.start.mockResolvedValue(claudeLogin(authorize));
+      agentsApi.submitCode.mockResolvedValue(withAccounts(jake, alex));
+      renderPanel('claude', withAccounts(jake));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Add another Claude account' }));
+      const field = await screen.findByLabelText('Code from claude.com');
+      expect(agentsApi.start).toHaveBeenCalledWith(organization, 'claude', {});
+      expect(screen.getByText('jake@example.com')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Add another Claude account' })).toBeNull();
+
+      fireEvent.change(field, { target: { value: 'fake-code#fake-state' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
+
+      expect(await screen.findByText('alex@example.com')).toBeInTheDocument();
+      expect(
+        within(screen.getByRole('list', { name: 'Claude Code accounts' })).getAllByRole('listitem')
+      ).toHaveLength(2);
+      expect(screen.getByRole('button', { name: 'Add another Claude account' })).toBeEnabled();
+    });
+
+    it('shows an account that reached its limit until it resets', () => {
+      renderPanel('claude', withAccounts(spentUsage(jake), alex));
+
+      const spent = within(row('jake@example.com'));
+      expect(spent.getByText('Limit reached')).toBeInTheDocument();
+      expect(spent.queryByText('Signed in')).toBeNull();
+      expect(spent.getByText(/^Exhausted until 6:10 AM · /)).toBeInTheDocument();
+      const [fiveHour] = meters('jake@example.com');
+      expect(fiveHour).toHaveAttribute('aria-valuetext', '100% used, resets in 2h 10m');
+      expect(fiveHour.closest('.usage-bar')).toHaveAttribute('data-severity', 'exhausted');
+      expect(within(row('alex@example.com')).getByText('Signed in')).toBeInTheDocument();
+    });
+
+    it('treats an exhaustion whose reset has passed as signed in again', () => {
+      const lapsed = spentUsage(jake);
+      renderPanel(
+        'claude',
+        withAccounts({
+          ...lapsed,
+          usage: lapsed.usage && { ...lapsed.usage, exhausted_until: '2026-09-23T03:00:00Z' },
+        })
+      );
+
+      expect(within(row('jake@example.com')).getByText('Signed in')).toBeInTheDocument();
+      expect(screen.queryByText('Limit reached')).toBeNull();
+      expect(screen.queryByText(/Exhausted until/)).toBeNull();
+    });
+
+    it('says so when an account has no usage reading', () => {
+      renderPanel('claude', withAccounts({ ...jake, usage: null }));
+
+      const unread = within(row('jake@example.com'));
+      expect(unread.getByText('Usage unavailable')).toBeInTheDocument();
+      expect(unread.queryAllByRole('meter')).toHaveLength(0);
+      expect(unread.queryByText(/Usage checked/)).toBeNull();
+    });
+
+    it('says so when an account reports no limits', () => {
+      renderPanel(
+        'claude',
+        withAccounts({ ...jake, usage: jake.usage && { ...jake.usage, windows: [] } })
+      );
+
+      const unlimited = within(row('jake@example.com'));
+      expect(unlimited.getByText('No limits reported')).toBeInTheDocument();
+      expect(unlimited.queryAllByRole('meter')).toHaveLength(0);
+      expect(unlimited.getByText(/Usage checked 4:00 AM/)).toBeInTheDocument();
+    });
+
+    it('reads the usage again every minute while nothing else is going on', async () => {
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
+      const busier = spentUsage(jake);
+      agentsApi.get.mockResolvedValue(withAccounts(busier));
+      const { onChange } = renderPanel('claude', withAccounts(jake));
+
+      expect(USAGE_POLL_INTERVAL).toBe(60_000);
+      await act(async () => {
+        vi.advanceTimersByTime(USAGE_POLL_INTERVAL - 1);
+      });
+      expect(agentsApi.get).not.toHaveBeenCalled();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+      expect(agentsApi.get).toHaveBeenCalledWith(organization, 'claude');
+      expect(onChange).toHaveBeenLastCalledWith(withAccounts(busier));
+      expect(meters('jake@example.com')[0]).toHaveAttribute(
+        'aria-valuetext',
+        '100% used, resets in 2h 9m'
+      );
+      expect(screen.getByText('Limit reached')).toBeInTheDocument();
+
+      await act(async () => {
+        vi.advanceTimersByTime(USAGE_POLL_INTERVAL);
+      });
+      expect(agentsApi.get).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the last reading when reading the usage again fails', async () => {
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
+      agentsApi.get.mockRejectedValue(
+        new AgentRequestError('Failed to load the claude sign-in: 502', 502)
+      );
+      const { onChange } = renderPanel('claude', withAccounts(jake));
+
+      await act(async () => {
+        vi.advanceTimersByTime(USAGE_POLL_INTERVAL);
+      });
+      expect(agentsApi.get).toHaveBeenCalledTimes(1);
+      expect(onChange).not.toHaveBeenCalled();
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(meters('jake@example.com')[0]).toHaveAttribute(
+        'aria-valuetext',
+        '62% used, resets in 2h 9m'
+      );
+
+      await act(async () => {
+        vi.advanceTimersByTime(USAGE_POLL_INTERVAL);
+      });
+      expect(agentsApi.get).toHaveBeenCalledTimes(2);
+    });
+
+    it('reads no usage while there is no account, or while a sign-in is polling', async () => {
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
+      agentsApi.get.mockResolvedValue({ ...codexPending, logins: [jake] });
+      renderPanel('claude', claudeSignedOut);
+      await act(async () => {
+        vi.advanceTimersByTime(USAGE_POLL_INTERVAL * 3);
+      });
+      expect(agentsApi.get).not.toHaveBeenCalled();
+      cleanup();
+
+      renderPanel('codex', { ...codexPending, logins: [jake] });
+      for (let elapsed = 0; elapsed < USAGE_POLL_INTERVAL; elapsed += POLL_INTERVAL) {
+        await act(async () => {
+          vi.advanceTimersByTime(POLL_INTERVAL);
+        });
+      }
+      expect(agentsApi.get).toHaveBeenCalledTimes(USAGE_POLL_INTERVAL / POLL_INTERVAL);
+      for (const call of agentsApi.get.mock.calls) {
+        expect(call).toEqual([organization, 'codex', undefined]);
+      }
+    });
+
+    it('drops a usage reading that lands after the account was signed out', async () => {
+      vi.useFakeTimers({ now: beforeTheCodeExpires });
+      let land!: (status: AgentStatus) => void;
+      agentsApi.get
+        .mockReturnValueOnce(
+          new Promise<AgentStatus>((resolve) => {
+            land = resolve;
+          })
+        )
+        .mockResolvedValue(withAccounts(jake));
+      agentsApi.signOut.mockResolvedValue(undefined);
+      const { onChange } = renderPanel('claude', withAccounts(jake, alex));
+
+      await act(async () => {
+        vi.advanceTimersByTime(USAGE_POLL_INTERVAL);
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out alex@example.com' }));
+      await act(async () => {
+        fireEvent.click(
+          within(screen.getByRole('dialog')).getByRole('button', { name: 'Sign out' })
+        );
+      });
+      await act(async () => land(withAccounts(jake, alex)));
+
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onChange).toHaveBeenCalledWith(withAccounts(jake));
+      expect(screen.queryByText('alex@example.com')).toBeNull();
     });
   });
 
@@ -1252,11 +1600,17 @@ describe('AgentSignIn', () => {
       expect(screen.queryAllByRole('button')).toHaveLength(0);
     });
 
-    it('see a signed-in agent without a way to sign it out', () => {
-      renderPanel('claude', claudeSignedIn, 'view');
+    it('see every account and its usage without a way to sign one out or add one', () => {
+      setSystemTime(beforeTheCodeExpires);
+      renderPanel('claude', withAccounts(jake, alex), 'view');
 
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
+      expect(screen.getByRole('status')).toHaveTextContent(routing);
+      expect(screen.getByText('jake@example.com')).toBeInTheDocument();
+      expect(screen.getByText('alex@example.com')).toBeInTheDocument();
+      expect(screen.getAllByRole('meter')).toHaveLength(3);
       expect(screen.queryAllByRole('button')).toHaveLength(0);
+      setSystemTime();
     });
   });
 

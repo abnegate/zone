@@ -30,13 +30,13 @@ const organizationId = '00000000-0000-0000-0000-000000000001';
 const workspaceId = '00000000-0000-0000-0000-000000000001';
 const agentsPath = `/api/organizations/${organizationId}/agents`;
 const authorize =
-  'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=e2e-fake-challenge&code_challenge_method=S256&state=e2e-fake-state';
+  'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference+user%3Aprofile&code_challenge=e2e-fake-challenge&code_challenge_method=S256&state=e2e-fake-state';
 const fullAuthorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge=e2e-fake-challenge-2&code_challenge_method=S256&state=e2e-fake-state-2';
 const restartAuthorize =
-  'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=e2e-fake-challenge-3&code_challenge_method=S256&state=e2e-fake-state-3';
+  'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference+user%3Aprofile&code_challenge=e2e-fake-challenge-3&code_challenge_method=S256&state=e2e-fake-state-3';
 const loopbackAuthorize =
-  'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&scope=user%3Ainference&code_challenge=e2e-fake-challenge-4&code_challenge_method=S256&state=e2e-fake-state-4';
+  'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&scope=user%3Ainference+user%3Aprofile&code_challenge=e2e-fake-challenge-4&code_challenge_method=S256&state=e2e-fake-state-4';
 const approve = 'Approve on claude.com; Zone finishes the sign-in automatically.';
 const onThisMachine =
   'Approve in this browser, on the machine Zone runs on: claude.com sends it back to Zone at localhost. From any other machine, paste a code instead.';
@@ -47,11 +47,96 @@ const startedElsewhere =
 const attempt = '6f1b1f63-5a3e-4c8e-9d0e-2b7f7c1d9a10';
 const receipt = 'e2e-fake-receipt_0123456789';
 const returned = `/agent-sign-in#receipt=${receipt}&organization=${organizationId}`;
+const routing =
+  "New chats start on the account with the most headroom and stay on it until it runs out; the other agent's accounts take over when this one is spent.";
+const jake = {
+  id: '3f2b9c1e-6d4a-4f0b-9c7e-1a2b3c4d5e6f',
+  label: 'jake@example.com',
+  plan: 'Claude Max',
+  state: 'signed_in',
+  expires_at: '2027-09-23T12:00:00Z',
+  usage: {
+    windows: [
+      { name: '5h', used_percent: 62, used: null, limit: null, resets_at: '2026-09-23T06:10:00Z' },
+      { name: '7d', used_percent: 31, used: null, limit: null, resets_at: '2026-09-28T04:00:00Z' },
+    ],
+    headroom: 38,
+    fetched_at: '2026-09-23T04:00:00Z',
+    exhausted_until: null,
+  },
+  last_used_at: '2026-09-23T03:50:00Z',
+};
+const alex = {
+  id: '9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a',
+  label: 'alex@example.com',
+  plan: 'Claude Pro',
+  state: 'signed_in',
+  expires_at: '2027-10-01T09:00:00Z',
+  usage: {
+    windows: [
+      { name: '5h', used_percent: 84, used: null, limit: null, resets_at: '2026-09-23T04:42:00Z' },
+      { name: '7d', used_percent: 47, used: null, limit: null, resets_at: '2026-09-26T16:00:00Z' },
+      {
+        name: '7d opus',
+        used_percent: 93,
+        used: null,
+        limit: null,
+        resets_at: '2026-09-26T16:00:00Z',
+      },
+    ],
+    headroom: 7,
+    fetched_at: '2026-09-23T03:59:00Z',
+    exhausted_until: null,
+  },
+  last_used_at: '2026-09-22T18:20:00Z',
+};
+const sam = {
+  id: '5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d',
+  label: 'sam@example.com',
+  plan: 'Claude Max',
+  state: 'signed_in',
+  expires_at: null,
+  usage: null,
+  last_used_at: null,
+};
+const spentJake = {
+  ...jake,
+  usage: {
+    ...jake.usage,
+    windows: [{ ...jake.usage.windows[0], used_percent: 100 }, jake.usage.windows[1]],
+    headroom: 0,
+    exhausted_until: '2026-09-23T06:10:00Z',
+  },
+};
+const team = {
+  id: '7c6b5a49-3827-4f16-a5e4-d3c2b1a09f8e',
+  label: 'team@example.com',
+  plan: 'ChatGPT Plus',
+  state: 'signed_in',
+  expires_at: null,
+  usage: {
+    windows: [
+      { name: '5h', used_percent: 18, used: null, limit: null, resets_at: '2026-09-23T07:30:00Z' },
+      { name: '7d', used_percent: 9, used: null, limit: null, resets_at: '2026-09-29T00:00:00Z' },
+    ],
+    headroom: 82,
+    fetched_at: '2026-09-23T04:00:00Z',
+    exhausted_until: null,
+  },
+  last_used_at: '2026-09-23T02:15:00Z',
+};
 const claudeSignedIn = {
   state: 'signed_in',
   source: 'zone',
-  label: 'Claude Max',
-  expires_at: '2027-09-23T12:00:00Z',
+  label: 'jake@example.com',
+  expires_at: null,
+  logins: [jake],
+};
+const codexSignedIn = {
+  state: 'signed_in',
+  source: 'zone',
+  label: 'team@example.com',
+  logins: [team],
 };
 const unreadable = 'The code could not be read. Paste the whole code claude.com shows.';
 const spent = 'Claude rejected the code: Invalid authorization code. Start again.';
@@ -100,6 +185,7 @@ function status(agent: Agent, changes: Record<string, unknown> = {}) {
       agent === 'claude' ? ['sonnet', 'opus', 'haiku'] : ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'],
     pending: null,
     error: null,
+    logins: [],
     ...changes,
   };
 }
@@ -256,14 +342,7 @@ test.describe('Coding agent sign-in', () => {
           };
         }
         if (method === 'POST' && path === '/claude/login/code') {
-          return {
-            json: status('claude', {
-              state: 'signed_in',
-              source: 'zone',
-              label: 'Claude Max',
-              expires_at: '2027-09-23T12:00:00Z',
-            }),
-          };
+          return { json: status('claude', claudeSignedIn) };
         }
         return { status: 404, json: { error: `unexpected ${method} ${path}` } };
       },
@@ -299,10 +378,15 @@ test.describe('Coding agent sign-in', () => {
     await capture(page, 'claude-code');
 
     await field.press('Enter');
-    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible();
-    await expect(panel.getByText('Claude Max · Expires Sep 23, 2027')).toBeVisible();
+    await expect(panel.getByRole('status').getByText('Signed in', { exact: true })).toBeVisible();
+    await expect(panel.getByRole('status')).toContainText(routing);
+    const account = panel.getByRole('listitem').filter({ hasText: 'jake@example.com' });
+    await expect(account.getByText('Claude Max', { exact: true })).toBeVisible();
+    await expect(account.getByText(/^Expires Sep 23, 2027/)).toBeVisible();
+    await expect(account.getByRole('meter')).toHaveCount(2);
     await expect(panel.getByRole('status')).toBeFocused();
-    await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Sign out jake@example.com' })).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Add another Claude account' })).toBeVisible();
     await expect(field).toHaveCount(0);
     expect(captured.find((request) => request.path.endsWith('/claude/login/code'))?.body).toEqual({
       code: callback,
@@ -328,14 +412,14 @@ test.describe('Coding agent sign-in', () => {
     expect(saved.model_embedding).toBe('');
     expect(Object.keys(saved).filter((key) => !key.startsWith('model_'))).toEqual(['provider']);
 
-    await panel.getByRole('button', { name: 'Sign out' }).click();
-    const dialog = page.getByRole('dialog', { name: 'Sign out of Claude Code?' });
+    await panel.getByRole('button', { name: 'Sign out jake@example.com' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign out jake@example.com?' });
     await expect(dialog).toContainText(
-      'This signs Claude Code out for every workspace in this organization.'
+      'This signs jake@example.com out of Claude Code for every workspace in this organization.'
     );
     await dialog.getByRole('button', { name: 'Cancel' }).click();
     await expect(dialog).toHaveCount(0);
-    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible();
+    await expect(panel.getByText('jake@example.com')).toBeVisible();
     expect(captured.filter((request) => request.method === 'DELETE')).toHaveLength(0);
   });
 
@@ -468,8 +552,10 @@ test.describe('Coding agent sign-in', () => {
     await expect(panel.getByRole('button', { name: 'Try again with full access' })).toBeVisible();
     await capture(page, 'claude-loopback');
 
-    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible({ timeout: 10000 });
-    await expect(panel.getByText('Claude Max · Expires Sep 23, 2027')).toBeVisible();
+    await expect(panel.getByRole('status').getByText('Signed in', { exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(panel.getByText('jake@example.com')).toBeVisible();
     await expect(panel.getByRole('status')).toBeFocused();
     await expect(link).toHaveCount(0);
     expect(polls).toBe(2);
@@ -561,7 +647,7 @@ test.describe('Coding agent sign-in', () => {
     await page.getByRole('button', { name: 'Go to organization settings' }).click();
     await expect(page).toHaveURL(/\/org-settings$/);
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
-    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible();
+    await expect(panel.getByRole('status').getByText('Signed in', { exact: true })).toBeVisible();
   });
 
   test('a sign-in sent back to a browser that did not start it finishes nothing', async ({
@@ -666,7 +752,7 @@ test.describe('Coding agent sign-in', () => {
 
     await field.fill(callback);
     await field.press('Enter');
-    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible();
+    await expect(panel.getByRole('status').getByText('Signed in', { exact: true })).toBeVisible();
     const starts = captured.filter((request) => request.path.endsWith('/claude/login'));
     expect(starts.map((request) => request.body)).toEqual([{}, { flow: 'paste' }]);
   });
@@ -689,7 +775,7 @@ test.describe('Coding agent sign-in', () => {
             json:
               polls === 1
                 ? status('codex', { state: 'pending', pending: device })
-                : status('codex', { state: 'signed_in', source: 'zone', label: 'ChatGPT Plus' }),
+                : status('codex', codexSignedIn),
           };
         }
         return { status: 404, json: { error: `unexpected ${method} ${path}` } };
@@ -710,7 +796,10 @@ test.describe('Coding agent sign-in', () => {
     await expect(panel.getByText('Expires at 4:15 AM.', { exact: false })).toBeVisible();
     await capture(page, 'codex-pending');
 
-    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(panel.getByRole('status').getByText('Signed in', { exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(panel.getByText('team@example.com')).toBeVisible();
     await expect(panel.getByText('ChatGPT Plus')).toBeVisible();
     await expect(panel.getByText('ABCD-EFGHI')).toHaveCount(0);
     expect(polls).toBe(2);
@@ -787,13 +876,8 @@ test.describe('Coding agent sign-in', () => {
     ).toHaveLength(0);
   });
 
-  test('a member sees a working sign-in without a way to end it', async ({ page }) => {
-    const signedIn = status('claude', {
-      state: 'signed_in',
-      source: 'zone',
-      label: 'Claude Max',
-      expires_at: '2027-09-23T12:00:00Z',
-    });
+  test('a member sees every account and its usage without a way to end one', async ({ page }) => {
+    const signedIn = status('claude', { ...claudeSignedIn, logins: [jake, alex] });
     const captured = await mockApi(page, {
       role: 'member',
       provider: 'codex',
@@ -815,13 +899,241 @@ test.describe('Coding agent sign-in', () => {
     await expect(page.getByLabel('AI Provider')).toHaveValue('claude_code');
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await expect(panel.getByRole('heading', { level: 3 })).toHaveText('Claude Code sign-in');
-    await expect(panel.getByText('Signed in', { exact: true })).toBeVisible();
-    await expect(panel.getByText('Claude Max · Expires Sep 23, 2027')).toBeVisible();
+    await expect(panel.getByRole('status').getByText('Signed in', { exact: true })).toBeVisible();
+    await expect(panel.getByRole('status')).toContainText(routing);
+    await expect(panel.getByRole('listitem')).toHaveCount(2);
+    await expect(panel.getByRole('meter')).toHaveCount(5);
+    await expect(panel.getByText('jake@example.com')).toBeVisible();
+    await expect(panel.getByText('alex@example.com')).toBeVisible();
     await expect(panel.getByRole('button')).toHaveCount(0);
     await expect(panel.getByText('Save Changes to use this provider.')).toHaveCount(0);
     await capture(page, 'member-view');
     expect(
       captured.filter((request) => request.method !== 'GET' && request.path.startsWith(agentsPath))
     ).toHaveLength(0);
+  });
+
+  test('an owner sees every account with its usage and adds another', async ({ page }) => {
+    const captured = await mockApi(page, {
+      role: 'owner',
+      provider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') {
+          return {
+            json: {
+              agents: [
+                status('claude', { ...claudeSignedIn, logins: [jake, alex] }),
+                status('codex'),
+              ],
+            },
+          };
+        }
+        if (method === 'POST' && path === '/claude/login') {
+          return {
+            json: {
+              agent: 'claude',
+              authorize_url: authorize,
+              expires_at: '2026-09-23T04:10:00Z',
+              flow: 'paste',
+              attempt,
+            },
+          };
+        }
+        if (method === 'POST' && path === '/claude/login/code') {
+          return { json: status('claude', { ...claudeSignedIn, logins: [jake, alex, sam] }) };
+        }
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto('/org-settings');
+
+    const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
+    const accounts = panel.getByRole('list', { name: 'Claude Code accounts' });
+    await expect(accounts.getByRole('listitem')).toHaveCount(2);
+    await expect(panel.getByRole('status')).toContainText(routing);
+    const first = accounts.getByRole('listitem').filter({ hasText: 'jake@example.com' });
+    await expect(first.getByRole('meter', { name: '5h usage' })).toHaveAttribute(
+      'aria-valuetext',
+      '62% used, resets in 2h 10m'
+    );
+    await expect(first.getByRole('meter', { name: '7d usage' })).toHaveAttribute(
+      'aria-valuenow',
+      '31'
+    );
+    await expect(first).toContainText(
+      'Expires Sep 23, 2027 · Last used 3:50 AM · Usage checked 4:00 AM'
+    );
+    const second = accounts.getByRole('listitem').filter({ hasText: 'alex@example.com' });
+    await expect(second.getByRole('meter', { name: '7d opus usage' })).toHaveAttribute(
+      'aria-valuetext',
+      '93% used, resets in 3d 12h'
+    );
+    await expect(second).toContainText('Last used Sep 22, 6:20 PM');
+    await capture(page, 'accounts');
+
+    await panel.getByRole('button', { name: 'Add another Claude account' }).click();
+    const field = panel.getByLabel('Code from claude.com');
+    await expect(field).toBeFocused();
+    await expect(accounts.getByRole('listitem')).toHaveCount(2);
+    await expect(panel.getByRole('button', { name: 'Add another Claude account' })).toHaveCount(0);
+    await field.fill(callback);
+    await field.press('Enter');
+
+    await expect(accounts.getByRole('listitem')).toHaveCount(3);
+    const added = accounts.getByRole('listitem').filter({ hasText: 'sam@example.com' });
+    await expect(added.getByText('Usage unavailable')).toBeVisible();
+    await expect(added.getByRole('meter')).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Add another Claude account' })).toBeEnabled();
+    await capture(page, 'add-another');
+    expect(
+      captured
+        .filter((request) => request.path.endsWith('/claude/login'))
+        .map((request) => request.body)
+    ).toEqual([{}]);
+    expect(captured.filter((request) => request.method === 'DELETE')).toHaveLength(0);
+  });
+
+  test('an account that reached its limit says until when, beside one that has headroom', async ({
+    page,
+  }) => {
+    await mockApi(page, {
+      role: 'owner',
+      provider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') {
+          return {
+            json: {
+              agents: [
+                status('claude', { ...claudeSignedIn, logins: [spentJake, alex] }),
+                status('codex'),
+              ],
+            },
+          };
+        }
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto('/org-settings');
+
+    const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
+    const spent = panel.getByRole('listitem').filter({ hasText: 'jake@example.com' });
+    await expect(spent.getByText('Limit reached', { exact: true })).toBeVisible();
+    await expect(spent).toContainText('Exhausted until 6:10 AM');
+    await expect(spent.getByRole('meter', { name: '5h usage' })).toHaveAttribute(
+      'aria-valuetext',
+      '100% used, resets in 2h 10m'
+    );
+    const other = panel.getByRole('listitem').filter({ hasText: 'alex@example.com' });
+    await expect(other.getByText('Signed in', { exact: true })).toBeVisible();
+    await expect(other.getByText('Limit reached', { exact: true })).toHaveCount(0);
+    await capture(page, 'exhausted');
+  });
+
+  test('an owner signs one account out and the other stays', async ({ page }) => {
+    let signedOut = false;
+    const captured = await mockApi(page, {
+      role: 'owner',
+      provider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') {
+          return {
+            json: {
+              agents: [
+                status('claude', { ...claudeSignedIn, logins: [jake, alex] }),
+                status('codex'),
+              ],
+            },
+          };
+        }
+        if (method === 'DELETE' && path === `/claude/logins/${alex.id}`) {
+          signedOut = true;
+          return {};
+        }
+        if (method === 'GET' && path === '/claude') {
+          return {
+            json: status('claude', {
+              ...claudeSignedIn,
+              logins: signedOut ? [jake] : [jake, alex],
+            }),
+          };
+        }
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto('/org-settings');
+
+    const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
+    await panel.getByRole('button', { name: 'Sign out alex@example.com' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign out alex@example.com?' });
+    await expect(dialog).toContainText(
+      'This signs alex@example.com out of Claude Code for every workspace in this organization. Chats on it move to another account.'
+    );
+    await still(page, 'sign-out-account');
+    await dialog.getByRole('button', { name: 'Sign out' }).click();
+
+    await expect(panel.getByText('alex@example.com')).toHaveCount(0);
+    await expect(panel.getByRole('listitem')).toHaveCount(1);
+    await expect(panel.getByText('jake@example.com')).toBeVisible();
+    await expect(panel.getByRole('status')).toBeFocused();
+    await expect(panel.getByRole('button', { name: 'Add another Claude account' })).toBeEnabled();
+    expect(
+      captured
+        .filter((request) => request.method === 'DELETE')
+        .map((request) => `${request.method} ${request.path}`)
+    ).toEqual([`DELETE ${agentsPath}/claude/logins/${alex.id}`]);
+  });
+
+  test('cancelling another Codex device sign-in keeps the account already held', async ({
+    page,
+  }) => {
+    let cancelled = false;
+    const captured = await mockApi(page, {
+      role: 'owner',
+      provider: 'codex',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') {
+          return { json: { agents: [status('claude'), status('codex', codexSignedIn)] } };
+        }
+        if (method === 'POST' && path === '/codex/login') {
+          return { json: { agent: 'codex', ...device } };
+        }
+        if (method === 'DELETE' && path === '/codex/login/attempt') {
+          cancelled = true;
+          return {};
+        }
+        if (method === 'GET' && path === '/codex') {
+          return {
+            json: cancelled
+              ? status('codex', codexSignedIn)
+              : status('codex', { ...codexSignedIn, state: 'pending', pending: device }),
+          };
+        }
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto('/org-settings');
+
+    const panel = page.getByRole('region', { name: 'Codex sign-in' });
+    await expect(panel.getByText('team@example.com')).toBeVisible();
+    await panel.getByRole('button', { name: 'Add another ChatGPT account' }).click();
+    await expect(panel.getByText('ABCD-EFGHI')).toBeFocused();
+    await expect(panel.getByText('team@example.com')).toBeVisible();
+    await expect(panel.getByRole('status')).toContainText('Waiting for you to finish signing in.');
+    await capture(page, 'codex-add-another');
+
+    await panel.getByRole('button', { name: 'Cancel' }).click();
+    await expect(panel.getByText('ABCD-EFGHI')).toHaveCount(0);
+    await expect(panel.getByRole('status')).toBeFocused();
+    await expect(panel.getByText('team@example.com')).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Add another ChatGPT account' })).toBeEnabled();
+    expect(
+      captured
+        .filter((request) => request.method === 'DELETE')
+        .map((request) => `${request.method} ${request.path}`)
+    ).toEqual([`DELETE ${agentsPath}/codex/login/attempt`]);
   });
 });
