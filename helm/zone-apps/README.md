@@ -61,9 +61,12 @@ The following table lists the configurable parameters and their default values.
 | `server.autoscaling.minReplicas` | Minimum number of replicas | `2` |
 | `server.autoscaling.maxReplicas` | Maximum number of replicas | `10` |
 | `server.autoscaling.targetCPUUtilization` | Target CPU utilization percentage | `70` |
-| `server.agentState.persistence.enabled` | Keep agent state (codex sign-ins, CLI homes and transcripts) on a claim; applies only with one replica and autoscaling off. Claude tokens are in the database either way | `true` |
+| `server.agentState.persistence.enabled` | Keep agent state (each sign-in's CLI home under `<state>/<org>/<agent>/logins/<id>`, with codex's login and the CLI's session files, and each agent's shared `work` directory) on a claim; applies only with one replica and autoscaling off. Claude tokens are in the database either way | `true` |
 | `server.agentState.persistence.size` | Size of the agent-state claim, which grows with every CLI turn; see [Coding Agent Sign-ins](#coding-agent-sign-ins) | `1Gi` |
 | `server.agentState.persistence.storageClass` | Storage class of the agent-state claim; empty uses the cluster default | `""` |
+| `server.env.ZONE_AGENT_USAGE_TTL_SECONDS` | Whole seconds a sign-in's usage reading stays fresh before zone-server reads it again to pick the account a chat or task starts on; anything else is refused at boot | `"60"` |
+| `server.env.ZONE_CLAUDE_API_URL` | Where zone-server reads Claude sign-ins' usage and profile, for example through a proxy | unset (`https://api.anthropic.com`) |
+| `server.env.ZONE_CODEX_API_URL` | Where zone-server reads codex sign-ins' usage, for example through a proxy | unset (`https://chatgpt.com`) |
 
 ### Manager Configuration
 
@@ -286,6 +289,8 @@ zone-server can run the claude and codex CLIs its image ships for organizations 
 - `server.env.ZONE_CONSOLE_ORIGINS` is empty, so no sign-in returns to the callback even when it is set. It lists the consoles a returned sign-in goes on to, comma separated, each exactly as the browser opens it. With the callback set and the console forwarded as the install notes show, list the forwarded console, `ZONE_CONSOLE_ORIGINS: "http://127.0.0.1:3001"`, or `http://localhost:3001` if that is the address you open. List only consoles you run: the callback sends the approving browser, with its sign-in's receipt, to whichever listed console started the sign-in.
 - The server container sets `HOME=/home/zone`, `ZONE_AGENT_STATE_DIR=/app/agent-state` and `ZONE_CHAT_AGENT_CWD=/app/workspace`. The root filesystem is read-only, so `/home/zone`, `/app/workspace` and `/tmp` are emptyDirs.
 - `/app/agent-state` is a ReadWriteOnce claim, set by `server.agentState.persistence`, only when `server.replicaCount` is `1` and `server.autoscaling.enabled` is `false`. The Deployment then uses the `Recreate` strategy. Otherwise it is an emptyDir, and the install notes say what that loses.
+- An organization can sign in to each agent with several accounts. Each sign-in gets its own CLI home, `/app/agent-state/<org>/<agent>/logins/<id>`, which holds codex's login and the CLI's session files: claude's under `projects/`, codex's under `sessions/`. Every sign-in of an agent works in the same `/app/agent-state/<org>/<agent>/work`, so a chat that moves to another account keeps its files, and its session file moves with it.
+- `server.env.ZONE_AGENT_USAGE_TTL_SECONDS` is `"60"`: zone-server reads an account's usage again once its last reading is older than that, and starts each chat or task on the account with the most room left. `ZONE_CLAUDE_API_URL` and `ZONE_CODEX_API_URL` are unset, so those reads go to `https://api.anthropic.com` and `https://chatgpt.com`.
 
 The claim holds codex's logins and both CLIs' state; Claude sign-ins are kept in the database. With an emptyDir, zone-server loses codex logins whenever the pod is replaced (a rollout, an eviction or a reschedule).
 
@@ -306,11 +311,11 @@ Helm 4 upgrades a release it installed server-side, and server-side apply cannot
 
 The claim carries `helm.sh/resource-policy: keep`. Neither `helm uninstall` nor an upgrade that stops using it, such as one to a second replica, deletes it, and a release of the same name mounts it again once it is back to one replica. The claim holds working ChatGPT logins, so delete it by hand once they should go: for a release named `zone`, `kubectl delete pvc zone-zone-apps-agent-state`.
 
-Size the claim for transcripts. Every claude and codex turn, whether a chat message, a task attempt, a title or a review, writes a transcript of its own under its organization's directory, and Zone prunes none of them, so the claim grows with use. Check it with `kubectl exec deploy/zone-zone-apps-server -- du -sh /app/agent-state`. Before it fills, raise `server.agentState.persistence.size`, where the claim's storage class allows volume expansion, or delete old transcripts from each organization's `claude/projects` and `codex/sessions` directories. On a full claim neither CLI can write its transcript, and codex cannot save a login it has renewed.
+Size the claim for transcripts. Every claude and codex turn, whether a chat message, a task attempt, a title or a review, writes a transcript of its own under its organization's directory, and Zone prunes none of them, so the claim grows with use. Check it with `kubectl exec deploy/zone-zone-apps-server -- du -sh /app/agent-state`. Before it fills, raise `server.agentState.persistence.size`, where the claim's storage class allows volume expansion, or delete old transcripts from each sign-in's `projects` (claude) and `sessions` (codex) directories under `<org>/<agent>/logins/<id>`. On a full claim neither CLI can write its transcript, and codex cannot save a login it has renewed.
 
 The image sets `ZONE_CODEX_SANDBOX=danger-full-access`: codex sandboxes its own shell with bubblewrap, which needs user namespaces, and Docker's default seccomp profile blocks them. Whether the pods' `RuntimeDefault` profile allows them has not been tested; set `server.env.ZONE_CODEX_SANDBOX: workspace-write` only where it does.
 
-With `networkPolicy.enabled`, the server's egress policy admits DNS, the database, Valkey and LiteLLM only, so neither the CLIs nor zone-server's own Claude token exchange can reach Anthropic or OpenAI.
+With `networkPolicy.enabled`, the server's egress policy admits DNS, the database, Valkey and LiteLLM only, so neither the CLIs nor zone-server's own Claude token exchange can reach Anthropic or OpenAI. zone-server's usage reads need `api.anthropic.com` and `chatgpt.com` (or the hosts `ZONE_CLAUDE_API_URL` and `ZONE_CODEX_API_URL` name) as well; without them every account's usage reads as unknown.
 
 Every organization's CLI runs as the pod's user, uid 1000 with the chart's default security context. Read the security notes under Model Backend in [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) before enabling these providers on a shared instance.
 

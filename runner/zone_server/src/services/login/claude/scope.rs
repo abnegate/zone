@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::LIFETIME;
 
 const DELIMITER: &str = " ";
-const INFERENCE: &[&str] = &["user:inference"];
+const INFERENCE: &[&str] = &["user:inference", "user:profile"];
 const FULL: &[&str] = &[
     "org:create_api_key",
     "user:profile",
@@ -50,7 +50,6 @@ mod tests {
 
     #[test]
     fn full_access_asks_for_exactly_what_the_cli_asks_for() {
-        assert_eq!(Scope::Inference.scopes(), ["user:inference"]);
         assert_eq!(
             Scope::Full.scopes(),
             [
@@ -63,12 +62,20 @@ mod tests {
                 "user:plugins",
             ]
         );
-        assert_eq!(Scope::Inference.parameter(), "user:inference");
         assert_eq!(
             Scope::Full.parameter(),
             "org:create_api_key user:profile user:inference user:sessions:claude_code \
              user:mcp_servers user:file_upload user:plugins"
         );
+    }
+
+    #[test]
+    fn an_inference_sign_in_asks_for_the_profile_too() {
+        assert_eq!(
+            Scope::Inference.scopes(),
+            ["user:inference", "user:profile"]
+        );
+        assert_eq!(Scope::Inference.parameter(), "user:inference user:profile");
     }
 
     #[test]

@@ -38,4 +38,7 @@ extensions:
       - ["zone_server::routes::models::providers::catalog_request_url", "ReturnValue", "request-url", "manual"]
       - ["zone_server::config::agent_home", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::config::agent_work", "ReturnValue", "path-injection", "manual"]
+      - ["zone_server::config::agent_login_home", "ReturnValue", "path-injection", "manual"]
+      - ["zone_server::config::AgentConfig::login_home", "ReturnValue", "path-injection", "manual"]
+      - ["zone_server::services::agent::sessions::locate", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::login::claude::token_endpoint", "ReturnValue", "request-url", "manual"]
