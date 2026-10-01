@@ -6,7 +6,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
@@ -214,19 +213,29 @@ impl From<ai_settings::EffectiveAiSettings> for AiSettingsResponse {
 /// `saved` as every member may read it. A URL saved before URLs were checked
 /// can carry a username, password, query or fragment, any of which may hold a
 /// credential; none of them is returned.
+///
+/// Everything up to the last `@` goes before the query and fragment are cut,
+/// because a password may itself hold `?`, `#`, `/` or `@`, and a parser reads
+/// `https://user:1234?rest@host` as a clean URL on host `user`, port 1234.
 fn without_credentials(saved: String) -> String {
-    let end = saved.find(['?', '#']).unwrap_or(saved.len());
-    let kept = &saved[..end];
-    if Url::parse(kept)
-        .is_ok_and(|url| url.has_host() && url.username().is_empty() && url.password().is_none())
-    {
-        return kept.to_string();
-    }
-    let (scheme, rest) = kept
+    let start = saved
         .find("://")
-        .map_or(("", kept), |index| kept.split_at(index + "://".len()));
+        .filter(|&index| is_scheme(&saved[..index]))
+        .map_or(0, |index| index + "://".len());
+    let (scheme, rest) = saved.split_at(start);
     let host = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
-    format!("{scheme}{host}")
+    let end = host.find(['?', '#']).unwrap_or(host.len());
+    format!("{scheme}{}", &host[..end])
+}
+
+fn is_scheme(candidate: &str) -> bool {
+    let mut characters = candidate.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        })
 }
 
 /// Update AI settings request
@@ -595,6 +604,46 @@ mod tests {
             let returned = without_credentials(saved.to_string());
             assert_eq!(returned, shown, "{saved}");
             assert!(!returned.contains("secret"), "{saved}");
+        }
+    }
+
+    #[test]
+    fn without_credentials_leaks_no_part_of_a_password_that_holds_url_delimiters() {
+        for saved in [
+            "https://alice:hunter?two@proxy.example/v1",
+            "https://alice:hunter#two@proxy.example/v1",
+            "https://alice:hunter@two@proxy.example/v1",
+            "https://alice:hunter:two@proxy.example/v1",
+            "https://alice:hunter/two@proxy.example/v1",
+            "https://alice:hunter?two#three@proxy.example/v1?key=four",
+            "https://alice:1234?two@proxy.example/v1",
+            "https://alice:1234#two@proxy.example/v1",
+            "https://alice?hunter:two@proxy.example/v1",
+        ] {
+            assert_eq!(
+                without_credentials(saved.to_string()),
+                "https://proxy.example/v1",
+                "{saved}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_credentials_leaks_no_part_of_the_userinfo_of_a_value_that_is_not_a_url() {
+        for saved in [
+            "alice:hunter?two@proxy.example",
+            "alice:hunter#two@proxy.example",
+            "alice:a://hunter@proxy.example",
+            "https:\\\\alice:hunter@proxy.example",
+            "ht tps://alice:hunter two@proxy.example",
+            "https://alice:hunter@",
+            "https://alice:hunter@[::1",
+            "https://alice:hunter@proxy.example:port",
+        ] {
+            let returned = without_credentials(saved.to_string());
+            for part in ["alice", "hunter", "two"] {
+                assert!(!returned.contains(part), "{saved} returned {returned}");
+            }
         }
     }
 }
