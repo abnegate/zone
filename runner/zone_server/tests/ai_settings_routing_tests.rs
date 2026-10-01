@@ -8,13 +8,16 @@
 mod common;
 
 use common::{
-    TestClient, create_test_pool, create_test_state, discard, next_frame, seed_chat, serve,
-    setup_test_data, setup_workspace_member, test_config, test_email, test_password,
+    TestClient, TestResponse, create_test_pool, create_test_router, create_test_state, discard,
+    next_frame, seed_chat, serve, setup_test_data, setup_workspace_member, test_config, test_email,
+    test_password,
 };
 use futures_util::SinkExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as Frame;
 use uuid::Uuid;
@@ -25,6 +28,7 @@ use zone_server::config::Config;
 use zone_server::db::{ai_settings, chats, tasks};
 use zone_server::services::endpoint::{self, Endpoint};
 use zone_server::services::hosts::Hosts;
+use zone_server::state::AppState;
 use zone_server::workers::{task, titles};
 
 const INSTANCE_KEY: &str = "test-key";
@@ -1481,4 +1485,150 @@ async fn resetting_the_organization_settings_never_sends_a_workspace_key_to_the_
     keyed.assert_status(axum::http::StatusCode::OK);
     reset.assert_status(axum::http::StatusCode::NO_CONTENT);
     assert_eq!(routed, Some(false), "the workspace row was left routed");
+}
+
+const LOCK_ATTEMPTS: usize = 500;
+const LOCK_PAUSE: Duration = Duration::from_millis(20);
+
+/// A pool beside the server's, for a transaction the test holds open while the
+/// server's own connections wait on it.
+async fn side_pool() -> PgPool {
+    let database = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/zone_test".to_string());
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database)
+        .await
+        .expect("the test database is reachable")
+}
+
+/// The backend that comes to wait on a lock `holder` holds, if one does.
+async fn waiting_on(pool: &PgPool, holder: i32) -> Option<i32> {
+    for _ in 0..LOCK_ATTEMPTS {
+        let waiting: Option<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) LIMIT 1",
+        )
+        .bind(holder)
+        .fetch_optional(pool)
+        .await
+        .expect("the backends waiting on locks are readable");
+        if waiting.is_some() {
+            return waiting;
+        }
+        tokio::time::sleep(LOCK_PAUSE).await;
+    }
+    None
+}
+
+/// Wait until `request` has either answered or come to wait on `holder`.
+async fn answered_or_waiting(pool: &PgPool, holder: i32, request: &JoinHandle<TestResponse>) {
+    for _ in 0..LOCK_ATTEMPTS {
+        if request.is_finished() {
+            return;
+        }
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+        )
+        .bind(holder)
+        .fetch_one(pool)
+        .await
+        .expect("the backends waiting on locks are readable");
+        if waiting {
+            return;
+        }
+        tokio::time::sleep(LOCK_PAUSE).await;
+    }
+}
+
+fn put(state: &AppState, uri: String, body: Value, token: &str) -> JoinHandle<TestResponse> {
+    let client = TestClient::new(create_test_router(state.clone()));
+    let token = token.to_string();
+    tokio::spawn(async move { client.put_json_auth(&uri, &body, &token).await })
+}
+
+#[tokio::test]
+async fn a_workspace_first_save_racing_an_organization_move_never_stays_routed() {
+    const MOVED_KEY: &str = "sk-organization-moved";
+    let endpoints = Endpoints::start().await;
+    let first = provider().await;
+    let client = TestClient::with_config(endpoints.config()).await;
+    let pool = client.state().db().clone();
+    let (token, _, workspace) = chat_on(&client, CHAT_MODEL).await;
+    let organization = organization_of(&pool, workspace).await;
+    let organization_settings = format!("/api/organizations/{organization}/settings/ai");
+    let opened = client
+        .put_json_auth(
+            &organization_settings,
+            &json!({
+                "provider": SELF_HOSTED,
+                "litellm_host": first.uri(),
+                "litellm_key": ORGANIZATION_KEY,
+                "model_fast": CHAT_MODEL,
+            }),
+            &token,
+        )
+        .await;
+
+    let side = side_pool().await;
+    let mut holder = side.begin().await.expect("the holding transaction starts");
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .expect("the holding backend is known");
+    sqlx::query("INSERT INTO workspace_ai_settings (workspace_id) VALUES ($1)")
+        .bind(workspace)
+        .execute(&mut *holder)
+        .await
+        .expect("the workspace's first row is held uncommitted");
+
+    let keying = put(
+        client.state(),
+        format!("/api/organizations/{organization}/workspaces/{workspace}/settings/ai"),
+        json!({"litellm_key": WORKSPACE_KEY}),
+        &token,
+    );
+    let keyer = waiting_on(&side, holder_pid).await;
+    let moving = put(
+        client.state(),
+        organization_settings,
+        json!({"litellm_host": endpoints.organization.uri(), "litellm_key": MOVED_KEY}),
+        &token,
+    );
+    if let Some(keyer) = keyer {
+        answered_or_waiting(&side, keyer, &moving).await;
+    }
+    holder
+        .rollback()
+        .await
+        .expect("the holding transaction rolls back");
+    let keyed = keying.await.expect("the workspace save answers");
+    let moved = moving.await.expect("the organization move answers");
+    let routed: Option<bool> = sqlx::query_scalar(
+        "SELECT completions_routed FROM workspace_ai_settings WHERE workspace_id = $1",
+    )
+    .bind(workspace)
+    .fetch_optional(&pool)
+    .await
+    .expect("the workspace's settings are readable");
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+
+    assert!(
+        keyer.is_some(),
+        "the workspace save never reached the row the test held"
+    );
+    opened.assert_status(axum::http::StatusCode::OK);
+    keyed.assert_status(axum::http::StatusCode::OK);
+    moved.assert_status(axum::http::StatusCode::OK);
+    assert_eq!(
+        routed,
+        Some(false),
+        "a workspace key saved while its organization's URL moved still follows the new URL"
+    );
+    assert_eq!(
+        moved.json_value()["notice"],
+        "1 workspace key waits for its admin to save again.",
+        "{}",
+        moved.text()
+    );
 }

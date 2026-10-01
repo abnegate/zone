@@ -194,6 +194,27 @@ fn lent_pairs(saved: &SavedEndpoints) -> [bool; 3] {
     Pair::ALL.map(|pair| saved.lent(pair).is_some())
 }
 
+/// Every writer of an organization's endpoints claims the organization row and
+/// every workspace save shares it, so a workspace key saved without a URL either
+/// commits before the URL moves, and the move unroutes it, or is saved against
+/// the moved URL. Both take it before any other row, the order an
+/// organization's deletion locks in.
+const CLAIM_ORGANIZATION: &str = "SELECT 1 FROM organizations WHERE id = $1 FOR NO KEY UPDATE";
+
+const SHARE_ORGANIZATION: &str = "SELECT 1 FROM organizations WHERE id = $1 FOR SHARE";
+
+async fn lock_organization(
+    connection: &mut PgConnection,
+    query: &'static str,
+    organization_id: Uuid,
+) -> DbResult<()> {
+    sqlx::query(query)
+        .bind(organization_id)
+        .fetch_optional(connection)
+        .await?;
+    Ok(())
+}
+
 const ORGANIZATION_ENDPOINTS: &str = r#"
     SELECT litellm_host, litellm_key IS NOT NULL AS litellm_key,
            openai_base_url, openai_api_key IS NOT NULL AS openai_api_key,
@@ -724,6 +745,7 @@ pub async fn upsert_org_authorized(
     update: Update<'_>,
 ) -> AccessResult<OrganizationSave> {
     let mut transaction = pool.begin().await?;
+    lock_organization(&mut transaction, CLAIM_ORGANIZATION, organization_id).await?;
     authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
     validate(&update, hosts)?;
     let saved = saved_endpoints(&mut transaction, ORGANIZATION_ENDPOINTS, organization_id).await?;
@@ -762,6 +784,7 @@ pub async fn delete_org_authorized(
     user_id: Uuid,
 ) -> AccessResult<bool> {
     let mut transaction = pool.begin().await?;
+    lock_organization(&mut transaction, CLAIM_ORGANIZATION, organization_id).await?;
     authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
     let saved = saved_endpoints(&mut transaction, ORGANIZATION_ENDPOINTS, organization_id).await?;
     let deleted = delete_org(&mut *transaction, organization_id).await?;
@@ -984,6 +1007,7 @@ pub async fn upsert_workspace_authorized(
     update: Update<'_>,
 ) -> AccessResult<WorkspaceSettings<WorkspaceAiSettingsRow>> {
     let mut transaction = pool.begin().await?;
+    lock_organization(&mut transaction, SHARE_ORGANIZATION, organization_id).await?;
     authorize_workspace(
         &mut transaction,
         organization_id,
