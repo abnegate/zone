@@ -110,16 +110,22 @@ server:
   # port and the console; see the install notes. ZONE_CONSOLE_ORIGINS lists
   # the consoles such a sign-in returns to, exactly as the browser opens them,
   # and stays empty: with the callback set, list the forwarded console, such
-  # as "http://127.0.0.1:3001".
+  # as "http://127.0.0.1:3001". ZONE_AGENT_USAGE_TTL_SECONDS is how long a
+  # sign-in's usage reading stays fresh before Zone reads it again, in whole
+  # seconds; ZONE_CLAUDE_API_URL and ZONE_CODEX_API_URL, unset here, point
+  # those reads at https://api.anthropic.com and https://chatgpt.com.
   env:
     PORT: "8000"
     HOST: "0.0.0.0"
     ZONE_AGENT_HOST_LOGIN: "false"
     ZONE_CONSOLE_ORIGINS: ""
+    ZONE_AGENT_USAGE_TTL_SECONDS: "60"
 
-  # Per organization: codex's auth.json and the claude and codex homes,
-  # transcripts and working directories. Claude tokens are sealed in the
-  # database, not here. This state is per pod, so the claim is used only
+  # Per organization and agent: every sign-in's own claude or codex home
+  # under <state>/<org>/<agent>/logins/<id>, holding codex's auth.json and
+  # the CLI's session files under its projects/ or sessions/, beside the
+  # work directory the agent's sign-ins share. Claude tokens are sealed in
+  # the database, not here. This state is per pod, so the claim is used only
   # while zone-server runs one replica (replicaCount 1, autoscaling off);
   # otherwise it is an emptyDir. The chart keeps the claim when it stops
   # using it, and every CLI turn adds a transcript to it: see the README.

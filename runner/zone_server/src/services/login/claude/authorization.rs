@@ -69,11 +69,11 @@ mod tests {
         116, 24, 223, 180, 151, 153, 224, 37, 79, 250, 96, 125, 216, 173, 187, 186, 22, 212, 37,
         77, 105, 214, 191, 240, 91, 88, 5, 88, 83, 132, 141, 121,
     ];
-    const INFERENCE_SCOPE: &str = "user:inference";
+    const INFERENCE_SCOPE: &str = "user:inference user:profile";
     const FULL_SCOPE: &str = "org:create_api_key user:profile user:inference \
                               user:sessions:claude_code user:mcp_servers user:file_upload \
                               user:plugins";
-    const INFERENCE_QUERY: &str = "user%3Ainference";
+    const INFERENCE_QUERY: &str = "user%3Ainference+user%3Aprofile";
     const FULL_QUERY: &str = "org%3Acreate_api_key+user%3Aprofile+user%3Ainference\
                               +user%3Asessions%3Aclaude_code+user%3Amcp_servers\
                               +user%3Afile_upload+user%3Aplugins";

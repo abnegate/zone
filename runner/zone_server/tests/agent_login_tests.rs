@@ -43,7 +43,7 @@ const ACCESS: &str = "fake-access-token-for-agent-login-tests";
 const REFRESH: &str = "fake-refresh-token-for-agent-login-tests";
 const CODE: &str = "fake-authorization-code";
 const YEAR: i64 = 31_536_000;
-const INFERENCE_SCOPE: &str = "user:inference";
+const INFERENCE_SCOPE: &str = "user:inference user:profile";
 const FULL_SCOPE: &str = "org:create_api_key user:profile user:inference \
                           user:sessions:claude_code user:mcp_servers user:file_upload user:plugins";
 const AUTHORIZE_PARAMETERS: [&str; 8] = [
