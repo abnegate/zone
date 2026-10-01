@@ -251,8 +251,11 @@ organization's data to a provider it did not choose. That happens when a URL
 saved before these checks fails them, when `ZONE_ENDPOINT_HOSTS` is later
 tightened to leave out a saved host or a key-only row's default host, or when
 the AI settings cannot be read at all. Chats then end in an error, *This
-workspace's AI endpoint can't be used: <reason>. Check AI Settings.*, a task run
-fails with that message, and an auto-project task pauses with it; chat titles,
+workspace's AI endpoint can't be used: <reason>. Check AI Settings.*, creating
+a chat or starting an auto project is refused with it (`409`), the chat's model
+picker (`GET /api/models?workspace_id=`) answers `409` with it instead of
+listing models, a task run fails with that message, and an auto-project task
+pauses with it; chat titles,
 pull request subjects and merge summaries fall back to their plain versions,
 and the server logs a warning. The message never carries a key or the saved
 URL. Only a workspace with no saved settings, or with a row saved before
@@ -260,8 +263,8 @@ completions were routed, runs on the instance endpoint.
 
 Every request to a saved endpoint is checked again when it is sent: a host
 that resolves only to link-local or metadata addresses is refused, those
-addresses are dropped from one that also resolves elsewhere, and a redirect to
-one is not followed. When a saved endpoint refuses a request, the chat or task
+addresses are dropped from one that also resolves elsewhere, no redirect is
+followed, and no system proxy (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) is used. When a saved endpoint refuses a request, the chat or task
 reports only the HTTP status and the provider's own error message, cut to 500
 characters and without the saved key; the rest of the response body is never
 shown.
