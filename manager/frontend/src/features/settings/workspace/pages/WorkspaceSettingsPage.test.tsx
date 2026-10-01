@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
+import { ApiError } from '../../../../api/ApiError';
 import type { OrgRole } from '../../organization/types';
 import type { AiSettings, WorkspaceAiSettings, WorkspaceTheme } from '../types';
 
@@ -884,6 +885,35 @@ describe('WorkspaceSettingsPage', () => {
           expect.objectContaining({ model_audio: '' })
         );
       });
+    });
+
+    it('shows the reason the server refused the save', async () => {
+      const message =
+        'Failed to update workspace AI settings: litellm_host: Re-enter the key when changing the endpoint URL.';
+      mockClient.updateWorkspaceAiSettings.mockRejectedValueOnce(new ApiError(message, 400));
+      const user = userEvent.setup();
+      render(<WorkspaceSettingsPage />);
+      await openAiTab(user);
+      await waitFor(() => expect(mockClient.getWorkspaceAiSettings).toHaveBeenCalled());
+
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText(message)).toHaveClass('alert-error');
+    });
+
+    it('shows the reason the server refused the reset', async () => {
+      const message =
+        'Failed to reset workspace AI settings: Only workspace admins can change AI settings';
+      mockClient.resetWorkspaceAiSettings.mockReset();
+      mockClient.resetWorkspaceAiSettings.mockRejectedValue(new ApiError(message, 403));
+      const user = userEvent.setup();
+      render(<WorkspaceSettingsPage />);
+      await openAiTab(user);
+      await waitFor(() => expect(mockClient.getWorkspaceAiSettings).toHaveBeenCalled());
+
+      await user.click(screen.getByRole('button', { name: 'Reset to Defaults' }));
+
+      expect(await screen.findByText(message)).toHaveClass('alert-error');
     });
 
     describe('coding agent overrides', () => {

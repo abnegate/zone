@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Limits, Plan, Subscription, Usage } from '../types';
+import { ApiError } from './ApiError';
 import { client } from './client';
 
 // Mock fetch globally
@@ -1747,6 +1748,55 @@ describe('Client', () => {
         await expect(client.getEffectiveAiSettings('org-1', 'ws-1')).rejects.toThrow(
           'Failed to fetch effective AI settings: 500'
         );
+      });
+
+      const refusal = 'litellm_host: Re-enter the key when changing the endpoint URL.';
+      const refusals: [string, () => Promise<unknown>, string][] = [
+        [
+          'updateOrgAiSettings',
+          () => client.updateOrgAiSettings('org-1', { litellm_host: 'http://b' }),
+          'Failed to update org AI settings',
+        ],
+        [
+          'resetOrgAiSettings',
+          () => client.resetOrgAiSettings('org-1'),
+          'Failed to reset org AI settings',
+        ],
+        [
+          'updateWorkspaceAiSettings',
+          () => client.updateWorkspaceAiSettings('org-1', 'ws-1', { litellm_host: 'http://b' }),
+          'Failed to update workspace AI settings',
+        ],
+        [
+          'resetWorkspaceAiSettings',
+          () => client.resetWorkspaceAiSettings('org-1', 'ws-1'),
+          'Failed to reset workspace AI settings',
+        ],
+        [
+          'getOrgAiSettings',
+          () => client.getOrgAiSettings('org-1'),
+          'Failed to fetch org AI settings',
+        ],
+        [
+          'getWorkspaceAiSettings',
+          () => client.getWorkspaceAiSettings('org-1', 'ws-1'),
+          'Failed to fetch workspace AI settings',
+        ],
+        [
+          'getEffectiveAiSettings',
+          () => client.getEffectiveAiSettings('org-1', 'ws-1'),
+          'Failed to fetch effective AI settings',
+        ],
+      ];
+
+      it.each(refusals)('%s names the reason the server refused it', async (_, call, action) => {
+        mockFetch.mockResolvedValueOnce(Response.json({ error: refusal }, { status: 400 }));
+
+        const failure = await call().catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(ApiError);
+        expect((failure as ApiError).status).toBe(400);
+        expect((failure as ApiError).message).toBe(`${action}: ${refusal}`);
       });
     });
   });

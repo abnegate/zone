@@ -11,6 +11,7 @@ import {
 } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
+import { ApiError } from '../../../../api/ApiError';
 import type { AiSettings, OrgRole } from '../types';
 
 // Mock client
@@ -793,6 +794,17 @@ describe('OrgSettingsPage', () => {
         expect(screen.getByText('Save failed')).toBeInTheDocument();
       });
     });
+
+    it('shows the reason the server refused the save', async () => {
+      const message =
+        "Failed to update org AI settings: litellm_host: The URL's host is not one this instance allows endpoints on.";
+      mockClient.updateOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 400));
+
+      render(<OrgSettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText(message)).toHaveClass('alert-error');
+    });
   });
 
   describe('Reset Functionality', () => {
@@ -865,6 +877,17 @@ describe('OrgSettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Reset failed')).toBeInTheDocument();
       });
+    });
+
+    it('shows the reason the server refused the reset', async () => {
+      const message =
+        'Failed to reset org AI settings: Only organization admins can manage AI settings';
+      mockClient.resetOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 403));
+
+      render(<OrgSettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Reset to Defaults' }));
+
+      expect(await screen.findByText(message)).toHaveClass('alert-error');
     });
   });
 

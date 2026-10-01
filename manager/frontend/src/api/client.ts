@@ -94,6 +94,7 @@ import {
   WorkspacesResponseSchema,
   WorkspaceThemeResponseSchema,
 } from '../validation/schemas';
+import { ApiError } from './ApiError';
 import { chatsApi } from './chats';
 import { knowledgeApi } from './knowledge';
 import { modelsApi } from './models';
@@ -527,7 +528,7 @@ class Client {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to fetch org AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch org AI settings');
     }
     return parse(AiSettingsResponseSchema, await response.json());
   }
@@ -542,7 +543,7 @@ class Client {
       body: JSON.stringify(request),
     });
     if (!response.ok) {
-      throw new Error(`Failed to update org AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to update org AI settings');
     }
     return parse(OrganizationAiSettingsSaveSchema, await response.json());
   }
@@ -556,7 +557,7 @@ class Client {
       headers: this.getHeaders(),
     });
     if (!response.ok && response.status !== 404) {
-      throw new Error(`Failed to reset org AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to reset org AI settings');
     }
     const reset =
       response.status === 200
@@ -574,7 +575,7 @@ class Client {
       { headers: this.getHeaders() }
     );
     if (!response.ok) {
-      throw new Error(`Failed to fetch workspace AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch workspace AI settings');
     }
     return parse(WorkspaceAiSettingsResponseSchema, await response.json());
   }
@@ -593,7 +594,7 @@ class Client {
       }
     );
     if (!response.ok) {
-      throw new Error(`Failed to update workspace AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to update workspace AI settings');
     }
     return parse(WorkspaceAiSettingsResponseSchema, await response.json());
   }
@@ -607,7 +608,7 @@ class Client {
       }
     );
     if (!response.ok && response.status !== 404) {
-      throw new Error(`Failed to reset workspace AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to reset workspace AI settings');
     }
     return this.getWorkspaceAiSettings(orgId, wsId);
   }
@@ -618,7 +619,7 @@ class Client {
       { headers: this.getHeaders() }
     );
     if (!response.ok) {
-      throw new Error(`Failed to fetch effective AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch effective AI settings');
     }
     return parse(AiSettingsResponseSchema, await response.json());
   }
