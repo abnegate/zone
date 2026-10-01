@@ -22,7 +22,8 @@ use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::ReasoningEffort;
 use zone_server::config::Config;
-use zone_server::db::{chats, tasks};
+use zone_server::db::{ai_settings, chats, tasks};
+use zone_server::services::endpoint::{self, Endpoint};
 use zone_server::services::hosts::Hosts;
 use zone_server::workers::{task, titles};
 
@@ -205,6 +206,14 @@ async fn save_for_workspace(pool: &PgPool, workspace: Uuid, saved: &Saved<'_>) {
     .execute(pool)
     .await
     .expect("the workspace's settings are writable");
+}
+
+async fn organization_of(pool: &PgPool, workspace: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id = $1")
+        .bind(workspace)
+        .fetch_one(pool)
+        .await
+        .expect("the workspace's organization")
 }
 
 async fn members(pool: &PgPool, workspace: Uuid) -> Vec<Uuid> {
@@ -1292,12 +1301,7 @@ async fn a_workspace_key_saved_without_a_url_never_follows_its_organization_to_a
     let client = TestClient::with_config(endpoints.config()).await;
     let pool = client.state().db().clone();
     let (token, chat, workspace) = chat_on(&client, CHAT_MODEL).await;
-    let organization: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id = $1")
-            .bind(workspace)
-            .fetch_one(&pool)
-            .await
-            .expect("the workspace's organization");
+    let organization = organization_of(&pool, workspace).await;
     let organization_settings = format!("/api/organizations/{organization}/settings/ai");
 
     let opened = client
@@ -1377,5 +1381,104 @@ async fn a_workspace_key_saved_without_a_url_never_follows_its_organization_to_a
         "{}",
         moved.text()
     );
+    assert_eq!(routed, Some(false), "the workspace row was left routed");
+}
+
+#[tokio::test]
+async fn resetting_the_organization_settings_never_sends_a_workspace_key_to_the_default_host() {
+    let endpoints = Endpoints::start().await;
+    let config = endpoints.config();
+    let client = TestClient::with_config(config.clone()).await;
+    let pool = client.state().db().clone();
+    let (token, chat, workspace) = chat_on(&client, OPENAI_MODEL).await;
+    let organization = organization_of(&pool, workspace).await;
+    let organization_settings = format!("/api/organizations/{organization}/settings/ai");
+
+    let opened = client
+        .put_json_auth(
+            &organization_settings,
+            &json!({
+                "provider": OPENAI,
+                "openai_base_url": format!("{}/v1", endpoints.organization.uri()),
+                "openai_api_key": ORGANIZATION_KEY,
+                "model_fast": OPENAI_MODEL,
+            }),
+            &token,
+        )
+        .await;
+    let keyed = client
+        .put_json_auth(
+            &format!("/api/organizations/{organization}/workspaces/{workspace}/settings/ai"),
+            &json!({
+                "provider": OPENAI,
+                "openai_api_key": WORKSPACE_KEY,
+                "model_fast": OPENAI_MODEL,
+            }),
+            &token,
+        )
+        .await;
+    let reset = client.delete_auth(&organization_settings, &token).await;
+    let settings = ai_settings::get_effective_ai_settings(&pool, organization, workspace)
+        .await
+        .expect("the workspace's effective settings are readable");
+    let resolved = Endpoint::try_resolve(&config, &settings).map(|resolved| {
+        (
+            resolved.url().to_string(),
+            resolved.key().expose().to_string(),
+        )
+    });
+    let defaulted = resolved
+        .as_ref()
+        .is_ok_and(|(url, key)| url == endpoint::OPENAI_URL || key == WORKSPACE_KEY);
+    // A regression must not send the workspace key to the real default host.
+    let ended = if defaulted {
+        None
+    } else {
+        let address = serve(client.state().clone()).await;
+        converse(&address, &token, &chat, "Hello").await
+    };
+    let routed: Option<bool> = sqlx::query_scalar(
+        "SELECT completions_routed FROM workspace_ai_settings WHERE workspace_id = $1",
+    )
+    .bind(workspace)
+    .fetch_optional(&pool)
+    .await
+    .expect("the workspace's settings are readable");
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+    let outcome = format!("the turn ended on {ended:?}");
+
+    assert!(
+        !defaulted,
+        "the workspace key resolves to {:?} once its organization's URL is gone",
+        resolved.map(|(url, _)| url)
+    );
+    for (name, server) in [
+        ("organization's old URL", &endpoints.organization),
+        ("instance's LITELLM_HOST", &endpoints.instance),
+        ("workspace's endpoint", &endpoints.workspace),
+    ] {
+        let leaked: Vec<Request> = any_completions(server)
+            .await
+            .into_iter()
+            .filter(|request| {
+                authorization(request).is_some_and(|value| value.contains(WORKSPACE_KEY))
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "the workspace key reached the {name} ({outcome})"
+        );
+    }
+    assert!(
+        any_completions(&endpoints.instance)
+            .await
+            .iter()
+            .any(|request| authorization(request) == Some(format!("Bearer {INSTANCE_KEY}"))),
+        "the turn did not fall back to the instance ({outcome})"
+    );
+    opened.assert_status(axum::http::StatusCode::OK);
+    keyed.assert_status(axum::http::StatusCode::OK);
+    reset.assert_status(axum::http::StatusCode::NO_CONTENT);
     assert_eq!(routed, Some(false), "the workspace row was left routed");
 }

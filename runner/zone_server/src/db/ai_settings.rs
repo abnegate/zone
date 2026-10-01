@@ -187,6 +187,13 @@ fn moved_pairs(update: &Update<'_>, saved: &SavedEndpoints) -> [bool; 3] {
     })
 }
 
+/// The pairs an organization row lends: removing the row moves every one of
+/// them, and a workspace key saved without a URL would fall to its provider's
+/// default host.
+fn lent_pairs(saved: &SavedEndpoints) -> [bool; 3] {
+    Pair::ALL.map(|pair| saved.lent(pair).is_some())
+}
+
 const ORGANIZATION_ENDPOINTS: &str = r#"
     SELECT litellm_host, litellm_key IS NOT NULL AS litellm_key,
            openai_base_url, openai_api_key IS NOT NULL AS openai_api_key,
@@ -747,7 +754,8 @@ where
     Ok(result.rows_affected() > 0)
 }
 
-/// Delete organization settings while holding the caller's admin membership row.
+/// Delete organization settings while holding the caller's admin membership
+/// row, unrouting the workspace keys saved without a URL that took one from it.
 pub async fn delete_org_authorized(
     pool: &PgPool,
     organization_id: Uuid,
@@ -755,7 +763,9 @@ pub async fn delete_org_authorized(
 ) -> AccessResult<bool> {
     let mut transaction = pool.begin().await?;
     authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
+    let saved = saved_endpoints(&mut transaction, ORGANIZATION_ENDPOINTS, organization_id).await?;
     let deleted = delete_org(&mut *transaction, organization_id).await?;
+    unroute_keys_without_url(&mut transaction, organization_id, lent_pairs(&saved)).await?;
     transaction.commit().await?;
     Ok(deleted)
 }
@@ -1605,6 +1615,29 @@ mod tests {
             );
         }
         assert_eq!(moved_pairs(&Update::default(), &first), [false; 3]);
+    }
+
+    #[test]
+    fn removing_an_organization_row_moves_only_the_pairs_it_lends() {
+        let lending = keyed_beside(Some("http://first.example"));
+        assert_eq!(lent_pairs(&lending), [true; 3]);
+        assert_eq!(lent_pairs(&keyed_beside(None)), [false; 3]);
+        assert_eq!(lent_pairs(&SavedEndpoints::default()), [false; 3]);
+        assert_eq!(
+            lent_pairs(&SavedEndpoints {
+                routed: false,
+                ..lending
+            }),
+            [false; 3],
+            "a row saved before routing lent nothing"
+        );
+        assert_eq!(
+            lent_pairs(&SavedEndpoints {
+                openai_base_url: Some("  ".to_string()),
+                ..keyed_beside(Some("http://first.example"))
+            }),
+            [true, false, true]
+        );
     }
 
     #[test]
