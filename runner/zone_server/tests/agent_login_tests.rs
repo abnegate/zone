@@ -834,6 +834,7 @@ fn signed_out(agent: AgentKind, provider: &str) -> Value {
         "models": models(agent),
         "pending": null,
         "error": null,
+        "logins": [],
     })
 }
 
@@ -969,6 +970,7 @@ async fn a_member_reads_both_statuses_with_their_models_and_never_a_code() {
             "expires_at": null,
             "models": models(AgentKind::Codex),
             "error": null,
+            "logins": [],
         })
     );
     assert_eq!(pending["pending"]["verification_url"], VERIFICATION_URL);
@@ -1255,6 +1257,7 @@ async fn a_pasted_code_signs_the_organization_in_and_only_a_sealed_login_is_kept
             "models": models(AgentKind::Claude),
             "pending": null,
             "error": null,
+            "logins": [],
         }),
         "a sign-in that renews itself showed when its access token runs out"
     );
@@ -1413,6 +1416,7 @@ async fn a_claude_login_zone_cannot_open_has_expired() {
             "models": models(AgentKind::Claude),
             "pending": null,
             "error": null,
+            "logins": [],
         }),
         "a login no turn can open was shown as signed in"
     );
@@ -1803,6 +1807,7 @@ async fn the_callback_alone_signs_nothing_in_until_the_console_hands_its_receipt
         "models": models(AgentKind::Claude),
         "pending": null,
         "error": null,
+        "logins": [],
     });
     assert_eq!(response.json_value(), signed_in);
     assert_eq!(
@@ -2643,6 +2648,7 @@ async fn a_codex_sign_in_stays_pending_until_codex_saves_its_login() {
             "models": models(AgentKind::Codex),
             "pending": null,
             "error": null,
+            "logins": [],
         })
     );
     let home = stage.home(organization);
@@ -2729,6 +2735,7 @@ async fn a_refused_codex_sign_in_is_a_bad_gateway_and_the_status_says_why_until_
             "models": models(AgentKind::Codex),
             "pending": null,
             "error": REFUSAL,
+            "logins": [],
         })
     );
     assert!(!stage.home(organization).join(STAGING).exists());

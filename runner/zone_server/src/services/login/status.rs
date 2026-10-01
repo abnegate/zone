@@ -1,9 +1,11 @@
 //! How an organization's sign-in to each coding agent looks to its members.
 
 mod host;
+mod login;
 mod prompt;
 mod source;
 mod state;
+mod usage;
 mod viewer;
 
 use std::path::PathBuf;
@@ -16,9 +18,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
 
+pub use login::LoginStatus;
 pub use prompt::Prompt;
 pub use source::Source;
 pub use state::State;
+pub use usage::UsageStatus;
 pub use viewer::Viewer;
 
 use super::claude::Tokens;
@@ -35,7 +39,7 @@ const FRESH: Duration = Duration::from_secs(30);
 
 static HOST: LazyLock<Host> = LazyLock::new(|| Host::new(FRESH));
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentStatus {
     #[serde(with = "name")]
     pub agent: AgentKind,
@@ -50,6 +54,7 @@ pub struct AgentStatus {
     /// Why a sign-in that finished away from the panel failed, until the next one starts: the
     /// organization's last codex device sign-in, or the viewer's own Claude sign-in `attempt`.
     pub error: Option<String>,
+    pub logins: Vec<LoginStatus>,
 }
 
 impl AgentStatus {
@@ -120,6 +125,7 @@ impl AgentStatus {
             models: agent.models().iter().map(ToString::to_string).collect(),
             pending: None,
             error: None,
+            logins: vec![],
         }
     }
 }
@@ -220,6 +226,8 @@ mod tests {
     use futures::future::join_all;
     use serde_json::{Value, json};
     use tempfile::TempDir;
+
+    use zone_core::llm::Window;
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
@@ -434,8 +442,8 @@ mod tests {
                 provider: "claude_code".to_string(),
                 state: State::SignedIn,
                 source: Some(Source::Zone),
-                label: Some("Claude Max".to_string()),
-                expires_at: Some(at(1_821_672_000)),
+                label: Some("jake@example.com".to_string()),
+                expires_at: None,
                 models: vec![
                     "sonnet".to_string(),
                     "opus".to_string(),
@@ -443,6 +451,36 @@ mod tests {
                 ],
                 pending: None,
                 error: None,
+                logins: vec![LoginStatus {
+                    id: Uuid::parse_str("3f2b9c1e-6d4a-4f0b-9c7e-1a2b3c4d5e6f")
+                        .expect("a login id"),
+                    label: Some("jake@example.com".to_string()),
+                    plan: Some("Claude Max".to_string()),
+                    state: State::SignedIn,
+                    expires_at: Some(at(1_821_672_000)),
+                    usage: Some(UsageStatus {
+                        windows: vec![
+                            Window {
+                                name: "5h".to_string(),
+                                used_percent: Some(62.0),
+                                used: None,
+                                limit: None,
+                                resets_at: Some(at(1_790_143_800)),
+                            },
+                            Window {
+                                name: "7d".to_string(),
+                                used_percent: Some(31.0),
+                                used: None,
+                                limit: None,
+                                resets_at: Some(at(1_790_568_000)),
+                            },
+                        ],
+                        headroom: Some(38.0),
+                        fetched_at: at(1_790_136_000),
+                        exhausted_until: None,
+                    }),
+                    last_used_at: Some(at(1_790_135_400)),
+                }],
             },
             AgentStatus {
                 agent: AgentKind::Codex,
@@ -462,6 +500,7 @@ mod tests {
                     expires_at: at(1_790_136_900),
                 }),
                 error: None,
+                logins: vec![],
             },
         ];
 
@@ -489,7 +528,28 @@ mod tests {
                     "models": agent.models(),
                     "pending": null,
                     "error": null,
+                    "logins": [],
                 })
+            );
+        }
+    }
+
+    #[test]
+    fn a_status_with_no_sign_in_lists_no_logins() {
+        for agent in AgentKind::ALL {
+            let status = AgentStatus::signed_out(agent);
+            let serialised = serde_json::to_value(&status).expect("serialise");
+
+            assert!(
+                status.logins.is_empty(),
+                "{agent} listed {:?}",
+                status.logins
+            );
+            assert_eq!(serialised["logins"], json!([]), "{agent}");
+            assert_eq!(
+                serde_json::from_value::<AgentStatus>(serialised).expect("deserialise"),
+                status,
+                "{agent}"
             );
         }
     }
