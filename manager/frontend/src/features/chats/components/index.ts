@@ -5,6 +5,7 @@ export { AuthenticatedVideo } from './AuthenticatedVideo';
 export { ChatSources } from './ChatSources';
 export { Citations } from './Citations';
 export { Generation } from './Generation';
+export { HandoverNotice } from './HandoverNotice';
 export { JobCard } from './JobCard';
 export { MemoryBadge } from './MemoryBadge';
 export { MessageContent } from './MessageContent';

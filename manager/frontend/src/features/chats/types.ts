@@ -237,6 +237,29 @@ export interface ActionReceipt {
   reason?: string;
 }
 
+export const HANDOVER_AGENTS = ['claude', 'codex'] as const;
+
+export type HandoverAgent = (typeof HANDOVER_AGENTS)[number];
+
+export const HANDOVER_REASONS = ['limit', 'credits', 'signed_out'] as const;
+
+export type HandoverReason = (typeof HANDOVER_REASONS)[number];
+
+/// A turn that moved to another signed-in account part way through. `at` is
+/// the count of code points of the answer written before the switch, so the
+/// divider lands where the new account took over. Streamed live and stored on
+/// the assistant message so the divider survives a reload.
+export interface Handover {
+  kind: 'handover';
+  from?: string;
+  to: string;
+  agent: HandoverAgent;
+  reason: HandoverReason;
+  resets_at?: string;
+  carried: boolean;
+  at: number;
+}
+
 export interface MessageMetadata {
   attachments?: MessageAttachment[];
   tool_calls?: ToolCallRecord[];
@@ -248,6 +271,7 @@ export interface MessageMetadata {
   memory_used?: boolean;
   /** Model thinking text, when the deployment advertised reasoning. */
   reasoning?: string;
+  handovers?: Handover[];
 }
 
 export interface Message {
