@@ -4,6 +4,7 @@ import {
   chatShowsCharacter,
   chatShowsReasoning,
   findInstalledModel,
+  offersAgent,
   sameModelName,
 } from './modelOptions';
 
@@ -28,6 +29,21 @@ describe('chatShowsAgent', () => {
     expect(chatShowsAgent({ agent_enabled: false, tools: true })).toBe(true);
     expect(chatShowsAgent({ agent_enabled: false }, { tools: false })).toBe(false);
     expect(chatShowsAgent({ agent_enabled: false })).toBe(false);
+  });
+
+  it('shows Agent for a listed model whose tool calling is unknown', () => {
+    expect(chatShowsAgent({ agent_enabled: false, tools: null }, {})).toBe(true);
+    expect(chatShowsAgent({ agent_enabled: false, tools: false }, {})).toBe(false);
+  });
+});
+
+describe('offersAgent', () => {
+  it('offers Agent unless the model is known to lack tools or chat', () => {
+    expect(offersAgent({ tools: true })).toBe(true);
+    expect(offersAgent({})).toBe(true);
+    expect(offersAgent({ tools: false })).toBe(false);
+    expect(offersAgent({ completion: false })).toBe(false);
+    expect(offersAgent(undefined)).toBe(false);
   });
 });
 

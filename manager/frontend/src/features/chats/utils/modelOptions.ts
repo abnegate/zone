@@ -26,14 +26,23 @@ type ChatHints = {
 };
 
 type ModelHints = {
+  completion?: boolean;
   tools?: boolean;
   reasoning?: boolean;
   needs_character?: boolean;
   capabilities?: string[] | null;
 };
 
+export function offersAgent(model?: ModelHints): boolean {
+  return model !== undefined && model.completion !== false && model.tools !== false;
+}
+
 export function chatShowsAgent(chat: ChatHints, model?: ModelHints): boolean {
-  return Boolean(chat.agent_enabled) || chat.tools === true || model?.tools === true;
+  return (
+    Boolean(chat.agent_enabled) ||
+    chat.tools === true ||
+    (chat.tools !== false && offersAgent(model))
+  );
 }
 
 export function chatShowsCharacter(chat: ChatHints, model?: ModelHints): boolean {

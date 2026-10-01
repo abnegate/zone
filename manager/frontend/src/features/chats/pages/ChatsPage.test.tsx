@@ -119,7 +119,7 @@ mock.module('../../sources/hooks/useSources', () => ({
 type ListedModel = { name: string; size: number; modified_at: string } & Record<string, unknown>;
 
 const instanceModels: ListedModel[] = [
-  { name: 'llama2', size: 1, modified_at: '' },
+  { name: 'llama2', size: 1, modified_at: '', tools: false },
   { name: 'mistral', size: 1, modified_at: '', completion: true },
   { name: 'llama3.1', size: 1, modified_at: '', completion: true, tools: true },
   { name: 'vectors', size: 1, modified_at: '', completion: false },
@@ -890,6 +890,24 @@ describe('ChatsPage', () => {
       ]);
     });
 
+    it('offers Agent mode for a saved model whose tool calling is unknown', async () => {
+      listedModels = [
+        { name: 'gpt-4o-mini', size: 0, modified_at: '2026-01-01T00:00:00Z' },
+        { name: 'o3', size: 0, modified_at: '2026-01-01T00:00:00Z' },
+      ];
+      renderChatsPage();
+
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
+      expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+
+      fireEvent.keyDown(screen.getByLabelText('Select Model'), { key: 'ArrowDown' });
+      fireEvent.click(screen.getByRole('option', { name: 'gpt-4o-mini' }));
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+      });
+    });
+
     it('closes new chat modal on cancel', async () => {
       renderChatsPage();
 
@@ -1037,7 +1055,7 @@ describe('ChatsPage', () => {
       });
     });
 
-    it('shows Agent mode only for a model that can call tools', async () => {
+    it('hides Agent mode for a model known not to call tools', async () => {
       renderChatsPage();
       fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
       await waitFor(() => {
