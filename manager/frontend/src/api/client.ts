@@ -41,6 +41,7 @@ import type {
   Message,
   ModelSource,
   Organization,
+  OrganizationAiSettingsSave,
   OrganizationMember,
   OrgMembersResponse,
   Plan,
@@ -71,6 +72,8 @@ import {
   InvitationSchema,
   InvitationsResponseSchema,
   LimitsResponseSchema,
+  OrganizationAiSettingsResetSchema,
+  OrganizationAiSettingsSaveSchema,
   OrganizationMemberSchema,
   OrganizationResponseSchema,
   OrganizationsResponseSchema,
@@ -91,6 +94,7 @@ import {
   WorkspacesResponseSchema,
   WorkspaceThemeResponseSchema,
 } from '../validation/schemas';
+import { ApiError } from './ApiError';
 import { chatsApi } from './chats';
 import { knowledgeApi } from './knowledge';
 import { modelsApi } from './models';
@@ -524,34 +528,43 @@ class Client {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to fetch org AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch org AI settings');
     }
     return parse(AiSettingsResponseSchema, await response.json());
   }
 
-  async updateOrgAiSettings(orgId: string, request: UpdateAiSettingsRequest): Promise<AiSettings> {
+  async updateOrgAiSettings(
+    orgId: string,
+    request: UpdateAiSettingsRequest
+  ): Promise<OrganizationAiSettingsSave> {
     const response = await fetch(`${API_BASE}/api/organizations/${orgId}/settings/ai`, {
       method: 'PUT',
       headers: this.getHeaders(),
       body: JSON.stringify(request),
     });
     if (!response.ok) {
-      throw new Error(`Failed to update org AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to update org AI settings');
     }
-    return parse(AiSettingsResponseSchema, await response.json());
+    return parse(OrganizationAiSettingsSaveSchema, await response.json());
   }
 
-  // The delete answers 204 with no body (404 when nothing was ever saved), so
-  // the defaults are read back rather than parsed out of the reply.
-  async resetOrgAiSettings(orgId: string): Promise<AiSettings> {
+  // The delete answers with no settings: 200 with only a notice when it left
+  // workspace keys waiting on their admins, 204 otherwise, 404 when nothing was
+  // ever saved. The defaults are read back rather than parsed out of the reply.
+  async resetOrgAiSettings(orgId: string): Promise<OrganizationAiSettingsSave> {
     const response = await fetch(`${API_BASE}/api/organizations/${orgId}/settings/ai`, {
       method: 'DELETE',
       headers: this.getHeaders(),
     });
     if (!response.ok && response.status !== 404) {
-      throw new Error(`Failed to reset org AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to reset org AI settings');
     }
-    return this.getOrgAiSettings(orgId);
+    const reset =
+      response.status === 200
+        ? parse(OrganizationAiSettingsResetSchema, await response.json())
+        : null;
+    const settings = await this.getOrgAiSettings(orgId);
+    return reset ? { ...settings, notice: reset.notice } : settings;
   }
 
   // Workspace AI Settings API
@@ -562,7 +575,7 @@ class Client {
       { headers: this.getHeaders() }
     );
     if (!response.ok) {
-      throw new Error(`Failed to fetch workspace AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch workspace AI settings');
     }
     return parse(WorkspaceAiSettingsResponseSchema, await response.json());
   }
@@ -581,7 +594,7 @@ class Client {
       }
     );
     if (!response.ok) {
-      throw new Error(`Failed to update workspace AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to update workspace AI settings');
     }
     return parse(WorkspaceAiSettingsResponseSchema, await response.json());
   }
@@ -595,7 +608,7 @@ class Client {
       }
     );
     if (!response.ok && response.status !== 404) {
-      throw new Error(`Failed to reset workspace AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to reset workspace AI settings');
     }
     return this.getWorkspaceAiSettings(orgId, wsId);
   }
@@ -606,7 +619,7 @@ class Client {
       { headers: this.getHeaders() }
     );
     if (!response.ok) {
-      throw new Error(`Failed to fetch effective AI settings: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch effective AI settings');
     }
     return parse(AiSettingsResponseSchema, await response.json());
   }

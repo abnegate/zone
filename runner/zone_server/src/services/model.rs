@@ -5,6 +5,8 @@ use serde::Deserialize;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use crate::services::endpoint::Origin;
+
 static CLIENT: LazyLock<Client> = LazyLock::new(|| {
     Client::builder()
         .connect_timeout(Duration::from_secs(2))
@@ -44,6 +46,26 @@ impl Model {
 
     pub async fn profile(host: &str, name: &str) -> ModelProfile {
         if crate::services::stages::is_auto(name) {
+            return Self::unshown(name);
+        }
+        match Self::show(host, name).await {
+            Some(model) => model.into_profile(name),
+            None => Self::unshown(name),
+        }
+    }
+
+    /// What is known of `name` where `origin` sends its completions. The
+    /// instance's Ollama is asked only about a model it serves.
+    pub async fn profile_on(origin: Origin, host: &str, name: &str) -> ModelProfile {
+        match origin {
+            Origin::Instance => Self::profile(host, name).await,
+            Origin::Settings => Self::unshown(name),
+        }
+    }
+
+    /// What is known of `name` without asking the inference engine about it.
+    pub fn unshown(name: &str) -> ModelProfile {
+        if crate::services::stages::is_auto(name) {
             return ModelProfile {
                 capabilities: Some(vec![
                     "completion".to_string(),
@@ -56,15 +78,12 @@ impl Model {
                 needs_character: false,
             };
         }
-        match Self::show(host, name).await {
-            Some(model) => model.into_profile(name),
-            None => ModelProfile {
-                capabilities: None,
-                completion: None,
-                tools: None,
-                reasoning: None,
-                needs_character: needs_character(name, None, false),
-            },
+        ModelProfile {
+            capabilities: None,
+            completion: None,
+            tools: None,
+            reasoning: None,
+            needs_character: needs_character(name, None, false),
         }
     }
 

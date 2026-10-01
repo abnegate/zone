@@ -4,6 +4,8 @@ mod common;
 
 use axum::http::StatusCode;
 use serde_json::json;
+use uuid::Uuid;
+use zone_core::OptionalSecretExt;
 use zone_server::db::ai_settings;
 
 use common::{TestClient, test_email, test_password};
@@ -377,6 +379,97 @@ async fn test_delete_org_ai_settings_not_found() {
         )
         .await;
     response.assert_status(StatusCode::NOT_FOUND);
+}
+
+async fn save_litellm_for_organization(client: &TestClient, token: &str, org_id: &str) {
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &json!({
+                "provider": "self_hosted",
+                "litellm_host": "http://litellm:4000",
+                "litellm_key": "sk-organization-litellm",
+            }),
+            token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+async fn save_for_workspace(
+    client: &TestClient,
+    token: &str,
+    org_id: &str,
+    settings: &serde_json::Value,
+) {
+    let ws_id = create_workspace(client, token, org_id).await;
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai"),
+            settings,
+            token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_resetting_org_ai_settings_names_the_workspace_keys_left_waiting() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    save_litellm_for_organization(&client, &token, &org_id).await;
+    for key in ["sk-workspace-one", "sk-workspace-two"] {
+        save_for_workspace(&client, &token, &org_id, &json!({"litellm_key": key})).await;
+    }
+
+    let response = client
+        .delete_auth(&format!("/api/organizations/{org_id}/settings/ai"), &token)
+        .await;
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(
+        response.json_value(),
+        json!({"notice": "2 workspace keys wait for their admins to save again."}),
+        "{}",
+        response.text()
+    );
+}
+
+#[tokio::test]
+async fn test_resetting_org_ai_settings_without_workspace_keys_left_waiting_has_no_content() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    save_litellm_for_organization(&client, &token, &org_id).await;
+    save_for_workspace(
+        &client,
+        &token,
+        &org_id,
+        &json!({
+            "litellm_host": "http://workspace-litellm:4000",
+            "litellm_key": "sk-workspace-own-host",
+        }),
+    )
+    .await;
+    save_for_workspace(
+        &client,
+        &token,
+        &org_id,
+        &json!({"model_fast": "llama3.1:8b"}),
+    )
+    .await;
+
+    let response = client
+        .delete_auth(&format!("/api/organizations/{org_id}/settings/ai"), &token)
+        .await;
+
+    response.assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        response.text(),
+        "",
+        "a reset that left no key waiting has no body"
+    );
 }
 
 #[tokio::test]
@@ -1414,4 +1507,633 @@ async fn test_credentials_not_exposed_in_response() {
 
     assert!(body.get("openai_api_key").is_none());
     assert!(body.get("litellm_key").is_none());
+}
+
+const ENDPOINT_PAIRS: [(&str, &str, &str); 3] = [
+    ("litellm_host", "litellm_key", "has_litellm_key"),
+    ("openai_base_url", "openai_api_key", "has_openai_api_key"),
+    (
+        "anthropic_base_url",
+        "anthropic_api_key",
+        "has_anthropic_api_key",
+    ),
+];
+
+fn organization_endpoints() -> serde_json::Value {
+    let mut body = json!({ "provider": "self_hosted" });
+    for (url, key, _) in ENDPOINT_PAIRS {
+        body[url] = json!(format!("http://organization-{url}.example:4000"));
+        body[key] = json!(format!("sk-organization-{key}"));
+    }
+    body
+}
+
+#[tokio::test]
+async fn test_ai_settings_refuse_a_base_url_that_is_not_http() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let paths = [
+        format!("/api/organizations/{org_id}/settings/ai"),
+        format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai"),
+    ];
+
+    for path in &paths {
+        for (field, _, _) in ENDPOINT_PAIRS {
+            for url in [
+                "file:///etc/passwd",
+                "http://user:secret@litellm:4000",
+                "http://litellm:4000/?key=x",
+            ] {
+                let response = client
+                    .put_json_auth(path, &json!({ field: url }), &token)
+                    .await;
+                assert_eq!(
+                    response.status,
+                    StatusCode::BAD_REQUEST,
+                    "{path} saved {field} = {url}: {}",
+                    response.text()
+                );
+                assert!(
+                    !response.text().contains("secret"),
+                    "the refusal echoed the URL's credential: {}",
+                    response.text()
+                );
+            }
+        }
+    }
+
+    for path in &paths {
+        let saved = client.get_auth(path, &token).await;
+        saved.assert_status(StatusCode::OK);
+        for (field, _, _) in ENDPOINT_PAIRS {
+            assert!(
+                saved.json_value()[field].is_null(),
+                "{path} stored a refused {field}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_ai_settings_accept_private_and_loopback_hosts() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let paths = [
+        format!("/api/organizations/{org_id}/settings/ai"),
+        format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai"),
+    ];
+
+    for path in &paths {
+        for (field, _, _) in ENDPOINT_PAIRS {
+            for url in [
+                "http://127.0.0.1:4000",
+                "http://192.168.1.10:4000",
+                "http://litellm:4000",
+                "",
+            ] {
+                let response = client
+                    .put_json_auth(path, &json!({ field: url }), &token)
+                    .await;
+                assert_eq!(
+                    response.status,
+                    StatusCode::OK,
+                    "{path} refused {field} = {url:?}: {}",
+                    response.text()
+                );
+                let saved = if url.is_empty() {
+                    json!(null)
+                } else {
+                    json!(url)
+                };
+                assert_eq!(response.json_value()[field], saved, "{path} {field}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_a_workspace_base_url_does_not_inherit_the_organization_key() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &organization_endpoints(),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    let mut repointed = json!({});
+    for (url, _, _) in ENDPOINT_PAIRS {
+        repointed[url] = json!(format!("http://workspace-{url}.example:4000"));
+    }
+    client
+        .put_json_auth(&workspace, &repointed, &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    let effective = client
+        .get_auth(&format!("{workspace}/effective"), &token)
+        .await;
+    effective.assert_status(StatusCode::OK);
+    let body = effective.json_value();
+    for (url, _, has_key) in ENDPOINT_PAIRS {
+        assert_eq!(
+            body[url],
+            format!("http://workspace-{url}.example:4000"),
+            "the workspace's {url} wins"
+        );
+        assert_eq!(
+            body[has_key], false,
+            "the organization's key followed the workspace's {url}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_a_workspace_key_alone_keeps_the_organization_host() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &organization_endpoints(),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    let mut keys = json!({});
+    for (_, key, _) in ENDPOINT_PAIRS {
+        keys[key] = json!(format!("sk-workspace-{key}"));
+    }
+    client
+        .put_json_auth(&workspace, &keys, &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    let effective = client
+        .get_auth(&format!("{workspace}/effective"), &token)
+        .await;
+    effective.assert_status(StatusCode::OK);
+    let body = effective.json_value();
+    for (url, _, has_key) in ENDPOINT_PAIRS {
+        assert_eq!(
+            body[url],
+            format!("http://organization-{url}.example:4000"),
+            "a workspace key alone keeps the organization's {url}"
+        );
+        assert_eq!(body[has_key], true);
+    }
+
+    let settings = ai_settings::get_effective_ai_settings(
+        client.state().db(),
+        org_id.parse().expect("organization id"),
+        ws_id.parse().expect("workspace id"),
+    )
+    .await
+    .expect("effective settings");
+    assert_eq!(
+        settings.litellm_key.expose_as_deref(),
+        Some("sk-workspace-litellm_key")
+    );
+    assert_eq!(
+        settings.openai_api_key.expose_as_deref(),
+        Some("sk-workspace-openai_api_key")
+    );
+    assert_eq!(
+        settings.anthropic_api_key.expose_as_deref(),
+        Some("sk-workspace-anthropic_api_key")
+    );
+}
+
+async fn save_unrouted(client: &TestClient, organization: Uuid, workspace: Uuid) {
+    let pool = client.state().db();
+    sqlx::query(
+        "INSERT INTO organization_ai_settings (organization_id, provider, litellm_host, litellm_key) \
+         VALUES ($1, 'self_hosted', 'http://localhost:11434', 'sk-organization-litellm')",
+    )
+    .bind(organization)
+    .execute(pool)
+    .await
+    .expect("an organization row saved before completions were routed");
+    sqlx::query(
+        "INSERT INTO workspace_ai_settings (workspace_id, provider, openai_base_url) \
+         VALUES ($1, 'openai', 'http://workspace-openai.example:4000')",
+    )
+    .bind(workspace)
+    .execute(pool)
+    .await
+    .expect("a workspace row saved before completions were routed");
+}
+
+async fn effective_settings(
+    client: &TestClient,
+    organization: Uuid,
+    workspace: Uuid,
+) -> ai_settings::EffectiveAiSettings {
+    ai_settings::get_effective_ai_settings(client.state().db(), organization, workspace)
+        .await
+        .expect("effective settings")
+}
+
+#[tokio::test]
+async fn test_a_row_saved_before_completions_were_routed_lends_no_endpoint_until_saved() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization: Uuid = org_id.parse().expect("organization id");
+    let workspace: Uuid = ws_id.parse().expect("workspace id");
+    let paths = [
+        format!("/api/organizations/{org_id}/settings/ai"),
+        format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai"),
+    ];
+    save_unrouted(&client, organization, workspace).await;
+
+    for path in &paths {
+        let saved = client.get_auth(path, &token).await;
+        saved.assert_status(StatusCode::OK);
+        assert_eq!(
+            saved.json_value()["completions_routed"],
+            false,
+            "{path} was saved before completions were routed"
+        );
+    }
+    let before = effective_settings(&client, organization, workspace).await;
+    assert_eq!(before.provider, "openai");
+    assert_eq!(before.litellm_host, None);
+    assert_eq!(before.litellm_key.expose_as_deref(), None);
+    assert_eq!(before.openai_base_url, None);
+
+    for path in &paths {
+        let saved = client
+            .put_json_auth(path, &json!({ "model_fast": "llama3.2:3b" }), &token)
+            .await;
+        saved.assert_status(StatusCode::OK);
+        assert_eq!(
+            saved.json_value()["completions_routed"],
+            true,
+            "saving {path} routes its completions"
+        );
+        let read = client.get_auth(path, &token).await;
+        assert_eq!(read.json_value()["completions_routed"], true, "{path}");
+    }
+    let after = effective_settings(&client, organization, workspace).await;
+    assert_eq!(
+        after.litellm_host.as_deref(),
+        Some("http://localhost:11434")
+    );
+    assert_eq!(
+        after.litellm_key.expose_as_deref(),
+        Some("sk-organization-litellm")
+    );
+    assert_eq!(
+        after.openai_base_url.as_deref(),
+        Some("http://workspace-openai.example:4000")
+    );
+    assert_eq!(after.openai_api_key.expose_as_deref(), None);
+}
+
+#[tokio::test]
+async fn test_workspace_settings_say_which_keys_the_organization_saved() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    let none = client.get_auth(&workspace, &token).await;
+    none.assert_status(StatusCode::OK);
+    assert_eq!(
+        none.json_value()["organization_keys"],
+        json!({ "litellm": false, "openai": false, "anthropic": false })
+    );
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &json!({ "openai_api_key": "sk-organization-openai" }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let expected = json!({ "litellm": false, "openai": true, "anthropic": false });
+    let read = client.get_auth(&workspace, &token).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(read.json_value()["organization_keys"], expected);
+    let saved = client
+        .put_json_auth(
+            &workspace,
+            &json!({ "provider": "openai", "openai_base_url": "http://workspace.example:4000" }),
+            &token,
+        )
+        .await;
+    saved.assert_status(StatusCode::OK);
+    assert_eq!(saved.json_value()["organization_keys"], expected);
+}
+
+#[tokio::test]
+async fn test_an_empty_endpoint_value_clears_the_saved_one_and_an_absent_one_keeps_it() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+
+    for path in [
+        format!("/api/organizations/{org_id}/settings/ai"),
+        format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai"),
+    ] {
+        client
+            .put_json_auth(&path, &organization_endpoints(), &token)
+            .await
+            .assert_status(StatusCode::OK);
+
+        let kept = client
+            .put_json_auth(&path, &json!({ "provider": "self_hosted" }), &token)
+            .await;
+        kept.assert_status(StatusCode::OK);
+        let body = kept.json_value();
+        for (url, _, has_key) in ENDPOINT_PAIRS {
+            assert_eq!(
+                body[url],
+                format!("http://organization-{url}.example:4000"),
+                "{path} dropped {url} it was not sent"
+            );
+            assert_eq!(body[has_key], true, "{path} dropped a key it was not sent");
+        }
+
+        let mut blanks = json!({ "provider": "self_hosted" });
+        for (url, key, _) in ENDPOINT_PAIRS {
+            blanks[url] = json!("");
+            blanks[key] = json!("  ");
+        }
+        client
+            .put_json_auth(&path, &blanks, &token)
+            .await
+            .assert_status(StatusCode::OK);
+
+        let cleared = client.get_auth(&path, &token).await;
+        cleared.assert_status(StatusCode::OK);
+        let body = cleared.json_value();
+        for (url, _, has_key) in ENDPOINT_PAIRS {
+            assert_eq!(body[url], serde_json::Value::Null, "{path} kept {url}");
+            assert_eq!(body[has_key], false, "{path} kept the key beside {url}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_a_legacy_url_carrying_credentials_is_returned_without_them() {
+    const SECRET: &str = "legacy-secret";
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization: Uuid = org_id.parse().expect("organization id");
+    let workspace: Uuid = ws_id.parse().expect("workspace id");
+    let pool = client.state().db();
+    sqlx::query(
+        "INSERT INTO organization_ai_settings \
+         (organization_id, provider, litellm_host, openai_base_url, anthropic_base_url, completions_routed) \
+         VALUES ($1, 'self_hosted', $2, $3, $4, true)",
+    )
+    .bind(organization)
+    .bind(format!("http://admin:{SECRET}@gateway.example:4000"))
+    .bind(format!("https://proxy.example/v1?api_key={SECRET}"))
+    .bind(format!("https://{SECRET}@proxy.example/v1#{SECRET}"))
+    .execute(pool)
+    .await
+    .expect("an organization row saved before URLs were checked");
+    sqlx::query("INSERT INTO workspace_ai_settings (workspace_id, litellm_host) VALUES ($1, $2)")
+        .bind(workspace)
+        .bind(format!("http://admin:{SECRET}@workspace.example:4000/"))
+        .execute(pool)
+        .await
+        .expect("a workspace row saved before URLs were checked");
+
+    let organization_path = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace_path = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let effective_path = format!("{workspace_path}/effective");
+    for path in [&organization_path, &workspace_path, &effective_path] {
+        let response = client.get_auth(path, &token).await;
+        response.assert_status(StatusCode::OK);
+        assert!(
+            !response.text().contains(SECRET),
+            "{path} returned a credential saved in a URL: {}",
+            response.text()
+        );
+    }
+    let organization_body = client
+        .get_auth(&organization_path, &token)
+        .await
+        .json_value();
+    assert_eq!(
+        organization_body["litellm_host"],
+        "http://gateway.example:4000"
+    );
+    assert_eq!(
+        organization_body["openai_base_url"],
+        "https://proxy.example/v1"
+    );
+    assert_eq!(
+        organization_body["anthropic_base_url"],
+        "https://proxy.example/v1"
+    );
+    assert_eq!(
+        client.get_auth(&workspace_path, &token).await.json_value()["litellm_host"],
+        "http://workspace.example:4000/"
+    );
+}
+
+const RE_ENTER_KEY: &str = "Re-enter the key when changing the endpoint URL.";
+
+fn settings_paths(org_id: &str, ws_id: &str) -> [String; 2] {
+    [
+        format!("/api/organizations/{org_id}/settings/ai"),
+        format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai"),
+    ]
+}
+
+#[tokio::test]
+async fn test_a_key_saved_without_a_url_is_refused_when_the_default_host_is_not_listed() {
+    const SECRET: &str = "sk-default-host-9d41c7";
+    let mut config = common::test_config();
+    config.endpoint_hosts = zone_server::services::hosts::Hosts::parse("llm.corp.example");
+    let client = TestClient::with_config(config).await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let [organization, workspace] = settings_paths(&org_id, &ws_id);
+
+    for path in [workspace, organization] {
+        for (provider, url, key, has_key, host) in [
+            (
+                "openai",
+                "openai_base_url",
+                "openai_api_key",
+                "has_openai_api_key",
+                "api.openai.com",
+            ),
+            (
+                "anthropic",
+                "anthropic_base_url",
+                "anthropic_api_key",
+                "has_anthropic_api_key",
+                "api.anthropic.com",
+            ),
+        ] {
+            let refused = client
+                .put_json_auth(&path, &json!({ "provider": provider, key: SECRET }), &token)
+                .await;
+            assert_eq!(
+                refused.status,
+                StatusCode::BAD_REQUEST,
+                "{path} saved a {provider} key for {host}: {}",
+                refused.text()
+            );
+            assert!(
+                refused.text().contains(host),
+                "the refusal does not name {host}: {}",
+                refused.text()
+            );
+            assert!(
+                !refused.text().contains(SECRET),
+                "the refusal echoed the key: {}",
+                refused.text()
+            );
+            let stored = client.get_auth(&path, &token).await;
+            stored.assert_status(StatusCode::OK);
+            assert_eq!(stored.json_value()[has_key], false, "{path} kept {key}");
+
+            client
+                .put_json_auth(
+                    &path,
+                    &json!({
+                        "provider": provider,
+                        url: "https://llm.corp.example/v1",
+                        key: SECRET,
+                    }),
+                    &token,
+                )
+                .await
+                .assert_status(StatusCode::OK);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_changing_an_endpoint_url_without_its_key_is_refused() {
+    const KEY: &str = "sk-saved-beside-a-4b1e0f";
+    const RE_ENTERED: &str = "sk-re-entered-for-b";
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+
+    for path in settings_paths(&org_id, &ws_id) {
+        for (url, key, has_key) in ENDPOINT_PAIRS {
+            let first = format!("http://first-{url}.example:4000");
+            let second = format!("http://second-{url}.example:4000");
+            client
+                .put_json_auth(&path, &json!({ url: first, key: KEY }), &token)
+                .await
+                .assert_status(StatusCode::OK);
+
+            let refused = client
+                .put_json_auth(&path, &json!({ url: second }), &token)
+                .await;
+            assert_eq!(
+                refused.status,
+                StatusCode::BAD_REQUEST,
+                "{path} moved the key beside {url} to {second}: {}",
+                refused.text()
+            );
+            assert!(refused.text().contains(RE_ENTER_KEY), "{}", refused.text());
+            assert!(!refused.text().contains(KEY), "{}", refused.text());
+
+            let stored = client.get_auth(&path, &token).await;
+            stored.assert_status(StatusCode::OK);
+            assert_eq!(
+                stored.json_value()[url],
+                first,
+                "{path} took {second} without its key"
+            );
+            assert_eq!(stored.json_value()[has_key], true);
+
+            client
+                .put_json_auth(&path, &json!({ url: format!(" {first} ") }), &token)
+                .await
+                .assert_status(StatusCode::OK);
+            client
+                .put_json_auth(&path, &json!({ url: second, key: RE_ENTERED }), &token)
+                .await
+                .assert_status(StatusCode::OK);
+        }
+    }
+
+    let settings = ai_settings::get_effective_ai_settings(
+        client.state().db(),
+        org_id.parse().expect("organization id"),
+        ws_id.parse().expect("workspace id"),
+    )
+    .await
+    .expect("effective settings");
+    assert_eq!(
+        settings.openai_base_url.as_deref(),
+        Some("http://second-openai_base_url.example:4000")
+    );
+    assert_eq!(settings.openai_api_key.expose_as_deref(), Some(RE_ENTERED));
+}
+
+#[tokio::test]
+async fn test_a_key_saved_for_the_default_host_does_not_follow_a_new_url() {
+    const KEY: &str = "sk-default-host-7f20aa";
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+
+    for path in settings_paths(&org_id, &ws_id) {
+        for (provider, url, key) in [
+            ("openai", "openai_base_url", "openai_api_key"),
+            ("anthropic", "anthropic_base_url", "anthropic_api_key"),
+        ] {
+            client
+                .put_json_auth(&path, &json!({ "provider": provider, key: KEY }), &token)
+                .await
+                .assert_status(StatusCode::OK);
+
+            let refused = client
+                .put_json_auth(
+                    &path,
+                    &json!({ "provider": provider, url: "http://collector.example:4000" }),
+                    &token,
+                )
+                .await;
+            assert_eq!(
+                refused.status,
+                StatusCode::BAD_REQUEST,
+                "{path} sent the {provider} key saved for its default host to a new URL: {}",
+                refused.text()
+            );
+            assert!(refused.text().contains(RE_ENTER_KEY), "{}", refused.text());
+
+            let stored = client.get_auth(&path, &token).await;
+            stored.assert_status(StatusCode::OK);
+            assert!(stored.json_value()[url].is_null(), "{path} took the URL");
+        }
+    }
 }

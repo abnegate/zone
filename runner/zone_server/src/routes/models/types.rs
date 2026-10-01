@@ -2,6 +2,7 @@
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -195,6 +196,9 @@ pub struct ListModelsQuery {
     pub size: Option<ModelSizeFilter>,
     /// Filter by medium (text, image, video, tools, ...)
     pub medium: Option<ModelMediumFilter>,
+    /// The workspace whose chats pick from the installed models: an endpoint
+    /// its AI settings save runs only the models they save.
+    pub workspace_id: Option<Uuid>,
 }
 
 /// Options passed to a model provider search
@@ -261,6 +265,7 @@ mod tests {
             family: Some("all".into()),
             size: None,
             medium: None,
+            workspace_id: None,
         };
         let browse = query.to_browse_query(20);
         assert_eq!(browse.query, Some("qwen"));
@@ -280,6 +285,7 @@ mod tests {
             family: Some("llama".into()),
             size: Some(ModelSizeFilter::Small),
             medium: Some(ModelMediumFilter::Image),
+            workspace_id: None,
         };
         let browse = query.to_browse_query(20);
         assert_eq!(browse.family, Some("llama"));

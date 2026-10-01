@@ -129,10 +129,11 @@ With no model pinned, a chat with an attached image goes to the smallest install
 Where chat turns and task runs get their completions, along with chat titles,
 pull request subjects, and auto-project reviews and summaries. The default is
 the OpenAI-compatible endpoint `LITELLM_HOST` names. An organization can instead
-choose a coding agent CLI as its provider, **Claude Code** or **Codex**, and
-sign it in with its own Claude or ChatGPT subscription. Zone then runs that CLI
-for the organization's completions and serves Zone's tools to it over MCP. The
-manager image ships both CLIs: claude 2.1.278 and codex 0.156.1.
+save its own endpoint (see *Saved endpoints*), or choose a coding agent CLI as
+its provider, **Claude Code** or **Codex**, and sign it in with its own Claude
+or ChatGPT subscription. Zone then runs that CLI for the organization's
+completions and serves Zone's tools to it over MCP. The manager image ships
+both CLIs: claude 2.1.278 and codex 0.156.1.
 
 ### Choosing a provider
 
@@ -143,7 +144,8 @@ Bedrock (`claude_code` and `codex` in the API). A workspace admin can choose
 one for a single workspace under **Workspace Settings > AI Settings**, with
 **Override organization AI settings** on; the workspace then runs on its
 organization's sign-in for that agent. Organizations and workspaces that choose
-neither follow `ZONE_LLM_BACKEND`, the instance-wide default.
+neither a CLI nor a saved endpoint follow `ZONE_LLM_BACKEND`, the instance-wide
+default.
 
 No instance-wide setting turns these providers off: any organization admin can
 select them. Read *Security* below before using them on an instance shared by
@@ -151,6 +153,154 @@ organizations that must not see each other's data. On Claude Code, a Claude
 account with usage credits turned on keeps every turn going past its plan's
 limits, on those credits: read *Usage credits* before choosing it for an
 organization whose tasks run unattended.
+
+### Saved endpoints
+
+Self-Hosted, OpenAI and Anthropic send completions over HTTP to the endpoint
+saved in AI Settings, even when `ZONE_LLM_BACKEND` names a CLI. A workspace
+with **Override organization AI settings** on uses the fields it saves in place
+of the organization's, and inherits the ones it leaves blank.
+
+- **Self-Hosted**: the saved LiteLLM host, with the saved key. A host on the
+  same origin as `LITELLM_HOST` (scheme, host and port, with each scheme's
+  default port filled in) is the instance's own: Zone sends to `LITELLM_HOST`
+  as configured, with the saved key or `LITELLM_KEY` without one, and it
+  follows `ZONE_LLM_BACKEND` like the instance endpoint. With no host saved,
+  the instance endpoint runs, and a key saved without a host is not used.
+- **OpenAI**: the saved base URL, or `https://api.openai.com/v1` without one,
+  with the saved key.
+- **Anthropic**: the saved base URL, or `https://api.anthropic.com/v1` without
+  one, with the saved key as a Bearer token. That default is Anthropic's
+  OpenAI-compatible endpoint, which Anthropic describes as meant for testing and
+  "not considered a long-term or production-ready solution for most use cases".
+- **OpenAI** or **Anthropic** with neither a base URL nor a key saved runs on
+  the instance endpoint. With only a key saved, the provider's default host
+  (`api.openai.com` or `api.anthropic.com`) must be one `ZONE_ENDPOINT_HOSTS`
+  lists when that is set: AI Settings refuses such a save naming the host, and
+  a row saved before the host was left out of the list is unusable (see
+  below).
+- **AWS Bedrock** is not routed yet: it runs on the instance default.
+
+Settings saved before completions were routed keep running on the instance
+endpoint, since their hosts, base URLs and keys were never used and may be
+stale: an old Ollama placeholder, an OpenAI key saved long ago, or a workspace
+URL saved on the promise that it pairs with the organization's key. AI Settings
+marks such a row *Saved before completions were routed; save to start sending
+completions here*. Saving the row, even unchanged, routes it.
+
+Emptying a host or base URL and saving clears it, and the API clears an
+endpoint field sent as an empty string. A field left out of the request keeps
+its saved value, which is how the console keeps a key it never shows.
+
+Keys stay with the URL they were saved beside. Changing a saved URL, including
+giving a key saved for the provider's default host a URL of its own, or
+clearing the URL a key was saved beside, takes the key again: without one the
+save is refused with *Re-enter the key when changing the endpoint URL*, so a
+key someone else saved never goes to a host an admin has since typed in. Send
+an empty key to change the URL and clear the key instead. AI Settings marks
+the key field required, saying *Changing the URL needs the key again*, as soon
+as the URL differs from the saved one. A URL a workspace saves never
+receives the organization's key, and the instance's `LITELLM_KEY` only ever goes
+to `LITELLM_HOST`. A key a workspace saves without a URL goes to the URL its
+organization saved, or on OpenAI and Anthropic to the provider's default
+without one. So when an organization admin changes, sets or clears its URL for
+a pair, every workspace of that organization holding a key for the pair without
+a URL stops using its saved endpoints until its own admin saves AI Settings
+again, and the key never follows the organization to a host that admin did not
+see. The organization's save says so: *N workspace keys wait for their admins
+to save again.* Until then those workspaces run as rows saved before
+completions were routed, on the organization's own URLs and keys. A URL saved with no key, or a blank one, is sent no
+`Authorization` header. A workspace that names a host without a key while its
+organization saved one is warned in AI Settings that the host gets no key.
+
+A URL is checked when it is saved: it must be `http` or `https`, name a host,
+and carry no credentials, query or fragment. Private, LAN, loopback and
+single-label hosts are allowed, since an operator may run the model next to
+Zone. Link-local addresses (`169.254.0.0/16`, `fe80::/10`) and cloud metadata
+services (`fd00:ec2::254`, `100.100.100.200`, `metadata.google.internal`,
+`metadata.goog`) never are, however the address is written, and when
+`ZONE_ENDPOINT_HOSTS` is set the host must be one it lists. Every member can
+read a workspace's settings, so a URL saved before this check is returned
+without its username, password, query and fragment. The URL is read as it was
+saved:
+
+- no path gets `/v1`: `http://10.0.0.5:4000` sends to `http://10.0.0.5:4000/v1`;
+- a trailing `/` and no path is the host's root, sent as is:
+  `http://10.0.0.5:4000/` sends to `http://10.0.0.5:4000`;
+- a path is used as saved, trailing slashes dropped:
+  `https://proxy.example/openai/v1/` sends to `https://proxy.example/openai/v1`.
+
+*Automatic* on a saved endpoint uses the **Fast Model** and **Reasoning Model**
+names saved in AI Settings, never the instance's `OLLAMA_MODEL_*` defaults. With
+no name saved, the turn fails asking you to set one.
+
+The image-intent check, which asks a model whether an ambiguous message wants
+an image, runs on a saved endpoint's **Fast Model**, never
+`COMFYUI_CLASSIFIER_MODEL`. With *Automatic* and no Fast Model saved, the check
+is skipped and the message is answered as chat.
+
+Auto-project reviews on a saved endpoint run only on its saved **Reasoning
+Model** and **Fast Model**: `ZONE_AUTO_REVIEW_MODELS` names models on the
+instance endpoint and is ignored there. With neither saved, the task pauses
+asking you to set one, and a review that pauses for want of a model tells you
+to set the Fast/Reasoning model in AI Settings.
+
+A saved endpoint that can no longer be used fails closed: its completions are
+never sent to the instance endpoint instead, since that would hand an
+organization's data to a provider it did not choose. That happens when a URL
+saved before these checks fails them, when `ZONE_ENDPOINT_HOSTS` is later
+tightened to leave out a saved host or a key-only row's default host, or when
+the AI settings cannot be read at all. Chats then end in an error, *This
+workspace's AI endpoint can't be used: <reason>. Check AI Settings.*, creating
+a chat or starting an auto project is refused with it (`409`), the chat's model
+picker (`GET /api/models?workspace_id=`) answers `409` with it instead of
+listing models, a task run fails with that message, and an auto-project task
+pauses with it; chat titles,
+pull request subjects and merge summaries fall back to their plain versions,
+and the server logs a warning. The message never carries a key or the saved
+URL. Only a workspace with no saved settings, or with a row saved before
+completions were routed, runs on the instance endpoint.
+
+Every request to a saved endpoint is checked again when it is sent: a host
+that resolves only to link-local or metadata addresses is refused, those
+addresses are dropped from one that also resolves elsewhere, no redirect is
+followed, and no system proxy (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) is used. When a saved endpoint refuses a request, the chat or task
+reports only the HTTP status and the provider's own error message, cut to 500
+characters and without the saved key; the rest of the response body is never
+shown.
+
+Requests to OpenAI and Anthropic are shaped for their APIs, which LiteLLM would
+otherwise do: OpenAI gets at most four stop sequences and none of the chat
+template tokens (Zone still stops on those itself), and its reasoning models
+(`o1`, `o3`, `o4` and `gpt-5` families) get `max_completion_tokens` in place of
+`max_tokens`, with no `stop`, `temperature` or, on other models,
+`reasoning_effort`. Anthropic's OpenAI-compatible endpoint gets a temperature
+of at most 1 and no whitespace-only stop sequences. Self-Hosted endpoints get
+the request unshaped, as the instance endpoint does. A chat's reasoning effort
+is not sent to a saved endpoint other than `LITELLM_HOST`, since Zone learns
+nothing of a model's capabilities there.
+
+Embeddings, model captioning and LoRA training stay on the instance whatever the
+provider. A model known to lack vision gets the chat's history without its
+images and a one-line note saying so; the stored history keeps them. The
+context estimate reads the stored history, so it still counts a withheld image,
+as an attachment of unknown size.
+
+### `ZONE_ENDPOINT_HOSTS`
+
+- **Purpose**: Limits the hosts organizations and workspaces may save endpoints
+  on in AI Settings
+- **Format**: Comma-separated hosts or suffixes. A host (`api.openai.com`,
+  `192.168.1.20`) matches only itself; a suffix (`.corp.example` or
+  `*.corp.example`) matches `corp.example` and every name under it. Case and a
+  trailing dot are ignored, and so are ports.
+- **Default**: Empty, which allows every host
+- **Note**: A URL the list does not match is refused when it is saved, and so
+  is an OpenAI or Anthropic key saved without a URL when the list does not
+  match that provider's default host. A row saved before the list was set that
+  it does not match can no longer be used: its completions fail with the reason
+  rather than going to the instance endpoint (see *Saved endpoints*).
+  Link-local and metadata addresses stay refused even when listed.
 
 ### Usage credits
 
@@ -188,7 +338,9 @@ setting a monthly cap, at claude.ai/settings/usage.
 ### `ZONE_LLM_BACKEND`
 - **Default**: `litellm`
 - **Description**: The instance-wide default, for organizations and workspaces
-  whose provider is not Claude Code or Codex
+  whose provider is not Claude Code or Codex and that save no endpoint of their
+  own (see *Saved endpoints*): a saved endpoint runs over HTTP whatever this
+  says
 - **Options**:
   - `litellm` (the endpoint `LITELLM_HOST` names)
   - `claude` (runs the `claude` CLI)
@@ -1099,7 +1251,9 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: Optional Fast LiteLLM model used when image-intent rules are
   unsure, including informal edits of an attached photo (`IMAGE` vs `CHAT`,
   3-token reply). Org/workspace Fast overrides this when set. When empty, Zone
-  uses the current chat model or a small installed completion model.
+  uses the current chat model or a small installed completion model. An
+  organization or workspace on a saved endpoint ignores it (see *Saved
+  endpoints*).
 - **Timeout**: `COMFYUI_CLASSIFIER_TIMEOUT_SECS` (default `3`, range 1–30).
   Timeouts fall back to normal chat.
 
@@ -1295,7 +1449,7 @@ On Claude Code, an auto project's runs, reviews and summaries run with no one wa
 
 ### `ZONE_AUTO_REVIEW_MODELS`
 - **Default**: *empty*
-- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the tool-capable installed models. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers, and a round whose reviewer errors or gives no readable verdict moves to the next. Two such rounds on one head pause the task. An endpoint that does not answer (a refused connection, a timeout, a 5xx while Ollama restarts, or a 429) judged nothing, so it is not a round: the same reviewer is asked again on the next tick, the next one in the rotation is asked instead once it has gone unanswered 5 times, and the task pauses only once every reviewer has gone unanswered at least 5 times over 10 minutes. A review session offers tools, so a model Ollama lists without the `tools` capability (such as `llava:7b`) is never picked, even when named here or when it wrote the change; a model Ollama lists without any capabilities, or does not list at all, is still tried. When every model left cannot call tools, the task pauses saying so.
+- **Description**: Comma-separated models to review with, tried before the workspace's reasoning and fast models and the tool-capable installed models. The model that wrote a change never reviews it while another is available; successive rounds rotate reviewers, and a round whose reviewer errors or gives no readable verdict moves to the next. Two such rounds on one head pause the task. An endpoint that does not answer (a refused connection, a timeout, a 5xx while Ollama restarts, or a 429) judged nothing, so it is not a round: the same reviewer is asked again on the next tick, the next one in the rotation is asked instead once it has gone unanswered 5 times, and the task pauses only once every reviewer has gone unanswered at least 5 times over 10 minutes. A review session offers tools, so a model Ollama lists without the `tools` capability (such as `llava:7b`) is never picked, even when named here or when it wrote the change; a model Ollama lists without any capabilities, or does not list at all, is still tried. When every model left cannot call tools, the task pauses saying so. A workspace whose AI settings save an endpoint ignores this list and reviews only on its saved Reasoning and Fast models, since these names are models on the instance endpoint; its pauses point at AI Settings instead (see *Saved endpoints*).
 
 ### `ZONE_AUTO_REVIEW_REQUIRE_DISTINCT_MODEL`
 - **Default**: `false`

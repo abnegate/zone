@@ -7,9 +7,14 @@ use uuid::Uuid;
 use zone_core::context;
 use zone_core::llm::{Message, Role};
 use zone_search::client::{SearchContext, SearchHit};
-use zone_server::db::chats;
-use zone_server::services::backend;
+use zone_server::db::chats::{self, ChatRow};
 use zone_server::services::chat::session::{self, Mode};
+use zone_server::services::route::Route;
+use zone_server::state::AppState;
+
+async fn route(state: &AppState, chat: &ChatRow) -> Route {
+    Route::for_workspace(state, chat.workspace_id.unwrap()).await
+}
 
 /// The prefix of the one line a preview and the send after it cannot share:
 /// `session::build` reads the clock once per build, and the two are separate
@@ -56,25 +61,26 @@ async fn static_search_supplement_has_identical_preview_and_send_costs() {
             .unwrap();
         let current = "Explain how integer addition works.";
         let metadata = json!({"web_search":false});
+        let route = route(&state, &chat).await;
         let preview = session::build(
             &state,
             &chat,
             Uuid::new_v4(),
             Some((current, Some(&metadata))),
             Mode::Preview,
+            route.endpoint().expect("a usable route").clone(),
         )
         .await
         .unwrap();
         let user = harness.seed("user", current).await;
-        let backend = backend::for_workspace(&state, chat.workspace_id.unwrap())
-            .await
-            .unwrap();
+        let backend = route.backend(&state).await.unwrap();
         let mut generation = session::build(
             &state,
             &chat,
             Uuid::new_v4(),
             None,
             Mode::Generation(backend),
+            route.into_endpoint().expect("a usable route"),
         )
         .await
         .unwrap();
@@ -150,15 +156,15 @@ async fn retrieved_search_replaces_the_protected_user_supplement_without_trust_e
         .await
         .unwrap()
         .unwrap();
-    let backend = backend::for_workspace(&state, chat.workspace_id.unwrap())
-        .await
-        .unwrap();
+    let route = route(&state, &chat).await;
+    let backend = route.backend(&state).await.unwrap();
     let mut generation = session::build(
         &state,
         &chat,
         Uuid::new_v4(),
         None,
         Mode::Generation(backend),
+        route.into_endpoint().expect("a usable route"),
     )
     .await
     .unwrap();
@@ -244,6 +250,10 @@ async fn requested_search_preview_preserves_the_draft_and_marks_future_results_i
         Uuid::new_v4(),
         Some((current, None)),
         Mode::Preview,
+        route(&state, &chat)
+            .await
+            .into_endpoint()
+            .expect("a usable route"),
     )
     .await
     .unwrap();
@@ -288,7 +298,11 @@ async fn terminal_context_includes_the_same_static_supplement_as_restoration() {
         .await
         .unwrap()
         .unwrap();
-    let restored = session::build(&state, &chat, Uuid::new_v4(), None, Mode::Preview)
+    let endpoint = route(&state, &chat)
+        .await
+        .into_endpoint()
+        .expect("a usable route");
+    let restored = session::build(&state, &chat, Uuid::new_v4(), None, Mode::Preview, endpoint)
         .await
         .unwrap();
     let restored = restored.context.usage(&restored.model, None);

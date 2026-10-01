@@ -25,6 +25,7 @@ import type {
   ModelsResponse,
 } from '../features/models/types';
 import { parse } from '../validation';
+import { ApiError } from './ApiError';
 import { client } from './client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -48,14 +49,15 @@ export type TrainResult = z.infer<typeof TrainResultSchema>;
  */
 export const modelsApi = {
   /**
-   * Get list of installed models
+   * Get list of installed models, or the models a chat in `workspaceId` can run
    */
-  async getModels(): Promise<ModelsResponse> {
-    const response = await fetch(`${API_BASE}/api/models`, {
+  async getModels(workspaceId?: string): Promise<ModelsResponse> {
+    const query = workspaceId ? `?${new URLSearchParams({ workspace_id: workspaceId })}` : '';
+    const response = await fetch(`${API_BASE}/api/models${query}`, {
       headers: client.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to fetch models: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch models');
     }
     const text = await response.text();
     if (!text) {

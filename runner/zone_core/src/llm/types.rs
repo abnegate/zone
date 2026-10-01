@@ -288,6 +288,8 @@ pub struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<&'a [String]>,
@@ -526,6 +528,7 @@ mod tests {
             tool_choice: None,
             temperature: Some(0.7),
             max_tokens: Some(1000),
+            max_completion_tokens: None,
             stream: Some(false),
             stop: None,
         };
@@ -818,6 +821,7 @@ mod tests {
             tool_choice: None,
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: None,
             stop: None,
         };
@@ -848,6 +852,7 @@ mod tests {
             tool_choice: Some(ToolChoice::auto()),
             temperature: Some(0.5),
             max_tokens: Some(2048),
+            max_completion_tokens: None,
             stream: Some(false),
             stop: None,
         };
@@ -873,6 +878,7 @@ mod tests {
             tool_choice: None,
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: None,
             stop: None,
         };

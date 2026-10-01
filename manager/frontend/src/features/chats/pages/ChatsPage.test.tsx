@@ -116,20 +116,29 @@ mock.module('../../sources/hooks/useSources', () => ({
   }),
 }));
 
+type ListedModel = { name: string; size: number; modified_at: string } & Record<string, unknown>;
+
+const instanceModels: ListedModel[] = [
+  { name: 'llama2', size: 1, modified_at: '', tools: false },
+  { name: 'mistral', size: 1, modified_at: '', completion: true },
+  { name: 'llama3.1', size: 1, modified_at: '', completion: true, tools: true },
+  { name: 'vectors', size: 1, modified_at: '', completion: false },
+];
+let listedModels = instanceModels;
+const modelWorkspaces: (string | undefined)[] = [];
+
 // Mock useModels - include all exports from models module for proper mocking
 mock.module('../../models', () => ({
-  useModels: () => ({
-    models: [
-      { name: 'llama2', size: 1, modified_at: '' },
-      { name: 'mistral', size: 1, modified_at: '', completion: true },
-      { name: 'llama3.1', size: 1, modified_at: '', completion: true, tools: true },
-      { name: 'vectors', size: 1, modified_at: '', completion: false },
-    ],
-    loading: false,
-    error: null,
-    refresh: mock(),
-    deleteModel: mock(),
-  }),
+  useModels: (workspaceId?: string) => {
+    modelWorkspaces.push(workspaceId);
+    return {
+      models: listedModels,
+      loading: false,
+      error: null,
+      refresh: mock(),
+      deleteModel: mock(),
+    };
+  },
   useBrowse: () => ({
     browse: mock(),
     models: [],
@@ -346,6 +355,8 @@ describe('ChatsPage', () => {
     mockWsClose.mockReset();
     mockClient.getChats.mockResolvedValue(mockChats);
     mockClient.getChat.mockResolvedValue(mockChatWithMessages);
+    listedModels = instanceModels;
+    modelWorkspaces.length = 0;
   });
 
   describe('chat names', () => {
@@ -857,6 +868,46 @@ describe('ChatsPage', () => {
       expect(screen.queryByRole('option', { name: 'vectors' })).not.toBeInTheDocument();
     });
 
+    it('offers only the models the current workspace can run', async () => {
+      listedModels = [
+        { name: 'gpt-4o-mini', size: 0, modified_at: '2026-01-01T00:00:00Z' },
+        { name: 'o3', size: 0, modified_at: '2026-01-01T00:00:00Z' },
+      ];
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(newChatButtons()[0]).toBeInTheDocument();
+      });
+      fireEvent.click(newChatButtons()[0]);
+      fireEvent.keyDown(screen.getByLabelText('Select Model'), { key: 'ArrowDown' });
+
+      expect(modelWorkspaces).toContain('ws-1');
+      expect(modelWorkspaces).not.toContain(undefined);
+      expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
+        'Automatic',
+        'gpt-4o-mini',
+        'o3',
+      ]);
+    });
+
+    it('offers Agent mode for a saved model whose tool calling is unknown', async () => {
+      listedModels = [
+        { name: 'gpt-4o-mini', size: 0, modified_at: '2026-01-01T00:00:00Z' },
+        { name: 'o3', size: 0, modified_at: '2026-01-01T00:00:00Z' },
+      ];
+      renderChatsPage();
+
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
+      expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+
+      fireEvent.keyDown(screen.getByLabelText('Select Model'), { key: 'ArrowDown' });
+      fireEvent.click(screen.getByRole('option', { name: 'gpt-4o-mini' }));
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+      });
+    });
+
     it('closes new chat modal on cancel', async () => {
       renderChatsPage();
 
@@ -1004,7 +1055,7 @@ describe('ChatsPage', () => {
       });
     });
 
-    it('shows Agent mode only for a model that can call tools', async () => {
+    it('hides Agent mode for a model known not to call tools', async () => {
       renderChatsPage();
       fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
       await waitFor(() => {
@@ -1798,15 +1849,26 @@ describe('ChatsPage', () => {
 
     it('keeps the messages anchored to the bottom when the scroller resizes', async () => {
       const Original = globalThis.ResizeObserver;
-      const callbacks: ResizeObserverCallback[] = [];
+      const observers: StubObserver[] = [];
       class StubObserver {
+        readonly callback: ResizeObserverCallback;
+        readonly targets = new Set<Element>();
         constructor(callback: ResizeObserverCallback) {
-          callbacks.push(callback);
+          this.callback = callback;
+          observers.push(this);
         }
-        observe(): void {}
-        unobserve(): void {}
-        disconnect(): void {}
+        observe(target: Element): void {
+          this.targets.add(target);
+        }
+        unobserve(target: Element): void {
+          this.targets.delete(target);
+        }
+        disconnect(): void {
+          this.targets.clear();
+        }
       }
+      const watching = (scroller: Element | null) =>
+        observers.filter((observer) => scroller !== null && observer.targets.has(scroller));
       globalThis.ResizeObserver = StubObserver as unknown as typeof ResizeObserver;
       try {
         renderChatsPage();
@@ -1819,15 +1881,15 @@ describe('ChatsPage', () => {
 
         await waitFor(() => {
           expect(screen.getByText('Hello')).toBeInTheDocument();
+          expect(watching(document.querySelector('.messages-container'))).not.toHaveLength(0);
         });
         const container = document.querySelector('.messages-container') as HTMLDivElement;
         Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 900 });
         const scrollTo = spyOn(container, 'scrollTo').mockImplementation(() => {});
-        expect(callbacks.length).toBeGreaterThan(0);
 
         act(() => {
-          for (const callback of callbacks) {
-            callback([], {} as ResizeObserver);
+          for (const observer of watching(container)) {
+            observer.callback([], observer as unknown as ResizeObserver);
           }
         });
 

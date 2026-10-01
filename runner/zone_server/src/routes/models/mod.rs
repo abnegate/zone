@@ -24,8 +24,14 @@ use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::path::{Component, PathBuf};
 use std::time::Duration;
+use uuid::Uuid;
 
+use super::chats::check_workspace_read_access;
 use crate::auth::AuthUser;
+use crate::error::ServerError;
+use crate::services::endpoint::Origin;
+use crate::services::model::Model;
+use crate::services::route::Route;
 use crate::state::AppState;
 use types::ModelCapability;
 use zone_comfy::caption::{CaptionRequest, Captioner, Draft};
@@ -93,7 +99,7 @@ fn validate_model_name(name: &str) -> Result<(), ErrorResponse> {
 /// GET /api/models
 pub async fn list(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Query(query): Query<ListModelsQuery>,
 ) -> impl IntoResponse {
     let source = query.source.as_deref().unwrap_or("ollama");
@@ -115,7 +121,10 @@ pub async fn list(
                     Err(e) => e.into_response(),
                 }
             } else {
-                list_installed_models(state).await
+                match query.workspace_id {
+                    Some(workspace) => list_workspace_models(state, &auth, workspace).await,
+                    None => list_installed_models(state).await,
+                }
             }
         }
         "comfy" => Json(list_comfy_models(&state)).into_response(),
@@ -215,6 +224,51 @@ struct OllamaFailure {
 impl IntoResponse for OllamaFailure {
     fn into_response(self) -> axum::response::Response {
         (self.status, Json(ErrorResponse::new(self.message))).into_response()
+    }
+}
+
+/// The models a chat in `workspace` may run: the Fast and Reasoning models its
+/// AI settings save when they send its completions to an endpoint of their
+/// own, and otherwise the instance's installed models.
+async fn list_workspace_models(
+    state: AppState,
+    auth: &AuthUser,
+    workspace: Uuid,
+) -> axum::response::Response {
+    if let Err(error) = check_workspace_read_access(&state, auth, workspace).await {
+        return error.into_response();
+    }
+    let route = Route::for_workspace(&state, workspace).await;
+    let origin = match route.endpoint() {
+        Ok(endpoint) => endpoint.origin(),
+        Err(unusable) => return ServerError::Conflict(unusable.to_string()).into_response(),
+    };
+    match origin {
+        Origin::Instance => list_installed_models(state).await,
+        Origin::Settings => {
+            let preferences = route.preferences(&state.config().comfyui.classifier_model);
+            let saved: Vec<ModelResponse> = preferences
+                .completions()
+                .into_iter()
+                .map(saved_model)
+                .collect();
+            Json(saved).into_response()
+        }
+    }
+}
+
+/// A model the AI settings save, with only what is known of it without asking
+/// the endpoint that runs it. Nothing of it is on this instance's disk.
+fn saved_model(name: &str) -> ModelResponse {
+    let profile = Model::unshown(name);
+    ModelResponse {
+        name: name.to_string(),
+        completion: profile.completion,
+        tools: profile.tools,
+        needs_character: Some(profile.needs_character),
+        size: Some(0),
+        modified_at: Some(chrono::Utc::now().to_rfc3339()),
+        ..Default::default()
     }
 }
 

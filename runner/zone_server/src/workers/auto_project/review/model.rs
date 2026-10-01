@@ -1,6 +1,8 @@
 //! Which model reviews a change: one that did not write it, when there is one.
 
-use crate::db::{ai_settings, workspaces};
+use crate::services::backend;
+use crate::services::endpoint::{self, Endpoint, Origin};
+use crate::services::route::Route;
 use crate::services::stages::{self, Catalog, Preferences};
 use crate::state::AppState;
 use uuid::Uuid;
@@ -13,17 +15,36 @@ const CHOSEN_AUTHOR: &str = "the agent chose its own model to write the change, 
      the agent knows in AI settings";
 const NO_OTHER_MODEL: &str = "no model other than the one that wrote the change is available to \
      review it, and no review bot answered";
+const NO_INSTALLED_TOOL_MODEL: &str = "no installed model can call tools, which a review session \
+     offers; install one that can, or name one in ZONE_AUTO_REVIEW_MODELS";
+const NO_SAVED_TOOL_MODEL: &str = "no model can call tools, which a review session offers; set \
+     the Fast/Reasoning model in AI Settings to one that can";
 
 /// Why no model can review a change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Unavailable {
     #[error("no completion model is installed to review with")]
     NoModel,
-    #[error(
-        "no installed model can call tools, which a review session offers; install one that \
-         can, or name one in ZONE_AUTO_REVIEW_MODELS"
-    )]
-    NoToolModel,
+    #[error("{}", no_tool_model(*.0))]
+    NoToolModel(Origin),
+    #[error(transparent)]
+    Unset(#[from] endpoint::Error),
+}
+
+fn no_tool_model(origin: Origin) -> &'static str {
+    match origin {
+        Origin::Instance => NO_INSTALLED_TOOL_MODEL,
+        Origin::Settings => NO_SAVED_TOOL_MODEL,
+    }
+}
+
+/// How a person gives the reviews on an endpoint of `origin` another model:
+/// `ZONE_AUTO_REVIEW_MODELS` names models on the instance's endpoint alone.
+pub fn remedy(origin: Origin) -> &'static str {
+    match origin {
+        Origin::Instance => "name another in ZONE_AUTO_REVIEW_MODELS",
+        Origin::Settings => "set the Fast/Reasoning model in AI Settings",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,10 +97,12 @@ impl Author {
 /// On an agent, a candidate is a model the agent knows, and the agent's own
 /// models stand in for what is installed, less those it runs only when named.
 /// A change the agent wrote on a model of its own choosing may have come from
-/// any of them.
+/// any of them. `origin` is the endpoint the reviews run on, which decides
+/// where a person is told to name a model when none can review.
 pub fn lineup(
+    origin: Origin,
     author: &Author,
-    prefs: &Preferences,
+    preferences: &Preferences,
     catalog: &Catalog,
     configured: &[String],
     round: u32,
@@ -109,10 +132,10 @@ pub fn lineup(
     for name in configured {
         push(name);
     }
-    if let Some(name) = prefs.reasoning.as_deref() {
+    if let Some(name) = preferences.reasoning.as_deref() {
         push(name);
     }
-    if let Some(name) = prefs.fast.as_deref() {
+    if let Some(name) = preferences.fast.as_deref() {
         push(name);
     }
     let mut installed: Vec<_> = catalog.unattended().collect();
@@ -123,19 +146,23 @@ pub fn lineup(
         }
     }
     if candidates.is_empty() {
-        let fallbacks: Vec<&str> = [named, prefs.reasoning.as_deref(), prefs.fast.as_deref()]
-            .into_iter()
-            .flatten()
-            .map(str::trim)
-            .filter(|name| !stages::is_auto(name))
-            .collect();
+        let fallbacks: Vec<&str> = [
+            named,
+            preferences.reasoning.as_deref(),
+            preferences.fast.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|name| !stages::is_auto(name))
+        .collect();
         return match fallbacks.iter().find(|name| !catalog.refuses_tools(name)) {
             Some(model) => Ok(vec![Reviewer {
                 model: (*model).to_string(),
                 same_model: true,
             }]),
             None if !fallbacks.is_empty() || catalog.completions().next().is_some() => {
-                Err(Unavailable::NoToolModel)
+                Err(Unavailable::NoToolModel(origin))
             }
             None => Err(Unavailable::NoModel),
         };
@@ -159,36 +186,72 @@ pub fn objection(author: &Author, reviewer: &Reviewer) -> Option<&'static str> {
     }
 }
 
-/// The workspace's model preferences and what `backend` can run, read the way
-/// a run reads them.
-pub async fn preferences(
-    state: &AppState,
-    workspace_id: Uuid,
-    backend: &LlmBackend,
-) -> (Preferences, Catalog) {
-    let catalog = Catalog::for_backend(&state.config().ollama_host, backend).await;
-    let settings = match workspaces::get_workspace(state.db(), workspace_id).await {
-        Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
-            state.db(),
-            workspace.organization_id,
-            workspace_id,
+/// Where a workspace's reviews and merge summaries run, and what they may run
+/// there, read from its settings once.
+pub struct Venue {
+    pub backend: LlmBackend,
+    pub endpoint: Endpoint,
+    pub preferences: Preferences,
+    pub catalog: Catalog,
+}
+
+impl Venue {
+    /// The venue the workspace's settings name, the instance's when it saves
+    /// none, or why its saved endpoint cannot be used.
+    pub async fn for_workspace(state: &AppState, workspace: Uuid) -> Result<Self, backend::Error> {
+        let config = state.config();
+        let route = Route::for_workspace(state, workspace).await;
+        let backend = route.backend(state).await?;
+        let preferences = route.preferences(&config.comfyui.classifier_model);
+        let endpoint = route.into_endpoint()?;
+        let catalog = endpoint.catalog(&config.ollama_host, &backend).await;
+        Ok(Self {
+            backend,
+            preferences,
+            endpoint,
+            catalog,
+        })
+    }
+
+    /// The [`lineup`] for `round`. `configured` names models on the instance's
+    /// endpoint, so an endpoint the settings name is reviewed on the Fast and
+    /// Reasoning models the settings save, and on none when they save none.
+    pub fn lineup(
+        &self,
+        author: &Author,
+        configured: &[String],
+        round: u32,
+    ) -> Result<Vec<Reviewer>, Unavailable> {
+        let configured = match self.endpoint.origin() {
+            Origin::Instance => configured,
+            Origin::Settings => {
+                let saved = [
+                    self.preferences.reasoning.as_deref(),
+                    self.preferences.fast.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .find(|name| !stages::is_auto(name))
+                .unwrap_or(stages::AUTO);
+                self.endpoint.model(saved)?;
+                &[]
+            }
+        };
+        lineup(
+            self.endpoint.origin(),
+            author,
+            &self.preferences,
+            &self.catalog,
+            configured,
+            round,
         )
-        .await
-        .ok(),
-        _ => None,
-    };
-    (
-        Preferences::from_optional_settings(
-            settings.as_ref(),
-            &state.config().comfyui.classifier_model,
-        ),
-        catalog,
-    )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::ai_settings::EffectiveAiSettings;
     use crate::services::stages::Installed;
     use zone_core::llm::AgentKind;
 
@@ -220,14 +283,21 @@ mod tests {
 
     fn pick(
         author: &Author,
-        prefs: &Preferences,
+        preferences: &Preferences,
         catalog: &Catalog,
         configured: &[String],
         round: u32,
     ) -> Reviewer {
-        lineup(author, prefs, catalog, configured, round)
-            .expect("a model can review")
-            .swap_remove(0)
+        lineup(
+            Origin::Instance,
+            author,
+            preferences,
+            catalog,
+            configured,
+            round,
+        )
+        .expect("a model can review")
+        .swap_remove(0)
     }
 
     fn catalog() -> Catalog {
@@ -243,17 +313,17 @@ mod tests {
 
     #[test]
     fn the_author_is_never_its_own_reviewer_while_another_model_exists() {
-        let prefs = Preferences::default();
+        let preferences = Preferences::default();
         let author = Author::Model("author".into());
-        let first = pick(&author, &prefs, &catalog(), &[], 1);
+        let first = pick(&author, &preferences, &catalog(), &[], 1);
         assert_eq!(first.model, "big:latest");
         assert!(!first.same_model);
-        let second = pick(&author, &prefs, &catalog(), &[], 2);
+        let second = pick(&author, &preferences, &catalog(), &[], 2);
         assert_eq!(
             second.model, "small:latest",
             "rounds rotate through the rest"
         );
-        let third = pick(&author, &prefs, &catalog(), &[], 3);
+        let third = pick(&author, &preferences, &catalog(), &[], 3);
         assert_eq!(third.model, "big:latest");
     }
 
@@ -273,6 +343,7 @@ mod tests {
         let configured = ["gemma3:27b".to_string(), "qwen3:32b".to_string()];
         let names = |round| -> Vec<String> {
             lineup(
+                Origin::Instance,
                 &author,
                 &Preferences::default(),
                 &catalog(),
@@ -297,13 +368,19 @@ mod tests {
 
     #[test]
     fn configured_and_workspace_models_come_first_and_the_author_reviews_itself_last() {
-        let prefs = Preferences {
+        let preferences = Preferences {
             reasoning: Some("reasoner".into()),
             fast: Some("author".into()),
             ..Preferences::default()
         };
         let author = Author::Model("author".into());
-        let picked = pick(&author, &prefs, &catalog(), &["ops-reviewer".into()], 1);
+        let picked = pick(
+            &author,
+            &preferences,
+            &catalog(),
+            &["ops-reviewer".into()],
+            1,
+        );
         assert_eq!(picked.model, "ops-reviewer");
         let alone = pick(
             &author,
@@ -321,7 +398,7 @@ mod tests {
 
     #[test]
     fn an_agent_reviews_on_models_it_knows_and_never_an_installed_one() {
-        let prefs = Preferences {
+        let preferences = Preferences {
             reasoning: Some("llama3.1:70b".into()),
             ..Preferences::default()
         };
@@ -330,18 +407,21 @@ mod tests {
         let sonnet = Author::Model("sonnet".into());
 
         assert_eq!(
-            pick(&sonnet, &prefs, &claude, &configured, 1),
+            pick(&sonnet, &preferences, &claude, &configured, 1),
             Reviewer {
                 model: "opus".into(),
                 same_model: false,
             }
         );
         assert_eq!(
-            pick(&sonnet, &prefs, &claude, &configured, 2).model,
+            pick(&sonnet, &preferences, &claude, &configured, 2).model,
             "haiku",
             "the agent's other models follow the ones configured"
         );
-        assert_eq!(pick(&sonnet, &prefs, &claude, &configured, 3).model, "opus");
+        assert_eq!(
+            pick(&sonnet, &preferences, &claude, &configured, 3).model,
+            "opus"
+        );
     }
 
     #[test]
@@ -374,7 +454,7 @@ mod tests {
             "fable",
             "ZONE_AUTO_REVIEW_MODELS=fable"
         );
-        for prefs in [
+        for preferences in [
             Preferences {
                 reasoning: fable(),
                 ..Preferences::default()
@@ -385,9 +465,9 @@ mod tests {
             },
         ] {
             assert_eq!(
-                pick(&sonnet, &prefs, &claude, &[], 1).model,
+                pick(&sonnet, &preferences, &claude, &[], 1).model,
                 "fable",
-                "{prefs:?}"
+                "{preferences:?}"
             );
         }
     }
@@ -496,7 +576,7 @@ mod tests {
     #[test]
     fn a_configured_or_preferred_model_that_cannot_call_tools_is_skipped() {
         let author = Author::Model("qwen2.5:7b-instruct".into());
-        let prefs = Preferences {
+        let preferences = Preferences {
             reasoning: Some(LLAVA.into()),
             fast: Some(NOROMAID.into()),
             ..Preferences::default()
@@ -504,7 +584,7 @@ mod tests {
 
         let reviewer = pick(
             &author,
-            &prefs,
+            &preferences,
             &catalog_with_models_that_cannot_call_tools(),
             &[LLAVA.into(), "ops-reviewer".into()],
             1,
@@ -533,7 +613,7 @@ mod tests {
 
     #[test]
     fn the_fallback_reviewer_is_never_a_model_that_cannot_call_tools() {
-        let prefs = Preferences {
+        let preferences = Preferences {
             reasoning: Some(LLAVA.into()),
             fast: Some("llama3.2:3b".into()),
             ..Preferences::default()
@@ -547,7 +627,7 @@ mod tests {
         };
         let author = Author::Model("llama3.2:3b".into());
 
-        let reviewers = lineup(&author, &prefs, &catalog, &[], 1);
+        let reviewers = lineup(Origin::Instance, &author, &preferences, &catalog, &[], 1);
 
         assert_eq!(
             reviewers,
@@ -568,24 +648,32 @@ mod tests {
             ],
             agent: None,
         };
-        let prefs = Preferences {
+        let preferences = Preferences {
             reasoning: Some(LLAVA.into()),
             ..Preferences::default()
         };
 
-        for (author, prefs) in [
-            (Author::Unrecorded, prefs.clone()),
+        for (author, preferences) in [
+            (Author::Unrecorded, preferences.clone()),
             (Author::Unrecorded, Preferences::default()),
             (Author::Model(NOROMAID.into()), Preferences::default()),
         ] {
             assert_eq!(
-                lineup(&author, &prefs, &refusing, &[LLAVA.into()], 1),
-                Err(Unavailable::NoToolModel),
-                "{author:?} {prefs:?}"
+                lineup(
+                    Origin::Instance,
+                    &author,
+                    &preferences,
+                    &refusing,
+                    &[LLAVA.into()],
+                    1
+                ),
+                Err(Unavailable::NoToolModel(Origin::Instance)),
+                "{author:?} {preferences:?}"
             );
         }
         assert_eq!(
             lineup(
+                Origin::Instance,
                 &Author::Unrecorded,
                 &Preferences::default(),
                 &Catalog::default(),
@@ -595,5 +683,72 @@ mod tests {
             Err(Unavailable::NoModel),
             "an endpoint that lists nothing has nothing to review with"
         );
+    }
+
+    #[test]
+    fn a_missing_tool_model_is_named_where_the_endpoint_takes_one() {
+        let instance = Unavailable::NoToolModel(Origin::Instance).to_string();
+        let saved = Unavailable::NoToolModel(Origin::Settings).to_string();
+
+        assert!(instance.contains("ZONE_AUTO_REVIEW_MODELS"), "{instance}");
+        assert!(saved.contains("AI Settings"), "{saved}");
+        assert!(!saved.contains("ZONE_AUTO_REVIEW_MODELS"), "{saved}");
+    }
+
+    fn saved_endpoint(
+        fast: Option<&str>,
+        reasoning: Option<&str>,
+        configured: &[String],
+    ) -> Result<Vec<Reviewer>, Unavailable> {
+        let settings = EffectiveAiSettings {
+            litellm_host: Some("http://models.example:4000".into()),
+            model_fast: fast.map(str::to_string),
+            model_reasoning: reasoning.map(str::to_string),
+            ..crate::services::endpoint::testing::settings(
+                zone_context::embeddings::providers::PROVIDER_SELF_HOSTED,
+            )
+        };
+        let endpoint = Endpoint::resolve(&crate::state::test_config(), &settings);
+        assert_eq!(endpoint.origin(), Origin::Settings);
+        let venue = Venue {
+            backend: LlmBackend::Http,
+            preferences: Preferences::for_endpoint(&settings, "instance-classifier", &endpoint),
+            endpoint,
+            catalog: Catalog::default(),
+        };
+        venue.lineup(&Author::Unrecorded, configured, 1)
+    }
+
+    #[test]
+    fn an_endpoint_the_settings_name_is_reviewed_only_on_the_models_they_save() {
+        let configured = ["instance-reviewer".to_string()];
+
+        let names: Vec<String> = saved_endpoint(Some("gpt-4o-mini"), Some("o3"), &configured)
+            .expect("the saved models review")
+            .into_iter()
+            .map(|reviewer| reviewer.model)
+            .collect();
+
+        assert_eq!(names, ["o3", "gpt-4o-mini"]);
+    }
+
+    #[test]
+    fn an_endpoint_the_settings_name_without_a_saved_model_has_nobody_to_review() {
+        let configured = ["instance-reviewer".to_string()];
+
+        for (fast, reasoning) in [(None, None), (Some(stages::AUTO), None)] {
+            let reviewers = saved_endpoint(fast, reasoning, &configured);
+
+            assert_eq!(
+                reviewers,
+                Err(Unavailable::Unset(endpoint::Error::ModelUnset)),
+                "{fast:?} {reasoning:?}"
+            );
+            assert_eq!(
+                reviewers.unwrap_err().to_string(),
+                endpoint::Error::ModelUnset.to_string(),
+                "the task pauses with the settings' own remedy"
+            );
+        }
     }
 }

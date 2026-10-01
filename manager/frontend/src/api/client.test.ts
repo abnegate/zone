@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Limits, Plan, Subscription, Usage } from '../types';
+import { ApiError } from './ApiError';
 import { client } from './client';
 
 // Mock fetch globally
@@ -1516,8 +1517,13 @@ describe('Client', () => {
       model_image: 'flux1-schnell-fp8.safetensors',
       model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
       model_audio: 'ace_step_v1_3.5b.safetensors',
+      completions_routed: true,
     };
-    const mockWorkspaceAiSettings = { ...mockAiSettings, overrides: true };
+    const mockWorkspaceAiSettings = {
+      ...mockAiSettings,
+      overrides: true,
+      organization_keys: { litellm: false, openai: false, anthropic: false },
+    };
 
     describe('Organization AI Settings', () => {
       it('getOrgAiSettings fetches org AI settings', async () => {
@@ -1554,6 +1560,18 @@ describe('Client', () => {
         );
       });
 
+      it('updateOrgAiSettings keeps the notice a save leaves for the admin', async () => {
+        const notice = '2 workspace keys wait for their admins to save again.';
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ ...mockAiSettings, notice }),
+        });
+
+        const saved = await client.updateOrgAiSettings('org-1', { litellm_host: 'http://b' });
+
+        expect(saved.notice).toBe(notice);
+      });
+
       it('resetOrgAiSettings resets org AI settings and reads the defaults back', async () => {
         const defaults = { ...mockAiSettings, provider: 'self_hosted' };
         mockFetch
@@ -1563,6 +1581,7 @@ describe('Client', () => {
         const result = await client.resetOrgAiSettings('org-1');
 
         expect(result.provider).toBe('self_hosted');
+        expect(result.notice).toBeUndefined();
         expect(mockFetch).toHaveBeenNthCalledWith(
           1,
           '/api/organizations/org-1/settings/ai',
@@ -1573,6 +1592,19 @@ describe('Client', () => {
           '/api/organizations/org-1/settings/ai',
           expect.not.objectContaining({ method: 'DELETE' })
         );
+      });
+
+      it('resetOrgAiSettings keeps the notice a reset leaves for the admin', async () => {
+        const notice = '1 workspace key waits for its admin to save again.';
+        const defaults = { ...mockAiSettings, provider: 'self_hosted' };
+        mockFetch
+          .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ notice }) })
+          .mockResolvedValueOnce({ ok: true, json: async () => defaults });
+
+        const result = await client.resetOrgAiSettings('org-1');
+
+        expect(result.provider).toBe('self_hosted');
+        expect(result.notice).toBe(notice);
       });
 
       it('resetOrgAiSettings treats settings that were never saved as already reset', async () => {
@@ -1626,7 +1658,7 @@ describe('Client', () => {
       it('resetWorkspaceAiSettings resets workspace AI settings and reads the defaults back', async () => {
         mockFetch.mockResolvedValueOnce({ ok: true, status: 204 }).mockResolvedValueOnce({
           ok: true,
-          json: async () => ({ ...mockAiSettings, overrides: false }),
+          json: async () => ({ ...mockWorkspaceAiSettings, overrides: false }),
         });
 
         const result = await client.resetWorkspaceAiSettings('org-1', 'ws-1');
@@ -1716,6 +1748,55 @@ describe('Client', () => {
         await expect(client.getEffectiveAiSettings('org-1', 'ws-1')).rejects.toThrow(
           'Failed to fetch effective AI settings: 500'
         );
+      });
+
+      const refusal = 'litellm_host: Re-enter the key when changing the endpoint URL.';
+      const refusals: [string, () => Promise<unknown>, string][] = [
+        [
+          'updateOrgAiSettings',
+          () => client.updateOrgAiSettings('org-1', { litellm_host: 'http://b' }),
+          'Failed to update org AI settings',
+        ],
+        [
+          'resetOrgAiSettings',
+          () => client.resetOrgAiSettings('org-1'),
+          'Failed to reset org AI settings',
+        ],
+        [
+          'updateWorkspaceAiSettings',
+          () => client.updateWorkspaceAiSettings('org-1', 'ws-1', { litellm_host: 'http://b' }),
+          'Failed to update workspace AI settings',
+        ],
+        [
+          'resetWorkspaceAiSettings',
+          () => client.resetWorkspaceAiSettings('org-1', 'ws-1'),
+          'Failed to reset workspace AI settings',
+        ],
+        [
+          'getOrgAiSettings',
+          () => client.getOrgAiSettings('org-1'),
+          'Failed to fetch org AI settings',
+        ],
+        [
+          'getWorkspaceAiSettings',
+          () => client.getWorkspaceAiSettings('org-1', 'ws-1'),
+          'Failed to fetch workspace AI settings',
+        ],
+        [
+          'getEffectiveAiSettings',
+          () => client.getEffectiveAiSettings('org-1', 'ws-1'),
+          'Failed to fetch effective AI settings',
+        ],
+      ];
+
+      it.each(refusals)('%s names the reason the server refused it', async (_, call, action) => {
+        mockFetch.mockResolvedValueOnce(Response.json({ error: refusal }, { status: 400 }));
+
+        const failure = await call().catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(ApiError);
+        expect((failure as ApiError).status).toBe(400);
+        expect((failure as ApiError).message).toBe(`${action}: ${refusal}`);
       });
     });
   });

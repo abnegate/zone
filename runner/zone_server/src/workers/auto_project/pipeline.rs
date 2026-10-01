@@ -21,13 +21,13 @@ use crate::db::auto_projects::{
     Verdict as Recorded,
 };
 use crate::db::tasks::{self, TaskRow};
-use crate::services::backend;
+use crate::services::endpoint::Origin;
 use crate::workers::conflict::RepairOutcome;
 use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception};
 
 use super::driver::Drive;
 use super::notification::{self, MergeReport};
-use super::review::model::{self, Author, Unavailable};
+use super::review::model::{self, Author, Unavailable, Venue};
 use super::review::outage::Outages;
 use super::review::{self, Outcome, ReviewError, ReviewRequest, bots, verdict};
 use super::summary;
@@ -662,21 +662,17 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 .map_or(Author::Unrecorded, |mode| Author::recorded(mode.model)),
             None => Author::Unrecorded,
         };
-        let resolved = backend::for_workspace(step.drive.state, step.drive.workspace_id).await;
-        let backend = match resolved {
-            Ok(backend) => backend,
+        let resolved = Venue::for_workspace(step.drive.state, step.drive.workspace_id).await;
+        let venue = match resolved {
+            Ok(venue) => venue,
             Err(error) => return step.pause(&error.to_string()).await,
         };
-        let (prefs, catalog) =
-            model::preferences(step.drive.state, step.drive.workspace_id, &backend).await;
         let round = auto_projects::latest_round(pool, step.task.task_id)
             .await
             .map_err(|error| error.to_string())?
             + 1;
-        let lineup = match model::lineup(
+        let lineup = match venue.lineup(
             &author,
-            &prefs,
-            &catalog,
             &config.review_models,
             u32::try_from(round).unwrap_or(1),
         ) {
@@ -708,8 +704,8 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             .unwrap_or_default();
         let open = auto_projects::open_findings_of(&rows);
         let outcome = review::run(
-            step.drive.state.config(),
-            backend,
+            &venue.endpoint,
+            venue.backend,
             pr.clone(),
             ReviewRequest {
                 task: &step.row,
@@ -785,6 +781,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                         task: step.task.task_id,
                         lineup: &names,
                         now: Utc::now(),
+                        origin: venue.endpoint.origin(),
                     },
                 );
                 if let Some(missed) = &recovery.missed {
@@ -969,6 +966,8 @@ pub struct Attempt<'a> {
     pub task: Uuid,
     pub lineup: &'a [String],
     pub now: DateTime<Utc>,
+    /// The endpoint the reviews run on.
+    pub origin: Origin,
 }
 
 /// What follows a review by `reviewer` that ended in `error`, when `earlier`
@@ -1010,7 +1009,8 @@ pub fn recover(
     let next = if rounds >= MAX_VERDICTLESS_ROUNDS {
         Next::Pause(format!(
             "{rounds} review rounds on this head ended without a verdict; the last, by \
-             {reviewer}: {summary}. Check the model, or name another in ZONE_AUTO_REVIEW_MODELS"
+             {reviewer}: {summary}. Check the model, or {}",
+            model::remedy(attempt.origin)
         ))
     } else {
         Next::Retry(retry)
@@ -1034,6 +1034,7 @@ fn unanswered(attempt: &Attempt<'_>, reviewer: &str, failure: &str) -> Next {
         task,
         lineup,
         now,
+        origin,
     } = *attempt;
     let streak = outages.record(project, task, reviewer, now);
     tracing::warn!(
@@ -1053,7 +1054,7 @@ fn unanswered(attempt: &Attempt<'_>, reviewer: &str, failure: &str) -> Next {
             streak.attempts, lineup[index]
         )),
         None => {
-            let reason = outages.reason(task, lineup, failure);
+            let reason = outages.reason(task, lineup, failure, origin);
             outages.clear(task);
             Next::Pause(reason)
         }
@@ -1705,6 +1706,27 @@ mod tests {
         assert!(reason.contains("ZONE_AUTO_REVIEW_MODELS"), "{reason}");
     }
 
+    #[test]
+    fn a_saved_endpoint_s_pause_points_at_ai_settings_rather_than_the_instance() {
+        let error = ReviewError::Model("the model returned no choices".into());
+        let outages = Outages::default();
+        let attempt = Attempt {
+            origin: Origin::Settings,
+            ..attempt(&outages, &[], 0)
+        };
+
+        let recovery = recover(&error, "small", MAX_VERDICTLESS_ROUNDS - 1, &attempt);
+
+        let Next::Pause(reason) = recovery.next else {
+            panic!("the task keeps retrying after {MAX_VERDICTLESS_ROUNDS} verdictless rounds");
+        };
+        assert!(
+            reason.contains("set the Fast/Reasoning model in AI Settings"),
+            "{reason}"
+        );
+        assert!(!reason.contains("ZONE_AUTO_REVIEW_MODELS"), "{reason}");
+    }
+
     fn names(reviewers: &[&str]) -> Vec<String> {
         reviewers.iter().map(ToString::to_string).collect()
     }
@@ -1716,6 +1738,7 @@ mod tests {
             task: Uuid::nil(),
             lineup,
             now: DateTime::UNIX_EPOCH + chrono::TimeDelta::minutes(minute),
+            origin: Origin::Instance,
         }
     }
 

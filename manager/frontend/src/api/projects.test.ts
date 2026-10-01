@@ -49,6 +49,16 @@ describe('ProjectsApi', () => {
     );
   });
 
+  it("names the reason the server refuses to start a project on a workspace's endpoint", async () => {
+    const reason =
+      "This workspace's AI endpoint can't be used: its saved URL is refused (the URL must use http or https). Check AI Settings.";
+    mockFetch.mockImplementation(() => answer(409, { success: false, error: reason }));
+
+    await expect(projectsApi.startAutoProject('ws-1', { brief: 'A todo app' })).rejects.toThrow(
+      reason
+    );
+  });
+
   it('saves an edit with PATCH carrying only the changed fields', async () => {
     mockFetch.mockImplementation(() => answer(200, { project: { ...project, status: 'on_hold' } }));
 

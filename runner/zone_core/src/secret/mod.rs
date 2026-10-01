@@ -6,12 +6,14 @@
 
 pub mod encryption;
 
+mod conceal;
 mod redact;
 mod value;
 
 #[cfg(feature = "sqlx")]
 mod database;
 
+pub use conceal::conceal;
 pub use encryption::{MasterKey, SecretError};
 pub use redact::{REDACTED, redact};
 pub use value::{OptionalSecretExt, SecretValue};

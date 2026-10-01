@@ -49,6 +49,7 @@ import {
   isSendable,
   isStartingImage,
   modelLabel,
+  offersAgent,
   parseCharacterFile,
   parseCharacterText,
   readAttachment,
@@ -63,7 +64,7 @@ const UNTITLED_CHAT_TITLE = 'Untitled chat';
 export default function ChatsPage() {
   const { isAuthenticated } = useAuth();
   const { currentWorkspace } = useWorkspace();
-  const { models } = useModels();
+  const { models, error: modelsError } = useModels(currentWorkspace?.id);
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [showArchived, setShowArchived] = useState(false);
@@ -166,7 +167,7 @@ export default function ChatsPage() {
   const installedForChat = displayedChat
     ? displayedChat.model_name === AUTO_MODEL
       ? {
-          tools: models.some((model) => model.tools === true),
+          tools: models.some((model) => offersAgent(model)),
           reasoning: models.some((model) => chatShowsReasoning({}, model)),
         }
       : findInstalledModel(models, displayedChat.model_name)
@@ -184,8 +185,8 @@ export default function ChatsPage() {
   const selectedNewModel = findInstalledModel(models, newChatModel);
   const autoNewChat = newChatModel === AUTO_MODEL;
   const showNewChatAgent = autoNewChat
-    ? models.some((model) => model.tools === true)
-    : selectedNewModel?.tools === true;
+    ? models.some((model) => offersAgent(model))
+    : offersAgent(selectedNewModel);
   const showNewChatReasoning = autoNewChat
     ? models.some((model) => chatShowsReasoning({}, model))
     : selectedNewModel
@@ -1321,7 +1322,7 @@ export default function ChatsPage() {
               setNewChatModel(name);
               const installed = findInstalledModel(models, name);
               const automatic = name === AUTO_MODEL;
-              if (!automatic && installed?.tools !== true) {
+              if (!automatic && !offersAgent(installed)) {
                 setNewChatAgent(false);
                 setNewChatAutoApprove(false);
               }
@@ -1330,6 +1331,7 @@ export default function ChatsPage() {
               }
             }}
             helpText="Automatic picks a chat, image, video or audio model from the message."
+            error={modelsError ?? undefined}
             options={[
               { value: AUTO_MODEL, label: 'Automatic' },
               ...models

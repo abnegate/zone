@@ -363,7 +363,9 @@ describe('WorkspaceContext', () => {
     });
 
     it('settles without a role when the membership list cannot be read', async () => {
-      mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations);
+      mockClient.getOrganizations.mockReturnValueOnce(
+        new Promise((resolve) => setTimeout(() => resolve(mockOrganizations), 20))
+      );
       mockClient.getWorkspaces.mockResolvedValue([]);
       mockClient.getOrgMembers.mockRejectedValueOnce(new Error('offline'));
 
@@ -374,6 +376,7 @@ describe('WorkspaceContext', () => {
       );
 
       await waitFor(() => {
+        expect(screen.getByTestId('current-org')).toHaveTextContent('Org 1');
         expect(screen.getByTestId('resolving-role')).toHaveTextContent('settled');
       });
       expect(screen.getByTestId('current-role')).toHaveTextContent('unknown');

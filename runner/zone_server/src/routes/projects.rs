@@ -13,6 +13,8 @@ use crate::auth::AuthUser;
 use crate::db::projects::{self, NewProject, ProjectRow};
 use crate::db::{auto_projects, chats, sources, workspace_members};
 use crate::error::ServerError;
+use crate::services::model::Model;
+use crate::services::route::Route;
 use crate::state::AppState;
 
 use super::common::Timestamps;
@@ -289,7 +291,13 @@ pub async fn start_auto(
         .filter(|model| !model.is_empty())
         .unwrap_or(crate::services::stages::AUTO)
         .to_string();
-    if crate::services::model::Model::completion(&state.config().ollama_host, &model).await
+    let endpoint = Route::for_workspace(&state, workspace_id)
+        .await
+        .into_endpoint()
+        .map_err(|unusable| ServerError::Conflict(unusable.to_string()))?;
+    if Model::profile_on(endpoint.origin(), &state.config().ollama_host, &model)
+        .await
+        .completion
         == Some(false)
     {
         return Err(ServerError::BadRequest(

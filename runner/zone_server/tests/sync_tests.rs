@@ -75,6 +75,7 @@ async fn setup_test_state() -> AppState {
         monitoring: Default::default(),
         chat: Default::default(),
         train_upload_limit_mb: 512,
+        endpoint_hosts: Default::default(),
         auto: Default::default(),
     };
 

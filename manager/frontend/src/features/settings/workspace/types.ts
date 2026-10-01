@@ -84,10 +84,22 @@ export interface AiSettings {
   model_image: string | null;
   model_video: string | null;
   model_audio: string | null;
+  completions_routed: boolean;
+}
+
+export interface OrganizationAiSettingsSave extends AiSettings {
+  notice?: string;
+}
+
+export interface OrganizationKeys {
+  litellm: boolean;
+  openai: boolean;
+  anthropic: boolean;
 }
 
 export interface WorkspaceAiSettings extends AiSettings {
   overrides: boolean;
+  organization_keys: OrganizationKeys;
 }
 
 export interface UpdateAiSettingsRequest {

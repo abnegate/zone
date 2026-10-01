@@ -41,13 +41,14 @@ use crate::agent::{
 };
 use crate::auth::validate_access_token;
 use crate::db::{
-    self, ai_settings, chat_attached_sources, chat_sources, chats, knowledge, sessions,
-    workspace_members, workspaces,
+    self, chat_attached_sources, chat_sources, chats, knowledge, sessions, workspace_members,
 };
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
 use crate::services::chat::session::{self, Session};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
+use crate::services::endpoint::{Endpoint, Origin};
+use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use zone_chat::history::ReplayMessage;
@@ -388,78 +389,17 @@ impl Drop for Generation {
 type ChatPreparation = session::Preparation;
 
 enum Routing {
-    Image(crate::config::ComfyUiConfig, LlmBackend),
+    Image(crate::config::ComfyUiConfig, LlmBackend, Endpoint),
     Video(crate::config::ComfyUiConfig),
     Audio(crate::config::ComfyUiConfig),
     Upscale(crate::config::ComfyUiConfig),
-    Chat(chats::ChatRow, Option<WorkspaceSettings>),
+    Chat(chats::ChatRow, Route),
 }
 
-/// A workspace's AI settings, read once for a turn, and the organization
-/// they belong to.
-struct WorkspaceSettings {
-    organization: Uuid,
-    effective: ai_settings::EffectiveAiSettings,
-}
-
-impl WorkspaceSettings {
-    async fn read(pool: &PgPool, workspace_id: Uuid) -> Option<Self> {
-        let organization = match workspaces::get_workspace(pool, workspace_id).await {
-            Ok(Some(workspace)) => workspace.organization_id,
-            Ok(None) => return None,
-            Err(error) => {
-                tracing::warn!(
-                    %workspace_id,
-                    %error,
-                    "Could not read the workspace for its AI settings"
-                );
-                return None;
-            }
-        };
-        match ai_settings::get_effective_ai_settings(pool, organization, workspace_id).await {
-            Ok(effective) => Some(Self {
-                organization,
-                effective,
-            }),
-            Err(error) => {
-                tracing::warn!(
-                    %workspace_id,
-                    %error,
-                    "Could not read the workspace's AI settings"
-                );
-                None
-            }
-        }
-    }
-
-    /// The backend `settings` choose, or the instance's default when they
-    /// could not be read.
-    async fn backend(
-        settings: Option<&Self>,
-        state: &AppState,
-    ) -> Result<LlmBackend, crate::services::backend::Error> {
-        match settings {
-            Some(settings) => {
-                crate::services::backend::for_settings(
-                    state,
-                    settings.organization,
-                    &settings.effective,
-                )
-                .await
-            }
-            None => Ok(crate::services::backend::instance(state.config())),
-        }
-    }
-
-    fn preferences(
-        settings: Option<&Self>,
-        classifier: &str,
-    ) -> crate::services::stages::Preferences {
-        crate::services::stages::Preferences::from_optional_settings(
-            settings.map(|settings| &settings.effective),
-            classifier,
-        )
-    }
+/// What a provider reported when a turn failed, remedied for a coding agent's
+/// sign-in and without the endpoint's key.
+fn failure(endpoint: &Endpoint, backend: &LlmBackend, message: String) -> String {
+    endpoint.scrub(&crate::services::backend::remedied(backend, message).message)
 }
 
 /// Client message types
@@ -1755,6 +1695,7 @@ async fn handle_image_generation(
     metadata: Option<&serde_json::Value>,
     image_config: crate::config::ComfyUiConfig,
     backend: LlmBackend,
+    endpoint: Endpoint,
     generation: &mut Generation,
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1811,8 +1752,7 @@ async fn handle_image_generation(
     {
         crate::services::image_intent::ImageIntentClassifier::new(
             image_config.clone(),
-            state.config().litellm_host.clone(),
-            state.config().litellm_key.clone(),
+            endpoint,
             backend,
         )
         .edit_prompt(prompt)
@@ -2447,7 +2387,7 @@ async fn handle_send_message(
             return Ok(());
         }
         match routing {
-            Routing::Image(config, backend) => {
+            Routing::Image(config, backend, endpoint) => {
                 handle_image_generation(
                     state,
                     stream,
@@ -2457,6 +2397,7 @@ async fn handle_send_message(
                     metadata.as_ref(),
                     config,
                     backend,
+                    endpoint,
                     &mut request,
                     &mut session,
                 )
@@ -2502,7 +2443,7 @@ async fn handle_send_message(
                 )
                 .await
             }
-            Routing::Chat(mut chat, settings) => {
+            Routing::Chat(mut chat, route) => {
                 // Cleared before the prompt is built rather than after it.
                 // `prepare_chat` renders the approval rules from this flag, so
                 // setting it on the preparation instead would gate the tools
@@ -2520,7 +2461,7 @@ async fn handle_send_message(
                         return Ok(());
                     }
                     _ = session.guard.lost() => { return Err(OWNERSHIP_LOST.into()); }
-                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, settings.as_ref(), web_search_requested) => result?,
+                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, route, web_search_requested) => result?,
                 };
                 handle_chat_generation(state, stream, chat_id, workspace_id, user_id, preparation, &mut request, &mut session, &mut jobs).await
             }
@@ -2629,10 +2570,11 @@ async fn prepare_message(
     if chat.workspace_id != Some(workspace_id) {
         return Err("Chat does not belong to the authenticated workspace".into());
     }
-    let settings = WorkspaceSettings::read(state.db(), workspace_id).await;
+    let route = Route::for_workspace(state, workspace_id).await;
+    let endpoint = route.endpoint()?.clone();
     let mut image_config = state.config().comfyui.clone();
-    if let Some(settings) = &settings {
-        settings.effective.apply_to_comfyui(&mut image_config);
+    if let Some(settings) = route.settings() {
+        settings.apply_to_comfyui(&mut image_config);
     }
     let mut backend = None;
     let intent = match crate::services::image_intent::reading(&image_config, content, metadata) {
@@ -2642,14 +2584,14 @@ async fn prepare_message(
                 state,
                 workspace_id,
                 &chat,
-                settings.as_ref(),
+                &route,
+                &endpoint,
                 &mut image_config,
             )
             .await;
             let intent = crate::services::image_intent::ImageIntentClassifier::new(
                 image_config.clone(),
-                state.config().litellm_host.clone(),
-                state.config().litellm_key.clone(),
+                endpoint.clone(),
                 resolved.clone(),
             )
             .settle(content, lanes)
@@ -2661,6 +2603,7 @@ async fn prepare_message(
     .yielding_to_agent(chat.agent_enabled);
 
     if intent == crate::services::image_intent::GenerationIntent::Chat
+        && endpoint.origin() == Origin::Instance
         && crate::services::model::Model::completion(&state.config().ollama_host, &chat.model_name)
             .await
             == Some(false)
@@ -2678,17 +2621,18 @@ async fn prepare_message(
                         state,
                         workspace_id,
                         &chat,
-                        settings.as_ref(),
+                        &route,
+                        &endpoint,
                         &mut image_config,
                     )
                     .await
                 }
             };
-            Routing::Image(image_config, backend)
+            Routing::Image(image_config, backend, endpoint)
         }
         crate::services::image_intent::GenerationIntent::Audio => Routing::Audio(image_config),
         crate::services::image_intent::GenerationIntent::Upscale => Routing::Upscale(image_config),
-        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat, settings),
+        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat, route),
     })
 }
 
@@ -2698,24 +2642,24 @@ async fn classifying(
     state: &AppState,
     workspace_id: Uuid,
     chat: &chats::ChatRow,
-    settings: Option<&WorkspaceSettings>,
+    route: &Route,
+    endpoint: &Endpoint,
     config: &mut crate::config::ComfyUiConfig,
 ) -> LlmBackend {
-    let backend = WorkspaceSettings::backend(settings, state)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(
-                %workspace_id,
-                %error,
-                "Could not resolve the workspace's model backend; classifying on the instance's"
-            );
-            crate::services::backend::instance(state.config())
-        });
-    let catalog =
-        crate::services::stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
-    let prefs = WorkspaceSettings::preferences(settings, &config.classifier_model);
+    let backend = route.backend(state).await.unwrap_or_else(|error| {
+        tracing::warn!(
+            %workspace_id,
+            %error,
+            "Could not resolve the workspace's model backend; classifying on the instance's"
+        );
+        crate::services::backend::instance(state.config())
+    });
+    let catalog = endpoint
+        .catalog(&state.config().ollama_host, &backend)
+        .await;
+    let preferences = route.preferences(&config.classifier_model);
     config.classifier_model =
-        crate::services::stages::classifier_model(&prefs, &catalog, &chat.model_name);
+        crate::services::stages::classifier_model(&preferences, &catalog, &chat.model_name);
     backend
 }
 
@@ -2795,16 +2739,18 @@ async fn prepare_chat(
     content: &str,
     metadata: Option<&serde_json::Value>,
     mut chat: chats::ChatRow,
-    settings: Option<&WorkspaceSettings>,
+    route: Route,
     web_search_requested: bool,
 ) -> Result<ChatPreparation, Box<dyn std::error::Error + Send + Sync>> {
-    let backend = WorkspaceSettings::backend(settings, state).await?;
-    let catalog =
-        crate::services::stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
-    let prefs = WorkspaceSettings::preferences(settings, &state.config().comfyui.classifier_model);
+    let backend = route.backend(state).await?;
+    let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    let endpoint = route.into_endpoint()?;
+    let catalog = endpoint
+        .catalog(&state.config().ollama_host, &backend)
+        .await;
     chat.model_name = crate::services::stages::chat_model(
         &chat.model_name,
-        &prefs,
+        &preferences,
         &catalog,
         content,
         crate::services::media_source::has_image_attachment(metadata),
@@ -2825,6 +2771,7 @@ async fn prepare_chat(
         user_id,
         None,
         session::Mode::Generation(backend),
+        endpoint,
     )
     .await?;
     let search = load_web_search(state, chat_id, content, web_search_requested).await;
@@ -2988,6 +2935,7 @@ async fn handle_chat_generation(
         mut tools,
         mut context,
         llm: llm_client,
+        endpoint,
         stop,
         mut budget,
         timeout,
@@ -3334,7 +3282,7 @@ async fn handle_chat_generation(
                             stop_stream = true;
                         }
                         Some(AgentEvent::Failed(message)) => {
-                            failure = Some(crate::services::backend::remedied(&llm_client.config().backend, message).message);
+                            failure = Some(self::failure(&endpoint, &llm_client.config().backend, message));
                             break;
                         }
                         None => {
@@ -3793,6 +3741,7 @@ const fn citation_kind(kind: agent::identifier::Kind) -> Option<agent::CitationK
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::workspaces;
     use sqlx::PgPool;
 
     #[test]
@@ -4162,6 +4111,132 @@ mod tests {
             );
         }
 
+        /// `prepare_message` and `prepare_chat` for one turn on `state`.
+        async fn prepare_turn(
+            state: &AppState,
+            organization: &Organization,
+        ) -> Result<ChatPreparation, String> {
+            let routing = prepare_message(
+                state,
+                organization.chat,
+                organization.workspace,
+                QUESTION,
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let Routing::Chat(chat, route) = routing else {
+                return Err("the turn routed to media".to_string());
+            };
+            prepare_chat(
+                state,
+                &ChatStream::of(organization.chat),
+                organization.chat,
+                organization.workspace,
+                Uuid::new_v4(),
+                QUESTION,
+                None,
+                chat,
+                route,
+                false,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+
+        const UNREACHABLE: &str = "http://127.0.0.1:9";
+
+        #[tokio::test]
+        async fn a_turn_reads_its_workspaces_ai_settings_once() {
+            let organization = Organization::on(PROVIDER_SELF_HOSTED).await;
+            let state = AppState::new(
+                Config {
+                    litellm_host: UNREACHABLE.to_string(),
+                    ollama_host: UNREACHABLE.to_string(),
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+
+            let prepared = prepare_turn(&state, &organization).await;
+            organization.remove().await;
+
+            if let Err(error) = prepared {
+                panic!("the turn was not prepared: {error}");
+            }
+            assert_eq!(
+                crate::services::route::reads::of(organization.workspace),
+                1,
+                "one turn read its workspace's AI settings more than once"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_chat_pinned_to_an_instance_model_runs_on_a_model_the_endpoint_settings_save() {
+            const SAVED: &str = "gpt-4o-mini";
+            let ollama = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/show"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"capabilities": ["embedding"]})),
+                )
+                .mount(&ollama)
+                .await;
+            let organization = Organization::on(PROVIDER_SELF_HOSTED).await;
+            sqlx::query(
+                "UPDATE organization_ai_settings SET litellm_host = $2, model_fast = $3, \
+                 completions_routed = true WHERE organization_id = $1",
+            )
+            .bind(organization.id)
+            .bind("http://gateway.example:4000")
+            .bind(SAVED)
+            .execute(&organization.pool)
+            .await
+            .expect("the organization's endpoint");
+            sqlx::query("UPDATE chats SET model_name = 'llama3.2:3b' WHERE id = $1")
+                .bind(organization.chat)
+                .execute(&organization.pool)
+                .await
+                .expect("the chat's pinned model");
+            let state = AppState::new(
+                Config {
+                    litellm_host: UNREACHABLE.to_string(),
+                    ollama_host: ollama.uri(),
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+
+            let prepared = prepare_turn(&state, &organization).await;
+            organization.remove().await;
+
+            let preparation = prepared.unwrap_or_else(|error| {
+                panic!("the turn on the saved endpoint was not prepared: {error}")
+            });
+            assert_eq!(preparation.endpoint.origin(), Origin::Settings);
+            assert_eq!(
+                preparation.model, SAVED,
+                "the instance's model name was sent to the saved endpoint"
+            );
+            let shown = ollama
+                .received_requests()
+                .await
+                .expect("the requests Ollama received")
+                .len();
+            assert_eq!(
+                shown, 0,
+                "the instance's Ollama was asked about a model the saved endpoint runs"
+            );
+            assert_eq!(
+                preparation.context.policy.limit,
+                Some(state.config().chat.context),
+                "the saved endpoint's turn has no context limit to compact against"
+            );
+        }
+
         #[tokio::test]
         async fn a_turn_that_routes_no_media_leaves_the_organizations_agent_unresolved() {
             let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
@@ -4249,7 +4324,7 @@ mod tests {
             .await;
             organization.remove().await;
 
-            let Ok(Routing::Image(config, LlmBackend::Cli { agent, settings })) = routing else {
+            let Ok(Routing::Image(config, LlmBackend::Cli { agent, settings }, _)) = routing else {
                 panic!("expected an image route carrying the organization's agent");
             };
             assert_eq!(agent, AgentKind::Claude);
@@ -4281,7 +4356,7 @@ mod tests {
             .await;
             organization.remove().await;
 
-            let Ok(Routing::Image(_, LlmBackend::Cli { settings, .. })) = routing else {
+            let Ok(Routing::Image(_, LlmBackend::Cli { settings, .. }, _)) = routing else {
                 panic!("expected the agent's IMAGE to route the turn to an image");
             };
             assert_eq!(settings.executable.as_ref(), Some(&claude.executable));
@@ -4292,6 +4367,58 @@ mod tests {
                 "the classifier did not run on the Fast model: {runs:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_provider_rejecting_the_saved_key_reaches_the_reader_without_it() {
+        use crate::services::endpoint::testing::settings;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+        use zone_core::llm::LlmClient;
+        use zone_core::secret::{REDACTED, SecretValue};
+
+        const KEY: &str = "sk-organization-0123456789abcdef";
+        const MASKED: &str = "sk-org************cdef";
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": {
+                    "message": format!("Incorrect API key provided: {MASKED}. The key {KEY} is not valid."),
+                    "type": "invalid_request_error",
+                    "code": "invalid_api_key"
+                }
+            })))
+            .mount(&provider)
+            .await;
+        let mut saved = settings(PROVIDER_SELF_HOSTED);
+        saved.litellm_host = Some(provider.uri());
+        saved.litellm_key = Some(SecretValue::new(KEY.to_string()));
+        let endpoint = Endpoint::resolve(&crate::state::test_config(), &saved);
+        let llm = LlmClient::new(endpoint.llm("llama3.2:3b", 0.7, 64, LlmBackend::Http));
+
+        let Err(error) = llm.chat_stream(&[LlmMessage::user("Hello")], None).await else {
+            panic!("the provider rejected the key, so the completion must fail");
+        };
+        let reported = format!("Failed to generate response: {error}");
+        assert!(
+            !reported.contains(KEY) && !reported.contains(MASKED),
+            "the client reported the key it was sent: {reported}"
+        );
+        let message = failure(&endpoint, &LlmBackend::Http, reported);
+
+        assert!(
+            !message.contains(KEY),
+            "the key reached the reader: {message}"
+        );
+        assert!(
+            !message.contains(MASKED),
+            "the key's masked echo reached the reader: {message}"
+        );
+        assert!(
+            message.contains("Incorrect API key provided") && message.contains(REDACTED),
+            "the reader lost why the turn failed: {message}"
+        );
     }
 
     #[tokio::test]

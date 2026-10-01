@@ -733,6 +733,7 @@ async fn filtered_normal_stop_and_interrupted_image_are_canonical() {
 #[tokio::test]
 async fn preview_does_not_initialize_mcp_in_real_application_state() {
     use zone_server::services::chat::session::{self, Mode};
+    use zone_server::services::route::Route;
     use zone_server::state::AppState;
     let (pool, _, chat, _) = fixture().await;
     let mut config = common::test_config();
@@ -745,12 +746,17 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
             .await
             .unwrap()
             .unwrap();
+        let endpoint = Route::for_workspace(&state, row.workspace_id.unwrap())
+            .await
+            .into_endpoint()
+            .expect("a usable route");
         session::build(
             &state,
             &row,
             Uuid::new_v4(),
             Some(("A draft", None)),
             Mode::Preview,
+            endpoint,
         )
         .await
         .unwrap();

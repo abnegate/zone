@@ -156,6 +156,7 @@ export default function WorkspaceSettingsPage() {
   const [configured, setConfigured] = useState<ProviderConfigured>(nothingConfigured);
   const [models, setModels] = useState<ModelSelection>(emptyModels);
   const [effectiveSettings, setEffectiveSettings] = useState<AiSettings | null>(null);
+  const [savedAiSettings, setSavedAiSettings] = useState<WorkspaceAiSettings | null>(null);
 
   const agent = overrideAiSettings ? agentOf(aiProvider) : null;
   const agents = useAgentStatuses(orgId, agent !== null);
@@ -168,6 +169,7 @@ export default function WorkspaceSettingsPage() {
     setCredentials(credentialsFromSettings(settings));
     setConfigured(configuredFromSettings(settings));
     setModels(modelsFromSettings(settings));
+    setSavedAiSettings(settings);
   }, []);
 
   const applyThemeToForm = useCallback((theme: WorkspaceTheme | null): void => {
@@ -365,7 +367,7 @@ export default function WorkspaceSettingsPage() {
         const aiSettings = await client.updateWorkspaceAiSettings(
           orgId,
           workspaceId,
-          buildAiSettingsRequest(aiProvider, credentials, models)
+          buildAiSettingsRequest(aiProvider, credentials, models, savedAiSettings)
         );
         if (currentScope.current !== scope) return;
         applyAiSettingsToForm(aiSettings);
@@ -679,6 +681,7 @@ export default function WorkspaceSettingsPage() {
             {overrideAiSettings ? (
               <>
                 <AiProviderFields
+                  level="workspace"
                   provider={aiProvider}
                   onProviderChange={(provider) => {
                     setAiProvider(provider);
@@ -694,6 +697,8 @@ export default function WorkspaceSettingsPage() {
                   onChange={(key, value) =>
                     setCredentials((previous) => ({ ...previous, [key]: value }))
                   }
+                  saved={savedAiSettings}
+                  organizationKeys={savedAiSettings?.organization_keys}
                 />
                 {agent && (
                   <AgentSignIn

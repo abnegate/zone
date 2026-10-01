@@ -11,6 +11,7 @@ import {
 } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
+import { ApiError } from '../../../../api/ApiError';
 import type { AiSettings, OrgRole } from '../types';
 
 // Mock client
@@ -142,6 +143,7 @@ const mockAiSettings: AiSettings = {
   model_image: 'flux1-schnell-fp8.safetensors',
   model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
   model_audio: 'ace_step_v1_3.5b.safetensors',
+  completions_routed: true,
 };
 
 describe('OrgSettingsPage', () => {
@@ -356,6 +358,24 @@ describe('OrgSettingsPage', () => {
         model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
         model_audio: 'ace_step_v1_3.5b.safetensors',
       });
+    });
+
+    it('sends an empty host to clear the one saved, so the next save cannot bring it back', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValue({ ...mockAiSettings, litellm_host: null });
+      render(<OrgSettingsPage />);
+
+      const host = await screen.findByLabelText(/LiteLLM Host/);
+      await waitFor(() => expect(host).toHaveValue('http://localhost:4000'));
+      fireEvent.change(host, { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalled());
+      const [, request] = mockClient.updateOrgAiSettings.mock.calls[0];
+      expect(request.litellm_host).toBe('');
+      await waitFor(() => expect(host).toHaveValue(''));
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+      await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalledTimes(2));
+      expect(mockClient.updateOrgAiSettings.mock.calls[1][1].litellm_host).toBeUndefined();
     });
 
     it('sends an empty model to clear one saved before Automatic was picked', async () => {
@@ -749,6 +769,17 @@ describe('OrgSettingsPage', () => {
       });
     });
 
+    it('keeps the notice a save leaves about workspaces waiting on their admins', async () => {
+      const notice = '2 workspace keys wait for their admins to save again.';
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
+
+      render(<OrgSettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText(notice)).toBeInTheDocument();
+      expect(screen.getByText(notice)).toHaveClass('alert-warning');
+    });
+
     it('shows error when save fails', async () => {
       mockClient.updateOrgAiSettings.mockRejectedValueOnce(new Error('Save failed'));
 
@@ -762,6 +793,17 @@ describe('OrgSettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Save failed')).toBeInTheDocument();
       });
+    });
+
+    it('shows the reason the server refused the save', async () => {
+      const message =
+        "Failed to update org AI settings: litellm_host: The URL's host is not one this instance allows endpoints on.";
+      mockClient.updateOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 400));
+
+      render(<OrgSettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText(message)).toHaveClass('alert-error');
     });
   });
 
@@ -796,6 +838,32 @@ describe('OrgSettingsPage', () => {
       });
     });
 
+    it('keeps the notice a reset leaves about workspaces waiting on their admins', async () => {
+      const notice = '1 workspace key waits for its admin to save again.';
+      mockClient.resetOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
+
+      render(<OrgSettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Reset to Defaults' }));
+
+      expect(await screen.findByText(notice)).toBeInTheDocument();
+      expect(screen.getByText(notice)).toHaveClass('alert-warning');
+      expect(screen.getByText('Settings reset to defaults')).toBeInTheDocument();
+    });
+
+    it('drops an earlier save notice when a reset leaves none', async () => {
+      const notice = '2 workspace keys wait for their admins to save again.';
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
+      mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
+
+      render(<OrgSettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
+      expect(await screen.findByText(notice)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Reset to Defaults' }));
+
+      expect(await screen.findByText('Settings reset to defaults')).toBeInTheDocument();
+      expect(screen.queryByText(notice)).not.toBeInTheDocument();
+    });
+
     it('shows error when reset fails', async () => {
       mockClient.resetOrgAiSettings.mockRejectedValueOnce(new Error('Reset failed'));
 
@@ -809,6 +877,17 @@ describe('OrgSettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Reset failed')).toBeInTheDocument();
       });
+    });
+
+    it('shows the reason the server refused the reset', async () => {
+      const message =
+        'Failed to reset org AI settings: Only organization admins can manage AI settings';
+      mockClient.resetOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 403));
+
+      render(<OrgSettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Reset to Defaults' }));
+
+      expect(await screen.findByText(message)).toHaveClass('alert-error');
     });
   });
 

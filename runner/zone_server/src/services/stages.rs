@@ -12,6 +12,7 @@ use std::time::Duration;
 use zone_core::llm::{AgentKind, LlmBackend};
 
 use crate::db::ai_settings::EffectiveAiSettings;
+use crate::services::endpoint::{Endpoint, Origin};
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -33,21 +34,100 @@ pub struct Preferences {
     pub embedding: Option<String>,
     pub vision: Option<String>,
     pub classifier: Option<String>,
+    pub scope: Scope,
+}
+
+/// Which model names a completion may be sent under.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Scope {
+    /// Any name the catalog allows.
+    #[default]
+    Open,
+    /// Only the Fast and Reasoning models the settings save. A chat or task
+    /// may name a model of the instance's, which an endpoint the settings
+    /// name does not serve.
+    Saved,
+}
+
+/// What a stage runs when the saved settings name no model.
+#[derive(Debug, Clone, Default)]
+struct Fallbacks {
+    fast: Option<String>,
+    reasoning: Option<String>,
+    embedding: Option<String>,
+    vision: Option<String>,
+    classifier: Option<String>,
+}
+
+impl Fallbacks {
+    fn environment(classifier: &str) -> Self {
+        Self {
+            fast: env_optional("OLLAMA_MODEL_FAST"),
+            reasoning: env_optional("OLLAMA_MODEL_REASON"),
+            embedding: env_optional("OLLAMA_MODEL_EMBED"),
+            vision: env_optional("OLLAMA_MODEL_VISION"),
+            classifier: nonempty(Some(classifier))
+                .or_else(|| env_optional("COMFYUI_CLASSIFIER_MODEL")),
+        }
+    }
 }
 
 impl Preferences {
     pub fn from_settings(settings: &EffectiveAiSettings, classifier: &str) -> Self {
+        Self::layered(settings, Fallbacks::environment(classifier))
+    }
+
+    /// The preferences for completions sent to `endpoint`. The instance's
+    /// `OLLAMA_MODEL_*` and classifier models name models on the instance's
+    /// own endpoint, so an endpoint the settings name runs only the models the
+    /// settings save.
+    pub fn for_endpoint(
+        settings: &EffectiveAiSettings,
+        classifier: &str,
+        endpoint: &Endpoint,
+    ) -> Self {
+        match endpoint.origin() {
+            Origin::Instance => Self::from_settings(settings, classifier),
+            Origin::Settings => Self {
+                scope: Scope::Saved,
+                ..Self::layered(settings, Fallbacks::default())
+            },
+        }
+    }
+
+    fn layered(settings: &EffectiveAiSettings, fallbacks: Fallbacks) -> Self {
         Self {
-            fast: nonempty(settings.model_fast.as_deref())
-                .or_else(|| env_optional("OLLAMA_MODEL_FAST")),
-            reasoning: nonempty(settings.model_reasoning.as_deref())
-                .or_else(|| env_optional("OLLAMA_MODEL_REASON")),
-            embedding: nonempty(settings.model_embedding.as_deref())
-                .or_else(|| env_optional("OLLAMA_MODEL_EMBED")),
-            vision: env_optional("OLLAMA_MODEL_VISION"),
-            classifier: nonempty(settings.model_fast.as_deref())
-                .or_else(|| nonempty(Some(classifier)))
-                .or_else(|| env_optional("COMFYUI_CLASSIFIER_MODEL")),
+            fast: nonempty(settings.model_fast.as_deref()).or(fallbacks.fast),
+            reasoning: nonempty(settings.model_reasoning.as_deref()).or(fallbacks.reasoning),
+            embedding: nonempty(settings.model_embedding.as_deref()).or(fallbacks.embedding),
+            vision: fallbacks.vision,
+            classifier: nonempty(settings.model_fast.as_deref()).or(fallbacks.classifier),
+            scope: Scope::Open,
+        }
+    }
+
+    /// The Fast and Reasoning models, each named once.
+    pub fn completions(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = Vec::new();
+        for name in [self.fast.as_deref(), self.reasoning.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !names.iter().any(|named| same_model(named, name)) {
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    /// Whether a completion may be sent under `name`.
+    pub fn admits(&self, name: &str) -> bool {
+        match self.scope {
+            Scope::Open => true,
+            Scope::Saved => [self.fast.as_deref(), self.reasoning.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|saved| same_model(saved, name.trim())),
         }
     }
 
@@ -200,10 +280,11 @@ pub fn is_auto(name: &str) -> bool {
 ///
 /// On an agent's catalog a requested name the agent does not know counts as
 /// [`AUTO`], and so does a preference it does not know; [`AUTO`] then means
-/// the agent chooses.
+/// the agent chooses. A requested name the preferences do not admit counts
+/// as [`AUTO`] too.
 pub fn chat_model(
     requested: &str,
-    prefs: &Preferences,
+    preferences: &Preferences,
     catalog: &Catalog,
     message: &str,
     has_image: bool,
@@ -211,12 +292,17 @@ pub fn chat_model(
 ) -> String {
     if let Some(kind) = catalog.agent {
         let preferred = if wants_reason(message) {
-            &prefs.reasoning
+            &preferences.reasoning
         } else {
-            &prefs.fast
+            &preferences.fast
         };
         return known(kind, [Some(requested), preferred.as_deref()]);
     }
+    let requested = if preferences.admits(requested) {
+        requested
+    } else {
+        AUTO
+    };
     if !is_auto(requested) {
         return requested.to_string();
     }
@@ -226,22 +312,34 @@ pub fn chat_model(
         Tools::Optional
     };
     if has_image
-        && let Some(model) = pick_installed(prefs.vision.as_deref(), catalog, Stage::Vision, tools)
+        && let Some(model) =
+            pick_installed(preferences.vision.as_deref(), catalog, Stage::Vision, tools)
     {
         return model;
     }
     if wants_reason(message)
-        && let Some(model) =
-            pick_installed(prefs.reasoning.as_deref(), catalog, Stage::Reason, tools)
+        && let Some(model) = pick_installed(
+            preferences.reasoning.as_deref(),
+            catalog,
+            Stage::Reason,
+            tools,
+        )
     {
         return model;
     }
-    pick_installed(prefs.fast.as_deref(), catalog, Stage::Fast, tools)
-        .or_else(|| pick_installed(prefs.reasoning.as_deref(), catalog, Stage::Reason, tools))
+    pick_installed(preferences.fast.as_deref(), catalog, Stage::Fast, tools)
+        .or_else(|| {
+            pick_installed(
+                preferences.reasoning.as_deref(),
+                catalog,
+                Stage::Reason,
+                tools,
+            )
+        })
         .unwrap_or_else(|| {
             fallback_name(
                 requested,
-                prefs
+                preferences
                     .fast
                     .as_deref()
                     .filter(|name| tools.allows(catalog, name)),
@@ -253,33 +351,52 @@ pub fn chat_model(
 ///
 /// On an agent's catalog, only a classifier or fast model the agent knows;
 /// otherwise [`AUTO`].
-pub fn classifier_model(prefs: &Preferences, catalog: &Catalog, chat_model: &str) -> String {
+pub fn classifier_model(preferences: &Preferences, catalog: &Catalog, chat_model: &str) -> String {
     if let Some(kind) = catalog.agent {
-        return known(kind, [prefs.classifier.as_deref(), prefs.fast.as_deref()]);
+        return known(
+            kind,
+            [
+                preferences.classifier.as_deref(),
+                preferences.fast.as_deref(),
+            ],
+        );
     }
-    if let Some(name) = prefs.classifier.as_deref().filter(|name| !is_auto(name))
+    if let Some(name) = preferences
+        .classifier
+        .as_deref()
+        .filter(|name| !is_auto(name))
         && catalog_allows(catalog, name)
     {
         return name.to_string();
     }
-    if !is_auto(chat_model) && catalog.contains(chat_model) {
+    if !is_auto(chat_model) && preferences.admits(chat_model) && catalog_allows(catalog, chat_model)
+    {
         return chat_model.to_string();
     }
-    pick_installed(prefs.fast.as_deref(), catalog, Stage::Fast, Tools::Optional)
-        .or_else(|| {
-            catalog
-                .completions()
-                .min_by_key(|model| (model.million_params.unwrap_or(u32::MAX), model.bytes))
-                .map(|model| model.name.clone())
-        })
-        .unwrap_or_else(|| fallback_name(AUTO, prefs.classifier.as_deref()))
+    pick_installed(
+        preferences.fast.as_deref(),
+        catalog,
+        Stage::Fast,
+        Tools::Optional,
+    )
+    .or_else(|| {
+        catalog
+            .completions()
+            .min_by_key(|model| (model.million_params.unwrap_or(u32::MAX), model.bytes))
+            .map(|model| model.name.clone())
+    })
+    .unwrap_or_else(|| fallback_name(AUTO, preferences.classifier.as_deref()))
 }
 
 /// The model a chat title, a pull request subject or a merge summary runs on,
 /// or `None` when there is nothing to run it on: an agent chooses its own on
 /// [`AUTO`], and the endpoint has to be given a name.
-pub fn summary_model(prefs: &Preferences, catalog: &Catalog, chat_model: &str) -> Option<String> {
-    let model = classifier_model(prefs, catalog, chat_model);
+pub fn summary_model(
+    preferences: &Preferences,
+    catalog: &Catalog,
+    chat_model: &str,
+) -> Option<String> {
+    let model = classifier_model(preferences, catalog, chat_model);
     (catalog.chooses() || !is_auto(&model)).then_some(model)
 }
 
@@ -556,13 +673,14 @@ mod tests {
         }
     }
 
-    fn prefs(fast: Option<&str>, reason: Option<&str>) -> Preferences {
+    fn preferences(fast: Option<&str>, reason: Option<&str>) -> Preferences {
         Preferences {
             fast: fast.map(str::to_string),
             reasoning: reason.map(str::to_string),
             embedding: None,
             vision: Some("llava:7b".to_string()),
             classifier: fast.map(str::to_string),
+            scope: Scope::Open,
         }
     }
 
@@ -575,7 +693,14 @@ mod tests {
             installed("llava:7b", 4_700, 7_000),
         ]);
         assert_eq!(
-            chat_model(AUTO, &prefs(None, None), &catalog, "hello", false, false),
+            chat_model(
+                AUTO,
+                &preferences(None, None),
+                &catalog,
+                "hello",
+                false,
+                false
+            ),
             "llama3.2:3b"
         );
     }
@@ -589,7 +714,7 @@ mod tests {
         assert_eq!(
             chat_model(
                 AUTO,
-                &prefs(Some("qwen3.8:27b"), None),
+                &preferences(Some("qwen3.8:27b"), None),
                 &catalog,
                 "hello",
                 false,
@@ -605,7 +730,7 @@ mod tests {
         assert_eq!(
             chat_model(
                 AUTO,
-                &prefs(Some("llama3.1:8b"), Some("llama3.1:8b")),
+                &preferences(Some("llama3.1:8b"), Some("llama3.1:8b")),
                 &catalog,
                 "hello",
                 false,
@@ -621,7 +746,7 @@ mod tests {
         assert_eq!(
             chat_model(
                 "qwen3.8:27b",
-                &prefs(Some("llama3.2:3b"), None),
+                &preferences(Some("llama3.2:3b"), None),
                 &catalog,
                 "hello",
                 false,
@@ -640,7 +765,7 @@ mod tests {
         assert_eq!(
             chat_model(
                 AUTO,
-                &prefs(None, None),
+                &preferences(None, None),
                 &catalog,
                 "Prove that this algorithm is correct and list edge cases",
                 false,
@@ -657,7 +782,7 @@ mod tests {
             installed("qwen3.8:27b", 17_000, 27_000),
         ]);
         assert_eq!(
-            classifier_model(&prefs(None, None), &catalog, "qwen3.8:27b"),
+            classifier_model(&preferences(None, None), &catalog, "qwen3.8:27b"),
             "qwen3.8:27b"
         );
     }
@@ -665,14 +790,18 @@ mod tests {
     #[test]
     fn classifier_skips_uninstalled_env_pin() {
         let catalog = catalog(&[installed("llama3.2:3b", 2_000, 3_000)]);
-        let prefs = Preferences {
+        let preferences = Preferences {
             fast: None,
             reasoning: None,
             embedding: None,
             vision: None,
             classifier: Some("llama3.1:8b".to_string()),
+            scope: Scope::Open,
         };
-        assert_eq!(classifier_model(&prefs, &catalog, AUTO), "llama3.2:3b");
+        assert_eq!(
+            classifier_model(&preferences, &catalog, AUTO),
+            "llama3.2:3b"
+        );
     }
 
     #[test]
@@ -684,7 +813,7 @@ mod tests {
         assert_eq!(
             chat_model(
                 AUTO,
-                &prefs(None, None),
+                &preferences(None, None),
                 &catalog,
                 "what is this",
                 true,
@@ -708,7 +837,7 @@ mod tests {
             installed("llama3.2:3b", 2_000, 3_000),
         ]);
         assert_eq!(
-            chat_model(AUTO, &prefs(None, None), &catalog, "hi", false, false),
+            chat_model(AUTO, &preferences(None, None), &catalog, "hi", false, false),
             "llama3.2:3b"
         );
     }
@@ -734,14 +863,21 @@ mod tests {
     #[test]
     fn an_agent_runs_a_requested_model_it_knows() {
         let claude = Catalog::agent(AgentKind::Claude);
-        let prefs = prefs(Some("haiku"), Some("sonnet"));
+        let preferences = preferences(Some("haiku"), Some("sonnet"));
 
         assert_eq!(
-            chat_model("opus", &prefs, &claude, "hello", false, true),
+            chat_model("opus", &preferences, &claude, "hello", false, true),
             "opus"
         );
         assert_eq!(
-            chat_model("claude-opus-4-1", &prefs, &claude, REASONING, false, true),
+            chat_model(
+                "claude-opus-4-1",
+                &preferences,
+                &claude,
+                REASONING,
+                false,
+                true
+            ),
             "claude-opus-4-1",
             "a full name the agent knows is kept, though the agent offers only aliases"
         );
@@ -750,14 +886,14 @@ mod tests {
     #[test]
     fn a_requested_model_the_agent_does_not_know_is_left_to_the_preferences() {
         let claude = Catalog::agent(AgentKind::Claude);
-        let prefs = prefs(Some("haiku"), Some("opus"));
+        let preferences = preferences(Some("haiku"), Some("opus"));
 
         assert_eq!(
-            chat_model("llama3.2:3b", &prefs, &claude, "hello", false, true),
+            chat_model("llama3.2:3b", &preferences, &claude, "hello", false, true),
             "haiku"
         );
         assert_eq!(
-            chat_model("llama3.2:3b", &prefs, &claude, REASONING, false, true),
+            chat_model("llama3.2:3b", &preferences, &claude, REASONING, false, true),
             "opus"
         );
     }
@@ -765,14 +901,14 @@ mod tests {
     #[test]
     fn an_agent_reasons_on_the_reasoning_model_and_answers_on_the_fast_one() {
         let codex = Catalog::agent(AgentKind::Codex);
-        let prefs = prefs(Some("gpt-6-luna"), Some("gpt-6-astra"));
+        let preferences = preferences(Some("gpt-6-luna"), Some("gpt-6-astra"));
 
         assert_eq!(
-            chat_model(AUTO, &prefs, &codex, "hello", false, true),
+            chat_model(AUTO, &preferences, &codex, "hello", false, true),
             "gpt-6-luna"
         );
         assert_eq!(
-            chat_model(AUTO, &prefs, &codex, REASONING, false, true),
+            chat_model(AUTO, &preferences, &codex, REASONING, false, true),
             "gpt-6-astra"
         );
     }
@@ -780,7 +916,7 @@ mod tests {
     #[test]
     fn an_agent_chooses_its_own_model_when_no_preference_is_one_it_knows() {
         let claude = Catalog::agent(AgentKind::Claude);
-        let installed = prefs(Some("llama3.2:3b"), Some("qwen3.8:27b"));
+        let installed = preferences(Some("llama3.2:3b"), Some("qwen3.8:27b"));
 
         assert_eq!(
             chat_model(AUTO, &installed, &claude, "hello", false, true),
@@ -791,13 +927,20 @@ mod tests {
             AUTO
         );
         assert_eq!(
-            chat_model(AUTO, &prefs(None, None), &claude, "hello", false, false),
+            chat_model(
+                AUTO,
+                &preferences(None, None),
+                &claude,
+                "hello",
+                false,
+                false
+            ),
             AUTO
         );
         assert_eq!(
             chat_model(
                 AUTO,
-                &prefs(Some("gpt-6-sol"), None),
+                &preferences(Some("gpt-6-sol"), None),
                 &claude,
                 "hello",
                 false,
@@ -815,7 +958,7 @@ mod tests {
         assert_eq!(
             chat_model(
                 AUTO,
-                &prefs(Some("haiku"), None),
+                &preferences(Some("haiku"), None),
                 &claude,
                 REASONING,
                 false,
@@ -827,7 +970,7 @@ mod tests {
         assert_eq!(
             chat_model(
                 AUTO,
-                &prefs(None, Some("opus")),
+                &preferences(None, Some("opus")),
                 &claude,
                 "hello",
                 false,
@@ -1092,8 +1235,8 @@ mod tests {
         let llava = vision(installed("llava:7b", 4_733, 7_000), Some(false));
         let qwen = vision(installed("qwen3.8:27b", 17_741, 27_300), Some(true));
         let catalog = catalog(&[llava, qwen]);
-        let task = |prefs: &Preferences, message: &str, agent: bool| {
-            chat_model(AUTO, prefs, &catalog, message, false, agent)
+        let task = |preferences: &Preferences, message: &str, agent: bool| {
+            chat_model(AUTO, preferences, &catalog, message, false, agent)
         };
 
         assert_eq!(
@@ -1106,7 +1249,7 @@ mod tests {
         );
         assert_eq!(
             task(
-                &prefs(Some("llava:7b"), Some("llava:7b")),
+                &preferences(Some("llava:7b"), Some("llava:7b")),
                 "Add a cart",
                 true
             ),
@@ -1139,13 +1282,223 @@ mod tests {
         assert_eq!(
             chat_model(
                 AUTO,
-                &prefs(Some("llava:7b"), None),
+                &preferences(Some("llava:7b"), None),
                 &refusing,
                 "Add a cart",
                 false,
                 true
             ),
             AUTO
+        );
+    }
+
+    fn openai(fast: Option<&str>, reasoning: Option<&str>) -> EffectiveAiSettings {
+        let mut settings = crate::services::endpoint::testing::settings(
+            zone_context::embeddings::providers::PROVIDER_OPENAI,
+        );
+        settings.openai_api_key = Some(zone_core::SecretValue::new("sk-organization-key"));
+        settings.model_fast = fast.map(str::to_string);
+        settings.model_reasoning = reasoning.map(str::to_string);
+        settings
+    }
+
+    fn instance_models() -> Fallbacks {
+        Fallbacks {
+            fast: Some("qwen2.5:7b-instruct".to_string()),
+            reasoning: Some("deepseek-r1:14b".to_string()),
+            embedding: Some("nomic-embed-text".to_string()),
+            vision: Some("llava:7b".to_string()),
+            classifier: Some("qwen2.5:3b".to_string()),
+        }
+    }
+
+    #[test]
+    fn unsaved_stages_fall_back_to_the_instances_models() {
+        let preferences = Preferences::layered(&openai(None, None), instance_models());
+
+        assert_eq!(preferences.fast.as_deref(), Some("qwen2.5:7b-instruct"));
+        assert_eq!(preferences.reasoning.as_deref(), Some("deepseek-r1:14b"));
+        assert_eq!(preferences.embedding.as_deref(), Some("nomic-embed-text"));
+        assert_eq!(preferences.vision.as_deref(), Some("llava:7b"));
+        assert_eq!(preferences.classifier.as_deref(), Some("qwen2.5:3b"));
+    }
+
+    #[test]
+    fn an_endpoint_the_settings_name_runs_no_model_of_the_instances() {
+        let settings = openai(None, None);
+        let endpoint =
+            crate::services::endpoint::Endpoint::resolve(&crate::state::test_config(), &settings);
+        assert_eq!(endpoint.origin(), Origin::Settings);
+
+        let preferences = Preferences::for_endpoint(&settings, "qwen2.5:3b", &endpoint);
+
+        assert_eq!(preferences.fast, None);
+        assert_eq!(preferences.reasoning, None);
+        assert_eq!(preferences.embedding, None);
+        assert_eq!(preferences.vision, None);
+        assert_eq!(
+            preferences.classifier, None,
+            "the instance's classifier is no model here"
+        );
+        let chosen = chat_model(
+            AUTO,
+            &preferences,
+            &Catalog::default(),
+            "hello",
+            false,
+            false,
+        );
+        assert_eq!(
+            endpoint.model(&chosen),
+            Err(crate::services::endpoint::Error::ModelUnset),
+            "an unset model is refused before a provider is asked for {chosen}"
+        );
+    }
+
+    #[test]
+    fn an_endpoint_the_settings_name_runs_the_models_they_save() {
+        let settings = openai(Some("gpt-4o-mini"), Some("o3"));
+        let endpoint =
+            crate::services::endpoint::Endpoint::resolve(&crate::state::test_config(), &settings);
+
+        let preferences = Preferences::for_endpoint(&settings, "qwen2.5:3b", &endpoint);
+
+        assert_eq!(preferences.fast.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(preferences.reasoning.as_deref(), Some("o3"));
+        assert_eq!(preferences.classifier.as_deref(), Some("gpt-4o-mini"));
+        let catalog = Catalog::default();
+        assert_eq!(
+            chat_model(AUTO, &preferences, &catalog, "hello", false, false),
+            "gpt-4o-mini"
+        );
+        assert_eq!(
+            chat_model(
+                AUTO,
+                &preferences,
+                &catalog,
+                "find the root cause",
+                false,
+                false
+            ),
+            "o3"
+        );
+        assert_eq!(
+            summary_model(&preferences, &catalog, AUTO).as_deref(),
+            Some("gpt-4o-mini")
+        );
+    }
+
+    #[test]
+    fn the_instances_endpoint_keeps_the_instances_classifier() {
+        let settings = crate::services::endpoint::testing::settings(
+            zone_context::embeddings::providers::PROVIDER_SELF_HOSTED,
+        );
+        let endpoint = crate::services::endpoint::Endpoint::instance(&crate::state::test_config());
+
+        let preferences = Preferences::for_endpoint(&settings, "qwen2.5:3b", &endpoint);
+
+        assert_eq!(preferences.classifier.as_deref(), Some("qwen2.5:3b"));
+    }
+
+    fn saved_endpoint(settings: &EffectiveAiSettings) -> Preferences {
+        let endpoint =
+            crate::services::endpoint::Endpoint::resolve(&crate::state::test_config(), settings);
+        assert_eq!(endpoint.origin(), Origin::Settings);
+        Preferences::for_endpoint(settings, "qwen2.5:3b", &endpoint)
+    }
+
+    #[test]
+    fn an_endpoint_the_settings_name_is_never_sent_a_model_they_do_not_save() {
+        let preferences = saved_endpoint(&openai(Some("gpt-4o-mini"), Some("o3")));
+        let catalog = Catalog::default();
+
+        assert_eq!(
+            chat_model("llama3.2:3b", &preferences, &catalog, "hello", false, false),
+            "gpt-4o-mini",
+            "a chat pinned to an instance model was sent it on the saved endpoint"
+        );
+        assert_eq!(
+            chat_model(
+                "llama3.2:3b",
+                &preferences,
+                &catalog,
+                "find the root cause",
+                false,
+                true
+            ),
+            "o3"
+        );
+        assert_eq!(
+            chat_model("o3", &preferences, &catalog, "hello", false, false),
+            "o3",
+            "a saved model the chat names is kept"
+        );
+        assert_eq!(
+            summary_model(&preferences, &catalog, "llama3.2:3b").as_deref(),
+            Some("gpt-4o-mini")
+        );
+
+        let unsaved = saved_endpoint(&openai(None, None));
+        let chosen = chat_model("llama3.2:3b", &unsaved, &catalog, "hello", false, false);
+        assert_eq!(chosen, AUTO, "nothing saved leaves nothing to send");
+        assert_eq!(summary_model(&unsaved, &catalog, "llama3.2:3b"), None);
+
+        let reasoning = saved_endpoint(&openai(None, Some("o3")));
+        assert_eq!(
+            summary_model(&reasoning, &catalog, "llama3.2:3b"),
+            None,
+            "a title was asked of an instance model on the saved endpoint"
+        );
+    }
+
+    #[test]
+    fn a_saved_endpoint_offers_its_fast_and_reasoning_models_once_each() {
+        assert_eq!(
+            saved_endpoint(&openai(Some("gpt-4o-mini"), Some("o3"))).completions(),
+            ["gpt-4o-mini", "o3"]
+        );
+        assert_eq!(
+            saved_endpoint(&openai(Some("o3"), Some("o3:latest"))).completions(),
+            ["o3"]
+        );
+        assert!(saved_endpoint(&openai(None, None)).completions().is_empty());
+    }
+
+    #[test]
+    fn the_instances_endpoint_runs_any_model_a_chat_names() {
+        let preferences = Preferences::for_endpoint(
+            &openai(None, None),
+            "qwen2.5:3b",
+            &crate::services::endpoint::Endpoint::instance(&crate::state::test_config()),
+        );
+
+        assert_eq!(preferences.scope, Scope::Open);
+        assert_eq!(
+            chat_model(
+                "llama3.2:3b",
+                &preferences,
+                &Catalog::default(),
+                "hello",
+                false,
+                false
+            ),
+            "llama3.2:3b"
+        );
+    }
+
+    #[test]
+    fn a_saved_model_a_chat_names_runs_its_summaries_on_an_endpoint_that_lists_nothing() {
+        let preferences = saved_endpoint(&openai(None, Some("o3")));
+
+        assert_eq!(
+            summary_model(&preferences, &Catalog::default(), "o3").as_deref(),
+            Some("o3"),
+            "titles and summaries stopped because the endpoint lists no models"
+        );
+        assert_eq!(
+            summary_model(&Preferences::default(), &Catalog::default(), "llama3.2:3b").as_deref(),
+            Some("llama3.2:3b"),
+            "an instance whose catalog cannot be read still summarizes on the chat's model"
         );
     }
 }

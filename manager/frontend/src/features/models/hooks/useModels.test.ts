@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { ApiError } from '../../../api/ApiError';
 
 const mockGetModels = mock();
 const mockDeleteModel = mock();
@@ -66,6 +67,45 @@ describe('useModels', () => {
 
     expect(result.current.models).toEqual(mockModels);
     expect(result.current.error).toBeNull();
+  });
+
+  it("asks for the workspace's models when given one", async () => {
+    const saved = [{ name: 'gpt-4o-mini', size: 0, modified_at: '2026-01-01T00:00:00Z' }];
+    mockGetModels.mockResolvedValueOnce({ models: saved });
+
+    const { result } = renderHook(() => useModels('ws-1'));
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(mockGetModels).toHaveBeenCalledWith('ws-1');
+    expect(result.current.models).toEqual(saved);
+  });
+
+  it("never shows an earlier workspace's models once another is chosen", async () => {
+    let answerFirst: (value: unknown) => void = () => {};
+    const first = new Promise((resolve) => {
+      answerFirst = resolve;
+    });
+    const saved = [{ name: 'o3', size: 0, modified_at: '2026-01-01T00:00:00Z' }];
+    mockGetModels.mockImplementationOnce(() => first).mockResolvedValueOnce({ models: saved });
+
+    const { result, rerender } = renderHook(({ workspace }) => useModels(workspace), {
+      initialProps: { workspace: 'ws-1' },
+    });
+    rerender({ workspace: 'ws-2' });
+
+    await waitFor(() => {
+      expect(result.current.models).toEqual(saved);
+    });
+    await act(async () => {
+      answerFirst({ models: [{ name: 'llama2', size: 1, modified_at: '' }] });
+      await first;
+    });
+
+    expect(mockGetModels).toHaveBeenLastCalledWith('ws-2');
+    expect(result.current.models).toEqual(saved);
   });
 
   it('does not fetch when not authenticated', async () => {
@@ -185,7 +225,7 @@ describe('useModels', () => {
   });
 
   it('calls logout on 401 error', async () => {
-    mockGetModels.mockRejectedValueOnce(new Error('401 Unauthorized'));
+    mockGetModels.mockRejectedValueOnce(new ApiError('Failed to fetch models: Unauthorized', 401));
 
     renderHook(() => useModels());
 

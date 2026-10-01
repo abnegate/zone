@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::llm::{LlmClient, Message, RequestOptions, Role, ToolDefinition};
+use crate::llm::{LlmClient, Message, RequestOptions, Role, ToolDefinition, finish_reason};
 
 use super::estimate::{message_cost, tokens};
 use super::{ContextError, ContextStatus, Coverage, Entry, Policy, Prepared, Summary, estimate};
@@ -403,7 +403,7 @@ async fn summarize(
             .choices
             .first()
             .ok_or_else(|| ContextError::Summary("Provider returned no summary choice.".into()))?;
-        if choice.finish_reason.as_deref() == Some("length")
+        if choice.finish_reason.as_deref() == Some(finish_reason::LENGTH)
             || choice
                 .message
                 .tool_calls

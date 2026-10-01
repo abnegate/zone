@@ -2,7 +2,12 @@ import type { InstalledModel } from '../../models/types';
 import { mergeStageOptions } from '../../models/utils/stageOptions';
 import type { OrgRole } from '../organization/types';
 import { AiProviderSchema } from '../workspace/schemas';
-import type { AiProvider, AiSettings, UpdateAiSettingsRequest } from '../workspace/types';
+import type {
+  AiProvider,
+  AiSettings,
+  OrganizationKeys,
+  UpdateAiSettingsRequest,
+} from '../workspace/types';
 import { type Agent, type AgentProvider, AgentProviderSchema } from './schemas';
 import type { AgentAccess } from './types';
 
@@ -214,6 +219,86 @@ export function configuredFromSettings(settings: AiSettings): ProviderConfigured
   };
 }
 
+export type EndpointProvider = Extract<AiProvider, 'self_hosted' | 'openai' | 'anthropic'>;
+
+interface EndpointFields {
+  url: 'litellmHost' | 'openaiBaseUrl' | 'anthropicBaseUrl';
+  key: 'litellmKey' | 'openaiApiKey' | 'anthropicApiKey';
+  configured: keyof OrganizationKeys;
+  savedUrl: 'litellm_host' | 'openai_base_url' | 'anthropic_base_url';
+  savedKey: 'has_litellm_key' | 'has_openai_api_key' | 'has_anthropic_api_key';
+}
+
+const endpointFields: Record<EndpointProvider, EndpointFields> = {
+  self_hosted: {
+    url: 'litellmHost',
+    key: 'litellmKey',
+    configured: 'litellm',
+    savedUrl: 'litellm_host',
+    savedKey: 'has_litellm_key',
+  },
+  openai: {
+    url: 'openaiBaseUrl',
+    key: 'openaiApiKey',
+    configured: 'openai',
+    savedUrl: 'openai_base_url',
+    savedKey: 'has_openai_api_key',
+  },
+  anthropic: {
+    url: 'anthropicBaseUrl',
+    key: 'anthropicApiKey',
+    configured: 'anthropic',
+    savedUrl: 'anthropic_base_url',
+    savedKey: 'has_anthropic_api_key',
+  },
+};
+
+export function isEndpointProvider(provider: AiProvider): provider is EndpointProvider {
+  return provider in endpointFields;
+}
+
+function savesEndpoint(settings: AiSettings, provider: EndpointProvider): boolean {
+  const fields = endpointFields[provider];
+  return Boolean(settings[fields.savedUrl]?.trim()) || settings[fields.savedKey];
+}
+
+export type Routing = 'none' | 'pending' | 'routed';
+
+export function routingOf(settings: AiSettings | null, provider: AiProvider): Routing {
+  if (!settings || !isEndpointProvider(provider) || !savesEndpoint(settings, provider)) {
+    return 'none';
+  }
+  return settings.completions_routed ? 'routed' : 'pending';
+}
+
+export function missesOrganizationKey(
+  provider: AiProvider,
+  credentials: ProviderCredentials,
+  configured: ProviderConfigured,
+  organizationKeys: OrganizationKeys
+): boolean {
+  if (!isEndpointProvider(provider)) return false;
+  const fields = endpointFields[provider];
+  return (
+    Boolean(credentials[fields.url].trim()) &&
+    !credentials[fields.key].trim() &&
+    !configured[fields.configured] &&
+    organizationKeys[fields.configured]
+  );
+}
+
+export function needsKeyAgain(
+  provider: AiProvider,
+  credentials: ProviderCredentials,
+  configured: ProviderConfigured,
+  saved: AiSettings | null
+): boolean {
+  if (!isEndpointProvider(provider)) return false;
+  const fields = endpointFields[provider];
+  const savedUrl = saved?.[fields.savedUrl]?.trim() ?? '';
+  return configured[fields.configured] && credentials[fields.url].trim() !== savedUrl;
+}
+
 export function modelsFromSettings(settings: AiSettings): ModelSelection {
   return {
     fast: settings.model_fast || '',
@@ -225,10 +310,16 @@ export function modelsFromSettings(settings: AiSettings): ModelSelection {
   };
 }
 
+function endpointUrl(entered: string, saved: string | null): string | undefined {
+  if (entered.trim()) return entered;
+  return saved?.trim() ? '' : undefined;
+}
+
 export function buildAiSettingsRequest(
   provider: AiProvider,
   credentials: ProviderCredentials,
-  models: ModelSelection
+  models: ModelSelection,
+  saved: AiSettings | null = null
 ): UpdateAiSettingsRequest {
   const request: UpdateAiSettingsRequest = {
     provider,
@@ -243,13 +334,19 @@ export function buildAiSettingsRequest(
     return request;
   }
   if (provider === 'self_hosted') {
-    request.litellm_host = credentials.litellmHost || undefined;
+    request.litellm_host = endpointUrl(credentials.litellmHost, saved?.litellm_host ?? null);
     if (credentials.litellmKey) request.litellm_key = credentials.litellmKey;
   } else if (provider === 'openai') {
-    request.openai_base_url = credentials.openaiBaseUrl || undefined;
+    request.openai_base_url = endpointUrl(
+      credentials.openaiBaseUrl,
+      saved?.openai_base_url ?? null
+    );
     if (credentials.openaiApiKey) request.openai_api_key = credentials.openaiApiKey;
   } else if (provider === 'anthropic') {
-    request.anthropic_base_url = credentials.anthropicBaseUrl || undefined;
+    request.anthropic_base_url = endpointUrl(
+      credentials.anthropicBaseUrl,
+      saved?.anthropic_base_url ?? null
+    );
     if (credentials.anthropicApiKey) request.anthropic_api_key = credentials.anthropicApiKey;
   } else if (provider === 'bedrock') {
     request.bedrock_region = credentials.bedrockRegion || undefined;

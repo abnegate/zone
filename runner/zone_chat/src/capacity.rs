@@ -21,6 +21,12 @@ use std::time::Duration;
 /// Production callers supply validated typed configuration through `with_context`.
 pub const DEFAULT_CONTEXT: u64 = 32_768;
 
+const THINKING: &str = "thinking";
+const UNDISCLOSED: &str = "The endpoint publishes no deployment metadata.";
+const ASSUMED: &str =
+    "The endpoint publishes no deployment metadata, so the configured context is assumed.";
+const VISION: &str = "vision";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -38,6 +44,8 @@ pub struct Capacity {
     pub ollama: Option<u64>,
     /// Engine or provider advertised thinking / extended reasoning.
     pub reasoning: bool,
+    /// Whether the engine declared it can read images; `None` when it has not said.
+    pub vision: Option<bool>,
     pub reason: Option<String>,
     pub identity: String,
 }
@@ -49,6 +57,7 @@ impl Capacity {
             source: Source::Unknown,
             ollama: None,
             reasoning: false,
+            vision: None,
             reason: Some(reason.into()),
             identity: model.into(),
         }
@@ -57,11 +66,16 @@ impl Capacity {
 
 /// Refreshed per preparation: no stale cross-provider or unloaded-runtime cache.
 pub struct Resolver {
+    configured: Option<u64>,
+    deployment: Option<Deployment>,
+}
+
+/// A LiteLLM deployment of this instance and the Ollama behind it.
+struct Deployment {
     client: Client,
     host: String,
     key: String,
     ollama: String,
-    configured: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -95,19 +109,55 @@ impl Resolver {
 
     pub fn with_context(host: &str, key: &str, ollama: &str, configured: Option<u64>) -> Self {
         Self {
-            client: Client::builder()
-                .connect_timeout(Duration::from_secs(2))
-                .timeout(Duration::from_secs(2))
-                .build()
-                .expect("Valid metadata HTTP client"),
-            host: host.trim_end_matches('/').into(),
-            key: key.into(),
-            ollama: ollama.trim_end_matches('/').into(),
             configured: configured.filter(|value| *value > 0),
+            deployment: Some(Deployment {
+                client: Client::builder()
+                    .connect_timeout(Duration::from_secs(2))
+                    .timeout(Duration::from_secs(2))
+                    .build()
+                    .expect("Valid metadata HTTP client"),
+                host: host.trim_end_matches('/').into(),
+                key: key.into(),
+                ollama: ollama.trim_end_matches('/').into(),
+            }),
+        }
+    }
+
+    /// For an endpoint that is not a LiteLLM deployment of this instance.
+    /// Nothing is requested to learn a model's capacity: every model is given
+    /// `configured`, and no Ollama `num_ctx` is ever set for it.
+    pub fn undisclosed(configured: Option<u64>) -> Self {
+        Self {
+            configured: configured.filter(|value| *value > 0),
+            deployment: None,
         }
     }
 
     pub async fn resolve(&self, model: &str) -> Capacity {
+        match &self.deployment {
+            Some(deployment) => deployment.resolve(model, self.configured).await,
+            None => assumed(model, self.configured),
+        }
+    }
+}
+
+fn assumed(model: &str, configured: Option<u64>) -> Capacity {
+    let Some(limit) = configured else {
+        return Capacity::unknown(model, UNDISCLOSED);
+    };
+    Capacity {
+        limit: Some(limit),
+        source: Source::Configured,
+        ollama: None,
+        reasoning: false,
+        vision: None,
+        reason: Some(ASSUMED.into()),
+        identity: model.into(),
+    }
+}
+
+impl Deployment {
+    async fn resolve(&self, model: &str, configured: Option<u64>) -> Capacity {
         let Some(mut routes) = self.routes(model).await else {
             return Capacity::unknown(
                 model,
@@ -153,6 +203,7 @@ impl Resolver {
                 },
                 ollama: None,
                 reasoning: provider_reasoning(&route.model_info),
+                vision: None,
                 reason: limit.is_none().then(|| {
                     "The selected provider has not reported an input context limit.".into()
                 }),
@@ -196,6 +247,7 @@ impl Resolver {
         let advertised = shown.as_ref().and_then(native_limit);
         let requested = route.litellm_params.num_ctx.filter(|value| *value > 0);
         let reasoning = shown.as_ref().is_some_and(ollama_thinking);
+        let vision = shown.as_ref().and_then(ollama_vision);
         if let Some(runtime) = runtime {
             let limit = advertised.map_or(runtime, |advertised| runtime.min(advertised));
             return Capacity {
@@ -207,6 +259,7 @@ impl Resolver {
                 },
                 ollama: Some(limit),
                 reasoning,
+                vision,
                 reason: (limit != runtime).then(|| {
                     "The loaded context exceeds native capacity; this request uses the supported bound.".into()
                 }),
@@ -221,6 +274,7 @@ impl Resolver {
                     source: Source::Configured,
                     ollama: Some(limit),
                     reasoning,
+                    vision,
                     reason: (limit < requested).then(|| {
                         "The requested context allocation is bounded by the model's reported native capacity.".into()
                     }),
@@ -232,6 +286,7 @@ impl Resolver {
                 source: Source::Provider,
                 ollama: Some(advertised),
                 reasoning,
+                vision,
                 reason: None,
                 identity,
             };
@@ -244,7 +299,7 @@ impl Resolver {
                     .and_then(Value::as_str)
                     .and_then(configured_limit)
             })
-            .or(self.configured)
+            .or(configured)
         else {
             return Capacity::unknown(
                 model,
@@ -256,6 +311,7 @@ impl Resolver {
             source: Source::Configured,
             ollama: Some(limit),
             reasoning,
+            vision,
             reason: None,
             identity,
         }
@@ -366,15 +422,23 @@ fn select(routes: &[Route], model: &str) -> Result<Route, &'static str> {
     Ok(route)
 }
 
-fn ollama_thinking(shown: &Value) -> bool {
+fn ollama_capability(shown: &Value, name: &str) -> Option<bool> {
     shown
         .get("capabilities")
         .and_then(Value::as_array)
-        .is_some_and(|capabilities| {
+        .map(|capabilities| {
             capabilities
                 .iter()
-                .any(|capability| capability.as_str() == Some("thinking"))
+                .any(|capability| capability.as_str() == Some(name))
         })
+}
+
+fn ollama_thinking(shown: &Value) -> bool {
+    ollama_capability(shown, THINKING).unwrap_or(false)
+}
+
+fn ollama_vision(shown: &Value) -> Option<bool> {
+    ollama_capability(shown, VISION)
 }
 
 fn provider_reasoning(info: &Value) -> bool {
@@ -429,6 +493,31 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn an_undisclosed_endpoint_is_given_the_configured_context_without_a_num_ctx() {
+        let capacity = Resolver::undisclosed(Some(DEFAULT_CONTEXT))
+            .resolve("gpt-4o")
+            .await;
+
+        assert_eq!(capacity.limit, Some(DEFAULT_CONTEXT));
+        assert_eq!(capacity.source, Source::Configured);
+        assert_eq!(capacity.ollama, None, "no num_ctx may reach a third party");
+        assert!(!capacity.reasoning);
+        assert_eq!(capacity.vision, None);
+        assert_eq!(capacity.identity, "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn an_undisclosed_endpoint_without_a_configured_context_is_unknown() {
+        for configured in [None, Some(0)] {
+            let capacity = Resolver::undisclosed(configured).resolve("gpt-4o").await;
+
+            assert_eq!(capacity.source, Source::Unknown, "{configured:?}");
+            assert_eq!(capacity.limit, None, "{configured:?}");
+            assert_eq!(capacity.ollama, None, "{configured:?}");
+        }
+    }
 
     async fn fixture(parameters: Value, running: Value, shown: Value) -> (MockServer, Resolver) {
         let server = MockServer::start().await;
@@ -692,6 +781,89 @@ mod tests {
         let capacity = resolver.resolve("alias").await;
         assert!(capacity.reasoning);
         assert_eq!(capacity.ollama, None);
+    }
+
+    #[tokio::test]
+    async fn ollama_vision_capability_is_read_from_the_same_show_response() {
+        let (server, resolver) = fixture(
+            json!({"model":"ollama_chat/native:latest"}),
+            json!({"models":[]}),
+            json!({
+                "capabilities": ["completion", "vision"],
+                "model_info": {"general.architecture":"gemma3","gemma3.context_length":16384}
+            }),
+        )
+        .await;
+        assert_eq!(resolver.resolve("alias").await.vision, Some(true));
+        let shows = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path() == "/api/show")
+            .count();
+        assert_eq!(shows, 1, "Vision must not cost a second /api/show");
+    }
+
+    #[tokio::test]
+    async fn a_text_only_ollama_model_reports_no_vision() {
+        let (_server, resolver) = fixture(
+            json!({"model":"ollama_chat/native:latest"}),
+            json!({"models":[]}),
+            json!({
+                "capabilities": ["completion", "tools"],
+                "model_info": {"general.architecture":"qwen3","qwen3.context_length":16384}
+            }),
+        )
+        .await;
+        assert_eq!(resolver.resolve("alias").await.vision, Some(false));
+    }
+
+    #[tokio::test]
+    async fn vision_is_unknown_without_capabilities() {
+        let (_server, resolver) = fixture(
+            json!({"model":"ollama_chat/native:latest"}),
+            json!({"models":[]}),
+            json!({"model_info": {"general.architecture":"qwen3","qwen3.context_length":16384}}),
+        )
+        .await;
+        assert_eq!(resolver.resolve("alias").await.vision, None);
+    }
+
+    #[tokio::test]
+    async fn vision_is_unknown_for_a_provider_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(path("/v2/model/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data":[{
+                    "model_name":"alias",
+                    "litellm_params":{"model":"openai/remote"},
+                    "model_info":{"max_input_tokens":128000}
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let resolver = Resolver::new(&server.uri(), "key", &server.uri());
+        assert_eq!(resolver.resolve("alias").await.vision, None);
+    }
+
+    #[test]
+    fn vision_is_unknown_for_an_unknown_capacity() {
+        assert_eq!(Capacity::unknown("auto", "unresolved").vision, None);
+    }
+
+    #[test]
+    fn vision_is_only_the_engine_declared_capability() {
+        assert_eq!(
+            ollama_vision(&json!({"capabilities":["vision"]})),
+            Some(true)
+        );
+        assert_eq!(
+            ollama_vision(&json!({"capabilities":["completion"]})),
+            Some(false)
+        );
+        assert_eq!(ollama_vision(&json!({"capabilities":null})), None);
+        assert_eq!(ollama_vision(&json!({})), None);
     }
 
     #[test]

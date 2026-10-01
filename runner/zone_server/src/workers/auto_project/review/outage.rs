@@ -21,6 +21,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 use dashmap::DashMap;
 use uuid::Uuid;
 
+use super::model;
+use crate::services::endpoint::Origin;
+
 /// Unanswered attempts after which a task asks its next reviewer, and which a
 /// streak needs before it can pause a task.
 pub const ATTEMPTS: u32 = 5;
@@ -73,7 +76,7 @@ impl Outage {
 
 /// Why a task waits for a person once no reviewer in its lineup answered, in
 /// the words of the last failure.
-pub fn reason(streaks: &[(&str, Outage)], failure: &str) -> String {
+pub fn reason(streaks: &[(&str, Outage)], failure: &str, origin: Origin) -> String {
     match streaks {
         [(reviewer, streak)] => format!(
             "the reviewer model {reviewer} could not be reached on {} attempts over {} minutes; \
@@ -83,12 +86,13 @@ pub fn reason(streaks: &[(&str, Outage)], failure: &str) -> String {
         ),
         _ => format!(
             "no reviewer model could be reached: {}; the last: {failure}. Check that the model \
-             server is running, or name another in ZONE_AUTO_REVIEW_MODELS",
+             server is running, or {}",
             streaks
                 .iter()
                 .map(|(reviewer, streak)| streak.describe(reviewer))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            model::remedy(origin)
         ),
     }
 }
@@ -148,7 +152,7 @@ impl Outages {
 
     /// Why `task` waits for a person, naming every reviewer in `lineup` that
     /// went unanswered.
-    pub fn reason(&self, task: Uuid, lineup: &[String], failure: &str) -> String {
+    pub fn reason(&self, task: Uuid, lineup: &[String], failure: &str, origin: Origin) -> String {
         let streaks: Vec<(&str, Outage)> = lineup
             .iter()
             .filter_map(|reviewer| {
@@ -156,7 +160,7 @@ impl Outages {
                     .map(|streak| (reviewer.as_str(), streak))
             })
             .collect();
-        reason(&streaks, failure)
+        reason(&streaks, failure, origin)
     }
 
     /// End `task`'s streaks: a reviewer answered, or a person was told.
@@ -328,7 +332,11 @@ mod tests {
         };
 
         assert_eq!(
-            reason(&[("qwen3:32b", streak)], "connection refused"),
+            reason(
+                &[("qwen3:32b", streak)],
+                "connection refused",
+                Origin::Instance
+            ),
             "the reviewer model qwen3:32b could not be reached on 7 attempts over 12 minutes; the \
              last: connection refused. Check that the model server is running"
         );
@@ -348,10 +356,34 @@ mod tests {
         };
 
         assert_eq!(
-            reason(&[("gemma3:27b", first), ("qwen3:32b", second)], "HTTP 503"),
+            reason(
+                &[("gemma3:27b", first), ("qwen3:32b", second)],
+                "HTTP 503",
+                Origin::Instance
+            ),
             "no reviewer model could be reached: gemma3:27b on 5 attempts over 40 minutes, \
              qwen3:32b on 6 attempts over 11 minutes; the last: HTTP 503. Check that the model \
              server is running, or name another in ZONE_AUTO_REVIEW_MODELS"
+        );
+    }
+
+    #[test]
+    fn a_saved_endpoint_s_pause_points_at_ai_settings() {
+        let streak = Outage {
+            attempts: 5,
+            since: at(0),
+            last: at(40),
+        };
+
+        let reason = reason(
+            &[("gemma3:27b", streak), ("qwen3:32b", streak)],
+            "HTTP 503",
+            Origin::Settings,
+        );
+
+        assert!(
+            reason.ends_with("or set the Fast/Reasoning model in AI Settings"),
+            "{reason}"
         );
     }
 }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
-use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message, Role};
+use zone_core::llm::{LlmBackend, LlmClient, Message, Role};
 
 use crate::agent::prompt::{self, Environment};
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
@@ -16,12 +16,15 @@ use crate::db::knowledge::not_memory;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::backend;
 use crate::services::completion_tokens::merge_stops;
+use crate::services::endpoint::Endpoint;
 use crate::state::AppState;
 use zone_chat::{capacity, history};
 use zone_search::client::SearchContext;
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
+const TEMPERATURE: f32 = 0.7;
 const SEARCH: &str = "supplement:search";
+pub const WITHHELD_IMAGE: &str = "[An image is omitted here because this model can't view images.]";
 
 fn parse_timeout(seconds: u64) -> Result<Duration, String> {
     let timeout = Duration::from_secs(seconds);
@@ -101,6 +104,8 @@ pub struct RunContext {
     pub reason: Option<String>,
     pub incomplete: bool,
     pub artifacts: Option<(PathBuf, Uuid, Uuid)>,
+    /// False only when the engine declared the model cannot read images.
+    pub vision: bool,
 }
 
 impl RunContext {
@@ -128,6 +133,7 @@ impl RunContext {
             reason: None,
             incomplete: false,
             artifacts: None,
+            vision: true,
         }
     }
 
@@ -195,6 +201,12 @@ impl RunContext {
 
     /// Resolve protected images on a transport copy, never in canonical replay/hash fields.
     pub async fn transport(&self, messages: &mut [Message]) -> Result<(), String> {
+        if !self.vision {
+            messages
+                .iter_mut()
+                .filter(|message| !message.images.is_empty())
+                .for_each(withhold_images);
+        }
         for message in messages {
             for image in &mut message.images {
                 if !image.starts_with("/api/artifacts/") {
@@ -236,6 +248,20 @@ impl RunContext {
     }
 }
 
+fn withhold_images(message: &mut Message) {
+    message.images.clear();
+    message.content = Some(match message.content.take() {
+        Some(content) if !content.is_empty() => format!("{content}\n\n{WITHHELD_IMAGE}"),
+        _ => WITHHELD_IMAGE.into(),
+    });
+}
+
+/// An `auto` name is resolved later by whoever serves it, so only a concrete
+/// model the engine declared text-only loses its images.
+pub fn sees_images(model: &str, vision: Option<bool>) -> bool {
+    crate::services::stages::is_auto(model) || vision != Some(false)
+}
+
 #[derive(Clone)]
 pub enum Mode {
     Preview,
@@ -255,6 +281,7 @@ pub struct Preparation {
     pub tools: ChatTools,
     pub context: RunContext,
     pub llm: LlmClient,
+    pub endpoint: Endpoint,
     pub stop: Vec<String>,
     pub budget: LoopBudget,
     pub timeout: Duration,
@@ -278,18 +305,13 @@ pub async fn build(
     user: Uuid,
     pending: Option<(&str, Option<&Value>)>,
     mode: Mode,
+    endpoint: Endpoint,
 ) -> Result<Preparation, String> {
     let workspace = chat
         .workspace_id
         .ok_or("Chat has no workspace association")?;
     let settings = &state.config().chat;
     let store = Store::new(state.db().clone(), chat.id, Some(workspace));
-    let resolver = capacity::Resolver::with_context(
-        &state.config().litellm_host,
-        &state.config().litellm_key,
-        &state.config().ollama_host,
-        Some(settings.context),
-    );
     let scope = WorkspaceScope {
         state: state.clone(),
         workspace_id: workspace,
@@ -303,8 +325,14 @@ pub async fn build(
             ChatTools::preview(scope).await
         }
     };
+    let resolver = endpoint.capacity(state.config());
     let (history, capacity, tools) =
         tokio::join!(store.load(), resolver.resolve(&chat.model_name), catalog);
+    if matches!(mode, Mode::Generation(_)) {
+        endpoint
+            .model(&chat.model_name)
+            .map_err(|error| error.to_string())?;
+    }
     let history = history.map_err(|error| error.to_string())?;
     // A planner chat carries the two calls that end its interview until it
     // has made its project; after that it is a chat about the project.
@@ -454,14 +482,12 @@ pub async fn build(
             .map(|card| card.stop_sequences.as_slice())
             .unwrap_or(&[]),
     );
-    let mut llm = LlmClient::new(LlmConfig {
-        base_url: state.config().litellm_host.clone(),
-        api_key: state.config().litellm_key.clone(),
-        default_model: chat.model_name.clone(),
-        temperature: 0.7,
-        max_tokens: policy.reserved,
+    let mut llm = LlmClient::new(endpoint.llm(
+        chat.model_name.clone(),
+        TEMPERATURE,
+        policy.reserved,
         backend,
-    })
+    ))
     .with_stop(stop.clone());
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(&chat.model_name, limit);
@@ -480,6 +506,7 @@ pub async fn build(
             workspace,
             chat.id,
         )),
+        vision: sees_images(&chat.model_name, capacity.vision),
     };
     context.search(&SearchContext::new(&state.config().web_search));
     Ok(Preparation {
@@ -490,6 +517,7 @@ pub async fn build(
         tools,
         context,
         llm,
+        endpoint,
         stop,
         budget: settings.budget(),
         timeout: settings.timeout,
@@ -764,6 +792,97 @@ mod tests {
         assert_eq!(settings.budget(), LoopBudget::chat());
     }
 
+    const PIXEL: &str = "data:image/png;base64,iVBORw0KGgo=";
+
+    fn illustrated() -> RunContext {
+        let mut described = Message::user("What is in this picture?");
+        described.images = vec![PIXEL.into()];
+        let mut bare = Message::user("");
+        bare.images = vec![PIXEL.into()];
+        let mut screenshot = Message::tool_result("call-1", "Captured the page.");
+        screenshot.images = vec![PIXEL.into()];
+        RunContext::from_messages(vec![
+            Message::system("Be helpful."),
+            described,
+            bare,
+            screenshot,
+            Message::user("Hello"),
+        ])
+    }
+
+    fn transported(context: &RunContext) -> Vec<Message> {
+        context
+            .entries
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn transport_drops_images_for_a_model_without_vision() {
+        let mut context = illustrated();
+        context.vision = false;
+        let mut messages = transported(&context);
+        context.transport(&mut messages).await.unwrap();
+
+        assert!(messages.iter().all(|message| message.images.is_empty()));
+        assert_eq!(
+            messages[1].content.as_deref(),
+            Some(format!("What is in this picture?\n\n{WITHHELD_IMAGE}").as_str())
+        );
+        assert_eq!(messages[2].content.as_deref(), Some(WITHHELD_IMAGE));
+        assert_eq!(
+            messages[3].content.as_deref(),
+            Some(format!("Captured the page.\n\n{WITHHELD_IMAGE}").as_str())
+        );
+        assert_eq!(messages[4].content.as_deref(), Some("Hello"));
+        assert_eq!(messages[0].content.as_deref(), Some("Be helpful."));
+        let body = serde_json::to_string(&messages).unwrap();
+        assert!(!body.contains("image_url"), "{body}");
+        assert!(
+            context
+                .entries
+                .iter()
+                .filter(|entry| !entry.message.images.is_empty())
+                .count()
+                == 3,
+            "Canonical history must keep its images for a later vision model"
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_keeps_images_for_a_vision_model() {
+        let context = illustrated();
+        assert!(context.vision);
+        let mut messages = transported(&context);
+        context.transport(&mut messages).await.unwrap();
+
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.images == [PIXEL])
+                .count(),
+            3
+        );
+        let body = serde_json::to_string(&messages).unwrap();
+        assert!(body.contains("image_url"), "{body}");
+        assert!(!body.contains(WITHHELD_IMAGE), "{body}");
+    }
+
+    #[test]
+    fn only_a_declared_text_only_model_loses_its_images() {
+        assert!(!sees_images("qwen3:8b", Some(false)));
+        assert!(sees_images("qwen3:8b", None));
+        assert!(sees_images("gemma3:4b", Some(true)));
+    }
+
+    #[test]
+    fn an_auto_model_keeps_its_images() {
+        assert!(sees_images(crate::services::stages::AUTO, Some(false)));
+        assert!(sees_images("", Some(false)));
+        assert!(sees_images("Auto", None));
+    }
+
     /// The wiring proof for the whole builder: whichever of the four arms runs,
     /// a character card prefixes the assembled text, the boundary section is
     /// present, and the web-search capability tail follows the assembled
@@ -1002,6 +1121,73 @@ mod tests {
         {
             let error = parse_timeout(u64::MAX).expect_err("overflowing deadline");
             assert!(error.contains("ZONE_CHAT_TIMEOUT_SECONDS"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_saved_endpoint_with_no_model_refuses_a_turn_but_still_previews() {
+        use crate::db::{chats, organizations, workspaces};
+        use crate::services::endpoint;
+        use crate::services::stages::AUTO;
+        use sqlx::PgPool;
+        use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+
+        const GATEWAY: &str = "http://127.0.0.1:9";
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        )
+        .await
+        .expect("the test database");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let organization = organizations::create_organization(&pool, "Unset", &suffix, None)
+            .await
+            .expect("an organization");
+        let workspace =
+            workspaces::create_workspace(&pool, organization.id, "Unset", &suffix, None)
+                .await
+                .expect("a workspace");
+        sqlx::query(
+            "INSERT INTO organization_ai_settings (organization_id, provider, litellm_host, completions_routed) VALUES ($1, $2, $3, true)",
+        )
+        .bind(organization.id)
+        .bind(PROVIDER_SELF_HOSTED)
+        .bind(GATEWAY)
+        .execute(&pool)
+        .await
+        .expect("the organization's AI settings");
+        let chat = chats::create_chat(&pool, Some(workspace.id), "Unset", AUTO, false, false)
+            .await
+            .expect("a chat on automatic model selection");
+        let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+        let user = Uuid::new_v4();
+        let endpoint = crate::services::route::Route::for_workspace(&state, workspace.id)
+            .await
+            .into_endpoint()
+            .expect("a usable route");
+
+        let turn = build(
+            &state,
+            &chat,
+            user,
+            None,
+            Mode::Generation(LlmBackend::Http),
+            endpoint.clone(),
+        )
+        .await;
+        let preview = build(&state, &chat, user, None, Mode::Preview, endpoint).await;
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .expect("the organization to be removed");
+
+        assert_eq!(
+            turn.err(),
+            Some(endpoint::Error::ModelUnset.to_string()),
+            "a turn on a saved endpoint with no model must tell the reader to set one"
+        );
+        if let Err(error) = preview {
+            panic!("the context meter must still preview a chat with no model: {error}");
         }
     }
 }

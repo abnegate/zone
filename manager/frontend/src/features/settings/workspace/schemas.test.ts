@@ -25,6 +25,7 @@ describe('workspace AI settings schemas', () => {
     model_image: null,
     model_video: null,
     model_audio: null,
+    completions_routed: true,
   };
 
   it.each(['claude_code', 'codex'])('accepts a %s workspace override', (provider) => {

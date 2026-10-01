@@ -46,6 +46,7 @@ export default function OrgSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
 
   const [provider, setProvider] = useState<AiProvider>('self_hosted');
@@ -53,6 +54,7 @@ export default function OrgSettingsPage() {
   const [credentials, setCredentials] = useState<ProviderCredentials>(emptyCredentials);
   const [configured, setConfigured] = useState<ProviderConfigured>(nothingConfigured);
   const [models, setModels] = useState<ModelSelection>(emptyModels);
+  const [saved, setSaved] = useState<AiSettings | null>(null);
 
   const agent = agentOf(provider);
   const agents = useAgentStatuses(currentOrganization?.id ?? null, agent !== null);
@@ -63,6 +65,7 @@ export default function OrgSettingsPage() {
     setCredentials(credentialsFromSettings(settings));
     setConfigured(configuredFromSettings(settings));
     setModels(modelsFromSettings(settings));
+    setSaved(settings);
   }, []);
 
   const loadSettings = useCallback(async () => {
@@ -99,13 +102,15 @@ export default function OrgSettingsPage() {
     setSaving(true);
     setError(null);
     setSuccess(null);
+    setNotice(null);
 
     try {
       const settings = await client.updateOrgAiSettings(
         currentOrganization.id,
-        buildAiSettingsRequest(provider, credentials, models)
+        buildAiSettingsRequest(provider, credentials, models, saved)
       );
       applySettingsToForm(settings);
+      setNotice(settings.notice ?? null);
       flash('Settings saved successfully');
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'Failed to save settings');
@@ -120,10 +125,12 @@ export default function OrgSettingsPage() {
     setSaving(true);
     setError(null);
     setSuccess(null);
+    setNotice(null);
 
     try {
       const settings = await client.resetOrgAiSettings(currentOrganization.id);
       applySettingsToForm(settings);
+      setNotice(settings.notice ?? null);
       flash('Settings reset to defaults');
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'Failed to reset settings');
@@ -171,6 +178,7 @@ export default function OrgSettingsPage() {
     <SettingsPage title={TITLE} tabs={tabs} value={activeTab} onValueChange={selectTab}>
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
+      {notice && <div className="alert alert-warning">{notice}</div>}
 
       <TabsContent value="members">
         <OrgMembersSection orgId={currentOrganization.id} />
@@ -198,6 +206,7 @@ export default function OrgSettingsPage() {
           <div className="settings-card">
             <h3 className="card-title">Provider</h3>
             <AiProviderFields
+              level="organization"
               provider={provider}
               onProviderChange={(next) => {
                 setProvider(next);
@@ -208,6 +217,7 @@ export default function OrgSettingsPage() {
               onChange={(key, value) =>
                 setCredentials((previous) => ({ ...previous, [key]: value }))
               }
+              saved={saved}
             />
             {agent && (
               <AgentSignIn

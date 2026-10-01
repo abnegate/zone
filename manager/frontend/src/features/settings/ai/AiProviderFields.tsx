@@ -1,21 +1,30 @@
 import type { ReactNode } from 'react';
-import type { AiProvider } from '../workspace/types';
+import type { AiProvider, AiSettings, OrganizationKeys } from '../workspace/types';
 import {
   awsRegions,
+  missesOrganizationKey,
+  needsKeyAgain,
   type ProviderConfigured,
   type ProviderCredentials,
   providerOptions,
+  routingOf,
 } from './options';
+import type { SettingsLevel } from './types';
 
 interface AiProviderFieldsProps {
+  level: SettingsLevel;
   provider: AiProvider;
   onProviderChange: (provider: AiProvider) => void;
   credentials: ProviderCredentials;
   configured: ProviderConfigured;
   onChange: <K extends keyof ProviderCredentials>(key: K, value: ProviderCredentials[K]) => void;
+  saved?: AiSettings | null;
+  organizationKeys?: OrganizationKeys;
 }
 
 const MASK = '••••••••';
+const ENDPOINT_HINT_ID = 'ai-endpoint-hint';
+const REKEY_HINT_ID = 'ai-rekey-hint';
 
 function Field({
   id,
@@ -44,13 +53,132 @@ function Field({
   );
 }
 
+export const UNROUTED_NOTICE =
+  'Saved before completions were routed; save to start sending completions here.';
+export const VERSION_HINT =
+  "A URL naming only a host gets /v1 added. End it with / to use the host's root, or give a path to use it as saved.";
+export const AUTOMATIC_HINT =
+  'Automatic needs a Fast or Reasoning model when completions go to a saved endpoint.';
+export const REKEY_HINT = 'Changing the URL needs the key again';
+export const KEYLESS_WORKSPACE_WARNING =
+  "This workspace host has no key of its own, and the organization's key never goes to it. Enter a key if the host needs one.";
+
+interface EndpointKeyProps {
+  id: string;
+  label: string;
+  value: string;
+  placeholder: string;
+  configured: boolean;
+  optional?: boolean;
+  rekey: boolean;
+  onChange: (value: string) => void;
+}
+
+function EndpointKey({
+  id,
+  label,
+  value,
+  placeholder,
+  configured,
+  optional,
+  rekey,
+  onChange,
+}: EndpointKeyProps) {
+  return (
+    <Field id={id} label={label} configured={configured} optional={optional && !rekey}>
+      <input
+        type="password"
+        id={id}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={configured ? MASK : placeholder}
+        required={rekey}
+        aria-describedby={rekey ? REKEY_HINT_ID : undefined}
+        className="form-input"
+      />
+      {rekey && (
+        <p id={REKEY_HINT_ID} className="form-hint">
+          {REKEY_HINT}
+        </p>
+      )}
+    </Field>
+  );
+}
+
+interface EndpointHintsProps {
+  level: SettingsLevel;
+  provider: AiProvider;
+  credentials: ProviderCredentials;
+  configured: ProviderConfigured;
+  saved: AiSettings | null;
+  organizationKeys: OrganizationKeys | undefined;
+}
+
+function EndpointHints({
+  level,
+  provider,
+  credentials,
+  configured,
+  saved,
+  organizationKeys,
+}: EndpointHintsProps) {
+  const routing = routingOf(saved, provider);
+  const keyless =
+    level === 'workspace' &&
+    organizationKeys !== undefined &&
+    missesOrganizationKey(provider, credentials, configured, organizationKeys);
+  return (
+    <div id={ENDPOINT_HINT_ID} className="form-group form-group--full">
+      {routing === 'pending' && (
+        <div className="alert alert-warning" role="status">
+          {UNROUTED_NOTICE}
+        </div>
+      )}
+      {routing === 'routed' && (
+        <p className="form-hint">
+          Chats, task runs and background work in this {level} send completions here.
+        </p>
+      )}
+      <p className="form-hint">{VERSION_HINT}</p>
+      <p className="form-hint">{AUTOMATIC_HINT}</p>
+      {provider === 'anthropic' && (
+        <p className="form-hint">Completions go through Anthropic's OpenAI-compatible endpoint.</p>
+      )}
+      {level === 'workspace' && (
+        <p className="form-hint">
+          A workspace host needs its own key; it never receives the organization's.
+        </p>
+      )}
+      {keyless && (
+        <div className="alert alert-warning" role="status">
+          {KEYLESS_WORKSPACE_WARNING}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AiProviderFields({
+  level,
   provider,
   onProviderChange,
   credentials,
   configured,
   onChange,
+  saved = null,
+  organizationKeys,
 }: AiProviderFieldsProps) {
+  const rekey = needsKeyAgain(provider, credentials, configured, saved);
+  const hints = (
+    <EndpointHints
+      level={level}
+      provider={provider}
+      credentials={credentials}
+      configured={configured}
+      saved={saved}
+      organizationKeys={organizationKeys}
+    />
+  );
   return (
     <div className="form-grid">
       <Field id="ai-provider" label="AI Provider" full>
@@ -76,35 +204,36 @@ export function AiProviderFields({
               id="litellm-host"
               value={credentials.litellmHost}
               onChange={(event) => onChange('litellmHost', event.target.value)}
-              placeholder="http://localhost:11434"
+              placeholder="http://litellm:4000"
+              aria-describedby={ENDPOINT_HINT_ID}
               className="form-input"
             />
           </Field>
-          <Field id="litellm-key" label="LiteLLM API Key" configured={configured.litellm} optional>
-            <input
-              type="password"
-              id="litellm-key"
-              value={credentials.litellmKey}
-              onChange={(event) => onChange('litellmKey', event.target.value)}
-              placeholder={configured.litellm ? MASK : 'Enter API key'}
-              className="form-input"
-            />
-          </Field>
+          <EndpointKey
+            id="litellm-key"
+            label="LiteLLM API Key"
+            value={credentials.litellmKey}
+            placeholder="Enter API key"
+            configured={configured.litellm}
+            optional
+            rekey={rekey}
+            onChange={(value) => onChange('litellmKey', value)}
+          />
+          {hints}
         </>
       )}
 
       {provider === 'openai' && (
         <>
-          <Field id="openai-key" label="OpenAI API Key" configured={configured.openai}>
-            <input
-              type="password"
-              id="openai-key"
-              value={credentials.openaiApiKey}
-              onChange={(event) => onChange('openaiApiKey', event.target.value)}
-              placeholder={configured.openai ? MASK : 'sk-...'}
-              className="form-input"
-            />
-          </Field>
+          <EndpointKey
+            id="openai-key"
+            label="OpenAI API Key"
+            value={credentials.openaiApiKey}
+            placeholder="sk-..."
+            configured={configured.openai}
+            rekey={rekey}
+            onChange={(value) => onChange('openaiApiKey', value)}
+          />
           <Field id="openai-base-url" label="Base URL" optional>
             <input
               type="text"
@@ -112,34 +241,37 @@ export function AiProviderFields({
               value={credentials.openaiBaseUrl}
               onChange={(event) => onChange('openaiBaseUrl', event.target.value)}
               placeholder="https://api.openai.com/v1"
+              aria-describedby={ENDPOINT_HINT_ID}
               className="form-input"
             />
           </Field>
+          {hints}
         </>
       )}
 
       {provider === 'anthropic' && (
         <>
-          <Field id="anthropic-key" label="Anthropic API Key" configured={configured.anthropic}>
-            <input
-              type="password"
-              id="anthropic-key"
-              value={credentials.anthropicApiKey}
-              onChange={(event) => onChange('anthropicApiKey', event.target.value)}
-              placeholder={configured.anthropic ? MASK : 'sk-ant-...'}
-              className="form-input"
-            />
-          </Field>
+          <EndpointKey
+            id="anthropic-key"
+            label="Anthropic API Key"
+            value={credentials.anthropicApiKey}
+            placeholder="sk-ant-..."
+            configured={configured.anthropic}
+            rekey={rekey}
+            onChange={(value) => onChange('anthropicApiKey', value)}
+          />
           <Field id="anthropic-base-url" label="Base URL" optional>
             <input
               type="text"
               id="anthropic-base-url"
               value={credentials.anthropicBaseUrl}
               onChange={(event) => onChange('anthropicBaseUrl', event.target.value)}
-              placeholder="https://api.anthropic.com"
+              placeholder="https://api.anthropic.com/v1"
+              aria-describedby={ENDPOINT_HINT_ID}
               className="form-input"
             />
           </Field>
+          {hints}
           <div className="alert alert-warning">
             Anthropic does not provide embedding models. Use a different provider for embeddings.
           </div>
@@ -197,6 +329,9 @@ export function AiProviderFields({
               </Field>
             </>
           )}
+          <div className="alert alert-warning">
+            Bedrock completions still use the server's default endpoint for now.
+          </div>
         </>
       )}
     </div>

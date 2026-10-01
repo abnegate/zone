@@ -149,6 +149,7 @@ export const AiSettingsSchema = z.object({
   model_image: z.string().nullable(),
   model_video: z.string().nullable(),
   model_audio: z.string().nullable(),
+  completions_routed: z.boolean(),
 });
 
 export const UpdateAiSettingsRequestSchema = z.object({
@@ -190,10 +191,26 @@ export const AiSettingsResponseSchema = z.object({
   model_image: z.string().nullable(),
   model_video: z.string().nullable(),
   model_audio: z.string().nullable(),
+  completions_routed: z.boolean(),
+});
+
+export const OrganizationAiSettingsSaveSchema = AiSettingsResponseSchema.extend({
+  notice: z.string().optional(),
+});
+
+export const OrganizationAiSettingsResetSchema = z.object({
+  notice: z.string(),
+});
+
+export const OrganizationKeysSchema = z.object({
+  litellm: z.boolean(),
+  openai: z.boolean(),
+  anthropic: z.boolean(),
 });
 
 export const WorkspaceAiSettingsResponseSchema = AiSettingsResponseSchema.extend({
   overrides: z.boolean(),
+  organization_keys: OrganizationKeysSchema,
 });
 
 export type WorkspaceZ = z.infer<typeof WorkspaceSchema>;

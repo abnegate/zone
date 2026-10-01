@@ -10,15 +10,18 @@ use uuid::Uuid;
 
 use serde_json::{Value, json};
 
-use crate::db::{ai_settings, projects, tasks, workspaces};
+use crate::config::Config;
+use crate::db::{projects, tasks};
 use crate::services::backend;
 use crate::services::checkout::{Baseline, Repository};
+use crate::services::endpoint::{Endpoint, Error as EndpointError};
+use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
 use crate::workers::conflict::agent::ModelRepairAgent;
 use crate::workers::conflict::{RepairOutcome, RepairRequest, repair};
 use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
-use zone_core::llm::{LlmBackend, LlmClient, LlmConfig, Message};
+use zone_core::llm::{LlmBackend, LlmClient, Message};
 use zone_vcs::conflict::{BranchName, ConflictService};
 use zone_vcs::git::GitService;
 use zone_vcs::pull_request::{Description, PrService, PullRequestReception};
@@ -571,26 +574,32 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         _ => return RepairOutcome::Failed("Branch names are not repairable".to_string()),
     };
 
-    let Some(backend) = repair_backend(
-        backend::for_workspace(state, task.workspace_id).await,
+    let route = Route::for_workspace(state, task.workspace_id).await;
+    let resolved = route.backend(state).await;
+    let (backend, route) = match repair_route(
+        route,
+        resolved,
         backend::instance(state.config()),
-    ) else {
-        return RepairOutcome::Failed(NO_REPAIR_BACKEND.to_string());
+        state.config(),
+    ) {
+        Ok(chosen) => chosen,
+        Err(reason) => return RepairOutcome::Failed(reason),
     };
-    let model = repair_model(state, &task, &backend).await;
+    let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    let endpoint = match route.into_endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(unusable) => return RepairOutcome::Failed(unusable.to_string()),
+    };
+    let model = match repair_model(state, &task, &backend, &endpoint, &preferences).await {
+        Ok(model) => model,
+        Err(error) => return RepairOutcome::Failed(error.to_string()),
+    };
     let repairer = ModelRepairAgent::new(
-        LlmClient::new(LlmConfig {
-            base_url: state.config().litellm_host.clone(),
-            api_key: state.config().litellm_key.clone(),
-            default_model: model.clone(),
-            temperature: REPAIR_TEMPERATURE,
-            max_tokens: REPAIR_TOKENS,
-            backend,
-        }),
+        LlmClient::new(endpoint.llm(model.clone(), REPAIR_TEMPERATURE, REPAIR_TOKENS, backend)),
         model,
     );
 
-    repair(
+    let outcome = repair(
         &ConflictService::new(),
         &repairer,
         &RepairRequest {
@@ -603,7 +612,11 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
             pull_request: task.pr_url.clone(),
         },
     )
-    .await
+    .await;
+    match outcome {
+        RepairOutcome::Failed(reason) => RepairOutcome::Failed(endpoint.scrub(&reason)),
+        outcome => outcome,
+    }
 }
 
 /// Attempt a repair and say what came of it, without letting the outcome change
@@ -673,38 +686,24 @@ async fn subject(state: &AppState, task: &tasks::TaskRow, report: &str) -> Subje
 }
 
 async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Option<Subject> {
-    let backend = backend::for_workspace(state, task.workspace_id)
-        .await
-        .ok()?;
-    let catalog = stages::Catalog::for_backend(&state.config().ollama_host, &backend).await;
-    let settings = match workspaces::get_workspace(state.db(), task.workspace_id).await {
-        Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
-            state.db(),
-            workspace.organization_id,
-            task.workspace_id,
-        )
-        .await
-        .ok(),
-        _ => None,
-    };
-    let preferences = stages::Preferences::from_optional_settings(
-        settings.as_ref(),
-        &state.config().comfyui.classifier_model,
-    );
+    let route = Route::for_workspace(state, task.workspace_id).await;
+    if let Err(unusable) = route.endpoint() {
+        tracing::warn!(task_id = %task.id, %unusable, "Naming the change without a model");
+        return None;
+    }
+    let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    let backend = route.backend(state).await.ok()?;
+    let endpoint = route.into_endpoint().ok()?;
+    let catalog = endpoint
+        .catalog(&state.config().ollama_host, &backend)
+        .await;
     let model = stages::summary_model(
         &preferences,
         &catalog,
         task.model_name.as_deref().unwrap_or(stages::AUTO),
     )?;
 
-    let client = LlmClient::new(LlmConfig {
-        base_url: state.config().litellm_host.clone(),
-        api_key: state.config().litellm_key.clone(),
-        default_model: model,
-        temperature: SUBJECT_TEMPERATURE,
-        max_tokens: SUBJECT_TOKENS,
-        backend,
-    });
+    let client = LlmClient::new(endpoint.llm(model, SUBJECT_TEMPERATURE, SUBJECT_TOKENS, backend));
     let messages = [
         Message::system(SUBJECT_INSTRUCTIONS),
         Message::user(format!(
@@ -716,44 +715,46 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
     Subject::parse(response.choices.first()?.message.content.as_deref()?)
 }
 
-fn repair_backend(
+/// Where a repair's turns go: the workspace's endpoint when it runs over HTTP,
+/// else the instance's own endpoint, when the instance runs over HTTP. The
+/// instance's key only ever goes to the instance's host, and a workspace whose
+/// saved endpoint cannot be used is never repaired on the instance instead.
+fn repair_route(
+    route: Route,
     resolved: Result<LlmBackend, backend::Error>,
     instance: LlmBackend,
-) -> Option<LlmBackend> {
+    config: &Config,
+) -> Result<(LlmBackend, Route), String> {
     match resolved {
-        Ok(LlmBackend::Http) => Some(LlmBackend::Http),
-        Ok(LlmBackend::Cli { .. }) | Err(_) => {
-            matches!(instance, LlmBackend::Http).then_some(instance)
-        }
+        Ok(LlmBackend::Http) => Ok((LlmBackend::Http, route)),
+        Err(backend::Error::Unusable(unusable)) => Err(unusable.to_string()),
+        Ok(LlmBackend::Cli { .. }) | Err(_) => match instance {
+            LlmBackend::Http => Ok((instance, route.on_instance(config))),
+            LlmBackend::Cli { .. } => Err(NO_REPAIR_BACKEND.to_string()),
+        },
     }
 }
 
 /// The model a repair runs on: the one the task itself ran on, resolved the same
 /// way, because the branch being repaired is that run's own work.
-async fn repair_model(state: &AppState, task: &tasks::TaskRow, backend: &LlmBackend) -> String {
-    let catalog = stages::Catalog::for_backend(&state.config().ollama_host, backend).await;
-    let settings = match workspaces::get_workspace(state.db(), task.workspace_id).await {
-        Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
-            state.db(),
-            workspace.organization_id,
-            task.workspace_id,
-        )
-        .await
-        .ok(),
-        _ => None,
-    };
-
-    stages::chat_model(
+async fn repair_model(
+    state: &AppState,
+    task: &tasks::TaskRow,
+    backend: &LlmBackend,
+    endpoint: &Endpoint,
+    preferences: &stages::Preferences,
+) -> Result<String, EndpointError> {
+    let catalog = endpoint.catalog(&state.config().ollama_host, backend).await;
+    let model = stages::chat_model(
         task.model_name.as_deref().unwrap_or(stages::AUTO),
-        &stages::Preferences::from_optional_settings(
-            settings.as_ref(),
-            &state.config().comfyui.classifier_model,
-        ),
+        preferences,
         &catalog,
         &format!("{}\n\n{}", task.title, task.description),
         false,
         true,
-    )
+    );
+    endpoint.model(&model)?;
+    Ok(model)
 }
 
 /// The first linked project's repository token, opened from how it is stored.
@@ -834,36 +835,204 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_repair_runs_over_the_instances_endpoint_or_not_at_all() {
-        fn claude() -> LlmBackend {
-            LlmBackend::cli(
-                zone_core::llm::AgentKind::Claude,
-                zone_core::llm::CliSettings::default(),
-            )
-        }
-        fn signed_out() -> Result<LlmBackend, backend::Error> {
-            Err(backend::Error::SignedOut {
-                agent: zone_core::llm::AgentKind::Claude,
-            })
-        }
+    fn claude() -> LlmBackend {
+        LlmBackend::cli(
+            zone_core::llm::AgentKind::Claude,
+            zone_core::llm::CliSettings::default(),
+        )
+    }
 
-        for resolved in [Ok(LlmBackend::Http), Ok(claude()), signed_out()] {
-            assert!(
-                matches!(
-                    repair_backend(resolved, LlmBackend::Http),
-                    Some(LlmBackend::Http)
-                ),
-                "the instance has an endpoint, so a repair runs on it whatever the workspace chose"
+    fn signed_out() -> Result<LlmBackend, backend::Error> {
+        Err(backend::Error::SignedOut {
+            agent: zone_core::llm::AgentKind::Claude,
+        })
+    }
+
+    const INSTANCE_KEY: &str = "sk-instance-0123456789";
+    const ORGANIZATION_KEY: &str = "sk-organization-0123456789";
+
+    fn instance_config(host: &str) -> Config {
+        Config {
+            litellm_host: host.to_string(),
+            litellm_key: INSTANCE_KEY.to_string(),
+            ollama_host: "http://127.0.0.1:9".to_string(),
+            ..crate::state::test_config()
+        }
+    }
+
+    /// A workspace whose organization saved an OpenAI endpoint.
+    fn saved(config: &Config) -> Route {
+        let mut settings = crate::services::endpoint::testing::settings(
+            zone_context::embeddings::providers::PROVIDER_OPENAI,
+        );
+        settings.openai_base_url = Some("https://organization.example/v1".to_string());
+        settings.openai_api_key = Some(zone_core::secret::SecretValue::new(
+            ORGANIZATION_KEY.to_string(),
+        ));
+        Route::new(config, Uuid::new_v4(), Uuid::new_v4(), settings)
+    }
+
+    #[test]
+    fn a_repair_runs_over_the_workspaces_endpoint_or_the_instances_or_not_at_all() {
+        let config = instance_config("http://litellm:4000");
+
+        let (backend, route) = repair_route(
+            saved(&config),
+            Ok(LlmBackend::Http),
+            LlmBackend::Http,
+            &config,
+        )
+        .expect("a workspace on an endpoint repairs over it");
+        assert!(matches!(backend, LlmBackend::Http));
+        let endpoint = route.endpoint().expect("a usable route");
+        assert_eq!(endpoint.url(), "https://organization.example/v1");
+        assert_eq!(endpoint.key().expose(), ORGANIZATION_KEY);
+
+        for resolved in [Ok(claude()), signed_out()] {
+            let (backend, route) =
+                repair_route(saved(&config), resolved, LlmBackend::Http, &config)
+                    .expect("the instance has an endpoint, so a repair runs on it");
+            assert_eq!(
+                route.preferences("qwen2.5:3b").scope,
+                stages::Scope::Open,
+                "a repair on the instance chose its model as if on the saved endpoint"
+            );
+            let endpoint = route.into_endpoint().expect("the instance's endpoint");
+            assert!(matches!(backend, LlmBackend::Http));
+            assert_eq!(
+                endpoint.url(),
+                config.litellm_host,
+                "a repair that falls back to the instance runs on its host"
+            );
+            assert_eq!(
+                endpoint.key().expose(),
+                INSTANCE_KEY,
+                "the instance's host was handed a key the organization saved for another"
+            );
+            assert_eq!(
+                endpoint.origin(),
+                crate::services::endpoint::Origin::Instance
             );
         }
+
         for resolved in [Ok(claude()), signed_out()] {
-            assert!(
-                repair_backend(resolved, claude()).is_none(),
+            assert_eq!(
+                repair_route(saved(&config), resolved, claude(), &config).err(),
+                Some(NO_REPAIR_BACKEND.to_string()),
                 "a repair was handed to a coding agent CLI, which cannot run its tool loop"
             );
         }
     }
+
+    #[test]
+    fn a_repair_on_an_unusable_endpoint_fails_with_the_reason_rather_than_run_on_the_instance() {
+        let config = Config {
+            endpoint_hosts: crate::services::hosts::Hosts::parse("llm.corp.example"),
+            ..instance_config("http://litellm:4000")
+        };
+        let route = saved(&config);
+        let unusable = route.endpoint().expect_err("the saved host is not listed");
+
+        let refused = repair_route(
+            route,
+            Err(backend::Error::Unusable(unusable)),
+            LlmBackend::Http,
+            &config,
+        );
+
+        assert_eq!(refused.err(), Some(unusable.to_string()));
+        assert!(
+            saved(&config).on_instance(&config).endpoint().is_err(),
+            "an unusable route was moved onto the instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_change_is_named_on_the_endpoint_its_organization_saved() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let named = serde_json::json!({
+            "id": "completion", "object": "chat.completion", "created": 0, "model": "test",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "(feat): add a shopping cart"}, "finish_reason": "stop"}]
+        });
+        let instance = MockServer::start().await;
+        let organization = MockServer::start().await;
+        for server in [&instance, &organization] {
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&named))
+                .mount(server)
+                .await;
+        }
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        )
+        .await
+        .expect("the test database");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let owner = organizations::create_organization(&pool, "Subject endpoint", &suffix, None)
+            .await
+            .expect("an organization");
+        let workspace =
+            workspaces::create_workspace(&pool, owner.id, "Subject endpoint", &suffix, None)
+                .await
+                .expect("a workspace");
+        sqlx::query(
+            "INSERT INTO organization_ai_settings \
+             (organization_id, provider, litellm_host, litellm_key, model_fast, completions_routed) \
+             VALUES ($1, $2, $3, $4, $5, true)",
+        )
+        .bind(owner.id)
+        .bind(zone_context::embeddings::providers::PROVIDER_SELF_HOSTED)
+        .bind(organization.uri())
+        .bind(ORGANIZATION_KEY)
+        .bind("llama3.2:3b")
+        .execute(&pool)
+        .await
+        .expect("the organization's AI settings");
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Add a cart",
+            "Shoppers want to buy more than one item.",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .expect("a task");
+        let state = AppState::new(instance_config(&instance.uri()), pool.clone(), None);
+
+        let subject = classify(&state, &task, "Added a cart to the shop.").await;
+        let sent = organization.received_requests().await.unwrap_or_default();
+        let leaked = instance.received_requests().await.unwrap_or_default();
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(owner.id)
+            .execute(&pool)
+            .await
+            .expect("the organization to be removed");
+
+        assert_eq!(
+            subject.map(|subject| subject.to_string()).as_deref(),
+            Some("(feat): add a shopping cart")
+        );
+        assert_eq!(sent.len(), 1, "the saved endpoint names the change");
+        assert_eq!(
+            sent[0]
+                .headers
+                .get("authorization")
+                .map(|value| value.to_str().unwrap_or_default().to_string()),
+            Some(format!("Bearer {ORGANIZATION_KEY}"))
+        );
+        assert!(
+            leaked.is_empty(),
+            "the instance's LITELLM_HOST was sent {} completions",
+            leaked.len()
+        );
+    }
+
     use crate::db::{organizations, projects, users, workspace_members, workspaces};
     use sqlx::PgPool;
     use std::path::PathBuf;

@@ -50,6 +50,7 @@ pub struct AiSettingsResponse {
     pub model_image: Option<String>,
     pub model_video: Option<String>,
     pub model_audio: Option<String>,
+    pub completions_routed: bool,
 }
 
 impl AiSettingsResponse {
@@ -71,6 +72,53 @@ impl AiSettingsResponse {
             model_image: None,
             model_video: None,
             model_audio: None,
+            completions_routed: false,
+        }
+    }
+}
+
+/// An organization's saved AI settings, with a notice when the save left
+/// workspaces waiting on their admins.
+#[derive(Debug, Serialize)]
+pub struct OrganizationAiSettingsResponse {
+    #[serde(flatten)]
+    pub settings: AiSettingsResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// What an organization reset tells its admin when it left workspaces waiting
+/// on their admins. A reset that left none answers with no content.
+#[derive(Debug, Serialize)]
+pub struct OrganizationAiSettingsResetResponse {
+    pub notice: String,
+}
+
+/// What an organization admin is told when moving or removing an endpoint URL
+/// stopped workspace keys saved without one from following it.
+fn waiting_notice(unrouted_workspaces: u64) -> Option<String> {
+    match unrouted_workspaces {
+        0 => None,
+        1 => Some("1 workspace key waits for its admin to save again.".to_string()),
+        count => Some(format!(
+            "{count} workspace keys wait for their admins to save again."
+        )),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrganizationKeysResponse {
+    pub litellm: bool,
+    pub openai: bool,
+    pub anthropic: bool,
+}
+
+impl From<ai_settings::OrganizationKeys> for OrganizationKeysResponse {
+    fn from(keys: ai_settings::OrganizationKeys) -> Self {
+        Self {
+            litellm: keys.litellm,
+            openai: keys.openai,
+            anthropic: keys.anthropic,
         }
     }
 }
@@ -82,6 +130,7 @@ pub struct WorkspaceAiSettingsResponse {
     #[serde(flatten)]
     pub settings: AiSettingsResponse,
     pub overrides: bool,
+    pub organization_keys: OrganizationKeysResponse,
 }
 
 impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
@@ -89,11 +138,11 @@ impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
         Self {
             provider: row.provider,
             has_litellm_key: row.litellm_key.is_some(),
-            litellm_host: row.litellm_host,
+            litellm_host: row.litellm_host.map(without_credentials),
             has_openai_api_key: row.openai_api_key.is_some(),
-            openai_base_url: row.openai_base_url,
+            openai_base_url: row.openai_base_url.map(without_credentials),
             has_anthropic_api_key: row.anthropic_api_key.is_some(),
-            anthropic_base_url: row.anthropic_base_url,
+            anthropic_base_url: row.anthropic_base_url.map(without_credentials),
             bedrock_region: row.bedrock_region,
             bedrock_use_iam_role: row.bedrock_use_iam_role.unwrap_or(false),
             has_bedrock_credentials: row.bedrock_access_key.is_some()
@@ -104,6 +153,7 @@ impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
             model_image: row.model_image,
             model_video: row.model_video,
             model_audio: row.model_audio,
+            completions_routed: row.completions_routed,
         }
     }
 }
@@ -115,11 +165,11 @@ impl From<ai_settings::WorkspaceAiSettingsRow> for AiSettingsResponse {
                 .provider
                 .unwrap_or_else(|| PROVIDER_SELF_HOSTED.to_string()),
             has_litellm_key: row.litellm_key.is_some(),
-            litellm_host: row.litellm_host,
+            litellm_host: row.litellm_host.map(without_credentials),
             has_openai_api_key: row.openai_api_key.is_some(),
-            openai_base_url: row.openai_base_url,
+            openai_base_url: row.openai_base_url.map(without_credentials),
             has_anthropic_api_key: row.anthropic_api_key.is_some(),
-            anthropic_base_url: row.anthropic_base_url,
+            anthropic_base_url: row.anthropic_base_url.map(without_credentials),
             bedrock_region: row.bedrock_region,
             bedrock_use_iam_role: row.bedrock_use_iam_role.unwrap_or(false),
             has_bedrock_credentials: row.bedrock_access_key.is_some()
@@ -130,6 +180,7 @@ impl From<ai_settings::WorkspaceAiSettingsRow> for AiSettingsResponse {
             model_image: row.model_image,
             model_video: row.model_video,
             model_audio: row.model_audio,
+            completions_routed: row.completions_routed,
         }
     }
 }
@@ -139,11 +190,11 @@ impl From<ai_settings::EffectiveAiSettings> for AiSettingsResponse {
         Self {
             provider: settings.provider,
             has_litellm_key: settings.litellm_key.is_some(),
-            litellm_host: settings.litellm_host,
+            litellm_host: settings.litellm_host.map(without_credentials),
             has_openai_api_key: settings.openai_api_key.is_some(),
-            openai_base_url: settings.openai_base_url,
+            openai_base_url: settings.openai_base_url.map(without_credentials),
             has_anthropic_api_key: settings.anthropic_api_key.is_some(),
-            anthropic_base_url: settings.anthropic_base_url,
+            anthropic_base_url: settings.anthropic_base_url.map(without_credentials),
             bedrock_region: settings.bedrock_region,
             bedrock_use_iam_role: settings.bedrock_use_iam_role,
             has_bedrock_credentials: settings.bedrock_access_key.is_some()
@@ -154,8 +205,37 @@ impl From<ai_settings::EffectiveAiSettings> for AiSettingsResponse {
             model_image: settings.model_image,
             model_video: settings.model_video,
             model_audio: settings.model_audio,
+            completions_routed: true,
         }
     }
+}
+
+/// `saved` as every member may read it. A URL saved before URLs were checked
+/// can carry a username, password, query or fragment, any of which may hold a
+/// credential; none of them is returned.
+///
+/// Everything up to the last `@` goes before the query and fragment are cut,
+/// because a password may itself hold `?`, `#`, `/` or `@`, and a parser reads
+/// `https://user:1234?rest@host` as a clean URL on host `user`, port 1234.
+fn without_credentials(saved: String) -> String {
+    let start = saved
+        .find("://")
+        .filter(|&index| is_scheme(&saved[..index]))
+        .map_or(0, |index| index + "://".len());
+    let (scheme, rest) = saved.split_at(start);
+    let host = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    let end = host.find(['?', '#']).unwrap_or(host.len());
+    format!("{scheme}{}", &host[..end])
+}
+
+fn is_scheme(candidate: &str) -> bool {
+    let mut characters = candidate.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        })
 }
 
 /// Update AI settings request
@@ -257,9 +337,17 @@ pub async fn upsert_org(
         Ok(user_id) => user_id,
         Err(response) => return *response,
     };
-    match ai_settings::upsert_org_authorized(state.db(), org_id, user_id, req.update()).await {
-        Ok(settings) => {
-            let response = AiSettingsResponse::from(settings);
+    match ai_settings::upsert_org_authorized(
+        state.db(),
+        &state.config().endpoint_hosts,
+        org_id,
+        user_id,
+        req.update(),
+    )
+    .await
+    {
+        Ok(saved) => {
+            let response = AiSettingsResponse::from(saved.settings);
             audit(
                 state.db(),
                 AuditEvent {
@@ -275,7 +363,11 @@ pub async fn upsert_org(
                 },
             )
             .await;
-            Json(response).into_response()
+            Json(OrganizationAiSettingsResponse {
+                settings: response,
+                notice: waiting_notice(saved.unrouted_workspaces),
+            })
+            .into_response()
         }
         Err(error) => *access_error(error),
     }
@@ -292,7 +384,7 @@ pub async fn delete_org(
         Err(response) => return *response,
     };
     match ai_settings::delete_org_authorized(state.db(), org_id, user_id).await {
-        Ok(true) => {
+        Ok(Some(unrouted_workspaces)) => {
             audit(
                 state.db(),
                 AuditEvent {
@@ -308,9 +400,14 @@ pub async fn delete_org(
                 },
             )
             .await;
-            StatusCode::NO_CONTENT.into_response()
+            match waiting_notice(unrouted_workspaces) {
+                Some(notice) => {
+                    Json(OrganizationAiSettingsResetResponse { notice }).into_response()
+                }
+                None => StatusCode::NO_CONTENT.into_response(),
+            }
         }
-        Ok(false) => (
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("AI settings not found")),
         )
@@ -337,9 +434,12 @@ pub async fn get_workspace(
     };
     match ai_settings::get_workspace_authorized(state.db(), path.org_id, path.ws_id, user_id).await
     {
-        Ok(settings) => Json(WorkspaceAiSettingsResponse {
-            overrides: settings.is_some(),
-            settings: settings.map_or_else(AiSettingsResponse::unsaved, AiSettingsResponse::from),
+        Ok(saved) => Json(WorkspaceAiSettingsResponse {
+            overrides: saved.settings.is_some(),
+            settings: saved
+                .settings
+                .map_or_else(AiSettingsResponse::unsaved, AiSettingsResponse::from),
+            organization_keys: saved.organization_keys.into(),
         })
         .into_response(),
         Err(error) => *access_error(error),
@@ -359,6 +459,7 @@ pub async fn upsert_workspace(
     };
     match ai_settings::upsert_workspace_authorized(
         state.db(),
+        &state.config().endpoint_hosts,
         path.org_id,
         path.ws_id,
         user_id,
@@ -366,8 +467,8 @@ pub async fn upsert_workspace(
     )
     .await
     {
-        Ok(settings) => {
-            let response = AiSettingsResponse::from(settings);
+        Ok(saved) => {
+            let response = AiSettingsResponse::from(saved.settings);
             audit(
                 state.db(),
                 AuditEvent {
@@ -386,6 +487,7 @@ pub async fn upsert_workspace(
             Json(WorkspaceAiSettingsResponse {
                 settings: response,
                 overrides: true,
+                organization_keys: saved.organization_keys.into(),
             })
             .into_response()
         }
@@ -447,5 +549,101 @@ pub async fn get_effective(
     {
         Ok(settings) => Json(AiSettingsResponse::from(settings)).into_response(),
         Err(error) => *access_error(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn without_credentials_keeps_a_clean_url_exactly_as_saved() {
+        for saved in [
+            "http://localhost:11434",
+            "http://gateway.example:4000/",
+            "https://proxy.example/openai/v1/",
+            "http://[::1]:4000/v1",
+            "not a url",
+            "",
+        ] {
+            assert_eq!(without_credentials(saved.to_string()), saved);
+        }
+    }
+
+    #[test]
+    fn without_credentials_drops_every_part_that_can_carry_a_credential() {
+        for (saved, shown) in [
+            (
+                "http://user:secret@gateway.example:4000",
+                "http://gateway.example:4000",
+            ),
+            (
+                "http://user:secret@gateway.example:4000/",
+                "http://gateway.example:4000/",
+            ),
+            ("https://token@proxy.example/v1", "https://proxy.example/v1"),
+            (
+                "http://user:se/cret@gateway.example/v1",
+                "http://gateway.example/v1",
+            ),
+            ("http://user:p@ss@gateway.example", "http://gateway.example"),
+            ("user:secret@gateway.example:4000", "gateway.example:4000"),
+            (
+                "https://proxy.example/v1?api_key=secret",
+                "https://proxy.example/v1",
+            ),
+            (
+                "https://proxy.example/v1#secret",
+                "https://proxy.example/v1",
+            ),
+            (
+                "https://user:secret@proxy.example/v1?key=secret#secret",
+                "https://proxy.example/v1",
+            ),
+        ] {
+            let returned = without_credentials(saved.to_string());
+            assert_eq!(returned, shown, "{saved}");
+            assert!(!returned.contains("secret"), "{saved}");
+        }
+    }
+
+    #[test]
+    fn without_credentials_leaks_no_part_of_a_password_that_holds_url_delimiters() {
+        for saved in [
+            "https://alice:hunter?two@proxy.example/v1",
+            "https://alice:hunter#two@proxy.example/v1",
+            "https://alice:hunter@two@proxy.example/v1",
+            "https://alice:hunter:two@proxy.example/v1",
+            "https://alice:hunter/two@proxy.example/v1",
+            "https://alice:hunter?two#three@proxy.example/v1?key=four",
+            "https://alice:1234?two@proxy.example/v1",
+            "https://alice:1234#two@proxy.example/v1",
+            "https://alice?hunter:two@proxy.example/v1",
+        ] {
+            assert_eq!(
+                without_credentials(saved.to_string()),
+                "https://proxy.example/v1",
+                "{saved}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_credentials_leaks_no_part_of_the_userinfo_of_a_value_that_is_not_a_url() {
+        for saved in [
+            "alice:hunter?two@proxy.example",
+            "alice:hunter#two@proxy.example",
+            "alice:a://hunter@proxy.example",
+            "https:\\\\alice:hunter@proxy.example",
+            "ht tps://alice:hunter two@proxy.example",
+            "https://alice:hunter@",
+            "https://alice:hunter@[::1",
+            "https://alice:hunter@proxy.example:port",
+        ] {
+            let returned = without_credentials(saved.to_string());
+            for part in ["alice", "hunter", "two"] {
+                assert!(!returned.contains(part), "{saved} returned {returned}");
+            }
+        }
     }
 }

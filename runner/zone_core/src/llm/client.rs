@@ -1,14 +1,19 @@
 //! LLM client for OpenAI-compatible APIs
 
 use futures::{Stream, StreamExt};
-use reqwest::{Client, Url};
+use reqwest::{Client, ClientBuilder, Url, redirect};
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::runtime;
 
+use crate::secret::{conceal, redact};
+
+use super::dialect::{Budget, Dialect};
+use super::finish_reason::STOP;
+use super::metadata;
 use super::provider::{
     AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Completion,
     CompletionProvider, CompletionRequest, Toolset,
@@ -18,14 +23,29 @@ use super::types::{
     ToolDefinition,
 };
 
-fn pool() -> Client {
-    Client::builder()
+const REPORTED_LIMIT: usize = 500;
+const ELLIPSIS: char = '…';
+
+fn guarded(builder: ClientBuilder, trust: Trust) -> ClientBuilder {
+    match trust {
+        Trust::Operator => builder,
+        Trust::Tenant => builder
+            .no_proxy()
+            .dns_resolver(Arc::new(metadata::Resolver))
+            .redirect(redirect::Policy::none()),
+    }
+}
+
+fn pool(trust: Trust) -> Client {
+    let tuned = Client::builder()
         .pool_max_idle_per_host(16)
         .pool_idle_timeout(Duration::from_secs(90))
         .connect_timeout(Duration::from_secs(10))
-        .tcp_nodelay(true)
+        .tcp_nodelay(true);
+    guarded(tuned, trust)
         .build()
-        .unwrap_or_else(|_| Client::new())
+        .or_else(|_| guarded(Client::builder(), trust).build())
+        .unwrap_or_else(|error| panic!("no HTTP client can be built: {error}"))
 }
 
 /// One connection pool per runtime. Building a `reqwest::Client` per turn
@@ -37,15 +57,18 @@ fn pool() -> Client {
 /// from a second runtime hands out connections whose driver died with the
 /// first, and the send fails with "runtime dropped the dispatch task" without
 /// ever reaching the server.
-static HTTP: LazyLock<Mutex<HashMap<runtime::Id, Client>>> =
+static HTTP: LazyLock<Mutex<HashMap<(runtime::Id, Trust), Client>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn http() -> Client {
+fn http(trust: Trust) -> Client {
     let Ok(runtime) = runtime::Handle::try_current() else {
-        return pool();
+        return pool(trust);
     };
     let mut pools = HTTP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    pools.entry(runtime.id()).or_insert_with(pool).clone()
+    pools
+        .entry((runtime.id(), trust))
+        .or_insert_with(|| pool(trust))
+        .clone()
 }
 
 /// LLM client error
@@ -92,13 +115,6 @@ impl LlmError {
 /// A completion in pieces, whichever backend produced it.
 pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamChunk, LlmError>> + Send>>;
 
-/// OpenAI's word for a turn that ended normally.
-///
-/// Claude reports `success` and codex `completed`. The agent loop takes a
-/// reply as final only on `stop`, so a turn carrying the agent's own word
-/// would never be accepted and would run to the iteration limit instead.
-const STOP: &str = "stop";
-
 /// Where completions come from.
 #[derive(Debug, Clone, Default)]
 pub enum LlmBackend {
@@ -120,6 +136,18 @@ impl LlmBackend {
     }
 }
 
+/// Who chose [`LlmConfig::base_url`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Trust {
+    /// The operator, in the instance's own configuration.
+    #[default]
+    Operator,
+    /// A tenant, in settings saved through the API. Its endpoint is never
+    /// sent to a link-local or cloud metadata address, and what it answers a
+    /// refused request with is reported only as its status and error message.
+    Tenant,
+}
+
 /// Configuration for the LLM client
 #[derive(Clone)]
 pub struct LlmConfig {
@@ -135,6 +163,8 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     /// Where completions are fetched from. Defaults to the endpoint above.
     pub backend: LlmBackend,
+    pub dialect: Dialect,
+    pub trust: Trust,
 }
 
 impl LlmConfig {
@@ -156,6 +186,8 @@ impl std::fmt::Debug for LlmConfig {
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
             .field("backend", &self.backend)
+            .field("dialect", &self.dialect)
+            .field("trust", &self.trust)
             .finish()
     }
 }
@@ -169,6 +201,8 @@ impl Default for LlmConfig {
             temperature: 0.7,
             max_tokens: 4096,
             backend: LlmBackend::Http,
+            dialect: Dialect::Compatible,
+            trust: Trust::Operator,
         }
     }
 }
@@ -224,6 +258,25 @@ fn validate_outbound_url(url: &str) -> Result<Url, LlmError> {
     }
 
     Ok(parsed)
+}
+
+/// The error message a refusal's body carries, as OpenAI, Anthropic, LiteLLM
+/// and Ollama each shape it.
+fn reported(body: &str) -> Option<String> {
+    let body = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    ["/error/message", "/error", "/message"]
+        .iter()
+        .find_map(|pointer| body.pointer(pointer).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_string)
+}
+
+fn capped(message: &str) -> String {
+    match message.char_indices().nth(REPORTED_LIMIT) {
+        Some((end, _)) => format!("{}{ELLIPSIS}", &message[..end]),
+        None => message.to_string(),
+    }
 }
 
 /// Refuse a turn that expects zone's tools to be callable.
@@ -343,7 +396,7 @@ impl LlmClient {
     /// Create a new LLM client
     pub fn new(config: LlmConfig) -> Self {
         Self {
-            client: http(),
+            client: http(config.trust),
             config,
             stop: Vec::new(),
             ollama: None,
@@ -405,15 +458,47 @@ impl LlmClient {
         self
     }
 
+    fn body(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        reserved: u32,
+        stream: bool,
+    ) -> Result<serde_json::Value, LlmError> {
+        let dialect = self.config.dialect;
+        let stop = dialect.stops(model, &self.stop);
+        let (max_tokens, max_completion_tokens) = match dialect.budget(model) {
+            Budget::MaxTokens => (Some(reserved), None),
+            Budget::MaxCompletionTokens => (None, Some(reserved)),
+        };
+        let messages = dialect.messages(messages);
+        let tools = dialect.tools(tools);
+        self.request(ChatRequest {
+            model,
+            messages: &messages,
+            tools: tools.as_deref(),
+            tool_choice: None,
+            temperature: dialect.temperature(model, self.config.temperature),
+            max_tokens,
+            max_completion_tokens,
+            stream: Some(stream),
+            stop: (!stop.is_empty()).then_some(stop.as_slice()),
+        })
+    }
+
     fn request(&self, request: ChatRequest<'_>) -> Result<serde_json::Value, LlmError> {
+        let dialect = self.config.dialect;
         let mut body = serde_json::to_value(&request)?;
         if let Some((model, limit)) = &self.ollama
             && model == request.model
+            && dialect.extended()
         {
             body["num_ctx"] = (*limit).into();
         }
         if let Some((model, effort)) = &self.reasoning
             && model == request.model
+            && dialect.effort(model)
         {
             body["reasoning_effort"] = effort.as_str().into();
         }
@@ -429,14 +514,41 @@ impl LlmClient {
         body: &serde_json::Value,
     ) -> Result<reqwest::Response, LlmError> {
         let url = validate_outbound_url(url)?;
-        Ok(self
+        if self.config.trust == Trust::Tenant && metadata::is_url(&url) {
+            return Err(LlmError::InvalidConfig(
+                "LLM base_url must not point at a link-local or cloud metadata address".to_string(),
+            ));
+        }
+        let mut request = self
             .client
             .post(url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .json(body)
-            .send()
-            .await?)
+            .header("Content-Type", "application/json");
+        if !self.config.api_key.trim().is_empty() {
+            request = request.bearer_auth(&self.config.api_key);
+        }
+        Ok(request.json(body).send().await?)
+    }
+
+    /// The endpoint's refusal, without the key this client sent it. A
+    /// tenant's endpoint is reported only by its status and its own error
+    /// message, in OpenAI's error envelope, so whatever else a host answers
+    /// is never reflected back.
+    async fn rejected(&self, response: reqwest::Response) -> LlmError {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let message = match self.config.trust {
+            Trust::Operator => conceal(&body, &self.config.api_key),
+            Trust::Tenant => {
+                let reported = reported(&body)
+                    .unwrap_or_else(|| status.canonical_reason().unwrap_or_default().to_string());
+                let message = capped(&redact(&conceal(&reported, &self.config.api_key)));
+                serde_json::json!({ "error": { "message": message } }).to_string()
+            }
+        };
+        LlmError::Api {
+            status: status.as_u16(),
+            message,
+        }
     }
 
     /// Make a chat completion request
@@ -488,28 +600,13 @@ impl LlmClient {
             return Ok(response(completion, model));
         }
 
-        let request = ChatRequest {
-            model,
-            messages,
-            tools,
-            tool_choice: None,
-            temperature: Some(self.config.temperature),
-            max_tokens: Some(options.reserved),
-            stream: Some(false),
-            stop: (!self.stop.is_empty()).then_some(self.stop.as_slice()),
-        };
-
+        let body = self.body(model, messages, tools, options.reserved, false)?;
         let url = format!("{}/chat/completions", self.config.base_url);
 
-        let response = self.send(&url, &self.request(request)?).await?;
+        let response = self.send(&url, &body).await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(LlmError::Api {
-                status: status.as_u16(),
-                message,
-            });
+        if !response.status().is_success() {
+            return Err(self.rejected(response).await);
         }
 
         let response: ChatResponse = response.json().await?;
@@ -564,28 +661,13 @@ impl LlmClient {
             return Ok(Box::pin(chunks(events, agent.to_string())));
         }
 
-        let request = ChatRequest {
-            model,
-            messages,
-            tools,
-            tool_choice: None,
-            temperature: Some(self.config.temperature),
-            max_tokens: Some(options.reserved),
-            stream: Some(true),
-            stop: (!self.stop.is_empty()).then_some(self.stop.as_slice()),
-        };
-
+        let body = self.body(model, messages, tools, options.reserved, true)?;
         let url = format!("{}/chat/completions", self.config.base_url);
 
-        let response = self.send(&url, &self.request(request)?).await?;
+        let response = self.send(&url, &body).await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(LlmError::Api {
-                status: status.as_u16(),
-                message,
-            });
+        if !response.status().is_success() {
+            return Err(self.rejected(response).await);
         }
 
         // Parse SSE without reallocating the leftover buffer on every line.
@@ -647,6 +729,871 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod authorization {
+        use super::*;
+        use serde_json::json;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
+
+        struct Unauthorized;
+
+        impl Match for Unauthorized {
+            fn matches(&self, request: &Request) -> bool {
+                !request.headers.contains_key(reqwest::header::AUTHORIZATION)
+            }
+        }
+
+        fn completion() -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop"
+                }]
+            }))
+        }
+
+        async fn turn(server: &MockServer, api_key: &str) -> Result<ChatResponse, LlmError> {
+            LlmClient::new(LlmConfig {
+                base_url: server.uri(),
+                api_key: api_key.to_string(),
+                default_model: "test".to_string(),
+                ..LlmConfig::default()
+            })
+            .chat(&[Message::user("hi")], None)
+            .await
+        }
+
+        #[tokio::test]
+        async fn an_endpoint_without_a_key_is_sent_no_authorization_header() {
+            for blank in ["", "   "] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/chat/completions"))
+                    .and(Unauthorized)
+                    .respond_with(completion())
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let answered = turn(&server, blank).await;
+
+                assert!(answered.is_ok(), "{blank:?}: {answered:?}");
+                server.verify().await;
+            }
+        }
+
+        #[tokio::test]
+        async fn an_endpoint_with_a_key_is_sent_it_as_a_bearer_token() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(header("authorization", "Bearer sk-endpoint-key"))
+                .respond_with(completion())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let answered = turn(&server, "sk-endpoint-key").await;
+
+            assert!(answered.is_ok(), "{answered:?}");
+            server.verify().await;
+        }
+    }
+
+    mod refusal {
+        use super::*;
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const KEY: &str = "sk-proj-AbCdEfGh1234567890wxyz";
+
+        fn echoes() -> Vec<String> {
+            vec![
+                format!(r#"{{"error":{{"message":"bad key {KEY}"}}}}"#),
+                r#"{"error":{"message":"Incorrect API key provided: sk-proj-****************wxyz."}}"#
+                    .to_string(),
+                r#"{"error":"{\"message\":\"invalid x-api-key: ****wxyz\"}"}"#.to_string(),
+                r#"{"detail":"litellm.AuthenticationError: api_key=sk-proj-AbCd****"}"#.to_string(),
+                "rejected key:sk-proj-AbCd****".to_string(),
+            ]
+        }
+
+        async fn refused(body: &str, stream: bool) -> LlmError {
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(401).set_body_string(body))
+                .mount(&server)
+                .await;
+            let client = LlmClient::new(LlmConfig {
+                base_url: server.uri(),
+                api_key: KEY.to_string(),
+                ..LlmConfig::default()
+            });
+            let messages = [Message::user("hi")];
+            if stream {
+                client
+                    .chat_stream(&messages, None)
+                    .await
+                    .err()
+                    .expect("the endpoint refused the stream")
+            } else {
+                client
+                    .chat(&messages, None)
+                    .await
+                    .expect_err("the endpoint refused the turn")
+            }
+        }
+
+        #[tokio::test]
+        async fn a_refusal_never_carries_the_key_it_was_sent() {
+            for body in echoes() {
+                for stream in [false, true] {
+                    let error = refused(&body, stream).await;
+                    let LlmError::Api { status, message } = &error else {
+                        panic!("{error:?}");
+                    };
+                    let shown = error.to_string();
+
+                    assert_eq!(*status, 401);
+                    for leaked in [KEY, "wxyz", "sk-proj-AbCd"] {
+                        assert!(!message.contains(leaked), "{body} -> {message}");
+                        assert!(!shown.contains(leaked), "{body} -> {shown}");
+                    }
+                    assert!(message.contains(crate::secret::REDACTED), "{message}");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_refusal_without_the_key_is_reported_as_the_endpoint_sent_it() {
+            let body = r#"{"error":{"message":"The model `gpt-9` does not exist"}}"#;
+
+            let error = refused(body, false).await;
+
+            assert!(
+                matches!(&error, LlmError::Api { status: 401, message } if message == body),
+                "{error:?}"
+            );
+        }
+    }
+
+    mod tenant {
+        use super::*;
+        use serde_json::json;
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const KEY: &str = "sk-tenant-AbCdEfGh1234567890wxyz";
+
+        fn client(base_url: &str) -> LlmClient {
+            LlmClient::new(LlmConfig {
+                base_url: base_url.to_string(),
+                api_key: KEY.to_string(),
+                trust: Trust::Tenant,
+                ..LlmConfig::default()
+            })
+        }
+
+        async fn refusal(response: ResponseTemplate) -> LlmError {
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            client(&server.uri())
+                .chat(&[Message::user("hi")], None)
+                .await
+                .expect_err("the endpoint refused the turn")
+        }
+
+        fn reported(error: &LlmError) -> (u16, String) {
+            let LlmError::Api { status, message } = error else {
+                panic!("{error:?}");
+            };
+            let envelope: serde_json::Value =
+                serde_json::from_str(message).expect("an error envelope");
+            let text = envelope["error"]["message"]
+                .as_str()
+                .expect("an error message")
+                .to_string();
+            assert_eq!(
+                envelope,
+                json!({ "error": { "message": text } }),
+                "{message}"
+            );
+            (*status, text)
+        }
+
+        #[tokio::test]
+        async fn a_tenant_endpoint_is_never_sent_to_a_metadata_address() {
+            for base_url in [
+                "http://169.254.169.254/latest",
+                "http://169.254.170.2/v1",
+                "http://[fe80::1]:8080/v1",
+                "http://[fd00:ec2::254]/v1",
+                "http://[::ffff:169.254.169.254]/v1",
+                "http://[fd20:ce::254]/computeMetadata/v1",
+                "http://168.63.129.16/machine",
+                "http://metadata.google.internal/computeMetadata/v1",
+                "http://METADATA.GOOGLE.INTERNAL./v1",
+            ] {
+                let refused = client(base_url).chat(&[Message::user("hi")], None).await;
+
+                assert!(
+                    matches!(&refused, Err(LlmError::InvalidConfig(message)) if message.contains("metadata")),
+                    "{base_url}: {refused:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_tenant_endpoint_is_never_redirected_to_a_metadata_address() {
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(
+                    ResponseTemplate::new(307)
+                        .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let refused = client(&server.uri())
+                .chat(&[Message::user("hi")], None)
+                .await
+                .expect_err("a redirect is refused");
+
+            assert_eq!(reported(&refused), (307, "Temporary Redirect".to_string()));
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn a_tenant_endpoint_is_never_followed_through_a_redirect() {
+            let elsewhere = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&elsewhere)
+                .await;
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(
+                    ResponseTemplate::new(307)
+                        .insert_header("location", format!("{}/admin", elsewhere.uri())),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let refused = client(&server.uri())
+                .chat(&[Message::user("hi")], None)
+                .await
+                .expect_err("a redirect is refused");
+
+            assert_eq!(reported(&refused), (307, "Temporary Redirect".to_string()));
+            server.verify().await;
+            elsewhere.verify().await;
+        }
+
+        async fn proxied(trust: Trust) -> (usize, usize) {
+            let proxy = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&proxy)
+                .await;
+            let endpoint = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&endpoint)
+                .await;
+            let builder =
+                Client::builder().proxy(reqwest::Proxy::all(proxy.uri()).expect("a proxy URL"));
+            let client = guarded(builder, trust).build().expect("a client");
+
+            let sent = client.post(endpoint.uri()).send().await;
+
+            assert!(sent.is_ok(), "{trust:?}: {sent:?}");
+            (reached(&proxy).await, reached(&endpoint).await)
+        }
+
+        async fn reached(server: &MockServer) -> usize {
+            server.received_requests().await.unwrap_or_default().len()
+        }
+
+        #[tokio::test]
+        async fn a_tenant_endpoint_is_never_sent_through_a_proxy() {
+            assert_eq!(
+                proxied(Trust::Operator).await,
+                (1, 0),
+                "the operator's client goes through the proxy it was given"
+            );
+            assert_eq!(
+                proxied(Trust::Tenant).await,
+                (0, 1),
+                "a proxy resolves the tenant's host itself, past the metadata guard"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_tenant_endpoint_still_reaches_loopback() {
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "completion",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "test",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "stop"
+                    }]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let localhost = server.uri().replace("127.0.0.1", "localhost");
+
+            let answered = client(&localhost).chat(&[Message::user("hi")], None).await;
+
+            assert!(answered.is_ok(), "{answered:?}");
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn a_tenant_refusal_reports_only_its_status_and_error_message() {
+            let error = refusal(ResponseTemplate::new(400).set_body_json(json!({
+                "error": {
+                    "message": "The model `gpt-9` does not exist",
+                    "type": "invalid_request_error",
+                },
+                "reflected": "ami-id: i-0123456789abcdef0",
+            })))
+            .await;
+
+            assert_eq!(
+                reported(&error),
+                (400, "The model `gpt-9` does not exist".to_string())
+            );
+            assert!(!error.to_string().contains("ami-id"), "{error}");
+        }
+
+        #[tokio::test]
+        async fn a_tenant_refusal_without_an_error_message_reports_its_status_alone() {
+            for body in [
+                "<html><body>instance-id: i-0123456789abcdef0</body></html>",
+                r#"{"Code":"Success","AccessKeyId":"ASIAEXAMPLE"}"#,
+                "",
+            ] {
+                let error = refusal(ResponseTemplate::new(502).set_body_string(body)).await;
+
+                assert_eq!(reported(&error), (502, "Bad Gateway".to_string()), "{body}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_tenant_refusal_is_capped_and_never_carries_the_key() {
+            let long = format!("{}{KEY} sk-tenant-****wxyz", "x".repeat(2_000));
+            let error = refusal(
+                ResponseTemplate::new(401)
+                    .set_body_json(json!({ "error": { "message": format!("bad key {KEY}") } })),
+            )
+            .await;
+            let (_, message) = reported(&error);
+            assert!(!message.contains(KEY), "{message}");
+
+            let error = refusal(
+                ResponseTemplate::new(400).set_body_json(json!({ "error": { "message": long } })),
+            )
+            .await;
+            let (_, message) = reported(&error);
+
+            assert_eq!(message.chars().count(), REPORTED_LIMIT + 1);
+            assert!(message.ends_with(ELLIPSIS), "{message}");
+            assert!(!message.contains("wxyz"), "{message}");
+        }
+
+        #[tokio::test]
+        async fn a_tenant_refusal_still_says_when_a_model_takes_no_tools() {
+            for body in [
+                json!({ "error": "llava:7b does not support tools" }),
+                json!({ "error": { "message": "llava:7b does not support tools" } }),
+            ] {
+                let error = refusal(ResponseTemplate::new(400).set_body_json(body)).await;
+
+                assert!(error.unsupported_tools(), "{error:?}");
+            }
+        }
+    }
+
+    mod shape {
+        use super::*;
+        use crate::llm::{Dialect, TEMPLATE_STOPS};
+        use serde_json::{Value, json};
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
+
+        const TEMPERATURE: f32 = 1.4;
+        const RESERVED: u32 = 321;
+
+        struct Without(&'static str);
+
+        impl Match for Without {
+            fn matches(&self, request: &Request) -> bool {
+                serde_json::from_slice::<Value>(&request.body)
+                    .is_ok_and(|body| body.get(self.0).is_none())
+            }
+        }
+
+        fn completion() -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop"
+                }]
+            }))
+        }
+
+        fn streamed() -> ResponseTemplate {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+        }
+
+        fn stops() -> Vec<String> {
+            TEMPLATE_STOPS
+                .iter()
+                .map(|stop| (*stop).to_string())
+                .chain(["User:", " ", "Human:", "###", "END", "STOP"].map(String::from))
+                .collect()
+        }
+
+        fn client(server: &MockServer, dialect: Dialect) -> LlmClient {
+            LlmClient::new(LlmConfig {
+                base_url: server.uri(),
+                temperature: TEMPERATURE,
+                max_tokens: RESERVED,
+                dialect,
+                ..LlmConfig::default()
+            })
+            .with_stop(stops())
+            .with_ollama_context("model", 8192)
+        }
+
+        async fn sent(server: &MockServer, dialect: Dialect, model: &str) -> Value {
+            let answered = client(server, dialect)
+                .chat_with_model(model, &[Message::user("hi")], None)
+                .await;
+            assert!(answered.is_ok(), "{dialect:?} {model}: {answered:?}");
+            let requests = server.received_requests().await.unwrap_or_default();
+            let request = requests.last().expect("a request reached the endpoint");
+            serde_json::from_slice(&request.body).expect("a JSON body")
+        }
+
+        fn stop_count(body: &Value) -> usize {
+            body.get("stop")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        }
+
+        #[tokio::test]
+        async fn openai_is_sent_at_most_four_stops_and_no_template_tokens() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({
+                    "max_tokens": RESERVED,
+                    "stop": ["User:", " ", "Human:", "###"],
+                })))
+                .and(Without("max_completion_tokens"))
+                .and(Without("num_ctx"))
+                .respond_with(completion())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let body = sent(&server, Dialect::OpenAI, "gpt-4o").await;
+
+            assert_eq!(stop_count(&body), 4, "{body}");
+            assert!(body.get("temperature").is_some(), "{body}");
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn an_openai_reasoning_model_is_sent_no_stop_no_temperature_and_a_completion_budget()
+        {
+            for model in ["o3-mini", "o1", "o4-mini", "gpt-5"] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/chat/completions"))
+                    .and(body_partial_json(
+                        json!({ "max_completion_tokens": RESERVED }),
+                    ))
+                    .and(Without("max_tokens"))
+                    .and(Without("temperature"))
+                    .and(Without("stop"))
+                    .respond_with(completion())
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let body = sent(&server, Dialect::OpenAI, model).await;
+
+                assert_eq!(stop_count(&body), 0, "{model}: {body}");
+                server.verify().await;
+            }
+        }
+
+        #[tokio::test]
+        async fn an_openai_chat_variant_keeps_its_temperature_and_stops() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({ "max_tokens": RESERVED })))
+                .and(Without("max_completion_tokens"))
+                .respond_with(completion())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let body = sent(&server, Dialect::OpenAI, "gpt-5-chat-latest").await;
+
+            assert_eq!(stop_count(&body), 4, "{body}");
+            assert_eq!(
+                body["temperature"].as_f64().map(|value| value as f32),
+                Some(TEMPERATURE),
+                "{body}"
+            );
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn an_openai_reasoning_model_streams_under_the_same_shape() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({
+                    "max_completion_tokens": RESERVED,
+                    "stream": true,
+                })))
+                .and(Without("max_tokens"))
+                .and(Without("temperature"))
+                .and(Without("stop"))
+                .respond_with(streamed())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut stream = client(&server, Dialect::OpenAI)
+                .chat_stream_with_model("o3", &[Message::user("hi")], None)
+                .await
+                .expect("the stream opens");
+            while let Some(chunk) = stream.next().await {
+                assert!(chunk.is_ok(), "{chunk:?}");
+            }
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn openai_is_sent_reasoning_effort_only_for_a_model_that_reasons() {
+            for (model, expected) in [("o3", Some("high")), ("gpt-4o", None)] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(completion())
+                    .mount(&server)
+                    .await;
+                let answered = client(&server, Dialect::OpenAI)
+                    .with_reasoning(model, crate::llm::Effort::High)
+                    .chat_with_model(model, &[Message::user("hi")], None)
+                    .await;
+                assert!(answered.is_ok(), "{answered:?}");
+                let requests = server.received_requests().await.unwrap_or_default();
+                let body: Value = serde_json::from_slice(&requests[0].body).expect("a JSON body");
+
+                assert_eq!(
+                    body.get("reasoning_effort").and_then(Value::as_str),
+                    expected,
+                    "{model}: {body}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn anthropic_is_sent_every_non_blank_stop_and_a_temperature_of_at_most_one() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({
+                    "max_tokens": RESERVED,
+                    "temperature": 1.0,
+                })))
+                .and(Without("max_completion_tokens"))
+                .and(Without("num_ctx"))
+                .respond_with(completion())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let body = sent(&server, Dialect::Anthropic, "claude-sonnet-4-5").await;
+
+            assert_eq!(stop_count(&body), stops().len() - 1, "{body}");
+            assert!(
+                body["stop"]
+                    .as_array()
+                    .is_some_and(|stops| stops.iter().all(|stop| stop != " ")),
+                "{body}"
+            );
+            server.verify().await;
+        }
+
+        const UPLOAD: &str = "data:image/png;base64,dXBsb2Fk";
+        const SCREENSHOT: &str = "data:image/png;base64,c2NyZWVu";
+        const GENERATED: &str = "data:image/png;base64,Z2VuZXJhdGVk";
+        const DRAWN: &str = "data:image/png;base64,ZHJhd24=";
+
+        fn call(id: &str, name: &str, arguments: &str) -> crate::llm::ToolCall {
+            crate::llm::ToolCall {
+                id: id.to_string(),
+                call_type: "function".to_string(),
+                function: crate::llm::FunctionCall {
+                    name: name.to_string(),
+                    arguments: arguments.to_string(),
+                },
+            }
+        }
+
+        fn history() -> Vec<Message> {
+            let mut asked = Message::user("What is on screen?");
+            asked.images = vec![UPLOAD.to_string()];
+            let mut requested = Message::assistant_with_tools(vec![
+                call("call_1", "screenshot", ""),
+                call("call_2", "list", r#"{"path":"."}"#),
+            ]);
+            requested.reasoning_content = Some("I should look first".to_string());
+            requested.thinking_blocks =
+                vec![json!({ "type": "thinking", "thinking": "look", "signature": "c2ln" })];
+            let mut captured = Message::tool_result("call_1", "captured");
+            captured.images = vec![SCREENSHOT.to_string()];
+            let listed = Message::tool_result("call_2", "a.rs");
+            let mut answered = Message::assistant("Here it is");
+            answered.images = vec![GENERATED.to_string()];
+            answered.reasoning_content = Some("the screen shows a.rs".to_string());
+            let mut drawn = Message::assistant("");
+            drawn.images = vec![DRAWN.to_string()];
+            vec![
+                Message::system("Be brief."),
+                asked,
+                requested,
+                captured,
+                listed,
+                answered,
+                drawn,
+                Message::user("Again."),
+            ]
+        }
+
+        fn tools() -> Vec<ToolDefinition> {
+            vec![
+                ToolDefinition::function("screenshot", "Capture the screen", json!({})),
+                ToolDefinition::function(
+                    "list",
+                    "List a directory",
+                    json!({ "type": "object", "properties": { "path": { "type": "string" } } }),
+                ),
+            ]
+        }
+
+        fn image(url: &str) -> Value {
+            json!({ "type": "image_url", "image_url": { "url": url } })
+        }
+
+        fn forwarded(label: &str, url: &str) -> Value {
+            json!({ "role": "user", "content": [{ "type": "text", "text": label }, image(url)] })
+        }
+
+        fn provider_contract() -> (Value, Value) {
+            let messages = json!([
+                { "role": "system", "content": "Be brief." },
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "What is on screen?" }, image(UPLOAD)],
+                },
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": { "name": "screenshot", "arguments": "{}" },
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": { "name": "list", "arguments": r#"{"path":"."}"# },
+                        },
+                    ],
+                },
+                { "role": "tool", "content": "captured", "tool_call_id": "call_1" },
+                { "role": "tool", "content": "a.rs", "tool_call_id": "call_2" },
+                forwarded("[Image from the tool result for call_1]", SCREENSHOT),
+                { "role": "assistant", "content": "Here it is" },
+                forwarded("[Image from the previous assistant message]", GENERATED),
+                forwarded("[Image from the previous assistant message]", DRAWN),
+                { "role": "user", "content": "Again." },
+            ]);
+            let tools = json!([
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "screenshot",
+                        "description": "Capture the screen",
+                        "parameters": { "type": "object", "properties": {} },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list",
+                        "description": "List a directory",
+                        "parameters": {
+                            "type": "object",
+                            "properties": { "path": { "type": "string" } },
+                        },
+                    },
+                },
+            ]);
+            (messages, tools)
+        }
+
+        async fn contract(dialect: Dialect, stream: bool) -> Value {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(if stream { streamed() } else { completion() })
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = client(&server, dialect);
+            let (messages, tools) = (history(), tools());
+            if stream {
+                let mut chunks = client
+                    .chat_stream_with_model("model", &messages, Some(&tools))
+                    .await
+                    .expect("the stream opens");
+                while let Some(chunk) = chunks.next().await {
+                    assert!(chunk.is_ok(), "{dialect:?}: {chunk:?}");
+                }
+            } else {
+                let answered = client
+                    .chat_with_model("model", &messages, Some(&tools))
+                    .await;
+                assert!(answered.is_ok(), "{dialect:?}: {answered:?}");
+            }
+            server.verify().await;
+            let requests = server.received_requests().await.unwrap_or_default();
+            serde_json::from_slice(&requests[0].body).expect("a JSON body")
+        }
+
+        #[tokio::test]
+        async fn a_provider_api_is_sent_only_the_message_shapes_it_accepts() {
+            let (messages, tools) = provider_contract();
+            for dialect in [Dialect::OpenAI, Dialect::Anthropic] {
+                for stream in [false, true] {
+                    let body = contract(dialect, stream).await;
+
+                    assert_eq!(body["messages"], messages, "{dialect:?} stream={stream}");
+                    assert_eq!(body["tools"], tools, "{dialect:?} stream={stream}");
+                    assert_eq!(body["stream"], json!(stream), "{dialect:?}");
+                    assert!(body.get("tool_choice").is_none(), "{dialect:?}: {body}");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_provider_api_is_never_sent_an_empty_tool_list() {
+            for dialect in [Dialect::OpenAI, Dialect::Anthropic] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(Without("tools"))
+                    .respond_with(completion())
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let answered = client(&server, dialect)
+                    .chat_with_model("model", &[Message::user("hi")], Some(&[]))
+                    .await;
+
+                assert!(answered.is_ok(), "{dialect:?}: {answered:?}");
+                server.verify().await;
+            }
+        }
+
+        #[tokio::test]
+        async fn a_compatible_endpoint_is_sent_the_history_as_it_always_was() {
+            let history = history();
+            let tools = tools();
+            for stream in [false, true] {
+                let body = contract(Dialect::Compatible, stream).await;
+
+                assert_eq!(
+                    body["messages"],
+                    serde_json::to_value(&history).expect("a history"),
+                    "stream={stream}"
+                );
+                assert_eq!(
+                    body["tools"],
+                    serde_json::to_value(&tools).expect("tools"),
+                    "stream={stream}"
+                );
+                assert_eq!(
+                    body["messages"][3]["content"][1],
+                    image(SCREENSHOT),
+                    "LiteLLM translates a tool result's image itself"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_compatible_endpoint_is_sent_the_request_as_it_always_was() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({
+                    "max_tokens": RESERVED,
+                    "num_ctx": 8192,
+                })))
+                .and(Without("max_completion_tokens"))
+                .respond_with(completion())
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let body = sent(&server, Dialect::Compatible, "model").await;
+
+            assert_eq!(stop_count(&body), stops().len(), "{body}");
+            assert_eq!(
+                body["temperature"].as_f64().map(|value| value as f32),
+                Some(TEMPERATURE),
+                "{body}"
+            );
+            server.verify().await;
+        }
+    }
+
     use crate::llm::Effort;
     use crate::llm::provider::ProviderError;
     use crate::llm::types::{ChatRequest, FunctionCall, Message, ToolCall, Usage};
@@ -1018,6 +1965,7 @@ mod tests {
                 tool_choice: None,
                 temperature: None,
                 max_tokens: Some(4096),
+                max_completion_tokens: None,
                 stream: None,
                 stop: None,
             })
@@ -1031,6 +1979,7 @@ mod tests {
                 tool_choice: None,
                 temperature: None,
                 max_tokens: Some(4096),
+                max_completion_tokens: None,
                 stream: None,
                 stop: None,
             })
@@ -1045,6 +1994,7 @@ mod tests {
                 tool_choice: None,
                 temperature: None,
                 max_tokens: Some(4096),
+                max_completion_tokens: None,
                 stream: None,
                 stop: None,
             })
