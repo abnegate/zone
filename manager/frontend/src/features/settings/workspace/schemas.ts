@@ -198,6 +198,10 @@ export const OrganizationAiSettingsSaveSchema = AiSettingsResponseSchema.extend(
   notice: z.string().optional(),
 });
 
+export const OrganizationAiSettingsResetSchema = z.object({
+  notice: z.string(),
+});
+
 export const OrganizationKeysSchema = z.object({
   litellm: z.boolean(),
   openai: z.boolean(),

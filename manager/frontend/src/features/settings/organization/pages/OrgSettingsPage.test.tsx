@@ -826,6 +826,32 @@ describe('OrgSettingsPage', () => {
       });
     });
 
+    it('keeps the notice a reset leaves about workspaces waiting on their admins', async () => {
+      const notice = '1 workspace key waits for its admin to save again.';
+      mockClient.resetOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
+
+      render(<OrgSettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Reset to Defaults' }));
+
+      expect(await screen.findByText(notice)).toBeInTheDocument();
+      expect(screen.getByText(notice)).toHaveClass('alert-warning');
+      expect(screen.getByText('Settings reset to defaults')).toBeInTheDocument();
+    });
+
+    it('drops an earlier save notice when a reset leaves none', async () => {
+      const notice = '2 workspace keys wait for their admins to save again.';
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
+      mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
+
+      render(<OrgSettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
+      expect(await screen.findByText(notice)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Reset to Defaults' }));
+
+      expect(await screen.findByText('Settings reset to defaults')).toBeInTheDocument();
+      expect(screen.queryByText(notice)).not.toBeInTheDocument();
+    });
+
     it('shows error when reset fails', async () => {
       mockClient.resetOrgAiSettings.mockRejectedValueOnce(new Error('Reset failed'));
 

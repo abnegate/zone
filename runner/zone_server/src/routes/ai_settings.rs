@@ -88,8 +88,15 @@ pub struct OrganizationAiSettingsResponse {
     pub notice: Option<String>,
 }
 
-/// What an organization admin is told when moving an endpoint URL stopped
-/// workspace keys saved without one from following it.
+/// What an organization reset tells its admin when it left workspaces waiting
+/// on their admins. A reset that left none answers with no content.
+#[derive(Debug, Serialize)]
+pub struct OrganizationAiSettingsResetResponse {
+    pub notice: String,
+}
+
+/// What an organization admin is told when moving or removing an endpoint URL
+/// stopped workspace keys saved without one from following it.
 fn waiting_notice(unrouted_workspaces: u64) -> Option<String> {
     match unrouted_workspaces {
         0 => None,
@@ -368,7 +375,7 @@ pub async fn delete_org(
         Err(response) => return *response,
     };
     match ai_settings::delete_org_authorized(state.db(), org_id, user_id).await {
-        Ok(true) => {
+        Ok(Some(unrouted_workspaces)) => {
             audit(
                 state.db(),
                 AuditEvent {
@@ -384,9 +391,14 @@ pub async fn delete_org(
                 },
             )
             .await;
-            StatusCode::NO_CONTENT.into_response()
+            match waiting_notice(unrouted_workspaces) {
+                Some(notice) => {
+                    Json(OrganizationAiSettingsResetResponse { notice }).into_response()
+                }
+                None => StatusCode::NO_CONTENT.into_response(),
+            }
         }
-        Ok(false) => (
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("AI settings not found")),
         )

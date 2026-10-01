@@ -1483,7 +1483,13 @@ async fn resetting_the_organization_settings_never_sends_a_workspace_key_to_the_
     );
     opened.assert_status(axum::http::StatusCode::OK);
     keyed.assert_status(axum::http::StatusCode::OK);
-    reset.assert_status(axum::http::StatusCode::NO_CONTENT);
+    reset.assert_status(axum::http::StatusCode::OK);
+    assert_eq!(
+        reset.json_value()["notice"],
+        "1 workspace key waits for its admin to save again.",
+        "{}",
+        reset.text()
+    );
     assert_eq!(routed, Some(false), "the workspace row was left routed");
 }
 

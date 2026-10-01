@@ -381,6 +381,97 @@ async fn test_delete_org_ai_settings_not_found() {
     response.assert_status(StatusCode::NOT_FOUND);
 }
 
+async fn save_litellm_for_organization(client: &TestClient, token: &str, org_id: &str) {
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &json!({
+                "provider": "self_hosted",
+                "litellm_host": "http://litellm:4000",
+                "litellm_key": "sk-organization-litellm",
+            }),
+            token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+async fn save_for_workspace(
+    client: &TestClient,
+    token: &str,
+    org_id: &str,
+    settings: &serde_json::Value,
+) {
+    let ws_id = create_workspace(client, token, org_id).await;
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai"),
+            settings,
+            token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_resetting_org_ai_settings_names_the_workspace_keys_left_waiting() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    save_litellm_for_organization(&client, &token, &org_id).await;
+    for key in ["sk-workspace-one", "sk-workspace-two"] {
+        save_for_workspace(&client, &token, &org_id, &json!({"litellm_key": key})).await;
+    }
+
+    let response = client
+        .delete_auth(&format!("/api/organizations/{org_id}/settings/ai"), &token)
+        .await;
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(
+        response.json_value(),
+        json!({"notice": "2 workspace keys wait for their admins to save again."}),
+        "{}",
+        response.text()
+    );
+}
+
+#[tokio::test]
+async fn test_resetting_org_ai_settings_without_workspace_keys_left_waiting_has_no_content() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    save_litellm_for_organization(&client, &token, &org_id).await;
+    save_for_workspace(
+        &client,
+        &token,
+        &org_id,
+        &json!({
+            "litellm_host": "http://workspace-litellm:4000",
+            "litellm_key": "sk-workspace-own-host",
+        }),
+    )
+    .await;
+    save_for_workspace(
+        &client,
+        &token,
+        &org_id,
+        &json!({"model_fast": "llama3.1:8b"}),
+    )
+    .await;
+
+    let response = client
+        .delete_auth(&format!("/api/organizations/{org_id}/settings/ai"), &token)
+        .await;
+
+    response.assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        response.text(),
+        "",
+        "a reset that left no key waiting has no body"
+    );
+}
+
 #[tokio::test]
 async fn test_get_workspace_ai_settings_default() {
     let client = TestClient::with_db().await;

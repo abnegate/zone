@@ -1580,6 +1580,7 @@ describe('Client', () => {
         const result = await client.resetOrgAiSettings('org-1');
 
         expect(result.provider).toBe('self_hosted');
+        expect(result.notice).toBeUndefined();
         expect(mockFetch).toHaveBeenNthCalledWith(
           1,
           '/api/organizations/org-1/settings/ai',
@@ -1590,6 +1591,19 @@ describe('Client', () => {
           '/api/organizations/org-1/settings/ai',
           expect.not.objectContaining({ method: 'DELETE' })
         );
+      });
+
+      it('resetOrgAiSettings keeps the notice a reset leaves for the admin', async () => {
+        const notice = '1 workspace key waits for its admin to save again.';
+        const defaults = { ...mockAiSettings, provider: 'self_hosted' };
+        mockFetch
+          .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ notice }) })
+          .mockResolvedValueOnce({ ok: true, json: async () => defaults });
+
+        const result = await client.resetOrgAiSettings('org-1');
+
+        expect(result.provider).toBe('self_hosted');
+        expect(result.notice).toBe(notice);
       });
 
       it('resetOrgAiSettings treats settings that were never saved as already reset', async () => {

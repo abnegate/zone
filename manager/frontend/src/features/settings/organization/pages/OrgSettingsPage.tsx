@@ -125,10 +125,12 @@ export default function OrgSettingsPage() {
     setSaving(true);
     setError(null);
     setSuccess(null);
+    setNotice(null);
 
     try {
       const settings = await client.resetOrgAiSettings(currentOrganization.id);
       applySettingsToForm(settings);
+      setNotice(settings.notice ?? null);
       flash('Settings reset to defaults');
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'Failed to reset settings');

@@ -72,6 +72,7 @@ import {
   InvitationSchema,
   InvitationsResponseSchema,
   LimitsResponseSchema,
+  OrganizationAiSettingsResetSchema,
   OrganizationAiSettingsSaveSchema,
   OrganizationMemberSchema,
   OrganizationResponseSchema,
@@ -546,9 +547,10 @@ class Client {
     return parse(OrganizationAiSettingsSaveSchema, await response.json());
   }
 
-  // The delete answers 204 with no body (404 when nothing was ever saved), so
-  // the defaults are read back rather than parsed out of the reply.
-  async resetOrgAiSettings(orgId: string): Promise<AiSettings> {
+  // The delete answers with no settings: 200 with only a notice when it left
+  // workspace keys waiting on their admins, 204 otherwise, 404 when nothing was
+  // ever saved. The defaults are read back rather than parsed out of the reply.
+  async resetOrgAiSettings(orgId: string): Promise<OrganizationAiSettingsSave> {
     const response = await fetch(`${API_BASE}/api/organizations/${orgId}/settings/ai`, {
       method: 'DELETE',
       headers: this.getHeaders(),
@@ -556,7 +558,12 @@ class Client {
     if (!response.ok && response.status !== 404) {
       throw new Error(`Failed to reset org AI settings: ${response.status}`);
     }
-    return this.getOrgAiSettings(orgId);
+    const reset =
+      response.status === 200
+        ? parse(OrganizationAiSettingsResetSchema, await response.json())
+        : null;
+    const settings = await this.getOrgAiSettings(orgId);
+    return reset ? { ...settings, notice: reset.notice } : settings;
   }
 
   // Workspace AI Settings API

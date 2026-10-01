@@ -778,19 +778,22 @@ where
 
 /// Delete organization settings while holding the caller's admin membership
 /// row, unrouting the workspace keys saved without a URL that took one from it.
+/// Returns how many workspaces stopped routing, or `None` when the
+/// organization had no settings to delete.
 pub async fn delete_org_authorized(
     pool: &PgPool,
     organization_id: Uuid,
     user_id: Uuid,
-) -> AccessResult<bool> {
+) -> AccessResult<Option<u64>> {
     let mut transaction = pool.begin().await?;
     lock_organization(&mut transaction, CLAIM_ORGANIZATION, organization_id).await?;
     authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
     let saved = saved_endpoints(&mut transaction, ORGANIZATION_ENDPOINTS, organization_id).await?;
     let deleted = delete_org(&mut *transaction, organization_id).await?;
-    unroute_keys_without_url(&mut transaction, organization_id, lent_pairs(&saved)).await?;
+    let unrouted_workspaces =
+        unroute_keys_without_url(&mut transaction, organization_id, lent_pairs(&saved)).await?;
     transaction.commit().await?;
-    Ok(deleted)
+    Ok(deleted.then_some(unrouted_workspaces))
 }
 
 async fn get_workspace<'e, E>(
