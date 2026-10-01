@@ -1333,7 +1333,8 @@ async fn prepare(
 /// Nothing the run does not use is read: an endpoint run reads nothing, a
 /// sign-in zone does not keep -- the host's, or codex's in its own home -- is
 /// its agent's to renew, and a run whose workspace has moved to another
-/// provider since finishes on the sign-in it began with.
+/// provider since finishes on the sign-in it began with. Settings that cannot
+/// be read say neither, so the attempt is retried.
 async fn refreshed(
     state: &AppState,
     workspace: Uuid,
@@ -1347,10 +1348,13 @@ async fn refreshed(
     else {
         return Ok(prepared.clone());
     };
-    let Some(organization) = Route::for_workspace(state, workspace)
-        .await
-        .organization_on(*agent)
-    else {
+    let route = Route::for_workspace(state, workspace).await;
+    if let Err(unusable) = route.endpoint()
+        && unusable.reason == Reason::Unreadable
+    {
+        return Err(Fault::backend(backend::Error::Unusable(unusable)));
+    }
+    let Some(organization) = route.organization_on(*agent) else {
         tracing::warn!(
             %workspace,
             %agent,
@@ -7101,6 +7105,61 @@ mod cli_tests {
             finished.error_message
         );
         assert_eq!(agent.lines(TOKENS), ["first-access", "first-access"]);
+        fixture.remove().await;
+    }
+
+    /// A run prepared on the organization's claude sign-in, holding `token`.
+    fn signed_in(token: &str) -> LlmBackend {
+        LlmBackend::cli(
+            AgentKind::Claude,
+            CliSettings::default()
+                .with_sign_in(SignIn::Organization)
+                .with_credential(Credential::key("CLAUDE_CODE_OAUTH_TOKEN", token)),
+        )
+    }
+
+    /// Settings that cannot be read say nothing about the agent the workspace
+    /// runs on, so the attempt is retried rather than run on a sign-in that may
+    /// since have been renewed or removed.
+    #[tokio::test]
+    async fn an_attempt_whose_settings_cannot_be_read_is_retried() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/unreachable")
+            .expect("a lazy pool that never connects");
+        let state = AppState::new(crate::state::test_config(), pool, None);
+
+        let fault = refreshed(&state, Uuid::new_v4(), &signed_in("first-access"))
+            .await
+            .expect_err("unreadable settings are no sign-in to keep");
+
+        assert_eq!(fault.failure, Failure::Transient, "{}", fault.message);
+        assert_eq!(
+            fault.message,
+            backend::Error::Unusable(Unusable {
+                reason: Reason::Unreadable
+            })
+            .to_string()
+        );
+    }
+
+    /// Settings that are read and name another agent leave the run on the
+    /// sign-in it began with.
+    #[tokio::test]
+    async fn an_attempt_whose_workspace_left_its_agent_keeps_the_runs_sign_in() {
+        let fixture = Fixture::new(false).await;
+        let state = fixture.state(crate::state::test_config());
+        fixture.choose(PROVIDER_CODEX).await;
+
+        let backend = refreshed(&state, fixture.workspace, &signed_in("first-access"))
+            .await
+            .expect("a workspace that left its agent keeps the run's sign-in");
+
+        let LlmBackend::Cli { agent, settings } = backend else {
+            panic!("the run left its coding agent");
+        };
+        assert_eq!(agent, AgentKind::Claude);
+        assert_eq!(settings.credential.expose(), Some("first-access"));
         fixture.remove().await;
     }
 
