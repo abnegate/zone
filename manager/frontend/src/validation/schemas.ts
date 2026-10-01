@@ -326,6 +326,7 @@ export {
   AiProviderSchema,
   AiSettingsResponseSchema,
   AiSettingsSchema,
+  OrganizationAiSettingsSaveSchema,
   UpdateAiSettingsRequestSchema,
   UpdateWorkspaceMemberRequestSchema,
   WorkspaceAiSettingsResponseSchema,

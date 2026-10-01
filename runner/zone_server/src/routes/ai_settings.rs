@@ -78,6 +78,28 @@ impl AiSettingsResponse {
     }
 }
 
+/// An organization's saved AI settings, with a notice when the save left
+/// workspaces waiting on their admins.
+#[derive(Debug, Serialize)]
+pub struct OrganizationAiSettingsResponse {
+    #[serde(flatten)]
+    pub settings: AiSettingsResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// What an organization admin is told when moving an endpoint URL stopped
+/// workspace keys saved without one from following it.
+fn waiting_notice(unrouted_workspaces: u64) -> Option<String> {
+    match unrouted_workspaces {
+        0 => None,
+        1 => Some("1 workspace key waits for its admin to save again.".to_string()),
+        count => Some(format!(
+            "{count} workspace keys wait for their admins to save again."
+        )),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct OrganizationKeysResponse {
     pub litellm: bool,
@@ -308,8 +330,8 @@ pub async fn upsert_org(
     )
     .await
     {
-        Ok(settings) => {
-            let response = AiSettingsResponse::from(settings);
+        Ok(saved) => {
+            let response = AiSettingsResponse::from(saved.settings);
             audit(
                 state.db(),
                 AuditEvent {
@@ -325,7 +347,11 @@ pub async fn upsert_org(
                 },
             )
             .await;
-            Json(response).into_response()
+            Json(OrganizationAiSettingsResponse {
+                settings: response,
+                notice: waiting_notice(saved.unrouted_workspaces),
+            })
+            .into_response()
         }
         Err(error) => *access_error(error),
     }

@@ -146,6 +146,7 @@ struct SavedEndpoints {
     openai_api_key: bool,
     anthropic_base_url: Option<String>,
     anthropic_api_key: bool,
+    routed: bool,
 }
 
 impl SavedEndpoints {
@@ -164,12 +165,33 @@ impl SavedEndpoints {
             Pair::Anthropic => self.anthropic_api_key,
         }
     }
+
+    /// The URL an organization row lends a workspace key saved without one.
+    /// A row saved before completions were routed lends none.
+    fn lent(&self, pair: Pair) -> Option<&str> {
+        self.routed.then(|| self.url(pair)).flatten()
+    }
+}
+
+/// The pairs whose lent URL an organization update moves: a workspace key
+/// saved without a URL would follow it to a host its admin never chose. The
+/// saved row is routed once the update is saved, so a URL it kept from before
+/// routing is lent from then on.
+fn moved_pairs(update: &Update<'_>, saved: &SavedEndpoints) -> [bool; 3] {
+    Pair::ALL.map(|pair| {
+        let next = match pair.url(update) {
+            Some(url) => nonempty(Some(url)),
+            None => saved.url(pair),
+        };
+        next != saved.lent(pair)
+    })
 }
 
 const ORGANIZATION_ENDPOINTS: &str = r#"
     SELECT litellm_host, litellm_key IS NOT NULL AS litellm_key,
            openai_base_url, openai_api_key IS NOT NULL AS openai_api_key,
-           anthropic_base_url, anthropic_api_key IS NOT NULL AS anthropic_api_key
+           anthropic_base_url, anthropic_api_key IS NOT NULL AS anthropic_api_key,
+           completions_routed AS routed
     FROM organization_ai_settings
     WHERE organization_id = $1
     FOR UPDATE
@@ -178,7 +200,8 @@ const ORGANIZATION_ENDPOINTS: &str = r#"
 const WORKSPACE_ENDPOINTS: &str = r#"
     SELECT litellm_host, litellm_key IS NOT NULL AS litellm_key,
            openai_base_url, openai_api_key IS NOT NULL AS openai_api_key,
-           anthropic_base_url, anthropic_api_key IS NOT NULL AS anthropic_api_key
+           anthropic_base_url, anthropic_api_key IS NOT NULL AS anthropic_api_key,
+           completions_routed AS routed
     FROM workspace_ai_settings
     WHERE workspace_id = $1
     FOR UPDATE
@@ -187,10 +210,50 @@ const WORKSPACE_ENDPOINTS: &str = r#"
 const ROUTED_ORGANIZATION_ENDPOINTS: &str = r#"
     SELECT litellm_host, litellm_key IS NOT NULL AS litellm_key,
            openai_base_url, openai_api_key IS NOT NULL AS openai_api_key,
-           anthropic_base_url, anthropic_api_key IS NOT NULL AS anthropic_api_key
+           anthropic_base_url, anthropic_api_key IS NOT NULL AS anthropic_api_key,
+           completions_routed AS routed
     FROM organization_ai_settings
     WHERE organization_id = $1 AND completions_routed
 "#;
+
+/// Stop routing the workspace rows of an organization that keep a key without
+/// a URL for a pair whose lent URL moved, so those keys never reach the new
+/// host. Their workspaces fall back as rows saved before routing until their
+/// admins save again. Returns how many rows stopped.
+const UNROUTE_KEYS_WITHOUT_URL: &str = r#"
+    UPDATE workspace_ai_settings AS settings
+    SET completions_routed = false, updated_at = NOW()
+    FROM workspaces
+    WHERE workspaces.id = settings.workspace_id
+      AND workspaces.organization_id = $1
+      AND settings.completions_routed
+      AND (
+        ($2 AND settings.litellm_key IS NOT NULL
+            AND NULLIF(BTRIM(settings.litellm_host), '') IS NULL)
+        OR ($3 AND settings.openai_api_key IS NOT NULL
+            AND NULLIF(BTRIM(settings.openai_base_url), '') IS NULL)
+        OR ($4 AND settings.anthropic_api_key IS NOT NULL
+            AND NULLIF(BTRIM(settings.anthropic_base_url), '') IS NULL)
+      )
+"#;
+
+async fn unroute_keys_without_url(
+    connection: &mut PgConnection,
+    organization_id: Uuid,
+    [litellm, openai, anthropic]: [bool; 3],
+) -> DbResult<u64> {
+    if !(litellm || openai || anthropic) {
+        return Ok(0);
+    }
+    let result = sqlx::query(UNROUTE_KEYS_WITHOUT_URL)
+        .bind(organization_id)
+        .bind(litellm)
+        .bind(openai)
+        .bind(anthropic)
+        .execute(connection)
+        .await?;
+    Ok(result.rows_affected())
+}
 
 async fn saved_endpoints(
     connection: &mut PgConnection,
@@ -403,6 +466,15 @@ pub struct OrganizationKeys {
     pub litellm: bool,
     pub openai: bool,
     pub anthropic: bool,
+}
+
+/// An organization's saved settings, and how many of its workspaces stopped
+/// routing because their key saved without a URL would have followed a moved
+/// organization URL.
+#[derive(Debug, Clone)]
+pub struct OrganizationSave {
+    pub settings: OrgAiSettingsRow,
+    pub unrouted_workspaces: u64,
 }
 
 /// A workspace's own settings beside the keys its organization saved.
@@ -643,15 +715,24 @@ pub async fn upsert_org_authorized(
     organization_id: Uuid,
     user_id: Uuid,
     update: Update<'_>,
-) -> AccessResult<OrgAiSettingsRow> {
+) -> AccessResult<OrganizationSave> {
     let mut transaction = pool.begin().await?;
     authorize_organization(&mut transaction, organization_id, user_id, OrgRole::Admin).await?;
     validate(&update, hosts)?;
     let saved = saved_endpoints(&mut transaction, ORGANIZATION_ENDPOINTS, organization_id).await?;
     validate_keys(&update, &saved, &SavedEndpoints::default(), hosts)?;
     let settings = upsert_org(&mut *transaction, organization_id, &update).await?;
+    let unrouted_workspaces = unroute_keys_without_url(
+        &mut transaction,
+        organization_id,
+        moved_pairs(&update, &saved),
+    )
+    .await?;
     transaction.commit().await?;
-    Ok(settings)
+    Ok(OrganizationSave {
+        settings,
+        unrouted_workspaces,
+    })
 }
 
 async fn delete_org<'e, E>(executor: E, organization_id: Uuid) -> DbResult<bool>
@@ -1483,6 +1564,7 @@ mod tests {
             openai_api_key: true,
             anthropic_base_url: url.map(str::to_string),
             anthropic_api_key: true,
+            routed: true,
         }
     }
 
@@ -1501,6 +1583,28 @@ mod tests {
                 ..Update::default()
             },
         }
+    }
+
+    #[test]
+    fn only_an_organization_update_that_moves_a_lent_url_moves_its_pair() {
+        let first = keyed_beside(Some("http://first.example"));
+        for pair in Pair::ALL {
+            let index = Pair::ALL.iter().position(|each| *each == pair).unwrap_or(0);
+            assert!(moved_pairs(&url_update(pair, "http://second.example"), &first)[index]);
+            assert!(moved_pairs(&url_update(pair, ""), &first)[index]);
+            assert!(!moved_pairs(&url_update(pair, "http://first.example"), &first)[index]);
+            assert!(
+                moved_pairs(
+                    &url_update(pair, "http://first.example"),
+                    &SavedEndpoints {
+                        routed: false,
+                        ..keyed_beside(Some("http://first.example"))
+                    }
+                )[index],
+                "a URL saved before routing starts being lent"
+            );
+        }
+        assert_eq!(moved_pairs(&Update::default(), &first), [false; 3]);
     }
 
     #[test]

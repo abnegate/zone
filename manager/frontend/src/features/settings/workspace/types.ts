@@ -87,6 +87,10 @@ export interface AiSettings {
   completions_routed: boolean;
 }
 
+export interface OrganizationAiSettingsSave extends AiSettings {
+  notice?: string;
+}
+
 export interface OrganizationKeys {
   litellm: boolean;
   openai: boolean;

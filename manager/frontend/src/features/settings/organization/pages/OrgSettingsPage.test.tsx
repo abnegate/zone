@@ -768,6 +768,17 @@ describe('OrgSettingsPage', () => {
       });
     });
 
+    it('keeps the notice a save leaves about workspaces waiting on their admins', async () => {
+      const notice = '2 workspace keys wait for their admins to save again.';
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
+
+      render(<OrgSettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText(notice)).toBeInTheDocument();
+      expect(screen.getByText(notice)).toHaveClass('alert-warning');
+    });
+
     it('shows error when save fails', async () => {
       mockClient.updateOrgAiSettings.mockRejectedValueOnce(new Error('Save failed'));
 

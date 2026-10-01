@@ -1559,6 +1559,18 @@ describe('Client', () => {
         );
       });
 
+      it('updateOrgAiSettings keeps the notice a save leaves for the admin', async () => {
+        const notice = '2 workspace keys wait for their admins to save again.';
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ ...mockAiSettings, notice }),
+        });
+
+        const saved = await client.updateOrgAiSettings('org-1', { litellm_host: 'http://b' });
+
+        expect(saved.notice).toBe(notice);
+      });
+
       it('resetOrgAiSettings resets org AI settings and reads the defaults back', async () => {
         const defaults = { ...mockAiSettings, provider: 'self_hosted' };
         mockFetch

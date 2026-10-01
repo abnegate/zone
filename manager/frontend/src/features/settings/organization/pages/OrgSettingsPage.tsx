@@ -46,6 +46,7 @@ export default function OrgSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
 
   const [provider, setProvider] = useState<AiProvider>('self_hosted');
@@ -101,6 +102,7 @@ export default function OrgSettingsPage() {
     setSaving(true);
     setError(null);
     setSuccess(null);
+    setNotice(null);
 
     try {
       const settings = await client.updateOrgAiSettings(
@@ -108,6 +110,7 @@ export default function OrgSettingsPage() {
         buildAiSettingsRequest(provider, credentials, models, saved)
       );
       applySettingsToForm(settings);
+      setNotice(settings.notice ?? null);
       flash('Settings saved successfully');
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'Failed to save settings');
@@ -173,6 +176,7 @@ export default function OrgSettingsPage() {
     <SettingsPage title={TITLE} tabs={tabs} value={activeTab} onValueChange={selectTab}>
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
+      {notice && <div className="alert alert-warning">{notice}</div>}
 
       <TabsContent value="members">
         <OrgMembersSection orgId={currentOrganization.id} />

@@ -194,6 +194,10 @@ export const AiSettingsResponseSchema = z.object({
   completions_routed: z.boolean(),
 });
 
+export const OrganizationAiSettingsSaveSchema = AiSettingsResponseSchema.extend({
+  notice: z.string().optional(),
+});
+
 export const OrganizationKeysSchema = z.object({
   litellm: z.boolean(),
   openai: z.boolean(),

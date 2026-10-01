@@ -99,6 +99,7 @@ export type {
   BorderRadius,
   CreateWorkspaceRequest,
   FontFamily,
+  OrganizationAiSettingsSave,
   UpdateAiSettingsRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,

@@ -41,6 +41,7 @@ import type {
   Message,
   ModelSource,
   Organization,
+  OrganizationAiSettingsSave,
   OrganizationMember,
   OrgMembersResponse,
   Plan,
@@ -71,6 +72,7 @@ import {
   InvitationSchema,
   InvitationsResponseSchema,
   LimitsResponseSchema,
+  OrganizationAiSettingsSaveSchema,
   OrganizationMemberSchema,
   OrganizationResponseSchema,
   OrganizationsResponseSchema,
@@ -529,7 +531,10 @@ class Client {
     return parse(AiSettingsResponseSchema, await response.json());
   }
 
-  async updateOrgAiSettings(orgId: string, request: UpdateAiSettingsRequest): Promise<AiSettings> {
+  async updateOrgAiSettings(
+    orgId: string,
+    request: UpdateAiSettingsRequest
+  ): Promise<OrganizationAiSettingsSave> {
     const response = await fetch(`${API_BASE}/api/organizations/${orgId}/settings/ai`, {
       method: 'PUT',
       headers: this.getHeaders(),
@@ -538,7 +543,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to update org AI settings: ${response.status}`);
     }
-    return parse(AiSettingsResponseSchema, await response.json());
+    return parse(OrganizationAiSettingsSaveSchema, await response.json());
   }
 
   // The delete answers 204 with no body (404 when nothing was ever saved), so

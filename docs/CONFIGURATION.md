@@ -203,7 +203,13 @@ as the URL differs from the saved one. A URL a workspace saves never
 receives the organization's key, and the instance's `LITELLM_KEY` only ever goes
 to `LITELLM_HOST`. A key a workspace saves without a URL goes to the URL its
 organization saved, or on OpenAI and Anthropic to the provider's default
-without one. A URL saved with no key, or a blank one, is sent no
+without one. So when an organization admin changes, sets or clears its URL for
+a pair, every workspace of that organization holding a key for the pair without
+a URL stops using its saved endpoints until its own admin saves AI Settings
+again, and the key never follows the organization to a host that admin did not
+see. The organization's save says so: *N workspace keys wait for their admins
+to save again.* Until then those workspaces run as rows saved before
+completions were routed, on the organization's own URLs and keys. A URL saved with no key, or a blank one, is sent no
 `Authorization` header. A workspace that names a host without a key while its
 organization saved one is warned in AI Settings that the host gets no key.
 

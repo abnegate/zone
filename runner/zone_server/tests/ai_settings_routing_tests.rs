@@ -1211,24 +1211,30 @@ async fn creating_a_chat_on_an_endpoint_the_instance_no_longer_allows_is_refused
         )
         .await;
     let asked = shown(&ollama).await - before;
-    let created: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chats WHERE title = 'Refused' AND workspace_id = $1")
-        .bind(workspace)
-        .fetch_one(&pool)
-        .await
-        .expect("the chats are readable");
+    let created: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM chats WHERE title = 'Refused' AND workspace_id = $1",
+    )
+    .bind(workspace)
+    .fetch_one(&pool)
+    .await
+    .expect("the chats are readable");
     let people = members(&pool, workspace).await;
     discard(&pool, workspace, &people).await;
 
     response.assert_status(axum::http::StatusCode::CONFLICT);
     assert!(response.text().contains(UNUSABLE), "{}", response.text());
-    assert!(!response.text().contains(ORGANIZATION_KEY), "{}", response.text());
+    assert!(
+        !response.text().contains(ORGANIZATION_KEY),
+        "{}",
+        response.text()
+    );
     assert_eq!(created, 0, "a chat was created on an unusable endpoint");
     assert_eq!(asked, 0, "the instance's Ollama was asked about the model");
 }
 
 #[tokio::test]
 async fn starting_a_project_on_an_endpoint_the_instance_no_longer_allows_is_refused_with_the_reason()
-{
+ {
     let endpoints = Endpoints::start().await;
     let ollama = MockServer::start().await;
     let (client, token, workspace) =
@@ -1276,4 +1282,100 @@ async fn the_model_picker_says_why_an_endpoint_the_instance_no_longer_allows_off
         !body.contains(CHAT_MODEL) && !body.contains(INSTANCE_MODEL),
         "the picker offered the instance's models for a workspace whose endpoint cannot be used: {body}"
     );
+}
+
+#[tokio::test]
+async fn a_workspace_key_saved_without_a_url_never_follows_its_organization_to_a_new_url() {
+    const MOVED_KEY: &str = "sk-organization-moved";
+    let endpoints = Endpoints::start().await;
+    let first = provider().await;
+    let client = TestClient::with_config(endpoints.config()).await;
+    let pool = client.state().db().clone();
+    let (token, chat, workspace) = chat_on(&client, CHAT_MODEL).await;
+    let organization: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id = $1")
+            .bind(workspace)
+            .fetch_one(&pool)
+            .await
+            .expect("the workspace's organization");
+    let organization_settings = format!("/api/organizations/{organization}/settings/ai");
+
+    let opened = client
+        .put_json_auth(
+            &organization_settings,
+            &json!({
+                "provider": SELF_HOSTED,
+                "litellm_host": first.uri(),
+                "litellm_key": ORGANIZATION_KEY,
+                "model_fast": CHAT_MODEL,
+            }),
+            &token,
+        )
+        .await;
+    let keyed = client
+        .put_json_auth(
+            &format!("/api/organizations/{organization}/workspaces/{workspace}/settings/ai"),
+            &json!({"litellm_key": WORKSPACE_KEY}),
+            &token,
+        )
+        .await;
+    let moved = client
+        .put_json_auth(
+            &organization_settings,
+            &json!({"litellm_host": endpoints.organization.uri(), "litellm_key": MOVED_KEY}),
+            &token,
+        )
+        .await;
+    let address = serve(client.state().clone()).await;
+    let ended = converse(&address, &token, &chat, "Hello").await;
+    let routed: Option<bool> = sqlx::query_scalar(
+        "SELECT completions_routed FROM workspace_ai_settings WHERE workspace_id = $1",
+    )
+    .bind(workspace)
+    .fetch_optional(&pool)
+    .await
+    .expect("the workspace's settings are readable");
+    let people = members(&pool, workspace).await;
+    discard(&pool, workspace, &people).await;
+    let outcome = format!("the turn ended on {ended:?}");
+
+    for (name, server) in [
+        ("organization's new URL", &endpoints.organization),
+        ("organization's old URL", &first),
+        ("instance's LITELLM_HOST", &endpoints.instance),
+    ] {
+        let leaked: Vec<Request> = any_completions(server)
+            .await
+            .into_iter()
+            .filter(|request| {
+                authorization(request).is_some_and(|value| value.contains(WORKSPACE_KEY))
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "the workspace key reached the {name} ({outcome})"
+        );
+    }
+    let delivered = any_completions(&endpoints.organization).await;
+    assert!(
+        delivered
+            .iter()
+            .any(|request| authorization(request) == Some(format!("Bearer {MOVED_KEY}"))),
+        "the turn did not fall back to the organization's own pair ({outcome})"
+    );
+    opened.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        opened.json_value().get("notice").is_none(),
+        "{}",
+        opened.text()
+    );
+    keyed.assert_status(axum::http::StatusCode::OK);
+    moved.assert_status(axum::http::StatusCode::OK);
+    assert_eq!(
+        moved.json_value()["notice"],
+        "1 workspace key waits for its admin to save again.",
+        "{}",
+        moved.text()
+    );
+    assert_eq!(routed, Some(false), "the workspace row was left routed");
 }
