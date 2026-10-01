@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { ApiError } from '../../../api/ApiError';
 import { modelsApi } from '../../../api/models';
 import { useAuth } from '../../../features/auth';
 import type { DiskUsage, InstalledModel, ProviderErrors } from '../types';
@@ -33,11 +34,10 @@ export function useModels(workspaceId?: string) {
       setProviderErrors(response.errors ?? {});
     } catch (err) {
       if (!current()) return;
-      const message = err instanceof Error ? err.message : 'Failed to fetch models';
-      if (message.includes('401')) {
+      if (err instanceof ApiError && err.status === 401) {
         logout();
       }
-      setError(message);
+      setError(err instanceof Error ? err.message : 'Failed to fetch models');
     } finally {
       if (current()) {
         setLoading(false);

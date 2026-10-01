@@ -20,6 +20,7 @@ import type {
   UpdateChatRequest,
 } from '../features/chats/types';
 import { parse } from '../validation';
+import { ApiError } from './ApiError';
 import { API_BASE } from './client';
 
 class ChatsApi {
@@ -65,7 +66,7 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to fetch chats: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch chats');
     }
     const data = parse(ChatsResponseSchema, await response.json());
     return data.chats;
@@ -76,7 +77,7 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to fetch chat: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch chat');
     }
     const data = parse(ChatResponseSchema, await response.json());
     return data.chat;
@@ -89,7 +90,7 @@ class ChatsApi {
       body: JSON.stringify(request),
     });
     if (!response.ok) {
-      throw new Error(`Failed to create chat: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to create chat');
     }
     const data = parse(ChatResponseSchema, await response.json());
     return data.chat;
@@ -102,7 +103,7 @@ class ChatsApi {
       body: JSON.stringify(request),
     });
     if (!response.ok) {
-      throw new Error(`Failed to update chat: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to update chat');
     }
     const data = parse(ChatResponseSchema, await response.json());
     return data.chat;
@@ -114,7 +115,7 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to delete chat: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to delete chat');
     }
   }
 
@@ -124,7 +125,7 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to archive chat: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to archive chat');
     }
     const data = parse(ChatResponseSchema, await response.json());
     return data.chat;
@@ -136,7 +137,7 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to unarchive chat: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to unarchive chat');
     }
     const data = parse(ChatResponseSchema, await response.json());
     return data.chat;
@@ -147,7 +148,7 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to fetch messages: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch messages');
     }
     const data = parse(MessagesResponseSchema, await response.json());
     return data.messages;
@@ -160,7 +161,7 @@ class ChatsApi {
       body: JSON.stringify(request),
     });
     if (!response.ok) {
-      throw new Error(`Failed to send message: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to send message');
     }
     const data = parse(MessageResponseSchema, await response.json());
     return data.message;
@@ -188,7 +189,7 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to delete message: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to delete message');
     }
   }
 
@@ -197,7 +198,7 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(await this.failure(response, 'Failed to load attached sources'));
+      throw await ApiError.from(response, 'Failed to load attached sources');
     }
     return parse(ChatSourcesResponseSchema, await response.json()).sources;
   }
@@ -209,7 +210,7 @@ class ChatsApi {
       body: JSON.stringify({ source_ids: sourceIds }),
     });
     if (!response.ok) {
-      throw new Error(await this.failure(response, 'Failed to attach sources'));
+      throw await ApiError.from(response, 'Failed to attach sources');
     }
     return parse(ChatSourcesResponseSchema, await response.json()).sources;
   }
@@ -225,25 +226,9 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(await this.failure(response, 'Failed to search chat messages'));
+      throw await ApiError.from(response, 'Failed to search chat messages');
     }
     return parse(ChatSearchResponseSchema, await response.json());
-  }
-
-  private async failure(response: Response, fallback: string): Promise<string> {
-    try {
-      const parsed = JSON.parse(await response.text()) as {
-        error?: unknown;
-        message?: unknown;
-      };
-      const detail = [parsed.error, parsed.message].find(
-        (value): value is string => typeof value === 'string' && value.length > 0
-      );
-      if (detail) return `${fallback}: ${detail}`;
-    } catch {
-      // A body that is missing or not JSON still names the status below.
-    }
-    return `${fallback}: ${response.status}`;
   }
 }
 

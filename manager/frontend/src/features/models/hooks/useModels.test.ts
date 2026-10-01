@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { ApiError } from '../../../api/ApiError';
 
 const mockGetModels = mock();
 const mockDeleteModel = mock();
@@ -224,7 +225,7 @@ describe('useModels', () => {
   });
 
   it('calls logout on 401 error', async () => {
-    mockGetModels.mockRejectedValueOnce(new Error('401 Unauthorized'));
+    mockGetModels.mockRejectedValueOnce(new ApiError('Failed to fetch models: Unauthorized', 401));
 
     renderHook(() => useModels());
 

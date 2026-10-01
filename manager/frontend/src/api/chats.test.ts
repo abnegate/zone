@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { ApiError } from './ApiError';
 import { chatsApi } from './chats';
 
 const fetch = globalThis.fetch;
@@ -42,5 +43,31 @@ describe('chatsApi.searchChatMessages', () => {
     ).rejects.toThrow(
       'Failed to search chat messages: Failed to deserialize query string: missing field workspace_id'
     );
+  });
+});
+
+describe('chatsApi.createChat', () => {
+  const request = { workspace_id: 'ws-1', title: 'New chat', model_name: 'auto' };
+
+  it("names the reason the server refuses a workspace's endpoint", async () => {
+    const reason =
+      "This workspace's AI endpoint can't be used: its AI settings couldn't be read. Check AI Settings.";
+    globalThis.fetch = mock(async () =>
+      Response.json({ success: false, error: reason }, { status: 409 })
+    ) as unknown as typeof globalThis.fetch;
+
+    const failure = await chatsApi.createChat(request).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(409);
+    expect((failure as ApiError).message).toBe(`Failed to create chat: ${reason}`);
+  });
+
+  it('falls back to the status when the refusal carries no reason', async () => {
+    globalThis.fetch = mock(
+      async () => new Response('', { status: 502 })
+    ) as unknown as typeof globalThis.fetch;
+
+    await expect(chatsApi.createChat(request)).rejects.toThrow('Failed to create chat: 502');
   });
 });

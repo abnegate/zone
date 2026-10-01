@@ -25,6 +25,7 @@ import type {
   ModelsResponse,
 } from '../features/models/types';
 import { parse } from '../validation';
+import { ApiError } from './ApiError';
 import { client } from './client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -56,7 +57,7 @@ export const modelsApi = {
       headers: client.getHeaders(),
     });
     if (!response.ok) {
-      throw new Error(`Failed to fetch models: ${response.status}`);
+      throw await ApiError.from(response, 'Failed to fetch models');
     }
     const text = await response.text();
     if (!text) {

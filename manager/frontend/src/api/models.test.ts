@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { ApiError } from './ApiError';
 import { modelsApi } from './models';
 
 describe('Namespaced model requests', () => {
@@ -107,5 +108,25 @@ describe('Namespaced model requests', () => {
       '/api/models/hf.co%2Fowner%2Frepository%3AQ4_K_M',
       expect.objectContaining({ method: 'DELETE' })
     );
+  });
+
+  it("names the reason the server refuses a workspace's endpoint", async () => {
+    const reason =
+      "This workspace's AI endpoint can't be used: its host isn't one this instance allows endpoints on. Check AI Settings.";
+    global.fetch = mock(async () =>
+      Response.json({ success: false, error: reason }, { status: 409 })
+    ) as unknown as typeof fetch;
+
+    const failure = await modelsApi.getModels('ws-1').catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(409);
+    expect((failure as ApiError).message).toBe(`Failed to fetch models: ${reason}`);
+  });
+
+  it('falls back to the status when a refused listing carries no reason', async () => {
+    global.fetch = mock(async () => new Response('', { status: 500 })) as unknown as typeof fetch;
+
+    await expect(modelsApi.getModels()).rejects.toThrow('Failed to fetch models: 500');
   });
 });

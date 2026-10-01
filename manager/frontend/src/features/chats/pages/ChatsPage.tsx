@@ -64,7 +64,7 @@ const UNTITLED_CHAT_TITLE = 'Untitled chat';
 export default function ChatsPage() {
   const { isAuthenticated } = useAuth();
   const { currentWorkspace } = useWorkspace();
-  const { models } = useModels(currentWorkspace?.id);
+  const { models, error: modelsError } = useModels(currentWorkspace?.id);
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [showArchived, setShowArchived] = useState(false);
@@ -1331,6 +1331,7 @@ export default function ChatsPage() {
               }
             }}
             helpText="Automatic picks a chat, image, video or audio model from the message."
+            error={modelsError ?? undefined}
             options={[
               { value: AUTO_MODEL, label: 'Automatic' },
               ...models
