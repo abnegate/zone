@@ -26,6 +26,7 @@ import {
   ChatSources,
   Citations,
   Generation,
+  HandoverNotice,
   MemoryBadge,
   MessageContent,
 } from '../components';
@@ -54,6 +55,7 @@ import {
   parseCharacterText,
   readAttachment,
   sourceAttachment,
+  splitAtHandovers,
   toPlainText,
   videoAttachments,
 } from '../utils';
@@ -1014,6 +1016,8 @@ export default function ChatsPage() {
                   const toolCalls = message.metadata?.tool_calls ?? [];
                   const citations = message.metadata?.citations ?? [];
                   const receipts = message.metadata?.action_receipts ?? [];
+                  const handovers =
+                    message.role === 'assistant' ? (message.metadata?.handovers ?? []) : [];
                   const memoryUsed =
                     message.role === 'assistant' && Boolean(message.metadata?.memory_used);
                   const links = message.role === 'assistant' ? 'citations' : 'all';
@@ -1102,14 +1106,25 @@ export default function ChatsPage() {
                         onAnswer={handleAnswerQuestions}
                       />
                       {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
-                      {body && !awaitingAnswer ? (
+                      {(body || handovers.length > 0) && !awaitingAnswer ? (
                         <div className="message-content">
-                          <MessageContent
-                            content={message.content}
-                            links={links}
-                            citations={citations}
-                            breaks={message.role === 'user'}
-                          />
+                          {splitAtHandovers(message.content, handovers).map((part) =>
+                            part.kind === 'text' ? (
+                              <MessageContent
+                                key={`text-${part.offset}`}
+                                content={part.text}
+                                links={links}
+                                citations={citations}
+                                breaks={message.role === 'user'}
+                              />
+                            ) : (
+                              <HandoverNotice
+                                key={`handover-${part.handover.at}-${part.handover.to}`}
+                                handover={part.handover}
+                                agentChanged={part.agentChanged}
+                              />
+                            )
+                          )}
                         </div>
                       ) : null}
                       {citations.length > 0 && <Citations citations={citations} />}

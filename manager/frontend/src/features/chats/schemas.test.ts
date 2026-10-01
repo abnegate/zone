@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   ActionReceiptSchema,
   ActionTargetSchema,
+  HandoverSchema,
   MessageMetadataSchema,
   MessageSchema,
 } from './schemas';
@@ -81,5 +82,74 @@ describe('a memory receipt', () => {
   it('the schema names every target the console lists, memory included', () => {
     expect(ActionTargetSchema.options).toEqual([...ACTION_TARGETS]);
     expect(ACTION_TARGETS).toContain('memory');
+  });
+});
+
+describe('a handover', () => {
+  const frame = {
+    type: 'handover',
+    message_id: 'msg-2',
+    from: 'a@example.com',
+    to: 'b@example.com',
+    agent: 'codex',
+    reason: 'limit',
+    resets_at: '2026-09-23T06:10:00Z',
+    carried: false,
+    at: 12,
+  };
+  const { type: _type, message_id: _message, ...stored } = frame;
+
+  it('reads the live frame, which carries type rather than kind', () => {
+    expect(HandoverSchema.parse(frame)).toEqual({
+      kind: 'handover',
+      from: 'a@example.com',
+      to: 'b@example.com',
+      agent: 'codex',
+      reason: 'limit',
+      resets_at: '2026-09-23T06:10:00Z',
+      carried: false,
+      at: 12,
+    });
+  });
+
+  it('reads the stored record the same way the frame was read', () => {
+    expect(HandoverSchema.parse({ kind: 'handover', ...stored })).toEqual(
+      HandoverSchema.parse(frame)
+    );
+  });
+
+  it('reads an unknown reason as a usage limit, keeping the switch', () => {
+    expect(HandoverSchema.parse({ ...stored, reason: 'quota' }).reason).toBe('limit');
+  });
+
+  it('treats an empty or null from and a null reset as absent', () => {
+    const parsed = HandoverSchema.parse({ ...stored, from: '', resets_at: null });
+
+    expect(parsed.from).toBeUndefined();
+    expect(parsed.resets_at).toBeUndefined();
+  });
+
+  it('is kept on the reply it arrived on', () => {
+    const parsed = MessageSchema.parse({ ...reply, metadata: { handovers: [stored] } });
+
+    expect(parsed.metadata?.handovers).toHaveLength(1);
+    expect(parsed.metadata?.handovers?.[0].to).toBe('b@example.com');
+  });
+
+  it('drops an unreadable handover without costing the reply or the readable ones', () => {
+    const parsed = MessageMetadataSchema.parse({
+      handovers: [stored, { ...stored, at: -1 }, { ...stored, agent: 'gemini' }],
+      reasoning: 'kept',
+    });
+
+    expect(parsed.handovers).toHaveLength(1);
+    expect(parsed.reasoning).toBe('kept');
+  });
+
+  it('drops handovers that are not a list, keeping the reply', () => {
+    const parsed = MessageSchema.parse({ ...reply, metadata: { handovers: 'oops' } });
+
+    expect(parsed.metadata?.handovers).toBeUndefined();
+    expect(parsed.content).toBe('Hi there!');
   });
 });

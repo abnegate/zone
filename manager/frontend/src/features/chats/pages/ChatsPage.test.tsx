@@ -2928,4 +2928,100 @@ describe('ChatsPage', () => {
       expect(mockGetChat).toHaveBeenCalledWith('chat-1');
     });
   });
+
+  describe('account handover', () => {
+    const resetsAt = () => new Date(Date.now() + (2 * 60 + 10) * 60_000).toISOString();
+    const NOTICE =
+      'Switched to Codex · b@example.com — a@example.com reached its usage limit; resets in 2h 10m';
+
+    it('draws the divider inside the answer where the new account took over', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      const input = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+        'Type a message, or drop a file...'
+      );
+      fireEvent.change(input, { target: { value: 'Explain the deploy' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => expect(input.value).toBe(''));
+
+      act(() => {
+        socket.emit({ type: 'message_start', message_id: 'moved', role: 'assistant' });
+        socket.emit({ type: 'chunk', content: 'Before the switch. ', index: 0 });
+        socket.emit({ type: 'status', message: 'Switching to b@example.com…' });
+        socket.emit({
+          type: 'handover',
+          message_id: 'moved',
+          from: 'a@example.com',
+          to: 'b@example.com',
+          agent: 'codex',
+          reason: 'limit',
+          resets_at: resetsAt(),
+          carried: false,
+          at: Array.from('Before the switch. ').length,
+        });
+        socket.emit({ type: 'chunk', content: 'After the switch.', index: 1 });
+      });
+
+      const note = await screen.findByRole('note');
+      expect(note).toHaveTextContent(NOTICE);
+      expect(screen.getByRole('status')).toHaveTextContent('Switching to b@example.com…');
+      const answer = note.closest('.message-content');
+      expect(answer?.closest('.message-assistant')).not.toBeNull();
+      expect(answer?.textContent).toMatch(/^Before the switch\..*Switched to.*After the switch\.$/);
+
+      act(() =>
+        socket.emit({
+          type: 'message_end',
+          message_id: 'moved',
+          content: 'Before the switch. After the switch.',
+        })
+      );
+      await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
+      expect(screen.getByRole('note')).toHaveTextContent(NOTICE);
+    });
+
+    it('rebuilds the divider from the stored reply on reload', async () => {
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          {
+            ...mockChatWithMessages.messages[1],
+            content: 'Started here. Finished there.',
+            metadata: {
+              handovers: [
+                {
+                  kind: 'handover',
+                  from: 'a@example.com',
+                  to: 'b@example.com',
+                  agent: 'codex',
+                  reason: 'limit',
+                  resets_at: resetsAt(),
+                  carried: false,
+                  at: 14,
+                },
+              ],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const note = await screen.findByRole('note');
+      expect(note).toHaveTextContent(NOTICE);
+      const answer = note.closest('.message-content');
+      expect(answer?.firstElementChild?.textContent).toBe('Started here.');
+      expect(answer?.lastElementChild?.textContent).toBe('Finished there.');
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('draws no divider on a reply that stayed on one account', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      expect(await screen.findByText('Hi there!')).toBeInTheDocument();
+      expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    });
+  });
 });

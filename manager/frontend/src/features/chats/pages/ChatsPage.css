@@ -469,6 +469,34 @@
   word-wrap: break-word;
 }
 
+.handover-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  margin: var(--ui-space-3) 0;
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-xs);
+}
+
+.handover-notice::before,
+.handover-notice::after {
+  flex: 1 1 var(--ui-space-6);
+  border-top: 1px solid var(--ui-border);
+  content: '';
+}
+
+.handover-notice-text {
+  flex: 0 1 auto;
+  max-width: 80%;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.handover-notice-text strong {
+  color: var(--ui-text-secondary);
+  font-weight: 600;
+}
+
 .message-activity {
   display: flex;
   flex-direction: column;
