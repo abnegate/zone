@@ -4,10 +4,17 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::llm::provider::event::AgentEvent;
+use crate::llm::provider::limit::Limit;
 use crate::llm::provider::settings::Toolset;
 use crate::llm::{FunctionCall, ToolCall, Usage};
 
 const CALL_TYPE: &str = "function";
+
+const UNWORDED_FAILURE: &str = "the agent reported a failed turn";
+
+/// The status codex names a sign-in it could not use by, which stays a
+/// failure whatever else its words say.
+const UNAUTHORIZED: &str = "401";
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -138,11 +145,11 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
                 finish_reason: Some("completed".to_string()),
             });
         }
-        Event::Failed { error, message } => events.push(AgentEvent::Failed(
+        Event::Failed { error, message } => events.push(failed(
             error
                 .and_then(|error| error.message)
                 .or(message)
-                .unwrap_or_else(|| "the agent reported a failed turn".to_string()),
+                .unwrap_or_else(|| UNWORDED_FAILURE.to_string()),
         )),
         Event::Error { message } => {
             tracing::warn!(
@@ -155,6 +162,20 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
         }
         | Event::Ignored => {}
     }
+}
+
+/// A failed turn, which is a limit when codex's words say one refused it.
+/// codex reports no reset time with one.
+fn failed(message: String) -> AgentEvent {
+    if Limit::worded(&message) && !message.contains(UNAUTHORIZED) {
+        return AgentEvent::Limited(Limit {
+            message,
+            resets_at: None,
+            credits: false,
+            window: None,
+        });
+    }
+    AgentEvent::Failed(message)
 }
 
 #[cfg(test)]
@@ -446,22 +467,37 @@ mod tests {
     }
 
     #[test]
-    fn an_exhausted_quota_reads_as_a_rate_limit_to_the_worker() {
+    fn an_exhausted_quota_is_a_limit_without_a_reset_time() {
         let events = interpret_all(QUOTA);
 
-        let failures = failures(&events);
-
+        let [AgentEvent::Limited(limit)] = events.as_slice() else {
+            panic!("expected the failed turn, and only it, as a limit: {events:?}");
+        };
         assert_eq!(
-            failures.len(),
-            1,
-            "the failed turn, and only the failed turn"
+            limit.message,
+            "You have hit your usage limit. Try again later."
         );
-        for message in failures {
-            assert!(
-                message.to_ascii_lowercase().contains("usage limit"),
-                "the worker cannot classify {message:?}"
-            );
-        }
+        assert!(
+            limit.message.to_ascii_lowercase().contains("usage limit"),
+            "the worker cannot classify {limit:?}"
+        );
+        assert_eq!(limit.resets_at, None);
+        assert_eq!(limit.window, None);
+        assert!(!limit.credits);
+    }
+
+    #[test]
+    fn an_unauthorized_turn_in_limit_words_stays_a_failure() {
+        let mut events = Vec::new();
+        interpret(
+            r#"{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: you have hit your usage limit for this key"}}"#,
+            &mut events,
+        );
+
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::Failed(message)] if message.contains("401")),
+            "{events:?}"
+        );
     }
 
     #[test]

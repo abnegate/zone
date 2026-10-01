@@ -16,7 +16,7 @@ use super::finish_reason::STOP;
 use super::metadata;
 use super::provider::{
     AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Completion,
-    CompletionProvider, CompletionRequest, Toolset,
+    CompletionProvider, CompletionRequest, Limit, ProviderError, Toolset,
 };
 use super::types::{
     ChatRequest, ChatResponse, ChatStreamChunk, Choice, Message, StreamChoice, StreamDelta,
@@ -86,6 +86,11 @@ pub enum LlmError {
     /// words so the operator reads "Not logged in" rather than a status code.
     #[error("{0}")]
     Agent(String),
+    /// A coding agent CLI's turn a usage limit refused. It renders exactly as
+    /// the [`LlmError::Agent`] the same refusal used to be, so anything that
+    /// reads a failure's text reads it unchanged.
+    #[error("{provider}: {}", .limit.message)]
+    Limited { provider: String, limit: Box<Limit> },
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
 }
@@ -109,6 +114,15 @@ impl LlmError {
             .or_else(|| error.get("error"))
             .and_then(serde_json::Value::as_str)
             .is_some_and(|message| message.contains("does not support tools"))
+    }
+}
+
+impl From<ProviderError> for LlmError {
+    fn from(error: ProviderError) -> Self {
+        match error {
+            ProviderError::Limited { provider, limit } => Self::Limited { provider, limit },
+            error => Self::Agent(error.to_string()),
+        }
     }
 }
 
@@ -312,6 +326,7 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, LlmError>
     let mut delta = StreamDelta::default();
     let mut finish_reason = None;
     let mut usage = None;
+    let mut window = None;
 
     match event {
         AgentEvent::Text(text) => delta.content = Some(text),
@@ -319,6 +334,7 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, LlmError>
             delta.reasoning_content = Some(format!("{}\n", call.function.name));
         }
         AgentEvent::Usage(counts) => usage = Some(counts),
+        AgentEvent::Window(reported) => window = Some(reported),
         AgentEvent::Finished {
             finish_reason: reported,
         } => {
@@ -330,6 +346,12 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, LlmError>
             finish_reason = Some(STOP.to_string());
         }
         AgentEvent::Failed(message) => return Err(LlmError::Agent(message)),
+        AgentEvent::Limited(limit) => {
+            return Err(LlmError::Limited {
+                provider: provider.to_string(),
+                limit: Box::new(limit),
+            });
+        }
     }
 
     Ok(ChatStreamChunk {
@@ -343,6 +365,8 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, LlmError>
             finish_reason,
         }],
         usage,
+        window,
+        session: None,
     })
 }
 
@@ -355,7 +379,7 @@ fn chunks(
         while let Some(event) = events.next().await {
             let translated = match event {
                 Ok(event) => chunk(event, &provider),
-                Err(error) => Err(LlmError::Agent(error.to_string())),
+                Err(error) => Err(LlmError::from(error)),
             };
             match translated {
                 Ok(chunk) => yield Ok(chunk),
@@ -428,6 +452,15 @@ impl LlmClient {
                 .with_toolset(toolset)
                 .with_builtin_tools(builtin_tools);
         }
+        self
+    }
+
+    /// This client on `backend` instead, keeping everything else it was built
+    /// with. A toolset attached to the old backend is not carried over: it was
+    /// minted for that backend's agent, so a caller that still serves the turn
+    /// tools attaches them again.
+    pub fn with_backend(mut self, backend: LlmBackend) -> Self {
+        self.config.backend = backend;
         self
     }
 
@@ -595,8 +628,7 @@ impl LlmClient {
                     tools: None,
                     options,
                 })
-                .await
-                .map_err(|error| LlmError::Agent(error.to_string()))?;
+                .await?;
             return Ok(response(completion, model));
         }
 
@@ -650,14 +682,13 @@ impl LlmClient {
     ) -> Result<ChatStream, LlmError> {
         if let LlmBackend::Cli { agent, settings } = &self.config.backend {
             refuse_tools(tools, *agent)?;
-            let events = CliProvider::agent(*agent, settings.clone())
-                .stream(CompletionRequest {
+            let events =
+                CliProvider::agent(*agent, settings.clone()).stream(CompletionRequest {
                     model,
                     messages,
                     tools: None,
                     options,
-                })
-                .map_err(|error| LlmError::Agent(error.to_string()))?;
+                })?;
             return Ok(Box::pin(chunks(events, agent.to_string())));
         }
 
@@ -1595,7 +1626,7 @@ mod tests {
     }
 
     use crate::llm::Effort;
-    use crate::llm::provider::ProviderError;
+    use crate::llm::provider::{ProviderError, Window};
     use crate::llm::types::{ChatRequest, FunctionCall, Message, ToolCall, Usage};
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -2113,6 +2144,39 @@ mod tests {
     /// The builder replaces what a turn decides and nothing else: the executable
     /// the operator configured is still the one that runs.
     #[test]
+    fn with_backend_replaces_the_backend_and_drops_its_toolset() {
+        let client = LlmClient::new(
+            LlmConfig::default()
+                .with_backend(LlmBackend::cli(AgentKind::Claude, CliSettings::default())),
+        )
+        .with_toolset(
+            Toolset::new(
+                "http://127.0.0.1:8421/mcp",
+                "zone-turn-notarealtoken",
+                ["read_file"],
+            ),
+            BuiltinTools::Withheld,
+        )
+        .with_temperature(0.25);
+
+        let moved = client.with_backend(LlmBackend::cli(
+            AgentKind::Codex,
+            CliSettings::default().with_timeout(Duration::from_secs(42)),
+        ));
+
+        let LlmBackend::Cli { agent, settings } = &moved.config().backend else {
+            panic!("the backend stayed on the endpoint");
+        };
+        assert_eq!(*agent, AgentKind::Codex);
+        assert!(
+            settings.toolset.is_none(),
+            "the old agent's toolset reached the new one"
+        );
+        assert_eq!(settings.timeout, Duration::from_secs(42));
+        assert_eq!(moved.config().temperature, 0.25);
+    }
+
+    #[test]
     fn attaching_a_toolset_keeps_the_rest_of_the_settings() {
         let client = LlmClient::new(LlmConfig::default().with_backend(LlmBackend::cli(
             AgentKind::Claude,
@@ -2212,6 +2276,131 @@ mod tests {
             delivered.is_empty(),
             "a refusal was delivered as an answer: {delivered:?}"
         );
+    }
+
+    const SESSION_LIMIT: &str =
+        "rate limit reached (five_hour, rejected): You've hit your session limit · resets 5pm";
+
+    fn session_limit() -> Limit {
+        Limit {
+            message: SESSION_LIMIT.to_string(),
+            resets_at: chrono::DateTime::from_timestamp(1_790_208_000, 0),
+            credits: false,
+            window: None,
+        }
+    }
+
+    fn five_hours_at(used_percent: f64) -> Window {
+        Window {
+            name: "five_hour".to_string(),
+            used_percent: Some(used_percent),
+            used: None,
+            limit: None,
+            resets_at: chrono::DateTime::from_timestamp(1_790_208_000, 0),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_limited_agent_stream_ends_in_a_limited_error_not_an_agent_one() {
+        let events = agent_events(vec![
+            Ok(AgentEvent::Text("Halfway there.".to_string())),
+            Err(ProviderError::Limited {
+                provider: "claude".to_string(),
+                limit: Box::new(session_limit()),
+            }),
+            Ok(AgentEvent::Text("never read".to_string())),
+        ]);
+
+        let (delivered, failure) = collected(chunks(events, "claude".to_string())).await;
+
+        assert_eq!(spoken(&delivered), "Halfway there.");
+        let failure = failure.expect("a limited turn to fail");
+        let LlmError::Limited { provider, limit } = &failure else {
+            panic!("expected a limit, got {failure:?}");
+        };
+        assert_eq!(provider, "claude");
+        assert_eq!(**limit, session_limit());
+    }
+
+    #[tokio::test]
+    async fn a_window_rides_the_chunk_it_arrived_on() {
+        let events = agent_events(vec![
+            Ok(AgentEvent::Window(five_hours_at(43.0))),
+            Ok(AgentEvent::Text("Done.".to_string())),
+            Ok(AgentEvent::Finished {
+                finish_reason: Some("success".to_string()),
+            }),
+        ]);
+
+        let (delivered, failure) = collected(chunks(events, "claude".to_string())).await;
+
+        assert!(failure.is_none(), "a window failed the turn: {failure:?}");
+        let windows: Vec<Option<&Window>> = delivered
+            .iter()
+            .map(|chunk| chunk.window.as_ref())
+            .collect();
+        assert_eq!(windows, [Some(&five_hours_at(43.0)), None, None]);
+        assert_eq!(spoken(&delivered), "Done.");
+        assert_eq!(reasons(&delivered), [STOP]);
+    }
+
+    /// Whatever reads a failure's text, the task worker's retry policy and
+    /// the chat's sign-in remedy among them, reads a limit exactly as it read
+    /// the agent failure the same refusal was before limits had their own
+    /// variant.
+    #[test]
+    fn a_limit_error_reads_as_the_agent_error_it_replaces() {
+        for message in [
+            SESSION_LIMIT.to_string(),
+            format!(
+                "{}: Fable 5.1 requires usage credits. Switch to another model to continue.",
+                crate::llm::provider::UNFUNDED
+            ),
+            format!(
+                "You have hit your usage limit.{}warning: the plan is spent",
+                crate::llm::provider::STDERR_HEADING
+            ),
+        ] {
+            let limit = Limit {
+                message: message.clone(),
+                ..session_limit()
+            };
+            let before = LlmError::Agent(
+                ProviderError::Agent {
+                    provider: "claude".to_string(),
+                    message: message.clone(),
+                }
+                .to_string(),
+            );
+            let provider = ProviderError::Limited {
+                provider: "claude".to_string(),
+                limit: Box::new(limit.clone()),
+            };
+
+            assert_eq!(provider.to_string(), before.to_string());
+            assert_eq!(LlmError::from(provider).to_string(), before.to_string());
+            assert_eq!(
+                LlmError::Limited {
+                    provider: "claude".to_string(),
+                    limit: Box::new(limit),
+                }
+                .to_string(),
+                before.to_string()
+            );
+            assert_eq!(
+                format!(
+                    "Stream error: {}",
+                    LlmError::Limited {
+                        provider: "claude".to_string(),
+                        limit: Box::new(Limit {
+                            message: message.clone(),
+                            ..session_limit()
+                        }),
+                    }
+                ),
+                format!("Stream error: claude: {message}")
+            );
+        }
     }
 
     #[tokio::test]

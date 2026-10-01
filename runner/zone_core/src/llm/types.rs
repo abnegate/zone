@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::provider::Window;
+
 fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -391,6 +393,13 @@ pub struct ChatStreamChunk {
     pub choices: Vec<StreamChoice>,
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// A usage window a coding agent reported spending on this chunk. No
+    /// endpoint sends one.
+    #[serde(skip)]
+    pub window: Option<Window>,
+    /// The session a coding agent announced it is running this turn under.
+    #[serde(skip)]
+    pub session: Option<String>,
 }
 
 /// Streaming choice delta
