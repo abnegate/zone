@@ -15,7 +15,7 @@ use super::error::Error;
 use super::pending::{self, Pending, WINDOW};
 use super::{audit, devices, receipts};
 use crate::config::Config;
-use crate::db::agent_logins::{self, AgentLoginRow, Upsert};
+use crate::db::agent_logins::{self, AgentLoginRow, Insert};
 use crate::db::ai_settings::{self, AccessError};
 use crate::db::organization_members::OrgRole;
 use crate::db::{organizations, sessions};
@@ -297,11 +297,18 @@ async fn record(
         return Err(Error::Deleted);
     }
     authorize(state, &mut transaction, pending).await?;
-    let login = agent_logins::upsert(
+    agent_logins::delete_all(
         &mut *transaction,
-        &Upsert {
+        pending.organization,
+        AgentKind::Claude.as_str(),
+    )
+    .await?;
+    let login = agent_logins::insert(
+        &mut *transaction,
+        &Insert {
             organization_id: pending.organization,
             agent: AgentKind::Claude.as_str(),
+            account: None,
             credential: Some(&sealed),
             label: label.as_deref(),
             expires_at: Some(tokens.expires_at),

@@ -6348,7 +6348,7 @@ mod watchdog_tests {
 mod cli_tests {
     use super::*;
     use crate::config::{AgentConfig, Config, ModelBackend};
-    use crate::db::agent_logins::{self, Upsert};
+    use crate::db::agent_logins::{self, Insert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, users, workspace_members, workspaces};
     use crate::services::login::claude::Tokens;
@@ -6694,11 +6694,15 @@ mod cli_tests {
             }
             .seal(state.encryption_key())
             .expect("the tokens to seal");
-            agent_logins::upsert(
+            agent_logins::delete_all(&self.pool, self.organization, AgentKind::Claude.as_str())
+                .await
+                .unwrap();
+            agent_logins::insert(
                 &self.pool,
-                &Upsert {
+                &Insert {
                     organization_id: self.organization,
                     agent: AgentKind::Claude.as_str(),
+                    account: None,
                     credential: Some(&sealed),
                     label: None,
                     expires_at: None,
@@ -7038,9 +7042,10 @@ mod cli_tests {
 
         agent.first_attempt().await;
         assert!(
-            agent_logins::delete(&fixture.pool, fixture.organization, "claude")
+            !agent_logins::delete_all(&fixture.pool, fixture.organization, "claude")
                 .await
                 .unwrap()
+                .is_empty()
         );
         agent.release();
         tokio::time::timeout(SPAWN_TIMEOUT * 2, running)

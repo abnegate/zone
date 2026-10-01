@@ -1200,6 +1200,63 @@ async fn the_unlink_event_check_is_added_unvalidated_and_proven_after() {
     database.cleanup().await;
 }
 
+/// 055 adds the chat's login key under the brief lock of an unvalidated
+/// constraint, and 056 proves the rows while chats stay writable. A login kept
+/// before 055 keeps its id, and an organization may then hold a second one.
+#[tokio::test]
+async fn the_chat_login_key_is_added_unvalidated_and_proven_after() {
+    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
+         WHERE conrelid = 'chats'::regclass AND conname = 'chats_agent_login_id_fkey'";
+    const SIGN_IN: &str =
+        "INSERT INTO agent_logins(organization_id,agent) VALUES($1,'claude') RETURNING id";
+    let database = Database::new().await;
+    database.through(54).await;
+    let (workspace, _) = database.workspace().await;
+    let organization: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id=$1")
+            .bind(workspace)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    let kept: Uuid = sqlx::query_scalar(SIGN_IN)
+        .bind(organization)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    sqlx::query(SIGN_IN)
+        .bind(organization)
+        .fetch_one(&database.pool)
+        .await
+        .expect_err("054 keeps one login per agent");
+
+    database.through(55).await;
+    let added: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("055 adds the chat's login key");
+    database.through(56).await;
+    let proven: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("056 keeps the chat's login key");
+
+    assert!(!added, "055 must not scan chats under its exclusive lock");
+    assert!(proven, "056 validates what 055 added");
+    let logins: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM agent_logins WHERE organization_id=$1")
+            .bind(organization)
+            .fetch_all(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(logins, [kept], "055 must keep the login saved before it");
+    sqlx::query(SIGN_IN)
+        .bind(organization)
+        .fetch_one(&database.pool)
+        .await
+        .expect("055 lets an organization keep a second login of one agent");
+    database.cleanup().await;
+}
+
 /// 054 leaves every AI settings row saved before it unrouted, in place: a
 /// constant default rewrites neither table.
 #[tokio::test]
@@ -1345,6 +1402,8 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
             "051_sync_deliveries.sql",
             "052_sync_events_unlink_validation.sql",
             "054_ai_settings_completions_routed.sql",
+            "055_agent_login_usage.sql",
+            "056_agent_login_usage_validation.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );

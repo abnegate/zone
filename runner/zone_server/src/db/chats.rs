@@ -1,14 +1,18 @@
 //! Chat database queries
 
+mod session;
+
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::services::character::ChatCharacter;
-use zone_core::llm::ReasoningEffort;
+use zone_core::llm::{AgentKind, ReasoningEffort};
 
 use super::DbResult;
+
+pub use session::ChatSession;
 
 fn effort(value: &str) -> ReasoningEffort {
     ReasoningEffort::parse(value).unwrap_or_default()
@@ -808,4 +812,180 @@ pub async fn ensure_project_chat(
     .await?;
     transaction.commit().await?;
     Ok(id)
+}
+
+/// The CLI session the chat's turns resume, or `None` when it has none to resume.
+pub async fn session<'e, E>(executor: E, chat_id: Uuid) -> DbResult<Option<ChatSession>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    type Row = (
+        Option<Uuid>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT agent_login_id, agent_session_id, agent_session_agent, agent_session_entry, \
+           agent_session_prompt \
+         FROM chats WHERE id = $1",
+    )
+    .bind(chat_id)
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.and_then(|(login, id, agent, entry, prompt)| {
+        Some(ChatSession {
+            login,
+            id: id?,
+            agent: AgentKind::named(&agent?)?,
+            entry: entry?,
+            prompt,
+        })
+    }))
+}
+
+/// Records `session` as the one the chat's turns resume, or with `None` forgets the chat's
+/// session and login together.
+pub async fn set_session<'e, E>(
+    executor: E,
+    chat_id: Uuid,
+    session: Option<&ChatSession>,
+) -> DbResult<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query(
+        "UPDATE chats SET agent_login_id = $2, agent_session_id = $3, agent_session_agent = $4, \
+           agent_session_entry = $5, agent_session_prompt = $6 \
+         WHERE id = $1",
+    )
+    .bind(chat_id)
+    .bind(session.and_then(|session| session.login))
+    .bind(session.map(|session| session.id.as_str()))
+    .bind(session.map(|session| session.agent.as_str()))
+    .bind(session.map(|session| session.entry))
+    .bind(session.and_then(|session| session.prompt.as_deref()))
+    .execute(executor)
+    .await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::agent_logins::{self, Insert};
+
+    use super::*;
+
+    const PROMPT: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+    async fn pool() -> PgPool {
+        PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+            .await
+            .expect("the test database accepts connections")
+    }
+
+    #[tokio::test]
+    async fn a_chat_remembers_its_login_and_session_until_that_login_goes() {
+        let pool = pool().await;
+        let organization = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Sessions', $1::text)")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+        let workspace = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Sessions', $1::text)",
+        )
+        .bind(workspace)
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("a workspace");
+        let chat = create_chat(&pool, Some(workspace), "Sessions", "auto", true, true)
+            .await
+            .expect("a chat")
+            .id;
+        let other = create_chat(&pool, Some(workspace), "Bystander", "auto", true, true)
+            .await
+            .expect("another chat")
+            .id;
+        let login = agent_logins::insert(
+            &pool,
+            &Insert {
+                organization_id: organization,
+                agent: AgentKind::Claude.as_str(),
+                account: Some("jake@example.com"),
+                credential: None,
+                label: None,
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("a login")
+        .id;
+        assert_eq!(session(&pool, chat).await.unwrap(), None);
+
+        let remembered = ChatSession {
+            login: Some(login),
+            id: "2f0e9c4a-5b1d-4e6f-8a7b-9c0d1e2f3a4b".to_string(),
+            agent: AgentKind::Claude,
+            entry: 7,
+            prompt: Some(PROMPT.to_string()),
+        };
+        set_session(&pool, chat, Some(&remembered)).await.unwrap();
+        assert_eq!(
+            session(&pool, chat).await.unwrap().as_ref(),
+            Some(&remembered)
+        );
+        assert_eq!(
+            session(&pool, other).await.unwrap(),
+            None,
+            "a session belongs to its own chat"
+        );
+
+        let resumed = ChatSession {
+            entry: 9,
+            prompt: None,
+            ..remembered.clone()
+        };
+        set_session(&pool, chat, Some(&resumed)).await.unwrap();
+        assert_eq!(session(&pool, chat).await.unwrap().as_ref(), Some(&resumed));
+
+        set_session(&pool, chat, Some(&remembered)).await.unwrap();
+        assert!(
+            agent_logins::delete(&pool, organization, login)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            session(&pool, chat).await.unwrap(),
+            Some(ChatSession {
+                login: None,
+                ..remembered.clone()
+            }),
+            "signing the login out lets go of it, and leaves the session for the next turn to decide"
+        );
+
+        set_session(&pool, chat, None).await.unwrap();
+        let kept: i32 = sqlx::query_scalar(
+            "SELECT num_nonnulls(agent_login_id, agent_session_id, agent_session_agent, \
+               agent_session_entry, agent_session_prompt) FROM chats WHERE id = $1",
+        )
+        .bind(chat)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(kept, 0, "forgetting clears all five");
+        assert_eq!(session(&pool, chat).await.unwrap(), None);
+
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization can be deleted");
+    }
 }

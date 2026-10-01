@@ -260,7 +260,7 @@ mod tests {
     use zone_core::llm::provider::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
 
     use crate::config::{AgentConfig, ModelBackend};
-    use crate::db::agent_logins::{self, Upsert};
+    use crate::db::agent_logins::{self, Insert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, workspaces};
     use crate::services::endpoint::testing::settings;
@@ -366,11 +366,15 @@ mod tests {
         }
 
         async fn store(&self, agent: AgentKind, credential: Option<&str>) {
-            agent_logins::upsert(
+            agent_logins::delete_all(&self.pool, self.organization, agent.as_str())
+                .await
+                .expect("the login it replaces is removed");
+            agent_logins::insert(
                 &self.pool,
-                &Upsert {
+                &Insert {
                     organization_id: self.organization,
                     agent: agent.as_str(),
+                    account: None,
                     credential,
                     label: None,
                     expires_at: None,

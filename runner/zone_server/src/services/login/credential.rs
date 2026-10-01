@@ -54,7 +54,7 @@ pub async fn resolve(
             resolve_claude(state, organization, &claude::Client::new(endpoint)).await
         }
         AgentKind::Codex => {
-            let login = agent_logins::get(state.db(), organization, agent.as_str()).await?;
+            let login = first(state, organization, agent).await?;
             Ok(login.map(|_| Login::Codex {
                 home: state.config().agents.home(organization, agent),
             }))
@@ -72,8 +72,7 @@ pub(crate) async fn resolve_claude(
     organization: Uuid,
     client: &claude::Client,
 ) -> Result<Option<Login>, Error> {
-    let agent = AgentKind::Claude.as_str();
-    let Some(login) = agent_logins::get(state.db(), organization, agent).await? else {
+    let Some(login) = first(state, organization, AgentKind::Claude).await? else {
         return Ok(None);
     };
     let margin = margin(state.config());
@@ -84,7 +83,7 @@ pub(crate) async fn resolve_claude(
 
     let _renewing = RENEWALS.lock(organization).await;
     let mut transaction = state.db().begin().await?;
-    let Some(login) = agent_logins::lock(&mut transaction, organization, agent).await? else {
+    let Some(login) = agent_logins::lock(&mut transaction, login.id).await? else {
         return Ok(None);
     };
     let tokens = open(state, &login)?;
@@ -109,6 +108,20 @@ pub(crate) async fn resolve_claude(
                 .map_err(|_| Error::Renewal(error.to_string()))
         }
     }
+}
+
+/// The organization's oldest login of `agent`.
+async fn first(
+    state: &AppState,
+    organization: Uuid,
+    agent: AgentKind,
+) -> Result<Option<AgentLoginRow>, Error> {
+    Ok(
+        agent_logins::list_for(state.db(), organization, agent.as_str())
+            .await?
+            .into_iter()
+            .next(),
+    )
 }
 
 /// Stores `renewed` over the login `id` it renews. A write that fails is tried once more on a
@@ -207,7 +220,7 @@ mod tests {
 
     use super::*;
     use crate::config::{AgentConfig, Config};
-    use crate::db::agent_logins::Upsert;
+    use crate::db::agent_logins::Insert;
     use crate::services::chat::session::Settings;
 
     const TOKEN_PATH: &str = "/v1/oauth/token";
@@ -341,11 +354,15 @@ mod tests {
             credential: Option<&str>,
             expires_at: Option<DateTime<Utc>>,
         ) {
-            agent_logins::upsert(
+            agent_logins::delete_all(&self.pool, self.organization, agent.as_str())
+                .await
+                .expect("the login it replaces is removed");
+            agent_logins::insert(
                 &self.pool,
-                &Upsert {
+                &Insert {
                     organization_id: self.organization,
                     agent: agent.as_str(),
+                    account: None,
                     credential,
                     label: None,
                     expires_at,
@@ -357,9 +374,11 @@ mod tests {
 
         async fn stored(&self) -> (claude::Tokens, Option<DateTime<Utc>>) {
             let login =
-                agent_logins::get(&self.pool, self.organization, AgentKind::Claude.as_str())
+                agent_logins::list_for(&self.pool, self.organization, AgentKind::Claude.as_str())
                     .await
                     .expect("the login to be readable")
+                    .into_iter()
+                    .next()
                     .expect("a claude login");
             let sealed = login.credential.expect("a sealed credential");
             let tokens = claude::Tokens::open(self.state.encryption_key(), sealed.expose())
