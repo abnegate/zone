@@ -75,4 +75,6 @@ pub const EMBEDDED: &[Source] = &[
     source!("052_sync_events_unlink_validation.sql"),
     source!("053_sync_unlinked_items.sql"),
     source!("054_ai_settings_completions_routed.sql"),
+    source!("055_agent_login_usage.sql"),
+    source!("056_agent_login_usage_validation.sql"),
 ];

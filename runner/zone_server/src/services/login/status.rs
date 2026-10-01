@@ -70,7 +70,10 @@ impl AgentStatus {
         viewer: Viewer,
         attempt: Option<Uuid>,
     ) -> Result<Self, sqlx::Error> {
-        let login = agent_logins::get(state.db(), organization, agent.as_str()).await?;
+        let login = agent_logins::list_for(state.db(), organization, agent.as_str())
+            .await?
+            .into_iter()
+            .next();
         let mut status = Self::signed_out(agent);
         let pending = match agent {
             AgentKind::Claude => {
@@ -271,9 +274,15 @@ mod tests {
             id: Uuid::new_v4(),
             organization_id: Uuid::new_v4(),
             agent: agent.as_str().to_string(),
+            account: None,
             credential,
             label: None,
             expires_at,
+            windows: None,
+            headroom: None,
+            usage_fetched_at: None,
+            exhausted_until: None,
+            last_used_at: None,
             created_at: at(1_780_000_000),
             updated_at: at(1_780_000_000),
         }

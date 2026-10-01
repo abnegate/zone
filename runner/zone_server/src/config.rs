@@ -7,6 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use uuid::Uuid;
 use zone_core::llm::{AgentKind, CodexSandbox};
@@ -32,6 +33,12 @@ pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 
 /// Where a Claude authorization code is exchanged and its tokens renewed.
 pub const DEFAULT_CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+
+/// Where a Claude login's usage and profile are read.
+pub const DEFAULT_CLAUDE_API_URL: &str = "https://api.anthropic.com";
+
+/// Where a Codex login's usage is read.
+pub const DEFAULT_CODEX_API_URL: &str = "https://chatgpt.com";
 
 /// Server configuration loaded from environment variables
 #[derive(Clone)]
@@ -176,6 +183,15 @@ const AGENT_HOST_LOGIN: &str = "ZONE_AGENT_HOST_LOGIN";
 /// Overrides [`DEFAULT_CLAUDE_TOKEN_URL`].
 const CLAUDE_TOKEN_URL: &str = "ZONE_CLAUDE_TOKEN_URL";
 
+/// Overrides [`DEFAULT_CLAUDE_API_URL`].
+const CLAUDE_API_URL: &str = "ZONE_CLAUDE_API_URL";
+
+/// Overrides [`DEFAULT_CODEX_API_URL`].
+const CODEX_API_URL: &str = "ZONE_CODEX_API_URL";
+
+/// How long a login's usage reading is trusted before it is read again.
+const USAGE_TTL: &str = "ZONE_AGENT_USAGE_TTL_SECONDS";
+
 /// Where codex runs the tools of a turn that grants them.
 const CODEX_SANDBOX: &str = "ZONE_CODEX_SANDBOX";
 
@@ -209,6 +225,11 @@ const TEMPORARY_STATE_ROOT: &str = "zone-agents";
 /// Each agent home's working directory, where every turn it serves runs.
 const WORK: &str = "work";
 
+/// The directory under an agent's shared root holding one home per login.
+const LOGINS: &str = "logins";
+
+const DEFAULT_USAGE_TTL: Duration = Duration::from_secs(60);
+
 const DEFAULT_HOST_LOGIN: bool = true;
 
 /// Owner-only access, for directories holding an agent's credentials and
@@ -222,8 +243,9 @@ const FALSE: &[&str] = &["0", "false", "no", "off"];
 
 /// The coding agent CLIs organizations sign in to, from
 /// `ZONE_AGENT_STATE_DIR`, `ZONE_AGENT_HOST_LOGIN`, `ZONE_CLAUDE_TOKEN_URL`,
-/// `ZONE_CODEX_SANDBOX`, `ZONE_AGENT_CALLBACK`, `ZONE_AGENT_CALLBACK_BIND` and
-/// `ZONE_CONSOLE_ORIGINS`.
+/// `ZONE_CODEX_SANDBOX`, `ZONE_AGENT_CALLBACK`, `ZONE_AGENT_CALLBACK_BIND`,
+/// `ZONE_CONSOLE_ORIGINS`, `ZONE_AGENT_USAGE_TTL_SECONDS`, `ZONE_CLAUDE_API_URL`
+/// and `ZONE_CODEX_API_URL`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentConfig {
     /// Root of every organization's agent homes.
@@ -242,6 +264,12 @@ pub struct AgentConfig {
     /// browser names it by. A sign-in uses the callback only when it starts
     /// from one of them at a loopback address; with none, every one pastes.
     pub consoles: Vec<String>,
+    /// How long a login's usage reading is trusted before it is read again.
+    pub usage_ttl: Duration,
+    /// Where a Claude login's usage and profile are read.
+    pub claude_api_url: String,
+    /// Where a Codex login's usage is read.
+    pub codex_api_url: String,
 }
 
 /// The loopback address a browser returns a Claude sign-in to,
@@ -266,6 +294,9 @@ impl Default for AgentConfig {
             codex_sandbox: CodexSandbox::default(),
             callback: None,
             consoles: Vec::new(),
+            usage_ttl: DEFAULT_USAGE_TTL,
+            claude_api_url: DEFAULT_CLAUDE_API_URL.to_string(),
+            codex_api_url: DEFAULT_CODEX_API_URL.to_string(),
         }
     }
 }
@@ -277,13 +308,31 @@ impl AgentConfig {
         Ok(Self {
             state: state_root(env_path(AGENT_STATE), env_path(STATE_HOME), env_path(HOME))?,
             host_login: host_login(env::var(AGENT_HOST_LOGIN).ok())?,
-            claude_token_url: claude_token_url(env::var(CLAUDE_TOKEN_URL).ok())?,
+            claude_token_url: endpoint(
+                env::var(CLAUDE_TOKEN_URL).ok(),
+                DEFAULT_CLAUDE_TOKEN_URL,
+                "ZONE_CLAUDE_TOKEN_URL must be an absolute http or https URL with a host",
+                "ZONE_CLAUDE_TOKEN_URL must not carry credentials, a query or a fragment",
+            )?,
             codex_sandbox: codex_sandbox(env::var(CODEX_SANDBOX).ok())?,
             callback: callback(
                 env::var(AGENT_CALLBACK).ok(),
                 env::var(AGENT_CALLBACK_BIND).ok(),
             )?,
             consoles: consoles(env::var(CONSOLE_ORIGINS).ok())?,
+            usage_ttl: usage_ttl(env::var(USAGE_TTL).ok())?,
+            claude_api_url: endpoint(
+                env::var(CLAUDE_API_URL).ok(),
+                DEFAULT_CLAUDE_API_URL,
+                "ZONE_CLAUDE_API_URL must be an absolute http or https URL with a host",
+                "ZONE_CLAUDE_API_URL must not carry credentials, a query or a fragment",
+            )?,
+            codex_api_url: endpoint(
+                env::var(CODEX_API_URL).ok(),
+                DEFAULT_CODEX_API_URL,
+                "ZONE_CODEX_API_URL must be an absolute http or https URL with a host",
+                "ZONE_CODEX_API_URL must not carry credentials, a query or a fragment",
+            )?,
         })
     }
 
@@ -306,20 +355,47 @@ impl AgentConfig {
     /// private again when they already exist. An existing state root keeps
     /// its mode, because it is the operator's directory and may be shared.
     pub fn create_home(&self, organization: Uuid, agent: AgentKind) -> io::Result<PathBuf> {
-        let work = self.work(organization, agent);
+        self.create_private(&self.work(organization, agent))?;
+        Ok(self.home(organization, agent))
+    }
+
+    /// `<state>/<organization>/<agent>/logins/<login>`: one login's own home,
+    /// beside the agent's shared working directory.
+    pub fn login_home(&self, organization: Uuid, agent: AgentKind, login: Uuid) -> PathBuf {
+        agent_login_home(&self.state, organization, agent, login)
+    }
+
+    /// Create the login's home and the agent's shared working directory, and
+    /// return the login's home, private the way [`Self::create_home`] makes
+    /// the agent's.
+    pub fn create_login_home(
+        &self,
+        organization: Uuid,
+        agent: AgentKind,
+        login: Uuid,
+    ) -> io::Result<PathBuf> {
+        self.create_private(&self.work(organization, agent))?;
+        let home = self.login_home(organization, agent, login);
+        self.create_private(&home)?;
+        Ok(home)
+    }
+
+    /// Create `directory` and every missing directory above it, each private
+    /// to the server's user, up to the state root, which keeps its mode.
+    fn create_private(&self, directory: &Path) -> io::Result<()> {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
         builder.mode(PRIVATE);
-        builder.create(&work)?;
+        builder.create(directory)?;
         #[cfg(unix)]
-        for directory in work
+        for directory in directory
             .ancestors()
             .take_while(|directory| *directory != self.state.as_path())
         {
             fs::set_permissions(directory, fs::Permissions::from_mode(PRIVATE))?;
         }
-        Ok(self.home(organization, agent))
+        Ok(())
     }
 }
 
@@ -335,6 +411,19 @@ pub fn agent_home(state: &Path, organization: Uuid, agent: AgentKind) -> PathBuf
 /// [`agent_home`].
 pub fn agent_work(state: &Path, organization: Uuid, agent: AgentKind) -> PathBuf {
     agent_home(state, organization, agent).join(WORK)
+}
+
+/// `<state>/<organization>/<agent>/logins/<login>`, confined the same way as
+/// [`agent_home`].
+pub fn agent_login_home(
+    state: &Path,
+    organization: Uuid,
+    agent: AgentKind,
+    login: Uuid,
+) -> PathBuf {
+    agent_home(state, organization, agent)
+        .join(LOGINS)
+        .join(login.as_hyphenated().to_string())
 }
 
 /// The configured root, else the XDG state directory's, else the one under
@@ -404,31 +493,48 @@ fn codex_sandbox(value: Option<String>) -> Result<CodexSandbox, ConfigError> {
     }
 }
 
-/// The configured token endpoint, else Anthropic's.
-fn claude_token_url(value: Option<String>) -> Result<String, ConfigError> {
+/// The configured endpoint, else `default`. One that is not an absolute http
+/// or https URL is refused with `unparsable`, and one carrying credentials, a
+/// query or a fragment with `carrying`.
+fn endpoint(
+    value: Option<String>,
+    default: &str,
+    unparsable: &'static str,
+    carrying: &'static str,
+) -> Result<String, ConfigError> {
     let url = value
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
-        .unwrap_or_else(|| DEFAULT_CLAUDE_TOKEN_URL.to_string());
+        .unwrap_or_else(|| default.to_string());
     let parsed = reqwest::Url::parse(&url)
         .ok()
         .filter(|parsed| {
             matches!(parsed.scheme(), "http" | "https")
                 && parsed.host_str().is_some_and(|host| !host.is_empty())
         })
-        .ok_or(ConfigError::Invalid(
-            "ZONE_CLAUDE_TOKEN_URL must be an absolute http or https URL with a host",
-        ))?;
+        .ok_or(ConfigError::Invalid(unparsable))?;
     if !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
-        return Err(ConfigError::Invalid(
-            "ZONE_CLAUDE_TOKEN_URL must not carry credentials, a query or a fragment",
-        ));
+        return Err(ConfigError::Invalid(carrying));
     }
     Ok(url)
+}
+
+/// The configured whole number of seconds, else [`DEFAULT_USAGE_TTL`].
+fn usage_ttl(value: Option<String>) -> Result<Duration, ConfigError> {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(DEFAULT_USAGE_TTL),
+        Some(value) => value.parse().map(Duration::from_secs).map_err(|_| {
+            ConfigError::Invalid("ZONE_AGENT_USAGE_TTL_SECONDS must be a whole number of seconds")
+        }),
+    }
 }
 
 /// The loopback callback `value` names, listening where `bind` says. The bind
@@ -1359,6 +1465,9 @@ mod tests {
             AGENT_STATE,
             AGENT_HOST_LOGIN,
             CLAUDE_TOKEN_URL,
+            USAGE_TTL,
+            CLAUDE_API_URL,
+            CODEX_API_URL,
             CODEX_SANDBOX,
         ];
         let _environment = Environment::isolated(&names);
@@ -1647,6 +1756,9 @@ mod tests {
             AGENT_STATE,
             AGENT_HOST_LOGIN,
             CLAUDE_TOKEN_URL,
+            USAGE_TTL,
+            CLAUDE_API_URL,
+            CODEX_API_URL,
             CODEX_SANDBOX,
         ];
         let _environment = Environment::isolated(&names);
@@ -1769,6 +1881,9 @@ mod tests {
             AGENT_STATE,
             AGENT_HOST_LOGIN,
             CLAUDE_TOKEN_URL,
+            USAGE_TTL,
+            CLAUDE_API_URL,
+            CODEX_API_URL,
             CODEX_SANDBOX,
         ];
         let _environment = Environment::isolated(&names);
@@ -1914,7 +2029,7 @@ mod tests {
         );
     }
 
-    const AGENT_SETTINGS: [&str; 7] = [
+    const AGENT_SETTINGS: [&str; 10] = [
         AGENT_STATE,
         AGENT_HOST_LOGIN,
         CLAUDE_TOKEN_URL,
@@ -1922,6 +2037,9 @@ mod tests {
         AGENT_CALLBACK,
         AGENT_CALLBACK_BIND,
         CONSOLE_ORIGINS,
+        USAGE_TTL,
+        CLAUDE_API_URL,
+        CODEX_API_URL,
     ];
     const NOT_AN_ORIGIN: &str = "ZONE_CONSOLE_ORIGINS must list http or https origins, such as \
                                  http://manager.localhost, with no credentials, path, query or \
@@ -1972,6 +2090,7 @@ mod tests {
                     bind: SocketAddr::new(LOOPBACK, 54_545),
                 }),
                 consoles: vec!["http://manager.localhost".to_string()],
+                ..AgentConfig::default()
             },
             "a loopback token endpoint stays configurable: it is operator configuration"
         );
@@ -2317,6 +2436,154 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_login_home_sits_under_the_shared_agent_root_beside_work() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let agents = AgentConfig {
+            state: scratch.path().join("agents"),
+            ..AgentConfig::default()
+        };
+        let organization = Uuid::new_v4();
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+
+        for agent in AgentKind::ALL {
+            let root = agents.home(organization, agent);
+            let home = agents.login_home(organization, agent, first);
+            assert_eq!(home, root.join("logins").join(first.to_string()));
+            assert_eq!(
+                agent_login_home(&agents.state, organization, agent, first),
+                home
+            );
+
+            let created = agents
+                .create_login_home(organization, agent, first)
+                .expect("the login's home is created");
+            assert_eq!(created, home);
+            assert!(home.is_dir());
+            assert!(
+                agents.work(organization, agent).is_dir(),
+                "a login's turns run in the agent's shared working directory, so it is made too"
+            );
+            let other = agents
+                .create_login_home(organization, agent, second)
+                .expect("a second login's home");
+            assert_ne!(other, home, "every login keeps a home of its own");
+            assert_eq!(other.parent(), home.parent());
+            assert_eq!(
+                agents
+                    .create_login_home(organization, agent, first)
+                    .expect("an existing home is reused"),
+                home
+            );
+        }
+        #[cfg(unix)]
+        {
+            let home = agents.login_home(organization, AgentKind::Codex, first);
+            let organization_root = agents.state.join(organization.to_string());
+            for directory in [
+                &organization_root,
+                &agents.home(organization, AgentKind::Codex),
+                &home.parent().expect("the logins directory").to_path_buf(),
+                &home,
+                &agents.work(organization, AgentKind::Codex),
+            ] {
+                assert_eq!(
+                    mode(directory),
+                    PRIVATE,
+                    "{} is open to other users",
+                    directory.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_usage_ttl_defaults_to_a_minute_and_refuses_words() {
+        let _lock = lock();
+        let _environment = Environment::isolated(&AGENT_SETTINGS);
+
+        assert_eq!(
+            AgentConfig::from_env().expect("unset falls back").usage_ttl,
+            Duration::from_secs(60)
+        );
+        for (value, seconds) in [("300", 300), (" 15 ", 15), ("0", 0), ("   ", 60)] {
+            Environment::set(USAGE_TTL, value);
+            assert_eq!(
+                AgentConfig::from_env()
+                    .expect("a whole number of seconds")
+                    .usage_ttl,
+                Duration::from_secs(seconds),
+                "{value:?}"
+            );
+        }
+        for value in ["a minute", "60s", "1.5", "-1", "1m"] {
+            Environment::set(USAGE_TTL, value);
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(
+                        "ZONE_AGENT_USAGE_TTL_SECONDS must be a whole number of seconds"
+                    ))
+                ),
+                "{value} was read as a number of seconds"
+            );
+        }
+    }
+
+    #[test]
+    fn the_usage_endpoints_default_to_the_providers_and_follow_the_environment() {
+        let _lock = lock();
+        let _environment = Environment::isolated(&AGENT_SETTINGS);
+
+        let defaults = AgentConfig::from_env().expect("unset falls back");
+        assert_eq!(defaults.claude_api_url, "https://api.anthropic.com");
+        assert_eq!(defaults.codex_api_url, "https://chatgpt.com");
+        assert_eq!(
+            AgentConfig::default().claude_api_url,
+            DEFAULT_CLAUDE_API_URL
+        );
+        assert_eq!(AgentConfig::default().codex_api_url, DEFAULT_CODEX_API_URL);
+
+        Environment::set(CLAUDE_API_URL, " http://127.0.0.1:9101 ");
+        Environment::set(CODEX_API_URL, " http://127.0.0.1:9102/backend ");
+        let configured = AgentConfig::from_env().expect("loopback endpoints are operator settings");
+        assert_eq!(configured.claude_api_url, "http://127.0.0.1:9101");
+        assert_eq!(configured.codex_api_url, "http://127.0.0.1:9102/backend");
+
+        for (name, unparsable, carrying) in [
+            (
+                CLAUDE_API_URL,
+                "ZONE_CLAUDE_API_URL must be an absolute http or https URL with a host",
+                "ZONE_CLAUDE_API_URL must not carry credentials, a query or a fragment",
+            ),
+            (
+                CODEX_API_URL,
+                "ZONE_CODEX_API_URL must be an absolute http or https URL with a host",
+                "ZONE_CODEX_API_URL must not carry credentials, a query or a fragment",
+            ),
+        ] {
+            for url in ["api.anthropic.com", "ftp://chatgpt.com", "https://"] {
+                Environment::set(name, url);
+                assert!(
+                    matches!(AgentConfig::from_env(), Err(ConfigError::Invalid(message)) if message == unparsable),
+                    "{name}={url} is not an endpoint usage can be read at"
+                );
+            }
+            for url in [
+                "https://someone:secret@api.anthropic.com",
+                "https://chatgpt.com?key=secret",
+                "https://chatgpt.com#secret",
+            ] {
+                Environment::set(name, url);
+                assert!(
+                    matches!(AgentConfig::from_env(), Err(ConfigError::Invalid(message)) if message == carrying),
+                    "{name}={url} would reach every log that prints the config"
+                );
+            }
+            Environment::remove(name);
+        }
+    }
+
     #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
         fs::metadata(path)
@@ -2451,6 +2718,9 @@ mod tests {
             AGENT_STATE,
             AGENT_HOST_LOGIN,
             CLAUDE_TOKEN_URL,
+            USAGE_TTL,
+            CLAUDE_API_URL,
+            CODEX_API_URL,
             CODEX_SANDBOX,
             AGENT_CALLBACK,
             AGENT_CALLBACK_BIND,
@@ -2489,12 +2759,13 @@ mod tests {
                     "http://manager.localhost".to_string(),
                     "https://manager.localhost".to_string(),
                 ],
+                ..AgentConfig::default()
             }
         );
         let debug = format!("{config:?}");
         assert!(
             debug.contains(
-                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 60000, bind: 0.0.0.0:54545 }), consoles: ["http://manager.localhost", "https://manager.localhost"] }"#
+                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 60000, bind: 0.0.0.0:54545 }), consoles: ["http://manager.localhost", "https://manager.localhost"], usage_ttl: 60s, claude_api_url: "https://api.anthropic.com", codex_api_url: "https://chatgpt.com" }"#
             ),
             "{debug}"
         );

@@ -8,6 +8,7 @@ pub mod console;
 pub mod credential;
 pub mod devices;
 pub mod error;
+pub mod homes;
 pub mod identity;
 mod locks;
 pub mod oauth;

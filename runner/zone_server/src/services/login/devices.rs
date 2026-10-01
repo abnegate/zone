@@ -27,7 +27,7 @@ use super::error::Error;
 use super::locks::{Guard, Locks};
 use super::{audit, oauth, probe};
 use crate::config::Config;
-use crate::db::agent_logins::{self, Upsert};
+use crate::db::agent_logins::{self, AgentLoginRow, Insert};
 use crate::db::organizations;
 use crate::state::AppState;
 
@@ -266,14 +266,15 @@ impl Devices {
         };
         match ended {
             Ok(()) => {
-                let login = Upsert {
+                let login = Insert {
                     organization_id: organization,
                     agent: AgentKind::Codex.as_str(),
+                    account: None,
                     credential: None,
                     label: label.as_deref(),
                     expires_at: None,
                 };
-                match agent_logins::upsert(state.db(), &login).await {
+                match replace(&state, &login).await {
                     Ok(login) => {
                         self.attempts.remove(&organization);
                         audit::signed_in(state.db(), organization, initiator, &email, &login).await;
@@ -319,11 +320,9 @@ impl Devices {
                 log_out(state.config(), organization).await?;
             }
         }
-        let Some(login) = agent_logins::get(state.db(), organization, agent.as_str()).await? else {
-            return Ok(());
-        };
-        agent_logins::delete(state.db(), organization, agent.as_str()).await?;
-        audit::signed_out(state.db(), organization, user, email, &login).await;
+        for login in agent_logins::delete_all(state.db(), organization, agent.as_str()).await? {
+            audit::signed_out(state.db(), organization, user, email, &login).await;
+        }
         Ok(())
     }
 
@@ -371,6 +370,16 @@ impl Devices {
         }
         let _ = attempt.outcome.await;
     }
+}
+
+/// Records `login` in place of every login the organization held of its agent, in one transaction,
+/// so a sign-in without an account replaces the one before it.
+async fn replace(state: &AppState, login: &Insert<'_>) -> Result<AgentLoginRow, sqlx::Error> {
+    let mut transaction = state.db().begin().await?;
+    agent_logins::delete_all(&mut *transaction, login.organization_id, login.agent).await?;
+    let stored = agent_logins::insert(&mut *transaction, login).await?;
+    transaction.commit().await?;
+    Ok(stored)
 }
 
 /// `<state>/<organization>`, which holds every agent home of the organization, when it is a real
@@ -493,7 +502,6 @@ mod tests {
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
-    use crate::db::agent_logins::AgentLoginRow;
     use crate::services::login::caller::Caller;
     use crate::services::login::claude::{Redirect, Scope};
     use crate::services::login::codex::testing::{PROMPT, capture, script};
@@ -679,7 +687,11 @@ esac"#
         }
 
         async fn login(&self) -> Option<AgentLoginRow> {
-            agent_logins::get(&self.pool, self.organization, AgentKind::Codex.as_str())
+            self.logins().await.into_iter().next()
+        }
+
+        async fn logins(&self) -> Vec<AgentLoginRow> {
+            agent_logins::list_for(&self.pool, self.organization, AgentKind::Codex.as_str())
                 .await
                 .expect("the logins are readable")
         }
@@ -799,6 +811,32 @@ esac"#
             !DEVICES.locks.kept(scene.organization),
             "an idle organization's lock was kept"
         );
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn signing_in_again_without_an_account_still_replaces_the_login() {
+        let scene = Scene::new(PROMPT).await;
+        let (_, first) = scene.start().await;
+        scene.touch(APPROVE);
+        finished(first).await;
+        let replaced = scene.login().await.expect("the first sign-in was recorded");
+
+        let (_, second) = scene.start().await;
+        scene.touch(APPROVE);
+        finished(second).await;
+
+        let logins = scene.logins().await;
+        assert_eq!(
+            logins.len(),
+            1,
+            "a sign-in Zone cannot tell apart from the one before it must replace it, not add a \
+             second"
+        );
+        assert_ne!(logins[0].id, replaced.id);
+        assert_eq!(failure(scene.organization), None);
+        scene.sign_out().await;
+        assert!(scene.logins().await.is_empty());
         scene.remove().await;
     }
 
