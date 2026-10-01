@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_comfy::MediaType;
-use zone_core::llm::{BuiltinTools, LlmBackend, Message as LlmMessage, Role as LlmRole};
+use zone_core::llm::{BuiltinTools, Limit, LlmBackend, Message as LlmMessage, Role as LlmRole};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -3096,6 +3096,7 @@ async fn handle_chat_generation(
                             publish(stream,ServerMessage::Context {chat_id,message_id:Some(assistant_message_id),usage}).await;
                         }
                         Some(AgentEvent::Usage(usage)) => {tracing::debug!(prompt_tokens=usage.prompt_tokens,completion_tokens=usage.completion_tokens,"Observed provider usage");}
+                        Some(AgentEvent::Window(window)) => {tracing::debug!(window=%window.name,used_percent=?window.used_percent,"Observed agent usage window");}
                         Some(AgentEvent::Finalizing(message)) => { publish(stream,ServerMessage::Status {message}).await; }
                         Some(AgentEvent::Reasoning(content)) => {
                             round_reasoning.push_str(&content);
@@ -3281,7 +3282,7 @@ async fn handle_chat_generation(
                             persist_now = true;
                             stop_stream = true;
                         }
-                        Some(AgentEvent::Failed(message)) => {
+                        Some(AgentEvent::Failed(message) | AgentEvent::Limited(Limit { message, .. })) => {
                             failure = Some(self::failure(&endpoint, &llm_client.config().backend, message));
                             break;
                         }

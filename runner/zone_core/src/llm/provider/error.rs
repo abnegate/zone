@@ -4,6 +4,7 @@ use std::fmt;
 
 use thiserror::Error;
 
+use super::limit::Limit;
 use crate::llm::LlmError;
 use abnegate_secret::redact;
 
@@ -46,6 +47,12 @@ pub enum ProviderError {
     #[error("{provider}: {message}")]
     Agent { provider: String, message: String },
 
+    /// A turn a usage limit refused, rendered exactly as the same refusal is
+    /// as [`ProviderError::Agent`], so whatever classifies a failure by its
+    /// text reads it as it always did.
+    #[error("{provider}: {}", .limit.message)]
+    Limited { provider: String, limit: Box<Limit> },
+
     #[error("no provider is configured")]
     Unconfigured,
 
@@ -66,7 +73,8 @@ impl ProviderError {
             | Self::Exit { provider, .. }
             | Self::Timeout { provider, .. }
             | Self::Malformed { provider, .. }
-            | Self::Agent { provider, .. } => Some(provider),
+            | Self::Agent { provider, .. }
+            | Self::Limited { provider, .. } => Some(provider),
             Self::Unconfigured => None,
             Self::Exhausted { last, .. } => last.provider(),
         }
@@ -91,7 +99,8 @@ impl ProviderError {
             | Self::Exit { .. }
             | Self::Timeout { .. }
             | Self::Malformed { .. }
-            | Self::Agent { .. } => true,
+            | Self::Agent { .. }
+            | Self::Limited { .. } => true,
             Self::Unconfigured => false,
             Self::Exhausted { last, .. } => last.recoverable(),
         }
@@ -116,6 +125,16 @@ impl ProviderError {
         Self::Agent {
             provider: provider.to_string(),
             message: redact(message).into_owned(),
+        }
+    }
+
+    pub(super) fn limited(provider: &str, limit: Limit) -> Self {
+        Self::Limited {
+            provider: provider.to_string(),
+            limit: Box::new(Limit {
+                message: redact(&limit.message).into_owned(),
+                ..limit
+            }),
         }
     }
 
@@ -165,6 +184,15 @@ mod tests {
             ProviderError::agent("claude", leaked),
             ProviderError::malformed("claude", leaked),
             ProviderError::unavailable("claude", "claude", leaked),
+            ProviderError::limited(
+                "claude",
+                Limit {
+                    message: leaked.to_string(),
+                    resets_at: None,
+                    credits: false,
+                    window: None,
+                },
+            ),
         ] {
             let rendered = format!("{error} {error:?}");
             assert!(

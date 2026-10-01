@@ -39,6 +39,10 @@ use crate::workers::instructions;
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
 use zone_context::context::SearchResultWithAnalysis;
 
+mod halt;
+
+use halt::Halt;
+
 // Max concurrent task executions
 const MAX_CONCURRENT_TASKS: usize = 5;
 
@@ -211,6 +215,12 @@ impl Fault {
             status: RUN_FAILED,
             message: remedied.message,
         }
+    }
+
+    /// A turn a usage limit refused on `backend`, in the words the same
+    /// refusal reported as a failure, and judged as that failure is.
+    fn limited(backend: &LlmBackend, message: String) -> Self {
+        Self::agent(backend, message)
     }
 
     /// The backend an attempt was to run on could not be resolved. Only a
@@ -2226,8 +2236,11 @@ async fn attempt_run(
             )
             .await
             {
-                Err(error) => {
+                Err(Halt::Failed(error)) => {
                     return Err(Fault::agent(&llm.config().backend, error));
+                }
+                Err(Halt::Limited(limit)) => {
+                    return Err(Fault::limited(&llm.config().backend, limit.message));
                 }
                 Ok(TurnOutcome::Finished(outcome)) => {
                     carried.absorb(outcome);
@@ -2849,7 +2862,7 @@ async fn run_task_loop(
     budget: LoopBudget,
     callback: &DatabaseTaskCallback,
     calls: Option<&mut mpsc::UnboundedReceiver<AgentEvent>>,
-) -> Result<TurnOutcome, String> {
+) -> Result<TurnOutcome, Halt> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
     let mut tool_calls = 0usize;
@@ -2969,10 +2982,12 @@ async fn run_task_loop(
             AgentEvent::Consumed(_)
             | AgentEvent::Context(_)
             | AgentEvent::Usage(_)
+            | AgentEvent::Window(_)
             | AgentEvent::Image(_)
             | AgentEvent::Reasoning(_)
             | AgentEvent::ToolApprovalRequired { .. } => {}
-            AgentEvent::Failed(error) => return Err(error),
+            AgentEvent::Limited(limit) => return Err(Halt::Limited(Box::new(limit))),
+            AgentEvent::Failed(error) => return Err(Halt::Failed(error)),
         }
     }
     if let Some(park) = parked {
@@ -4056,7 +4071,11 @@ mod retry_tests {
             let failure = events
                 .iter()
                 .find_map(|event| match event {
-                    zone_core::llm::provider::AgentEvent::Failed(message) => Some(message),
+                    zone_core::llm::provider::AgentEvent::Failed(message)
+                    | zone_core::llm::provider::AgentEvent::Limited(zone_core::llm::Limit {
+                        message,
+                        ..
+                    }) => Some(message),
                     _ => None,
                 })
                 .expect("the refusal fails the turn");
@@ -4074,6 +4093,159 @@ mod retry_tests {
             );
             assert!(fault.message.ends_with(words), "{}", fault.message);
         }
+    }
+
+    /// A stand-in claude that replays `lines` as its turn.
+    fn replaying(directory: &tempfile::TempDir, lines: &[serde_json::Value]) -> LlmBackend {
+        use std::os::unix::fs::PermissionsExt;
+
+        let recording = directory.path().join("recording.jsonl");
+        let lines: Vec<String> = lines.iter().map(serde_json::Value::to_string).collect();
+        std::fs::write(&recording, format!("{}\n", lines.join("\n"))).expect("the recording");
+        let executable = directory.path().join("claude");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\ncat '{}'\n",
+                recording.display()
+            ),
+        )
+        .expect("the stand-in agent");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in agent to be executable");
+        LlmBackend::cli(
+            AgentKind::Claude,
+            zone_core::llm::CliSettings::default()
+                .with_sign_in(SignIn::Organization)
+                .with_executable(executable)
+                .with_timeout(Duration::from_secs(20)),
+        )
+    }
+
+    /// How a task's turn on `backend` stopped. Nothing it reaches for needs a
+    /// database: the progress it reports is written in the background, to
+    /// nowhere.
+    async fn halt(backend: &LlmBackend) -> Halt {
+        let pool =
+            PgPool::connect_lazy("postgres://zone@127.0.0.1:1/unreachable").expect("a lazy pool");
+        let callback = DatabaseTaskCallback::new(pool, Uuid::new_v4());
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_task_loop(
+                LlmClient::new(zone_core::llm::LlmConfig::default().with_backend(backend.clone())),
+                "sonnet".to_string(),
+                ChatTools::empty(),
+                RunContext::from_messages(vec![LlmMessage::user("Write the file.")]),
+                LoopBudget::task(),
+                &callback,
+                None,
+            ),
+        )
+        .await
+        .expect("the turn ends");
+        match outcome {
+            Ok(_) => panic!("the turn was expected to stop short of an answer"),
+            Err(halt) => halt,
+        }
+    }
+
+    fn refused_past_the_five_hour_window() -> [serde_json::Value; 3] {
+        [
+            serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_208_000, "rateLimitType": "five_hour", "isUsingOverage": false}}),
+            serde_json::json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": SESSION_LIMIT}]}, "parent_tool_use_id": null, "error": "rate_limit", "is_api_error_message": true}),
+            serde_json::json!({"type": "result", "subtype": "success", "is_error": true, "api_error_status": 429, "result": SESSION_LIMIT}),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_limited_turn_halts_as_a_limit_and_a_failed_one_as_words() {
+        let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
+        let limited = halt(&replaying(&directory, &refused_past_the_five_hour_window())).await;
+
+        let Halt::Limited(limit) = &limited else {
+            panic!("expected a limit, got {limited:?}");
+        };
+        assert_eq!(
+            limit.message,
+            format!(
+                "Stream error: claude: rate limit reached (five_hour, rejected): {SESSION_LIMIT}"
+            )
+        );
+        assert_eq!(
+            limit.resets_at,
+            chrono::DateTime::from_timestamp(1_790_208_000, 0)
+        );
+        assert!(!limit.credits);
+
+        let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
+        let failed = halt(&replaying(
+            &directory,
+            &[serde_json::json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": "Invalid API key provided"})],
+        ))
+        .await;
+
+        assert!(
+            matches!(&failed, Halt::Failed(message) if message == "Stream error: claude: Invalid API key provided"),
+            "{failed:?}"
+        );
+    }
+
+    /// The run log records a limited attempt in the words it recorded for
+    /// the same refusal when it was an agent failure, and the retry policy
+    /// backs off from it as it did.
+    #[tokio::test]
+    async fn a_limited_attempt_logs_the_words_it_logged_before() {
+        let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
+        let backend = replaying(&directory, &refused_past_the_five_hour_window());
+        let Halt::Limited(limit) = halt(&backend).await else {
+            panic!("the refusal was expected to halt the turn as a limit");
+        };
+
+        let fault = Fault::limited(&backend, limit.message);
+        let before = Fault::agent(
+            &backend,
+            format!(
+                "Stream error: claude: rate limit reached (five_hour, rejected): {SESSION_LIMIT}"
+            ),
+        );
+
+        assert_eq!(fault.message, before.message);
+        assert!(
+            fault.message.starts_with("Stream error: claude: "),
+            "{}",
+            fault.message
+        );
+        assert_eq!(fault.failure, before.failure);
+        assert_eq!(fault.failure, Failure::RateLimited { retry_after: None });
+        assert_eq!(fault.status, before.status);
+    }
+
+    /// A model the signed-in account cannot spend usage credits on refuses
+    /// every retry alike, so a credits limit ends the run as the unfunded
+    /// failure did.
+    #[tokio::test]
+    async fn a_credits_limit_stays_terminal_for_a_task() {
+        let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
+        let backend = replaying(
+            &directory,
+            &[
+                serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "overageStatus": "rejected", "overageDisabledReason": "overage_not_provisioned", "isUsingOverage": false, "errorCode": "credits_required"}}),
+                serde_json::json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": FABLE_REFUSAL}]}, "parent_tool_use_id": null, "error": "rate_limit", "is_api_error_message": true, "api_error": "model_requires_usage_credits"}),
+                serde_json::json!({"type": "result", "subtype": "success", "is_error": true, "api_error_status": 429, "result": FABLE_REFUSAL}),
+            ],
+        );
+        let Halt::Limited(limit) = halt(&backend).await else {
+            panic!("the refusal was expected to halt the turn as a limit");
+        };
+        assert!(limit.credits, "{limit:?}");
+
+        let fault = Fault::limited(&backend, limit.message);
+
+        assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+        assert_eq!(
+            fault.message,
+            format!("Stream error: claude: {UNFUNDED}: {FABLE_REFUSAL}")
+        );
     }
 
     /// claude's words for a turn it cannot fund, and Zone's, are a coding

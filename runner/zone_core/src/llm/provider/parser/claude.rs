@@ -1,8 +1,13 @@
 //! Reading `claude --output-format stream-json`.
 
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 
 use crate::llm::provider::event::AgentEvent;
+use crate::llm::provider::limit::Limit;
+use crate::llm::provider::window::Window;
 use crate::llm::{FunctionCall, ToolCall, Usage};
 
 /// Statuses that report headroom rather than refuse the request.
@@ -21,6 +26,11 @@ const UNWORDED_FAILURE: &str = "the agent reported a failed run";
 const FAILED_SUBTYPE_PREFIX: &str = "error";
 
 const CALL_TYPE: &str = "function";
+
+const TOO_MANY_REQUESTS: u16 = 429;
+
+/// claude reports a window's use as a fraction; a [`Window`] holds a percent.
+const PERCENT: f64 = 100.0;
 
 /// Begins the failure of a turn on a model the signed-in account cannot
 /// spend usage credits on, before claude's own words. The task worker never
@@ -103,11 +113,13 @@ enum Event {
         result: Option<String>,
         #[serde(default)]
         usage: Option<TokenCounts>,
+        #[serde(default, deserialize_with = "lenient")]
+        api_error_status: Option<u16>,
     },
     #[serde(rename = "rate_limit_event")]
     RateLimit {
         #[serde(default)]
-        rate_limit_info: Option<Limit>,
+        rate_limit_info: Option<Info>,
     },
     #[serde(other)]
     Ignored,
@@ -166,26 +178,32 @@ impl Block {
 }
 
 #[derive(Debug, Deserialize)]
-struct Limit {
+struct Info {
     #[serde(default)]
     status: Option<String>,
     #[serde(default, rename = "rateLimitType")]
-    window: Option<String>,
+    name: Option<String>,
     #[serde(default, rename = "overageDisabledReason")]
     reason: Option<String>,
     #[serde(default, rename = "isUsingOverage")]
     on_credits: bool,
     #[serde(default, rename = "errorCode")]
     code: Option<String>,
+    #[serde(default, rename = "resetsAt", deserialize_with = "reset")]
+    resets_at: Option<DateTime<Utc>>,
+    #[serde(default, deserialize_with = "lenient")]
+    utilization: Option<f64>,
 }
 
-impl Limit {
+impl Info {
+    fn allowed(&self) -> bool {
+        self.status
+            .as_deref()
+            .is_some_and(|status| ALLOWED.contains(&status))
+    }
+
     fn headroom(&self) -> bool {
-        self.on_credits
-            || self
-                .status
-                .as_deref()
-                .is_some_and(|status| ALLOWED.contains(&status))
+        self.on_credits || self.allowed()
     }
 
     /// A refused request as the worker reads a rate limit, naming its window.
@@ -194,14 +212,64 @@ impl Limit {
     fn refusal(&self) -> Option<String> {
         if self.headroom()
             || self.code.is_some()
-            || self.window.as_deref() == Some(OVERAGE_INCLUDED_WINDOW)
+            || self.name.as_deref() == Some(OVERAGE_INCLUDED_WINDOW)
         {
             return None;
         }
-        let window = self.window.as_deref().unwrap_or(UNNAMED_WINDOW);
+        let window = self.name.as_deref().unwrap_or(UNNAMED_WINDOW);
         let status = self.status.as_deref().unwrap_or_default();
         Some(format!("{THROTTLED} ({window}, {status})"))
     }
+
+    /// The named window this event reports on, counted as spent in full when
+    /// claude refused a request on it without saying how much was used.
+    fn window(&self, refused: bool) -> Option<Window> {
+        let name = self.name.clone()?;
+        let used_percent = self
+            .utilization
+            .map(|fraction| fraction * PERCENT)
+            .or(refused.then_some(PERCENT));
+        Some(Window {
+            name,
+            used_percent,
+            used: None,
+            limit: None,
+            resets_at: self.resets_at,
+        })
+    }
+}
+
+/// A field claude may one day send in another shape, read as absent rather
+/// than losing the whole line, and with it a refusal, to a parse error.
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+fn reset<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.as_ref().and_then(reset_time))
+}
+
+/// When a window resets, which claude has written both in epoch seconds and
+/// as an RFC 3339 timestamp.
+fn reset_time(value: &Value) -> Option<DateTime<Utc>> {
+    let seconds = match value {
+        Value::Number(seconds) => seconds.as_i64(),
+        Value::String(text) => match DateTime::parse_from_rfc3339(text) {
+            Ok(time) => return Some(time.with_timezone(&Utc)),
+            Err(_) => text.trim().parse().ok(),
+        },
+        _ => None,
+    };
+    seconds.and_then(|seconds| DateTime::from_timestamp(seconds, 0))
 }
 
 /// Anthropic reports cache reads and cache writes separately from fresh input.
@@ -249,6 +317,10 @@ pub struct Reader {
     /// with the same event as the main agent's, naming neither, so the window
     /// fails the turn only on the main agent's API error or a failed result.
     refusal: Option<String>,
+    /// When the latest refused request's window resets, and the window, which
+    /// a limit that ends the turn reports.
+    resets_at: Option<DateTime<Utc>>,
+    window: Option<Window>,
     credits: Credits,
 }
 
@@ -275,10 +347,11 @@ impl Reader {
                 is_error,
                 result,
                 usage,
-            } => self.result(subtype, is_error, result, usage, events),
+                api_error_status,
+            } => self.result(subtype, is_error, result, usage, api_error_status, events),
             Event::RateLimit {
-                rate_limit_info: Some(limit),
-            } => self.limit(&limit),
+                rate_limit_info: Some(info),
+            } => self.observe(&info, events),
             Event::RateLimit {
                 rate_limit_info: None,
             }
@@ -310,16 +383,21 @@ impl Reader {
                 .as_ref()
                 .map(AssistantMessage::words)
                 .unwrap_or_default();
-            let failure = match kind {
-                Some(kind) => Some(self.refused(kind.marker(), &words)),
-                None => self.refusal.as_deref().map(|window| worded(window, &words)),
+            let ended = match kind {
+                Some(kind) => Some(self.unfunded(kind.marker(), &words)),
+                None => self
+                    .refusal
+                    .as_deref()
+                    .map(|window| self.limited(worded(window, &words), false)),
             };
-            events.extend(failure.map(AgentEvent::Failed));
+            events.extend(ended);
             return;
         }
         // The main agent's request went through, so any window refused
         // before it was a subagent's.
         self.refusal = None;
+        self.resets_at = None;
+        self.window = None;
         let Some(message) = message else {
             return;
         };
@@ -340,6 +418,7 @@ impl Reader {
         is_error: bool,
         result: Option<String>,
         usage: Option<TokenCounts>,
+        status: Option<u16>,
         events: &mut Vec<AgentEvent>,
     ) {
         if let Some(usage) = usage {
@@ -356,38 +435,68 @@ impl Reader {
             return;
         }
         let words = result.filter(|result| !result.trim().is_empty());
-        let message = match (words, &self.refusal) {
-            (Some(words), _) if fable_refusal(&words) => self.refused(UNFUNDED, &words),
-            (Some(words), Some(window)) => worded(window, &words),
-            (Some(words), None) => words,
-            (None, Some(window)) => window.clone(),
-            (None, None) => subtype.unwrap_or_else(|| UNWORDED_FAILURE.to_string()),
+        let ended = match (words, &self.refusal) {
+            (Some(words), _) if fable_refusal(&words) => self.unfunded(UNFUNDED, &words),
+            (Some(words), Some(window)) => self.limited(worded(window, &words), false),
+            (Some(words), None) => self.judged(words, status),
+            (None, Some(window)) => self.limited(window.clone(), false),
+            (None, None) => self.judged(
+                subtype.unwrap_or_else(|| UNWORDED_FAILURE.to_string()),
+                status,
+            ),
         };
-        events.push(AgentEvent::Failed(message));
+        events.push(ended);
     }
 
-    fn limit(&mut self, limit: &Limit) {
-        self.reason.clone_from(&limit.reason);
-        if limit.on_credits && matches!(self.credits, Credits::Unused) {
-            let window = limit.window.as_deref().unwrap_or(UNNAMED_WINDOW);
+    fn observe(&mut self, info: &Info, events: &mut Vec<AgentEvent>) {
+        self.reason.clone_from(&info.reason);
+        if info.on_credits && matches!(self.credits, Credits::Unused) {
+            let window = info.name.as_deref().unwrap_or(UNNAMED_WINDOW);
             self.credits = Credits::Unreported(window.to_string());
         }
-        if let Some(refusal) = limit.refusal() {
+        if info.headroom() {
+            if info.allowed() && info.utilization.is_some() {
+                events.extend(info.window(false).map(AgentEvent::Window));
+            }
+            return;
+        }
+        self.resets_at = info.resets_at;
+        self.window = info.window(true);
+        if let Some(refusal) = info.refusal() {
             self.refusal = Some(refusal);
         }
     }
 
+    /// The turn refused past a limit, in `message`, with whatever claude said
+    /// of the window it refused on.
+    fn limited(&self, message: String, credits: bool) -> AgentEvent {
+        AgentEvent::Limited(Limit {
+            message,
+            resets_at: self.resets_at,
+            credits,
+            window: self.window.clone(),
+        })
+    }
+
+    /// A failed result no refused window accounts for, which is a limit when
+    /// claude's status or its words say one refused the turn.
+    fn judged(&self, message: String, status: Option<u16>) -> AgentEvent {
+        if status == Some(TOO_MANY_REQUESTS) || Limit::worded(&message) {
+            return self.limited(message, false);
+        }
+        AgentEvent::Failed(message)
+    }
+
     /// claude's `words` for a turn usage credits could not fund, begun with
-    /// `unfunded`, or with [`UNCONFIRMED`] when claude could not look the
-    /// account's credits up for the request it refused.
-    fn refused(&self, unfunded: &str, words: &str) -> String {
-        let marker = match self.reason.as_deref() {
+    /// `unfunded`, or a failure begun with [`UNCONFIRMED`] when claude could
+    /// not look the account's credits up for the request it refused.
+    fn unfunded(&self, unfunded: &str, words: &str) -> AgentEvent {
+        match self.reason.as_deref() {
             Some(reason) if INDETERMINATE_REASONS.contains(&reason) => {
-                format!("{UNCONFIRMED} ({reason})")
+                AgentEvent::Failed(worded(&format!("{UNCONFIRMED} ({reason})"), words))
             }
-            _ => unfunded.to_string(),
-        };
-        worded(&marker, words)
+            _ => self.limited(worded(unfunded, words), true),
+        }
     }
 }
 
@@ -490,14 +599,42 @@ mod tests {
             .collect()
     }
 
+    /// The words of every event that ended the turn unanswered, a limit's
+    /// as much as a failure's: the worker reads both the same way.
     fn failures(events: &[AgentEvent]) -> Vec<&str> {
         events
             .iter()
             .filter_map(|event| match event {
-                AgentEvent::Failed(message) => Some(message.as_str()),
+                AgentEvent::Failed(message) | AgentEvent::Limited(Limit { message, .. }) => {
+                    Some(message.as_str())
+                }
                 _ => None,
             })
             .collect()
+    }
+
+    fn limits(events: &[AgentEvent]) -> Vec<&Limit> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Limited(limit) => Some(limit),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn windows(events: &[AgentEvent]) -> Vec<&Window> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Window(window) => Some(window),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn at(seconds: i64) -> Option<DateTime<Utc>> {
+        DateTime::from_timestamp(seconds, 0)
     }
 
     fn limit(info: Value) -> String {
@@ -538,11 +675,15 @@ mod tests {
     }
 
     fn failed_result(words: &str) -> Value {
+        failed_with(words, 429)
+    }
+
+    fn failed_with(words: &str, status: u16) -> Value {
         json!({
             "type": "result",
             "subtype": "success",
             "is_error": true,
-            "api_error_status": 429,
+            "api_error_status": status,
             "result": words,
             "session_id": "6f1",
         })
@@ -702,16 +843,152 @@ mod tests {
     }
 
     #[test]
-    fn a_headroom_report_is_not_a_failure() {
+    fn a_headroom_report_becomes_a_window_and_not_a_failure() {
         for status in ["allowed", "allowed_warning"] {
             let line = limit(json!({
                 "status": status,
+                "resetsAt": 1_790_208_000,
                 "rateLimitType": "five_hour",
-                "utilization": 72.5,
+                "utilization": 0.43,
                 "isUsingOverage": false,
             }));
             let events = interpret_all(&line);
-            assert!(events.is_empty(), "{status} was treated as a failure");
+
+            assert!(failures(&events).is_empty(), "{status}: {events:?}");
+            assert_eq!(
+                windows(&events),
+                [&Window {
+                    name: "five_hour".to_string(),
+                    used_percent: Some(43.0),
+                    used: None,
+                    limit: None,
+                    resets_at: at(1_790_208_000),
+                }],
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_headroom_report_without_its_use_or_its_window_reports_no_window() {
+        for info in [
+            json!({"status": "allowed", "rateLimitType": "five_hour", "isUsingOverage": false}),
+            json!({"status": "allowed", "utilization": 0.43, "isUsingOverage": false}),
+        ] {
+            let events = interpret_all(&limit(info.clone()));
+            assert!(events.is_empty(), "{info}: {events:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_request_is_a_limit_with_its_reset_time_and_window() {
+        let events = interpret_all(FABLE_LIMIT_STREAM);
+
+        let limits = limits(&events);
+        assert!(!limits.is_empty(), "no limit in {events:?}");
+        for limit in limits {
+            assert!(limit.credits, "{limit:?}");
+            assert_eq!(limit.resets_at, at(1_790_208_000), "{limit:?}");
+            assert_eq!(
+                limit.window,
+                Some(Window {
+                    name: "seven_day_overage_included".to_string(),
+                    used_percent: Some(100.0),
+                    used: None,
+                    limit: None,
+                    resets_at: at(1_790_208_000),
+                }),
+                "{limit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejected_window_keeps_the_wording_the_worker_reads() {
+        let events = interpret_all(&stream(&[
+            limit(json!({
+                "status": "rejected",
+                "resetsAt": 1_790_208_000,
+                "rateLimitType": "five_hour",
+                "utilization": 1.0,
+                "isUsingOverage": false,
+            })),
+            api_error(SESSION_LIMIT, None).to_string(),
+        ]));
+
+        let [AgentEvent::Limited(limit)] = events.as_slice() else {
+            panic!("expected one limit, got {events:?}");
+        };
+        assert_eq!(limit.message, throttled("five_hour", SESSION_LIMIT));
+        assert!(limit.message.contains(THROTTLED), "{limit:?}");
+        assert!(!limit.credits, "{limit:?}");
+        assert_eq!(limit.resets_at, at(1_790_208_000));
+        assert_eq!(
+            limit.window.as_ref().and_then(|window| window.used_percent),
+            Some(100.0)
+        );
+    }
+
+    #[test]
+    fn a_failed_result_in_limit_words_is_a_limit_without_a_reset_time() {
+        for line in [
+            failed_with(SESSION_LIMIT, 400),
+            failed_with("Request refused", 429),
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": LIMIT_HIT}),
+        ] {
+            let events = interpret_all(&line.to_string());
+
+            let [AgentEvent::Limited(limit)] = events.as_slice() else {
+                panic!("expected one limit for {line}, got {events:?}");
+            };
+            assert_eq!(Some(limit.message.as_str()), line["result"].as_str());
+            assert_eq!(limit.resets_at, None, "{line}");
+            assert_eq!(limit.window, None, "{line}");
+            assert!(!limit.credits, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_signed_out_result_is_a_failure_and_not_a_limit() {
+        for line in [
+            failed_with("Not logged in · Please run /login", 401),
+            failed_with("Invalid API key · Please run /login", 401),
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": "OAuth token has expired. Please obtain a new token or refresh your existing token."}),
+        ] {
+            let events = interpret_all(&line.to_string());
+
+            assert!(
+                matches!(events.as_slice(), [AgentEvent::Failed(message)] if Some(message.as_str()) == line["result"].as_str()),
+                "{line}: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reset_time_reads_as_seconds_or_a_timestamp() {
+        for (resets_at, expected) in [
+            (json!(1_790_208_000), at(1_790_208_000)),
+            (json!("1790208000"), at(1_790_208_000)),
+            (json!("2026-09-24T04:00:00Z"), at(1_790_222_400)),
+            (json!("2026-09-24T16:00:00+12:00"), at(1_790_222_400)),
+            (json!("next Tuesday"), None),
+            (json!({"seconds": 1_790_208_000}), None),
+            (Value::Null, None),
+        ] {
+            let events = interpret_all(&stream(&[
+                limit(json!({
+                    "status": "rejected",
+                    "resetsAt": resets_at,
+                    "rateLimitType": "five_hour",
+                    "isUsingOverage": false,
+                })),
+                api_error(SESSION_LIMIT, None).to_string(),
+            ]));
+
+            let [AgentEvent::Limited(limit)] = events.as_slice() else {
+                panic!("{resets_at}: a reset time it cannot read lost the refusal: {events:?}");
+            };
+            assert_eq!(limit.resets_at, expected, "{resets_at}");
         }
     }
 
@@ -833,7 +1110,7 @@ mod tests {
             ]));
 
             assert!(
-                matches!(events.as_slice(), [AgentEvent::Failed(message)] if message.starts_with(THROTTLED)),
+                matches!(events.as_slice(), [AgentEvent::Limited(limit)] if limit.message.starts_with(THROTTLED)),
                 "{info}: {events:?}"
             );
         }
@@ -901,11 +1178,18 @@ mod tests {
         ] {
             let events = interpret_all(stream);
 
-            let failures = failures(&events);
-            assert!(!failures.is_empty(), "no failure in {events:?}");
+            let limits = limits(&events);
+            assert!(!limits.is_empty(), "no limit in {events:?}");
             assert!(
-                failures.iter().all(|message| *message == unfunded(words)),
-                "{failures:?}"
+                limits
+                    .iter()
+                    .all(|limit| limit.credits && limit.message == unfunded(words)),
+                "{limits:?}"
+            );
+            assert_eq!(
+                failures(&events).len(),
+                limits.len(),
+                "a refusal was not a limit: {events:?}"
             );
             assert_eq!(text(&events), "", "claude's refusal read as an answer");
         }
@@ -979,6 +1263,10 @@ mod tests {
                 Some(unfunded(words).as_str()),
                 "{reason}"
             );
+            assert!(
+                limits(&events).first().is_some_and(|limit| limit.credits),
+                "{reason}: {events:?}"
+            );
             assert_eq!(text(&events), "", "{reason}");
         }
     }
@@ -1015,6 +1303,10 @@ mod tests {
                     failures.iter().all(|message| !message.contains(UNFUNDED)
                         && !message.contains(UNFUNDED_CONTEXT)),
                     "{failures:?}"
+                );
+                assert!(
+                    limits(&events).iter().all(|limit| !limit.credits),
+                    "{reason}, {kind}: {events:?}"
                 );
             }
         }
@@ -1183,10 +1475,13 @@ mod tests {
             subagents(api_error(OPUS_LIMIT, None)).to_string(),
             said("Opus is past its weekly limit, so I will review the change.").to_string(),
             api_error(OVERLOADED, None).to_string(),
-            failed_result(OVERLOADED).to_string(),
+            failed_with(OVERLOADED, 529).to_string(),
         ]));
 
-        assert_eq!(failures(&events), [OVERLOADED]);
+        assert!(
+            matches!(events.last(), Some(AgentEvent::Failed(message)) if message == OVERLOADED),
+            "{events:?}"
+        );
     }
 
     /// A subagent's words are its own conversation's. What it reaches for is
@@ -1348,7 +1643,7 @@ mod tests {
 
     #[test]
     fn a_success_subtype_carrying_an_error_flag_is_still_a_failure() {
-        let line = r#"{"type":"result","subtype":"success","is_error":true,"result":"You have hit your weekly limit"}"#;
+        let line = r#"{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key provided"}"#;
         let events = interpret_all(line);
 
         assert!(matches!(events.as_slice(), [AgentEvent::Failed(_)]));
