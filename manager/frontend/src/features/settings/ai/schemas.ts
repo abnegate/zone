@@ -23,6 +23,33 @@ export const DevicePromptSchema = z.object({
   expires_at: TimestampSchema,
 });
 
+export const LoginStateSchema = AgentStateSchema;
+
+export const UsageWindowSchema = z.object({
+  name: z.string(),
+  used_percent: z.number().nullable(),
+  used: z.number().int().nonnegative().nullable(),
+  limit: z.number().int().nonnegative().nullable(),
+  resets_at: TimestampSchema.nullable(),
+});
+
+export const UsageSchema = z.object({
+  windows: z.array(UsageWindowSchema),
+  headroom: z.number().nullable(),
+  fetched_at: TimestampSchema,
+  exhausted_until: TimestampSchema.nullable(),
+});
+
+export const AgentAccountSchema = z.object({
+  id: z.uuid(),
+  label: z.string().nullable(),
+  plan: z.string().nullable(),
+  state: LoginStateSchema,
+  expires_at: TimestampSchema.nullable(),
+  usage: UsageSchema.nullable(),
+  last_used_at: TimestampSchema.nullable(),
+});
+
 export const AgentStatusSchema = z.object({
   agent: AgentSchema,
   provider: AgentProviderSchema,
@@ -33,6 +60,7 @@ export const AgentStatusSchema = z.object({
   models: z.array(z.string()),
   pending: DevicePromptSchema.nullable(),
   error: z.string().nullable(),
+  logins: z.array(AgentAccountSchema).default([]),
 });
 
 export const AgentStatusesSchema = z.object({
@@ -66,6 +94,10 @@ export type ClaudeScope = z.infer<typeof ClaudeScopeSchema>;
 export type SignInFlow = z.infer<typeof SignInFlowSchema>;
 export type CodeFailure = z.infer<typeof CodeFailureSchema>;
 export type DevicePrompt = z.infer<typeof DevicePromptSchema>;
+export type LoginState = z.infer<typeof LoginStateSchema>;
+export type UsageWindow = z.infer<typeof UsageWindowSchema>;
+export type Usage = z.infer<typeof UsageSchema>;
+export type AgentAccount = z.infer<typeof AgentAccountSchema>;
 export type AgentStatus = z.infer<typeof AgentStatusSchema>;
 export type ClaudeLogin = z.infer<typeof ClaudeLoginSchema>;
 export type CodexLogin = z.infer<typeof CodexLoginSchema>;
