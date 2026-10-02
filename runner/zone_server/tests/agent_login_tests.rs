@@ -1105,6 +1105,23 @@ async fn until(condition: impl Fn() -> bool) -> bool {
     false
 }
 
+#[test]
+fn the_harness_reads_agent_usage_only_from_loopback() {
+    for config in [
+        common::test_config(),
+        common::test_config_with_ollama_host("http://127.0.0.1:11434"),
+    ] {
+        for url in [config.agents.claude_api_url, config.agents.codex_api_url] {
+            let parsed = Url::parse(&url).expect("a usage URL");
+            assert_eq!(
+                parsed.host_str(),
+                Some("127.0.0.1"),
+                "{url} would reach a real agent's API from a test"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_member_reads_both_statuses_with_their_models_and_never_a_code() {
     let codex = Codex::new();

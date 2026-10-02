@@ -114,7 +114,7 @@ mod tests {
                     agents: AgentConfig {
                         state: directory.path().join("agents"),
                         host_login: false,
-                        ..AgentConfig::default()
+                        ..crate::state::test_agents()
                     },
                     ..crate::state::test_config()
                 },

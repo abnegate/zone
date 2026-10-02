@@ -22,6 +22,7 @@ use zone_context::adapters::{AdapterRegistry, TextAdapter};
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
 
+use zone_server::config::AgentConfig;
 use zone_server::config::Config;
 use zone_server::routes::create_router;
 use zone_server::state::AppState;
@@ -33,6 +34,19 @@ pub fn init_tracing() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
         .try_init();
+}
+
+/// A loopback port nothing listens on, where a test's agent logins read usage unless the test
+/// mocks it, so no test reaches a real agent's API.
+pub const UNREACHABLE_USAGE: &str = "http://127.0.0.1:1";
+
+/// Agent settings whose usage reads go to [`UNREACHABLE_USAGE`].
+pub fn agents() -> AgentConfig {
+    AgentConfig {
+        claude_api_url: UNREACHABLE_USAGE.to_string(),
+        codex_api_url: UNREACHABLE_USAGE.to_string(),
+        ..AgentConfig::default()
+    }
 }
 
 /// Test configuration with sensible defaults
@@ -49,7 +63,7 @@ pub fn test_config() -> Config {
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
         model_backend: Default::default(),
-        agents: Default::default(),
+        agents: agents(),
         litellm_host: std::env::var("LITELLM_HOST")
             .unwrap_or_else(|_| "http://localhost:4000".to_string()),
         litellm_key: std::env::var("LITELLM_KEY").unwrap_or_else(|_| "test-key".to_string()),
@@ -402,7 +416,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
         model_backend: Default::default(),
-        agents: Default::default(),
+        agents: agents(),
         litellm_host: ollama_host.to_string(),
         litellm_key: "test-key".to_string(),
         ollama_host: ollama_host.to_string(),

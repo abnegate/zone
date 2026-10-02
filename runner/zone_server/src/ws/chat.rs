@@ -4365,7 +4365,7 @@ mod tests {
                     agents: AgentConfig {
                         state: agents.path().to_path_buf(),
                         host_login: true,
-                        ..AgentConfig::default()
+                        ..crate::state::test_agents()
                     },
                     ..crate::state::test_config()
                 },
@@ -4414,7 +4414,7 @@ mod tests {
                     agents: AgentConfig {
                         state: agents.path().to_path_buf(),
                         host_login: true,
-                        ..AgentConfig::default()
+                        ..crate::state::test_agents()
                     },
                     comfyui: ComfyUiConfig {
                         enabled: true,
@@ -4708,7 +4708,7 @@ cat 'DIR/reply.jsonl'
                             },
                             agents: AgentConfig {
                                 state: agents.path().to_path_buf(),
-                                ..AgentConfig::default()
+                                ..crate::state::test_agents()
                             },
                             ..crate::state::test_config()
                         },

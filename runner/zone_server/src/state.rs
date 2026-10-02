@@ -14,6 +14,8 @@ use zone_core::llm::{CliSettings, LlmBackend};
 use zone_core::mcp::McpHub;
 
 use crate::cache::Cache;
+#[cfg(test)]
+use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
 use crate::pull::PullRegistry;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
@@ -349,6 +351,20 @@ impl AppState {
     }
 }
 
+/// A loopback port nothing listens on, where a test's agent logins read usage unless the test
+/// mocks it, so no test reaches a real agent's API.
+#[cfg(test)]
+pub(crate) const UNREACHABLE_USAGE: &str = "http://127.0.0.1:1";
+
+#[cfg(test)]
+pub(crate) fn test_agents() -> AgentConfig {
+    AgentConfig {
+        claude_api_url: UNREACHABLE_USAGE.to_string(),
+        codex_api_url: UNREACHABLE_USAGE.to_string(),
+        ..AgentConfig::default()
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn test_config() -> Config {
     Config {
@@ -360,7 +376,7 @@ pub(crate) fn test_config() -> Config {
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
         model_backend: Default::default(),
-        agents: Default::default(),
+        agents: test_agents(),
         litellm_host: "http://localhost:4000".to_string(),
         litellm_key: "test-key".to_string(),
         ollama_host: "http://localhost:11434".to_string(),
@@ -391,6 +407,19 @@ mod tests {
     use zone_core::llm::AgentKind;
     use zone_email::EmailConfig;
 
+    #[test]
+    fn a_test_config_reads_agent_usage_only_from_loopback() {
+        let agents = test_config().agents;
+        for url in [agents.claude_api_url, agents.codex_api_url] {
+            let parsed = reqwest::Url::parse(&url).expect("a usage URL");
+            assert_eq!(
+                parsed.host_str(),
+                Some("127.0.0.1"),
+                "{url} would reach a real agent's API from a test"
+            );
+        }
+    }
+
     fn create_test_config() -> Config {
         Config {
             host: "localhost".to_string(),
@@ -401,7 +430,7 @@ mod tests {
             jwt_access_lifetime: 900,
             jwt_refresh_lifetime: 604800,
             model_backend: Default::default(),
-            agents: Default::default(),
+            agents: test_agents(),
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),

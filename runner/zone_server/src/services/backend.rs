@@ -468,7 +468,7 @@ mod tests {
             Config {
                 agents: AgentConfig {
                     state: self.agents.path().to_path_buf(),
-                    ..AgentConfig::default()
+                    ..crate::state::test_agents()
                 },
                 ..crate::state::test_config()
             }

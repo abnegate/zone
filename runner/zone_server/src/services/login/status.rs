@@ -446,7 +446,7 @@ mod tests {
         Config {
             agents: AgentConfig {
                 state: state.path().to_path_buf(),
-                ..AgentConfig::default()
+                ..crate::state::test_agents()
             },
             ..crate::state::test_config()
         }
@@ -627,7 +627,7 @@ mod tests {
             agents: AgentConfig {
                 state: directory.path().join("agents"),
                 host_login: true,
-                ..AgentConfig::default()
+                ..crate::state::test_agents()
             },
             ..crate::state::test_config()
         };

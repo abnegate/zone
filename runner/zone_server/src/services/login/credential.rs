@@ -309,7 +309,7 @@ mod tests {
                     agents: AgentConfig {
                         state: agents.path().to_path_buf(),
                         claude_token_url: token_url,
-                        ..AgentConfig::default()
+                        ..crate::state::test_agents()
                     },
                     chat,
                     ..crate::state::test_config()
