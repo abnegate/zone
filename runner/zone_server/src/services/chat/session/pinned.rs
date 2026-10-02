@@ -7,8 +7,13 @@ use crate::services::backend::Continuation;
 use crate::services::login::identity::LoginIdentity;
 
 /// What a coding agent says, lowercased, when it has no session by the id it was asked to
-/// resume: claude's `No conversation found`, codex's `not found`.
-const REFUSALS: [&str; 2] = ["no conversation found", "not found"];
+/// resume: claude's `No conversation found with session ID: <id>`, and codex's
+/// `no rollout found for thread id <id>`, or `conversation id` where codex names it so.
+const REFUSALS: [&str; 3] = [
+    "no conversation found with session id",
+    "no rollout found for thread id",
+    "no rollout found for conversation id",
+];
 
 /// The coding agent session a chat's turn runs in, on one of the organization's logins, and
 /// what the chat records of it once the agent has it.
@@ -167,8 +172,8 @@ mod tests {
     use crate::services::backend::Resolved;
 
     const CLAUDE_REFUSAL: &str = "Stream error: claude: No conversation found with session ID: 6f1";
-    const CODEX_REFUSAL: &str =
-        "Stream error: codex: Error: thread/resume failed: thread not found";
+    const CODEX_REFUSAL: &str = "Stream error: codex: Error: thread/resume: thread/resume failed: \
+         no rollout found for thread id 019a0000-0000-7000-8000-000000000000 (code -32600)";
 
     fn login(agent: AgentKind) -> LoginIdentity {
         LoginIdentity {
@@ -306,6 +311,20 @@ mod tests {
             assert_eq!(pinned.resumed(), None);
             assert!(!pinned.refused(refusal), "{agent} restarted a second time");
             assert!(pinned.restart(LlmBackend::Http).is_none());
+        }
+    }
+
+    #[test]
+    fn a_missing_model_command_or_page_is_no_refused_resume() {
+        for agent in [AgentKind::Claude, AgentKind::Codex] {
+            let pinned = resuming(&login(agent));
+            for failure in [
+                "Stream error: claude: model not found: claude-opus-9",
+                "Stream error: codex: sh: codex: command not found",
+                "Stream error: codex: unexpected status 404 Not Found: {\"detail\":\"Not Found\"}",
+            ] {
+                assert!(!pinned.refused(failure), "{agent}: {failure}");
+            }
         }
     }
 

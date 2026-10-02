@@ -261,7 +261,8 @@ impl Store {
     }
 
     /// Explicit deletion removes private evidence with its visible owner and invalidates
-    /// checkpoints. The remaining visible companion is retained at its original position.
+    /// checkpoints and the agent session that saw it. The remaining visible companion is
+    /// retained at its original position.
     pub async fn delete_message(&self, lease: &Lease, id: Uuid) -> Result<bool, Error> {
         let mut transaction = self.pool.begin().await?;
         self.lock(&mut transaction, lease).await?;
@@ -312,6 +313,7 @@ impl Store {
             .bind(self.chat_id)
             .execute(&mut *transaction)
             .await?;
+        crate::db::chats::set_session(&mut *transaction, self.chat_id, None).await?;
         sqlx::query("DELETE FROM chat_entries WHERE chat_id=$1 AND id=$2")
             .bind(self.chat_id)
             .bind(id.to_string())

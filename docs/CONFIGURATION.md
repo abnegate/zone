@@ -924,10 +924,13 @@ clock line alone. Either way it then carries this turn's workspace retrieval
 and, when a web lookup ran, its outcome. On a resumed session the CLI's own
 compaction decides how much of the earlier conversation the model still sees.
 
-A resume the CLI refuses before it announces a session, such as claude's "No
-conversation found", replays the turn once, whole, under a fresh session. A
-turn that lands on another account starts a fresh session there with the
-whole transcript, unless a handover carried the session file across (below).
+A resume the CLI refuses before it announces a session, with claude's "No
+conversation found with session ID" or codex's "no rollout found for thread
+id", replays the turn once, whole, under a fresh session. A turn that lands on
+another account starts a fresh session there with the whole transcript, unless
+a handover carried the session file across (below). Deleting a message forgets
+the chat's session and account, since the session's file still holds what was
+deleted, so the next turn starts a fresh session with the whole transcript.
 Turns over HTTP, under the host's sign-in, or on the instance's own CLI keep
 no session and send the whole transcript every time. Task attempts keep no
 session either: each sends the whole transcript.

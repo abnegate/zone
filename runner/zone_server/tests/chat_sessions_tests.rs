@@ -38,6 +38,7 @@ use zone_server::state::AppState;
 
 const FIRST: &str = "Remember the word heliotrope.";
 const SECOND: &str = "Which word did I ask you to remember?";
+const THIRD: &str = "Say it once more.";
 
 const CLAUDE_REPLY: &str = "Claude reply";
 const CODEX_REPLY: &str = "Codex reply";
@@ -429,6 +430,30 @@ impl Harness {
         frames
     }
 
+    /// Deletes the user's message `content` from the chat, as the console does.
+    async fn delete(&self, content: &str) {
+        let message: Uuid = sqlx::query_scalar(
+            "SELECT id FROM messages WHERE chat_id = $1 AND role = 'user' AND content = $2",
+        )
+        .bind(self.chat)
+        .bind(content)
+        .fetch_one(&self.pool)
+        .await
+        .expect("the user's message");
+        let response = TestClient::new(create_test_router(self.state.clone()))
+            .delete_auth(
+                &format!("/api/chats/{}/messages/{message}", self.chat),
+                &self.token,
+            )
+            .await;
+        assert!(
+            response.status.is_success(),
+            "the message was not deleted: {} {}",
+            response.status,
+            response.text()
+        );
+    }
+
     async fn session(&self) -> Option<ChatSession> {
         chats::session(&self.pool, self.chat)
             .await
@@ -529,6 +554,66 @@ async fn a_first_turn_pins_a_session_and_a_later_turn_resumes_it_with_only_the_n
         resumed.prompt, pinned.prompt,
         "a prompt that was not sent again keeps the hash the session saw"
     );
+}
+
+#[tokio::test]
+async fn a_deleted_message_drops_the_session_so_the_next_turn_replays_without_it() {
+    let harness = Harness::start(AgentKind::Claude, Resumption::Accepted).await;
+
+    successful(&harness.turn(FIRST).await);
+    successful(&harness.turn(SECOND).await);
+    let runs = harness.claude.invocations();
+    let [first, resumed] = runs.as_slice() else {
+        panic!("each turn runs the agent once: {runs:?}");
+    };
+    let id = first
+        .after(SESSION_ID)
+        .unwrap_or_else(|| panic!("a first turn pins its session: {:?}", first.arguments))
+        .to_string();
+    assert_eq!(
+        resumed.after(RESUME),
+        Some(id.as_str()),
+        "{:?}",
+        resumed.arguments
+    );
+
+    harness.delete(FIRST).await;
+    assert_eq!(
+        harness.session().await,
+        None,
+        "a session whose file still holds the deleted message is not resumed"
+    );
+
+    successful(&harness.turn(THIRD).await);
+    let runs = harness.claude.invocations();
+    let [_, _, third] = runs.as_slice() else {
+        panic!("each turn runs the agent once: {runs:?}");
+    };
+    assert!(
+        !third.has(RESUME),
+        "the turn after a deletion starts over: {:?}",
+        third.arguments
+    );
+    let fresh = third
+        .after(SESSION_ID)
+        .unwrap_or_else(|| panic!("the turn pins a fresh session: {:?}", third.arguments))
+        .to_string();
+    assert_ne!(
+        fresh, id,
+        "the session that saw the deleted message is left"
+    );
+    assert!(
+        !third.prompt.contains(FIRST),
+        "the deleted message is not sent again: {}",
+        third.prompt
+    );
+    third.assert_replays(&[
+        (Speaker::Assistant, &reply(AgentKind::Claude, 0)),
+        (Speaker::User, SECOND),
+        (Speaker::Assistant, &reply(AgentKind::Claude, 1)),
+        (Speaker::User, THIRD),
+    ]);
+    harness.assert_session(AgentKind::Claude, &fresh).await;
 }
 
 #[tokio::test]
