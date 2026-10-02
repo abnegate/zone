@@ -42,11 +42,13 @@ use zone_context::context::SearchResultWithAnalysis;
 
 mod halt;
 mod handover;
+mod meter;
 mod seat;
 mod unprepared;
 
 use halt::Halt;
 use handover::Handover;
+use meter::Meter;
 use seat::{Seat, Seated};
 use unprepared::Unprepared;
 
@@ -1277,6 +1279,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 workspace_id,
                 actor,
                 &backend,
+                login.as_ref().map(|login| login.id),
                 endpoint,
                 &model,
                 task_prompt,
@@ -2232,6 +2235,7 @@ async fn attempt_run(
     workspace_id: Uuid,
     actor: Option<Uuid>,
     backend: &LlmBackend,
+    login: Option<Uuid>,
     endpoint: &Endpoint,
     model: &str,
     task_prompt: &str,
@@ -2348,6 +2352,7 @@ async fn attempt_run(
                 budget,
                 &callback,
                 agent_tools.as_mut().map(|served| &mut served.calls),
+                login.map(|login| Meter { state, login }),
             )
             .await
             {
@@ -2964,6 +2969,7 @@ fn accumulate(replay: &mut RunContext, event: &AgentEvent) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_task_loop(
     llm: LlmClient,
     model: String,
@@ -2972,6 +2978,7 @@ async fn run_task_loop(
     budget: LoopBudget,
     callback: &DatabaseTaskCallback,
     calls: Option<&mut mpsc::UnboundedReceiver<AgentEvent>>,
+    meter: Option<Meter<'_>>,
 ) -> Result<TurnOutcome, Halt> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
@@ -3092,11 +3099,15 @@ async fn run_task_loop(
             AgentEvent::Consumed(_)
             | AgentEvent::Context(_)
             | AgentEvent::Usage(_)
-            | AgentEvent::Window(_)
             | AgentEvent::Session(_)
             | AgentEvent::Image(_)
             | AgentEvent::Reasoning(_)
             | AgentEvent::ToolApprovalRequired { .. } => {}
+            AgentEvent::Window(window) => {
+                if let Some(meter) = meter {
+                    meter.observe(&window).await;
+                }
+            }
             AgentEvent::Limited(limit) => return Err(Halt::Limited(Box::new(limit))),
             AgentEvent::Failed(error) => return Err(Halt::Failed(error)),
         }
@@ -3619,6 +3630,7 @@ mod tests {
                 )]),
                 LoopBudget::task(),
                 &callback,
+                None,
                 None,
             ),
         )
@@ -4265,6 +4277,7 @@ mod retry_tests {
                 RunContext::from_messages(vec![LlmMessage::user("Write the file.")]),
                 LoopBudget::task(),
                 &callback,
+                None,
                 None,
             ),
         )
@@ -5762,6 +5775,7 @@ mod watchdog_tests {
                 workspace_id,
                 None,
                 &LlmBackend::Http,
+                None,
                 &Endpoint::instance(state.config()),
                 "gpt-4",
                 "# Task: Budget\n\nKeep asking until something stops you",
@@ -6743,6 +6757,7 @@ mod watchdog_tests {
             workspace_id,
             None,
             &LlmBackend::Http,
+            None,
             &Endpoint::instance(state.config()),
             "gpt-4",
             "# Task: Retry\n\nFinish without waiting",
@@ -7051,7 +7066,7 @@ mod cli_tests {
         Config {
             agents: AgentConfig {
                 state: agents.path().to_path_buf(),
-                ..AgentConfig::default()
+                ..config.agents
             },
             ..config
         }
@@ -7902,6 +7917,7 @@ mod cli_tests {
             fixture.workspace,
             None,
             backend,
+            None,
             &Endpoint::instance(state.config()),
             "sonnet",
             "# Task: Agent run\n\nWrite the file",
@@ -8140,6 +8156,7 @@ mod cli_tests {
             LoopBudget::task(),
             &callback,
             Some(&mut calls),
+            None,
         )
         .await
         .expect("the turn finishes");
@@ -8247,6 +8264,49 @@ mod cli_tests {
         )
         .await
         .expect("the run ends");
+    }
+
+    /// The usage claude reports as a turn runs is recorded over the run's
+    /// login's snapshot, so the next turn is routed on what this one spent.
+    #[tokio::test]
+    async fn a_run_records_the_usage_its_agent_reports_on_its_login() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::limited();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(routing(&agent, &provider, &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        let login = fixture.add(&state, "first-access", "a@example.com").await;
+        agent.refuse(
+            "first-access",
+            &[
+                json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.5, "isUsingOverage": false}}),
+                json!({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}}),
+                json!({"type": "result", "subtype": "success", "is_error": false}),
+            ],
+        );
+
+        execute(&state, &fixture).await;
+
+        let finished = fixture.finished().await;
+        let snapshot = agent_logins::get(&fixture.pool, login.id)
+            .await
+            .unwrap()
+            .expect("the run's login")
+            .snapshot();
+        fixture.remove().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        let windows = snapshot.expect("a snapshot of the login's usage").windows;
+        let window = windows
+            .iter()
+            .find(|window| window.name == "five_hour")
+            .unwrap_or_else(|| panic!("no five_hour window in {windows:?}"));
+        assert_eq!(window.used_percent, Some(50.0));
     }
 
     /// A login past its limit hands the run over to another of the
