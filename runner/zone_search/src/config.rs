@@ -39,9 +39,10 @@ impl Default for WebSearchConfig {
 }
 
 impl WebSearchConfig {
-    /// Load from `SEARCH_*` and `ZONE_VPN`. Missing values use the Compose
-    /// defaults (`SEARCH_ENABLE_WEB_SEARCH=true`, the Gluetun SearXNG URL).
-    /// Lookups stay off unless the VPN tunnel is on.
+    /// Load from `SEARCH_*`, `ZONE_VPN`, and `ZONE_VPN_REQUIRED`. Missing
+    /// values use the Compose defaults (`SEARCH_ENABLE_WEB_SEARCH=true`, the
+    /// Gluetun SearXNG URL). Lookups stay off when the VPN is required and
+    /// the tunnel is down.
     pub fn from_env() -> Self {
         let result_count = env::var("SEARCH_RESULT_COUNT")
             .ok()
@@ -53,8 +54,10 @@ impl WebSearchConfig {
             .and_then(|s| s.parse().ok())
             .unwrap_or(15)
             .clamp(1, 60);
+        let vpn_on = env_truthy("ZONE_VPN", false);
+        let vpn_required = env_truthy("ZONE_VPN_REQUIRED", false);
         Self {
-            enabled: env_truthy("SEARCH_ENABLE_WEB_SEARCH", true) && env_truthy("ZONE_VPN", false),
+            enabled: env_truthy("SEARCH_ENABLE_WEB_SEARCH", true) && (vpn_on || !vpn_required),
             query_url: env::var("SEARCH_SEARXNG_QUERY_URL")
                 .unwrap_or_else(|_| DEFAULT_SEARXNG_QUERY_URL.to_string()),
             result_count,
@@ -134,6 +137,7 @@ mod tests {
         "SEARCH_RESULT_COUNT",
         "SEARCH_TIMEOUT_SECS",
         "ZONE_VPN",
+        "ZONE_VPN_REQUIRED",
     ];
 
     fn recency() -> &'static str {
@@ -145,9 +149,10 @@ mod tests {
     }
 
     #[test]
-    fn from_env_stays_off_when_the_vpn_is_not_on() {
+    fn from_env_stays_off_when_the_vpn_is_required_and_not_on() {
         let _lock = lock();
         let _environment = Isolated::new(NAMES);
+        Isolated::set("ZONE_VPN_REQUIRED", "1");
         let config = WebSearchConfig::from_env();
         assert!(!config.enabled);
         assert!(!config.requested_for(recency(), None));
@@ -156,9 +161,20 @@ mod tests {
     }
 
     #[test]
+    fn from_env_allows_search_when_the_vpn_is_not_required() {
+        let _lock = lock();
+        let _environment = Isolated::new(NAMES);
+        let config = WebSearchConfig::from_env();
+        assert!(config.enabled);
+        assert!(config.requested_for(recency(), None));
+        assert_eq!(SearchContext::new(&config), SearchContext::NotRequested);
+    }
+
+    #[test]
     fn from_env_turns_on_when_the_vpn_is_on() {
         let _lock = lock();
         let _environment = Isolated::new(NAMES);
+        Isolated::set("ZONE_VPN_REQUIRED", "1");
         Isolated::set("ZONE_VPN", "1");
         let config = WebSearchConfig::from_env();
         assert!(config.enabled);
@@ -179,10 +195,11 @@ mod tests {
     }
 
     #[test]
-    fn from_env_treats_empty_and_zero_vpn_as_off() {
+    fn from_env_treats_empty_and_zero_vpn_as_off_when_required() {
         let _lock = lock();
         let _environment = Isolated::new(NAMES);
         Isolated::set("SEARCH_ENABLE_WEB_SEARCH", "true");
+        Isolated::set("ZONE_VPN_REQUIRED", "1");
         Isolated::set("ZONE_VPN", "");
         assert!(!WebSearchConfig::from_env().enabled);
         Isolated::set("ZONE_VPN", "0");

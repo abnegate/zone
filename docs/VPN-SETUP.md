@@ -15,13 +15,16 @@ make up
 ./scripts/compose.sh --replace-profiles= up -d
 ```
 
-**What works**: Everything except public web fetch and search
+**What works**: Everything, including public web, unless `ZONE_VPN_REQUIRED=1`
 - ✅ Chat with local models
 - ✅ Semantic routing (auto/fast/reason)
 - ✅ All core functionality
-- ❌ Web search (SearXNG not available — Zone chat)
-- ❌ Page fetch (`fetch_url`, knowledge URLs, web sources)
-- ❌ `curl` / `wget` from `run_command`
+- ✅ Page fetch (`fetch_url`, knowledge URLs, web sources) and `curl` / `wget`
+- ✅ Chat web search when `SEARCH_SEARXNG_QUERY_URL` reaches a SearXNG
+- Bundled SearXNG starts only with the `vpn` profile
+
+Set `ZONE_VPN_REQUIRED=1` to keep public web offline while the tunnel is down.
+`make up-vpn` writes that the first time the value is empty.
 
 ## Running With VPN
 
@@ -42,8 +45,9 @@ make up-vpn
 make up PROFILES=dev,vpn,monitoring
 ```
 
-The VPN launch writes `ZONE_VPN=1`, `MODEL_SEARCH_PROXY_URL=http://gluetun:8888`,
-and `TOOL_RUNNER_PROXY_URL=http://gluetun:8888` to `.env`, then starts Compose
+The VPN launch writes `ZONE_VPN=1`, `ZONE_VPN_REQUIRED=1` (when that value was
+empty), `MODEL_SEARCH_PROXY_URL=http://gluetun:8888`, and
+`TOOL_RUNNER_PROXY_URL=http://gluetun:8888` to `.env`, then starts Compose
 with `docker-compose.vpn.yml`. Internet-facing services share Gluetun's network
 namespace, so all of their IP traffic uses the tunnel and Gluetun's kill switch:
 
@@ -70,7 +74,9 @@ For direct Compose usage:
 The overlay requires Docker Compose v2.24+ (`!reset` / `!override`).
 
 When disabling the VPN, run `make down && make up`. The direct launch clears
-`ZONE_VPN` and both proxy URLs. When a proxy URL is configured, an unavailable
+`ZONE_VPN` and both proxy URLs and keeps `ZONE_VPN_REQUIRED`. Public web then
+stays offline until the tunnel is up again, unless you set
+`ZONE_VPN_REQUIRED=0`. When a proxy URL is configured, an unavailable
 proxy causes proxy-aware HTTP requests to fail; they do not retry directly.
 Internal service and loopback destinations bypass the proxy.
 

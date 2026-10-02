@@ -168,7 +168,7 @@ async fn test_create_knowledge_url_validation() {
 
 #[tokio::test]
 async fn creating_a_url_entry_stays_offline_when_the_vpn_is_off() {
-    let _vpn = zone_core::vpn::Hold::off();
+    let _vpn = zone_core::vpn::Hold::required_off();
     let client = TestClient::with_db().await;
     let (token, workspace_id) = setup_user_and_workspace(&client).await;
 
@@ -570,7 +570,7 @@ async fn refreshing_a_text_entry_is_refused_by_name() {
 /// it on the row, where the card's error state reads it.
 #[tokio::test]
 async fn refreshing_a_url_entry_refetches_and_records_the_outcome() {
-    let _vpn = zone_core::vpn::Hold::off();
+    let _vpn = zone_core::vpn::Hold::required_off();
     let client = TestClient::with_db().await;
     let (token, workspace_id) = setup_user_and_workspace(&client).await;
     let pool = client.state().db().clone();

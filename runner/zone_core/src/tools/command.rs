@@ -291,7 +291,7 @@ impl Waiting for RunCommandTool {
                 params.command
             )));
         }
-        if PUBLIC_WEB_COMMANDS.contains(&params.command.as_str()) && !crate::vpn::enabled() {
+        if PUBLIC_WEB_COMMANDS.contains(&params.command.as_str()) && !crate::vpn::allows_public() {
             return Err(ToolError::Execution(crate::vpn::OFFLINE.to_string()));
         }
 
@@ -943,8 +943,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn curl_and_wget_stay_offline_when_the_vpn_is_off() {
-        let _vpn = crate::vpn::Hold::off();
+    async fn curl_and_wget_stay_offline_when_the_vpn_is_required_and_off() {
+        let _vpn = crate::vpn::Hold::required_off();
         let tool = RunCommandTool;
         let context = create_test_context();
         for command in ["curl", "wget"] {

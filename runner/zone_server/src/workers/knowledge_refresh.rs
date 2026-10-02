@@ -420,7 +420,7 @@ pub async fn refresh_entry(
 /// Returns the extracted text content and its SHA-256 hash.
 pub(crate) async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
     let url = validate_public_url(url).map_err(|error| error.to_string())?;
-    if !zone_core::vpn::enabled() {
+    if !zone_core::vpn::allows_public() {
         return Err(zone_core::vpn::OFFLINE.to_string());
     }
     let client =
@@ -582,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_public_url_stays_offline_until_the_vpn_is_on() {
-        let _vpn = zone_core::vpn::Hold::off();
+        let _vpn = zone_core::vpn::Hold::required_off();
         let error = fetch_web_content("https://example.com")
             .await
             .expect_err("must refuse");
@@ -591,7 +591,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_private_url_is_refused_before_the_vpn_gate() {
-        let _vpn = zone_core::vpn::Hold::off();
+        let _vpn = zone_core::vpn::Hold::required_off();
         let error = fetch_web_content("http://127.0.0.1/secret")
             .await
             .expect_err("must refuse");

@@ -373,9 +373,10 @@ services:
       - VALKEY_HOST=valkey
       - VALKEY_PORT=6379
       # Chat web search through SearXNG on the Gluetun network namespace.
-      # Lookups stay off unless ZONE_VPN is on; SEARCH_ENABLE is the extra switch.
+      # Public web stays offline only when ZONE_VPN_REQUIRED is on and ZONE_VPN is off.
       - SEARCH_ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
       - ZONE_VPN=${ZONE_VPN:-}
+      - ZONE_VPN_REQUIRED=${ZONE_VPN_REQUIRED:-}
       - "SEARCH_SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL:-http://gluetun:8080/search?q=<query>&format=json}"
       - SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT:-5}
       # Belt-and-suspenders HTTP proxy. `make up-vpn` also attaches this

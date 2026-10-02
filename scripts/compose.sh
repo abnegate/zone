@@ -198,6 +198,9 @@ persist_profiles() {
     profiles=$(normalize_profiles "$list")
     if has_profile vpn "$profiles"; then
         sh "$root/scripts/configure-model-proxy.sh" "$ZONE_ENV_FILE" vpn
+        if [ -z "$(read_env_value ZONE_VPN_REQUIRED "$ZONE_ENV_FILE")" ]; then
+            upsert_env "$ZONE_ENV_FILE" ZONE_VPN_REQUIRED 1
+        fi
     else
         sh "$root/scripts/configure-model-proxy.sh" "$ZONE_ENV_FILE" direct
     fi

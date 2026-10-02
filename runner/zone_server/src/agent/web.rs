@@ -116,7 +116,7 @@ impl Tool for WebSearchTool {
     }
 
     async fn execute(&self, params: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
-        if !zone_core::vpn::enabled() {
+        if !zone_core::vpn::allows_public() {
             return Ok(ToolResult::error(zone_core::vpn::OFFLINE.to_string()));
         }
         let query = match params.get("query").and_then(Value::as_str) {
@@ -208,7 +208,7 @@ impl Tool for FetchUrlTool {
 }
 
 async fn fetch_public_url(raw: &str) -> ToolResult {
-    if !zone_core::vpn::enabled() {
+    if !zone_core::vpn::allows_public() {
         return ToolResult::error(zone_core::vpn::OFFLINE.to_string());
     }
     let url = match validate_public_url(raw) {
@@ -412,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_stays_offline_until_the_vpn_is_on() {
-        let _vpn = zone_core::vpn::Hold::off();
+        let _vpn = zone_core::vpn::Hold::required_off();
         let searxng = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
@@ -430,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_url_stays_offline_until_the_vpn_is_on() {
-        let _vpn = zone_core::vpn::Hold::off();
+        let _vpn = zone_core::vpn::Hold::required_off();
         let result = FetchUrlTool
             .execute(
                 json!({"url": "https://example.com"}),
@@ -440,6 +440,25 @@ mod tests {
             .expect("the tool answers");
         assert!(!result.success, "{result:?}");
         assert_eq!(result.error.as_deref(), Some(zone_core::vpn::OFFLINE));
+    }
+
+    #[tokio::test]
+    async fn fetch_url_uses_the_public_internet_when_the_vpn_is_not_required() {
+        let _vpn = zone_core::vpn::Hold::off();
+        let result = FetchUrlTool
+            .execute(
+                json!({"url": "http://127.0.0.1/secret"}),
+                &ToolContext::default(),
+            )
+            .await
+            .expect("the tool answers");
+        assert!(!result.success, "{result:?}");
+        let error = result.error.as_deref().unwrap_or_default();
+        assert_ne!(error, zone_core::vpn::OFFLINE, "{error}");
+        assert!(
+            error.contains("Private") || error.contains("allowed"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

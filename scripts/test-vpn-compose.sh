@@ -12,7 +12,7 @@ compose() {
     docker compose --env-file "$envfile" "$@"
 }
 
-unset ZONE_CONSOLE_ORIGINS ZONE_VPN
+unset ZONE_CONSOLE_ORIGINS ZONE_VPN ZONE_VPN_REQUIRED
 direct=$(mktemp)
 vpn=$(mktemp)
 trap 'rm -f "$direct" "$vpn"' EXIT HUP INT TERM

@@ -197,7 +197,7 @@ impl WebAdapter {
         const MAX_REDIRECTS: u32 = 5;
         const MAX_RESPONSE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
-        if !self.allow_private_ips && !zone_core::vpn::enabled() {
+        if !self.allow_private_ips && !zone_core::vpn::allows_public() {
             return Err(ContextError::adapter(
                 "web",
                 zone_core::vpn::OFFLINE.to_string(),
@@ -669,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_production_fetch_stays_offline_until_the_vpn_is_on() {
-        let _vpn = zone_core::vpn::Hold::off();
+        let _vpn = zone_core::vpn::Hold::required_off();
         let adapter = WebAdapter::new();
         let source = create_test_source(json!({
             "url": "https://example.com"
