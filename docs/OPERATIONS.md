@@ -251,6 +251,8 @@ account recorded:
   sign-in, and then moves into that sign-in's home,
   `<state>/<org>/codex/logins/<login id>/auth.json`, while the organization
   holds that one codex sign-in. Only a regular file is moved, never a link.
+  Signing in to the same ChatGPT account again then takes that sign-in over,
+  keyed by the account, rather than adding a second one beside it.
 
 The organization's existing session transcripts stay in
 `<state>/<org>/claude/projects` and `<state>/<org>/codex/sessions`, and

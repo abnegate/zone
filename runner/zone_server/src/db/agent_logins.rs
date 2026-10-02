@@ -151,6 +151,22 @@ where
     .await
 }
 
+/// Names the account of login `id`, which named none, so a sign-in to that account replaces it.
+pub async fn identify<'e, E>(executor: E, id: Uuid, account: &str) -> DbResult<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query(
+        "UPDATE agent_logins SET account = $2, updated_at = NOW() WHERE id = $1 AND account IS NULL",
+    )
+    .bind(id)
+    .bind(account)
+    .execute(executor)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn renew<'e, E>(
     executor: E,
     id: Uuid,
