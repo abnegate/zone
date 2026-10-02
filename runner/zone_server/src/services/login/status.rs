@@ -9,12 +9,14 @@ mod state;
 mod usage;
 mod viewer;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use abnegate_secret::redact;
 use chrono::{DateTime, SubsecRound, Utc};
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
@@ -28,8 +30,9 @@ pub use viewer::Viewer;
 
 use super::claude::Tokens;
 use super::probe::{self, Probe};
-use super::usage::{Availability, Snapshot};
-use super::{codex, devices, oauth};
+use super::router::Chosen;
+use super::usage::{Availability, Snapshot, refresh};
+use super::{codex, credential, devices, oauth};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::db::ai_settings;
@@ -65,7 +68,8 @@ pub struct AgentStatus {
 
 impl AgentStatus {
     /// `agent`'s status for `organization`, as `viewer` may see it, with why their Claude sign-in
-    /// `attempt` failed when it has. Each login shows the usage last read for it.
+    /// `attempt` failed when it has. Each login shows its usage, read again first when what was
+    /// last read for it is older than the TTL, as a session's router reads it.
     ///
     /// Signed in means Zone holds credentials the agent can use, not that they still work:
     /// neither CLI checks them until a turn needs them.
@@ -77,10 +81,12 @@ impl AgentStatus {
         attempt: Option<Uuid>,
     ) -> Result<Self, sqlx::Error> {
         let logins = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
+        let snapshots = refreshed(state, &logins).await;
         let now = Utc::now();
         let readings: Vec<Reading> = logins
             .iter()
-            .map(|login| read(state, login, logins.len(), now))
+            .zip(snapshots)
+            .map(|(login, snapshot)| read(state, login, snapshot, logins.len(), now))
             .collect();
         let mut status = Self::signed_out(agent);
         let pending = match agent {
@@ -143,8 +149,45 @@ impl AgentStatus {
     }
 }
 
-/// How `login`, one of `held` logins of its agent, looks at `now`, from what Zone stored for it.
-fn read(state: &AppState, login: &AgentLoginRow, held: usize, now: DateTime<Utc>) -> Reading {
+/// Each of `logins`' usage, in order: brought up to date through the router's TTL-guarded
+/// refresh, or as stored for a login that cannot be resolved to read it with.
+async fn refreshed(state: &AppState, logins: &[AgentLoginRow]) -> Vec<Option<Snapshot>> {
+    let resolutions = join_all(logins.iter().map(|login| async move {
+        let agent = AgentKind::named(&login.agent)?;
+        match credential::resolve(state, login).await {
+            Ok(resolved) => Some(Chosen {
+                login: login.clone(),
+                agent,
+                resolved,
+                snapshot: login.snapshot(),
+            }),
+            Err(error) => {
+                tracing::debug!(login = %login.id, %error, "Showing the login's stored usage");
+                None
+            }
+        }
+    }))
+    .await;
+    let mut chosen: Vec<Chosen> = resolutions.into_iter().flatten().collect();
+    refresh(state, &mut chosen).await;
+    let mut fresh: HashMap<_, _> = chosen
+        .into_iter()
+        .map(|chosen| (chosen.login.id, chosen.snapshot))
+        .collect();
+    logins
+        .iter()
+        .map(|login| fresh.remove(&login.id).unwrap_or_else(|| login.snapshot()))
+        .collect()
+}
+
+/// How `login`, one of `held` logins of its agent, looks at `now` with its usage `snapshot`.
+fn read(
+    state: &AppState,
+    login: &AgentLoginRow,
+    snapshot: Option<Snapshot>,
+    held: usize,
+    now: DateTime<Utc>,
+) -> Reading {
     let (state, expires_at, plan) = match AgentKind::named(&login.agent) {
         Some(AgentKind::Claude) => {
             let tokens = opened(state.encryption_key(), login);
@@ -157,7 +200,6 @@ fn read(state: &AppState, login: &AgentLoginRow, held: usize, now: DateTime<Utc>
         }
         None => (State::Expired, None, None),
     };
-    let snapshot = login.snapshot();
     let availability = availability(snapshot.as_ref(), login.exhausted_until);
     Reading {
         login: LoginStatus {
