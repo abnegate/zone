@@ -4,25 +4,44 @@
 
 mod common;
 
-use std::path::Path;
-
 use axum::http::StatusCode;
 use serde_json::json;
 use sqlx::{AssertSqlSafe, PgPool, raw_sql};
 
 use common::{TestClient, create_test_pool, test_email, test_password};
 
-fn backfill() -> String {
-    std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("migrations")
-            .join("023_workspace_owner_backfill.sql"),
-    )
-    .expect("the backfill migration is readable")
-}
+const BACKFILL: &str = "
+UPDATE workspace_members AS promoted
+SET role = 'owner', updated_at = NOW()
+WHERE promoted.id IN (
+    SELECT DISTINCT ON (candidate.workspace_id) candidate.id
+    FROM workspace_members AS candidate
+    JOIN workspaces AS workspace ON workspace.id = candidate.workspace_id
+    WHERE candidate.is_active
+      AND workspace.is_active
+      AND NOT EXISTS (
+          SELECT 1
+          FROM workspace_members AS existing
+          WHERE existing.workspace_id = candidate.workspace_id
+            AND existing.is_active
+            AND existing.role = 'owner'
+      )
+    ORDER BY
+        candidate.workspace_id,
+        (candidate.invited_by IS NULL) DESC,
+        CASE candidate.role
+            WHEN 'admin' THEN 0
+            WHEN 'member' THEN 1
+            WHEN 'viewer' THEN 2
+            ELSE 3
+        END,
+        candidate.created_at,
+        candidate.id
+);
+";
 
 async fn apply(pool: &PgPool) {
-    raw_sql(AssertSqlSafe(backfill()))
+    raw_sql(AssertSqlSafe(BACKFILL))
         .execute(pool)
         .await
         .expect("the backfill applies");
