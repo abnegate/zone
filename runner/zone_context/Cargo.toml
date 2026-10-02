@@ -79,6 +79,7 @@ fastembed = { version = "=6.0.2", optional = true }
 dirs = { workspace = true, optional = true }
 
 # Internal
+abnegate-index = { workspace = true }
 zone_core = { path = "../zone_core" }
 
 [dev-dependencies]
