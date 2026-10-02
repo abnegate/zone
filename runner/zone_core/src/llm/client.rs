@@ -131,7 +131,6 @@ pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamChunk, LlmError
 
 /// Where completions come from.
 #[derive(Debug, Clone, Default)]
-#[allow(clippy::large_enum_variant)]
 pub enum LlmBackend {
     /// The OpenAI-compatible endpoint at [`LlmConfig::base_url`].
     #[default]
@@ -141,13 +140,16 @@ pub enum LlmBackend {
     /// signed in and spend that subscription instead of a metered API key.
     Cli {
         agent: AgentKind,
-        settings: CliSettings,
+        settings: Box<CliSettings>,
     },
 }
 
 impl LlmBackend {
     pub fn cli(agent: AgentKind, settings: CliSettings) -> Self {
-        Self::Cli { agent, settings }
+        Self::Cli {
+            agent,
+            settings: Box::new(settings),
+        }
     }
 }
 
@@ -451,7 +453,8 @@ impl LlmClient {
     /// still carries whatever definitions it was given.
     pub fn with_toolset(mut self, toolset: Toolset, builtin_tools: BuiltinTools) -> Self {
         if let LlmBackend::Cli { settings, .. } = &mut self.config.backend {
-            *settings = std::mem::take(settings)
+            let current = std::mem::take(settings.as_mut());
+            **settings = current
                 .with_toolset(toolset)
                 .with_builtin_tools(builtin_tools);
         }
@@ -624,7 +627,7 @@ impl LlmClient {
     ) -> Result<ChatResponse, LlmError> {
         if let LlmBackend::Cli { agent, settings } = &self.config.backend {
             refuse_tools(tools, *agent)?;
-            let completion = CliProvider::agent(*agent, settings.clone())
+            let completion = CliProvider::agent(*agent, settings.as_ref().clone())
                 .complete(CompletionRequest {
                     model,
                     messages,
@@ -685,13 +688,14 @@ impl LlmClient {
     ) -> Result<ChatStream, LlmError> {
         if let LlmBackend::Cli { agent, settings } = &self.config.backend {
             refuse_tools(tools, *agent)?;
-            let events =
-                CliProvider::agent(*agent, settings.clone()).stream(CompletionRequest {
+            let events = CliProvider::agent(*agent, settings.as_ref().clone()).stream(
+                CompletionRequest {
                     model,
                     messages,
                     tools: None,
                     options,
-                })?;
+                },
+            )?;
             return Ok(Box::pin(chunks(events, agent.to_string())));
         }
 

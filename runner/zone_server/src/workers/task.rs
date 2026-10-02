@@ -2974,7 +2974,7 @@ async fn run_task_loop(
     llm: LlmClient,
     model: String,
     tools: ChatTools,
-    context: RunContext,
+    mut context: RunContext,
     budget: LoopBudget,
     callback: &DatabaseTaskCallback,
     calls: Option<&mut mpsc::UnboundedReceiver<AgentEvent>>,
@@ -2994,7 +2994,7 @@ async fn run_task_loop(
             budget,
             approval: ApprovalPolicy::auto(),
         },
-        context,
+        &mut context,
         true,
     );
     let mut events = std::pin::pin!(match calls {

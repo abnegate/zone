@@ -192,8 +192,14 @@ pub struct AgentRun {
 
 /// Run one agent turn, yielding events until the model produces a final answer.
 pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
-    let context = RunContext::from_messages(run.messages.clone());
-    run_with_context(run, context, true)
+    async_stream::stream! {
+        let mut context = RunContext::from_messages(run.messages.clone());
+        let events = run_with_context(run, &mut context, true);
+        futures::pin_mut!(events);
+        while let Some(event) = events.next().await {
+            yield event;
+        }
+    }
 }
 
 /// The system entry that ends a turn once tool work has stopped. The closing
@@ -212,7 +218,7 @@ fn finalizing_instruction(reason: &str) -> String {
 /// suspension point: the consumer must commit before resuming model or tool work.
 pub fn run_with_context(
     run: AgentRun,
-    mut context: RunContext,
+    context: &mut RunContext,
     agentic: bool,
 ) -> impl Stream<Item = AgentEvent> {
     async_stream::stream! {
@@ -260,7 +266,7 @@ pub fn run_with_context(
                     .take()
                     .unwrap_or_else(|| "Tool execution has ended for this turn.".into());
                 yield AgentEvent::Finalizing(reason.clone());
-                nudge(&mut context, finalizing_instruction(&reason));
+                nudge(context, finalizing_instruction(&reason));
             }
             // Recomputed each round, and owned: `load_tools` can have widened
             // the set since the last one, and the schemas it took have to be
@@ -418,7 +424,7 @@ pub fn run_with_context(
                 }
                 TextToolCalls::Malformed if !requested.is_empty() => None,
                 TextToolCalls::Malformed if !finalizing => {
-                    nudge(&mut context, MALFORMED_CALL.to_string());
+                    nudge(context, MALFORMED_CALL.to_string());
                     continue;
                 }
                 TextToolCalls::Malformed => {
@@ -2064,8 +2070,8 @@ mod tests {
                 budget: LoopBudget::chat(),
                 approval: ApprovalPolicy::auto(),
             };
-            let context = RunContext::from_messages(run.messages.clone());
-            let events = run_with_context(run, context, true);
+            let mut context = RunContext::from_messages(run.messages.clone());
+            let events = run_with_context(run, &mut context, true);
             futures::pin_mut!(events);
             let mut collected = Vec::new();
             while let Some(event) = events.next().await {

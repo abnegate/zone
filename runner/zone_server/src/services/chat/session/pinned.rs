@@ -151,7 +151,7 @@ impl Pinned {
                 mut settings,
             } => {
                 settings.session.clone_from(&self.session);
-                LlmBackend::cli(agent, settings)
+                LlmBackend::Cli { agent, settings }
             }
             LlmBackend::Http => LlmBackend::Http,
         }

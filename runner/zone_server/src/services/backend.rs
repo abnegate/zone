@@ -123,7 +123,7 @@ fn resetting(resets_at: Option<DateTime<Utc>>) -> String {
 pub fn instance(config: &Config) -> LlmBackend {
     match crate::state::llm_backend(config) {
         LlmBackend::Cli { agent, settings } => {
-            LlmBackend::cli(agent, prepared(config, agent, settings))
+            LlmBackend::cli(agent, prepared(config, agent, *settings))
         }
         LlmBackend::Http => LlmBackend::Http,
     }
@@ -579,7 +579,7 @@ mod tests {
 
     fn cli(resolved: Result<LlmBackend, Error>) -> (AgentKind, CliSettings) {
         match resolved {
-            Ok(LlmBackend::Cli { agent, settings }) => (agent, settings),
+            Ok(LlmBackend::Cli { agent, settings }) => (agent, *settings),
             other => panic!("expected a coding agent CLI, got {other:?}"),
         }
     }

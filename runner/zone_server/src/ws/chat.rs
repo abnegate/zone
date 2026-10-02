@@ -3163,7 +3163,6 @@ async fn handle_chat_generation(
     loop {
         wait::set_ceiling(ToolSession::Chat(chat_id), stream_deadline);
         let written = (full_content.len(), tool_calls.len());
-        let rerun = handover.is_some().then(|| context.clone());
         let round = agent::run_with_context(
             AgentRun {
                 llm: llm_client.clone(),
@@ -3176,7 +3175,7 @@ async fn handle_chat_generation(
                     generation.approvals.clone()
                 },
             },
-            context,
+            &mut context,
             agentic,
         );
         let mut events: Pin<Box<dyn Stream<Item = AgentEvent> + Send + '_>> =
@@ -3634,7 +3633,7 @@ async fn handle_chat_generation(
             context = match (wrote, switch.carried) {
                 (true, true) => handover::carried(&whole),
                 (true, false) => handover::replayed(&whole),
-                (false, true) => rerun.unwrap_or(whole),
+                (false, true) => context,
                 (false, false) => whole,
             };
             if let Err(error) = publish_live_assistant(
