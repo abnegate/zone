@@ -41,6 +41,7 @@ use zone_server::db::chats::{self, ChatSession};
 use zone_server::services::agent::sessions;
 use zone_server::services::backend;
 use zone_server::services::login::claude::Tokens;
+use zone_server::services::login::router::unfunded;
 use zone_server::state::AppState;
 
 const QUESTION: &str = "Why are there two tides a day?";
@@ -86,6 +87,7 @@ const ERROR: &str = "error";
 const LIMIT: &str = "limit";
 const CREDITS: &str = "credits";
 const SIGNED_OUT: &str = "signed_out";
+const CONFIGURED: &str = "configured";
 
 const RESETS_AT: &str = "resets_at";
 
@@ -1436,4 +1438,97 @@ async fn a_signed_out_login_hands_over_and_says_so() {
     carried.assert_continues();
     let session = harness.session().await;
     assert_eq!(session.login, Some(bob), "{session:?}");
+}
+
+/// Alice refused the chat's model for want of usage credits, so its turns run
+/// on Carol until that refusal cools down. Then the chat goes back to Alice,
+/// and a limit she hits partway through hands the turn back to Carol.
+#[tokio::test]
+async fn a_chat_stays_off_a_login_out_of_credits_for_its_model_until_the_cool_down_passes() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    let alice = harness.sign_in(ALICE).await;
+    let carol = harness.sign_in_codex(CAROL).await;
+    harness.claude.plan(
+        ALICE,
+        0,
+        Run::Unfunded {
+            partial: Some(PARTIAL),
+        },
+    );
+    let frames = harness.turn(QUESTION).await;
+    let handovers = handed(&frames, 1);
+    assert_eq!(handovers[0]["reason"], CREDITS, "{}", handovers[0]);
+    answered(&frames);
+    assert_eq!(harness.session().await.login, Some(carol));
+
+    let frames = harness.turn(FOLLOW_UP).await;
+
+    handed(&frames, 0);
+    let end = answered(&frames);
+    assert_eq!(end["content"], CODEX_ANSWER, "{end}");
+    let runs = harness.claude.invocations();
+    let [refused] = runs.as_slice() else {
+        panic!("Alice is not run again while her refusal cools down: {runs:#?}");
+    };
+    assert_eq!(harness.codex.invocations().len(), 2);
+    assert_eq!(harness.session().await.login, Some(carol));
+    assert_eq!(harness.login(alice).await.exhausted_until, None);
+
+    let model = refused
+        .after(MODEL)
+        .unwrap_or_else(|| panic!("Alice ran a model: {:?}", refused.arguments));
+    unfunded::record(
+        alice,
+        model,
+        Utc::now() - unfunded::COOL_DOWN - TimeDelta::seconds(1),
+    );
+    let resets_at = reset_in(TimeDelta::hours(2));
+    harness.claude.plan(
+        ALICE,
+        1,
+        Run::Limited {
+            partial: Some(PARTIAL),
+            resets_at,
+        },
+    );
+
+    let frames = harness.turn("And neap tides?").await;
+
+    let start = started(&frames);
+    let handovers = handed(&frames, 2);
+    assert_handover(
+        handovers[0],
+        start,
+        &Expected {
+            from: CAROL,
+            to: ALICE.label,
+            from_agent: AgentKind::Codex,
+            agent: AgentKind::Claude,
+            reason: CONFIGURED,
+            carried: false,
+            at: 0,
+            resets: Reset::Unreported,
+        },
+    );
+    assert_handover(
+        handovers[1],
+        start,
+        &Expected {
+            from: ALICE.label,
+            to: CAROL,
+            from_agent: AgentKind::Claude,
+            agent: AgentKind::Codex,
+            reason: LIMIT,
+            carried: false,
+            at: PARTIAL.chars().count(),
+            resets: Reset::At(resets_at),
+        },
+    );
+    let end = answered(&frames);
+    assert_eq!(end["content"], format!("{PARTIAL}{CODEX_ANSWER}"), "{end}");
+    let runs = harness.claude.invocations();
+    let tokens: Vec<&str> = runs.iter().map(|run| run.token.as_str()).collect();
+    assert_eq!(tokens, [ALICE.token, ALICE.token], "{runs:#?}");
+    assert_eq!(harness.codex.invocations().len(), 3);
+    assert_eq!(harness.session().await.login, Some(carol));
 }

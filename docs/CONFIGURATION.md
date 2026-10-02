@@ -899,8 +899,12 @@ else until its spent window resets by a read made there and then (a codex
 limit names no reset of its own), else for five minutes. One whose last
 reading has no headroom left is exhausted until that window resets. A turn
 refused for want of usage credits does not exhaust its account: the refusal
-says nothing about the subscription, so other chats still start there, and
-only that turn leaves it.
+says nothing about the subscription and refuses only the model the turn ran,
+so chats and task runs on other models still start there. For an hour after
+the refusal, which each new refusal starts again, chats on that model rank
+the account after every other, of either agent, and run on it only when no
+other account can. This memory lives in the server process, so a restart
+forgets it.
 
 When every account is exhausted, the chat or task gets "Every sign-in of this
 organization has reached its usage limit; the earliest resets at <time>.", and
@@ -922,7 +926,11 @@ by the time a new turn starts, or the workspace now chooses the other agent,
 or a chat that moved to the other agent finds an account of the chosen one
 usable again, the turn starts on the next account in the ranking and says so
 before it answers (see *Handing over in a chat*); a move to the other agent
-replays the transcript in a fresh session.
+replays the transcript in a fresh session. An account of the chosen agent that
+refused the chat's model for want of usage credits within the hour does not
+count as usable, so a chat that moved off it stays where it went until then.
+A turn that moved back to the chosen agent can still hand over to the account
+it left, which could run it all along.
 
 **Session resume.** A chat keeps a CLI session on the account and agent it
 runs on, so later turns send only what is new. Its first turn pins the

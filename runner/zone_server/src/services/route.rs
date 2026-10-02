@@ -191,13 +191,15 @@ impl Route {
         .await
     }
 
-    /// [`Self::resolve`] for a chat's turn: kept on the login `previous`, the chat's session,
-    /// runs on, and in that session while the login picked holds it, else in a fresh one.
+    /// [`Self::resolve`] for a chat's turn running `model` on the configured agent: kept on the
+    /// login `previous`, the chat's session, runs on, and in that session while the login picked
+    /// holds it, else in a fresh one.
     pub async fn chat(
         &self,
         state: &AppState,
         exclude: &[Uuid],
         previous: Option<&ChatSession>,
+        model: Option<&str>,
     ) -> Result<Resolved, backend::Error> {
         self.routed(
             state,
@@ -206,6 +208,7 @@ impl Route {
                 sticky: previous.and_then(|session| session.login),
                 touch: true,
                 continuation: Continuation::Chat(previous),
+                model,
             },
         )
         .await

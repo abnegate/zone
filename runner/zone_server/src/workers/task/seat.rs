@@ -108,7 +108,7 @@ impl Seat {
             return fault;
         };
         let refused = login.id;
-        router::mark_limited(state, refused, limit).await;
+        router::mark_limited(state, refused, limit, &self.model).await;
         if limit.credits {
             self.unfunded.push(refused);
         } else {

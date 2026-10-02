@@ -13,4 +13,7 @@ pub struct Routing<'a> {
     pub touch: bool,
     /// The agent's own session the backend runs in.
     pub continuation: Continuation<'a>,
+    /// The model the session runs on the configured agent, which a login that lately refused it
+    /// for want of usage credits is passed over for.
+    pub model: Option<&'a str>,
 }

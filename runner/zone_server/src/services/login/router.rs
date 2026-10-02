@@ -6,6 +6,7 @@ mod error;
 mod failure;
 mod observed;
 mod standing;
+pub mod unfunded;
 
 pub use chosen::Chosen;
 pub use error::Error;
@@ -37,12 +38,17 @@ const REST: TimeDelta = TimeDelta::minutes(5);
 /// `preferred`'s logins before every other agent's, and within an agent the most headroom first,
 /// then those whose usage is unknown, then the least recently used, then by label. A login that
 /// is exhausted or cannot be resolved is never picked.
+///
+/// A login that refused `model`, the one the session runs on `preferred`, for want of usage
+/// credits within [`unfunded::COOL_DOWN`] cannot run the session: it ranks after every other
+/// login, and is picked only when no other can be.
 pub async fn pick(
     state: &AppState,
     organization: Uuid,
     preferred: AgentKind,
     exclude: &[Uuid],
     sticky: Option<Uuid>,
+    model: Option<&str>,
 ) -> Result<Chosen, Error> {
     let now = Utc::now();
     let logins = agent_logins::list(state.db(), organization).await?;
@@ -51,10 +57,14 @@ pub async fn pick(
     }
     let mut failure = Failure::new(preferred);
     let sticky = sticky.filter(|sticky| !exclude.contains(sticky));
+    let cooling = model
+        .map(|model| unfunded::cooling(model, now))
+        .unwrap_or_default();
 
     let mut unresolved = None;
     if let Some(login) = sticky.and_then(|sticky| logins.iter().find(|login| login.id == sticky))
         && AgentKind::named(&login.agent) == Some(preferred)
+        && !cooling.contains(&login.id)
         && Standing::of(login, login.snapshot().as_ref(), now).usable()
     {
         match credential::resolve(state, login).await {
@@ -113,7 +123,12 @@ pub async fn pick(
             standing => ranked.push((standing, chosen)),
         }
     }
-    ranked.sort_by(|left, right| order(preferred, left, right));
+    let cooled = |(_, chosen): &(Standing, Chosen)| cooling.contains(&chosen.login.id);
+    ranked.sort_by(|left, right| {
+        cooled(left)
+            .cmp(&cooled(right))
+            .then_with(|| order(preferred, left, right))
+    });
     let kept = match ranked.first() {
         Some((_, best)) if best.agent != preferred => ranked
             .iter()
@@ -132,13 +147,15 @@ pub async fn pick(
     Err(failure.into_error())
 }
 
-/// Records that a turn on `login` hit `limit`.
+/// Records that a turn on `login`, running `model`, hit `limit`.
 ///
-/// A limit on paid credits is not the subscription's: the login stays a candidate for every other
-/// session, and the caller leaves it out for the rest of the turn. Any other limit exhausts the
-/// login until the limit's own reset, else until the login's last spent window resets, else, when
-/// a reading of the agent's usage made now names no spent window either, for [`REST`].
-pub async fn mark_limited(state: &AppState, login: Uuid, limit: &Limit) {
+/// A limit on paid credits is not the subscription's, and refuses only the model: the login stays
+/// a candidate for every session on another model, the caller leaves it out for the rest of the
+/// turn, and sessions on `model` pass it over for [`unfunded::COOL_DOWN`]. Any other limit
+/// exhausts the login until the limit's own reset, else until the login's last spent window
+/// resets, else, when a reading of the agent's usage made now names no spent window either, for
+/// [`REST`].
+pub async fn mark_limited(state: &AppState, login: Uuid, limit: &Limit, model: &str) {
     let snapshot = match &limit.window {
         Some(window) => observed(state, login, std::slice::from_ref(window)).await,
         None => agent_logins::get(state.db(), login)
@@ -146,6 +163,7 @@ pub async fn mark_limited(state: &AppState, login: Uuid, limit: &Limit) {
             .map(|row| row.and_then(|row| row.snapshot())),
     };
     if limit.credits {
+        unfunded::record(login, model, Utc::now());
         return;
     }
     let snapshot = snapshot.unwrap_or_else(|error| {
@@ -311,6 +329,8 @@ mod tests {
     const CODEX_USAGE: &str = "/backend-api/wham/usage";
     const READING: &str = r#"{"five_hour":{"utilization":62.0,"resets_at":"2026-09-23T06:10:00Z"},"seven_day":{"utilization":31.0,"resets_at":"2026-09-28T04:00:00Z"}}"#;
     const READ_HEADROOM: f64 = 38.0;
+    const MODEL: &str = "opus";
+    const OTHER_MODEL: &str = "sonnet";
 
     struct Scene {
         pool: PgPool,
@@ -473,7 +493,15 @@ mod tests {
             exclude: &[Uuid],
             sticky: Option<Uuid>,
         ) -> Result<Chosen, Error> {
-            pick(&self.state, self.organization, preferred, exclude, sticky).await
+            pick(
+                &self.state,
+                self.organization,
+                preferred,
+                exclude,
+                sticky,
+                None,
+            )
+            .await
         }
 
         async fn picked(
@@ -483,6 +511,29 @@ mod tests {
             sticky: Option<Uuid>,
         ) -> Uuid {
             match self.pick(preferred, exclude, sticky).await {
+                Ok(chosen) => chosen.login.id,
+                Err(error) => panic!("expected a login, got {error:?}"),
+            }
+        }
+
+        /// [`Scene::picked`] for a session that runs `model` on `preferred`.
+        async fn running(
+            &self,
+            model: &str,
+            preferred: AgentKind,
+            exclude: &[Uuid],
+            sticky: Option<Uuid>,
+        ) -> Uuid {
+            match pick(
+                &self.state,
+                self.organization,
+                preferred,
+                exclude,
+                sticky,
+                Some(model),
+            )
+            .await
+            {
                 Ok(chosen) => chosen.login.id,
                 Err(error) => panic!("expected a login, got {error:?}"),
             }
@@ -564,6 +615,7 @@ mod tests {
             &scene.state,
             sticky,
             &limit(false, Some(Utc::now() + TimeDelta::hours(1))),
+            MODEL,
         )
         .await;
 
@@ -647,7 +699,7 @@ mod tests {
         let sooner = Utc::now() + TimeDelta::hours(1);
         let marked = scene.login(AgentKind::Claude, "marked", Some(50.0)).await;
         let spent = scene.login(AgentKind::Claude, "spent", None).await;
-        mark_limited(&scene.state, marked, &limit(false, Some(later))).await;
+        mark_limited(&scene.state, marked, &limit(false, Some(later)), MODEL).await;
         scene.read(spent, 0.0, sooner).await;
 
         let none_left = scene.pick(AgentKind::Claude, &[], None).await;
@@ -729,6 +781,7 @@ mod tests {
             &scene.state,
             unfunded,
             &limit(true, Some(Utc::now() + TimeDelta::hours(1))),
+            MODEL,
         )
         .await;
         let stored = scene.stored(unfunded).await;
@@ -736,11 +789,64 @@ mod tests {
             .picked(AgentKind::Claude, &[unfunded], Some(unfunded))
             .await;
         let next_session = scene.picked(AgentKind::Claude, &[], None).await;
+        let another_model = scene
+            .running(OTHER_MODEL, AgentKind::Claude, &[], Some(unfunded))
+            .await;
+        let same_model = scene
+            .running(MODEL, AgentKind::Claude, &[], Some(unfunded))
+            .await;
         scene.remove().await;
 
         assert_eq!(stored.exhausted_until, None);
         assert_eq!(this_turn, other);
         assert_eq!(next_session, unfunded);
+        assert_eq!(
+            another_model, unfunded,
+            "a credits refusal is the model's alone"
+        );
+        assert_eq!(
+            same_model, other,
+            "a session on the refused model is not sent back to the login that refused it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chat_a_credits_refusal_moved_to_another_agent_stays_there_until_the_cool_down_passes()
+     {
+        let scene = Scene::new().await;
+        let refused = scene.login(AgentKind::Claude, "refused", Some(80.0)).await;
+        let fallback = scene.login(AgentKind::Codex, "fallback", None).await;
+        mark_limited(&scene.state, refused, &limit(true, None), MODEL).await;
+
+        let stays = scene
+            .running(MODEL, AgentKind::Claude, &[], Some(fallback))
+            .await;
+        let starts = scene.running(MODEL, AgentKind::Claude, &[], None).await;
+        let alone = scene
+            .running(MODEL, AgentKind::Claude, &[fallback], None)
+            .await;
+        unfunded::record(
+            refused,
+            MODEL,
+            Utc::now() - unfunded::COOL_DOWN - TimeDelta::seconds(1),
+        );
+        let returns = scene
+            .running(MODEL, AgentKind::Claude, &[], Some(fallback))
+            .await;
+        let stored = scene.stored(refused).await;
+        scene.remove().await;
+
+        assert_eq!(
+            stays, fallback,
+            "the chat went back to the login that refused its model"
+        );
+        assert_eq!(starts, fallback, "a new session on the model avoids it too");
+        assert_eq!(
+            alone, refused,
+            "a login that refused the model still runs it when no other can"
+        );
+        assert_eq!(returns, refused, "the cool-down passed");
+        assert_eq!(stored.exhausted_until, None);
     }
 
     #[tokio::test]
@@ -988,7 +1094,7 @@ mod tests {
             )
             .await;
 
-        mark_limited(&scene.state, limited, &limit(false, None)).await;
+        mark_limited(&scene.state, limited, &limit(false, None), MODEL).await;
         let stored = scene.stored(limited).await;
         scene.remove().await;
 

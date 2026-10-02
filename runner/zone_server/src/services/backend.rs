@@ -152,14 +152,22 @@ pub async fn for_settings(
             Origin::Instance => instance(config),
         }));
     };
-    let chosen =
-        match router::pick(state, organization, agent, routing.exclude, routing.sticky).await {
-            Ok(chosen) => chosen,
-            Err(router::Error::None) if config.agents.host_login => {
-                return host(config, organization, agent);
-            }
-            Err(error) => return Err(Error::routing(agent, error)),
-        };
+    let chosen = match router::pick(
+        state,
+        organization,
+        agent,
+        routing.exclude,
+        routing.sticky,
+        routing.model,
+    )
+    .await
+    {
+        Ok(chosen) => chosen,
+        Err(router::Error::None) if config.agents.host_login => {
+            return host(config, organization, agent);
+        }
+        Err(error) => return Err(Error::routing(agent, error)),
+    };
     let resolved = on_login(
         config,
         organization,
@@ -1021,7 +1029,7 @@ mod tests {
         let on_second = fixture.chosen(&state, second).await;
         let on_codex = fixture.chosen(&state, codex).await;
         let route = Route::for_workspace(&state, fixture.workspace).await;
-        let chatted = route.chat(&state, &[], Some(&previous)).await;
+        let chatted = route.chat(&state, &[], Some(&previous), None).await;
         let between = route.resolve(&state, &[], None).await;
         fixture.remove().await;
 

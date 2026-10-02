@@ -2785,8 +2785,18 @@ async fn prepare_chat(
             None
         }
     };
-    let mut resolved = route.chat(state, &[], previous.as_ref()).await?;
     let configured = route.settings().and_then(|settings| settings.agent());
+    let model = handover::Model {
+        requested: chat.model_name.clone(),
+        preferences: route.preferences(&state.config().comfyui.classifier_model),
+        message: content.to_string(),
+        image: crate::services::media_source::has_image_attachment(metadata),
+        agentic: chat.agent_enabled,
+    };
+    let running = configured.map(|agent| model.on(agent));
+    let mut resolved = route
+        .chat(state, &[], previous.as_ref(), running.as_deref())
+        .await?;
     let organization = configured.and_then(|agent| route.organization_on(agent));
     let opening = match organization.zip(configured) {
         Some((organization, configured)) => {
@@ -2796,24 +2806,17 @@ async fn prepare_chat(
                 configured,
                 previous.as_ref(),
                 &mut resolved,
+                running.as_deref(),
             )
             .await
         }
         None => None,
     };
     let current = resolved.login.clone();
-    let preferences = route.preferences(&state.config().comfyui.classifier_model);
     let endpoint = route.into_endpoint()?;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &resolved.backend)
         .await;
-    let model = handover::Model {
-        requested: chat.model_name.clone(),
-        preferences,
-        message: content.to_string(),
-        image: crate::services::media_source::has_image_attachment(metadata),
-        agentic: chat.agent_enabled,
-    };
     chat.model_name = crate::services::stages::chat_model(
         &model.requested,
         &model.preferences,

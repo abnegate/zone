@@ -54,7 +54,8 @@ pub struct Handover {
 
 impl Handover {
     /// A turn of one of `organization`'s chats starting on `current`, its model chosen from
-    /// `model`. A turn that left `previous`'s login before it started told of it by `opening`.
+    /// `model`. A turn that left `previous`'s login before it started told of it by `opening`,
+    /// and never runs on that login again unless it left only to run on the configured agent.
     pub fn new(
         organization: Uuid,
         current: LoginIdentity,
@@ -62,9 +63,12 @@ impl Handover {
         previous: Option<&ChatSession>,
         opening: Option<Notice>,
     ) -> Self {
+        let unusable = opening
+            .as_ref()
+            .is_some_and(|opening| opening.reason != Reason::Configured);
         let tried = previous
             .and_then(|previous| previous.login)
-            .filter(|login| opening.is_some() && *login != current.id)
+            .filter(|login| unusable && *login != current.id)
             .into_iter()
             .collect();
         Self {
@@ -104,15 +108,23 @@ impl Handover {
         timeout: Duration,
     ) -> Result<Switch, Option<backend::Error>> {
         let from = self.current.clone();
+        let running = self.model.on(from.agent);
         if let Some(limit) = &cause.limit {
-            router::mark_limited(state, from.id, limit).await;
+            router::mark_limited(state, from.id, limit, &running).await;
         }
         self.limited |= cause.reason == Reason::Limit;
         if !self.tried.contains(&from.id) {
             self.tried.push(from.id);
         }
-        let chosen = match router::pick(state, self.organization, from.agent, &self.tried, None)
-            .await
+        let chosen = match router::pick(
+            state,
+            self.organization,
+            from.agent,
+            &self.tried,
+            None,
+            Some(&running),
+        )
+        .await
         {
             Ok(chosen) => chosen,
             Err(router::Error::Exhausted { resets_at }) if self.limited || resets_at.is_some() => {
@@ -168,15 +180,16 @@ impl Handover {
 }
 
 /// The move a chat's turn makes before it starts, off `previous`'s login onto `resolved`'s, which
-/// the router picked because `previous`'s can no longer run it, or runs another agent than
-/// `configured` while `configured` can run it again. The session moves with it when both run the
-/// same agent and its file can be carried, and `resolved` then resumes it.
+/// the router picked because `previous`'s can no longer run it on `model`, or runs another agent
+/// than `configured` while `configured` can run it again. The session moves with it when both run
+/// the same agent and its file can be carried, and `resolved` then resumes it.
 pub async fn opening(
     state: &AppState,
     organization: Uuid,
     configured: AgentKind,
     previous: Option<&ChatSession>,
     resolved: &mut Resolved,
+    model: Option<&str>,
 ) -> Option<Notice> {
     let previous = previous?;
     let left = previous.login?;
@@ -192,9 +205,11 @@ pub async fn opening(
         }
     };
     let from = identity(&row)?;
+    let now = Utc::now();
+    let unfunded = model.is_some_and(|model| router::unfunded::cooling(model, now).contains(&left));
     let (reason, resets_at) = match from.agent != configured && to.agent == configured {
         true => (Reason::Configured, None),
-        false => standing(&row),
+        false => standing(&row, unfunded, now),
     };
     let carried = previous.agent == to.agent
         && from.agent == to.agent
@@ -328,9 +343,13 @@ fn identity(row: &AgentLoginRow) -> Option<LoginIdentity> {
 }
 
 /// Why the router passed over `row`, which it keeps a chat on while it can run: a limit it
-/// reached, and when that resets, else a sign-in that can no longer be used.
-fn standing(row: &AgentLoginRow) -> (Reason, Option<chrono::DateTime<Utc>>) {
-    let now = Utc::now();
+/// reached, and when that resets, else the chat's model it refused lately for want of usage
+/// credits, when it is `unfunded`, else a sign-in that can no longer be used.
+fn standing(
+    row: &AgentLoginRow,
+    unfunded: bool,
+    now: chrono::DateTime<Utc>,
+) -> (Reason, Option<chrono::DateTime<Utc>>) {
     if let Some(until) = row.exhausted_until.filter(|until| *until > now) {
         return (Reason::Limit, Some(until));
     }
@@ -342,6 +361,7 @@ fn standing(row: &AgentLoginRow) -> (Reason, Option<chrono::DateTime<Utc>>) {
             };
             (Reason::Limit, resets_at)
         }
+        _ if unfunded => (Reason::Credits, None),
         _ => (Reason::SignedOut, None),
     }
 }
@@ -964,6 +984,7 @@ mod tests {
             AgentKind::Claude,
             &[],
             Some(from.id),
+            None,
         )
         .await
         .expect("the other login");
@@ -981,6 +1002,7 @@ mod tests {
             AgentKind::Claude,
             Some(&previous),
             &mut resolved,
+            None,
         )
         .await;
         let unmoved = opening(
@@ -992,6 +1014,7 @@ mod tests {
                 ..previous.clone()
             }),
             &mut resolved.clone(),
+            None,
         )
         .await;
         let landed = fixture.carried(&to, SESSION);
@@ -1052,6 +1075,7 @@ mod tests {
             AgentKind::Claude,
             &[],
             Some(from.id),
+            None,
         )
         .await
         .expect("the configured agent's login");
@@ -1069,6 +1093,7 @@ mod tests {
             AgentKind::Claude,
             Some(&previous),
             &mut resolved,
+            None,
         )
         .await;
         fixture.remove().await;
@@ -1087,5 +1112,129 @@ mod tests {
                 at: 0,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn a_chat_moved_back_to_the_configured_agent_can_hand_its_turn_back_to_the_login_it_left()
+    {
+        let fixture = Fixture::new().await;
+        let fallback = fixture.codex("codex@example.com").await;
+        let configured = fixture.claude("claude@example.com").await;
+        let previous = ChatSession {
+            login: Some(fallback.id),
+            id: SESSION.into(),
+            agent: AgentKind::Codex,
+            entry: 3,
+            prompt: Some("a".repeat(64)),
+        };
+        let chosen = router::pick(
+            &fixture.state,
+            fixture.organization,
+            AgentKind::Claude,
+            &[],
+            Some(fallback.id),
+            None,
+        )
+        .await
+        .expect("the configured agent's login");
+        let mut resolved = backend::on_login(
+            fixture.state.config(),
+            fixture.organization,
+            &chosen,
+            Continuation::Chat(Some(&previous)).session(&chosen),
+        )
+        .expect("a backend on the configured agent's login");
+        let notice = opening(
+            &fixture.state,
+            fixture.organization,
+            AgentKind::Claude,
+            Some(&previous),
+            &mut resolved,
+            None,
+        )
+        .await;
+        let mut handover = Handover::new(
+            fixture.organization,
+            configured.clone(),
+            fixture.handover(&configured).model,
+            Some(&previous),
+            notice.clone(),
+        );
+
+        let switch = handover
+            .next(&fixture.state, &limit(false), None, TIMEOUT)
+            .await;
+        fixture.remove().await;
+
+        assert_eq!(chosen.login.id, configured.id);
+        assert_eq!(notice.map(|notice| notice.reason), Some(Reason::Configured));
+        let switch = switch.unwrap_or_else(|ended| {
+            panic!(
+                "the login the chat left only for the configured agent was barred from the turn: {:?}",
+                ended.map(|error| error.to_string())
+            )
+        });
+        assert_eq!(switch.from, configured);
+        assert_eq!(switch.to, fallback);
+        assert_eq!(switch.reason, Reason::Limit);
+    }
+
+    #[tokio::test]
+    async fn a_chat_on_a_login_that_refused_its_model_for_credits_moves_before_the_turn_and_says_why()
+     {
+        let fixture = Fixture::new().await;
+        let refused = fixture.claude("a@example.com").await;
+        let other = fixture.claude("b@example.com").await;
+        let model = fixture.handover(&refused).model.on(AgentKind::Claude);
+        router::mark_limited(
+            &fixture.state,
+            refused.id,
+            &limit(true).limit.expect("a credits limit"),
+            &model,
+        )
+        .await;
+        let previous = ChatSession {
+            login: Some(refused.id),
+            id: SESSION.into(),
+            agent: AgentKind::Claude,
+            entry: 3,
+            prompt: Some("a".repeat(64)),
+        };
+        let chosen = router::pick(
+            &fixture.state,
+            fixture.organization,
+            AgentKind::Claude,
+            &[],
+            Some(refused.id),
+            Some(&model),
+        )
+        .await
+        .expect("the other login");
+        let mut resolved = backend::on_login(
+            fixture.state.config(),
+            fixture.organization,
+            &chosen,
+            Continuation::Chat(Some(&previous)).session(&chosen),
+        )
+        .expect("a backend on the other login");
+
+        let notice = opening(
+            &fixture.state,
+            fixture.organization,
+            AgentKind::Claude,
+            Some(&previous),
+            &mut resolved,
+            Some(&model),
+        )
+        .await;
+        let exhausted = fixture.exhausted_until(&refused).await;
+        fixture.remove().await;
+
+        assert_eq!(chosen.login.id, other.id);
+        assert_eq!(
+            notice.map(|notice| (notice.reason, notice.resets_at)),
+            Some((Reason::Credits, None))
+        );
+        assert_eq!(exhausted, None);
     }
 }
