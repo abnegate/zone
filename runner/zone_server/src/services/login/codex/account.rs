@@ -150,14 +150,17 @@ mod tests {
 
     #[test]
     fn an_auth_json_that_names_no_account_has_none() {
-        for saved in [
+        for (case, saved) in [
             "{}".to_string(),
             "not json".to_string(),
             json!({ "OPENAI_API_KEY": "fake-key", "tokens": null }).to_string(),
             auth(&json!({ "id_token": "fixture", "account_id": "" })),
             auth(&json!({ "id_token": token(&json!({ "email": JAKE })) })),
-        ] {
-            assert_eq!(account(&saved), None, "{saved}");
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(account(&saved), None, "case {case}");
         }
     }
 

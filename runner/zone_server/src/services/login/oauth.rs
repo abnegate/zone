@@ -593,18 +593,17 @@ mod tests {
 
     #[test]
     fn a_login_is_known_by_its_accounts_id_else_by_its_email() {
-        for (uuid, email, expected) in [
+        for (case, (id, address, expected)) in [
             (Some("abc12345-ffff"), Some(EMAIL), Some("abc12345-ffff")),
             (None, Some(EMAIL), Some(EMAIL)),
             (Some(""), Some(EMAIL), Some(EMAIL)),
             (None, None, None),
             (Some(""), Some(""), None),
-        ] {
-            assert_eq!(
-                account(&profile(uuid, email)),
-                expected,
-                "{uuid:?} {email:?}"
-            );
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(account(&profile(id, address)), expected, "case {case}");
         }
         assert_eq!(
             account(&Profile::default()),
