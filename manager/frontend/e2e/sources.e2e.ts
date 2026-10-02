@@ -213,9 +213,9 @@ test.describe('Sources Page', () => {
       await page.reload();
       await page.click('a[href="/sources"]');
 
-      const firstCard = page.locator('.source-card').first();
-      await expect(firstCard.locator('h3')).toContainText('acme/frontend');
-      await expect(firstCard.locator('.source-provider')).toContainText('GitHub');
+      const row = page.locator('.source-card', { hasText: 'acme/frontend' });
+      await expect(row.locator('.source-name')).toHaveText('acme/frontend');
+      await expect(row.locator('.source-provider')).toContainText('GitHub');
     });
 
     test('shows verified status for verified sources', async ({ page }) => {
@@ -239,7 +239,7 @@ test.describe('Sources Page', () => {
       await page.click('a[href="/sources"]');
 
       await expect(
-        page.locator('.source-card').first().locator('.source-status')
+        page.locator('.source-card', { hasText: 'acme/frontend' }).locator('.source-status')
       ).toContainText('Verified');
     });
 
@@ -264,7 +264,7 @@ test.describe('Sources Page', () => {
       await page.click('a[href="/sources"]');
 
       await expect(
-        page.locator('.source-card').nth(1).locator('.source-status')
+        page.locator('.source-card', { hasText: 'acme/backend' }).locator('.source-status')
       ).toContainText('Inactive');
     });
 
@@ -289,7 +289,7 @@ test.describe('Sources Page', () => {
       await page.click('a[href="/sources"]');
 
       await expect(
-        page.locator('.source-card').nth(2).locator('.source-status')
+        page.locator('.source-card', { hasText: 'Work Calendar' }).locator('.source-status')
       ).toContainText('Error');
       await expect(page.locator('.source-error')).toContainText('Connection timed out');
     });

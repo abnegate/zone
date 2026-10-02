@@ -34,7 +34,11 @@ const PR_TINTS: Record<string, Tint> = {
 const SKELETON_CARDS = [1, 2, 3, 4];
 
 function TaskStatusBadge({ status }: { status: string }) {
-  return <Badge variant={STATUS_TINTS[status] ?? 'neutral'}>{status.replace('_', ' ')}</Badge>;
+  return (
+    <Badge className="task-status" variant={STATUS_TINTS[status] ?? 'neutral'}>
+      {status.replace('_', ' ')}
+    </Badge>
+  );
 }
 
 function PrStatusBadge({ status }: { status: 'pending' | 'open' | 'merged' | 'closed' }) {
