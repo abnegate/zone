@@ -977,6 +977,59 @@ async fn a_turn_that_hits_its_limit_continues_on_another_login_in_the_same_messa
 }
 
 #[tokio::test]
+async fn a_turn_limited_before_it_writes_sends_its_prompt_again_on_the_carried_session() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    let bob = harness.sign_in(BOB).await;
+    let resets_at = reset_in(TimeDelta::hours(2));
+    harness.claude.plan(
+        ALICE,
+        0,
+        Run::Limited {
+            partial: None,
+            resets_at,
+        },
+    );
+    harness.claude.plan(BOB, 0, Run::Answers(ANSWER));
+
+    let frames = harness.turn(QUESTION).await;
+
+    let start = started(&frames);
+    let handovers = handed(&frames, 1);
+    assert_handover(
+        handovers[0],
+        start,
+        &Expected {
+            from: ALICE.label,
+            to: BOB.label,
+            agent: AgentKind::Claude,
+            reason: LIMIT,
+            carried: true,
+            at: 0,
+            resets: Reset::At(resets_at),
+        },
+    );
+    let end = answered(&frames);
+    assert_eq!(end["content"], ANSWER, "{end}");
+    let runs = harness.claude.invocations();
+    let [limited, rerun] = runs.as_slice() else {
+        panic!("the turn runs Alice, then Bob: {runs:#?}");
+    };
+    assert_eq!(rerun.token, BOB.token);
+    assert_eq!(
+        rerun.after(RESUME),
+        Some(limited.pinned()),
+        "Bob resumes the session Alice started: {:?}",
+        rerun.arguments
+    );
+    assert_eq!(
+        rerun.prompt, limited.prompt,
+        "a round that wrote nothing is sent again as it was"
+    );
+    assert_eq!(rerun.home, harness.home(AgentKind::Claude, bob));
+}
+
+#[tokio::test]
 async fn a_handover_without_a_session_file_replays_the_transcript() {
     let harness = Harness::start(Sessions::Lost, Tools::Withheld).await;
     harness.sign_in(ALICE).await;
