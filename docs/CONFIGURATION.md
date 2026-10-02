@@ -780,9 +780,9 @@ sign-in to the organization still in flight, and forgets why any failed. For
 Codex, signing out runs `codex logout` in the account's home, which asks OpenAI
 to revoke the login and deletes `auth.json`; signing out of the whole agent also
 stops a sign-in in progress. Zone then removes the signed-out account's home
-with the session files in it, except that signing out of all of Claude at once
-leaves the Claude homes where they are. A chat that ran on a signed-out account
-starts its next turn on another, with the whole transcript. The panel asks
+with the session files in it, as it does for a Claude sign-in that names no
+account when another such sign-in replaces it. A chat that ran on a signed-out
+account starts its next turn on another, with the whole transcript. The panel asks
 before it signs out, since the sign-out applies to every workspace of the
 organization. Sign-ins and sign-outs are recorded in the organization's audit
 log as `agent.signed_in` and `agent.signed_out`, the sign-in even when the
@@ -1316,9 +1316,9 @@ What stands in the way:
   organization and agent, and only for a session id made of ASCII letters,
   digits and hyphens, as the UUIDs both CLIs use are, so an id cannot name a
   path outside the session folders. Zone looks the file up without following
-  a link, opens it refusing a link, writes the copy with mode 0600 under a
-  temporary name in directories it creates with mode 0700, and renames it
-  into place, so the CLI never reads half a file and nothing outside the
+  a link at any level below the home, opens it refusing a link, writes the
+  copy with mode 0600 under a temporary name in directories it creates with
+  mode 0700, refusing one that is a link, and renames it into place, so the CLI never reads half a file and nothing outside the
   organization's own state is read or written.
 - Usage reads go only to `ZONE_CLAUDE_API_URL` and `ZONE_CODEX_API_URL`, and
   the Claude profile read only to the former. Each carries the token of the

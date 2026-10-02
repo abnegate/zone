@@ -65,14 +65,12 @@ pub fn carry(
     let path = to.join(&relative);
     let parent = path.parent().unwrap_or(to);
 
-    DirBuilder::new()
-        .recursive(true)
-        .mode(DIRECTORY_MODE)
-        .create(parent)
-        .map_err(|source| Error::Filesystem {
+    directories(to, relative.parent().unwrap_or(Path::new(""))).map_err(|source| {
+        Error::Filesystem {
             path: parent.to_path_buf(),
             source,
-        })?;
+        }
+    })?;
 
     let staging = parent.join(format!("{STAGING}-{}", Uuid::new_v4().simple()));
     let bytes = copy(&source, &staging)
@@ -120,7 +118,7 @@ fn relative(home: &Path, agent: AgentKind, work: &Path, id: &str) -> Option<Path
         return None;
     }
 
-    match agent {
+    let relative = match agent {
         AgentKind::Claude => {
             let relative = Path::new(PROJECTS)
                 .join(sanitized(&physical(work)))
@@ -128,7 +126,46 @@ fn relative(home: &Path, agent: AgentKind, work: &Path, id: &str) -> Option<Path
             regular(&home.join(&relative)).then_some(relative)
         }
         AgentKind::Codex => rollout(home, Path::new(SESSIONS), &format!("-{id}{EXTENSION}")),
+    }?;
+    relative
+        .parent()
+        .is_none_or(|parent| unlinked(home, parent))
+        .then_some(relative)
+}
+
+/// Whether every directory on `relative`'s way down from `home` is a directory itself, not a
+/// link to one that could lie outside the home.
+fn unlinked(home: &Path, relative: &Path) -> bool {
+    let mut path = home.to_path_buf();
+    relative.components().all(|component| {
+        path.push(component);
+        real(&path)
+    })
+}
+
+/// Creates each directory on `relative`'s way down from `home` that is missing, refusing one that
+/// is a link, so nothing is written outside the home.
+fn directories(home: &Path, relative: &Path) -> io::Result<()> {
+    let mut path = home.to_path_buf();
+    for component in relative.components() {
+        path.push(component);
+        match DirBuilder::new().mode(DIRECTORY_MODE).create(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        if !real(&path) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("{} is a link or not a directory", path.display()),
+            ));
+        }
     }
+    Ok(())
+}
+
+fn real(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// Session ids are UUIDs. Anything else could name a path outside the session folders.
@@ -374,6 +411,62 @@ mod tests {
             );
         }
         assert!(empty(homes.to.path()));
+    }
+
+    #[test]
+    fn a_session_under_a_linked_directory_of_the_home_is_not_carried() {
+        let homes = Homes::new();
+        let outside = TempDir::new().unwrap();
+
+        for (agent, id, relative, linked) in [
+            (AgentKind::Claude, CLAUDE_ID, homes.claude(), 2),
+            (AgentKind::Codex, CODEX_ID, homes.codex(), 1),
+        ] {
+            let directory: PathBuf = relative.components().take(linked).collect();
+            let target = outside.path().join(agent.as_str());
+            let file = target.join(relative.strip_prefix(&directory).unwrap());
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, TRANSCRIPT).unwrap();
+            let link = homes.from.path().join(&directory);
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            symlink(&target, &link).unwrap();
+
+            assert_eq!(
+                locate(homes.from.path(), agent, homes.work.path(), id),
+                None,
+                "{agent} finds a session through a linked directory"
+            );
+            assert!(
+                matches!(homes.carry(agent, id), Err(Error::Missing { .. })),
+                "{agent} carries a session through a linked directory"
+            );
+        }
+        assert!(empty(homes.to.path()));
+    }
+
+    #[test]
+    fn a_session_is_never_carried_through_a_linked_directory_of_the_receiving_home() {
+        let homes = Homes::new();
+        let outside = TempDir::new().unwrap();
+
+        for (agent, id, relative, linked) in [
+            (AgentKind::Claude, CLAUDE_ID, homes.claude(), 1),
+            (AgentKind::Codex, CODEX_ID, homes.codex(), 2),
+        ] {
+            homes.write(&relative);
+            let directory: PathBuf = relative.components().take(linked).collect();
+            let target = outside.path().join(agent.as_str());
+            fs::create_dir_all(&target).unwrap();
+            let link = homes.to.path().join(&directory);
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            symlink(&target, &link).unwrap();
+
+            assert!(
+                matches!(homes.carry(agent, id), Err(Error::Filesystem { .. })),
+                "{agent} carries into a linked directory"
+            );
+            assert!(empty(&target), "{agent} wrote outside the receiving home");
+        }
     }
 
     #[test]

@@ -498,6 +498,23 @@ impl Stage {
             .login_home(organization, AgentKind::Codex, login)
     }
 
+    /// The home of the organization's Claude login `login`, with a session file in it, as a turn
+    /// on the login leaves it.
+    fn claude_session(&self, organization: Uuid, login: Uuid) -> PathBuf {
+        let home = self
+            .client
+            .state()
+            .config()
+            .agents
+            .create_login_home(organization, AgentKind::Claude, login)
+            .expect("the Claude login's home");
+        let project = home.join("projects").join("-work");
+        fs::create_dir_all(&project).expect("the session's project folder");
+        fs::write(project.join(format!("{JAKE_ID}.jsonl")), b"{}\n")
+            .expect("the session's transcript");
+        home
+    }
+
     /// `<state>/<organization>/codex/logins`, where every codex login home lives.
     fn login_homes(&self, organization: Uuid) -> PathBuf {
         self.client
@@ -3757,6 +3774,66 @@ async fn a_sign_in_the_profile_cannot_name_replaces_only_the_unnamed_login() {
     assert_ne!(
         logins[1].id, unnamed[1].id,
         "the unnamed login was not replaced"
+    );
+}
+
+#[tokio::test]
+async fn signing_out_of_claude_removes_every_accounts_home_with_its_sessions() {
+    let claude = MockServer::start().await;
+    answering(&claude, granted(), 200, profile(JAKE_ID, JAKE)).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.sign_in_claude(organization, &owner).await;
+    answering(&claude, granted(), 200, profile(ADA_ID, ADA)).await;
+    stage.sign_in_claude(organization, &owner).await;
+    let homes: Vec<PathBuf> = stage
+        .login_rows(organization, "claude")
+        .await
+        .iter()
+        .map(|login| stage.claude_session(organization, login.id))
+        .collect();
+    assert_eq!(homes.len(), 2);
+
+    stage.sign_out(organization, "claude", &owner).await;
+
+    assert!(stage.login_rows(organization, "claude").await.is_empty());
+    for home in homes {
+        assert!(
+            !home.exists(),
+            "{} outlived its sign-in with its sessions",
+            home.display()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_claude_sign_in_that_replaces_the_unnamed_login_removes_its_home() {
+    let claude = MockServer::start().await;
+    answering(&claude, granted(), PROFILE_REFUSED, json!({})).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.sign_in_claude(organization, &owner).await;
+    let unnamed = stage
+        .login_row(organization, "claude")
+        .await
+        .expect("the unnamed login");
+    let home = stage.claude_session(organization, unnamed.id);
+
+    stage.sign_in_claude(organization, &owner).await;
+
+    let ids: Vec<Uuid> = stage
+        .login_rows(organization, "claude")
+        .await
+        .iter()
+        .map(|login| login.id)
+        .collect();
+    assert_eq!(ids.len(), 1);
+    assert_ne!(ids[0], unnamed.id, "the unnamed login was not replaced");
+    assert!(
+        !home.exists(),
+        "the replaced login's home outlived it with its sessions"
     );
 }
 

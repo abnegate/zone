@@ -3,13 +3,15 @@
 
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use uuid::Uuid;
 use zone_core::llm::AgentKind;
 
 use super::codex::{self, CREDENTIALS};
 use super::devices;
 use super::error::Error;
+use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::state::AppState;
 
@@ -21,11 +23,13 @@ use crate::state::AppState;
 /// either account, so with one the file is left where it is. Only a regular file is moved, never a
 /// link.
 ///
-/// Takes the organization's sign-in lock for a codex login, so it must never be called holding it.
+/// Takes the organization's sign-in lock only to move that file, so a sign-in or sign-out holding
+/// it for as long as codex takes never holds up a turn. It must never be called holding the lock.
 pub async fn adopt(state: &AppState, login: &AgentLoginRow) -> Result<PathBuf, Error> {
     let agent = agent(login)?;
-    if agent != AgentKind::Codex {
-        return create(state, login, agent);
+    let home = create(state, login, agent)?;
+    if !adoptable(state.config(), login, agent, &home) || !sole(state, login).await? {
+        return Ok(home);
     }
     let _guard = devices::lock(login.organization_id).await;
     adopt_held(state, login).await
@@ -35,20 +39,14 @@ pub async fn adopt(state: &AppState, login: &AgentLoginRow) -> Result<PathBuf, E
 pub(super) async fn adopt_held(state: &AppState, login: &AgentLoginRow) -> Result<PathBuf, Error> {
     let agent = agent(login)?;
     let home = create(state, login, agent)?;
-    if agent != AgentKind::Codex {
+    if !adoptable(state.config(), login, agent, &home) {
         return Ok(home);
     }
 
-    let organization = login.organization_id;
-    let agents = &state.config().agents;
-    let root = agents.home(organization, agent);
-    if !codex::signed_in(&root) || codex::signed_in(&home) {
+    if !sole(state, login).await? {
         return Ok(home);
     }
-    let logins = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
-    if !matches!(logins.as_slice(), [only] if only.id == login.id) {
-        return Ok(home);
-    }
+    let root = state.config().agents.home(login.organization_id, agent);
     match fs::rename(root.join(CREDENTIALS), home.join(CREDENTIALS)) {
         Ok(()) => Ok(home),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(home),
@@ -56,6 +54,47 @@ pub(super) async fn adopt_held(state: &AppState, login: &AgentLoginRow) -> Resul
             "Could not move the organization's codex login into its home: {error}"
         ))),
     }
+}
+
+/// Removes the home of `login`, whose row is gone, with the session files in it, logging a
+/// removal that fails.
+pub(super) fn remove(config: &Config, login: &AgentLoginRow) {
+    if let Some(agent) = AgentKind::named(&login.agent) {
+        clear(
+            login.organization_id,
+            &config
+                .agents
+                .login_home(login.organization_id, agent, login.id),
+        );
+    }
+}
+
+/// Removes a home that no longer holds a login, logging a removal that fails.
+pub(super) fn clear(organization: Uuid, home: &Path) {
+    match fs::remove_dir_all(home) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            %organization,
+            %error,
+            home = %home.display(),
+            "could not remove a signed-out login's home"
+        ),
+    }
+}
+
+/// Whether a codex login from before login homes waits in the organization's codex root while
+/// `home` holds none of its own.
+fn adoptable(config: &Config, login: &AgentLoginRow, agent: AgentKind, home: &Path) -> bool {
+    agent == AgentKind::Codex
+        && codex::signed_in(&config.agents.home(login.organization_id, agent))
+        && !codex::signed_in(home)
+}
+
+/// Whether `login` is the only login of its agent the organization holds.
+async fn sole(state: &AppState, login: &AgentLoginRow) -> Result<bool, Error> {
+    let logins = agent_logins::list_for(state.db(), login.organization_id, &login.agent).await?;
+    Ok(matches!(logins.as_slice(), [only] if only.id == login.id))
 }
 
 fn agent(login: &AgentLoginRow) -> Result<AgentKind, Error> {
@@ -74,17 +113,18 @@ fn create(state: &AppState, login: &AgentLoginRow, agent: AgentKind) -> Result<P
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::symlink;
-    use std::path::Path;
+    use std::time::Duration;
 
     use sqlx::PgPool;
     use tempfile::TempDir;
-    use uuid::Uuid;
+    use tokio::time::timeout;
 
     use super::*;
     use crate::config::{AgentConfig, Config};
     use crate::db::agent_logins::Insert;
 
     const LEGACY: &str = r#"{"tokens":"legacy"}"#;
+    const PROMPTLY: Duration = Duration::from_secs(5);
 
     struct Scene {
         pool: PgPool,
@@ -248,6 +288,56 @@ mod tests {
             "the link stays where it was"
         );
         assert_eq!(read(&target), LEGACY);
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_login_with_nothing_to_adopt_never_waits_on_the_sign_in_lock() {
+        let scene = Scene::new().await;
+        let claude = scene.sign_in(AgentKind::Claude).await;
+        let first = scene.sign_in(AgentKind::Codex).await;
+        let _held = devices::lock(scene.organization).await;
+
+        for login in [&claude, &first] {
+            let home = timeout(PROMPTLY, scene.adopt(login))
+                .await
+                .expect("a home was found without the sign-in lock");
+            assert!(home.is_dir());
+        }
+
+        let second = scene.sign_in(AgentKind::Codex).await;
+        let legacy = scene.legacy();
+        for login in [&first, &second] {
+            let home = timeout(PROMPTLY, scene.adopt(login))
+                .await
+                .expect("a legacy login no single login can take was waited on");
+            assert!(!home.join(CREDENTIALS).exists());
+        }
+        assert_eq!(read(&legacy), LEGACY);
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_legacy_codex_login_is_adopted_only_once_the_sign_in_lock_is_free() {
+        let scene = Scene::new().await;
+        let login = scene.sign_in(AgentKind::Codex).await;
+        let legacy = scene.legacy();
+        let held = devices::lock(scene.organization).await;
+
+        let mut adopting = Box::pin(scene.adopt(&login));
+        assert!(
+            timeout(Duration::from_millis(200), &mut adopting)
+                .await
+                .is_err(),
+            "a legacy login was moved while a sign-in held the lock"
+        );
+        drop(held);
+        let home = timeout(PROMPTLY, adopting)
+            .await
+            .expect("the legacy login was moved once the lock was free");
+
+        assert_eq!(read(&home.join(CREDENTIALS)), LEGACY);
+        assert!(!legacy.exists());
         scene.remove().await;
     }
 }

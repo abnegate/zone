@@ -17,7 +17,7 @@ use super::claude::{self, Authorization, Client, Code, Flow, Redirect, Reply, Sc
 use super::console::Console;
 use super::error::Error;
 use super::pending::{self, Pending, WINDOW};
-use super::{audit, devices, receipts, usage};
+use super::{audit, devices, homes, receipts, usage};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow, Insert};
 use crate::db::ai_settings::{self, AccessError};
@@ -344,7 +344,7 @@ fn label(tokens: &Tokens, profile: Option<&Profile>) -> Option<String> {
 /// that records it, that whoever started the sign-in may finish it. A sign-in to an account the
 /// organization already holds replaces that account's login, and one to another account adds a
 /// login beside it. A sign-in whose account `profile` does not name replaces the login no account
-/// names, if there is one, and leaves every named one.
+/// names, if there is one, with its home, and leaves every named one.
 async fn record(
     state: &AppState,
     pending: &Pending,
@@ -362,10 +362,13 @@ async fn record(
         return Err(Error::Deleted);
     }
     authorize(state, &mut transaction, pending).await?;
+    let mut replaced = Vec::new();
     if account.is_none() {
         let held = agent_logins::list_for(&mut *transaction, pending.organization, agent).await?;
         for login in held.iter().filter(|login| login.account.is_none()) {
-            agent_logins::delete(&mut *transaction, pending.organization, login.id).await?;
+            replaced.extend(
+                agent_logins::delete(&mut *transaction, pending.organization, login.id).await?,
+            );
         }
     }
     let login = agent_logins::insert(
@@ -381,6 +384,9 @@ async fn record(
     )
     .await?;
     transaction.commit().await?;
+    for gone in &replaced {
+        homes::remove(state.config(), gone);
+    }
     Ok(login)
 }
 
