@@ -218,6 +218,7 @@ pub async fn opening(
     Some(Notice {
         from: from.label,
         to: to.label,
+        from_agent: from.agent,
         agent: to.agent,
         reason,
         resets_at,
@@ -777,6 +778,7 @@ mod tests {
             serde_json::json!({
                 "from": "a@example.com",
                 "to": "c@example.com",
+                "from_agent": "claude",
                 "agent": "codex",
                 "reason": "limit",
                 "resets_at": "2027-09-23T06:10:00Z",
@@ -1007,6 +1009,7 @@ mod tests {
             Some(Notice {
                 from: "a@example.com".into(),
                 to: "b@example.com".into(),
+                from_agent: AgentKind::Claude,
                 agent: AgentKind::Claude,
                 reason: Reason::Limit,
                 resets_at: Some(resets()),
@@ -1076,6 +1079,7 @@ mod tests {
             Some(Notice {
                 from: "codex@example.com".into(),
                 to: "claude@example.com".into(),
+                from_agent: AgentKind::Codex,
                 agent: AgentKind::Claude,
                 reason: Reason::Configured,
                 resets_at: None,

@@ -115,12 +115,7 @@ impl AgentStatus {
                     status.label.clone_from(&best.login.label);
                 }
             }
-            (None, Some(best)) => {
-                status.state = best.login.state;
-                status.expires_at = best.login.expires_at;
-                status.source = Some(Source::Zone);
-                status.label.clone_from(&best.login.label);
-            }
+            (None, Some(best)) => status.lead(&best.login),
             (None, None) => {
                 if let Some(probe) = host(state.config(), agent).await {
                     status.state = State::SignedIn;
@@ -131,6 +126,14 @@ impl AgentStatus {
         }
         status.logins = readings.into_iter().map(|reading| reading.login).collect();
         Ok(status)
+    }
+
+    /// Summarises the agent's status as `best`, the login a turn would start on.
+    fn lead(&mut self, best: &LoginStatus) {
+        self.state = best.state;
+        self.expires_at = best.expires_at;
+        self.source = Some(Source::Zone);
+        self.label.clone_from(&best.label);
     }
 
     fn signed_out(agent: AgentKind) -> Self {
@@ -208,11 +211,11 @@ fn read(
             plan,
             state,
             expires_at,
+            exhausted_until: login.exhausted_until,
             usage: snapshot.map(|snapshot| UsageStatus {
                 windows: snapshot.windows,
                 headroom: snapshot.headroom,
                 fetched_at: snapshot.fetched_at,
-                exhausted_until: login.exhausted_until,
             }),
             last_used_at: login.last_used_at,
         },
@@ -740,13 +743,8 @@ mod tests {
                 .map(|usage| (&usage.windows, usage.headroom)),
             Some((&jakes.windows, jakes.headroom))
         );
-        assert_eq!(
-            ada_status
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.exhausted_until),
-            Some(resets)
-        );
+        assert_eq!(ada_status.exhausted_until, Some(resets));
+        assert_eq!(jake_status.exhausted_until, None);
         assert_eq!(
             jake_status.expires_at, None,
             "a login that renews itself showed an expiry"
@@ -809,7 +807,8 @@ mod tests {
                     label: Some("jake@example.com".to_string()),
                     plan: Some("Claude Max".to_string()),
                     state: State::SignedIn,
-                    expires_at: Some(at(1_821_672_000)),
+                    expires_at: None,
+                    exhausted_until: None,
                     usage: Some(UsageStatus {
                         windows: vec![
                             Window {
@@ -829,7 +828,6 @@ mod tests {
                         ],
                         headroom: Some(38.0),
                         fetched_at: at(1_790_136_000),
-                        exhausted_until: None,
                     }),
                     last_used_at: Some(at(1_790_135_400)),
                 }],
@@ -861,6 +859,92 @@ mod tests {
             .expect("the fixture reads as statuses");
         assert_eq!(parsed, expected);
         assert_eq!(json!({ "agents": parsed }), fixture);
+    }
+
+    #[test]
+    fn each_fixture_status_summarises_its_best_login_as_a_status_does() {
+        let fixture: Value = serde_json::from_str(FIXTURE).expect("the fixture is JSON");
+        let statuses: Vec<AgentStatus> = serde_json::from_value(fixture["agents"].clone())
+            .expect("the fixture reads as statuses");
+
+        let led: Vec<&AgentStatus> = statuses
+            .iter()
+            .filter(|status| status.pending.is_none())
+            .collect();
+        assert!(!led.is_empty(), "the fixture summarises no login");
+        for status in led {
+            let [best] = status.logins.as_slice() else {
+                panic!("{} lists one login: {:?}", status.agent, status.logins);
+            };
+            let mut summarised = status.clone();
+            summarised.lead(best);
+
+            assert_eq!(
+                &summarised, status,
+                "{}'s summary is not what a status says of its only login",
+                status.agent
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_login_marked_spent_before_its_usage_was_ever_read_still_shows_until_when() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .expect("the test database accepts connections");
+        let organization = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Spent', $1::text)")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization to sign in");
+        let directory = TempDir::new().expect("a state root");
+        let state = AppState::new(config(&directory), pool.clone(), None);
+        let now = Utc::now();
+        let lasting = now + TimeDelta::days(365);
+        let credential = subscribed(state.encryption_key(), lasting, Some("fake-refresh"));
+        let login = agent_logins::insert(
+            &pool,
+            &Insert {
+                organization_id: organization,
+                agent: AgentKind::Claude.as_str(),
+                account: Some(JAKE),
+                credential: Some(&credential),
+                label: Some(JAKE),
+                expires_at: Some(lasting),
+            },
+        )
+        .await
+        .expect("a stored login");
+        let resets = (now + TimeDelta::hours(2)).trunc_subsecs(0);
+        agent_logins::exhaust(&pool, login.id, resets)
+            .await
+            .expect("the login at its limit");
+        let viewer = Viewer {
+            user: Uuid::new_v4(),
+            manages: false,
+        };
+
+        let status = AgentStatus::read(&state, organization, AgentKind::Claude, viewer, None)
+            .await
+            .expect("the status");
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization can be deleted");
+
+        let [spent] = status.logins.as_slice() else {
+            panic!("one login, got {:?}", status.logins);
+        };
+        assert_eq!(spent.usage, None, "no usage was ever read for the login");
+        assert_eq!(spent.state, State::SignedIn);
+        assert_eq!(
+            spent.exhausted_until,
+            Some(resets),
+            "a login with no snapshot hid that it is spent"
+        );
     }
 
     #[test]

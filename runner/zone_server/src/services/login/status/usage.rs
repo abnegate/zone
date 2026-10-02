@@ -9,5 +9,4 @@ pub struct UsageStatus {
     pub windows: Vec<Window>,
     pub headroom: Option<f64>,
     pub fetched_at: DateTime<Utc>,
-    pub exhausted_until: Option<DateTime<Utc>>,
 }

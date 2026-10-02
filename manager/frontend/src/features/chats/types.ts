@@ -253,6 +253,7 @@ export interface Handover {
   kind: 'handover';
   from?: string;
   to: string;
+  from_agent: HandoverAgent;
   agent: HandoverAgent;
   reason: HandoverReason;
   resets_at?: string;

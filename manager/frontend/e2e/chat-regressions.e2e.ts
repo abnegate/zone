@@ -280,6 +280,7 @@ test.describe('Chat regressions', () => {
     const handover = {
       from: 'a@example.com',
       to: 'b@example.com',
+      from_agent: 'claude',
       agent: 'codex',
       reason: 'limit',
       resets_at: new Date(Date.now() + (2 * 60 + 10) * 60_000).toISOString(),
@@ -350,6 +351,62 @@ test.describe('Chat regressions', () => {
     await expect(page.locator('.message-assistant .message-content').getByRole('note')).toHaveText(
       notice
     );
+  });
+
+  test('a replay on another account of the same agent leaves the agent unnamed', async ({
+    page,
+  }) => {
+    const messages: unknown[] = [];
+    await mockChatRoutes(page, messages);
+    await page.reload();
+    await page.click('a[href="/chats"]');
+    await openChat(page);
+
+    const before = 'The registry holds the last three images.\n';
+    const after = 'Roll back by pinning the previous tag and redeploying.';
+    const notice =
+      'Switched to b@example.com — a@example.com reached its usage limit; resets in 2h 10m';
+    const handover = {
+      from: 'a@example.com',
+      to: 'b@example.com',
+      from_agent: 'claude',
+      agent: 'claude',
+      reason: 'limit',
+      resets_at: new Date(Date.now() + (2 * 60 + 10) * 60_000).toISOString(),
+      carried: false,
+      at: Array.from(before).length,
+    };
+    socket.setOnSend(async (payload) => {
+      await socket.emit({
+        type: 'message_saved',
+        message_id: 'msg-ask',
+        role: 'user',
+        content: payload.content,
+      });
+      await socket.emit({ type: 'message_start', message_id: 'a1', role: 'assistant' });
+      await socket.emit({ type: 'chunk', content: before, index: 0 });
+      await socket.emit({ type: 'handover', message_id: 'a1', ...handover });
+      await socket.emit({ type: 'chunk', content: after, index: 1 });
+      await socket.emit({
+        type: 'message_end',
+        message_id: 'a1',
+        content: `${before}${after}`,
+        metadata: { handovers: [{ kind: 'handover', ...handover }] },
+      });
+    });
+
+    await page.fill('.message-form textarea', 'How do we roll back?');
+    await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
+
+    const divider = page.locator('.message-assistant .message-content').getByRole('note');
+    await expect(divider).toHaveText(notice);
+    await expect(divider).not.toContainText('Claude');
+    await page.mouse.move(0, 0);
+    await page.screenshot({
+      path: 'screenshots/chats-handover-same-agent.png',
+      fullPage: true,
+      animations: 'disabled',
+    });
   });
 
   test('streams preamble that arrived after native tool deltas', async ({ page }, testInfo) => {

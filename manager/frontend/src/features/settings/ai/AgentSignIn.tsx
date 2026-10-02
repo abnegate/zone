@@ -132,7 +132,7 @@ export function AgentSignIn({
     const active = document.activeElement;
     const away =
       active?.isConnected &&
-      active !== document.body &&
+      !(section.current && active.contains(section.current)) &&
       !section.current?.contains(active) &&
       !dialog.current?.contains(active);
     if (away) return;
