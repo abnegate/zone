@@ -1,16 +1,26 @@
 //! Where a workspace's completions go: the endpoint, or a coding agent CLI.
 
+mod resolved;
+mod routing;
+
+pub use resolved::Resolved;
+pub use routing::Routing;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use uuid::Uuid;
 use zone_core::llm::provider::{STDERR_HEADING, SignIn};
-use zone_core::llm::{AgentKind, CliSettings, Credential, LlmBackend};
+use zone_core::llm::{AgentKind, CliSettings, Credential, LlmBackend, Session};
 
 use crate::config::Config;
+use crate::db::agent_logins;
 use crate::db::ai_settings::EffectiveAiSettings;
 use crate::services::endpoint::Origin;
 use crate::services::login::credential::{self, Login};
+use crate::services::login::identity::LoginIdentity;
+use crate::services::login::router::{self, Chosen};
 use crate::services::route::Unusable;
 use crate::state::AppState;
 
@@ -50,6 +60,14 @@ pub enum Error {
         "The {agent} CLI is not signed in for this organization. An organization admin can sign in under Organization Settings > AI Settings."
     )]
     SignedOut { agent: AgentKind },
+    #[error(
+        "Every sign-in of this organization has reached its usage limit; {}.",
+        resetting(*.resets_at)
+    )]
+    Limited {
+        agent: AgentKind,
+        resets_at: Option<DateTime<Utc>>,
+    },
     #[error("The {agent} CLI's sign-in could not be renewed: {message}. {REMEDY}")]
     Renewal { agent: AgentKind, message: String },
     #[error("Could not prepare the {agent} CLI's state directory: {message}")]
@@ -65,14 +83,36 @@ pub enum Error {
 }
 
 impl Error {
-    fn login(agent: AgentKind, error: credential::Error) -> Self {
+    /// Why one of `agent`'s logins could not be made ready for a turn.
+    pub fn resolving(agent: AgentKind, error: credential::Error) -> Self {
         match error {
             credential::Error::Database(source) => Self::Database { agent, source },
+            credential::Error::Deleted => Self::SignedOut { agent },
+            credential::Error::Home(message) => Self::Home { agent, message },
             error => Self::Renewal {
                 agent,
                 message: error.to_string(),
             },
         }
+    }
+
+    fn routing(agent: AgentKind, error: router::Error) -> Self {
+        match error {
+            router::Error::None => Self::SignedOut { agent },
+            router::Error::Exhausted { resets_at } => Self::Limited { agent, resets_at },
+            router::Error::Unresolved { agent, source } => Self::resolving(agent, source),
+            router::Error::Database(source) => Self::Database { agent, source },
+        }
+    }
+}
+
+fn resetting(resets_at: Option<DateTime<Utc>>) -> String {
+    match resets_at {
+        Some(at) => format!(
+            "the earliest resets at {}",
+            at.to_rfc3339_opts(SecondsFormat::Secs, true)
+        ),
+        None => "none reports when it resets".to_string(),
     }
 }
 
@@ -89,58 +129,136 @@ pub fn instance(config: &Config) -> LlmBackend {
 
 /// The backend `settings` choose for one of `organization`'s workspaces.
 ///
-/// A coding agent provider runs that agent in the organization's own working
-/// directory, under the organization's sign-in, else under the host's when the
-/// instance allows that. A provider whose settings resolved to an endpoint of
-/// `origin` [`Origin::Settings`] runs over HTTP to it, and every other provider
-/// runs on the instance default.
+/// A coding agent provider runs on the login [`router::pick`] picks among the organization's,
+/// the configured agent's first, routed by `routing`: in that login's own home and the
+/// organization's working directory for its agent. With no login at all it runs under the
+/// host's sign-in when the instance allows that, and never when every login is exhausted. A
+/// provider whose settings resolved to an endpoint of `origin` [`Origin::Settings`] runs over
+/// HTTP to it, and every other provider runs on the instance default.
 pub async fn for_settings(
     state: &AppState,
     organization: Uuid,
     settings: &EffectiveAiSettings,
     origin: Origin,
-) -> Result<LlmBackend, Error> {
+    routing: Routing<'_>,
+) -> Result<Resolved, Error> {
     let config = state.config();
     let Some(agent) = settings.agent() else {
-        return Ok(match origin {
+        return Ok(Resolved::unrouted(match origin {
             Origin::Settings => LlmBackend::Http,
             Origin::Instance => instance(config),
-        });
+        }));
     };
-    let login = credential::resolve(state, organization, agent)
-        .await
-        .map_err(|error| Error::login(agent, error))?;
-    if login.is_none() && !config.agents.host_login {
-        return Err(Error::SignedOut { agent });
+    let chosen =
+        match router::pick(state, organization, agent, routing.exclude, routing.sticky).await {
+            Ok(chosen) => chosen,
+            Err(router::Error::None) if config.agents.host_login => {
+                return host(config, organization, agent);
+            }
+            Err(error) => return Err(Error::routing(agent, error)),
+        };
+    let resolved = on_login(config, organization, &chosen, None)?;
+    if routing.touch {
+        touch(state, chosen.login.id).await;
     }
+    Ok(resolved)
+}
 
+/// The backend `chosen`, one of `organization`'s logins, runs its turns on: its agent in the
+/// login's own home and the organization's working directory for that agent, resuming
+/// `session` when there is one.
+pub fn on_login(
+    config: &Config,
+    organization: Uuid,
+    chosen: &Chosen,
+    session: Option<Session>,
+) -> Result<Resolved, Error> {
+    let agent = chosen.agent;
     let work = config.agents.work(organization, agent);
-    let home = config
+    let cli = executed(
+        config,
+        agent,
+        CliSettings::default()
+            .with_working_directory(work)
+            .with_sign_in(SignIn::Organization),
+    );
+    let cli = match &chosen.resolved {
+        Login::Claude { token } => {
+            let home = config
+                .agents
+                .create_login_home(organization, agent, chosen.login.id)
+                .map_err(|error| Error::Home {
+                    agent,
+                    message: format!(
+                        "{}: {error}",
+                        config
+                            .agents
+                            .login_home(organization, agent, chosen.login.id)
+                            .display()
+                    ),
+                })?;
+            let variable = agent.token().ok_or(Error::SignedOut { agent })?;
+            homed(cli, agent, &home)?.with_credential(Credential::key(variable, token.clone()))
+        }
+        Login::Codex { home } => homed(cli, agent, home)?,
+    };
+    drop(session);
+    Ok(Resolved {
+        backend: LlmBackend::cli(agent, prepared(config, agent, cli)),
+        login: Some(identity(chosen)),
+    })
+}
+
+/// `agent` under the host's own sign-in, in the organization's working directory for it.
+fn host(config: &Config, organization: Uuid, agent: AgentKind) -> Result<Resolved, Error> {
+    let work = config.agents.work(organization, agent);
+    config
         .agents
         .create_home(organization, agent)
         .map_err(|error| Error::Home {
             agent,
             message: format!("{}: {error}", work.display()),
         })?;
-    let sign_in = match login {
-        Some(_) => SignIn::Organization,
-        None => SignIn::Host,
-    };
-    let mut cli = CliSettings::default()
-        .with_working_directory(work)
-        .with_sign_in(sign_in);
-    if let Some(executable) = overridden(config, agent) {
-        cli = cli.with_executable(executable);
+    let cli = executed(
+        config,
+        agent,
+        CliSettings::default()
+            .with_working_directory(work)
+            .with_sign_in(SignIn::Host),
+    );
+    Ok(Resolved::unrouted(LlmBackend::cli(
+        agent,
+        prepared(config, agent, cli),
+    )))
+}
+
+fn identity(chosen: &Chosen) -> LoginIdentity {
+    let login = &chosen.login;
+    LoginIdentity {
+        id: login.id,
+        agent: chosen.agent,
+        label: login
+            .label
+            .clone()
+            .or_else(|| login.account.clone())
+            .unwrap_or_else(|| chosen.agent.to_string()),
     }
-    let cli = match login {
-        Some(Login::Claude { token }) => {
-            let variable = agent.token().ok_or(Error::SignedOut { agent })?;
-            homed(cli, agent, &home)?.with_credential(Credential::key(variable, token))
-        }
-        Some(Login::Codex { home }) => homed(cli, agent, &home)?,
-        None => cli,
-    };
-    Ok(LlmBackend::cli(agent, prepared(config, agent, cli)))
+}
+
+/// Records that a session started on `login`. A record that fails costs only the order logins
+/// are tried in, so the session starts anyway.
+async fn touch(state: &AppState, login: Uuid) {
+    if let Err(error) = agent_logins::touch(state.db(), login, Utc::now()).await {
+        tracing::warn!(%login, %error, "Could not record that a session started on the login");
+    }
+}
+
+/// `settings` running the binary the environment names for `agent`, when it names one.
+fn executed(config: &Config, agent: AgentKind, settings: CliSettings) -> CliSettings {
+    match overridden(config, agent) {
+        Some(executable) => settings.with_executable(executable),
+        None => settings,
+    }
 }
 
 /// A failure a client reported, and whether it was a coding agent's sign-in.
@@ -266,6 +384,7 @@ mod tests {
     use crate::services::endpoint::testing::settings;
     use crate::services::login::claude::Tokens;
     use crate::services::route::Route;
+    use crate::workers::auto_project::review::model::Venue;
 
     const ACCESS: &str = "fake-claude-access-token";
     const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
@@ -348,9 +467,14 @@ mod tests {
             AppState::new(config, self.pool.clone(), None)
         }
 
-        async fn sign_in_claude(&self, state: &AppState, expires_in: TimeDelta) {
+        async fn sign_in_claude(&self, state: &AppState, expires_in: TimeDelta) -> Uuid {
+            self.add_claude(state, ACCESS, expires_in).await
+        }
+
+        /// A Claude login on `access`, beside any the organization has.
+        async fn add_claude(&self, state: &AppState, access: &str, expires_in: TimeDelta) -> Uuid {
             let tokens = Tokens {
-                access: SecretValue::new(ACCESS),
+                access: SecretValue::new(access),
                 refresh: None,
                 expires_at: Utc::now() + expires_in,
                 issued_at: None,
@@ -358,17 +482,14 @@ mod tests {
                 subscription: None,
             };
             let sealed = tokens.seal(state.encryption_key()).expect("tokens to seal");
-            self.store(AgentKind::Claude, Some(&sealed)).await;
+            self.store(AgentKind::Claude, Some(&sealed)).await
         }
 
-        async fn sign_in_codex(&self) {
-            self.store(AgentKind::Codex, None).await;
+        async fn sign_in_codex(&self) -> Uuid {
+            self.store(AgentKind::Codex, None).await
         }
 
-        async fn store(&self, agent: AgentKind, credential: Option<&str>) {
-            agent_logins::delete_all(&self.pool, self.organization, agent.as_str())
-                .await
-                .expect("the login it replaces is removed");
+        async fn store(&self, agent: AgentKind, credential: Option<&str>) -> Uuid {
             agent_logins::insert(
                 &self.pool,
                 &Insert {
@@ -381,14 +502,20 @@ mod tests {
                 },
             )
             .await
-            .expect("a stored login");
+            .expect("a stored login")
+            .id
         }
 
-        fn home(&self, agent: AgentKind) -> PathBuf {
+        /// The organization's own directory for `agent`.
+        fn root(&self, agent: AgentKind) -> PathBuf {
             self.agents
                 .path()
                 .join(self.organization.to_string())
                 .join(agent.as_str())
+        }
+
+        fn login_home(&self, agent: AgentKind, login: Uuid) -> PathBuf {
+            self.root(agent).join("logins").join(login.to_string())
         }
 
         async fn resolve(&self, state: &AppState) -> Result<LlmBackend, Error> {
@@ -396,6 +523,38 @@ mod tests {
                 .await
                 .backend(state)
                 .await
+        }
+
+        async fn route(&self, state: &AppState) -> Result<Resolved, Error> {
+            Route::for_workspace(state, self.workspace)
+                .await
+                .resolve(state, &[], None)
+                .await
+        }
+
+        async fn last_used_at(&self, login: Uuid) -> Option<chrono::DateTime<Utc>> {
+            agent_logins::get(&self.pool, login)
+                .await
+                .expect("the login to be readable")
+                .expect("the login to be there")
+                .last_used_at
+        }
+
+        async fn chosen(&self, state: &AppState, login: Uuid) -> Chosen {
+            let row = agent_logins::get(&self.pool, login)
+                .await
+                .expect("the login to be readable")
+                .expect("the login to be there");
+            let agent = AgentKind::named(&row.agent).expect("an agent Zone drives");
+            let resolved = credential::resolve(state, &row)
+                .await
+                .expect("the login to resolve");
+            Chosen {
+                login: row,
+                agent,
+                resolved,
+                snapshot: None,
+            }
         }
 
         async fn remove(&self) {
@@ -519,7 +678,7 @@ mod tests {
     async fn an_organization_on_claude_code_runs_claude_under_its_own_sign_in() {
         let fixture = Fixture::new(PROVIDER_CLAUDE_CODE).await;
         let state = fixture.state(fixture.config());
-        fixture.sign_in_claude(&state, TimeDelta::hours(1)).await;
+        let login = fixture.sign_in_claude(&state, TimeDelta::hours(1)).await;
 
         let resolved = fixture.resolve(&state).await;
         fixture.remove().await;
@@ -529,13 +688,13 @@ mod tests {
         assert_eq!(settings.credential.variable(), Some(CLAUDE_TOKEN));
         assert_eq!(settings.credential.expose(), Some(ACCESS));
         assert_eq!(settings.sign_in, SignIn::Organization);
-        let home = fixture.home(AgentKind::Claude);
+        let home = fixture.login_home(AgentKind::Claude, login);
         assert_eq!(
             variable(&settings, CLAUDE_CONFIG_DIR).map(PathBuf::from),
             Some(home.clone())
         );
         assert_defaults(AgentKind::Claude, &settings);
-        let work = home.join("work");
+        let work = fixture.root(AgentKind::Claude).join("work");
         assert_eq!(settings.working_directory.as_deref(), Some(work.as_path()));
         assert_private(&home);
         assert_private(&work);
@@ -546,7 +705,7 @@ mod tests {
     async fn a_workspace_on_codex_runs_its_organizations_codex_sign_in() {
         let fixture = Fixture::self_hosted().await;
         fixture.override_workspace(PROVIDER_CODEX).await;
-        fixture.sign_in_codex().await;
+        let login = fixture.sign_in_codex().await;
         let mut config = fixture.config();
         config.agents.codex_sandbox = CodexSandbox::DangerFullAccess;
         let state = fixture.state(config);
@@ -558,13 +717,14 @@ mod tests {
         assert_eq!(agent, AgentKind::Codex);
         assert!(matches!(settings.credential, Credential::Inherited));
         assert_eq!(settings.sign_in, SignIn::Organization);
-        let home = fixture.home(AgentKind::Codex);
+        let home = fixture.login_home(AgentKind::Codex, login);
         assert_eq!(
             variable(&settings, CODEX_HOME).map(PathBuf::from),
             Some(home.clone())
         );
+        assert_private(&home);
         assert_eq!(variable(&settings, CLAUDE_CONFIG_DIR), None);
-        let work = home.join("work");
+        let work = fixture.root(AgentKind::Codex).join("work");
         assert_eq!(settings.working_directory.as_deref(), Some(work.as_path()));
         assert_private(&work);
         assert_eq!(settings.sandbox, CodexSandbox::DangerFullAccess);
@@ -595,7 +755,7 @@ mod tests {
                 "a home would hide the host's own sign-in"
             );
         }
-        let work = fixture.home(AgentKind::Claude).join("work");
+        let work = fixture.root(AgentKind::Claude).join("work");
         assert_eq!(settings.working_directory.as_deref(), Some(work.as_path()));
         assert_private(&work);
         assert_defaults(AgentKind::Claude, &settings);
@@ -737,6 +897,154 @@ mod tests {
             .await;
 
         assert!(matches!(resolved, Ok(LlmBackend::Http)), "{resolved:?}");
+    }
+
+    #[tokio::test]
+    async fn every_login_of_an_organization_shares_one_working_directory() {
+        let fixture = Fixture::new(PROVIDER_CLAUDE_CODE).await;
+        let config = fixture.config();
+        let state = fixture.state(config.clone());
+        let first = fixture
+            .add_claude(&state, "first-access", TimeDelta::hours(8))
+            .await;
+        let second = fixture
+            .add_claude(&state, "second-access", TimeDelta::hours(8))
+            .await;
+        let codex = fixture.sign_in_codex().await;
+
+        let mut resolved = Vec::new();
+        for login in [first, second, codex] {
+            let chosen = fixture.chosen(&state, login).await;
+            resolved.push((
+                login,
+                on_login(&config, fixture.organization, &chosen, None).expect("a backend"),
+            ));
+        }
+        fixture.remove().await;
+
+        for (login, resolved) in resolved {
+            let identity = resolved.login.expect("a login's own identity");
+            assert_eq!(identity.id, login);
+            let (agent, settings) = cli(Ok(resolved.backend));
+            assert_eq!(identity.agent, agent);
+            assert_eq!(
+                identity.label,
+                agent.as_str(),
+                "an unlabelled login is named by its agent"
+            );
+            let work = fixture.root(agent).join("work");
+            assert_eq!(settings.working_directory.as_deref(), Some(work.as_path()));
+            assert_eq!(
+                variable(&settings, agent.home()).map(PathBuf::from),
+                Some(fixture.login_home(agent, login)),
+                "each login keeps its own home"
+            );
+            assert_eq!(settings.sign_in, SignIn::Organization);
+            assert_defaults(agent, &settings);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_organization_whose_logins_are_all_exhausted_is_limited_not_signed_out_and_never_falls_back_to_the_host()
+     {
+        let fixture = Fixture::new(PROVIDER_CLAUDE_CODE).await;
+        let mut config = fixture.config();
+        config.agents.host_login = true;
+        let state = fixture.state(config);
+        let login = fixture.sign_in_claude(&state, TimeDelta::hours(8)).await;
+        let resets_at = Utc::now() + TimeDelta::hours(2);
+        agent_logins::exhaust(&fixture.pool, login, resets_at)
+            .await
+            .expect("the login to be exhausted");
+
+        let resolved = fixture.route(&state).await;
+        fixture.remove().await;
+
+        match resolved {
+            Err(
+                error @ Error::Limited {
+                    agent: AgentKind::Claude,
+                    resets_at: Some(at),
+                },
+            ) => {
+                assert_eq!(at.timestamp_micros(), resets_at.timestamp_micros());
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "Every sign-in of this organization has reached its usage limit; the \
+                         earliest resets at {}.",
+                        at.to_rfc3339_opts(SecondsFormat::Secs, true)
+                    )
+                );
+            }
+            other => panic!("expected the organization to be limited, got {other:?}"),
+        }
+        assert_eq!(
+            Error::Limited {
+                agent: AgentKind::Codex,
+                resets_at: None,
+            }
+            .to_string(),
+            "Every sign-in of this organization has reached its usage limit; none reports when \
+             it resets."
+        );
+    }
+
+    #[tokio::test]
+    async fn the_hosts_login_has_no_identity() {
+        let fixture = Fixture::new(PROVIDER_CLAUDE_CODE).await;
+        let mut config = fixture.config();
+        config.agents.host_login = true;
+        let state = fixture.state(config);
+
+        let host = fixture.route(&state).await.expect("the host's sign-in");
+        let login = fixture.sign_in_claude(&state, TimeDelta::hours(8)).await;
+        let own = fixture
+            .route(&state)
+            .await
+            .expect("the organization's login");
+        fixture.remove().await;
+
+        assert_eq!(host.login, None);
+        assert_eq!(cli(Ok(host.backend)).1.sign_in, SignIn::Host);
+        assert_eq!(own.login.map(|identity| identity.id), Some(login));
+    }
+
+    /// Titles, pull requests and reviews ask for a backend between sessions, and only a session
+    /// or run that starts on a login records it as used.
+    #[tokio::test]
+    async fn title_and_review_routing_never_touch_a_login() {
+        let fixture = Fixture::new(PROVIDER_CLAUDE_CODE).await;
+        let state = fixture.state(fixture.config());
+        let login = fixture.sign_in_claude(&state, TimeDelta::hours(8)).await;
+        let route = Route::for_workspace(&state, fixture.workspace).await;
+
+        let titled = route.backend(&state).await;
+        let reviewed = Venue::for_workspace(&state, fixture.workspace).await;
+        let classified = route.backend_for(&state, Some(login)).await;
+        let untouched = fixture.last_used_at(login).await;
+        let started = route.resolve(&state, &[], None).await;
+        let touched = fixture.last_used_at(login).await;
+        fixture.remove().await;
+
+        assert_eq!(cli(titled).0, AgentKind::Claude);
+        assert!(reviewed.is_ok(), "the review found no venue");
+        assert_eq!(cli(classified).0, AgentKind::Claude);
+        assert_eq!(
+            untouched, None,
+            "routing between sessions recorded a login as used"
+        );
+        assert_eq!(
+            started
+                .expect("a session's backend")
+                .login
+                .map(|identity| identity.id),
+            Some(login)
+        );
+        assert!(
+            touched.is_some(),
+            "a session started on the login unrecorded"
+        );
     }
 
     /// A CLI's failure as the chat loop reports it: zone_core redacts it, and

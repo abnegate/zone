@@ -15,5 +15,6 @@ pub mod oauth;
 pub mod pending;
 pub mod probe;
 mod receipts;
+pub mod router;
 pub mod status;
 pub mod usage;

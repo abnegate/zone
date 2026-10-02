@@ -2637,7 +2637,7 @@ async fn prepare_message(
 }
 
 /// The backend a workspace's classifier runs on, with `config` naming the
-/// model it classifies with there.
+/// model it classifies with there: the login the chat runs on, while it can.
 async fn classifying(
     state: &AppState,
     workspace_id: Uuid,
@@ -2646,14 +2646,24 @@ async fn classifying(
     endpoint: &Endpoint,
     config: &mut crate::config::ComfyUiConfig,
 ) -> LlmBackend {
-    let backend = route.backend(state).await.unwrap_or_else(|error| {
-        tracing::warn!(
-            %workspace_id,
-            %error,
-            "Could not resolve the workspace's model backend; classifying on the instance's"
-        );
-        crate::services::backend::instance(state.config())
-    });
+    let sticky = match chats::session(state.db(), chat.id).await {
+        Ok(session) => session.and_then(|session| session.login),
+        Err(error) => {
+            tracing::warn!(chat_id = %chat.id, %error, "Could not read the chat's login; classifying on any");
+            None
+        }
+    };
+    let backend = route
+        .backend_for(state, sticky)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                %workspace_id,
+                %error,
+                "Could not resolve the workspace's model backend; classifying on the instance's"
+            );
+            crate::services::backend::instance(state.config())
+        });
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
@@ -4339,6 +4349,112 @@ mod tests {
                         .work(organization.id, AgentKind::Claude)
                 )
             );
+        }
+
+        /// A Claude login of the organization on `access`, with `headroom` percent of its usage
+        /// left.
+        async fn claude_login(
+            state: &AppState,
+            organization: &Organization,
+            access: &str,
+            headroom: f64,
+        ) -> Uuid {
+            let sealed = crate::services::login::claude::Tokens {
+                access: abnegate_secret::SecretValue::new(access),
+                refresh: None,
+                expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(8),
+                issued_at: None,
+                scope: "user:inference".to_string(),
+                subscription: None,
+            }
+            .seal(state.encryption_key())
+            .expect("tokens to seal");
+            let login = db::agent_logins::insert(
+                &organization.pool,
+                &db::agent_logins::Insert {
+                    organization_id: organization.id,
+                    agent: AgentKind::Claude.as_str(),
+                    account: Some(access),
+                    credential: Some(&sealed),
+                    label: Some(access),
+                    expires_at: None,
+                },
+            )
+            .await
+            .expect("a stored login")
+            .id;
+            db::agent_logins::observe(
+                &organization.pool,
+                login,
+                &crate::services::login::usage::Snapshot {
+                    windows: Vec::new(),
+                    headroom: Some(headroom),
+                    fetched_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .expect("the login's usage");
+            login
+        }
+
+        /// The token the classifier of an image turn on `organization`'s chat runs with.
+        async fn classified_on(state: &AppState, organization: &Organization) -> Option<String> {
+            let routing = prepare_message(
+                state,
+                organization.chat,
+                organization.workspace,
+                "generate an image of a lighthouse at dusk",
+                None,
+            )
+            .await;
+            let Ok(Routing::Image(_, LlmBackend::Cli { settings, .. }, _)) = routing else {
+                panic!("expected an image route carrying the organization's agent");
+            };
+            settings.credential.expose().map(str::to_string)
+        }
+
+        #[tokio::test]
+        async fn classifying_runs_on_the_chats_own_login() {
+            const TIGHT: &str = "tight-access";
+            const ROOMY: &str = "roomy-access";
+            let (organization, _agents, state) = routing_media_on_claude(None).await;
+            let tight = claude_login(&state, &organization, TIGHT, 10.0).await;
+            let roomy = claude_login(&state, &organization, ROOMY, 90.0).await;
+
+            let unsessioned = classified_on(&state, &organization).await;
+            db::chats::set_session(
+                &organization.pool,
+                organization.chat,
+                Some(&db::chats::ChatSession {
+                    login: Some(tight),
+                    id: Uuid::new_v4().to_string(),
+                    agent: AgentKind::Claude,
+                    entry: 0,
+                    prompt: None,
+                }),
+            )
+            .await
+            .expect("the chat's session");
+            let sessioned = classified_on(&state, &organization).await;
+            let mut used = Vec::new();
+            for login in [tight, roomy] {
+                used.push(
+                    db::agent_logins::get(&organization.pool, login)
+                        .await
+                        .expect("the login to be readable")
+                        .expect("the login to be there")
+                        .last_used_at,
+                );
+            }
+            organization.remove().await;
+
+            assert_eq!(unsessioned.as_deref(), Some(ROOMY));
+            assert_eq!(
+                sessioned.as_deref(),
+                Some(TIGHT),
+                "the classifier left the login the chat runs on"
+            );
+            assert_eq!(used, [None, None], "classifying recorded a login as used");
         }
 
         #[tokio::test]
