@@ -26,11 +26,12 @@ use crate::agent::question::{self, Question};
 use crate::agent::wait::{self, Waited, Waiting};
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
 use crate::config::ModelBackend;
-use crate::db::{task_tool_calls, tasks};
+use crate::db::{agent_logins, task_tool_calls, tasks};
 use crate::services::backend;
 use crate::services::chat::session::{self, RunContext};
 use crate::services::endpoint::Endpoint;
 use crate::services::login::credential::{self, Login};
+use crate::services::login::identity::LoginIdentity;
 use crate::services::route::{Reason, Route, Unusable};
 use crate::services::stages;
 use crate::state::AppState;
@@ -224,14 +225,23 @@ impl Fault {
     }
 
     /// The backend an attempt was to run on could not be resolved. Only a
-    /// database read can succeed on a later attempt: a sign-in that failed
-    /// needs an admin, and a state directory that cannot be made, an operator.
+    /// database read can succeed on a later attempt, and every login being
+    /// exhausted, once the earliest resets: a sign-in that failed needs an
+    /// admin, and a state directory that cannot be made, an operator.
     fn backend(error: backend::Error) -> Self {
         let failure = match error {
             backend::Error::Database { .. }
             | backend::Error::Unusable(Unusable {
                 reason: Reason::Unreadable,
             }) => Failure::Transient,
+            backend::Error::Limited { resets_at, .. } => Failure::RateLimited {
+                retry_after: resets_at.and_then(|resets_at| {
+                    resets_at
+                        .signed_duration_since(chrono::Utc::now())
+                        .to_std()
+                        .ok()
+                }),
+            },
             backend::Error::SignedOut { .. }
             | backend::Error::Renewal { .. }
             | backend::Error::Home { .. }
@@ -1021,7 +1031,12 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let plan_approval = task.require_plan_approval && !unattended;
     let workspace_id = task.workspace_id;
     let route = Route::for_workspace(state, workspace_id).await;
-    let resolved = route.backend(state).await;
+    let resolved = route.resolve(state, &[], None).await;
+    let login = resolved
+        .as_ref()
+        .ok()
+        .and_then(|resolved| resolved.login.clone());
+    let resolved = resolved.map(|resolved| resolved.backend);
     let Prepared {
         backend,
         endpoint,
@@ -1135,6 +1150,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let pool = state.db();
     let workspace = workspace_path.as_path();
     let backend = &backend;
+    let login = login.as_ref();
     let endpoint = &endpoint;
     let model = model.as_str();
     let task_prompt = task_prompt.as_str();
@@ -1149,7 +1165,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let result = run_with_policy(
         policy,
         move |_| async move {
-            let backend = refreshed(state, workspace_id, backend).await?;
+            let backend = refreshed(state, backend, login).await?;
             attempt_run(
                 state,
                 run_id,
@@ -1336,58 +1352,40 @@ async fn prepare(
 }
 
 /// The backend an attempt runs on: the one the run was prepared on, with the
-/// organization's Claude sign-in it carries resolved again, so a token renewed
-/// since the last attempt is the one this attempt hands its agent, and a
-/// sign-in the organization has since removed stops the run.
+/// Claude sign-in of the organization's `login` it carries resolved again, so a
+/// token renewed since the last attempt is the one this attempt hands its
+/// agent, and a login the organization has since signed out stops the run.
 ///
-/// Nothing the run does not use is read: an endpoint run reads nothing, a
+/// Nothing the run does not use is read: an endpoint run reads nothing, and a
 /// sign-in zone does not keep -- the host's, or codex's in its own home -- is
-/// its agent's to renew, and a run whose workspace has moved to another
-/// provider since finishes on the sign-in it began with. Settings that cannot
-/// be read say neither, so the attempt is retried.
+/// its agent's to renew. A login that cannot be read is retried.
 async fn refreshed(
     state: &AppState,
-    workspace: Uuid,
     prepared: &LlmBackend,
+    login: Option<&LoginIdentity>,
 ) -> Result<LlmBackend, Fault> {
     let LlmBackend::Cli { agent, settings } = prepared else {
         return Ok(prepared.clone());
     };
-    let (SignIn::Organization, Credential::Key { variable, .. }) =
-        (settings.sign_in, &settings.credential)
+    let (SignIn::Organization, Credential::Key { variable, .. }, Some(login)) =
+        (settings.sign_in, &settings.credential, login)
     else {
         return Ok(prepared.clone());
     };
-    let route = Route::for_workspace(state, workspace).await;
-    if let Err(unusable) = route.endpoint()
-        && unusable.reason == Reason::Unreadable
-    {
-        return Err(Fault::backend(backend::Error::Unusable(unusable)));
-    }
-    let Some(organization) = route.organization_on(*agent) else {
-        tracing::warn!(
-            %workspace,
-            %agent,
-            "The workspace left its run's agent during the run; the run keeps its own sign-in"
-        );
-        return Ok(prepared.clone());
-    };
-    let token = match credential::resolve(state, organization, *agent).await {
-        Ok(Some(Login::Claude { token })) => token,
-        Ok(Some(Login::Codex { .. })) => return Ok(prepared.clone()),
+    let row = match agent_logins::get(state.db(), login.id).await {
+        Ok(Some(row)) => row,
         Ok(None) => return Err(Fault::backend(backend::Error::SignedOut { agent: *agent })),
-        Err(credential::Error::Database(source)) => {
+        Err(source) => {
             return Err(Fault::backend(backend::Error::Database {
                 agent: *agent,
                 source,
             }));
         }
-        Err(error) => {
-            return Err(Fault::backend(backend::Error::Renewal {
-                agent: *agent,
-                message: error.to_string(),
-            }));
-        }
+    };
+    let token = match credential::resolve(state, &row).await {
+        Ok(Login::Claude { token }) => token,
+        Ok(Login::Codex { .. }) => return Ok(prepared.clone()),
+        Err(error) => return Err(Fault::backend(backend::Error::resolving(*agent, error))),
     };
     Ok(LlmBackend::cli(
         *agent,
@@ -6855,7 +6853,7 @@ mod cli_tests {
 
         /// The organization signs claude in on `access`, in place of any
         /// sign-in it had.
-        async fn sign_in(&self, state: &AppState, access: &str) {
+        async fn sign_in(&self, state: &AppState, access: &str) -> LoginIdentity {
             let sealed = Tokens {
                 access: SecretValue::new(access),
                 refresh: None,
@@ -6869,7 +6867,7 @@ mod cli_tests {
             agent_logins::delete_all(&self.pool, self.organization, AgentKind::Claude.as_str())
                 .await
                 .unwrap();
-            agent_logins::insert(
+            let login = agent_logins::insert(
                 &self.pool,
                 &Insert {
                     organization_id: self.organization,
@@ -6882,6 +6880,11 @@ mod cli_tests {
             )
             .await
             .unwrap();
+            LoginIdentity {
+                id: login.id,
+                agent: AgentKind::Claude,
+                label: AgentKind::Claude.to_string(),
+            }
         }
 
         /// The task names a repository no checkout can be made of.
@@ -7295,49 +7298,95 @@ mod cli_tests {
         )
     }
 
-    /// Settings that cannot be read say nothing about the agent the workspace
-    /// runs on, so the attempt is retried rather than run on a sign-in that may
-    /// since have been renewed or removed.
+    /// A login that cannot be read may since have been renewed or signed out,
+    /// so the attempt is retried rather than run on the sign-in it had.
     #[tokio::test]
-    async fn an_attempt_whose_settings_cannot_be_read_is_retried() {
+    async fn an_attempt_whose_login_cannot_be_read_is_retried() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgres://127.0.0.1:1/unreachable")
             .expect("a lazy pool that never connects");
         let state = AppState::new(crate::state::test_config(), pool, None);
+        let login = LoginIdentity {
+            id: Uuid::new_v4(),
+            agent: AgentKind::Claude,
+            label: "jake@example.com".to_string(),
+        };
 
-        let fault = refreshed(&state, Uuid::new_v4(), &signed_in("first-access"))
+        let fault = refreshed(&state, &signed_in("first-access"), Some(&login))
             .await
-            .expect_err("unreadable settings are no sign-in to keep");
+            .expect_err("an unreadable login is no sign-in to keep");
 
         assert_eq!(fault.failure, Failure::Transient, "{}", fault.message);
-        assert_eq!(
-            fault.message,
-            backend::Error::Unusable(Unusable {
-                reason: Reason::Unreadable
-            })
-            .to_string()
+        assert!(
+            fault
+                .message
+                .starts_with("Could not read the claude CLI's sign-in"),
+            "{}",
+            fault.message
         );
     }
 
-    /// Settings that are read and name another agent leave the run on the
-    /// sign-in it began with.
+    /// A run keeps the login it began on, even once its workspace has moved
+    /// to another agent, and each attempt runs on that login's current token.
     #[tokio::test]
-    async fn an_attempt_whose_workspace_left_its_agent_keeps_the_runs_sign_in() {
+    async fn an_attempt_whose_workspace_left_its_agent_keeps_the_runs_login() {
         let fixture = Fixture::new(false).await;
         let state = fixture.state(crate::state::test_config());
+        let login = fixture.sign_in(&state, "renewed-access").await;
         fixture.choose(PROVIDER_CODEX).await;
 
-        let backend = refreshed(&state, fixture.workspace, &signed_in("first-access"))
+        let backend = refreshed(&state, &signed_in("first-access"), Some(&login))
             .await
-            .expect("a workspace that left its agent keeps the run's sign-in");
+            .expect("a workspace that left its agent keeps the run's login");
+        let unrouted = refreshed(&state, &signed_in("first-access"), None)
+            .await
+            .expect("a run on no login keeps its sign-in");
+        fixture.remove().await;
 
         let LlmBackend::Cli { agent, settings } = backend else {
             panic!("the run left its coding agent");
         };
         assert_eq!(agent, AgentKind::Claude);
+        assert_eq!(settings.credential.expose(), Some("renewed-access"));
+        let LlmBackend::Cli { settings, .. } = unrouted else {
+            panic!("the run left its coding agent");
+        };
         assert_eq!(settings.credential.expose(), Some("first-access"));
-        fixture.remove().await;
+    }
+
+    /// Every login of the organization being exhausted is a rate limit that
+    /// lifts when the earliest of them resets, not a sign-in to fix.
+    #[test]
+    fn a_backend_whose_every_login_is_limited_waits_for_the_earliest_reset() {
+        let resets_at = Utc::now() + TimeDelta::minutes(30);
+
+        let fault = Fault::backend(backend::Error::Limited {
+            agent: AgentKind::Claude,
+            resets_at: Some(resets_at),
+        });
+        let unknown = Fault::backend(backend::Error::Limited {
+            agent: AgentKind::Claude,
+            resets_at: None,
+        });
+
+        let Failure::RateLimited {
+            retry_after: Some(retry_after),
+        } = fault.failure
+        else {
+            panic!("expected a rate limit, got {:?}", fault.failure);
+        };
+        assert!(
+            retry_after <= Duration::from_secs(30 * 60)
+                && retry_after > Duration::from_secs(29 * 60),
+            "{retry_after:?}"
+        );
+        assert!(
+            fault.message.contains("the earliest resets at"),
+            "{}",
+            fault.message
+        );
+        assert_eq!(unknown.failure, Failure::RateLimited { retry_after: None });
     }
 
     /// How many completions `provider` has been asked for.

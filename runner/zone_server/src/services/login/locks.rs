@@ -1,4 +1,4 @@
-//! One lock per organization, forgotten once nobody holds it or waits for it.
+//! One lock per id, an organization's or a login's, forgotten once nobody holds it or waits for it.
 
 use std::sync::Arc;
 
@@ -11,26 +11,26 @@ pub struct Locks {
     held: DashMap<Uuid, Arc<Mutex<()>>>,
 }
 
-/// The organization's lock, until it is dropped.
+/// The id's lock, until it is dropped.
 pub struct Guard<'a> {
     locks: &'a Locks,
-    organization: Uuid,
+    id: Uuid,
     guard: Option<OwnedMutexGuard<()>>,
 }
 
 impl Locks {
-    pub async fn lock(&self, organization: Uuid) -> Guard<'_> {
-        let lock = self.held.entry(organization).or_default().value().clone();
+    pub async fn lock(&self, id: Uuid) -> Guard<'_> {
+        let lock = self.held.entry(id).or_default().value().clone();
         Guard {
             locks: self,
-            organization,
+            id,
             guard: Some(lock.lock_owned().await),
         }
     }
 
     #[cfg(test)]
-    pub fn kept(&self, organization: Uuid) -> bool {
-        self.held.contains_key(&organization)
+    pub fn kept(&self, id: Uuid) -> bool {
+        self.held.contains_key(&id)
     }
 }
 
@@ -41,7 +41,7 @@ impl Drop for Guard<'_> {
         drop(self.guard.take());
         self.locks
             .held
-            .remove_if(&self.organization, |_, lock| Arc::strong_count(lock) == 1);
+            .remove_if(&self.id, |_, lock| Arc::strong_count(lock) == 1);
     }
 }
 
