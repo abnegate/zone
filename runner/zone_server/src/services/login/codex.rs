@@ -1,9 +1,12 @@
-//! Codex's own device-code sign-in, run against one organization's `CODEX_HOME`.
+//! Codex's own device-code sign-in, run beside an organization's codex logins, each in a
+//! `CODEX_HOME` of its own.
 
+pub mod account;
 mod device;
 mod error;
 mod limits;
 mod output;
+pub mod plan;
 mod process;
 mod prompt;
 mod staging;
@@ -16,12 +19,15 @@ use std::path::Path;
 use std::process::Stdio;
 
 use tokio::process::Command;
+use uuid::Uuid;
 use zone_core::llm::AgentKind;
 
+pub use account::Account;
 pub use device::Device;
 pub use error::Error;
 pub use limits::Limits;
 pub use prompt::Prompt;
+pub use staging::Staging;
 
 pub(super) use output::Output;
 
@@ -29,28 +35,31 @@ pub(super) const CREDENTIALS: &str = "auth.json";
 const LOGIN: &[&str] = &["login", "--device-auth"];
 const LOGOUT: &[&str] = &["logout"];
 
-/// Starts `codex login --device-auth` for the organization whose `CODEX_HOME` is `home`, which the
-/// caller has created, and returns once codex has printed the link and code a person must enter.
+/// Starts `codex login --device-auth` as sign-in `attempt` for the organization whose codex logins
+/// live under `root`, which the caller has created, and returns once codex has printed the link and
+/// code a person must enter.
 ///
-/// `environment` is the child's whole environment. Codex runs in a staging directory inside
-/// `home`, because it deletes any login in its `CODEX_HOME` before printing a code: the
-/// organization's existing login is replaced only when the new one succeeds. One device sign-in
-/// may run per home at a time.
+/// `environment` is the child's whole environment. Codex runs in a staging directory of its own
+/// under `root`, because it deletes any login in its `CODEX_HOME` before printing a code: no login
+/// is touched until the caller promotes the new one into its home. One device sign-in may run per
+/// root at a time.
 pub async fn device(
     executable: &Path,
-    home: &Path,
+    root: &Path,
+    attempt: Uuid,
     environment: &BTreeMap<String, String>,
 ) -> Result<Device, Error> {
-    device_with(executable, home, environment, Limits::default()).await
+    device_with(executable, root, attempt, environment, Limits::default()).await
 }
 
 pub async fn device_with(
     executable: &Path,
-    home: &Path,
+    root: &Path,
+    attempt: Uuid,
     environment: &BTreeMap<String, String>,
     limits: Limits,
 ) -> Result<Device, Error> {
-    Device::start(executable, home, environment, limits).await
+    Device::start(executable, root, attempt, environment, limits).await
 }
 
 /// Runs `codex logout` against `home`, which revokes the login upstream and deletes it.
@@ -74,6 +83,17 @@ pub async fn logout(
 pub fn signed_in(home: &Path) -> bool {
     fs::symlink_metadata(home.join(CREDENTIALS))
         .is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+/// The account of the login in `home`, when it holds one that names its ChatGPT account.
+pub fn signed_in_as(home: &Path) -> Option<Account> {
+    if !signed_in(home) {
+        return None;
+    }
+    fs::read_to_string(home.join(CREDENTIALS))
+        .ok()
+        .as_deref()
+        .and_then(account::account)
 }
 
 pub(super) fn command(
@@ -126,12 +146,16 @@ mod tests {
 
     fn home(directory: &TempDir) -> PathBuf {
         let home = directory.path().join("home");
-        fs::create_dir(&home).expect("the organization's home");
+        fs::create_dir(&home).expect("the organization's codex root");
         home
     }
 
     fn staging(home: &Path) -> PathBuf {
         home.join(".login")
+    }
+
+    fn attempt(home: &Path, attempt: Uuid) -> PathBuf {
+        staging(home).join(attempt.to_string())
     }
 
     fn login() -> String {
@@ -152,7 +176,7 @@ mod tests {
         environment
     }
 
-    async fn finish(outcome: JoinHandle<Result<(), Error>>) -> Result<(), Error> {
+    async fn finish(outcome: JoinHandle<Result<Staging, Error>>) -> Result<Staging, Error> {
         timeout(WAIT, outcome)
             .await
             .expect("the sign-in to finish")
@@ -171,7 +195,7 @@ mod tests {
         );
         let before = Utc::now();
 
-        let device = device(&codex, &home, &environment())
+        let device = device(&codex, &home, Uuid::new_v4(), &environment())
             .await
             .expect("a prompt");
         let after = Utc::now();
@@ -199,7 +223,7 @@ mod tests {
             let stderr = capture(&directory, "stderr", refusal);
             let codex = fake(&directory, &login(), &format!("cat '{stderr}' >&2\nexit 1"));
 
-            let error = device(&codex, &home, &environment())
+            let error = device(&codex, &home, Uuid::new_v4(), &environment())
                 .await
                 .expect_err("a refusal");
 
@@ -214,9 +238,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_completed_login_moves_codexs_credentials_into_the_home() {
+    async fn a_completed_login_is_staged_until_it_is_promoted_into_its_home() {
         let directory = TempDir::new().expect("a temporary directory");
         let home = home(&directory);
+        let login_home = home.join("logins").join("one");
+        fs::create_dir_all(&login_home).expect("the login's home");
+        let started = Uuid::new_v4();
         let prompt = capture(&directory, "prompt", SUCCESS_PROMPT);
         let stderr = capture(&directory, "stderr", SUCCESS);
         let written = capture(&directory, "auth.json", WRITTEN.as_bytes());
@@ -234,30 +261,37 @@ mod tests {
             prompt,
             outcome,
             cancel,
-        } = device(&codex, &home, &organization(&home))
+        } = device(&codex, &home, started, &organization(&home))
             .await
             .expect("a prompt");
-        let result = finish(outcome).await;
+        let staged = finish(outcome).await.expect("a saved login");
         drop(cancel);
 
         assert_eq!(prompt.user_code, "FXTR-9Z9Z9");
-        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(staged.path(), attempt(&home, started));
         assert_eq!(
             fs::read_to_string(record).expect("the home codex was given"),
-            staging(&home).display().to_string(),
-            "codex saved its login straight into the organization's home"
+            attempt(&home, started).display().to_string(),
+            "codex saved its login straight into a login's home"
         );
+        assert!(
+            !signed_in(&login_home),
+            "the login reached a home before it was promoted"
+        );
+        staged.promote(&login_home).expect("the login promoted");
+        drop(staged);
         assert_eq!(
-            fs::read_to_string(home.join(CREDENTIALS)).expect("the promoted login"),
+            fs::read_to_string(login_home.join(CREDENTIALS)).expect("the promoted login"),
             WRITTEN
         );
-        let mode = fs::metadata(home.join(CREDENTIALS))
+        let mode = fs::metadata(login_home.join(CREDENTIALS))
             .expect("the promoted login")
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
         assert!(!staging(&home).exists(), "the staging directory was left");
-        assert!(signed_in(&home));
+        assert!(signed_in(&login_home));
+        assert!(!signed_in(&home), "the login landed in the codex root");
     }
 
     #[tokio::test]
@@ -272,7 +306,7 @@ mod tests {
             &format!("{REVOKE}\ncat '{stderr}' >&2\nexit 1"),
         );
 
-        let error = device(&codex, &home, &organization(&home))
+        let error = device(&codex, &home, Uuid::new_v4(), &organization(&home))
             .await
             .expect_err("a refusal");
 
@@ -306,10 +340,12 @@ mod tests {
             ),
         );
 
-        let device = device(&codex, &home, &organization(&home))
+        let started = Uuid::new_v4();
+        let device = device(&codex, &home, started, &organization(&home))
             .await
             .expect("a prompt");
-        let mode = fs::metadata(staging(&home)).map(|metadata| metadata.permissions().mode());
+        let mode =
+            fs::metadata(attempt(&home, started)).map(|metadata| metadata.permissions().mode());
         device.cancel.send(()).expect("the sign-in to be running");
         let result = finish(device.outcome).await;
 
@@ -349,7 +385,7 @@ mod tests {
 
         let Device {
             outcome, cancel, ..
-        } = device(&codex, &home, &environment())
+        } = device(&codex, &home, Uuid::new_v4(), &environment())
             .await
             .expect("a prompt");
         drop(cancel);
@@ -386,7 +422,7 @@ mod tests {
 
         let Device {
             outcome, cancel, ..
-        } = device_with(&codex, &home, &organization(&home), limits)
+        } = device_with(&codex, &home, Uuid::new_v4(), &organization(&home), limits)
             .await
             .expect("a prompt");
         let result = finish(outcome).await;
@@ -424,7 +460,7 @@ mod tests {
 
             let Device {
                 outcome, cancel, ..
-            } = device(&codex, &home, &environment())
+            } = device(&codex, &home, Uuid::new_v4(), &environment())
                 .await
                 .expect("a prompt");
             let result = finish(outcome).await;
@@ -443,8 +479,9 @@ mod tests {
     async fn a_clean_exit_that_saved_nothing_never_promotes_a_stale_login() {
         let directory = TempDir::new().expect("a temporary directory");
         let home = home(&directory);
-        fs::create_dir(staging(&home)).expect("a staging directory left by a crash");
-        fs::write(staging(&home).join(CREDENTIALS), EXISTING).expect("a stale login");
+        let crashed = attempt(&home, Uuid::new_v4());
+        fs::create_dir_all(&crashed).expect("a staging directory left by a crash");
+        fs::write(crashed.join(CREDENTIALS), EXISTING).expect("a stale login");
         let prompt = capture(&directory, "prompt", SUCCESS_PROMPT);
         let stderr = capture(&directory, "stderr", SUCCESS);
         let codex = fake(
@@ -455,7 +492,7 @@ mod tests {
 
         let Device {
             outcome, cancel, ..
-        } = device(&codex, &home, &environment())
+        } = device(&codex, &home, Uuid::new_v4(), &environment())
             .await
             .expect("a prompt");
         let result = finish(outcome).await;
@@ -487,7 +524,7 @@ mod tests {
             ..Limits::default()
         };
 
-        let error = device_with(&codex, &home, &environment(), limits)
+        let error = device_with(&codex, &home, Uuid::new_v4(), &environment(), limits)
             .await
             .expect_err("no prompt");
 
@@ -509,7 +546,7 @@ mod tests {
             "head -c 5000 /dev/zero | tr '\\0' 'x'\necho\nexec sleep 60",
         );
 
-        let error = device(&codex, &home, &environment())
+        let error = device(&codex, &home, Uuid::new_v4(), &environment())
             .await
             .expect_err("no prompt");
 
@@ -526,7 +563,7 @@ mod tests {
         let home = home(&directory);
         let codex = fake(&directory, &login(), "exit 3");
 
-        let error = device(&codex, &home, &environment())
+        let error = device(&codex, &home, Uuid::new_v4(), &environment())
             .await
             .expect_err("no prompt");
 
@@ -550,12 +587,14 @@ mod tests {
         let mut given = organization(&home);
         given.insert("ZONE_LOGIN_TEST".to_string(), "kept".to_string());
 
-        let _ = device(&codex, &home, &given).await;
+        let started = Uuid::new_v4();
+
+        let _ = device(&codex, &home, started, &given).await;
 
         let mut expected = given.clone();
         expected.insert(
             AgentKind::Codex.home().to_string(),
-            staging(&home).display().to_string(),
+            attempt(&home, started).display().to_string(),
         );
         assert!(
             std::env::var_os("CARGO_MANIFEST_DIR").is_some(),
@@ -570,7 +609,7 @@ mod tests {
         let home = home(&directory);
         let missing = Path::new("/nonexistent/zone/codex");
 
-        let error = device(missing, &home, &environment())
+        let error = device(missing, &home, Uuid::new_v4(), &environment())
             .await
             .expect_err("a missing codex");
 

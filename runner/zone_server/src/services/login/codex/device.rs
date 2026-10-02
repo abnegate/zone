@@ -10,6 +10,7 @@ use tokio::process::ChildStdout;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout_at};
+use uuid::Uuid;
 use zone_core::llm::AgentKind;
 use zone_core::llm::provider::{Frame, Lines};
 
@@ -27,9 +28,9 @@ const CANCELLED: &str = "The sign-in was cancelled";
 #[derive(Debug)]
 pub struct Device {
     pub prompt: Prompt,
-    /// Resolves once codex has exited or been stopped and its staging directory is gone. `Ok` only
-    /// when the new login has replaced the organization's.
-    pub outcome: JoinHandle<Result<(), Error>>,
+    /// Resolves once codex has exited or been stopped. `Ok` holds the login codex saved, for the
+    /// caller to promote into its home; any other ending has already removed the staging directory.
+    pub outcome: JoinHandle<Result<Staging, Error>>,
     /// Sending on it, or dropping it, stops codex and discards the attempt.
     pub cancel: oneshot::Sender<()>,
 }
@@ -37,11 +38,12 @@ pub struct Device {
 impl Device {
     pub(super) async fn start(
         executable: &Path,
-        home: &Path,
+        root: &Path,
+        attempt: Uuid,
         environment: &BTreeMap<String, String>,
         limits: Limits,
     ) -> Result<Self, Error> {
-        let staging = Staging::create(home)?;
+        let staging = Staging::create(root, attempt)?;
         let mut command = command(executable, LOGIN, environment);
         command.env(AgentKind::Codex.home(), staging.path());
         let mut process = Process::spawn(command, executable)?;
@@ -180,7 +182,7 @@ async fn watch(
     cancelled: oneshot::Receiver<()>,
     expiry: Instant,
     executable: PathBuf,
-) -> Result<(), Error> {
+) -> Result<Staging, Error> {
     let drain = tokio::spawn(drain(stdout));
     let outcome = tokio::select! {
         biased;
@@ -197,7 +199,7 @@ async fn watch(
         status = process.wait() => match status {
             Ok(status) if status.success() => {
                 stderr.abort();
-                staging.promote()
+                staging.saved()
             }
             Ok(status) => Err(failure(&executable, &collect(stderr).await, status)),
             Err(error) => {

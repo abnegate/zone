@@ -3,6 +3,7 @@
 mod host;
 mod login;
 mod prompt;
+mod reading;
 mod source;
 mod state;
 mod usage;
@@ -27,12 +28,14 @@ pub use viewer::Viewer;
 
 use super::claude::Tokens;
 use super::probe::{self, Probe};
+use super::usage::Snapshot;
 use super::{codex, devices, oauth};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::db::ai_settings;
 use crate::state::AppState;
 use host::Host;
+use reading::Reading;
 
 /// How long one check of the host's own sign-in answers for every organization.
 const FRESH: Duration = Duration::from_secs(30);
@@ -44,22 +47,25 @@ pub struct AgentStatus {
     #[serde(with = "name")]
     pub agent: AgentKind,
     pub provider: String,
+    /// The best of the organization's logins, as its `label` is: the one a turn would start on.
     pub state: State,
     pub source: Option<Source>,
     pub label: Option<String>,
-    /// When Zone's Claude access token runs out, for one with no refresh token to renew it.
+    /// When the best login's Claude access token runs out, for one with no refresh token to renew
+    /// it, as each login's own `expires_at` is.
     pub expires_at: Option<DateTime<Utc>>,
     pub models: Vec<String>,
     pub pending: Option<Prompt>,
     /// Why a sign-in that finished away from the panel failed, until the next one starts: the
     /// organization's last codex device sign-in, or the viewer's own Claude sign-in `attempt`.
     pub error: Option<String>,
+    /// Every login the organization holds of the agent, oldest first.
     pub logins: Vec<LoginStatus>,
 }
 
 impl AgentStatus {
     /// `agent`'s status for `organization`, as `viewer` may see it, with why their Claude sign-in
-    /// `attempt` failed when it has.
+    /// `attempt` failed when it has. Each login shows the usage last read for it.
     ///
     /// Signed in means Zone holds credentials the agent can use, not that they still work:
     /// neither CLI checks them until a turn needs them.
@@ -70,10 +76,12 @@ impl AgentStatus {
         viewer: Viewer,
         attempt: Option<Uuid>,
     ) -> Result<Self, sqlx::Error> {
-        let login = agent_logins::list_for(state.db(), organization, agent.as_str())
-            .await?
-            .into_iter()
-            .next();
+        let logins = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
+        let now = Utc::now();
+        let readings: Vec<Reading> = logins
+            .iter()
+            .map(|login| read(state, login, logins.len(), now))
+            .collect();
         let mut status = Self::signed_out(agent);
         let pending = match agent {
             AgentKind::Claude => {
@@ -88,23 +96,24 @@ impl AgentStatus {
             }
         };
 
-        match (pending, login) {
-            (Some((prompt, initiator)), login) => {
+        let best = readings
+            .iter()
+            .max_by(|reading, other| reading.compare(other, now));
+        match (pending, best) {
+            (Some((prompt, initiator)), best) => {
                 status.state = State::Pending;
                 status.pending =
                     prompt.map(|prompt| Prompt::shown(&prompt, viewer.sees_code(initiator)));
-                if let Some(login) = login {
+                if let Some(best) = best {
                     status.source = Some(Source::Zone);
-                    status.label = login.label;
+                    status.label.clone_from(&best.login.label);
                 }
             }
-            (None, Some(login)) => {
-                (status.state, status.expires_at) = match agent {
-                    AgentKind::Claude => sealed(state.encryption_key(), &login, Utc::now()),
-                    AgentKind::Codex => (saved(state.config(), organization), None),
-                };
+            (None, Some(best)) => {
+                status.state = best.login.state;
+                status.expires_at = best.login.expires_at;
                 status.source = Some(Source::Zone);
-                status.label = login.label;
+                status.label.clone_from(&best.login.label);
             }
             (None, None) => {
                 if let Some(probe) = host(state.config(), agent).await {
@@ -114,6 +123,7 @@ impl AgentStatus {
                 }
             }
         }
+        status.logins = readings.into_iter().map(|reading| reading.login).collect();
         Ok(status)
     }
 
@@ -133,18 +143,55 @@ impl AgentStatus {
     }
 }
 
+/// How `login`, one of `held` logins of its agent, looks at `now`, from what Zone stored for it.
+fn read(state: &AppState, login: &AgentLoginRow, held: usize, now: DateTime<Utc>) -> Reading {
+    let (state, expires_at, plan) = match AgentKind::named(&login.agent) {
+        Some(AgentKind::Claude) => {
+            let tokens = opened(state.encryption_key(), login);
+            let (judged, expires_at) = judged(tokens.as_ref(), now);
+            (judged, expires_at, tokens.and_then(|tokens| tokens.label()))
+        }
+        Some(AgentKind::Codex) => {
+            let (saved, plan) = saved(state.config(), login, held);
+            (saved, None, plan)
+        }
+        None => (State::Expired, None, None),
+    };
+    let snapshot = login.snapshot();
+    let spent_until = snapshot
+        .as_ref()
+        .and_then(Snapshot::usable_at)
+        .max(login.exhausted_until);
+    Reading {
+        login: LoginStatus {
+            id: login.id,
+            label: login.label.clone(),
+            plan,
+            state,
+            expires_at,
+            usage: snapshot.map(|snapshot| UsageStatus {
+                windows: snapshot.windows,
+                headroom: snapshot.headroom,
+                fetched_at: snapshot.fetched_at,
+                exhausted_until: login.exhausted_until,
+            }),
+            last_used_at: login.last_used_at,
+        },
+        spent_until,
+    }
+}
+
+fn opened(key: &[u8; 32], login: &AgentLoginRow) -> Option<Tokens> {
+    login
+        .credential
+        .as_ref()
+        .and_then(|sealed| Tokens::open(key, sealed.expose()).ok())
+}
+
 /// A Zone-managed Claude login's state at `now`, judged by the credential a turn would run with,
 /// and when it runs out. A login that renews itself never shows an expiry, and one Zone cannot
 /// open has expired.
-fn sealed(
-    key: &[u8; 32],
-    login: &AgentLoginRow,
-    now: DateTime<Utc>,
-) -> (State, Option<DateTime<Utc>>) {
-    let tokens = login
-        .credential
-        .as_ref()
-        .and_then(|sealed| Tokens::open(key, sealed.expose()).ok());
+fn judged(tokens: Option<&Tokens>, now: DateTime<Utc>) -> (State, Option<DateTime<Utc>>) {
     match tokens {
         None => (State::Expired, None),
         Some(tokens) if tokens.refresh.is_some() => (State::SignedIn, None),
@@ -159,14 +206,27 @@ fn sealed(
     }
 }
 
-/// A Zone-managed codex login is signed in while codex's own `auth.json` is in the organization's
-/// home.
-fn saved(config: &Config, organization: Uuid) -> State {
-    if codex::signed_in(&config.agents.home(organization, AgentKind::Codex)) {
-        State::SignedIn
+/// A Zone-managed codex login is signed in while codex's own `auth.json` is in its home, and is
+/// on the plan that file names. The organization's only login may still have its file where codex
+/// kept one login before logins had homes.
+fn saved(config: &Config, login: &AgentLoginRow, held: usize) -> (State, Option<String>) {
+    let organization = login.organization_id;
+    let home = config
+        .agents
+        .login_home(organization, AgentKind::Codex, login.id);
+    let root = config.agents.home(organization, AgentKind::Codex);
+    let home = if codex::signed_in(&home) {
+        home
+    } else if held == 1 && codex::signed_in(&root) {
+        root
     } else {
-        State::Expired
-    }
+        return (State::Expired, None);
+    };
+    let plan = codex::signed_in_as(&home)
+        .and_then(|account| account.plan)
+        .and_then(|plan| codex::plan::label(&plan))
+        .map(str::to_string);
+    (State::SignedIn, plan)
 }
 
 /// The host's own sign-in, when the server may fall back on it and the host's CLI says it is
@@ -228,15 +288,21 @@ mod tests {
     use chrono::TimeDelta;
     use futures::future::join_all;
     use serde_json::{Value, json};
+    use sqlx::PgPool;
     use tempfile::TempDir;
 
     use zone_core::llm::Window;
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
+    use crate::db::agent_logins::Insert;
     use crate::services::login::codex::testing::fake;
 
     const STATUSES: usize = 5;
+    const JAKE: &str = "jake@example.com";
+    const ADA: &str = "ada@example.com";
+    const OLD: &str = "old@example.com";
+    const PRO: &str = r#"{"tokens":{"id_token":"eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9wbGFuX3R5cGUiOiJwcm8ifX0.","account_id":"00000000-0000-4000-8000-000000000000"}}"#;
 
     const FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -288,8 +354,42 @@ mod tests {
         }
     }
 
+    fn subscribed(key: &[u8; 32], expires_at: DateTime<Utc>, refresh: Option<&str>) -> String {
+        let tokens = Tokens {
+            access: SecretValue::new("fake-access-token"),
+            refresh: refresh.map(SecretValue::new),
+            expires_at,
+            issued_at: None,
+            scope: "user:inference user:profile".to_string(),
+            subscription: Some("max".to_string()),
+        };
+        tokens.seal(key).expect("seal")
+    }
+
+    fn snapshot(used_percent: f64, fetched_at: DateTime<Utc>) -> Snapshot {
+        Snapshot {
+            windows: vec![Window {
+                name: "5h".to_string(),
+                used_percent: Some(used_percent),
+                used: None,
+                limit: None,
+                resets_at: Some((fetched_at + TimeDelta::hours(3)).trunc_subsecs(0)),
+            }],
+            headroom: Some(100.0 - used_percent),
+            fetched_at: fetched_at.trunc_subsecs(0),
+        }
+    }
+
     fn claude(credential: Option<SecretValue>, expires_at: DateTime<Utc>) -> AgentLoginRow {
         login(AgentKind::Claude, credential, Some(expires_at))
+    }
+
+    fn sealed(
+        key: &[u8; 32],
+        login: &AgentLoginRow,
+        now: DateTime<Utc>,
+    ) -> (State, Option<DateTime<Utc>>) {
+        judged(opened(key, login).as_ref(), now)
     }
 
     fn config(state: &TempDir) -> Config {
@@ -379,23 +479,53 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_login_is_signed_in_while_its_auth_file_is_in_the_organizations_home() {
+    fn a_codex_login_is_signed_in_while_its_auth_file_is_in_its_own_home() {
         let state = TempDir::new().expect("a state root");
         let config = config(&state);
         let organization = Uuid::new_v4();
+        let mut login = login(AgentKind::Codex, None, None);
+        login.organization_id = organization;
         let home = config
             .agents
-            .create_home(organization, AgentKind::Codex)
-            .expect("the organization's codex home");
+            .create_login_home(organization, AgentKind::Codex, login.id)
+            .expect("the login's home");
 
-        assert_eq!(saved(&config, organization), State::Expired);
+        assert_eq!(saved(&config, &login, 1), (State::Expired, None));
 
-        std::fs::write(home.join("auth.json"), "{}").expect("codex's login");
-        assert_eq!(saved(&config, organization), State::SignedIn);
+        std::fs::write(home.join("auth.json"), PRO).expect("codex's login");
         assert_eq!(
-            saved(&config, Uuid::new_v4()),
-            State::Expired,
-            "another organization's home counted"
+            saved(&config, &login, 2),
+            (State::SignedIn, Some("ChatGPT Pro".to_string()))
+        );
+        let elsewhere = AgentLoginRow {
+            id: Uuid::new_v4(),
+            ..login.clone()
+        };
+        assert_eq!(
+            saved(&config, &elsewhere, 2),
+            (State::Expired, None),
+            "another login's home counted"
+        );
+    }
+
+    #[test]
+    fn the_only_codex_login_is_signed_in_by_a_file_left_where_codex_kept_one_login() {
+        let state = TempDir::new().expect("a state root");
+        let config = config(&state);
+        let organization = Uuid::new_v4();
+        let mut login = login(AgentKind::Codex, None, None);
+        login.organization_id = organization;
+        let root = config
+            .agents
+            .create_home(organization, AgentKind::Codex)
+            .expect("the organization's codex root");
+        std::fs::write(root.join("auth.json"), "{}").expect("a login from before login homes");
+
+        assert_eq!(saved(&config, &login, 1), (State::SignedIn, None));
+        assert_eq!(
+            saved(&config, &login, 2),
+            (State::Expired, None),
+            "with two logins, the legacy file could belong to either"
         );
     }
 
@@ -440,6 +570,141 @@ mod tests {
             1,
             "every status asked the host's codex for itself"
         );
+    }
+
+    #[tokio::test]
+    async fn a_status_lists_every_login_with_its_snapshot_and_summarises_the_best() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .expect("the test database accepts connections");
+        let organization = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Statuses', $1::text)")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization to sign in");
+        let directory = TempDir::new().expect("a state root");
+        let state = AppState::new(config(&directory), pool.clone(), None);
+        let key = *state.encryption_key();
+        let now = Utc::now();
+        let lasting = now + TimeDelta::days(365);
+        let lapsed = now - TimeDelta::days(1);
+        let sign_in = |account: &'static str, credential: String, expires_at| {
+            let pool = pool.clone();
+            async move {
+                agent_logins::insert(
+                    &pool,
+                    &Insert {
+                        organization_id: organization,
+                        agent: AgentKind::Claude.as_str(),
+                        account: Some(account),
+                        credential: Some(&credential),
+                        label: Some(account),
+                        expires_at: Some(expires_at),
+                    },
+                )
+                .await
+                .expect("a stored login")
+            }
+        };
+        let jake = sign_in(
+            JAKE,
+            subscribed(&key, lasting, Some("fake-refresh")),
+            lasting,
+        )
+        .await;
+        let ada = sign_in(
+            ADA,
+            subscribed(&key, lasting, Some("fake-refresh")),
+            lasting,
+        )
+        .await;
+        let old = sign_in(OLD, subscribed(&key, lapsed, None), lapsed).await;
+        let jakes = snapshot(62.0, now);
+        let adas = snapshot(20.0, now);
+        agent_logins::observe(&pool, jake.id, &jakes)
+            .await
+            .expect("jake's usage");
+        agent_logins::observe(&pool, ada.id, &adas)
+            .await
+            .expect("ada's usage");
+        let resets = (now + TimeDelta::hours(2)).trunc_subsecs(0);
+        agent_logins::exhaust(&pool, ada.id, resets)
+            .await
+            .expect("ada at her limit");
+        let used = (now - TimeDelta::minutes(10)).trunc_subsecs(0);
+        agent_logins::touch(&pool, jake.id, used)
+            .await
+            .expect("jake used");
+        let viewer = Viewer {
+            user: Uuid::new_v4(),
+            manages: false,
+        };
+
+        let status = AgentStatus::read(&state, organization, AgentKind::Claude, viewer, None)
+            .await
+            .expect("the status");
+
+        let ids: Vec<Uuid> = status.logins.iter().map(|login| login.id).collect();
+        assert_eq!(ids, [jake.id, ada.id, old.id], "every login, oldest first");
+        let [jake_status, ada_status, old_status] = status.logins.as_slice() else {
+            panic!("three logins, got {:?}", status.logins);
+        };
+        assert_eq!(jake_status.label.as_deref(), Some(JAKE));
+        assert_eq!(jake_status.plan.as_deref(), Some("Claude Max"));
+        assert_eq!(jake_status.state, State::SignedIn);
+        assert_eq!(jake_status.last_used_at, Some(used));
+        assert_eq!(
+            jake_status
+                .usage
+                .as_ref()
+                .map(|usage| (&usage.windows, usage.headroom)),
+            Some((&jakes.windows, jakes.headroom))
+        );
+        assert_eq!(
+            ada_status
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.exhausted_until),
+            Some(resets)
+        );
+        assert_eq!(
+            jake_status.expires_at, None,
+            "a login that renews itself showed an expiry"
+        );
+        assert_eq!(old_status.state, State::Expired);
+        assert_eq!(old_status.expires_at, Some(lapsed.trunc_subsecs(0)));
+        assert_eq!(old_status.usage, None, "a login never read shows no usage");
+        assert_eq!(
+            (
+                status.state,
+                status.source,
+                status.label.as_deref(),
+                status.expires_at
+            ),
+            (State::SignedIn, Some(Source::Zone), Some(JAKE), None),
+            "ada has more headroom but is at her limit, so jake is the best login"
+        );
+
+        agent_logins::delete(&pool, organization, jake.id)
+            .await
+            .expect("jake signed out");
+        let status = AgentStatus::read(&state, organization, AgentKind::Claude, viewer, None)
+            .await
+            .expect("the status");
+        assert_eq!(
+            status.label.as_deref(),
+            Some(ADA),
+            "an exhausted login beats an expired one"
+        );
+        assert_eq!(status.state, State::SignedIn);
+
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization can be deleted");
     }
 
     #[test]

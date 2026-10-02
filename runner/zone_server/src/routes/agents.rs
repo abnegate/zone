@@ -35,7 +35,7 @@ const UNKNOWN_AGENT: &str = "No coding agent has that name";
 const NO_CODE: &str = "Codex signs in with a device code; only a Claude sign-in takes a pasted one";
 const NO_RECEIPT: &str =
     "Codex signs in with a device code; only a Claude sign-in comes back with a receipt";
-const NO_ATTEMPT: &str = "A codex sign-in ends when codex is signed out";
+const UNKNOWN_LOGIN: &str = "The organization holds no such sign-in";
 const INVALID_USER: &str = "Invalid user ID in token";
 
 #[derive(Debug, Default, Deserialize)]
@@ -199,22 +199,47 @@ pub async fn redeem(
 
 /// DELETE /api/organizations/{org_id}/agents/{agent}/login/attempt
 ///
-/// Ends the caller's own Claude sign-in, wherever its code is.
+/// Ends the caller's own Claude sign-in, wherever its code is, or, for an admin, the
+/// organization's pending codex device sign-in. Every login the organization already holds stays.
 pub async fn cancel(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((organization, agent)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, Failure> {
     let agent = named(&agent)?;
-    let viewer = viewer(&state, &auth.0, organization).await?;
-    if agent != AgentKind::Claude {
-        return Err(Failure::new(StatusCode::BAD_REQUEST, NO_ATTEMPT));
+    match agent {
+        AgentKind::Claude => {
+            let viewer = viewer(&state, &auth.0, organization).await?;
+            oauth::cancel(organization, viewer.user).await;
+        }
+        AgentKind::Codex => {
+            admin(&state, &auth.0, organization).await?;
+            devices::cancel(&state, organization).await;
+        }
     }
-    oauth::cancel(organization, viewer.user).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// DELETE /api/organizations/{org_id}/agents/{agent}/logins/{login_id}
+///
+/// Signs the organization out of that one login, leaving its others signed in.
+pub async fn sign_out_login(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((organization, agent, login)): Path<(Uuid, String, Uuid)>,
+) -> Result<StatusCode, Failure> {
+    let agent = named(&agent)?;
+    let user = admin(&state, &auth.0, organization).await?;
+    if devices::sign_out_login(&state, organization, agent, login, user, &auth.0.email).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(Failure::new(StatusCode::NOT_FOUND, UNKNOWN_LOGIN))
+    }
+}
+
 /// DELETE /api/organizations/{org_id}/agents/{agent}/login
+///
+/// Signs the organization out of every login of the agent.
 pub async fn sign_out(
     State(state): State<AppState>,
     auth: AuthUser,

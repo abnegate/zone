@@ -119,6 +119,8 @@ const MISSING_CODEX: &str = "/nonexistent/zone/codex";
 const CREDENTIALS: &str = "auth.json";
 const STAGING: &str = ".login";
 const SAVED_LOGIN: &str = "{\"auth_mode\":\"chatgpt\",\"OPENAI_API_KEY\":null,\"tokens\":{\"id_token\":\"fixture\",\"access_token\":\"fixture\",\"refresh_token\":\"fixture\",\"account_id\":\"00000000-0000-4000-8000-000000000000\"},\"last_refresh\":\"2026-09-23T07:27:26.827371Z\"}\n";
+const FIXTURE_ACCOUNT: &str = "00000000-0000-4000-8000-000000000000";
+const OTHER_ACCOUNT: &str = "00000000-0000-4000-8000-000000000001";
 const WAIT: Duration = Duration::from_secs(20);
 const PAUSE: Duration = Duration::from_millis(50);
 const ATTEMPTS: u128 = WAIT.as_millis() / PAUSE.as_millis();
@@ -173,6 +175,15 @@ impl Codex {
 
     fn fail(&self) {
         self.touch(Self::FAIL);
+    }
+
+    /// Has the stand-in save a login to the ChatGPT account `account` from now on.
+    fn saves(&self, account: &str) {
+        fs::write(
+            self.marker(CREDENTIALS),
+            SAVED_LOGIN.replace(FIXTURE_ACCOUNT, account),
+        )
+        .expect("the login to save");
     }
 
     fn break_logout(&self) {
@@ -460,6 +471,23 @@ impl Stage {
             .home(organization, AgentKind::Codex)
     }
 
+    fn login_home(&self, organization: Uuid, login: Uuid) -> PathBuf {
+        self.client
+            .state()
+            .config()
+            .agents
+            .login_home(organization, AgentKind::Codex, login)
+    }
+
+    /// `<state>/<organization>/codex/logins`, where every codex login home lives.
+    fn login_homes(&self, organization: Uuid) -> PathBuf {
+        self.client
+            .state()
+            .config()
+            .agents
+            .logins(organization, AgentKind::Codex)
+    }
+
     /// `<state>/<organization>`, where every agent home of the organization lives.
     fn agent_state(&self, organization: Uuid) -> PathBuf {
         self.client
@@ -597,15 +625,57 @@ impl Stage {
     }
 
     async fn login_row(&self, organization: Uuid, agent: &str) -> Option<LoginRow> {
+        self.login_rows(organization, agent)
+            .await
+            .into_iter()
+            .next()
+    }
+
+    /// The organization's logins of `agent`, oldest first.
+    async fn login_rows(&self, organization: Uuid, agent: &str) -> Vec<LoginRow> {
         sqlx::query_as(
-            "SELECT credential, label, expires_at FROM agent_logins \
-             WHERE organization_id = $1 AND agent = $2",
+            "SELECT id, account, credential, label, expires_at FROM agent_logins \
+             WHERE organization_id = $1 AND agent = $2 ORDER BY created_at, id",
         )
         .bind(organization)
         .bind(agent)
-        .fetch_optional(self.pool())
+        .fetch_all(self.pool())
         .await
         .expect("the agent logins are readable")
+    }
+
+    /// Signs codex in as the login the stand-in saves, and waits for the status to settle.
+    async fn sign_in_codex(&self, organization: Uuid, codex: &Codex, person: &Person) {
+        self.start(organization, "codex", json!({}), person).await;
+        codex.approve();
+        assert_eq!(
+            self.settled(organization, person).await["state"],
+            "signed_in"
+        );
+    }
+
+    async fn sign_out_login(
+        &self,
+        organization: Uuid,
+        agent: &str,
+        login: Uuid,
+        person: &Person,
+    ) -> common::TestResponse {
+        self.client
+            .delete_auth(
+                &format!("{}/logins/{login}", agent_path(organization, agent)),
+                &person.token,
+            )
+            .await
+    }
+
+    async fn cancel_codex(&self, organization: Uuid, person: &Person) -> common::TestResponse {
+        self.client
+            .delete_auth(
+                &format!("{}/attempt", login_path(organization, "codex")),
+                &person.token,
+            )
+            .await
     }
 
     /// Whether the organization's Claude sign-in is recorded and audited within [`WAIT`].
@@ -636,6 +706,8 @@ impl Stage {
 
 #[derive(sqlx::FromRow)]
 struct LoginRow {
+    id: Uuid,
+    account: Option<String>,
     credential: Option<String>,
     label: Option<String>,
     expires_at: Option<DateTime<Utc>>,
@@ -835,6 +907,25 @@ fn signed_out(agent: AgentKind, provider: &str) -> Value {
         "pending": null,
         "error": null,
         "logins": [],
+    })
+}
+
+/// One login as a status lists it, before any usage was read for it or a turn used it.
+fn login_status(
+    id: Uuid,
+    label: &str,
+    plan: Option<&str>,
+    state: &str,
+    expires_at: Option<&str>,
+) -> Value {
+    json!({
+        "id": id,
+        "label": label,
+        "plan": plan,
+        "state": state,
+        "expires_at": expires_at,
+        "usage": null,
+        "last_used_at": null,
     })
 }
 
@@ -1244,6 +1335,10 @@ async fn a_pasted_code_signs_the_organization_in_and_only_a_sealed_login_is_kept
     let after = Utc::now();
 
     response.assert_status(StatusCode::OK);
+    let login = stage
+        .login_row(organization, "claude")
+        .await
+        .expect("a stored login");
     let status = response.json_value();
     assert_eq!(
         status,
@@ -1257,7 +1352,7 @@ async fn a_pasted_code_signs_the_organization_in_and_only_a_sealed_login_is_kept
             "models": models(AgentKind::Claude),
             "pending": null,
             "error": null,
-            "logins": [],
+            "logins": [login_status(login.id, "Claude Max", Some("Claude Max"), "signed_in", None)],
         }),
         "a sign-in that renews itself showed when its access token runs out"
     );
@@ -1283,10 +1378,6 @@ async fn a_pasted_code_signs_the_organization_in_and_only_a_sealed_login_is_kept
         "the verifier sent is not the one the authorize link was challenged with"
     );
 
-    let login = stage
-        .login_row(organization, "claude")
-        .await
-        .expect("a stored login");
     let credential = login.credential.expect("a sealed credential");
     for secret in [ACCESS, REFRESH, CODE, verifier] {
         assert!(
@@ -1387,9 +1478,9 @@ async fn a_claude_login_zone_cannot_open_has_expired() {
         scope: INFERENCE_SCOPE.to_string(),
         subscription: Some("max".to_string()),
     };
-    sqlx::query(
+    let (login,): (Uuid,) = sqlx::query_as(
         "INSERT INTO agent_logins (organization_id, agent, credential, label, expires_at) \
-         VALUES ($1, 'claude', $2, 'Claude Max', $3)",
+         VALUES ($1, 'claude', $2, 'Claude Max', $3) RETURNING id",
     )
     .bind(organization)
     .bind(
@@ -1398,7 +1489,7 @@ async fn a_claude_login_zone_cannot_open_has_expired() {
             .expect("tokens sealed with another key"),
     )
     .bind(tokens.expires_at)
-    .execute(stage.pool())
+    .fetch_one(stage.pool())
     .await
     .expect("a login sealed with another key");
 
@@ -1416,7 +1507,7 @@ async fn a_claude_login_zone_cannot_open_has_expired() {
             "models": models(AgentKind::Claude),
             "pending": null,
             "error": null,
-            "logins": [],
+            "logins": [login_status(login, "Claude Max", None, "expired", None)],
         }),
         "a login no turn can open was shown as signed in"
     );
@@ -1797,6 +1888,10 @@ async fn the_callback_alone_signs_nothing_in_until_the_console_hands_its_receipt
     let response = stage.redeem(organization, &receipt, &owner).await;
 
     response.assert_status(StatusCode::OK);
+    let login = stage
+        .login_row(organization, "claude")
+        .await
+        .expect("a stored login");
     let signed_in = json!({
         "agent": "claude",
         "provider": "claude_code",
@@ -1807,7 +1902,7 @@ async fn the_callback_alone_signs_nothing_in_until_the_console_hands_its_receipt
         "models": models(AgentKind::Claude),
         "pending": null,
         "error": null,
-        "logins": [],
+        "logins": [login_status(login.id, "Claude Max", Some("Claude Max"), "signed_in", None)],
     });
     assert_eq!(response.json_value(), signed_in);
     assert_eq!(
@@ -2635,6 +2730,10 @@ async fn a_codex_sign_in_stays_pending_until_codex_saves_its_login() {
 
     codex.approve();
     let status = stage.settled(organization, &owner).await;
+    let login = stage
+        .login_row(organization, "codex")
+        .await
+        .expect("a stored login");
 
     assert_eq!(
         status,
@@ -2648,22 +2747,24 @@ async fn a_codex_sign_in_stays_pending_until_codex_saves_its_login() {
             "models": models(AgentKind::Codex),
             "pending": null,
             "error": null,
-            "logins": [],
+            "logins": [login_status(login.id, "ChatGPT", None, "signed_in", None)],
         })
     );
-    let home = stage.home(organization);
+    let home = stage.login_home(organization, login.id);
     assert_eq!(
         fs::read_to_string(home.join(CREDENTIALS)).ok().as_deref(),
         Some(SAVED_LOGIN)
     );
+    let root = stage.home(organization);
     assert!(
-        !home.join(STAGING).exists(),
+        !root.join(STAGING).exists(),
         "the staging directory was left"
     );
-    let login = stage
-        .login_row(organization, "codex")
-        .await
-        .expect("a stored login");
+    assert!(
+        !root.join(CREDENTIALS).exists(),
+        "the login landed in the codex root"
+    );
+    assert_eq!(login.account.as_deref(), Some(FIXTURE_ACCOUNT));
     assert_eq!(login.credential, None, "codex keeps its own login");
     assert_eq!(login.label.as_deref(), Some("ChatGPT"));
     assert_eq!(login.expires_at, None);
@@ -2699,7 +2800,10 @@ async fn cancelling_a_codex_sign_in_stops_codex_and_leaves_nothing_behind() {
         "the staging directory was left"
     );
     assert!(!home.join(CREDENTIALS).exists());
-    assert_eq!(codex.logouts(), [home.display().to_string()]);
+    assert!(
+        codex.logouts().is_empty(),
+        "codex logged out of a home that held no login"
+    );
     assert!(stage.login_row(organization, "codex").await.is_none());
     assert!(
         stage.audited(organization).await.is_empty(),
@@ -2796,21 +2900,17 @@ async fn signing_out_of_codex_logs_codex_out_and_forgets_the_login() {
     let stage = Stage::codex(&codex.executable).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
-    stage.start(organization, "codex", json!({}), &owner).await;
-    codex.approve();
-    assert_eq!(
-        stage.settled(organization, &owner).await["state"],
-        "signed_in"
-    );
-    let home = stage.home(organization);
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    let login = stage
+        .login_row(organization, "codex")
+        .await
+        .expect("a stored login");
+    let home = stage.login_home(organization, login.id);
 
     stage.sign_out(organization, "codex", &owner).await;
 
     assert_eq!(codex.logouts(), [home.display().to_string()]);
-    assert!(
-        !home.join(CREDENTIALS).exists(),
-        "codex's login outlived the sign-out"
-    );
+    assert!(!home.exists(), "the login's home outlived the sign-out");
     assert!(stage.login_row(organization, "codex").await.is_none());
     assert_eq!(
         stage.status(organization, "codex", &owner).await,
@@ -2840,13 +2940,12 @@ async fn a_sign_out_codex_cannot_finish_still_deletes_codexs_login() {
     let stage = Stage::codex(&codex.executable).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
-    stage.start(organization, "codex", json!({}), &owner).await;
-    codex.approve();
-    assert_eq!(
-        stage.settled(organization, &owner).await["state"],
-        "signed_in"
-    );
-    let home = stage.home(organization);
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    let login = stage
+        .login_row(organization, "codex")
+        .await
+        .expect("a stored login");
+    let home = stage.login_home(organization, login.id);
     codex.break_logout();
 
     stage.sign_out(organization, "codex", &owner).await;
@@ -2869,13 +2968,12 @@ async fn a_sign_out_that_cannot_delete_codexs_login_leaves_the_organization_sign
     let stage = Stage::codex(&codex.executable).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
-    stage.start(organization, "codex", json!({}), &owner).await;
-    codex.approve();
-    assert_eq!(
-        stage.settled(organization, &owner).await["state"],
-        "signed_in"
-    );
-    let home = stage.home(organization);
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    let login = stage
+        .login_row(organization, "codex")
+        .await
+        .expect("a stored login");
+    let home = stage.login_home(organization, login.id);
     codex.break_logout();
     fs::set_permissions(&home, fs::Permissions::from_mode(0o500)).expect("a locked home");
 
@@ -2908,19 +3006,20 @@ async fn a_codex_login_whose_file_is_gone_has_expired() {
     let stage = Stage::codex(&codex.executable).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
-    stage.start(organization, "codex", json!({}), &owner).await;
-    codex.approve();
-    assert_eq!(
-        stage.settled(organization, &owner).await["state"],
-        "signed_in"
-    );
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    let login = stage
+        .login_row(organization, "codex")
+        .await
+        .expect("a stored login");
 
-    fs::remove_file(stage.home(organization).join(CREDENTIALS)).expect("codex's login");
+    fs::remove_file(stage.login_home(organization, login.id).join(CREDENTIALS))
+        .expect("codex's login");
 
     let status = stage.status(organization, "codex", &owner).await;
     assert_eq!(status["state"], "expired");
     assert_eq!(status["source"], "zone");
     assert_eq!(status["label"], "ChatGPT");
+    assert_eq!(status["logins"][0]["state"], "expired");
 }
 
 #[tokio::test]
@@ -2958,12 +3057,11 @@ async fn deleting_an_organization_logs_codex_out_and_removes_its_agent_state() {
     let stage = Stage::codex(&codex.executable).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
-    stage.start(organization, "codex", json!({}), &owner).await;
-    codex.approve();
-    assert_eq!(
-        stage.settled(organization, &owner).await["state"],
-        "signed_in"
-    );
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    let login = stage
+        .login_row(organization, "codex")
+        .await
+        .expect("a stored login");
     codex.refuse();
     stage
         .client
@@ -2971,7 +3069,7 @@ async fn deleting_an_organization_logs_codex_out_and_removes_its_agent_state() {
         .await
         .assert_status(StatusCode::BAD_GATEWAY);
     assert_eq!(devices::failure(organization).as_deref(), Some(REFUSAL));
-    let home = stage.home(organization);
+    let home = stage.login_home(organization, login.id);
     let agent_state = stage.agent_state(organization);
     let claude = agent_state.join("claude");
     fs::create_dir_all(&claude).expect("claude's home for the organization");
@@ -2999,7 +3097,6 @@ async fn deleting_an_organization_mid_sign_in_stops_codex_and_removes_its_agent_
     let organization = organization(&stage.client, &owner).await;
     stage.start(organization, "codex", json!({}), &owner).await;
     let process = codex.process();
-    let home = stage.home(organization);
     let agent_state = stage.agent_state(organization);
 
     stage.delete(organization, &owner).await;
@@ -3008,7 +3105,10 @@ async fn deleting_an_organization_mid_sign_in_stops_codex_and_removes_its_agent_
         ended(process).await,
         "codex was left running for a deleted organization"
     );
-    assert_eq!(codex.logouts(), [home.display().to_string()]);
+    assert!(
+        codex.logouts().is_empty(),
+        "codex logged out of a home that held no login"
+    );
     assert!(
         gone(&agent_state).await,
         "the deleted organization's agent state was left on the server"
@@ -3039,4 +3139,316 @@ async fn host_login_reports_the_hosts_claude() {
     assert_eq!(status["state"], "signed_in", "{status}");
     assert_eq!(status["source"], "host", "{status}");
     assert_eq!(status["expires_at"], Value::Null);
+}
+
+#[tokio::test]
+async fn signing_in_the_same_account_again_replaces_its_login() {
+    let codex = Codex::new();
+    let stage = Stage::codex(&codex.executable).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    let first = stage
+        .login_row(organization, "codex")
+        .await
+        .expect("a stored login");
+
+    stage.sign_in_codex(organization, &codex, &owner).await;
+
+    let logins = stage.login_rows(organization, "codex").await;
+    let ids: Vec<Uuid> = logins.iter().map(|login| login.id).collect();
+    assert_eq!(ids, [first.id], "the same account became a second login");
+    let status = stage.status(organization, "codex", &owner).await;
+    assert_eq!(
+        status["logins"],
+        json!([login_status(first.id, "ChatGPT", None, "signed_in", None)])
+    );
+    assert_eq!(
+        stage.audited(organization).await.len(),
+        2,
+        "each sign-in is audited"
+    );
+    stage.sign_out(organization, "codex", &owner).await;
+}
+
+#[tokio::test]
+async fn signing_in_another_account_adds_a_second_login() {
+    let codex = Codex::new();
+    let stage = Stage::codex(&codex.executable).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    codex.saves(OTHER_ACCOUNT);
+
+    stage.sign_in_codex(organization, &codex, &owner).await;
+
+    let logins = stage.login_rows(organization, "codex").await;
+    let accounts: Vec<Option<&str>> = logins
+        .iter()
+        .map(|login| login.account.as_deref())
+        .collect();
+    assert_eq!(accounts, [Some(FIXTURE_ACCOUNT), Some(OTHER_ACCOUNT)]);
+    let status = stage.status(organization, "codex", &owner).await;
+    assert_eq!(status["state"], "signed_in");
+    assert_eq!(
+        status["logins"],
+        json!(
+            logins
+                .iter()
+                .map(|login| login_status(login.id, "ChatGPT", None, "signed_in", None))
+                .collect::<Vec<_>>()
+        )
+    );
+    stage.sign_out(organization, "codex", &owner).await;
+    assert!(stage.login_rows(organization, "codex").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_second_codex_sign_in_lands_in_its_own_home() {
+    let codex = Codex::new();
+    let stage = Stage::codex(&codex.executable).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    codex.saves(OTHER_ACCOUNT);
+
+    stage.sign_in_codex(organization, &codex, &owner).await;
+
+    let logins = stage.login_rows(organization, "codex").await;
+    let [first, second] = logins.as_slice() else {
+        panic!("two logins");
+    };
+    let saved = |login: &LoginRow| {
+        fs::read_to_string(stage.login_home(organization, login.id).join(CREDENTIALS)).ok()
+    };
+    assert_eq!(saved(first).as_deref(), Some(SAVED_LOGIN));
+    assert_eq!(
+        saved(second),
+        Some(SAVED_LOGIN.replace(FIXTURE_ACCOUNT, OTHER_ACCOUNT))
+    );
+    let mut homes: Vec<PathBuf> = fs::read_dir(stage.login_homes(organization))
+        .expect("the login homes")
+        .map(|entry| entry.expect("a login home").path())
+        .collect();
+    homes.sort();
+    let mut expected = vec![
+        stage.login_home(organization, first.id),
+        stage.login_home(organization, second.id),
+    ];
+    expected.sort();
+    assert_eq!(homes, expected);
+    let root = stage.home(organization);
+    assert!(
+        !root.join(CREDENTIALS).exists(),
+        "a login landed in the codex root"
+    );
+    assert!(
+        !root.join(STAGING).exists(),
+        "the staging directory was left"
+    );
+    assert!(
+        codex.logouts().is_empty(),
+        "the second sign-in logged the first out"
+    );
+    stage.sign_out(organization, "codex", &owner).await;
+}
+
+#[tokio::test]
+async fn an_admin_signs_out_one_login_and_the_other_stays() {
+    let codex = Codex::new();
+    let stage = Stage::codex(&codex.executable).await;
+    let owner = person(&stage.client).await;
+    let member = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    seat(&stage.client, organization, &owner, &member, "member").await;
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    codex.saves(OTHER_ACCOUNT);
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    let logins = stage.login_rows(organization, "codex").await;
+    let (leaving, staying) = (logins[0].id, logins[1].id);
+
+    let refused = stage
+        .sign_out_login(organization, "codex", leaving, &member)
+        .await;
+    refused.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(refused.json_value(), json!({ "error": ADMINS_ONLY }));
+    for (agent, login) in [("codex", Uuid::new_v4()), ("claude", leaving)] {
+        let unknown = stage
+            .sign_out_login(organization, agent, login, &owner)
+            .await;
+        unknown.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(
+            unknown.json_value(),
+            json!({ "error": "The organization holds no such sign-in" })
+        );
+    }
+    stage
+        .sign_out_login(organization, "codex", leaving, &owner)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let ids: Vec<Uuid> = stage
+        .login_rows(organization, "codex")
+        .await
+        .iter()
+        .map(|login| login.id)
+        .collect();
+    assert_eq!(ids, [staying]);
+    assert_eq!(
+        codex.logouts(),
+        [stage
+            .login_home(organization, leaving)
+            .display()
+            .to_string()]
+    );
+    assert!(!stage.login_home(organization, leaving).exists());
+    assert!(
+        stage
+            .login_home(organization, staying)
+            .join(CREDENTIALS)
+            .exists(),
+        "the other login was signed out with it"
+    );
+    let status = stage.status(organization, "codex", &member).await;
+    assert_eq!(status["state"], "signed_in");
+    assert_eq!(
+        status["logins"],
+        json!([login_status(staying, "ChatGPT", None, "signed_in", None)])
+    );
+    let audited = stage.audited(organization).await;
+    assert_eq!(
+        audited.last(),
+        Some(&(
+            "agent.signed_out".to_string(),
+            Some(owner.id),
+            Some(json!({ "agent": "codex", "source": "zone" }))
+        ))
+    );
+    stage.sign_out(organization, "codex", &owner).await;
+}
+
+#[tokio::test]
+async fn a_member_reads_every_login_and_never_a_token() {
+    let claude = token_endpoint(200, granted()).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let member = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    seat(&stage.client, organization, &owner, &member, "member").await;
+    let key = *stage.client.state().encryption_key();
+    let tokens = Tokens {
+        access: SecretValue::new(ACCESS),
+        refresh: Some(SecretValue::new(REFRESH)),
+        expires_at: Utc::now() + TimeDelta::seconds(YEAR),
+        issued_at: None,
+        scope: INFERENCE_SCOPE.to_string(),
+        subscription: Some("max".to_string()),
+    };
+    let mut sealed = Vec::new();
+    let mut ids = Vec::new();
+    for account in ["jake@example.com", "ada@example.com"] {
+        let credential = tokens.seal(&key).expect("sealed tokens");
+        let (id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO agent_logins (organization_id, agent, account, credential, label, \
+             expires_at) VALUES ($1, 'claude', $2, $3, $2, $4) RETURNING id",
+        )
+        .bind(organization)
+        .bind(account)
+        .bind(&credential)
+        .bind(tokens.expires_at)
+        .fetch_one(stage.pool())
+        .await
+        .expect("a stored login");
+        sealed.push(credential);
+        ids.push(id);
+    }
+
+    let response = stage
+        .client
+        .get_auth(&agents_path(organization), &member.token)
+        .await;
+
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    let claude = &body["agents"][0];
+    assert_eq!(claude["agent"], "claude");
+    assert_eq!(
+        claude["logins"],
+        json!([
+            login_status(
+                ids[0],
+                "jake@example.com",
+                Some("Claude Max"),
+                "signed_in",
+                None
+            ),
+            login_status(
+                ids[1],
+                "ada@example.com",
+                Some("Claude Max"),
+                "signed_in",
+                None
+            ),
+        ])
+    );
+    let text = body.to_string();
+    for secret in [ACCESS, REFRESH, sealed[0].as_str(), sealed[1].as_str()] {
+        assert!(!text.contains(secret), "a member was shown {secret}");
+    }
+    assert!(!text.contains("credential"), "{text}");
+    assert_eq!(stage.status(organization, "claude", &member).await, *claude);
+}
+
+#[tokio::test]
+async fn cancelling_a_codex_device_sign_in_keeps_the_logins_already_held() {
+    let codex = Codex::new();
+    let stage = Stage::codex(&codex.executable).await;
+    let owner = person(&stage.client).await;
+    let member = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    seat(&stage.client, organization, &owner, &member, "member").await;
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    let held = stage
+        .login_row(organization, "codex")
+        .await
+        .expect("a stored login");
+    fs::remove_file(codex.marker(Codex::APPROVE)).expect("the first approval withdrawn");
+    codex.saves(OTHER_ACCOUNT);
+    stage.start(organization, "codex", json!({}), &owner).await;
+    let process = codex.process();
+
+    let refused = stage.cancel_codex(organization, &member).await;
+    refused.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(refused.json_value(), json!({ "error": ADMINS_ONLY }));
+    stage
+        .cancel_codex(organization, &owner)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    assert!(ended(process).await, "codex was left running");
+    let ids: Vec<Uuid> = stage
+        .login_rows(organization, "codex")
+        .await
+        .iter()
+        .map(|login| login.id)
+        .collect();
+    assert_eq!(ids, [held.id]);
+    assert_eq!(
+        fs::read_to_string(stage.login_home(organization, held.id).join(CREDENTIALS))
+            .ok()
+            .as_deref(),
+        Some(SAVED_LOGIN),
+        "cancelling a sign-in touched a login already held"
+    );
+    assert!(codex.logouts().is_empty(), "a held login was logged out");
+    assert!(!stage.home(organization).join(STAGING).exists());
+    let status = stage.status(organization, "codex", &owner).await;
+    assert_eq!(status["state"], "signed_in");
+    assert_eq!(status["pending"], Value::Null);
+    assert_eq!(status["error"], Value::Null);
+    assert_eq!(
+        status["logins"],
+        json!([login_status(held.id, "ChatGPT", None, "signed_in", None)])
+    );
+    stage.sign_out(organization, "codex", &owner).await;
 }
