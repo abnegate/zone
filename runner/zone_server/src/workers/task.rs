@@ -14,8 +14,8 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc};
 use uuid::Uuid;
 use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
-use zone_core::llm::provider::{OUTGROWN, SignIn, UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{BuiltinTools, Credential, LlmBackend, LlmClient, Message as LlmMessage};
+use zone_core::llm::provider::{OUTGROWN, UNFUNDED, UNFUNDED_CONTEXT};
+use zone_core::llm::{BuiltinTools, Limit, LlmBackend, LlmClient, Message as LlmMessage};
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
@@ -26,12 +26,12 @@ use crate::agent::question::{self, Question};
 use crate::agent::wait::{self, Waited, Waiting};
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
 use crate::config::ModelBackend;
-use crate::db::{agent_logins, task_tool_calls, tasks};
-use crate::services::backend;
+use crate::db::{task_tool_calls, tasks};
+use crate::services::backend::{self, Resolved};
 use crate::services::chat::session::{self, RunContext};
 use crate::services::endpoint::Endpoint;
-use crate::services::login::credential::{self, Login};
 use crate::services::login::identity::LoginIdentity;
+use crate::services::login::router;
 use crate::services::route::{Reason, Route, Unusable};
 use crate::services::stages;
 use crate::state::AppState;
@@ -41,8 +41,14 @@ use crate::workers::pr::{PrCreationResult, create_pr_for_task};
 use zone_context::context::SearchResultWithAnalysis;
 
 mod halt;
+mod handover;
+mod seat;
+mod unprepared;
 
 use halt::Halt;
+use handover::Handover;
+use seat::{Seat, Seated};
+use unprepared::Unprepared;
 
 // Max concurrent task executions
 const MAX_CONCURRENT_TASKS: usize = 5;
@@ -158,11 +164,15 @@ impl Permit {
 /// credentials, a malformed or oversized request, a missing model, a refusal,
 /// or a run that already burned its whole budget. Retrying those spends the
 /// budget again and can duplicate the side effects the attempt already had.
+///
+/// A usage limit that another of the organization's logins can run past is
+/// rerouted: the run moves to that login at once, at no cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Failure {
     Terminal,
     Transient,
     RateLimited { retry_after: Option<Duration> },
+    Rerouted,
 }
 
 impl Failure {
@@ -171,13 +181,14 @@ impl Failure {
             Self::Terminal => "terminal",
             Self::Transient => "transient",
             Self::RateLimited { .. } => "rate_limited",
+            Self::Rerouted => "rerouted",
         }
     }
 
     fn retry_after(self) -> Option<Duration> {
         match self {
             Self::RateLimited { retry_after } => retry_after,
-            Self::Terminal | Self::Transient => None,
+            Self::Terminal | Self::Transient | Self::Rerouted => None,
         }
     }
 }
@@ -188,16 +199,29 @@ struct Fault {
     failure: Failure,
     status: &'static str,
     message: String,
+    /// The usage limit that refused the attempt, when one did.
+    limit: Option<Box<Limit>>,
+    /// The organization's login the attempt ran under, when it ran under one.
+    login: Option<Box<LoginIdentity>>,
+    /// The login the run was handed over to, when it was.
+    rerouted: Option<Box<LoginIdentity>>,
 }
 
 impl Fault {
+    fn new(failure: Failure, status: &'static str, message: String) -> Self {
+        Self {
+            failure,
+            status,
+            message,
+            limit: None,
+            login: None,
+            rerouted: None,
+        }
+    }
+
     /// A failure judged by what it says.
     fn reported(message: String) -> Self {
-        Self {
-            failure: classify(&message),
-            status: RUN_FAILED,
-            message,
-        }
+        Self::new(classify(&message), RUN_FAILED, message)
     }
 
     /// A failure the loop reported for a client on `backend`. A coding agent
@@ -211,17 +235,30 @@ impl Fault {
             LlmBackend::Cli { .. } => classify_agent(backend::own_words(&remedied.message)),
             LlmBackend::Http => classify(&remedied.message),
         };
-        Self {
-            failure,
-            status: RUN_FAILED,
-            message: remedied.message,
-        }
+        Self::new(failure, RUN_FAILED, remedied.message)
     }
 
-    /// A turn a usage limit refused on `backend`, in the words the same
-    /// refusal reported as a failure, and judged as that failure is.
-    fn limited(backend: &LlmBackend, message: String) -> Self {
-        Self::agent(backend, message)
+    /// A turn `limit` refused on `backend`, in the words the same refusal
+    /// reported as a failure. A limit on usage credits refuses every retry
+    /// alike; any other backs off until it resets, when it says, else as its
+    /// words say.
+    fn limited(backend: &LlmBackend, limit: Box<Limit>) -> Self {
+        let judged = Self::agent(backend, limit.message.clone());
+        let failure = if limit.credits {
+            Failure::Terminal
+        } else {
+            Failure::RateLimited {
+                retry_after: limit
+                    .resets_at
+                    .and_then(remaining)
+                    .or(judged.failure.retry_after()),
+            }
+        };
+        Self {
+            failure,
+            limit: Some(limit),
+            ..judged
+        }
     }
 
     /// The backend an attempt was to run on could not be resolved. Only a
@@ -235,23 +272,62 @@ impl Fault {
                 reason: Reason::Unreadable,
             }) => Failure::Transient,
             backend::Error::Limited { resets_at, .. } => Failure::RateLimited {
-                retry_after: resets_at.and_then(|resets_at| {
-                    resets_at
-                        .signed_duration_since(chrono::Utc::now())
-                        .to_std()
-                        .ok()
-                }),
+                retry_after: resets_at.and_then(remaining),
             },
             backend::Error::SignedOut { .. }
             | backend::Error::Renewal { .. }
             | backend::Error::Home { .. }
             | backend::Error::Unusable(_) => Failure::Terminal,
         };
+        Self::new(failure, RUN_FAILED, error.to_string())
+    }
+
+    /// This fault, of an attempt that ran under `login`.
+    fn on(self, login: Option<&LoginIdentity>) -> Self {
         Self {
-            failure,
-            status: RUN_FAILED,
-            message: error.to_string(),
+            login: login.cloned().map(Box::new),
+            ..self
         }
+    }
+
+    /// This fault, handed over to `to`, which runs the run's next attempt.
+    fn rerouted(self, to: LoginIdentity) -> Self {
+        Self {
+            failure: Failure::Rerouted,
+            rerouted: Some(Box::new(to)),
+            ..self
+        }
+    }
+
+    /// This fault, backing off until `resets_at`, when the earliest of the
+    /// organization's logins resets, when one says.
+    fn deferred(self, resets_at: Option<chrono::DateTime<chrono::Utc>>) -> Self {
+        let failure = match self.failure {
+            Failure::RateLimited { retry_after } => Failure::RateLimited {
+                retry_after: resets_at.and_then(remaining).or(retry_after),
+            },
+            failure => failure,
+        };
+        Self { failure, ..self }
+    }
+
+    /// This fault, retried at once on a login that can run it now.
+    fn undelayed(self) -> Self {
+        Self {
+            failure: Failure::RateLimited {
+                retry_after: Some(Duration::ZERO),
+            },
+            ..self
+        }
+    }
+
+    /// Who the run moved from and to, when this fault handed it over.
+    fn handover(&self) -> Option<Handover> {
+        Some(Handover {
+            from: self.login.as_deref()?.clone(),
+            to: self.rerouted.as_deref()?.clone(),
+            resets_at: self.limit.as_ref().and_then(|limit| limit.resets_at),
+        })
     }
 
     /// This fault, with any key `endpoint` carries taken out of what it says.
@@ -263,50 +339,59 @@ impl Fault {
     }
 
     fn timeout() -> Self {
-        Self {
-            failure: Failure::Terminal,
-            status: "timeout",
-            message: format!(
+        Self::new(
+            Failure::Terminal,
+            "timeout",
+            format!(
                 "Task execution timed out after {} seconds",
                 TASK_TIMEOUT.as_secs()
             ),
-        }
+        )
     }
 
     fn overloaded() -> Self {
-        Self {
-            failure: Failure::Terminal,
-            status: "semaphore_denied",
-            message: "System overload - semaphore closed".to_string(),
-        }
+        Self::new(
+            Failure::Terminal,
+            "semaphore_denied",
+            "System overload - semaphore closed".to_string(),
+        )
     }
 
     /// A lease this attempt no longer holds. Terminal, because whatever holds
     /// it now is another execution of the same run, and retrying would put two
     /// writers on one checkout.
     fn lease() -> Self {
-        Self {
-            failure: Failure::Terminal,
-            status: RUN_FAILED,
-            message: LOST_LEASE.to_string(),
-        }
+        Self::new(Failure::Terminal, RUN_FAILED, LOST_LEASE.to_string())
     }
 
     /// The claim on the answer went away before one arrived. Terminal, because
     /// the only thing a retry can do is ask the same question into the same
     /// silence, and it would spend the backoff with the run unanswerable.
     fn withdrawn() -> Self {
-        Self {
-            failure: Failure::Terminal,
-            status: RUN_FAILED,
-            message: ANSWER_WITHDRAWN.to_string(),
+        Self::new(Failure::Terminal, RUN_FAILED, ANSWER_WITHDRAWN.to_string())
+    }
+}
+
+impl From<Unprepared> for Fault {
+    fn from(unprepared: Unprepared) -> Self {
+        match unprepared {
+            Unprepared::Backend(error) => Self::backend(error),
+            unprepared => Self::new(Failure::Terminal, RUN_FAILED, unprepared.to_string()),
         }
     }
+}
+
+/// How long until `at`, when it is still to come.
+fn remaining(at: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    at.signed_duration_since(chrono::Utc::now()).to_std().ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Decision {
     Retry(Duration),
+    /// Run the same attempt again at once, on the login the run was handed
+    /// over to.
+    Reroute,
     Terminal,
     Exhausted,
 }
@@ -315,6 +400,7 @@ impl Decision {
     fn label(self) -> &'static str {
         match self {
             Self::Retry(_) => "retry",
+            Self::Reroute => "reroute",
             Self::Terminal => "terminal",
             Self::Exhausted => "exhausted",
         }
@@ -323,7 +409,7 @@ impl Decision {
     fn delay(self) -> Option<Duration> {
         match self {
             Self::Retry(delay) => Some(delay),
-            Self::Terminal | Self::Exhausted => None,
+            Self::Reroute | Self::Terminal | Self::Exhausted => None,
         }
     }
 }
@@ -357,9 +443,12 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
+    /// A reroute is decided before the attempt cap: it costs no attempt.
     fn decide(&self, attempt: u32, failure: Failure, sample: f64) -> Decision {
-        if matches!(failure, Failure::Terminal) {
-            return Decision::Terminal;
+        match failure {
+            Failure::Terminal => return Decision::Terminal,
+            Failure::Rerouted => return Decision::Reroute,
+            Failure::Transient | Failure::RateLimited { .. } => {}
         }
         if attempt >= self.attempts {
             return Decision::Exhausted;
@@ -375,7 +464,7 @@ impl RetryPolicy {
         }
         let (base, ceiling) = match failure {
             Failure::RateLimited { .. } => (self.rate_limit_base, self.rate_limit_ceiling),
-            Failure::Terminal | Failure::Transient => (self.base, self.ceiling),
+            Failure::Terminal | Failure::Transient | Failure::Rerouted => (self.base, self.ceiling),
         };
         let span = backoff(base, ceiling, attempt);
         span.mul_f64(1.0 - self.jitter.clamp(0.0, 1.0) * sample.clamp(0.0, 1.0))
@@ -399,12 +488,13 @@ struct Attempt {
     failure: Failure,
     decision: Decision,
     message: String,
+    handover: Option<Handover>,
 }
 
 impl Attempt {
     fn level(&self) -> &'static str {
         match self.decision {
-            Decision::Retry(_) => LEVEL_WARNING,
+            Decision::Retry(_) | Decision::Reroute => LEVEL_WARNING,
             Decision::Terminal | Decision::Exhausted => LEVEL_ERROR,
         }
     }
@@ -419,6 +509,16 @@ impl Attempt {
                 delay.as_secs_f64(),
                 self.message
             ),
+            Decision::Reroute => match &self.handover {
+                Some(handover) => format!(
+                    "Attempt {} handed over from {} to {} after a usage limit: {}",
+                    self.number, handover.from.label, handover.to.label, self.message
+                ),
+                None => format!(
+                    "Attempt {} handed over to another sign-in after a usage limit: {}",
+                    self.number, self.message
+                ),
+            },
             Decision::Terminal => format!(
                 "Attempt {} of {} hit a terminal error and will not be retried: {}",
                 self.number, attempts, self.message
@@ -434,7 +534,7 @@ impl Attempt {
     }
 
     fn metadata(&self, attempts: u32) -> serde_json::Value {
-        serde_json::json!({
+        let mut metadata = serde_json::json!({
             "attempt": self.number,
             "attempts": attempts,
             "classification": self.failure.label(),
@@ -442,7 +542,20 @@ impl Attempt {
             "delay_ms": self.decision.delay().map(milliseconds),
             "retry_after_ms": self.failure.retry_after().map(milliseconds),
             "error": self.message,
-        })
+        });
+        if let (Some(handover), Some(fields)) = (&self.handover, metadata.as_object_mut()) {
+            fields.insert("from".to_string(), handover.from.label.clone().into());
+            fields.insert("to".to_string(), handover.to.label.clone().into());
+            fields.insert("agent".to_string(), handover.to.agent.as_str().into());
+            fields.insert(
+                "resets_at".to_string(),
+                handover
+                    .resets_at
+                    .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                    .into(),
+            );
+        }
+        metadata
     }
 }
 
@@ -478,12 +591,6 @@ const RATE_LIMIT_MARKERS: &[&str] = &[
 /// prompt meets again: an answer past the output cap, and a model or a
 /// context the signed-in account cannot spend usage credits on.
 const AGENT_TERMINAL_MARKERS: &[&str] = &[OUTGROWN, UNFUNDED, UNFUNDED_CONTEXT];
-
-/// How a coding agent says its subscription ran out. Only a coding agent's
-/// own words are read for these: an endpoint's failure that happens to use
-/// them is judged by [`classify`] alone.
-const SUBSCRIPTION_LIMIT_MARKERS: &[&str] =
-    &["hit your", "session limit", "usage limit", "weekly limit"];
 
 const TERMINAL_MARKERS: &[&str] = &[
     "access denied",
@@ -549,8 +656,10 @@ fn classify(message: &str) -> Failure {
 }
 
 /// [`classify`] for a coding agent's own words, where a failure no retry
-/// survives is terminal and a subscription that ran out backs off like any
-/// rate limit.
+/// survives is terminal and a subscription that ran out, in any of
+/// [`zone_core::llm::LIMIT_WORDINGS`], backs off like any rate limit. Only a
+/// coding agent's own words are read for those: an endpoint's failure that
+/// happens to use them is judged by [`classify`] alone.
 fn classify_agent(words: &str) -> Failure {
     if AGENT_TERMINAL_MARKERS
         .iter()
@@ -558,13 +667,9 @@ fn classify_agent(words: &str) -> Failure {
     {
         return Failure::Terminal;
     }
-    let lowered = words.to_ascii_lowercase();
-    if SUBSCRIPTION_LIMIT_MARKERS
-        .iter()
-        .any(|marker| lowered.contains(marker))
-    {
+    if Limit::worded(words) {
         return Failure::RateLimited {
-            retry_after: retry_after(&lowered),
+            retry_after: retry_after(&words.to_ascii_lowercase()),
         };
     }
     classify(words)
@@ -1032,26 +1137,17 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let workspace_id = task.workspace_id;
     let route = Route::for_workspace(state, workspace_id).await;
     let resolved = route.resolve(state, &[], None).await;
-    let login = resolved
-        .as_ref()
-        .ok()
-        .and_then(|resolved| resolved.login.clone());
-    let resolved = resolved.map(|resolved| resolved.backend);
-    let Prepared {
-        backend,
-        endpoint,
-        model,
-    } = match prepare(state, &task, route, resolved, plan_approval).await {
+    let prepared = match prepare(state, &task, route.clone(), resolved, plan_approval).await {
         Ok(prepared) => prepared,
-        Err(message) => {
+        Err(unprepared) => {
             obs.set_status(RUN_FAILED);
-            tracing::error!("Task {} cannot start: {}", task_id, message);
+            tracing::error!("Task {} cannot start: {}", task_id, unprepared);
             if let Err(error) = tasks::complete_owned_task_run(
                 state.db(),
                 run_id,
                 Some(owner),
                 RUN_FAILED,
-                Some(&message),
+                Some(&unprepared.to_string()),
                 None,
             )
             .await
@@ -1106,7 +1202,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     // The model the run runs on is written down so the reviewer can be chosen
     // against it.
     if !matches!(
-        tasks::record_run_model(state.db(), run_id, owner, &model).await,
+        tasks::record_run_model(state.db(), run_id, owner, &prepared.model).await,
         Ok(true)
     ) {
         tracing::warn!(%run_id, "Could not record the run's model; a reviewer is chosen without it");
@@ -1149,10 +1245,10 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let policy = RetryPolicy::default();
     let pool = state.db();
     let workspace = workspace_path.as_path();
-    let backend = &backend;
-    let login = login.as_ref();
-    let endpoint = &endpoint;
-    let model = model.as_str();
+    let seat = tokio::sync::Mutex::new(Seat::new(route, &prepared));
+    let seat = &seat;
+    let task = &task;
+    let endpoint = &prepared.endpoint;
     let task_prompt = task_prompt.as_str();
     let guidance = guidance.as_str();
     let environment = &environment;
@@ -1165,8 +1261,16 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let result = run_with_policy(
         policy,
         move |_| async move {
-            let backend = refreshed(state, backend, login).await?;
-            attempt_run(
+            let mut seat = seat.lock().await;
+            let Seated {
+                backend,
+                login,
+                model,
+            } = match seat.take(state, task, run_id, owner).await {
+                Ok(seated) => seated,
+                Err(fault) => return Err(seat.after(state, fault).await),
+            };
+            let outcome = attempt_run(
                 state,
                 run_id,
                 owner,
@@ -1174,7 +1278,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 actor,
                 &backend,
                 endpoint,
-                model,
+                &model,
                 task_prompt,
                 guidance,
                 workspace,
@@ -1185,8 +1289,17 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 approval,
                 tokio::time::Instant::now() + TASK_TIMEOUT,
             )
-            .await
-            .map_err(|fault| fault.scrubbed(endpoint))
+            .await;
+            let outcome = match outcome {
+                Ok(outcome) => Ok(outcome),
+                Err(fault) => Err(seat
+                    .after(state, fault.scrubbed(endpoint).on(login.as_ref()))
+                    .await),
+            };
+            if let Some(login) = &login {
+                settle(state, login.id);
+            }
+            outcome
         },
         move |attempt| record_attempt(pool, run_id, policy, attempt),
     )
@@ -1311,11 +1424,13 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     }
 }
 
-/// Where a run's turns go and the model they run on.
+/// Where a run's turns go, the model they run on, and the organization's
+/// login they run under, when they run under one.
 struct Prepared {
     backend: LlmBackend,
     endpoint: Endpoint,
     model: String,
+    login: Option<LoginIdentity>,
 }
 
 /// What a run runs on, or why it cannot start. The backend, endpoint and model
@@ -1328,71 +1443,62 @@ async fn prepare(
     state: &AppState,
     task: &tasks::TaskRow,
     route: Route,
-    resolved: Result<LlmBackend, backend::Error>,
+    resolved: Result<Resolved, backend::Error>,
     plan_approval: bool,
-) -> Result<Prepared, String> {
+) -> Result<Prepared, Unprepared> {
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
-    let endpoint = route
-        .into_endpoint()
-        .map_err(|unusable| unusable.to_string())?;
-    let backend = resolved.map_err(|error| error.to_string())?;
+    let endpoint = route.into_endpoint().map_err(backend::Error::from)?;
+    let Resolved { backend, login } = resolved?;
     if plan_approval && matches!(backend, LlmBackend::Cli { .. }) {
-        return Err(match state.config().model_backend() {
+        return Err(Unprepared::Refused(match state.config().model_backend() {
             ModelBackend::LiteLlm => PLAN_APPROVAL_UNAVAILABLE,
             ModelBackend::Cli { .. } => PLAN_APPROVAL_UNAVAILABLE_ANYWHERE,
-        }
-        .to_string());
+        }));
     }
-    let model = resolve_model(state, task, &backend, &endpoint, &preferences).await?;
+    let model = resolve_model(state, task, &backend, &endpoint, &preferences)
+        .await
+        .map_err(Unprepared::Model)?;
     Ok(Prepared {
         backend,
         endpoint,
         model,
+        login,
     })
 }
 
-/// The backend an attempt runs on: the one the run was prepared on, with the
-/// Claude sign-in of the organization's `login` it carries resolved again, so a
-/// token renewed since the last attempt is the one this attempt hands its
-/// agent, and a login the organization has since signed out stops the run.
+/// The backend an attempt runs on, routed again as the attempt starts.
 ///
-/// Nothing the run does not use is read: an endpoint run reads nothing, and a
-/// sign-in zone does not keep -- the host's, or codex's in its own home -- is
-/// its agent's to renew. A login that cannot be read is retried.
-async fn refreshed(
+/// A run on one of its organization's logins stays on `login` while it can
+/// still run, under its sign-in as it stands now, so a token renewed since the
+/// last attempt is the one this attempt hands its agent. Once `login` is gone,
+/// exhausted or in `tried`, the router picks another in its place, among every
+/// login of the organization but those in `tried`. A run with no logins left
+/// stops when none is signed in, and waits for the earliest reset when every
+/// one is exhausted; a login that cannot be read is retried.
+///
+/// A run on no login of the organization's -- an endpoint, the instance's
+/// agent or the host's sign-in -- reads nothing and runs where it began.
+async fn routed(
     state: &AppState,
+    route: &Route,
     prepared: &LlmBackend,
     login: Option<&LoginIdentity>,
-) -> Result<LlmBackend, Fault> {
-    let LlmBackend::Cli { agent, settings } = prepared else {
-        return Ok(prepared.clone());
+    tried: &[Uuid],
+) -> Result<Resolved, Fault> {
+    let Some(login) = login else {
+        return Ok(Resolved::unrouted(prepared.clone()));
     };
-    let (SignIn::Organization, Credential::Key { variable, .. }, Some(login)) =
-        (settings.sign_in, &settings.credential, login)
-    else {
-        return Ok(prepared.clone());
-    };
-    let row = match agent_logins::get(state.db(), login.id).await {
-        Ok(Some(row)) => row,
-        Ok(None) => return Err(Fault::backend(backend::Error::SignedOut { agent: *agent })),
-        Err(source) => {
-            return Err(Fault::backend(backend::Error::Database {
-                agent: *agent,
-                source,
-            }));
-        }
-    };
-    let token = match credential::resolve(state, &row).await {
-        Ok(Login::Claude { token }) => token,
-        Ok(Login::Codex { .. }) => return Ok(prepared.clone()),
-        Err(error) => return Err(Fault::backend(backend::Error::resolving(*agent, error))),
-    };
-    Ok(LlmBackend::cli(
-        *agent,
-        settings
-            .clone()
-            .with_credential(Credential::key(variable.clone(), token)),
-    ))
+    route
+        .resolve(state, tried, Some(login.id))
+        .await
+        .map_err(Fault::backend)
+}
+
+/// Brings what the organization knows of `login`'s usage up to date once an
+/// attempt on it has ended, without holding the run up for it.
+fn settle(state: &AppState, login: Uuid) {
+    let state = state.clone();
+    tokio::spawn(async move { router::settle(&state, login).await });
 }
 
 /// Resolves the run's model the way a chat resolves its own: workspace settings
@@ -2046,6 +2152,9 @@ async fn record_evaluation_log(
 ///
 /// A permit is acquired per attempt and dropped before any backoff, so a
 /// sleeping run never occupies a slot other runs are waiting on.
+///
+/// An attempt handed over to another login runs again at once under the same
+/// number: a reroute neither sleeps nor counts toward the attempts.
 async fn run_with_policy<Run, Running, Record, Recording>(
     policy: RetryPolicy,
     mut run: Run,
@@ -2074,9 +2183,17 @@ where
             failure: fault.failure,
             decision,
             message: fault.message.clone(),
+            handover: fault.handover(),
         })
         .await;
         match decision {
+            Decision::Reroute => {
+                tracing::info!(
+                    attempt = number,
+                    error = %fault.message,
+                    "Handing a task run over to another login after a usage limit"
+                );
+            }
             Decision::Retry(delay) => {
                 tracing::warn!(
                     attempt = number,
@@ -2234,12 +2351,7 @@ async fn attempt_run(
             )
             .await
             {
-                Err(Halt::Failed(error)) => {
-                    return Err(Fault::agent(&llm.config().backend, error));
-                }
-                Err(Halt::Limited(limit)) => {
-                    return Err(Fault::limited(&llm.config().backend, limit.message));
-                }
+                Err(halt) => return Err(halt.fault(&llm.config().backend)),
                 Ok(TurnOutcome::Finished(outcome)) => {
                     carried.absorb(outcome);
                     return Ok(carried);
@@ -3182,7 +3294,14 @@ mod tests {
             AgentTask::new("llama3.2:3b", "qwen3.8:27b", "Rename the settings page").await;
 
         let route = fixture.route().await;
-        let prepared = prepare(&fixture.state, &fixture.task, route, Ok(claude()), false).await;
+        let prepared = prepare(
+            &fixture.state,
+            &fixture.task,
+            route,
+            Ok(Resolved::unrouted(claude())),
+            false,
+        )
+        .await;
         fixture.remove().await;
 
         let Prepared { backend, model, .. } =
@@ -3215,7 +3334,16 @@ mod tests {
         .await;
         fixture.remove().await;
 
-        assert_eq!(prepared.err(), Some(signed_out().to_string()));
+        assert!(
+            matches!(
+                prepared.as_ref().err(),
+                Some(Unprepared::Backend(backend::Error::SignedOut {
+                    agent: zone_core::llm::AgentKind::Claude
+                }))
+            ),
+            "{:?}",
+            prepared.err()
+        );
     }
 
     #[tokio::test]
@@ -3241,7 +3369,7 @@ mod tests {
             &fixture.state,
             &fixture.task,
             route,
-            Ok(LlmBackend::Http),
+            Ok(Resolved::unrouted(LlmBackend::Http)),
             false,
         )
         .await;
@@ -3258,7 +3386,7 @@ mod tests {
 
         assert_eq!(origin, crate::services::endpoint::Origin::Settings);
         assert_eq!(
-            prepared.err(),
+            prepared.err().map(|unprepared| unprepared.to_string()),
             Some(crate::services::endpoint::Error::ModelUnset.to_string()),
             "the run says to set a model rather than sending the provider one it never named"
         );
@@ -4199,7 +4327,7 @@ mod retry_tests {
             panic!("the refusal was expected to halt the turn as a limit");
         };
 
-        let fault = Fault::limited(&backend, limit.message);
+        let fault = Fault::limited(&backend, limit);
         let before = Fault::agent(
             &backend,
             format!(
@@ -4237,7 +4365,7 @@ mod retry_tests {
         };
         assert!(limit.credits, "{limit:?}");
 
-        let fault = Fault::limited(&backend, limit.message);
+        let fault = Fault::limited(&backend, limit);
 
         assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
         assert_eq!(
@@ -4747,6 +4875,145 @@ mod retry_tests {
         assert_eq!(completed.attempts, 2);
         assert_eq!(permits.available_permits(), 0, "the loop took a permit");
         drop(held);
+    }
+    fn limit(resets_at: Option<chrono::DateTime<chrono::Utc>>, credits: bool) -> Box<Limit> {
+        Box::new(Limit {
+            message: format!("Stream error: claude: {SESSION_LIMIT}"),
+            resets_at,
+            credits,
+            window: None,
+        })
+    }
+
+    fn login(agent: AgentKind, label: &str) -> LoginIdentity {
+        LoginIdentity {
+            id: Uuid::new_v4(),
+            agent,
+            label: label.to_string(),
+        }
+    }
+
+    /// A limit another login can run past hands the run over at once: the
+    /// attempt runs again under the same number with no backoff, even when it
+    /// was the last the policy allows, and the run log says who it moved to.
+    #[tokio::test(start_paused = true)]
+    async fn a_reroute_costs_no_attempt_and_no_backoff() {
+        let from = login(AgentKind::Claude, "a@example.com");
+        let to = login(AgentKind::Codex, "b@example.com");
+        let resets_at = chrono::Utc::now() + chrono::TimeDelta::hours(2);
+        let refused = Fault::limited(
+            &agent(AgentKind::Claude, SignIn::Organization),
+            limit(Some(resets_at), false),
+        )
+        .on(Some(&from))
+        .rerouted(to.clone());
+        let numbers = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let policy = RetryPolicy {
+            attempts: 1,
+            ..RetryPolicy::default()
+        };
+        let started = tokio::time::Instant::now();
+
+        let completed = run_with_policy(
+            policy,
+            |number| {
+                let numbers = Arc::clone(&numbers);
+                let refused = refused.clone();
+                async move {
+                    let mut numbers = numbers.lock().unwrap();
+                    numbers.push(number);
+                    if numbers.len() == 1 {
+                        Err(refused)
+                    } else {
+                        Ok(outcome())
+                    }
+                }
+            },
+            |attempt| {
+                let recorded = Arc::clone(&recorded);
+                async move { recorded.lock().unwrap().push(attempt) }
+            },
+        )
+        .await
+        .expect("the attempt on the login it was handed to finishes the run");
+
+        assert_eq!(completed.attempts, 1);
+        assert_eq!(*numbers.lock().unwrap(), [1, 1]);
+        assert_eq!(started.elapsed(), Duration::ZERO, "a reroute backed off");
+        let recorded = recorded.lock().unwrap();
+        let [rerouted] = recorded.as_slice() else {
+            panic!("expected one recorded attempt, got {recorded:?}");
+        };
+        assert_eq!(rerouted.decision, Decision::Reroute);
+        assert_eq!(rerouted.level(), LEVEL_WARNING);
+        assert_eq!(
+            rerouted.summary(policy.attempts),
+            format!(
+                "Attempt 1 handed over from a@example.com to b@example.com after a usage \
+                 limit: Stream error: claude: {SESSION_LIMIT}"
+            )
+        );
+        let metadata = rerouted.metadata(policy.attempts);
+        assert_eq!(metadata["outcome"], "reroute");
+        assert_eq!(metadata["classification"], "rerouted");
+        assert_eq!(metadata["from"], "a@example.com");
+        assert_eq!(metadata["to"], "b@example.com");
+        assert_eq!(metadata["agent"], "codex");
+        assert_eq!(
+            metadata["resets_at"],
+            resets_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+        assert_eq!(metadata["delay_ms"], serde_json::Value::Null);
+    }
+
+    /// With no other login to hand over to, a limit backs off until it
+    /// resets, or until the organization's earliest login does, rather than
+    /// along the rate-limit curve. One with no reset backs off as its words
+    /// say, and a limit on usage credits is never waited out.
+    #[test]
+    fn a_limit_without_another_login_backs_off_by_its_reset() {
+        let policy = RetryPolicy::default();
+        let backend = agent(AgentKind::Claude, SignIn::Organization);
+        let within = |delay: Duration, minutes: u64| {
+            delay <= Duration::from_secs(minutes * 60)
+                && delay > Duration::from_secs(minutes * 60 - 60)
+        };
+
+        let own = Fault::limited(
+            &backend,
+            limit(
+                Some(chrono::Utc::now() + chrono::TimeDelta::minutes(3)),
+                false,
+            ),
+        );
+        let Decision::Retry(delay) = policy.decide(1, own.failure, 1.0) else {
+            panic!(
+                "a limit with no other login backs off, got {:?}",
+                own.failure
+            );
+        };
+        assert!(within(delay, 3), "{delay:?}");
+
+        let earliest = own
+            .clone()
+            .deferred(Some(chrono::Utc::now() + chrono::TimeDelta::minutes(2)));
+        let Decision::Retry(delay) = policy.decide(1, earliest.failure, 1.0) else {
+            panic!("expected a backoff, got {:?}", earliest.failure);
+        };
+        assert!(within(delay, 2), "{delay:?}");
+        assert_eq!(own.clone().deferred(None).failure, own.failure);
+
+        let unknown = Fault::limited(&backend, limit(None, false));
+        assert_eq!(unknown.failure, Failure::RateLimited { retry_after: None });
+        assert_eq!(
+            policy.decide(1, unknown.failure, 0.0),
+            Decision::Retry(policy.rate_limit_base)
+        );
+
+        let unfunded = Fault::limited(&backend, limit(None, true))
+            .deferred(Some(chrono::Utc::now() + chrono::TimeDelta::minutes(2)));
+        assert_eq!(unfunded.failure, Failure::Terminal);
     }
 }
 
@@ -6530,7 +6797,8 @@ mod cli_tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
     use wiremock::MockServer;
-    use zone_core::llm::{AgentKind, CliSettings, LlmConfig, Toolset};
+    use zone_core::llm::provider::SignIn;
+    use zone_core::llm::{AgentKind, CliSettings, Credential, LlmConfig, Toolset};
 
     const ANSWER: &str = "Wrote it.";
     const EXECUTABLE: &str = "claude";
@@ -6541,6 +6809,10 @@ mod cli_tests {
     const INVOCATIONS: &str = "invocations";
     const FAILED: &str = "failed";
     const RELEASE: &str = "release";
+    const REFUSALS: &str = "refusals";
+    /// Where a refusal [`Agent::limited`] prints names the second its window
+    /// resets at.
+    const RESETS_AT: &str = "__RESETS_AT__";
     const COMPLETIONS: &str = "/chat/completions";
     const POLL: Duration = Duration::from_millis(25);
     const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -6623,6 +6895,63 @@ mod cli_tests {
                     answer = answer(),
                 )
             })
+        }
+
+        /// It records the claude token and the arguments of each invocation
+        /// and answers, unless [`Self::refuse`] gave its token a refusal: that
+        /// it prints in place of an answer, once, as an account past a limit
+        /// does, after waiting as long as [`Self::hold`] said, with
+        /// [`RESETS_AT`] read as the second [`Self::reset`] said its window
+        /// resets at once printed. The refusal is used up before it is
+        /// printed, since the run stops the agent as soon as it reads the end
+        /// of the turn.
+        fn limited() -> Self {
+            Self::with(|agent| {
+                format!(
+                    "printf '%s\\n' \"$CLAUDE_CODE_OAUTH_TOKEN\" >> '{tokens}'\nprintf '%s\\n' \
+                     \"$*\" >> '{invocations}'\nrefusal='{refusals}/'\"$CLAUDE_CODE_OAUTH_TOKEN\"\n\
+                     if [ -f \"$refusal\" ]; then\nmv \"$refusal\" \"$refusal.printed\"\nif [ -f \
+                     \"$refusal.wait\" ]; then sleep \"$(cat \"$refusal.wait\")\"; fi\nafter=0\nif \
+                     [ -f \"$refusal.reset\" ]; then after=$(cat \"$refusal.reset\"); fi\nsed \
+                     \"s/{RESETS_AT}/$(( $(date +%s) + after ))/\" \"$refusal.printed\"\nexit 0\nfi\n\
+                     {answer}",
+                    tokens = agent.path(TOKENS).display(),
+                    invocations = agent.path(INVOCATIONS).display(),
+                    refusals = agent.path(REFUSALS).display(),
+                    answer = answer(),
+                )
+            })
+        }
+
+        /// The next turn under `token` prints `lines` in place of an answer.
+        fn refuse(&self, token: &str, lines: &[Value]) {
+            std::fs::create_dir_all(self.path(REFUSALS)).expect("a directory for refusals");
+            let lines: Vec<String> = lines.iter().map(Value::to_string).collect();
+            std::fs::write(
+                self.path(REFUSALS).join(token),
+                format!("{}\n", lines.join("\n")),
+            )
+            .expect("the refusal");
+        }
+
+        /// The refusal under `token` is printed once `seconds` have passed.
+        fn hold(&self, token: &str, seconds: u64) {
+            self.set(token, "wait", seconds);
+        }
+
+        /// The refusal under `token` says its window resets `seconds` after
+        /// it is printed.
+        fn reset(&self, token: &str, seconds: u64) {
+            self.set(token, "reset", seconds);
+        }
+
+        fn set(&self, token: &str, setting: &str, seconds: u64) {
+            std::fs::create_dir_all(self.path(REFUSALS)).expect("a directory for refusals");
+            std::fs::write(
+                self.path(REFUSALS).join(format!("{token}.{setting}")),
+                seconds.to_string(),
+            )
+            .expect("the refusal's setting");
         }
 
         /// Wait until the run's first attempt has spawned this agent.
@@ -6876,6 +7205,48 @@ mod cli_tests {
                 agent: AgentKind::Claude,
                 label: AgentKind::Claude.to_string(),
             }
+        }
+
+        /// The organization signs in another claude account, `label`, on
+        /// `access`, beside every account it already holds.
+        async fn add(&self, state: &AppState, access: &str, label: &str) -> LoginIdentity {
+            let sealed = sealed(state, access);
+            let login = agent_logins::insert(
+                &self.pool,
+                &Insert {
+                    organization_id: self.organization,
+                    agent: AgentKind::Claude.as_str(),
+                    account: Some(label),
+                    credential: Some(&sealed),
+                    label: Some(label),
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+            LoginIdentity {
+                id: login.id,
+                agent: AgentKind::Claude,
+                label: label.to_string(),
+            }
+        }
+
+        /// What the run logged of each attempt that did not finish it.
+        async fn attempts(&self) -> Vec<tasks::TaskRunLogRow> {
+            tasks::get_task_run_logs(&self.pool, self.run)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|log| log.agent_type == SOURCE_RETRY)
+                .collect()
+        }
+
+        async fn exhausted_until(&self, login: &LoginIdentity) -> Option<chrono::DateTime<Utc>> {
+            agent_logins::get(&self.pool, login.id)
+                .await
+                .unwrap()
+                .expect("the login")
+                .exhausted_until
         }
 
         /// The organization's claude `login` renews its token to `access`.
@@ -7319,15 +7690,27 @@ mod cli_tests {
             .connect_lazy("postgres://127.0.0.1:1/unreachable")
             .expect("a lazy pool that never connects");
         let state = AppState::new(crate::state::test_config(), pool, None);
+        let route = Route::new(
+            state.config(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            crate::services::endpoint::testing::settings(PROVIDER_CLAUDE_CODE),
+        );
         let login = LoginIdentity {
             id: Uuid::new_v4(),
             agent: AgentKind::Claude,
             label: "jake@example.com".to_string(),
         };
 
-        let fault = refreshed(&state, &signed_in("first-access"), Some(&login))
-            .await
-            .expect_err("an unreadable login is no sign-in to keep");
+        let fault = routed(
+            &state,
+            &route,
+            &signed_in("first-access"),
+            Some(&login),
+            &[],
+        )
+        .await
+        .expect_err("an unreadable login is no sign-in to keep");
 
         assert_eq!(fault.failure, Failure::Transient, "{}", fault.message);
         assert!(
@@ -7347,21 +7730,30 @@ mod cli_tests {
         let state = fixture.state(crate::state::test_config());
         let login = fixture.sign_in(&state, "renewed-access").await;
         fixture.choose(PROVIDER_CODEX).await;
+        let route = Route::for_workspace(&state, fixture.workspace).await;
 
-        let backend = refreshed(&state, &signed_in("first-access"), Some(&login))
-            .await
-            .expect("a workspace that left its agent keeps the run's login");
-        let unrouted = refreshed(&state, &signed_in("first-access"), None)
+        let kept = routed(
+            &state,
+            &route,
+            &signed_in("first-access"),
+            Some(&login),
+            &[],
+        )
+        .await
+        .expect("a workspace that left its agent keeps the run's login");
+        let unrouted = routed(&state, &route, &signed_in("first-access"), None, &[])
             .await
             .expect("a run on no login keeps its sign-in");
         fixture.remove().await;
 
-        let LlmBackend::Cli { agent, settings } = backend else {
+        assert_eq!(kept.login.as_ref(), Some(&login));
+        let LlmBackend::Cli { agent, settings } = kept.backend else {
             panic!("the run left its coding agent");
         };
         assert_eq!(agent, AgentKind::Claude);
         assert_eq!(settings.credential.expose(), Some("renewed-access"));
-        let LlmBackend::Cli { settings, .. } = unrouted else {
+        assert_eq!(unrouted.login, None);
+        let LlmBackend::Cli { settings, .. } = unrouted.backend else {
             panic!("the run left its coding agent");
         };
         assert_eq!(settings.credential.expose(), Some("first-access"));
@@ -7783,5 +8175,364 @@ mod cli_tests {
             );
         }
         fixture.remove().await;
+    }
+
+    const SESSION_LIMIT: &str = "You've hit your session limit · resets 5pm";
+    const FABLE_REFUSAL: &str =
+        "Fable 5.1 requires usage credits. Switch to another model to continue.";
+
+    /// An instance whose agent is the stand-in, in homes under `agents`, with
+    /// no host sign-in to fall back on and its usage read from `provider`.
+    fn routing(agent: &Agent, provider: &MockServer, agents: &TempDir) -> Config {
+        let mut config = homed(config(agent, provider), agents);
+        config.agents.host_login = false;
+        config.agents.claude_api_url = provider.uri();
+        config.agents.codex_api_url = provider.uri();
+        config
+    }
+
+    /// What claude prints when a turn runs past the plan's five-hour window,
+    /// which resets at `resets_at`: an epoch second, or [`RESETS_AT`].
+    fn past_its_window(resets_at: Value) -> [Value; 3] {
+        [
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": resets_at, "rateLimitType": "five_hour", "isUsingOverage": false}}),
+            json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": SESSION_LIMIT}]}, "parent_tool_use_id": null, "error": "rate_limit", "is_api_error_message": true}),
+            json!({"type": "result", "subtype": "success", "is_error": true, "api_error_status": 429, "result": SESSION_LIMIT}),
+        ]
+    }
+
+    /// What claude prints when the model needs usage credits the account
+    /// cannot spend.
+    fn unfunded() -> [Value; 3] {
+        [
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "overageStatus": "rejected", "overageDisabledReason": "overage_not_provisioned", "isUsingOverage": false, "errorCode": "credits_required"}}),
+            json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": FABLE_REFUSAL}]}, "parent_tool_use_id": null, "error": "rate_limit", "is_api_error_message": true, "api_error": "model_requires_usage_credits"}),
+            json!({"type": "result", "subtype": "success", "is_error": true, "api_error_status": 429, "result": FABLE_REFUSAL}),
+        ]
+    }
+
+    /// The turn claude fails the way a dropped stream does.
+    fn dropped() -> [Value; 1] {
+        [json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "result": "stream disconnected before completion",
+        })]
+    }
+
+    /// `at`, as the run log writes a reset time.
+    fn logged(at: chrono::DateTime<Utc>) -> Value {
+        json!(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    }
+
+    /// What each logged attempt decided.
+    fn outcomes(logs: &[tasks::TaskRunLogRow]) -> Vec<String> {
+        logs.iter()
+            .map(|log| {
+                log.metadata.as_ref().expect("an attempt's metadata")["outcome"]
+                    .as_str()
+                    .expect("an attempt's outcome")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Run the fixture's run to its end on `state`.
+    async fn execute(state: &AppState, fixture: &Fixture) {
+        tokio::time::timeout(
+            SPAWN_TIMEOUT * 2,
+            execute_task_run(state, fixture.run, fixture.task),
+        )
+        .await
+        .expect("the run ends");
+    }
+
+    /// A login past its limit hands the run over to another of the
+    /// organization's at once: the same attempt runs again on the other
+    /// login, nothing waits for the limit to reset, and the login that hit it
+    /// rests until then.
+    #[tokio::test]
+    async fn a_run_that_hits_its_limit_reroutes_to_another_login_without_backing_off() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::limited();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(routing(&agent, &provider, &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        let first = fixture.add(&state, "first-access", "a@example.com").await;
+        let second = fixture.add(&state, "second-access", "b@example.com").await;
+        let resets_at =
+            chrono::DateTime::from_timestamp((Utc::now() + TimeDelta::hours(5)).timestamp(), 0)
+                .expect("a reset time");
+        agent.refuse(
+            "first-access",
+            &past_its_window(json!(resets_at.timestamp())),
+        );
+        let started = tokio::time::Instant::now();
+
+        execute(&state, &fixture).await;
+
+        let elapsed = started.elapsed();
+        let finished = fixture.finished().await;
+        let logs = fixture.attempts().await;
+        let rested = fixture.exhausted_until(&first).await;
+        let other = fixture.exhausted_until(&second).await;
+        fixture.remove().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(agent.lines(TOKENS), ["first-access", "second-access"]);
+        assert!(
+            elapsed < RetryPolicy::default().rate_limit_base,
+            "the run backed off for {elapsed:?}"
+        );
+        let [rerouted] = logs.as_slice() else {
+            panic!("expected one handover, got {logs:?}");
+        };
+        assert_eq!(
+            rerouted.message,
+            format!(
+                "Attempt 1 handed over from a@example.com to b@example.com after a usage \
+                 limit: Stream error: claude: rate limit reached (five_hour, rejected): \
+                 {SESSION_LIMIT}"
+            )
+        );
+        let metadata = rerouted.metadata.as_ref().expect("the handover's metadata");
+        assert_eq!(metadata["outcome"], "reroute");
+        assert_eq!(metadata["attempt"], 1);
+        assert_eq!(metadata["from"], "a@example.com");
+        assert_eq!(metadata["to"], "b@example.com");
+        assert_eq!(metadata["agent"], "claude");
+        assert_eq!(metadata["resets_at"], logged(resets_at));
+        assert_eq!(rested, Some(resets_at));
+        assert_eq!(other, None);
+    }
+
+    /// A run is sticky: while its login can still run, a retried attempt
+    /// stays on it, however much more headroom another login has gained.
+    #[tokio::test]
+    async fn a_run_stays_on_its_login_across_attempts_while_it_has_headroom() {
+        use crate::services::login::usage::Snapshot;
+
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::limited();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(routing(&agent, &provider, &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        let first = fixture.add(&state, "first-access", "a@example.com").await;
+        let second = fixture.add(&state, "second-access", "b@example.com").await;
+        agent.refuse("first-access", &dropped());
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+
+        agent.first_attempt().await;
+        for (login, headroom) in [(&first, 10.0), (&second, 90.0)] {
+            let snapshot = Snapshot {
+                windows: vec![zone_core::llm::Window {
+                    name: "5h".to_string(),
+                    used_percent: Some(100.0 - headroom),
+                    used: None,
+                    limit: None,
+                    resets_at: Some(Utc::now() + TimeDelta::hours(3)),
+                }],
+                headroom: Some(headroom),
+                fetched_at: Utc::now(),
+            };
+            agent_logins::observe(&fixture.pool, login.id, &snapshot)
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(SPAWN_TIMEOUT * 2, running)
+            .await
+            .expect("the run finishes once its second attempt does")
+            .unwrap();
+
+        let finished = fixture.finished().await;
+        let logs = fixture.attempts().await;
+        fixture.remove().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(agent.lines(TOKENS), ["first-access", "first-access"]);
+        assert_eq!(outcomes(&logs), ["retry"]);
+    }
+
+    /// Each login a limit refuses hands the run over to the next. Only once
+    /// none is left does the run back off, until the earliest of them resets,
+    /// and then it runs on a login that has.
+    #[tokio::test]
+    async fn a_run_backs_off_only_once_every_login_is_exhausted() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::limited();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(routing(&agent, &provider, &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        fixture.add(&state, "first-access", "a@example.com").await;
+        fixture.add(&state, "second-access", "b@example.com").await;
+        for token in ["first-access", "second-access"] {
+            agent.refuse(token, &past_its_window(json!(RESETS_AT)));
+            agent.reset(token, 3);
+        }
+
+        execute(&state, &fixture).await;
+
+        let finished = fixture.finished().await;
+        let logs = fixture.attempts().await;
+        fixture.remove().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(outcomes(&logs), ["reroute", "retry"]);
+        let tokens = agent.lines(TOKENS);
+        assert_eq!(tokens.len(), 3, "{tokens:?}");
+        assert_eq!(tokens[..2], ["first-access", "second-access"]);
+        let backoff = logs[1].metadata.as_ref().expect("the backoff's metadata");
+        assert_eq!(backoff["attempt"], 1);
+        assert_eq!(backoff["classification"], "rate_limited");
+        let delay = backoff["delay_ms"].as_u64().expect("a backoff delay");
+        assert!(
+            delay <= 3_000,
+            "the run backed off for {delay}ms, not until the earliest reset"
+        );
+    }
+
+    /// A run with one login has no other to hand over to, so a limit costs it
+    /// an attempt and a backoff, as it always did, and it carries on there.
+    #[tokio::test]
+    async fn a_run_with_one_login_keeps_todays_backoff() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::limited();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(routing(&agent, &provider, &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        fixture.add(&state, "first-access", "a@example.com").await;
+        agent.refuse("first-access", &past_its_window(json!(RESETS_AT)));
+        agent.reset("first-access", 3);
+
+        execute(&state, &fixture).await;
+
+        let finished = fixture.finished().await;
+        let logs = fixture.attempts().await;
+        fixture.remove().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(agent.lines(TOKENS), ["first-access", "first-access"]);
+        let [backoff] = logs.as_slice() else {
+            panic!("expected one backoff, got {logs:?}");
+        };
+        assert!(
+            backoff
+                .message
+                .starts_with("Attempt 1 of 4 failed (rate_limited); retrying in "),
+            "{}",
+            backoff.message
+        );
+        assert_eq!(outcomes(&logs), ["retry"]);
+    }
+
+    /// A limit on usage credits hands the run over like any other, without
+    /// resting the login, since its subscription has room for other models.
+    /// Once no login is left, it ends the run, as no wait lifts it.
+    #[tokio::test]
+    async fn a_credits_limit_ends_the_run_when_no_login_remains() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::limited();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(routing(&agent, &provider, &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        let first = fixture.add(&state, "first-access", "a@example.com").await;
+        let second = fixture.add(&state, "second-access", "b@example.com").await;
+        agent.refuse("first-access", &unfunded());
+        agent.refuse("second-access", &unfunded());
+
+        execute(&state, &fixture).await;
+
+        let failed = fixture.finished().await;
+        let logs = fixture.attempts().await;
+        let rested = [
+            fixture.exhausted_until(&first).await,
+            fixture.exhausted_until(&second).await,
+        ];
+        fixture.remove().await;
+        assert_eq!(failed.status, RUN_FAILED, "{:?}", failed.error_message);
+        assert_eq!(
+            failed.error_message,
+            Some(format!("Stream error: claude: {UNFUNDED}: {FABLE_REFUSAL}"))
+        );
+        let artifacts = failed.artifacts.expect("a failed run's artifacts");
+        assert_eq!(
+            (&artifacts["attempts"], &artifacts["stopped"]),
+            (&json!(1), &json!("terminal"))
+        );
+        assert_eq!(agent.lines(TOKENS), ["first-access", "second-access"]);
+        assert_eq!(outcomes(&logs), ["reroute", "terminal"]);
+        assert_eq!(rested, [None, None]);
+    }
+
+    /// A login a limit refused, whose limit resets while the run is on
+    /// another, takes the run back at once when that other is refused too,
+    /// rather than the run waiting out the other's limit.
+    #[tokio::test]
+    async fn a_login_whose_limit_reset_while_the_run_was_elsewhere_takes_it_back_at_once() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::limited();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(routing(&agent, &provider, &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        fixture.add(&state, "first-access", "a@example.com").await;
+        fixture.add(&state, "second-access", "b@example.com").await;
+        agent.refuse("first-access", &past_its_window(json!(RESETS_AT)));
+        agent.reset("first-access", 2);
+        agent.refuse("second-access", &past_its_window(json!(RESETS_AT)));
+        agent.reset("second-access", 5 * 60 * 60);
+        agent.hold("second-access", 4);
+        let started = tokio::time::Instant::now();
+
+        execute(&state, &fixture).await;
+
+        let elapsed = started.elapsed();
+        let finished = fixture.finished().await;
+        let logs = fixture.attempts().await;
+        fixture.remove().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(
+            agent.lines(TOKENS),
+            ["first-access", "second-access", "first-access"]
+        );
+        assert_eq!(outcomes(&logs), ["reroute", "retry"]);
+        let retried = logs[1].metadata.as_ref().expect("the retry's metadata");
+        assert_eq!(retried["delay_ms"], 0);
+        assert!(
+            elapsed < RetryPolicy::default().rate_limit_base * 2,
+            "the run waited out the second login's limit: {elapsed:?}"
+        );
     }
 }
