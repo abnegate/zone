@@ -192,7 +192,7 @@ test.describe('wiki and search', () => {
     const sources = sql(
       `select name || ' | ' || source_type || ' | ' || is_active from sources where workspace_id = '${state.owner.workspace.id}' order by created_at`,
     );
-    await page.goto('/search');
+    await page.goto('/wiki');
     if (sources.length)
       await expect(page.locator('.source-pill').first()).toBeVisible({
         timeout: 60_000,
@@ -218,7 +218,7 @@ test.describe('wiki and search', () => {
         const target = page.locator('.source-pill', { hasText: pill });
         if (await target.count()) await target.click();
       }
-      await page.getByPlaceholder('Search your knowledge base...').fill(query);
+      await page.getByPlaceholder('Search knowledge and sources...').fill(query);
       const response = page
         .waitForResponse(
           (r) =>

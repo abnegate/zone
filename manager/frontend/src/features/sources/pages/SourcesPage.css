@@ -6,11 +6,12 @@
 .sources-body {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: var(--ui-space-3);
 }
 
 .sources-empty {
-  margin-top: var(--ui-space-8);
+  margin: auto;
 }
 
 .sources-banner {
@@ -35,21 +36,57 @@
   color: var(--ui-error-400);
 }
 
-.sources-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
-  gap: var(--ui-space-3);
-  align-items: start;
-}
-
-.source-card.card--list {
-  display: flex;
-  flex-direction: column;
+.sources-table-wrapper {
+  width: 100%;
   min-width: 0;
-  padding: var(--ui-space-2) var(--ui-space-3);
+  overflow-x: auto;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-card);
+  background: var(--ui-bg-elevated);
 }
 
-.source-card.source-inactive {
+.sources-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.sources-table th {
+  height: var(--ui-control-height);
+  padding: 0 var(--ui-space-3);
+  text-align: left;
+  white-space: nowrap;
+  font-size: var(--ui-text-2xs);
+  font-weight: 600;
+  letter-spacing: var(--ui-tracking-wider);
+  text-transform: uppercase;
+  color: var(--ui-text-muted);
+  background: var(--ui-bg-surface);
+  box-shadow: inset 0 -1px var(--ui-border);
+}
+
+.sources-table td {
+  height: var(--ui-list-row-2);
+  padding: 0 var(--ui-space-3);
+  border-bottom: none;
+  box-shadow: inset 0 -1px var(--ui-border);
+  vertical-align: middle;
+}
+
+.sources-table tbody tr:last-child td {
+  box-shadow: none;
+}
+
+.sources-table tbody tr:hover td {
+  background: var(--ui-bg-hover);
+}
+
+.sources-table th:last-child,
+.sources-table td:last-child {
+  width: 1%;
+  text-align: right;
+}
+
+.source-card.source-inactive td {
   background: var(--ui-bg-base);
 }
 
@@ -57,11 +94,12 @@
   color: var(--ui-text-secondary);
 }
 
-.source-card-title {
+.source-name-cell {
   display: flex;
   align-items: center;
   gap: var(--ui-space-2);
-  height: var(--ui-badge-height);
+  min-width: 12rem;
+  max-width: 22rem;
 }
 
 .source-provider-icon {
@@ -78,20 +116,25 @@
   height: 100%;
 }
 
+.source-name-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .source-name {
   min-width: 0;
   margin: 0;
   font-family: var(--ui-font-body);
   font-size: var(--ui-text-sm);
   font-weight: 600;
-  line-height: var(--ui-badge-height);
+  line-height: var(--ui-space-5);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .source-provider {
-  flex-shrink: 0;
   font-size: var(--ui-text-xs);
   color: var(--ui-text-muted);
   white-space: nowrap;
@@ -99,14 +142,13 @@
 
 .source-status {
   flex-shrink: 0;
-  margin-left: auto;
 }
 
 .source-description {
-  height: 1.125rem;
+  height: var(--ui-space-4);
   margin: 0;
-  font-size: var(--ui-text-sm);
-  line-height: 1.125rem;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-space-4);
   color: var(--ui-text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -115,7 +157,7 @@
 
 .source-url {
   display: block;
-  min-width: 0;
+  max-width: 18rem;
   font-family: var(--ui-font-mono);
   font-size: var(--ui-text-xs);
   line-height: var(--ui-space-4);
@@ -132,36 +174,29 @@
 }
 
 .source-error {
+  height: var(--ui-space-4);
   margin: 0;
-  padding: var(--ui-space-1) var(--ui-space-2);
-  border-radius: var(--ui-radius-sm);
-  background: color-mix(in srgb, var(--ui-error) 8%, transparent);
-  font-size: var(--ui-text-xs);
-  line-height: var(--ui-leading-normal);
+  font-size: var(--ui-text-2xs);
+  line-height: var(--ui-space-4);
   color: var(--ui-error);
-  overflow-wrap: anywhere;
-}
-
-.source-card-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--ui-space-2);
-  height: var(--ui-control-height-sm);
-  margin-top: var(--ui-space-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .source-meta {
-  font-size: var(--ui-text-2xs);
+  font-size: var(--ui-text-xs);
   color: var(--ui-text-muted);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .source-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--ui-space-0-5);
-  margin-right: calc(-1 * var(--ui-space-1));
+  white-space: nowrap;
 }
 
 .source-actions .source-delete {
@@ -170,7 +205,6 @@
 
 .skeleton-card {
   pointer-events: none;
-  min-height: 6.5rem;
 }
 
 .skeleton {
@@ -377,8 +411,8 @@
 }
 
 @media (max-width: 768px) {
-  .sources-list {
-    grid-template-columns: 1fr;
+  .sources-table {
+    min-width: 52rem;
   }
 
   .source-type-grid {

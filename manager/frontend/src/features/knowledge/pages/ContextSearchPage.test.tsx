@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { BrowserRouter } from 'react-router-dom';
 
 const mockSearch = mock();
 const mockClear = mock();
@@ -40,6 +41,7 @@ mock.module('../hooks', () => ({
     createEntry: mock(),
     deleteEntry: mock(),
     refreshEntry: mock(),
+    readEntry: mock(),
     reload: mock(),
   }),
 }));
@@ -67,17 +69,24 @@ mock.module('../../../shared/context/WorkspaceContext', () => ({
   WorkspaceProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-let ContextSearchPage: typeof import('./ContextSearchPage').default;
+let WikiPage: typeof import('./WikiPage').default;
 
 beforeAll(async () => {
-  ContextSearchPage = (await import('./ContextSearchPage')).default;
+  WikiPage = (await import('./WikiPage')).default;
 });
+
+const renderWiki = () =>
+  render(
+    <BrowserRouter>
+      <WikiPage />
+    </BrowserRouter>
+  );
 
 afterAll(() => {
   mock.restore();
 });
 
-describe('ContextSearchPage', () => {
+describe('Wiki source search', () => {
   const mockSources = [
     {
       id: 's1',
@@ -145,11 +154,11 @@ describe('ContextSearchPage', () => {
   });
 
   it('should render the search page', async () => {
-    render(<ContextSearchPage />);
+    renderWiki();
 
-    expect(screen.getByText('Context Search')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Search your knowledge base...')).toBeInTheDocument();
-    expect(screen.getByText('Search')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Knowledge Base' })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Search knowledge and sources...')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Search' })).toBeInTheDocument();
 
     await waitFor(() => {
       expect(mockGetSources).toHaveBeenCalledWith('test-workspace', undefined, true);
@@ -157,7 +166,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should load and display sources as pills', async () => {
-    render(<ContextSearchPage />);
+    renderWiki();
 
     await waitFor(() => {
       // Sources are displayed as buttons/pills
@@ -167,9 +176,9 @@ describe('ContextSearchPage', () => {
   });
 
   it('should perform search with query', async () => {
-    render(<ContextSearchPage />);
+    renderWiki();
 
-    const input = screen.getByPlaceholderText('Search your knowledge base...');
+    const input = screen.getByPlaceholderText('Search knowledge and sources...');
     const searchButton = screen.getByRole('button', { name: 'Search' });
 
     fireEvent.change(input, { target: { value: 'test query' } });
@@ -190,7 +199,7 @@ describe('ContextSearchPage', () => {
   /// is asserted first, or a selector that did nothing would still look right.
   it('should change search mode', async () => {
     const user = userEvent.setup();
-    render(<ContextSearchPage />);
+    renderWiki();
 
     const semantic = await waitFor(() => screen.getByRole('tab', { name: 'Semantic' }));
     expect(screen.getByRole('tab', { name: 'Hybrid' })).toHaveAttribute('aria-selected', 'true');
@@ -198,7 +207,7 @@ describe('ContextSearchPage', () => {
     await user.click(semantic);
     expect(semantic).toHaveAttribute('aria-selected', 'true');
 
-    const input = screen.getByPlaceholderText('Search your knowledge base...');
+    const input = screen.getByPlaceholderText('Search knowledge and sources...');
     fireEvent.change(input, { target: { value: 'test' } });
     fireEvent.submit(input.closest('form')!);
 
@@ -208,7 +217,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should filter by selected sources', async () => {
-    render(<ContextSearchPage />);
+    renderWiki();
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'GitHub Repo' })).toBeInTheDocument();
@@ -221,7 +230,7 @@ describe('ContextSearchPage', () => {
     // The pill should now have 'active' class
     expect(sourcePill).toHaveClass('active');
 
-    const input = screen.getByPlaceholderText('Search your knowledge base...');
+    const input = screen.getByPlaceholderText('Search knowledge and sources...');
     fireEvent.change(input, { target: { value: 'test' } });
     fireEvent.submit(input.closest('form')!);
 
@@ -238,7 +247,7 @@ describe('ContextSearchPage', () => {
       error: null,
     };
 
-    render(<ContextSearchPage />);
+    renderWiki();
 
     await waitFor(() => {
       // High relevance (0.95) shows "Highly relevant"
@@ -256,7 +265,7 @@ describe('ContextSearchPage', () => {
       error: null,
     };
 
-    render(<ContextSearchPage />);
+    renderWiki();
 
     await waitFor(() => {
       expect(screen.getByText('/src/test.ts')).toBeInTheDocument();
@@ -273,10 +282,10 @@ describe('ContextSearchPage', () => {
       error: null,
     };
 
-    render(<ContextSearchPage />);
+    renderWiki();
 
     // Simulate having searched (set query state)
-    const input = screen.getByPlaceholderText('Search your knowledge base...');
+    const input = screen.getByPlaceholderText('Search knowledge and sources...');
     fireEvent.change(input, { target: { value: 'nonexistent' } });
     fireEvent.submit(input.closest('form')!);
 
@@ -293,7 +302,7 @@ describe('ContextSearchPage', () => {
       error: 'Search failed',
     };
 
-    render(<ContextSearchPage />);
+    renderWiki();
 
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent('Search failed');
@@ -302,25 +311,23 @@ describe('ContextSearchPage', () => {
 
   it('centres the toolbar and the results in the page container', () => {
     searchState = { results: mockResults, total: 2, loading: false, error: null };
-    const { container } = render(<ContextSearchPage />);
+    const { container } = renderWiki();
 
-    const centred = container.querySelector('.page-body > .page-container');
-    expect(centred).not.toBeNull();
-    expect(centred?.querySelector('.search-toolbar')).not.toBeNull();
-    expect(centred?.querySelectorAll('.result-card')).toHaveLength(2);
+    const body = container.querySelector('.wiki-body');
+    expect(body?.querySelector('.search-toolbar')).not.toBeNull();
+    expect(body?.querySelectorAll('.result-card')).toHaveLength(2);
   });
 
   it('should display initial empty state', () => {
-    render(<ContextSearchPage />);
+    renderWiki();
 
-    // Initial state shows prompt to search
-    expect(screen.getByText('Search your knowledge')).toBeInTheDocument();
+    expect(screen.getByText('No knowledge entries found')).toBeInTheDocument();
   });
 
   it('should trim whitespace from query', async () => {
-    render(<ContextSearchPage />);
+    renderWiki();
 
-    const input = screen.getByPlaceholderText('Search your knowledge base...');
+    const input = screen.getByPlaceholderText('Search knowledge and sources...');
     fireEvent.change(input, { target: { value: '  test query  ' } });
     fireEvent.submit(input.closest('form')!);
 
@@ -330,7 +337,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should toggle source selection', async () => {
-    render(<ContextSearchPage />);
+    renderWiki();
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'GitHub Repo' })).toBeInTheDocument();
@@ -367,7 +374,7 @@ describe('ContextSearchPage', () => {
       error: null,
     };
 
-    render(<ContextSearchPage />);
+    renderWiki();
 
     await waitFor(() => {
       const snippet = document.querySelector('.result-snippet');
@@ -386,7 +393,7 @@ describe('ContextSearchPage', () => {
       error: null,
     };
 
-    render(<ContextSearchPage />);
+    renderWiki();
 
     await waitFor(() => {
       expect(screen.getByText('2 found')).toBeInTheDocument();

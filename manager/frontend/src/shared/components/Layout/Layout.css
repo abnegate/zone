@@ -116,6 +116,30 @@ body:has(.page--workspace) {
   display: none;
 }
 
+.page-search {
+  position: relative;
+  flex: 1 1 12rem;
+  width: 15rem;
+  max-width: 20rem;
+  min-width: 0;
+}
+
+.page-search-icon {
+  position: absolute;
+  left: var(--ui-space-2-5);
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--ui-icon-size);
+  height: var(--ui-icon-size);
+  color: var(--ui-text-muted);
+  pointer-events: none;
+}
+
+.page-search input[type='search'] {
+  width: 100%;
+  padding-left: var(--ui-space-8);
+}
+
 .page-container {
   flex: 1;
   width: 100%;

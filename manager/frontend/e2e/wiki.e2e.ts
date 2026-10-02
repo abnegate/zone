@@ -103,33 +103,6 @@ test.describe('Wiki Page', () => {
       });
       expect(spacing).toBeGreaterThan(0);
       await page.screenshot({ path: test.info().outputPath('wiki.png') });
-      await routeApi(page, '**/api/workspaces/*/sources?*', (route) =>
-        route.fulfill({ json: { sources: [] } })
-      );
-      await page.goto('/search');
-      const input = page.getByPlaceholder('Search your knowledge base...');
-      await input.fill('Search spacing');
-      const geometry = await input.evaluate((element, tolerance) => {
-        const field = element.getBoundingClientRect();
-        const form = element.closest('form')!;
-        const bounds = form.getBoundingClientRect();
-        const icon = form.querySelector('.search-icon-wrapper')!.getBoundingClientRect();
-        const button = form.querySelector('button')!.getBoundingClientRect();
-        return {
-          icon: field.left + Number.parseFloat(getComputedStyle(element).paddingLeft) - icon.right,
-          input: field.right,
-          button: button.right,
-          bounds: bounds.right,
-          separated:
-            field.right <= button.left + tolerance ||
-            field.bottom <= button.top + tolerance,
-        };
-      }, SUBPIXEL);
-      expect(geometry.bounds).toBeLessThanOrEqual(width + SUBPIXEL);
-      expect(geometry.input).toBeLessThanOrEqual(geometry.bounds + SUBPIXEL);
-      expect(geometry.button).toBeLessThanOrEqual(geometry.bounds + SUBPIXEL);
-      expect(geometry.separated).toBe(true);
-      expect(geometry.icon).toBeGreaterThan(0);
     });
   }
 
@@ -149,7 +122,10 @@ test.describe('Wiki Page', () => {
     test('shows search input', async ({ page }) => {
       const searchInput = page.getByRole('searchbox', { name: 'Search knowledge' });
       await expect(searchInput).toBeVisible();
-      await expect(searchInput).toHaveAttribute('placeholder', 'Search knowledge...');
+      await expect(searchInput).toHaveAttribute(
+        'placeholder',
+        'Search knowledge and sources...'
+      );
     });
 
     test('shows add knowledge button', async ({ page }) => {

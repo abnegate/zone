@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::{chat_attached_sources, chats, message_embeddings};
+use crate::db::{chat_attached_sources, chats, message_embeddings, projects};
 use crate::error::ServerError;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
@@ -371,6 +371,8 @@ pub struct CreateChatRequest {
     reasoning_effort: Option<zone_core::llm::ReasoningEffort>,
     #[serde(default)]
     character: Option<ChatCharacter>,
+    #[serde(default)]
+    project_id: Option<Uuid>,
 }
 
 const fn sandboxed_by_default() -> bool {
@@ -411,10 +413,29 @@ pub async fn list(
     }
 
     match chats::list_chats(state.db(), Some(query.workspace_id), query.archived).await {
-        Ok(items) => Json(ChatsListResponse {
-            chats: items.into_iter().map(ChatResponse::from).collect(),
-        })
-        .into_response(),
+        Ok(items) => {
+            let ids: Vec<_> = items.iter().map(|chat| chat.id).collect();
+            match chats::links_for(state.db(), &ids).await {
+                Ok(links) => Json(ChatsListResponse {
+                    chats: items
+                        .into_iter()
+                        .map(|chat| {
+                            let id = chat.id;
+                            ChatResponse::from(chat).with_link(links.get(&id).cloned())
+                        })
+                        .collect(),
+                })
+                .into_response(),
+                Err(e) => {
+                    tracing::error!("Database error: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::new("Internal server error")),
+                    )
+                        .into_response()
+                }
+            }
+        }
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -458,6 +479,27 @@ pub async fn create(
             .into_response();
     }
 
+    if let Some(project_id) = req.project_id {
+        match projects::get_project_in_workspace(state.db(), project_id, req.workspace_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::new("Project not found in this workspace")),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!("Database error: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     match chats::create_chat_with_title(
         state.db(),
         Some(req.workspace_id),
@@ -467,6 +509,7 @@ pub async fn create(
         req.automatic_title,
         req.auto_approve,
         req.reasoning_effort.unwrap_or_default(),
+        req.project_id,
     )
     .await
     {

@@ -3,7 +3,7 @@
 mod common;
 
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool};
 use std::time::Duration;
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
@@ -16,6 +16,11 @@ const LIFETIME: Duration = Duration::from_secs(30);
 async fn fixture() -> (PgPool, Store, Uuid, Uuid) {
     let address = common::context_database_url();
     let pool = PgPool::connect(&address).await.unwrap();
+    let (store, chat, workspace) = seed(pool.clone()).await;
+    (pool, store, chat, workspace)
+}
+
+async fn seed(pool: PgPool) -> (Store, Uuid, Uuid) {
     let organization = Uuid::new_v4();
     let workspace = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (id,name,slug) VALUES ($1,'Context test',$2)")
@@ -37,7 +42,6 @@ async fn fixture() -> (PgPool, Store, Uuid, Uuid) {
         .await
         .unwrap();
     (
-        pool.clone(),
         Store::new(pool, chat.id, Some(workspace)),
         chat.id,
         workspace,
@@ -1253,5 +1257,52 @@ async fn closing_a_session_whose_lease_was_lost_settles_its_turn() {
         completed.is_some(),
         "a closed turn must carry the time it stopped"
     );
+    chats::delete_chat(&pool, chat).await.unwrap();
+}
+
+#[tokio::test]
+async fn postgres_rejects_set_transaction_after_any_query() {
+    let (pool, _, chat, _) = fixture().await;
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let error = sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .expect_err("SET TRANSACTION after a query is the chat error");
+    let message = error.to_string();
+    assert!(
+        message.contains("SET TRANSACTION ISOLATION LEVEL must be called before any query"),
+        "{message}"
+    );
+    assert!(
+        message.starts_with("error returned from database:"),
+        "{message}"
+    );
+    chats::delete_chat(&pool, chat).await.unwrap();
+}
+
+#[tokio::test]
+async fn load_does_not_set_isolation_after_a_query_has_run() {
+    let address = common::context_database_url();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&address)
+        .await
+        .unwrap();
+    let (store, chat, _) = seed(pool.clone()).await;
+    // A cancelled load can return a connection that is still in a transaction
+    // with a snapshot. SET TRANSACTION and a nested BEGIN ISOLATION LEVEL then
+    // fail with the chat error; load must roll that leftover back first.
+    let mut connection = pool.acquire().await.unwrap();
+    connection.execute("BEGIN").await.unwrap();
+    connection.execute("SELECT 1").await.unwrap();
+    drop(connection);
+    store
+        .load()
+        .await
+        .expect("history load must not SET TRANSACTION after a query has already run");
     chats::delete_chat(&pool, chat).await.unwrap();
 }

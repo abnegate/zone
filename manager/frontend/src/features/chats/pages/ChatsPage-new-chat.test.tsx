@@ -32,6 +32,18 @@ mock.module('../../sources/hooks/useSources', () => ({
   }),
 }));
 
+mock.module('../../projects/hooks', () => ({
+  useProjects: () => ({
+    projects: [],
+    loading: false,
+    error: null,
+    createProject: mock(),
+    updateProject: mock(),
+    deleteProject: mock(),
+    refetch: mock(),
+  }),
+}));
+
 mock.module('../../auth/context', () => ({
   useAuth: () => ({
     isAuthenticated: true,

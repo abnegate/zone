@@ -848,11 +848,10 @@ describe('TasksPage', () => {
       expect(prLink).toHaveAttribute('target', '_blank');
       expect(prLink).toHaveAttribute('rel', 'noopener noreferrer');
       expect(prLink.closest('.task-pr')).not.toBeNull();
-      expect(prLink.closest('.task-meta')).not.toBeNull();
     });
   });
 
-  it('folds the pull request into the meta row so every card keeps the same height', async () => {
+  it('shows the pull request in its column with the branch beside it', async () => {
     mockGetTasks.mockImplementation(() =>
       Promise.resolve([
         {
@@ -868,16 +867,13 @@ describe('TasksPage', () => {
     const badge = await screen.findByText('PR: open');
     const pr = badge.closest('.task-pr') as HTMLElement | null;
     expect(pr).not.toBeNull();
-    expect(pr?.parentElement).toHaveClass('task-meta');
-    expect(pr?.nextElementSibling).toBeNull();
-    expect(pr?.parentElement?.nextElementSibling).toHaveClass('task-actions');
     expect(badge.closest('.task-card-title')).toBeNull();
     expect(within(pr as HTMLElement).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
-    expect(within(pr as HTMLElement).queryByText('zone/task-7')).toBeNull();
-    expect(document.querySelectorAll('.task-card-title .ui-badge')).toHaveLength(2);
+    expect(within(pr as HTMLElement).getByText('zone/task-7')).toHaveClass('task-branch');
+    expect(document.querySelectorAll('.task-card-title .ui-badge')).toHaveLength(1);
   });
 
-  it('sets the branch tag on the footer beside the actions, not on the meta row', async () => {
+  it('sets the branch tag on the pull request column, not on the actions', async () => {
     mockGetTasks.mockImplementation(() =>
       Promise.resolve([
         {
@@ -892,13 +888,10 @@ describe('TasksPage', () => {
     renderTasksPage();
     const branch = await screen.findByText('zone/task-7');
     expect(branch).toHaveClass('task-branch');
-    expect(branch.closest('.task-meta')).toBeNull();
-    const slot = branch.parentElement as HTMLElement;
-    expect(slot).toHaveClass('task-branch-slot');
-    const footer = slot.parentElement as HTMLElement;
-    expect(footer).toHaveClass('task-actions');
-    expect(footer.firstElementChild).toBe(slot);
-    expect(within(footer).getByRole('button', { name: 'Execute' })).toBeInTheDocument();
+    expect(branch.closest('.task-pr')).not.toBeNull();
+    expect(branch.closest('.task-actions')).toBeNull();
+    const row = branch.closest('.task-card') as HTMLElement;
+    expect(within(row).getByRole('button', { name: 'Execute' })).toBeInTheDocument();
   });
 
   it('keeps the branch tag off a card whose branch has no pull request yet', async () => {
@@ -922,7 +915,6 @@ describe('TasksPage', () => {
     renderTasksPage();
     const badge = await screen.findByText('PR: pending');
     expect(badge.closest('.task-pr')).not.toBeNull();
-    expect(badge.closest('.task-meta')).not.toBeNull();
     expect(screen.queryByRole('link', { name: 'View PR' })).not.toBeInTheDocument();
   });
 
@@ -932,32 +924,33 @@ describe('TasksPage', () => {
       const branch = screen.getByText('feature/fix-button-styling');
       expect(branch).toHaveClass('task-branch');
       expect(branch).toHaveAttribute('title', 'feature/fix-button-styling');
-      expect(branch.closest('.task-pr')).toBeNull();
-      expect(branch.closest('.task-actions')).not.toBeNull();
+      expect(branch.closest('.task-pr')).not.toBeNull();
+      expect(branch.closest('.task-actions')).toBeNull();
     });
   });
 
-  it('leaves the pull request row out of a card without a pull request', async () => {
+  it('leaves the pull request column empty without a pull request', async () => {
     mockGetTasks.mockImplementation(() => Promise.resolve([mockTasks[0]]));
 
     renderTasksPage();
     await screen.findByText('Implement login');
     expect(document.querySelector('.task-pr')).toBeNull();
-    expect(document.querySelector('.task-meta')?.nextElementSibling).toHaveClass('task-actions');
   });
 
-  it('reserves every slot of a card so siblings share one height', async () => {
+  it('renders each task as a table row with title, project, and actions', async () => {
     renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
+    const table = screen.getByRole('table', { name: 'Tasks' });
+    expect(table).toBeInTheDocument();
     const cards = document.querySelectorAll('.task-card');
     expect(cards.length).toBeGreaterThan(1);
     for (const card of cards) {
+      expect(card.tagName).toBe('TR');
       expect(card.querySelector('.task-card-title')).not.toBeNull();
       expect(card.querySelector('.task-project')).not.toBeNull();
       expect(card.querySelector('.task-description')).not.toBeNull();
-      expect(card.querySelector('.task-meta')).not.toBeNull();
       expect(card.querySelector('.task-actions')).not.toBeNull();
     }
     expect(document.querySelector('.task-pr-info')).toBeNull();

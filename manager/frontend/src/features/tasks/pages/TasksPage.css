@@ -12,31 +12,74 @@
   width: 12.5rem;
 }
 
+.tasks-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .tasks-body .error-banner {
   margin-bottom: var(--ui-space-4);
 }
 
-.tasks-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
-  gap: var(--ui-space-3);
+.tasks-empty {
+  margin: auto;
 }
 
-.task-card {
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-  height: 11rem;
+.tasks-table-wrapper {
+  width: 100%;
   min-width: 0;
-  padding: calc(var(--ui-card-padding-list) - 1px);
-  background: var(--ui-bg-elevated);
+  overflow-x: auto;
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-lg);
-  transition: border-color var(--ui-duration-fast) var(--ui-ease-out);
+  border-radius: var(--ui-radius-card);
+  background: var(--ui-bg-elevated);
 }
 
-.task-card:hover {
-  border-color: var(--ui-border-strong);
+.tasks-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.tasks-table th {
+  height: var(--ui-control-height);
+  padding: 0 var(--ui-space-3);
+  text-align: left;
+  white-space: nowrap;
+  font-size: var(--ui-text-2xs);
+  font-weight: 600;
+  letter-spacing: var(--ui-tracking-wider);
+  text-transform: uppercase;
+  color: var(--ui-text-muted);
+  background: var(--ui-bg-surface);
+  box-shadow: inset 0 -1px var(--ui-border);
+}
+
+.tasks-table td {
+  height: var(--ui-list-row-2);
+  padding: 0 var(--ui-space-3);
+  border-bottom: none;
+  box-shadow: inset 0 -1px var(--ui-border);
+  vertical-align: middle;
+}
+
+.tasks-table tbody tr:last-child td {
+  box-shadow: none;
+}
+
+.tasks-table tbody tr:hover td {
+  background: var(--ui-bg-hover);
+}
+
+.tasks-table th:last-child,
+.tasks-table td:last-child {
+  width: 1%;
+  text-align: right;
+}
+
+.task-card-agentic td:first-child {
+  box-shadow:
+    inset 2px 0 0 var(--ui-accent),
+    inset 0 -1px var(--ui-border);
 }
 
 .task-card-title {
@@ -69,7 +112,7 @@
 
 .task-project {
   height: var(--ui-space-4);
-  margin: var(--ui-space-1) 0 0;
+  margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -79,41 +122,34 @@
 }
 
 .task-card .task-description {
-  height: var(--ui-space-10);
-  margin: var(--ui-space-2) 0 0;
+  height: var(--ui-space-4);
+  margin: 0;
   overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  font-size: var(--ui-text-sm);
-  line-height: var(--ui-space-5);
-  color: var(--ui-text-secondary);
-}
-
-.task-card .task-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--ui-space-2);
-  height: var(--ui-badge-height);
-  margin: var(--ui-space-2) 0 0;
-  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--ui-text-xs);
   line-height: var(--ui-space-4);
-  color: var(--ui-text-muted);
+  color: var(--ui-text-secondary);
 }
 
-.task-meta > * + *::before {
-  content: '·';
-  margin-right: var(--ui-space-2);
+.task-priority {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
 }
 
 .task-model,
 .task-source {
-  flex: 0 1 auto;
+  display: block;
   min-width: 0;
+  max-width: 10rem;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
 }
 
 .task-source {
@@ -121,11 +157,10 @@
 }
 
 .task-pr {
-  display: contents;
-}
-
-.task-pr::before {
-  margin-right: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-width: 0;
 }
 
 .task-pr-link {
@@ -149,20 +184,17 @@
   justify-content: flex-end;
   gap: var(--ui-space-2);
   height: var(--ui-control-height-sm);
-  margin-top: auto;
-  padding-top: var(--ui-space-2);
-  box-sizing: content-box;
+  white-space: nowrap;
 }
 
 .task-branch-slot {
-  flex: 1 1 0;
   min-width: 0;
   height: var(--ui-badge-height);
 }
 
 .task-branch {
   display: block;
-  max-width: max-content;
+  max-width: 10rem;
   height: var(--ui-badge-height);
   padding: 0 var(--ui-space-1-5);
   overflow: hidden;
@@ -179,6 +211,12 @@
 .task-delete:hover {
   color: var(--ui-error);
   background: var(--ui-error-muted);
+}
+
+@media (max-width: 768px) {
+  .tasks-table {
+    min-width: 56rem;
+  }
 }
 
 .tasks-page .skeleton-card {

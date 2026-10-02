@@ -315,7 +315,7 @@ export interface Chat {
    * project that runs itself reports). Older servers omit this.
    */
   purpose?: string | null;
-  /** The project a planner or updates chat belongs to, once it exists. */
+  /** The workspace project this chat is grouped with, if any. Older servers omit this. */
   project_id?: string | null;
 }
 
@@ -345,6 +345,7 @@ export interface CreateChatRequest {
   auto_approve?: boolean;
   reasoning_effort?: ReasoningEffort;
   character?: ChatCharacter;
+  project_id?: string;
 }
 
 export interface UpdateChatRequest {

@@ -74,8 +74,11 @@ const radiusOptions: { value: BorderRadius; label: string }[] = [
   { value: 'large', label: 'Large' },
 ];
 
-const DEFAULT_PRIMARY = '#3b82f6';
-const DEFAULT_SECONDARY = '#6366f1';
+const DEFAULT_PRIMARY_LIGHT = '#0011d9';
+const DEFAULT_PRIMARY_DARK = '#00f3ff';
+const DEFAULT_SECONDARY = '#ecf9ff';
+const DEFAULT_FONT: FontFamily = 'nunito';
+const DEFAULT_RADIUS: BorderRadius = 'large';
 const HEX_PATTERN = '^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$';
 
 function ColorField({
@@ -140,13 +143,13 @@ export default function WorkspaceSettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const [primaryColorLight, setPrimaryColorLight] = useState(DEFAULT_PRIMARY);
+  const [primaryColorLight, setPrimaryColorLight] = useState(DEFAULT_PRIMARY_LIGHT);
   const [secondaryColorLight, setSecondaryColorLight] = useState(DEFAULT_SECONDARY);
-  const [primaryColorDark, setPrimaryColorDark] = useState(DEFAULT_PRIMARY);
+  const [primaryColorDark, setPrimaryColorDark] = useState(DEFAULT_PRIMARY_DARK);
   const [secondaryColorDark, setSecondaryColorDark] = useState(DEFAULT_SECONDARY);
-  const [fontFamily, setFontFamily] = useState<FontFamily | null>(null);
+  const [fontFamily, setFontFamily] = useState<FontFamily | null>(DEFAULT_FONT);
   const [fontSize, setFontSize] = useState('16');
-  const [borderRadius, setBorderRadius] = useState<BorderRadius | null>(null);
+  const [borderRadius, setBorderRadius] = useState<BorderRadius | null>(DEFAULT_RADIUS);
 
   const [overrideAiSettings, setOverrideAiSettings] = useState(false);
   const [savedOverride, setSavedOverride] = useState(false);
@@ -173,13 +176,13 @@ export default function WorkspaceSettingsPage() {
   }, []);
 
   const applyThemeToForm = useCallback((theme: WorkspaceTheme | null): void => {
-    setPrimaryColorLight(theme?.primary_color_light ?? DEFAULT_PRIMARY);
+    setPrimaryColorLight(theme?.primary_color_light ?? DEFAULT_PRIMARY_LIGHT);
     setSecondaryColorLight(theme?.secondary_color_light ?? DEFAULT_SECONDARY);
-    setPrimaryColorDark(theme?.primary_color_dark ?? DEFAULT_PRIMARY);
+    setPrimaryColorDark(theme?.primary_color_dark ?? DEFAULT_PRIMARY_DARK);
     setSecondaryColorDark(theme?.secondary_color_dark ?? DEFAULT_SECONDARY);
-    setFontFamily(theme?.font_family ?? null);
+    setFontFamily(theme ? (theme.font_family ?? null) : DEFAULT_FONT);
     setFontSize((theme?.font_size_base ?? '16px').replace('px', ''));
-    setBorderRadius(theme?.border_radius ?? null);
+    setBorderRadius(theme ? (theme.border_radius ?? null) : DEFAULT_RADIUS);
   }, []);
 
   useEffect(() => {

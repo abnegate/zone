@@ -149,16 +149,15 @@ test.describe('Navigation', () => {
 
   test('sidebar shows all navigation items', async ({ page }) => {
     const navItems = page.locator('.nav-item');
-    await expect(navItems).toHaveCount(9);
+    await expect(navItems).toHaveCount(8);
     await expect(navItems.nth(0)).toContainText('Chats');
     await expect(navItems.nth(1)).toContainText('Projects');
     await expect(navItems.nth(2)).toContainText('Tasks');
     await expect(navItems.nth(3)).toContainText('Sources');
-    await expect(navItems.nth(4)).toContainText('Search');
-    await expect(navItems.nth(5)).toContainText('Models');
-    await expect(navItems.nth(6)).toContainText('Wiki');
-    await expect(navItems.nth(7)).toContainText('Organization');
-    await expect(navItems.nth(8)).toContainText('Workspace');
+    await expect(navItems.nth(4)).toContainText('Models');
+    await expect(navItems.nth(5)).toContainText('Wiki');
+    await expect(navItems.nth(6)).toContainText('Organization');
+    await expect(navItems.nth(7)).toContainText('Workspace');
   });
 
   test('Chats page is default route', async ({ page }) => {
@@ -208,10 +207,10 @@ test.describe('Navigation', () => {
     ).toBeVisible();
   });
 
-  test('navigates to Search page', async ({ page }) => {
-    await page.click('a[href="/search"]');
-    await expect(page).toHaveURL('/search');
-    await expect(page.getByRole('heading', { name: 'Context Search' })).toBeVisible();
+  test('redirects Search to Wiki', async ({ page }) => {
+    await page.goto('/search');
+    await expect(page).toHaveURL('/wiki');
+    await expect(page.getByRole('heading', { name: 'Knowledge Base' })).toBeVisible();
   });
 
   test('navigates to Wiki page', async ({ page }) => {

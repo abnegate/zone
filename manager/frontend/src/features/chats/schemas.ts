@@ -297,6 +297,7 @@ export const CreateChatRequestSchema = z.object({
   agent_sandboxed: z.boolean().optional(),
   auto_approve: z.boolean().optional(),
   reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high']).optional(),
+  project_id: z.string().min(1).optional(),
 });
 
 export const SendMessageRequestSchema = z.object({

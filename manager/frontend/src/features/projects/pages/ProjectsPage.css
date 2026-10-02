@@ -25,6 +25,10 @@
   color: var(--ui-error);
 }
 
+.projects-page .page-search {
+  max-width: 16rem;
+}
+
 .projects-list-pane {
   width: 20rem;
   flex-shrink: 0;

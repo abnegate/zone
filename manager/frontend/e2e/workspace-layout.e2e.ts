@@ -50,13 +50,6 @@ const screens = [
     title: '.model-name',
     titleLeading: '20px',
   },
-  {
-    path: 'search',
-    heading: 'Context Search',
-    content: '.search-toolbar',
-    title: null,
-    titleLeading: null,
-  },
 ];
 
 async function fitsViewport(page: Page): Promise<void> {
@@ -440,9 +433,9 @@ for (const viewport of [
             },
           })
         );
-        await ready(page, 'search', theme);
+        await ready(page, 'wiki', theme);
         await page
-          .getByPlaceholder('Search your knowledge base...')
+          .getByPlaceholder('Search knowledge and sources...')
           .fill('design');
         await page.getByRole('button', { name: 'Search', exact: true }).click();
         await expect(page.locator('.result-card')).toBeVisible();
