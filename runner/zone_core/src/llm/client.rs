@@ -131,6 +131,7 @@ pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamChunk, LlmError
 
 /// Where completions come from.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::large_enum_variant)]
 pub enum LlmBackend {
     /// The OpenAI-compatible endpoint at [`LlmConfig::base_url`].
     #[default]
@@ -327,6 +328,7 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, LlmError>
     let mut finish_reason = None;
     let mut usage = None;
     let mut window = None;
+    let mut session = None;
 
     match event {
         AgentEvent::Text(text) => delta.content = Some(text),
@@ -335,6 +337,7 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, LlmError>
         }
         AgentEvent::Usage(counts) => usage = Some(counts),
         AgentEvent::Window(reported) => window = Some(reported),
+        AgentEvent::Session(announced) => session = Some(announced),
         AgentEvent::Finished {
             finish_reason: reported,
         } => {
@@ -366,7 +369,7 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, LlmError>
         }],
         usage,
         window,
-        session: None,
+        session,
     })
 }
 
@@ -2340,6 +2343,28 @@ mod tests {
             .map(|chunk| chunk.window.as_ref())
             .collect();
         assert_eq!(windows, [Some(&five_hours_at(43.0)), None, None]);
+        assert_eq!(spoken(&delivered), "Done.");
+        assert_eq!(reasons(&delivered), [STOP]);
+    }
+
+    #[tokio::test]
+    async fn the_session_an_agent_announces_rides_the_chunk_it_arrived_on() {
+        let events = agent_events(vec![
+            Ok(AgentEvent::Session("6f1".to_string())),
+            Ok(AgentEvent::Text("Done.".to_string())),
+            Ok(AgentEvent::Finished {
+                finish_reason: Some("success".to_string()),
+            }),
+        ]);
+
+        let (delivered, failure) = collected(chunks(events, "claude".to_string())).await;
+
+        assert!(failure.is_none(), "a session failed the turn: {failure:?}");
+        let sessions: Vec<Option<&str>> = delivered
+            .iter()
+            .map(|chunk| chunk.session.as_deref())
+            .collect();
+        assert_eq!(sessions, [Some("6f1"), None, None]);
         assert_eq!(spoken(&delivered), "Done.");
         assert_eq!(reasons(&delivered), [STOP]);
     }

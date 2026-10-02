@@ -263,6 +263,7 @@ pub fn sees_images(model: &str, vision: Option<bool>) -> bool {
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Mode {
     Preview,
     /// A turn a model answers, on the backend its model was chosen for.

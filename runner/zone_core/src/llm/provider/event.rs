@@ -20,6 +20,9 @@ pub enum AgentEvent {
     /// turn goes on.
     Window(Window),
     Limited(Limit),
+    /// The id of the session the agent runs this turn under, as it announced
+    /// it: the one a later turn resumes.
+    Session(String),
     Failed(String),
     Finished {
         finish_reason: Option<String>,
@@ -65,6 +68,7 @@ mod tests {
             })
             .terminal()
         );
+        assert!(!AgentEvent::Session("6f1".to_string()).terminal());
         assert!(AgentEvent::Failed("nope".to_string()).terminal());
         assert!(
             AgentEvent::Limited(Limit {

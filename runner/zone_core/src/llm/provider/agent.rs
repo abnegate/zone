@@ -7,6 +7,7 @@ use serde_json::{Map, Value, json};
 
 use super::event::AgentEvent;
 use super::parser;
+use super::session::Session;
 use super::settings::{BuiltinTools, CodexSandbox, DEFAULT_TIMEOUT, Toolset};
 
 const MODEL: &str = "--model";
@@ -69,6 +70,13 @@ const CLAUDE_DEFAULTS: &[(&str, &str)] = &[
     ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
 ];
 
+const SESSION_ID: &str = "--session-id";
+const RESUME: &str = "--resume";
+const CLAUDE_PROMPT: &str = "--print";
+
+const CODEX_RESUME: &str = "resume";
+const CODEX_PROMPT: &str = "-";
+
 const STRICT_MCP_CONFIG: &str = "--strict-mcp-config";
 const MCP_CONFIG: &str = "--mcp-config";
 const ALLOWED_TOOLS: &str = "--allowedTools";
@@ -78,6 +86,7 @@ const IGNORE_USER_CONFIG: &str = "--ignore-user-config";
 const DISABLE: &str = "--disable";
 const CONFIG: &str = "-c";
 const SANDBOX: &str = "--sandbox";
+const SANDBOX_MODE: &str = "sandbox_mode";
 const READ_ONLY: &str = "read-only";
 
 /// Codex features that bring tools from outside both zone and the host:
@@ -240,12 +249,18 @@ impl AgentKind {
     /// approval, so only its sandbox confines them -- `read-only` while they
     /// are withheld, and whichever sandbox a turn that grants them is given,
     /// of which `danger-full-access` confines nothing.
+    ///
+    /// A session pins claude's turn to the id it names, or resumes it. Codex
+    /// picks its own thread id, so only a session to resume reaches it, and
+    /// `codex exec resume` takes no `--sandbox`: a resumed turn's sandbox is
+    /// set as the `sandbox_mode` it would otherwise read from its config.
     pub fn arguments_with(
         self,
         model: Option<&str>,
         toolset: Option<&Toolset>,
         builtin_tools: BuiltinTools,
         sandbox: CodexSandbox,
+        session: Option<&Session>,
     ) -> Vec<String> {
         let mut arguments: Vec<String> = match self {
             Self::Claude => ["--verbose", "--output-format", "stream-json"],
@@ -278,15 +293,29 @@ impl AgentKind {
             .map(|argument| (*argument).to_string()),
         );
 
+        let resumed = session.is_some_and(|session| session.resume);
         arguments.extend(match self {
             Self::Claude => claude_tool_arguments(toolset, builtin_tools),
-            Self::Codex => codex_tool_arguments(toolset, builtin_tools, sandbox),
+            Self::Codex => codex_tool_arguments(toolset, builtin_tools, sandbox, resumed),
         });
+
+        if let Some(session) = session {
+            match self {
+                Self::Claude => arguments.extend([
+                    if session.resume { RESUME } else { SESSION_ID }.to_string(),
+                    session.id.clone(),
+                ]),
+                Self::Codex if session.resume => {
+                    arguments.extend([CODEX_RESUME.to_string(), session.id.clone()]);
+                }
+                Self::Codex => {}
+            }
+        }
 
         arguments.push(
             match self {
-                Self::Claude => "--print",
-                Self::Codex => "-",
+                Self::Claude => CLAUDE_PROMPT,
+                Self::Codex => CODEX_PROMPT,
             }
             .to_string(),
         );
@@ -400,6 +429,7 @@ fn codex_tool_arguments(
     toolset: Option<&Toolset>,
     builtin_tools: BuiltinTools,
     sandbox: CodexSandbox,
+    resumed: bool,
 ) -> Vec<String> {
     let withheld = builtin_tools == BuiltinTools::Withheld;
     let mut arguments = Vec::new();
@@ -414,14 +444,17 @@ fn codex_tool_arguments(
         arguments.extend(repeated(CONFIG, BUILTIN_TOOL_SETTINGS));
     }
 
-    arguments.push(SANDBOX.to_string());
-    arguments.push(
-        match builtin_tools {
-            BuiltinTools::Withheld => READ_ONLY,
-            BuiltinTools::Granted => sandbox.as_str(),
-        }
-        .to_string(),
-    );
+    let confinement = match builtin_tools {
+        BuiltinTools::Withheld => READ_ONLY,
+        BuiltinTools::Granted => sandbox.as_str(),
+    };
+    if resumed {
+        arguments.push(CONFIG.to_string());
+        arguments.push(format!("{SANDBOX_MODE}={}", toml_string(confinement)));
+    } else {
+        arguments.push(SANDBOX.to_string());
+        arguments.push(confinement.to_string());
+    }
 
     if let Some(toolset) = toolset {
         arguments.extend(repeated(CONFIG, server_settings(toolset)));
@@ -529,7 +562,13 @@ mod tests {
     impl AgentKind {
         /// A turn run with the agent's own tools and none of zone's.
         fn arguments(self, model: Option<&str>) -> Vec<String> {
-            self.arguments_with(model, None, BuiltinTools::Granted, CodexSandbox::default())
+            self.arguments_with(
+                model,
+                None,
+                BuiltinTools::Granted,
+                CodexSandbox::default(),
+                None,
+            )
         }
     }
 
@@ -832,6 +871,7 @@ mod tests {
                         served,
                         builtin_tools,
                         CodexSandbox::default(),
+                        None,
                     );
 
                     assert_eq!(
@@ -861,6 +901,7 @@ mod tests {
                     served,
                     builtin_tools,
                     CodexSandbox::default(),
+                    None,
                 );
                 assert!(
                     !arguments
@@ -896,6 +937,7 @@ mod tests {
                         served,
                         builtin_tools,
                         sandbox,
+                        None,
                     );
                     let codex = codex(served, builtin_tools, sandbox);
                     for arguments in [&claude, &codex] {
@@ -966,7 +1008,7 @@ mod tests {
         builtin_tools: BuiltinTools,
         sandbox: CodexSandbox,
     ) -> Vec<String> {
-        AgentKind::Codex.arguments_with(Some("gpt-6-sol"), toolset, builtin_tools, sandbox)
+        AgentKind::Codex.arguments_with(Some("gpt-6-sol"), toolset, builtin_tools, sandbox, None)
     }
 
     #[test]
@@ -977,6 +1019,7 @@ mod tests {
             Some(&toolset),
             BuiltinTools::Withheld,
             CodexSandbox::default(),
+            None,
         );
 
         assert!(
@@ -1010,7 +1053,7 @@ mod tests {
             for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
                 for sandbox in CodexSandbox::ALL {
                     let arguments = agent
-                        .arguments_with(Some("model"), Some(&toolset), builtin_tools, sandbox)
+                        .arguments_with(Some("model"), Some(&toolset), builtin_tools, sandbox, None)
                         .join(" ");
 
                     assert!(
@@ -1034,6 +1077,7 @@ mod tests {
             Some(&toolset),
             BuiltinTools::Granted,
             CodexSandbox::default(),
+            None,
         );
 
         assert!(
@@ -1051,6 +1095,7 @@ mod tests {
             None,
             BuiltinTools::Withheld,
             CodexSandbox::default(),
+            None,
         );
 
         assert!(
@@ -1289,6 +1334,208 @@ mod tests {
             values_after(&arguments, "-c").contains(&"mcp_servers.zone.enabled_tools=[]"),
             "codex offers every tool a server lists unless it is told otherwise: {arguments:?}"
         );
+    }
+
+    fn pinned(id: &str) -> Session {
+        Session {
+            id: id.to_string(),
+            resume: false,
+        }
+    }
+
+    fn resumed(id: &str) -> Session {
+        Session {
+            id: id.to_string(),
+            resume: true,
+        }
+    }
+
+    #[test]
+    fn a_new_claude_session_is_pinned_and_a_resumed_one_named() {
+        let toolset = toolset();
+        let id = "5b0c1f7e-8d43-4a77-9a3e-2f0d6c1b9e42";
+
+        for served in [None, Some(&toolset)] {
+            for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
+                let unpinned = AgentKind::Claude.arguments_with(
+                    Some("opus"),
+                    served,
+                    builtin_tools,
+                    CodexSandbox::default(),
+                    None,
+                );
+                let new = AgentKind::Claude.arguments_with(
+                    Some("opus"),
+                    served,
+                    builtin_tools,
+                    CodexSandbox::default(),
+                    Some(&pinned(id)),
+                );
+                let resume = AgentKind::Claude.arguments_with(
+                    Some("opus"),
+                    served,
+                    builtin_tools,
+                    CodexSandbox::default(),
+                    Some(&resumed(id)),
+                );
+
+                assert!(
+                    !unpinned
+                        .iter()
+                        .any(|argument| argument == SESSION_ID || argument == RESUME),
+                    "{unpinned:?}"
+                );
+                assert_eq!(&new[new.len() - 3..], [SESSION_ID, id, "--print"]);
+                assert_eq!(&new[..new.len() - 3], &unpinned[..unpinned.len() - 1]);
+                assert!(!new.contains(&RESUME.to_string()), "{new:?}");
+
+                assert_eq!(&resume[resume.len() - 3..], [RESUME, id, "--print"]);
+                assert_eq!(&resume[..resume.len() - 3], &unpinned[..unpinned.len() - 1]);
+                assert!(!resume.contains(&SESSION_ID.to_string()), "{resume:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_codex_resume_reads_the_prompt_from_stdin() {
+        let id = "019b2c41-0000-7000-8000-000000000001";
+        let arguments = AgentKind::Codex.arguments_with(
+            Some("gpt-6-sol"),
+            None,
+            BuiltinTools::Granted,
+            CodexSandbox::WorkspaceWrite,
+            Some(&resumed(id)),
+        );
+
+        assert_eq!(
+            arguments,
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--model",
+                "gpt-6-sol",
+                "-c",
+                r#"sandbox_mode="workspace-write""#,
+                "resume",
+                id,
+                "-",
+            ]
+        );
+
+        let new = AgentKind::Codex.arguments_with(
+            Some("gpt-6-sol"),
+            None,
+            BuiltinTools::Granted,
+            CodexSandbox::WorkspaceWrite,
+            Some(&pinned(id)),
+        );
+        assert_eq!(
+            new,
+            AgentKind::Codex.arguments(Some("gpt-6-sol")),
+            "codex names its own thread, so a new session leaves the turn as it was"
+        );
+    }
+
+    #[test]
+    fn a_resumed_codex_turn_keeps_its_sandbox_as_a_config_override() {
+        let toolset = toolset();
+        let id = "019b2c41-0000-7000-8000-000000000001";
+
+        for served in [None, Some(&toolset)] {
+            for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
+                for sandbox in CodexSandbox::ALL {
+                    let fresh = codex(served, builtin_tools, sandbox);
+                    let arguments = AgentKind::Codex.arguments_with(
+                        Some("gpt-6-sol"),
+                        served,
+                        builtin_tools,
+                        sandbox,
+                        Some(&resumed(id)),
+                    );
+                    let confinement = match builtin_tools {
+                        BuiltinTools::Withheld => READ_ONLY,
+                        BuiltinTools::Granted => sandbox.as_str(),
+                    };
+
+                    assert!(
+                        values_after(&arguments, SANDBOX).is_empty(),
+                        "{arguments:?}"
+                    );
+
+                    let sandboxed = fresh
+                        .iter()
+                        .position(|argument| argument == SANDBOX)
+                        .expect("a fresh turn's sandbox");
+                    let mut expected = fresh[..sandboxed].to_vec();
+                    expected.extend([
+                        CONFIG.to_string(),
+                        format!(r#"sandbox_mode="{confinement}""#),
+                    ]);
+                    expected.extend_from_slice(&fresh[sandboxed + 2..fresh.len() - 1]);
+                    expected.extend([
+                        CODEX_RESUME.to_string(),
+                        id.to_string(),
+                        CODEX_PROMPT.to_string(),
+                    ]);
+                    assert_eq!(
+                        arguments, expected,
+                        "a resumed turn keeps every other flag a fresh one has"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn both_agents_announce_their_session() {
+        for (agent, stream, id) in [
+            (
+                AgentKind::Claude,
+                concat!(
+                    r#"{"type":"system","subtype":"init","cwd":"/w","session_id":"6f1","tools":["Read"],"model":"claude-opus-4"}"#,
+                    "\n",
+                    r#"{"type":"system","subtype":"status","session_id":"6f1"}"#,
+                    "\n",
+                    r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"6f1"}"#,
+                ),
+                "6f1",
+            ),
+            (
+                AgentKind::Codex,
+                concat!(
+                    r#"{"type":"thread.started","thread_id":"019b2c41-0000-7000-8000-000000000001"}"#,
+                    "\n",
+                    r#"{"type":"turn.started"}"#,
+                    "\n",
+                    r#"{"type":"turn.completed","usage":{"input_tokens":4,"output_tokens":2}}"#,
+                ),
+                "019b2c41-0000-7000-8000-000000000001",
+            ),
+        ] {
+            let mut reader = agent.reader();
+            let mut events = Vec::new();
+            for line in stream.lines() {
+                reader.interpret(line, &mut events);
+            }
+
+            let sessions: Vec<&str> = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::Session(id) => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(sessions, [id], "{agent}: {events:?}");
+            assert!(
+                matches!(events.first(), Some(AgentEvent::Session(_))),
+                "{agent} announces its session before anything else: {events:?}"
+            );
+            assert!(
+                events.last().is_some_and(AgentEvent::terminal),
+                "{agent}: {events:?}"
+            );
+        }
     }
 
     #[test]

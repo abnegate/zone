@@ -59,5 +59,5 @@ pub use settings::{
     BuiltinTools, CliSettings, CodexSandbox, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT,
     DEFAULT_TIMEOUT, SignIn, Toolset,
 };
-pub use transcript::render;
+pub use transcript::{render, render_tail};
 pub use window::Window;
