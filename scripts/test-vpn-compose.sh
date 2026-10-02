@@ -12,7 +12,7 @@ compose() {
     docker compose --env-file "$envfile" "$@"
 }
 
-unset ZONE_CONSOLE_ORIGINS
+unset ZONE_CONSOLE_ORIGINS ZONE_VPN ZONE_VPN_REQUIRED
 direct=$(mktemp)
 vpn=$(mktemp)
 trap 'rm -f "$direct" "$vpn"' EXIT HUP INT TERM
@@ -145,6 +145,12 @@ if litellm_env.get("POSTGRES_HOST") != pinned["postgres"]:
     raise SystemExit("VPN LiteLLM must use the pinned Postgres address")
 
 manager_env = service_env(vpn["services"]["manager"])
+if manager_env.get("ZONE_VPN") != "1":
+    raise SystemExit("VPN manager must set ZONE_VPN=1 so web search can turn on")
+if manager_env.get("SEARCH_SEARXNG_QUERY_URL") != (
+    "http://127.0.0.1:8080/search?q=<query>&format=json"
+):
+    raise SystemExit("VPN manager must reach SearXNG on localhost")
 if pinned["postgres"] not in manager_env.get("DATABASE_URL", ""):
     raise SystemExit("VPN manager DATABASE_URL must use the pinned Postgres address")
 if pinned["valkey"] not in manager_env.get("REDIS_URL", ""):
@@ -167,6 +173,9 @@ for name, config in (("default", direct), ("VPN", vpn)):
         raise SystemExit(
             f"{name} manager must list the consoles Traefik serves, got {listed!r}"
         )
+
+if service_env(direct["services"]["manager"]).get("ZONE_VPN"):
+    raise SystemExit("default compose must not mark manager as on the VPN")
 
 grafana_env = service_env(vpn["services"]["grafana"])
 if grafana_env.get("PROMETHEUS_URL") != f"http://{pinned['prometheus']}:9090":

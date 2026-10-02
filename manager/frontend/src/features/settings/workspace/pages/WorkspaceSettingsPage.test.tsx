@@ -387,10 +387,31 @@ describe('WorkspaceSettingsPage', () => {
     savedTheme = null;
     mockPreviewWorkspaceTheme.mockClear();
     rerender(<WorkspaceSettingsPage />);
-    expect(screen.getByLabelText('Font Family')).toHaveValue('');
+    expect(screen.getByLabelText('Font Family')).toHaveValue('nunito');
+    expect(screen.getByLabelText('Large')).toBeChecked();
+    expect(screen.queryByRole('radio', { name: 'App Default' })).not.toBeInTheDocument();
+    expect(screen.getAllByLabelText('Primary Color hex')[0]).toHaveValue('#0011d9');
+    expect(screen.getAllByLabelText('Primary Color hex')[1]).toHaveValue('#00f3ff');
+    expect(screen.getAllByLabelText('Secondary Color hex')[0]).toHaveValue('#ecf9ff');
+    expect(screen.getAllByLabelText('Secondary Color hex')[1]).toHaveValue('#ecf9ff');
     expect(mockPreviewWorkspaceTheme.mock.calls.filter(([value]) => value !== null)).toHaveLength(
       0
     );
+  });
+
+  it('fills the form with product defaults when no theme is saved', async () => {
+    savedTheme = null;
+    render(<WorkspaceSettingsPage />);
+    expect(await screen.findByLabelText('Font Family')).toHaveValue('nunito');
+    expect(screen.getByLabelText('Large')).toBeChecked();
+    expect(screen.getByText('16px')).toBeInTheDocument();
+    expect(screen.getAllByLabelText('Primary Color hex')[0]).toHaveValue('#0011d9');
+    expect(screen.getAllByLabelText('Secondary Color hex')[0]).toHaveValue('#ecf9ff');
+    expect(screen.getAllByLabelText('Primary Color hex')[1]).toHaveValue('#00f3ff');
+    expect(screen.getAllByLabelText('Secondary Color hex')[1]).toHaveValue('#ecf9ff');
+    expect(
+      document.querySelector<HTMLElement>('.preview-box')?.style.getPropertyValue('--ui-accent')
+    ).toBe('#0011d9');
   });
 
   it('ignores a pending save when switching workspaces', async () => {
@@ -407,7 +428,7 @@ describe('WorkspaceSettingsPage', () => {
     savedTheme = null;
     mockPreviewWorkspaceTheme.mockClear();
     rerender(<WorkspaceSettingsPage />);
-    expect(screen.getByLabelText('Font Family')).toHaveValue('');
+    expect(screen.getByLabelText('Font Family')).toHaveValue('nunito');
     expect(mockPreviewWorkspaceTheme.mock.calls.filter(([value]) => value !== null)).toHaveLength(
       0
     );

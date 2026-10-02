@@ -9,13 +9,14 @@ import {
   TabsList,
   TabsTrigger,
 } from '@zone/ui';
-import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
+import { useProjects } from '../../projects/hooks';
 import { useSources } from '../../sources/hooks/useSources';
 import { isProtectedArtifactUrl } from '../api/protectedImages';
 import {
@@ -33,13 +34,21 @@ import {
 import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
 import { useChat, useChatSearch, useChatSources, useChats } from '../hooks';
-import { type ChatSearchResult, REASONING_EFFORT_OPTIONS, type ReasoningEffort } from '../types';
+import {
+  type Chat,
+  type ChatSearchResult,
+  REASONING_EFFORT_OPTIONS,
+  type ReasoningEffort,
+} from '../types';
 import {
   type Attachment,
   AUTO_MODEL,
+  arrangeChats,
   attachmentMetadata,
   audioAttachments,
   buildMessageWithAttachments,
+  CHAT_GROUP_OPTIONS,
+  CHAT_SORT_OPTIONS,
   chatShowsAgent,
   chatShowsCharacter,
   chatShowsReasoning,
@@ -47,6 +56,8 @@ import {
   formatBytes,
   formatDate,
   imageAttachments,
+  isChatGroupBy,
+  isChatSort,
   isSendable,
   isStartingImage,
   modelLabel,
@@ -54,14 +65,19 @@ import {
   parseCharacterFile,
   parseCharacterText,
   readAttachment,
+  readChatGroupBy,
+  readChatSort,
   sourceAttachment,
   splitAtHandovers,
   toPlainText,
   videoAttachments,
+  writeChatGroupBy,
+  writeChatSort,
 } from '../utils';
 import './ChatsPage.css';
 
 const UNTITLED_CHAT_TITLE = 'Untitled chat';
+const NO_PROJECT = 'none';
 
 export default function ChatsPage() {
   const { isAuthenticated } = useAuth();
@@ -77,6 +93,7 @@ export default function ChatsPage() {
   const [newChatAgent, setNewChatAgent] = useState(false);
   const [newChatAutoApprove, setNewChatAutoApprove] = useState(false);
   const [newChatReasoning, setNewChatReasoning] = useState<ReasoningEffort>('auto');
+  const [newChatProject, setNewChatProject] = useState(NO_PROJECT);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -85,6 +102,8 @@ export default function ChatsPage() {
   const renamePending = useRef(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchResults, setShowSearchResults] = useState(false);
+  const [groupBy, setGroupBy] = useState(readChatGroupBy);
+  const [sort, setSort] = useState(readChatSort);
   const [messageInput, setMessageInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -106,7 +125,6 @@ export default function ChatsPage() {
   const [sending, setSending] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
 
-  // Use feature hooks
   const {
     chats,
     loading: chatsLoading,
@@ -119,6 +137,15 @@ export default function ChatsPage() {
     renameChat,
     updateTitle: updateListTitle,
   } = useChats({ archived: showArchived });
+  const { projects } = useProjects('all');
+  const projectNames = useMemo(
+    () => Object.fromEntries(projects.map((project) => [project.id, project.name])),
+    [projects]
+  );
+  const arranged = useMemo(
+    () => arrangeChats(chats, { groupBy, sort, projectNames }),
+    [chats, groupBy, sort, projectNames]
+  );
 
   const {
     chat: activeChat,
@@ -287,12 +314,14 @@ export default function ChatsPage() {
         auto_approve: newChatAgent && newChatAutoApprove,
         reasoning_effort:
           showNewChatReasoning && newChatReasoning !== 'auto' ? newChatReasoning : undefined,
+        ...(newChatProject !== NO_PROJECT ? { project_id: newChatProject } : {}),
       });
       setShowNewChatModal(false);
       setNewChatModel(AUTO_MODEL);
       setNewChatAgent(false);
       setNewChatAutoApprove(false);
       setNewChatReasoning('auto');
+      setNewChatProject(NO_PROJECT);
       selectChat(chat.id);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to create chat');
@@ -555,6 +584,126 @@ export default function ChatsPage() {
     setShowSearchResults(false);
   };
 
+  const handleGroupBy = (value: string) => {
+    if (!isChatGroupBy(value)) return;
+    setGroupBy(value);
+    writeChatGroupBy(value);
+  };
+
+  const handleSort = (value: string) => {
+    if (!isChatSort(value)) return;
+    setSort(value);
+    writeChatSort(value);
+  };
+
+  const renderChatItem = (chat: Chat) => (
+    <div
+      key={chat.id}
+      className={`chat-item ${selectedChatId === chat.id ? 'active' : ''}`}
+      onClick={() => selectChat(chat.id)}
+      onKeyDown={(e) => e.target === e.currentTarget && e.key === 'Enter' && selectChat(chat.id)}
+      role="button"
+      tabIndex={0}
+    >
+      <div className="chat-item-content">
+        <span className="chat-title">{chat.title}</span>
+        <span className="chat-meta">
+          <span className="chat-meta-model">{modelLabel(chat.model_name)}</span>
+          <span className="chat-meta-time">· {formatDate(chat.updated_at)}</span>
+        </span>
+      </div>
+      <div className="chat-item-actions">
+        <button
+          className="btn btn-icon btn-xs"
+          type="button"
+          title="Rename"
+          aria-label={`Rename ${chat.title}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            setRenameId(chat.id);
+            setTitle(chat.title);
+            setRenameError(null);
+          }}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            width="14"
+            height="14"
+            aria-hidden="true"
+          >
+            <path d="m16 3 5 5-12 12H4v-5L16 3ZM14 5l5 5" />
+          </svg>
+        </button>
+        {showArchived ? (
+          <button
+            className="btn btn-icon btn-xs"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleUnarchiveChat(chat.id);
+            }}
+            title="Unarchive"
+            type="button"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              width="14"
+              height="14"
+            >
+              <path d="M3 6h18M3 6v14a2 2 0 002 2h14a2 2 0 002-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M10 11v6M14 11v6" />
+            </svg>
+          </button>
+        ) : (
+          <button
+            className="btn btn-icon btn-xs"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleArchiveChat(chat.id);
+            }}
+            title="Archive"
+            type="button"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              width="14"
+              height="14"
+            >
+              <path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4" />
+            </svg>
+          </button>
+        )}
+        <button
+          className="btn btn-icon btn-xs btn-danger-icon"
+          onClick={(e) => {
+            e.stopPropagation();
+            setDeleteConfirm(chat.id);
+          }}
+          title="Delete"
+          type="button"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            width="14"
+            height="14"
+          >
+            <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <div className={`page page--workspace chats-page ${selectedChatId ? 'has-chat' : ''}`}>
       <div className="chats-sidebar">
@@ -630,6 +779,33 @@ export default function ChatsPage() {
             </button>
           )}
         </form>
+
+        {!showSearchResults && chats.length > 0 && (
+          <div className="chats-arrange">
+            <select
+              value={groupBy}
+              onChange={(event) => handleGroupBy(event.target.value)}
+              aria-label="Group chats"
+            >
+              {CHAT_GROUP_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <select
+              value={sort}
+              onChange={(event) => handleSort(event.target.value)}
+              aria-label="Sort chats"
+            >
+              {CHAT_SORT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {operationError && !showNewChatModal && (
           <div className="chats-error" role="alert">
@@ -715,113 +891,15 @@ export default function ChatsPage() {
           />
         ) : (
           <div className="chats-list">
-            {chats.map((chat) => (
+            {arranged.map((group) => (
               <div
-                key={chat.id}
-                className={`chat-item ${selectedChatId === chat.id ? 'active' : ''}`}
-                onClick={() => selectChat(chat.id)}
-                onKeyDown={(e) =>
-                  e.target === e.currentTarget && e.key === 'Enter' && selectChat(chat.id)
-                }
-                role="button"
-                tabIndex={0}
+                key={group.key}
+                className="chat-group"
+                role="group"
+                aria-label={group.label ?? undefined}
               >
-                <div className="chat-item-content">
-                  <span className="chat-title">{chat.title}</span>
-                  <span className="chat-meta">
-                    <span className="chat-meta-model">{modelLabel(chat.model_name)}</span>
-                    <span className="chat-meta-time">· {formatDate(chat.updated_at)}</span>
-                  </span>
-                </div>
-                <div className="chat-item-actions">
-                  <button
-                    className="btn btn-icon btn-xs"
-                    type="button"
-                    title="Rename"
-                    aria-label={`Rename ${chat.title}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setRenameId(chat.id);
-                      setTitle(chat.title);
-                      setRenameError(null);
-                    }}
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <path d="m16 3 5 5-12 12H4v-5L16 3ZM14 5l5 5" />
-                    </svg>
-                  </button>
-                  {showArchived ? (
-                    <button
-                      className="btn btn-icon btn-xs"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleUnarchiveChat(chat.id);
-                      }}
-                      title="Unarchive"
-                      type="button"
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        width="14"
-                        height="14"
-                      >
-                        <path d="M3 6h18M3 6v14a2 2 0 002 2h14a2 2 0 002-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M10 11v6M14 11v6" />
-                      </svg>
-                    </button>
-                  ) : (
-                    <button
-                      className="btn btn-icon btn-xs"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleArchiveChat(chat.id);
-                      }}
-                      title="Archive"
-                      type="button"
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        width="14"
-                        height="14"
-                      >
-                        <path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4" />
-                      </svg>
-                    </button>
-                  )}
-                  <button
-                    className="btn btn-icon btn-xs btn-danger-icon"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setDeleteConfirm(chat.id);
-                    }}
-                    title="Delete"
-                    type="button"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      width="14"
-                      height="14"
-                    >
-                      <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  </button>
-                </div>
+                {group.label ? <h2 className="chat-group-header">{group.label}</h2> : null}
+                {group.chats.map(renderChatItem)}
               </div>
             ))}
           </div>
@@ -881,6 +959,15 @@ export default function ChatsPage() {
                     )}
                   </span>
                 )}
+                {displayedChat.project_id &&
+                  displayedChat.purpose !== 'project_planner' &&
+                  displayedChat.purpose !== 'project_updates' && (
+                    <span className="chat-purpose" data-testid="chat-project">
+                      <Link to={`/projects?id=${displayedChat.project_id}`}>
+                        {projectNames[displayedChat.project_id] ?? 'Open project'}
+                      </Link>
+                    </span>
+                  )}
               </div>
               <div className="chat-header-actions">
                 {showReasoning && (
@@ -1354,6 +1441,20 @@ export default function ChatsPage() {
                 .map((model) => ({ value: model.name, label: model.name })),
             ]}
           />
+          {projects.length > 0 && (
+            <Select
+              label="Project"
+              value={newChatProject}
+              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                setNewChatProject(event.target.value);
+              }}
+              helpText="Optional. Group this chat with a project."
+              options={[
+                { value: NO_PROJECT, label: 'No project' },
+                ...projects.map((project) => ({ value: project.id, label: project.name })),
+              ]}
+            />
+          )}
           {showNewChatAgent && (
             <Checkbox
               label="Agent mode"

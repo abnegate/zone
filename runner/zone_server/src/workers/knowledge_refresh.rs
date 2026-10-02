@@ -418,8 +418,11 @@ pub async fn refresh_entry(
 /// Fetch content from a web URL and extract text
 ///
 /// Returns the extracted text content and its SHA-256 hash.
-async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
+pub(crate) async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
     let url = validate_public_url(url).map_err(|error| error.to_string())?;
+    if !zone_core::vpn::allows_public() {
+        return Err(zone_core::vpn::OFFLINE.to_string());
+    }
     let client =
         public_client(Duration::from_secs(HTTP_TIMEOUT_SECS)).map_err(|error| error.to_string())?;
 
@@ -576,6 +579,28 @@ fn clean_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_public_url_stays_offline_until_the_vpn_is_on() {
+        let _vpn = zone_core::vpn::Hold::required_off();
+        let error = fetch_web_content("https://example.com")
+            .await
+            .expect_err("must refuse");
+        assert_eq!(error, zone_core::vpn::OFFLINE);
+    }
+
+    #[tokio::test]
+    async fn a_private_url_is_refused_before_the_vpn_gate() {
+        let _vpn = zone_core::vpn::Hold::required_off();
+        let error = fetch_web_content("http://127.0.0.1/secret")
+            .await
+            .expect_err("must refuse");
+        assert!(
+            error.contains("Private") || error.contains("allowed"),
+            "{error}"
+        );
+        assert_ne!(error, zone_core::vpn::OFFLINE);
+    }
 
     #[test]
     fn test_clean_text() {

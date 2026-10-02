@@ -1607,7 +1607,7 @@ esac"#
     }
 
     /// Stores a codex login to `account`, or, with none, one from before logins named their
-    /// account, as migration 055 left it.
+    /// account, as migration 002 left it.
     async fn stored(scene: &Scene, account: Option<&str>) -> AgentLoginRow {
         agent_logins::insert(
             &scene.pool,

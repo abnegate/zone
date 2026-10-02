@@ -12,6 +12,7 @@ import {
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import type { Chat, ChatSearchResult, ChatWithMessages, Message } from '../types';
+import { CHAT_GROUP_STORAGE_KEY, CHAT_SORT_STORAGE_KEY } from '../utils/arrange';
 
 // Create mock functions
 const mockGetChats = mock();
@@ -126,6 +127,43 @@ const instanceModels: ListedModel[] = [
 ];
 let listedModels = instanceModels;
 const modelWorkspaces: (string | undefined)[] = [];
+
+const mockProjects = [
+  {
+    id: 'proj-alpha',
+    name: 'Alpha',
+    description: null,
+    status: 'active',
+    github_repo_url: null,
+    source_id: null,
+    auto: false,
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+  },
+  {
+    id: 'proj-zeta',
+    name: 'Zeta',
+    description: null,
+    status: 'active',
+    github_repo_url: null,
+    source_id: null,
+    auto: false,
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+  },
+];
+
+mock.module('../../projects/hooks', () => ({
+  useProjects: () => ({
+    projects: mockProjects,
+    loading: false,
+    error: null,
+    createProject: mock(),
+    updateProject: mock(),
+    deleteProject: mock(),
+    refetch: mock(),
+  }),
+}));
 
 // Mock useModels - include all exports from models module for proper mocking
 mock.module('../../models', () => ({
@@ -338,6 +376,8 @@ afterAll(() => {
 
 describe('ChatsPage', () => {
   beforeEach(() => {
+    localStorage.removeItem(CHAT_GROUP_STORAGE_KEY);
+    localStorage.removeItem(CHAT_SORT_STORAGE_KEY);
     mockGetChatSources.mockReset();
     mockSetChatSources.mockReset();
     mockGetChatSources.mockResolvedValue([]);
@@ -862,6 +902,7 @@ describe('ChatsPage', () => {
 
       expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
       expect(screen.getByLabelText('Select Model')).toBeInTheDocument();
+      expect(screen.getByLabelText('Project')).toBeInTheDocument();
       fireEvent.keyDown(screen.getByLabelText('Select Model'), { key: 'ArrowDown' });
       expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
       expect(screen.getByRole('option', { name: 'mistral' })).toBeInTheDocument();
@@ -994,7 +1035,7 @@ describe('ChatsPage', () => {
       });
 
       // Open the select dropdown by clicking the trigger
-      const selectTrigger = screen.getByRole('combobox');
+      const selectTrigger = screen.getByLabelText('Select Model');
       fireEvent.mouseDown(selectTrigger);
       fireEvent.mouseUp(selectTrigger);
       fireEvent.click(selectTrigger);
@@ -1052,7 +1093,51 @@ describe('ChatsPage', () => {
             automatic_title: true,
           })
         );
+        expect(mockClient.createChat.mock.calls[0][0].project_id).toBeUndefined();
       });
+    });
+
+    it('offers a project when creating a chat and sends the chosen id', async () => {
+      mockCreateChat.mockResolvedValueOnce({
+        id: 'chat-alpha',
+        title: 'New chat',
+        model_name: 'auto',
+        archived: false,
+        agent_enabled: false,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+        project_id: 'proj-alpha',
+      });
+      renderChatsPage();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+      });
+      const projectTrigger = screen.getByLabelText('Project');
+      fireEvent.mouseDown(projectTrigger);
+      fireEvent.mouseUp(projectTrigger);
+      fireEvent.click(projectTrigger);
+      fireEvent.click(await screen.findByRole('option', { name: 'Alpha' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
+      await waitFor(() => {
+        expect(mockClient.createChat).toHaveBeenCalledWith(
+          expect.objectContaining({ project_id: 'proj-alpha' })
+        );
+      });
+    });
+
+    it('names the project on an assistant chat that belongs to one', async () => {
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        project_id: 'proj-alpha',
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      expect(await screen.findByTestId('chat-project')).toHaveTextContent('Alpha');
+      expect(screen.getByRole('link', { name: 'Alpha' })).toHaveAttribute(
+        'href',
+        '/projects?id=proj-alpha'
+      );
     });
 
     it('hides Agent mode for a model known not to call tools', async () => {
@@ -1063,7 +1148,7 @@ describe('ChatsPage', () => {
       });
       expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
 
-      const selectTrigger = screen.getByRole('combobox');
+      const selectTrigger = screen.getByLabelText('Select Model');
       fireEvent.mouseDown(selectTrigger);
       fireEvent.mouseUp(selectTrigger);
       fireEvent.click(selectTrigger);
@@ -1101,7 +1186,7 @@ describe('ChatsPage', () => {
       });
 
       // Open the select dropdown by clicking the trigger
-      const selectTrigger = screen.getByRole('combobox');
+      const selectTrigger = screen.getByLabelText('Select Model');
       fireEvent.mouseDown(selectTrigger);
       fireEvent.mouseUp(selectTrigger);
       fireEvent.click(selectTrigger);
@@ -3060,6 +3145,89 @@ describe('ChatsPage', () => {
 
       expect(await screen.findByText('Hi there!')).toBeInTheDocument();
       expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('grouping and sorting', () => {
+    it('groups chats by project and sorts titles inside each group', async () => {
+      mockClient.getChats.mockResolvedValue([
+        { ...mockChats[0], id: 'loose', title: 'Loose' },
+        { ...mockChats[1], id: 'zeta', title: 'Zeta chat', project_id: 'proj-zeta' },
+        {
+          ...mockChats[2],
+          id: 'alpha-z',
+          title: 'Zed',
+          project_id: 'proj-alpha',
+          updated_at: getDateString(0),
+        },
+        {
+          ...mockChats[3],
+          id: 'alpha-a',
+          title: 'Able',
+          project_id: 'proj-alpha',
+          updated_at: getDateString(1),
+        },
+        { ...mockChats[0], id: 'gone', title: 'Gone', project_id: 'missing' },
+      ]);
+
+      renderChatsPage();
+      fireEvent.change(await screen.findByRole('combobox', { name: 'Group chats' }), {
+        target: { value: 'project' },
+      });
+      fireEvent.change(screen.getByRole('combobox', { name: 'Sort chats' }), {
+        target: { value: 'title_asc' },
+      });
+
+      const headers = screen.getAllByRole('heading', { level: 2 }).map((node) => node.textContent);
+      expect(headers).toEqual(['Alpha', 'Zeta', 'Unknown project', 'No project']);
+      const titles = [...document.querySelectorAll('.chat-title')].map((node) => node.textContent);
+      expect(titles).toEqual(['Able', 'Zed', 'Zeta chat', 'Gone', 'Loose']);
+      expect(localStorage.getItem(CHAT_GROUP_STORAGE_KEY)).toBe('project');
+      expect(localStorage.getItem(CHAT_SORT_STORAGE_KEY)).toBe('title_asc');
+    });
+
+    it('groups chats by the local calendar day of last update', async () => {
+      const today = new Date();
+      const atNoon = (daysAgo: number) => {
+        const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - daysAgo, 12);
+        return date.toISOString();
+      };
+      mockClient.getChats.mockResolvedValue([
+        { ...mockChats[0], id: 'today', title: 'Today chat', updated_at: atNoon(0) },
+        { ...mockChats[1], id: 'yesterday', title: 'Yesterday chat', updated_at: atNoon(1) },
+      ]);
+
+      renderChatsPage();
+      fireEvent.change(await screen.findByRole('combobox', { name: 'Group chats' }), {
+        target: { value: 'date' },
+      });
+
+      expect(screen.getByRole('heading', { name: 'Today' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Yesterday' })).toBeInTheDocument();
+    });
+
+    it('restores grouping from localStorage and hides it while searching', async () => {
+      localStorage.setItem(CHAT_GROUP_STORAGE_KEY, 'project');
+      mockClient.searchChatMessages.mockResolvedValue({ results: [], total: 0 });
+
+      renderChatsPage();
+      expect(await screen.findByRole('heading', { name: 'No project' })).toBeInTheDocument();
+
+      const searchInput = screen.getByTestId('chat-search-input');
+      fireEvent.change(searchInput, { target: { value: 'TypeScript' } });
+      fireEvent.submit(searchInput.closest('form')!);
+
+      await waitFor(() => {
+        expect(screen.queryByRole('combobox', { name: 'Group chats' })).not.toBeInTheDocument();
+      });
+      expect(screen.queryByRole('heading', { name: 'No project' })).not.toBeInTheDocument();
+    });
+
+    it('hides arrange controls when there are no chats', async () => {
+      mockClient.getChats.mockResolvedValue([]);
+      renderChatsPage();
+      expect(await screen.findByText('No chats yet')).toBeInTheDocument();
+      expect(screen.queryByRole('combobox', { name: 'Group chats' })).not.toBeInTheDocument();
     });
   });
 });

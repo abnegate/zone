@@ -593,13 +593,13 @@ describeScreenshots('Screenshots - Populated States', () => {
     });
   });
 
-  test('Search page', async ({ page }) => {
+  test('Wiki search', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/search');
+    await page.goto('/wiki');
     await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);

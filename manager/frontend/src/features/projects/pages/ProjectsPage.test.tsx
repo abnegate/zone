@@ -295,6 +295,50 @@ describe('ProjectsPage', () => {
     expect(screen.getByRole('tab', { name: 'Cancelled' })).toBeInTheDocument();
   });
 
+  it('filters the list by name', async () => {
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search projects' }), {
+      target: { value: 'Beta' },
+    });
+
+    expect(screen.queryByText('Project Alpha')).not.toBeInTheDocument();
+    expect(screen.getByText('Project Beta')).toBeInTheDocument();
+  });
+
+  it('filters the list by description', async () => {
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search projects' }), {
+      target: { value: 'First project' },
+    });
+
+    expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    expect(screen.queryByText('Project Beta')).not.toBeInTheDocument();
+  });
+
+  it('offers to clear the search when nothing matches', async () => {
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search projects' }), {
+      target: { value: 'nonexistent' },
+    });
+
+    expect(screen.getByText('No matching projects')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
+    expect(screen.getByText('Project Alpha')).toBeInTheDocument();
+    expect(screen.getByRole('searchbox', { name: 'Search projects' })).toHaveValue('');
+  });
+
   // Note: Filters use TabsTrigger which has role="tab"
   it('filters projects by status', async () => {
     const user = userEvent.setup();

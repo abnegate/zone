@@ -2706,7 +2706,7 @@ async fn load_web_search(
     web_search_requested: bool,
 ) -> SearchContext {
     let search = SearchContext::new(&state.config().web_search);
-    if !web_search_requested {
+    if !web_search_requested || matches!(search, SearchContext::Disabled) {
         return search;
     }
     let query = sanitize_query(content);
@@ -4248,6 +4248,21 @@ mod tests {
         let state = AppState::for_tests();
         assert!(matches!(
             load_web_search(&state, Uuid::new_v4(), " \n\t ", true).await,
+            SearchContext::Disabled
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_search_does_not_leave_the_host() {
+        let state = AppState::for_tests();
+        assert!(matches!(
+            load_web_search(
+                &state,
+                Uuid::new_v4(),
+                "What is the latest news on OpenAI?",
+                true
+            )
+            .await,
             SearchContext::Disabled
         ));
     }

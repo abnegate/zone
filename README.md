@@ -190,7 +190,7 @@ Browse more models at [Ollama Library](https://ollama.com/library).
 
 ### VPN Configuration (Optional)
 
-VPN is optional. Zone chat works without it; private web search requires the VPN profile. When the VPN is on, internet-facing services share Gluetun's network so all of their traffic uses the tunnel (search, model catalogs, LiteLLM providers, Grafana alerts, bundled engine pulls, and tool HTTP). Host Ollama or ComfyUI daemons still use the host network.
+VPN is optional. Zone chat works without it; public web search and page fetch use the public internet unless `ZONE_VPN_REQUIRED` is on. When the VPN is on, internet-facing services share Gluetun's network so all of their traffic uses the tunnel (search, page fetch, model catalogs, LiteLLM providers, Grafana alerts, bundled engine pulls, and tool HTTP). Host Ollama or ComfyUI daemons still use the host network.
 
 To enable the VPN:
 ```bash
@@ -412,16 +412,7 @@ make install-cli
 
 ### Database Migrations
 
-Migrations are in `runner/zone_server/migrations/`:
-
-1. `001_initial_schema.sql` - Core tables (chats, messages, projects, tasks)
-2. `002_wiki_schema.sql` - Wiki/documentation
-3. `003_agentic_tasks.sql` - Task execution framework
-4. `004_sources.sql` - Source integration
-5. `005_source_categories.sql` - Source taxonomy
-6. `006_auth_rbac.sql` - Users, roles, permissions
-7. `007_organizations_workspaces.sql` - Multi-tenancy
-8. `008_workspace_themes.sql` - Theme customization
+Migrations are in `runner/zone_server/migrations/`. Fresh installs apply the squashed `001_initial_schema.sql`, then each later numbered migration in order.
 
 ### Project Structure
 

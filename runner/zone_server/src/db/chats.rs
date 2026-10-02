@@ -4,6 +4,7 @@ mod session;
 
 use chrono::NaiveDateTime;
 use sqlx::{Executor, PgPool, Postgres};
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -229,6 +230,7 @@ pub async fn create_chat(
         false,
         false,
         ReasoningEffort::Auto,
+        None,
     )
     .await
 }
@@ -243,6 +245,7 @@ pub async fn create_chat_with_title(
     automatic_title: bool,
     auto_approve: bool,
     reasoning_effort: ReasoningEffort,
+    project_id: Option<Uuid>,
 ) -> DbResult<ChatRow> {
     let (agent_enabled, agent_sandboxed) = agent;
     let mut transaction = pool.begin().await?;
@@ -266,6 +269,13 @@ pub async fn create_chat_with_title(
     if automatic_title {
         sqlx::query("UPDATE chats SET automatic_title = TRUE WHERE id = $1")
             .bind(row.id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    if let Some(project_id) = project_id {
+        sqlx::query("UPDATE chats SET project_id = $2 WHERE id = $1")
+            .bind(row.id)
+            .bind(project_id)
             .execute(&mut *transaction)
             .await?;
     }
@@ -706,6 +716,30 @@ pub async fn link(pool: &PgPool, chat_id: Uuid) -> DbResult<Option<ChatLink>> {
         purpose: ChatPurpose::parse(&purpose),
         project_id,
     }))
+}
+
+/// Purpose and project for each listed chat, so the list can group without a query per row.
+pub async fn links_for(pool: &PgPool, ids: &[Uuid]) -> DbResult<HashMap<Uuid, ChatLink>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(Uuid, String, Option<Uuid>)> =
+        sqlx::query_as("SELECT id, purpose, project_id FROM chats WHERE id = ANY($1)")
+            .bind(ids)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, purpose, project_id)| {
+            (
+                id,
+                ChatLink {
+                    purpose: ChatPurpose::parse(&purpose),
+                    project_id,
+                },
+            )
+        })
+        .collect())
 }
 
 /// Make a chat with a purpose inside a caller's transaction.

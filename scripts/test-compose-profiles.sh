@@ -86,7 +86,7 @@ assert_eq "$("$script" normalize 'monitoring,dev,vpn,dev')" 'dev,vpn,monitoring'
 directory=$(mktemp -d)
 trap 'rm -rf "$directory"' EXIT HUP INT TERM
 cp "$envfile" "$directory/environment"
-unset COMPOSE_PROFILES COMPOSE_FILE ZONE_VPN MODEL_SEARCH_PROXY_URL TOOL_RUNNER_PROXY_URL COMPOSE_PATH_SEPARATOR
+unset COMPOSE_PROFILES COMPOSE_FILE ZONE_VPN ZONE_VPN_REQUIRED MODEL_SEARCH_PROXY_URL TOOL_RUNNER_PROXY_URL COMPOSE_PATH_SEPARATOR
 
 persisted=$("$script" persist --env-file "$directory/environment" 'dev,vpn,monitoring')
 assert_eq "$persisted" 'dev,vpn,monitoring' 'persist prints normalized profiles'
@@ -95,17 +95,27 @@ assert_contains "$(cat "$directory/environment")" \
     'COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml:docker-compose.vpn.yml' \
     'persist COMPOSE_FILE'
 assert_contains "$(cat "$directory/environment")" 'ZONE_VPN=1' 'persist enables ZONE_VPN for vpn'
+assert_contains "$(cat "$directory/environment")" 'ZONE_VPN_REQUIRED=1' 'persist records that the VPN is required'
 assert_contains "$(cat "$directory/environment")" 'MODEL_SEARCH_PROXY_URL=http://gluetun:8888' 'persist vpn proxy'
 
 "$script" persist --env-file "$directory/environment" >/dev/null
 assert_contains "$(cat "$directory/environment")" 'COMPOSE_PROFILES=' 'persist empty clears profiles'
 assert_contains "$(cat "$directory/environment")" 'ZONE_VPN=' 'persist empty clears ZONE_VPN'
+assert_contains "$(cat "$directory/environment")" 'ZONE_VPN_REQUIRED=1' 'persist empty keeps ZONE_VPN_REQUIRED'
 if grep -q '^[[:space:]]*COMPOSE_FILE=' "$directory/environment"; then
     printf '%s\n' 'persist empty must remove COMPOSE_FILE' >&2
     exit 1
 fi
 
+awk '
+    $0 ~ "^[[:space:]]*(export[[:space:]]+)?ZONE_VPN_REQUIRED[[:space:]]*=" { print "ZONE_VPN_REQUIRED=0"; next }
+    { print }
+' "$directory/environment" > "$directory/environment.zero"
+mv "$directory/environment.zero" "$directory/environment"
 "$script" persist --env-file "$directory/environment" vpn >/dev/null
+assert_contains "$(cat "$directory/environment")" 'ZONE_VPN=1' 'persist vpn still enables ZONE_VPN'
+assert_contains "$(cat "$directory/environment")" 'ZONE_VPN_REQUIRED=0' 'persist vpn keeps ZONE_VPN_REQUIRED=0'
+
 ensured=$("$script" persist --env-file "$directory/environment" --ensure dev)
 assert_eq "$ensured" 'dev,vpn' 'persist --ensure keeps vpn and adds dev'
 

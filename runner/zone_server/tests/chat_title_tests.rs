@@ -33,6 +33,7 @@ async fn automatic_title_fallback_is_persisted_once() {
             true,
             false,
             zone_core::llm::ReasoningEffort::Auto,
+            None,
         )
         .await
         .unwrap();
@@ -84,6 +85,7 @@ async fn automatic_title_claim_is_first_user_only_and_concurrent_safe() {
         true,
         false,
         zone_core::llm::ReasoningEffort::Auto,
+        None,
     )
     .await
     .unwrap();
@@ -129,6 +131,7 @@ async fn manual_title_even_unchanged_wins_pending_generation() {
             true,
             false,
             zone_core::llm::ReasoningEffort::Auto,
+            None,
         )
         .await
         .unwrap();
@@ -169,6 +172,7 @@ async fn custom_titles_and_renamed_empty_chats_are_not_claimed() {
             automatic,
             false,
             zone_core::llm::ReasoningEffort::Auto,
+            None,
         )
         .await
         .unwrap();

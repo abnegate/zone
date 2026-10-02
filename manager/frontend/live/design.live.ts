@@ -14,7 +14,6 @@ const ROUTES = [
   '/projects',
   '/tasks',
   '/sources',
-  '/search',
   '/models',
   '/wiki',
   '/org-settings',

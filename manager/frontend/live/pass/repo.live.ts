@@ -495,12 +495,12 @@ test.describe('sources, projects and tasks', () => {
     );
 
     await signIn(page);
-    await page.goto('/search');
+    await page.goto('/wiki');
     await page.getByRole('tab', { name: 'Hybrid' }).click();
     const pill = page.locator('.source-pill', { hasText: SOURCE });
     if (await pill.count()) await pill.click();
     await page
-      .getByPlaceholder('Search your knowledge base...')
+      .getByPlaceholder('Search knowledge and sources...')
       .fill('widget area calculation');
     await page.getByRole('button', { name: 'Search', exact: true }).click();
     await page.waitForTimeout(6_000);

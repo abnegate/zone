@@ -270,7 +270,6 @@ describe('Sidebar', () => {
       expect(screen.getByText('Projects')).toBeInTheDocument();
       expect(screen.getByText('Tasks')).toBeInTheDocument();
       expect(screen.getByText('Sources')).toBeInTheDocument();
-      expect(screen.getByText('Search')).toBeInTheDocument();
       expect(screen.getByText('Models')).toBeInTheDocument();
       expect(screen.getByText('Wiki')).toBeInTheDocument();
       expect(screen.getByText('Organization')).toBeInTheDocument();
@@ -312,7 +311,6 @@ describe('Sidebar', () => {
       expect(screen.getByText('Projects').closest('a')).toHaveAttribute('href', '/projects');
       expect(screen.getByText('Tasks').closest('a')).toHaveAttribute('href', '/tasks');
       expect(screen.getByText('Sources').closest('a')).toHaveAttribute('href', '/sources');
-      expect(screen.getByText('Search').closest('a')).toHaveAttribute('href', '/search');
       expect(screen.getByText('Models').closest('a')).toHaveAttribute('href', '/models');
       expect(screen.getByText('Wiki').closest('a')).toHaveAttribute('href', '/wiki');
       expect(screen.getByText('Organization').closest('a')).toHaveAttribute(

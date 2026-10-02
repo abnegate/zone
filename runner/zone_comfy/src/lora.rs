@@ -743,6 +743,10 @@ fn failed(error: std::io::Error) -> TrainError {
     TrainError::Failed(error.to_string())
 }
 
+fn failed_at(path: &Path, error: std::io::Error) -> TrainError {
+    TrainError::Failed(format!("{}: {error}", path.display()))
+}
+
 fn require_directory(path: &Path, label: &'static str) -> Result<PathBuf, TrainError> {
     let metadata = fs::symlink_metadata(path).map_err(failed)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -793,12 +797,11 @@ fn require_regular_file(root: &Path, path: &Path) -> Result<PathBuf, TrainError>
 }
 
 fn write_new(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), TrainError> {
-    let named = |error: std::io::Error| TrainError::Failed(format!("{}: {error}", path.display()));
-    let root = fs::canonicalize(root).map_err(&named)?;
+    let root = fs::canonicalize(root).map_err(|error| failed_at(path, error))?;
     let parent = path
         .parent()
         .ok_or(TrainError::Invalid("training path has no parent"))?;
-    let parent = fs::canonicalize(parent).map_err(&named)?;
+    let parent = fs::canonicalize(parent).map_err(|error| failed_at(path, error))?;
     if !parent.starts_with(&root) {
         return Err(TrainError::Invalid("training path escapes its attempt"));
     }
@@ -806,8 +809,9 @@ fn write_new(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), TrainError> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(&named)?;
-    file.write_all(bytes).map_err(&named)
+        .map_err(|error| failed_at(path, error))?;
+    file.write_all(bytes)
+        .map_err(|error| failed_at(path, error))
 }
 
 fn validate_output(parent: &Path, output: &Path) -> Result<PathBuf, TrainError> {

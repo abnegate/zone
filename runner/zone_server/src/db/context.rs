@@ -3,7 +3,7 @@
 use chrono::NaiveDateTime;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{Connection, PgConnection, PgPool, Row};
 use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
@@ -583,10 +583,22 @@ impl Store {
     }
 
     pub async fn load(&self) -> Result<History, Error> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            .execute(&mut *transaction)
-            .await?;
+        let mut connection = self.pool.acquire().await?;
+        match begin_history(&mut connection).await {
+            Ok(transaction) => return self.read_history(transaction).await,
+            // A leaked snapshot makes BEGIN ISOLATION LEVEL fail the same way.
+            Err(error) if isolation_before_query(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+        sqlx::raw_sql("ROLLBACK").execute(&mut *connection).await?;
+        self.read_history(begin_history(&mut connection).await?)
+            .await
+    }
+
+    async fn read_history(
+        &self,
+        mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<History, Error> {
         self.scope(&mut transaction).await?;
         let history = self.load_in(&mut transaction).await?;
         if let Some(summary) = &history.summary {
@@ -1098,6 +1110,23 @@ impl Store {
             incomplete,
         })
     }
+}
+
+async fn begin_history(
+    connection: &mut PgConnection,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, sqlx::Error> {
+    // Isolation belongs on BEGIN: SET TRANSACTION fails once any query has run.
+    connection
+        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .await
+}
+
+fn isolation_before_query(error: &sqlx::Error) -> bool {
+    error.as_database_error().is_some_and(|error| {
+        error
+            .message()
+            .contains("SET TRANSACTION ISOLATION LEVEL must be called before any query")
+    })
 }
 
 fn milliseconds(lifetime: Duration) -> Result<i64, Error> {

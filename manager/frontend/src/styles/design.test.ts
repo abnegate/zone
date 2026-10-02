@@ -33,6 +33,16 @@ describe('design tokens', () => {
     expect(token(variables, 'ui-list-row-2')).toBe('3.5rem');
     expect(token(variables, 'ui-content-width')).toBe('60rem');
   });
+
+  it('ships Nunito, large radius and the screenshot accent as app defaults', () => {
+    expect(token(variables, 'ui-font-display')).toBe("'Nunito', system-ui, sans-serif");
+    expect(token(variables, 'ui-font-body')).toBe("'Nunito', system-ui, sans-serif");
+    expect(token(variables, 'ui-radius-sm')).toBe('0.5rem');
+    expect(token(variables, 'ui-radius-md')).toBe('0.75rem');
+    expect(token(variables, 'ui-radius-lg')).toBe('1rem');
+    expect(token(variables, 'ui-radius-xl')).toBe('1.5rem');
+    expect(token(variables, 'ui-accent-600')).toBe('#0011d9');
+  });
 });
 
 describe('shared surfaces', () => {

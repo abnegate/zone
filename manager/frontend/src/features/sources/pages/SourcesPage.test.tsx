@@ -196,9 +196,10 @@ describe('SourcesPage', () => {
 
   it('displays verified status', async () => {
     render(<SourcesPage />);
-    await waitFor(() => {
-      expect(screen.getByText('Verified')).toBeInTheDocument();
-    });
+    const row = await screen.findByText('GitHub Repository');
+    expect(within(row.closest('.source-card') as HTMLElement).getByText('Verified')).toHaveClass(
+      'source-status'
+    );
   });
 
   it('displays error status', async () => {
@@ -317,7 +318,9 @@ describe('SourcesPage', () => {
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent('Repository access denied');
       expect(screen.getAllByText('Error')).toHaveLength(2);
-      expect(screen.queryByText('Verified')).not.toBeInTheDocument();
+      const row = screen.getByText('GitHub Repository').closest('.source-card') as HTMLElement;
+      expect(within(row).getByText('Error')).toHaveClass('source-status');
+      expect(within(row).queryByText('Verified')).not.toBeInTheDocument();
     });
   });
 

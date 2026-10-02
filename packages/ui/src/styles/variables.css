@@ -1,6 +1,6 @@
 :root {
-  --ui-font-display: 'Newsreader', 'Source Serif 4', Georgia, 'Times New Roman', serif;
-  --ui-font-body: 'Source Sans 3', 'Source Sans Pro', ui-sans-serif, system-ui, sans-serif;
+  --ui-font-display: 'Nunito', system-ui, sans-serif;
+  --ui-font-body: 'Nunito', system-ui, sans-serif;
   --ui-font-mono:
     'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     monospace;
@@ -97,13 +97,13 @@
   --ui-space-3xl: var(--ui-space-10);
 
   --ui-radius-none: 0;
-  --ui-radius-sm: 0.25rem; /* 4px */
-  --ui-radius-md: 0.375rem; /* 6px */
-  --ui-radius-lg: 0.5rem; /* 8px */
+  --ui-radius-sm: 0.5rem; /* 8px */
+  --ui-radius-md: 0.75rem; /* 12px */
+  --ui-radius-lg: 1rem; /* 16px */
   --ui-radius-card: 0.625rem; /* 10px */
-  --ui-radius-xl: 0.75rem; /* 12px */
-  --ui-radius-2xl: 1rem; /* 16px */
-  --ui-radius-3xl: 1.5rem; /* 24px */
+  --ui-radius-xl: 1.5rem; /* 24px */
+  --ui-radius-2xl: 2rem; /* 32px */
+  --ui-radius-3xl: 3rem; /* 48px */
   --ui-radius-full: 9999px;
 
   --ui-duration-instant: 50ms;
@@ -202,7 +202,7 @@
   --ui-border: #d4cbb8;
   --ui-border-subtle: #e4dccb;
   --ui-border-strong: #b8ad98;
-  --ui-border-focus: #a3481d;
+  --ui-border-focus: #0011d9;
 
   /* Overlays */
   --ui-overlay-light: rgb(26 22 18 / 0.04);
@@ -233,7 +233,7 @@
   --ui-border: #2e2923;
   --ui-border-subtle: #221e1a;
   --ui-border-strong: #3f3830;
-  --ui-border-focus: #e5a574;
+  --ui-border-focus: #00f3ff;
 
   /* Overlays */
   --ui-overlay-light: rgb(0 0 0 / 0.22);
@@ -242,7 +242,60 @@
 }
 
 :root:not([data-accent]),
-:root[data-theme='light']:not([data-accent]),
+:root[data-theme='light']:not([data-accent]) {
+  --ui-accent-50: #eaebfc;
+  --ui-accent-100: #d5d7f9;
+  --ui-accent-200: #aab0f2;
+  --ui-accent-300: #8088ec;
+  --ui-accent-400: #5560e6;
+  --ui-accent-500: #2b39df;
+  --ui-accent-600: #0011d9;
+  --ui-accent-700: #000eb5;
+  --ui-accent-800: #000b91;
+  --ui-accent-900: #00096d;
+
+  --ui-accent: var(--ui-accent-600);
+  --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 14%, transparent);
+  --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 14%, var(--ui-bg-base));
+  --ui-accent-hover: var(--ui-accent-700);
+  --ui-accent-glow: rgb(0 17 217 / 0.22);
+  --ui-border-focus: var(--ui-accent);
+
+  --ui-secondary: #ecf9ff;
+  --ui-secondary-foreground: #000000;
+  --ui-secondary-hover: #effaff;
+  --ui-secondary-400: #effaff;
+  --ui-secondary-500: #ecf9ff;
+  --ui-secondary-600: #c9d4d9;
+}
+
+:root[data-theme='dark']:not([data-accent]) {
+  --ui-accent-50: #001415;
+  --ui-accent-100: #00292b;
+  --ui-accent-200: #005155;
+  --ui-accent-300: #007a80;
+  --ui-accent-400: #00a2aa;
+  --ui-accent-500: #00cbd5;
+  --ui-accent-600: #00f3ff;
+  --ui-accent-700: #2bf5ff;
+  --ui-accent-800: #55f7ff;
+  --ui-accent-900: #80f9ff;
+
+  --ui-accent: var(--ui-accent-600);
+  --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 18%, transparent);
+  --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 18%, var(--ui-bg-base));
+  --ui-accent-hover: var(--ui-accent-500);
+  --ui-accent-glow: rgb(0 243 255 / 0.24);
+  --ui-border-focus: var(--ui-accent);
+
+  --ui-secondary: #ecf9ff;
+  --ui-secondary-foreground: #000000;
+  --ui-secondary-hover: #effaff;
+  --ui-secondary-400: #effaff;
+  --ui-secondary-500: #ecf9ff;
+  --ui-secondary-600: #c9d4d9;
+}
+
 :root[data-accent='copper'],
 :root[data-theme='light'][data-accent='copper'] {
   --ui-accent-50: #fdf6f0;
@@ -261,13 +314,13 @@
   --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 14%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-700);
   --ui-accent-glow: rgb(164 72 29 / 0.22);
+  --ui-border-focus: var(--ui-accent);
 
   --ui-secondary-400: var(--ui-accent-400);
   --ui-secondary-500: var(--ui-accent-500);
   --ui-secondary-600: var(--ui-accent-600);
 }
 
-:root[data-theme='dark']:not([data-accent]),
 :root[data-theme='dark'][data-accent='copper'] {
   --ui-accent-50: #3d1c10;
   --ui-accent-100: #6d321c;
@@ -285,6 +338,7 @@
   --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 18%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-500);
   --ui-accent-glow: rgb(212 125 63 / 0.24);
+  --ui-border-focus: var(--ui-accent);
 
   --ui-secondary-400: var(--ui-accent-400);
   --ui-secondary-500: var(--ui-accent-500);
@@ -309,6 +363,7 @@
   --ui-bg-selected: color-mix(in srgb, var(--ui-accent-500) 14%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-700);
   --ui-accent-glow: hsl(221.2 83.2% 53.3% / 0.2);
+  --ui-border-focus: var(--ui-accent);
 
   --ui-secondary-400: var(--ui-accent-400);
   --ui-secondary-500: var(--ui-accent-500);
@@ -332,6 +387,7 @@
   --ui-bg-selected: color-mix(in srgb, var(--ui-accent-400) 16%, var(--ui-bg-base));
   --ui-accent-hover: var(--ui-accent-300);
   --ui-accent-glow: hsl(217.2 91.2% 59.8% / 0.2);
+  --ui-border-focus: var(--ui-accent);
 
   --ui-secondary-400: var(--ui-accent-400);
   --ui-secondary-500: var(--ui-accent-500);
@@ -357,6 +413,7 @@
   --ui-bg-selected: var(--ui-accent-muted);
   --ui-accent-hover: hsl(222.2 47.4% 15%);
   --ui-accent-glow: hsl(222.2 47.4% 11.2% / 0.2);
+  --ui-border-focus: var(--ui-accent);
 
   /* Secondary accent (legacy) */
   --ui-secondary-400: var(--ui-accent-400);
@@ -382,6 +439,7 @@
   --ui-bg-selected: var(--ui-accent-muted);
   --ui-accent-hover: hsl(210 40% 90%);
   --ui-accent-glow: hsl(210 40% 98% / 0.2);
+  --ui-border-focus: var(--ui-accent);
 
   /* Secondary accent (legacy) */
   --ui-secondary-400: var(--ui-accent-400);

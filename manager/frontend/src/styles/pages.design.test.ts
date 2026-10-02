@@ -70,6 +70,23 @@ describe('chats layout', () => {
     expect(rule(chats, '.chat-meta')).toContain('line-height: var(--ui-space-4)');
   });
 
+  it('sticks group headers inside the list scroller at 28px', () => {
+    const header = rule(chats, '.chat-group-header');
+    expect(header).toContain('position: sticky');
+    expect(header).toContain('top: 0');
+    expect(header).toContain('height: var(--ui-control-height-sm)');
+    expect(header).toContain('background: var(--ui-bg-base)');
+    expect(rule(chats, '.chats-list')).toContain('overflow-y: auto');
+    expect(rule(chats, '.chat-group')).not.toContain('overflow');
+  });
+
+  it('keeps group and sort controls out of the 48px page-bar', () => {
+    expect(rule(chats, '.chats-sidebar-header.page-bar')).not.toContain('chats-arrange');
+    expect(rule(chats, '.chats-arrange')).toContain('flex-shrink: 0');
+    expect(rule(chats, '.chats-arrange select')).toContain('height: var(--ui-control-height-sm)');
+    expect(rule(chats, '.chats-arrange select')).toContain('font-size: var(--ui-text-xs)');
+  });
+
   it('sets a search result to the 56px two-line row: 4 + 16 title + 32 snippet + 4', () => {
     expect(rule(chats, '.search-result-item')).toContain('height: var(--ui-list-row-2)');
     expect(rule(chats, '.search-result-item')).toContain(
@@ -181,7 +198,6 @@ describe('question card and receipts', () => {
 
 describe('knowledge layout', () => {
   const wiki = read(join(features, 'knowledge', 'pages', 'WikiPage.css'));
-  const search = read(join(features, 'knowledge', 'pages', 'ContextSearchPage.css'));
 
   it('gives every wiki card the same 96px height', () => {
     expect(rule(wiki, '.knowledge-card')).toContain('height: 6rem');
@@ -195,16 +211,15 @@ describe('knowledge layout', () => {
   });
 
   it('puts the search controls on one toolbar row without a card or a score bar', () => {
-    expect(search).not.toContain('.search-section');
-    expect(search).not.toContain('.relevance-bar');
-    expect(rule(search, '.search-toolbar')).toContain('display: flex');
-    expect(rule(search, '.source-pill')).toContain('height: var(--ui-control-height-sm)');
+    expect(wiki).not.toContain('.search-section');
+    expect(wiki).not.toContain('.relevance-bar');
+    expect(rule(wiki, '.search-toolbar')).toContain('display: flex');
+    expect(rule(wiki, '.source-pill')).toContain('height: var(--ui-control-height-sm)');
   });
 
-  it('centres the search empty state in the body like the other list pages', () => {
-    expect(rule(search, '.context-search-body')).toContain('flex-direction: column');
-    expect(rule(search, '.context-search-content')).toContain('flex-direction: column');
-    expect(rule(search, '.context-search-content > .ui-empty')).toContain('margin: auto');
+  it('sizes the wiki search field as a flex form in the page bar', () => {
+    expect(rule(wiki, '.wiki-search.search-form')).toContain('display: flex');
+    expect(rule(wiki, '.wiki-search.search-form')).toContain('max-width: 20rem');
   });
 
   it('mutes the wiki card excerpt slot when an entry has nothing to show there', () => {
@@ -252,20 +267,14 @@ const legacyScales = /var\(--(gray|blue|green|red|yellow|purple)-\d+\)/;
 describe('tasks page layout', () => {
   const css = read(join(features, 'tasks', 'pages', 'TasksPage.css'));
 
-  it('gives every card the same slots so a grid row shares one height', () => {
-    expect(rule(css, '.tasks-list')).not.toContain('grid-auto-rows');
+  it('lays tasks out as a 56px-row table with a 32px header', () => {
+    expect(rule(css, '.tasks-table-wrapper')).toContain('border: 1px solid var(--ui-border)');
+    expect(rule(css, '.tasks-table th')).toContain('height: var(--ui-control-height)');
+    expect(rule(css, '.tasks-table td')).toContain('height: var(--ui-list-row-2)');
+    expect(rule(css, '.tasks-table td')).toContain('box-shadow: inset 0 -1px var(--ui-border)');
     expect(rule(css, '.task-card-title')).toContain('height: var(--ui-space-5)');
     expect(rule(css, '.task-project')).toContain('height: var(--ui-space-4)');
-    expect(rule(css, '.task-card .task-description')).toContain('height: var(--ui-space-10)');
-    expect(rule(css, '.task-card .task-meta')).toContain('height: var(--ui-badge-height)');
-    expect(rule(css, '.task-actions')).toContain('margin-top: auto');
-  });
-
-  it('sizes every card at 176 including its border so grid rows step on the 4px grid', () => {
-    const card = rule(css, '.task-card');
-    expect(card).toContain('box-sizing: border-box');
-    expect(card).toContain('height: 11rem');
-    expect(card).toContain('padding: calc(var(--ui-card-padding-list) - 1px)');
+    expect(rule(css, '.task-card .task-description')).toContain('height: var(--ui-space-4)');
   });
 
   it('guarantees the title 60% of its row and keeps the badges from pushing it out', () => {
@@ -281,25 +290,21 @@ describe('tasks page layout', () => {
     expect(rule(css, '.task-branch')).toContain('height: var(--ui-badge-height)');
   });
 
-  it('folds the pull request into the meta row and lets the model and source give way', () => {
-    expect(rule(css, '.task-pr')).toContain('display: contents');
-    expect(rule(css, '.task-pr::before')).toContain('margin-right: 0');
-    expect(css).toContain('.task-meta > * + *::before');
+  it('keeps the pull request on one row and truncates the model and source', () => {
+    expect(rule(css, '.task-pr')).toContain('display: flex');
+    expect(css).not.toContain('.task-meta > * + *::before');
     const giveWay = rule(css, '.task-model,\n.task-source');
-    expect(giveWay).toContain('flex: 0 1 auto');
     expect(giveWay).toContain('min-width: 0');
     expect(giveWay).toContain('text-overflow: ellipsis');
   });
 
-  it('sets the branch tag on the footer where it takes the width the actions leave', () => {
+  it('sets the branch tag next to the pull request', () => {
     expect(rule(css, '.task-actions')).toContain('align-items: center');
     const slot = rule(css, '.task-branch-slot');
-    expect(slot).toContain('flex: 1 1 0');
     expect(slot).toContain('min-width: 0');
     expect(slot).toContain('height: var(--ui-badge-height)');
     const branch = rule(css, '.task-branch');
     expect(branch).toContain('display: block');
-    expect(branch).toContain('max-width: max-content');
     expect(branch).toContain('text-overflow: ellipsis');
     expect(branch).not.toContain('max-width: 50%');
     expect(branch).not.toContain('flex:');
@@ -362,16 +367,14 @@ describe('projects page layout', () => {
 describe('sources page layout', () => {
   const css = read(join(features, 'sources', 'pages', 'SourcesPage.css'));
 
-  it('makes every source card exactly 104px on 8/12 padding', () => {
-    const card = rule(css, '.source-card.card--list');
-    expect(card).toContain('padding: var(--ui-space-2) var(--ui-space-3)');
-    expect(card).not.toContain('gap:');
-    expect(rule(css, '.source-card-title')).toContain('height: var(--ui-badge-height)');
-    expect(rule(css, '.source-description')).toContain('height: 1.125rem');
-    expect(rule(css, '.source-description')).toContain('line-height: 1.125rem');
+  it('lays sources out as a 56px-row table with a 32px header', () => {
+    expect(rule(css, '.sources-table-wrapper')).toContain('border: 1px solid var(--ui-border)');
+    expect(rule(css, '.sources-table th')).toContain('height: var(--ui-control-height)');
+    expect(rule(css, '.sources-table td')).toContain('height: var(--ui-list-row-2)');
+    expect(rule(css, '.sources-table td')).toContain('box-shadow: inset 0 -1px var(--ui-border)');
+    expect(rule(css, '.source-name')).toContain('line-height: var(--ui-space-5)');
+    expect(rule(css, '.source-description')).toContain('height: var(--ui-space-4)');
     expect(rule(css, '.source-url')).toContain('line-height: var(--ui-space-4)');
-    expect(rule(css, '.source-card-meta')).toContain('height: var(--ui-control-height-sm)');
-    expect(rule(css, '.source-card-meta')).toContain('margin-top: var(--ui-space-1)');
   });
 });
 

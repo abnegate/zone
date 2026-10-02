@@ -11,6 +11,8 @@ const mockDeleteEntry = mock();
 const mockRefreshEntry = mock();
 const mockReadEntry = mock();
 const mockReload = mock();
+const mockSearchSources = mock();
+const mockClearSearch = mock();
 
 // Create a function reference that we can update
 let getMockState: () => { entries: KnowledgeEntry[]; loading: boolean; error: string | null };
@@ -31,15 +33,20 @@ mock.module('../hooks', () => ({
       reload: mockReload,
     };
   },
-  // Re-export useContextSearch for module compatibility
   useContextSearch: () => ({
     results: [],
     total: 0,
     loading: false,
     error: null,
-    search: mock(),
-    clear: mock(),
+    search: mockSearchSources,
+    clear: mockClearSearch,
   }),
+}));
+
+mock.module('../../../api/sources', () => ({
+  sourcesApi: {
+    getSources: mock(() => Promise.resolve([])),
+  },
 }));
 
 // Mock workspace context
@@ -141,6 +148,8 @@ describe('WikiPage', () => {
     mockDeleteEntry.mockReset();
     mockRefreshEntry.mockReset();
     mockReadEntry.mockReset();
+    mockSearchSources.mockReset();
+    mockClearSearch.mockReset();
     mockReadEntry.mockImplementation(async (id: string) => {
       const found = defaultEntries.find((entry) => entry.id === id);
       if (!found) throw new Error('Knowledge entry not found');
@@ -195,12 +204,12 @@ describe('WikiPage', () => {
   describe('Search Functionality', () => {
     it('renders search input', () => {
       renderWikiPage();
-      expect(screen.getByPlaceholderText('Search knowledge...')).toBeInTheDocument();
+      expect(screen.getByPlaceholderText('Search knowledge and sources...')).toBeInTheDocument();
     });
 
     it('filters entries by title', () => {
       renderWikiPage();
-      const searchInput = screen.getByPlaceholderText('Search knowledge...');
+      const searchInput = screen.getByPlaceholderText('Search knowledge and sources...');
       fireEvent.change(searchInput, { target: { value: 'Text' } });
       expect(screen.getByText('Text Entry')).toBeInTheDocument();
       expect(screen.queryByText('URL Entry')).not.toBeInTheDocument();
@@ -208,7 +217,7 @@ describe('WikiPage', () => {
 
     it('filters entries by content', () => {
       renderWikiPage();
-      const searchInput = screen.getByPlaceholderText('Search knowledge...');
+      const searchInput = screen.getByPlaceholderText('Search knowledge and sources...');
       fireEvent.change(searchInput, { target: { value: 'Fetched content' } });
       expect(screen.queryByText('Text Entry')).not.toBeInTheDocument();
       expect(screen.getByText('URL Entry')).toBeInTheDocument();
@@ -216,7 +225,7 @@ describe('WikiPage', () => {
 
     it('filters entries by tags', () => {
       renderWikiPage();
-      const searchInput = screen.getByPlaceholderText('Search knowledge...');
+      const searchInput = screen.getByPlaceholderText('Search knowledge and sources...');
       fireEvent.change(searchInput, { target: { value: 'documentation' } });
       expect(screen.queryByText('Text Entry')).not.toBeInTheDocument();
       expect(screen.getByText('URL Entry')).toBeInTheDocument();
@@ -224,16 +233,16 @@ describe('WikiPage', () => {
 
     it('shows appropriate message when search yields no results', () => {
       renderWikiPage();
-      const searchInput = screen.getByPlaceholderText('Search knowledge...');
+      const searchInput = screen.getByPlaceholderText('Search knowledge and sources...');
       fireEvent.change(searchInput, { target: { value: 'nonexistent' } });
-      expect(screen.getByText('No knowledge entries found')).toBeInTheDocument();
+      expect(screen.getByText('No results found')).toBeInTheDocument();
       expect(screen.getByText('Try adjusting your filters or search query')).toBeInTheDocument();
     });
 
     it('offers to show all entries when the filter or search hides everything', () => {
       renderWikiPage();
       fireEvent.click(screen.getByRole('tab', { name: 'URL' }));
-      const searchInput = screen.getByPlaceholderText('Search knowledge...');
+      const searchInput = screen.getByPlaceholderText('Search knowledge and sources...');
       fireEvent.change(searchInput, { target: { value: 'nonexistent' } });
       expect(screen.queryByRole('button', { name: 'Add Entry' })).not.toBeInTheDocument();
 

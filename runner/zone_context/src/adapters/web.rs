@@ -197,6 +197,13 @@ impl WebAdapter {
         const MAX_REDIRECTS: u32 = 5;
         const MAX_RESPONSE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
+        if !self.allow_private_ips && !zone_core::vpn::allows_public() {
+            return Err(ContextError::adapter(
+                "web",
+                zone_core::vpn::OFFLINE.to_string(),
+            ));
+        }
+
         // Build HTTP client with NO auto-redirect (manual handling for security)
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none()) // Disable auto-redirect
@@ -658,6 +665,28 @@ mod tests {
 
         let result = adapter.verify(&source).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_production_fetch_stays_offline_until_the_vpn_is_on() {
+        let _vpn = zone_core::vpn::Hold::required_off();
+        let adapter = WebAdapter::new();
+        let source = create_test_source(json!({
+            "url": "https://example.com"
+        }));
+        let error = adapter
+            .fetch(
+                &source,
+                &FetchConfig::default(),
+                FetchStrategy::Full,
+                &NoOpProgress,
+            )
+            .await
+            .expect_err("must refuse");
+        assert!(
+            error.to_string().contains(zone_core::vpn::OFFLINE),
+            "{error}"
+        );
     }
 
     #[tokio::test]

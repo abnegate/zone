@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { WorkspaceTheme } from '../../types';
-import { FONT_MAP, RADIUS_MAP, ThemeProvider, useTheme } from './ThemeContext';
+import {
+  FONT_MAP,
+  RADIUS_MAP,
+  ThemeProvider,
+  useTheme,
+  workspaceThemeProperties,
+} from './ThemeContext';
 
 // Test component to access context
 function TestComponent() {
@@ -316,6 +322,28 @@ describe('Workspace theme overrides', () => {
     expect(document.documentElement.style.getPropertyValue('--ui-accent-foreground')).toBe(
       '#ffffff'
     );
+  });
+
+  it('maps the shipped default colours onto accent, font and large radius', () => {
+    const theme = {
+      primary_color_light: '#0011d9',
+      secondary_color_light: '#ecf9ff',
+      primary_color_dark: '#00f3ff',
+      secondary_color_dark: '#ecf9ff',
+      font_family: 'nunito',
+      font_size_base: '16px',
+      border_radius: 'large',
+    } as WorkspaceTheme;
+    const light = workspaceThemeProperties(theme, 'light');
+    expect(light.get('--ui-accent')).toBe('#0011d9');
+    expect(light.get('--ui-accent-600')).toBe('#0011d9');
+    expect(light.get('--ui-secondary')).toBe('#ecf9ff');
+    expect(light.get('--ui-font-body')).toBe(FONT_MAP.nunito);
+    expect(light.get('--ui-radius-lg')).toBe(RADIUS_MAP.large.lg);
+    const dark = workspaceThemeProperties(theme, 'dark');
+    expect(dark.get('--ui-accent')).toBe('#00f3ff');
+    expect(dark.get('--ui-accent-600')).toBe('#00f3ff');
+    expect(dark.get('--ui-secondary')).toBe('#ecf9ff');
   });
 
   it('applies secondary colors, both fonts, rem scaling and all radius sizes', () => {

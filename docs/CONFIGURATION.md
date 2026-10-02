@@ -398,9 +398,9 @@ setting a monthly cap, at claude.ai/settings/usage.
   `projects/`, codex's under `sessions/`. Zone keeps the Claude tokens in the
   database and hands a turn its sign-in's token in `CLAUDE_CODE_OAUTH_TOKEN`;
   it does not write them here. Zone does not prune the session files. A codex
-  login made before migration 055 sits at `codex/auth.json` until Zone first
+  login made before migration 002 sits at `codex/auth.json` until Zone first
   needs it, and then moves into its sign-in's home; see
-  [OPERATIONS.md](OPERATIONS.md#upgrading-to-migration-055). Deleting an
+  [OPERATIONS.md](OPERATIONS.md#upgrading-to-migration-002). Deleting an
   organization stops any codex sign-in it has in progress, runs `codex logout`
   in each of its codex homes, and removes `<dir>/<organization id>` with
   everything in it. The delete request waits for any change to the
@@ -1402,11 +1402,11 @@ once approved, and its file tools read whatever else the server's user can.
 - **Backups.** `make backup` and `make restore` include
   `zone_manager_agent_state`, and with it every organization's codex login; see
   [OPERATIONS.md](OPERATIONS.md).
-- **Upgrading.** Coding agent sign-ins added migration 048, after which an
-  older image refuses to start against the database with
-  `VersionMissing(48)`. Several accounts per agent add migrations 055 and
-  056, after which an older image stops with `VersionMissing(55)`. Back up
-  first; see [OPERATIONS.md](OPERATIONS.md#upgrading-to-migration-055).
+- **Upgrading.** Several accounts per agent add migrations 002 and 003 on
+  top of the squashed initial schema, after which an older image stops with
+  `VersionMissing(2)`. A database migrated before the squash cannot be
+  upgraded in place. Back up first; see
+  [OPERATIONS.md](OPERATIONS.md#upgrading-to-migration-002).
 - **Refused at boot**: a relative `ZONE_AGENT_STATE_DIR`, or none when neither
   `XDG_STATE_HOME` nor `HOME` is absolute; a `ZONE_AGENT_HOST_LOGIN` that is not
   one of the spellings above; a `ZONE_CLAUDE_TOKEN_URL` that is not an absolute
@@ -1447,7 +1447,7 @@ once approved, and its file tools read whatever else the server's user can.
 - Claude's profile does not name the organization, so one person in two
   Claude organizations counts as one account, and signing in to the second
   replaces the first.
-- A Claude sign-in made before migration 055 names no account, so signing in
+- A Claude sign-in made before migration 002 names no account, so signing in
   to the same account again adds a second sign-in beside it rather than
   replacing it. Sign the old one out under AI Settings.
 - Agent state lives in each pod under Helm, so a session moves between
@@ -1608,8 +1608,7 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ### `SEARCH_ENABLE_WEB_SEARCH`
 - **Default**: `true`
-- **Description**: Enable Zone chat web search through SearXNG
-- **Note**: Requires the VPN profile
+- **Description**: Extra switch for Zone chat web search through SearXNG. When `ZONE_VPN_REQUIRED` is on, Manager also requires `ZONE_VPN`; with the VPN required and off, search and public page fetch stay offline even when this is `true`.
 
 ### `SEARCH_RESULT_COUNT`
 - **Default**: `5`
@@ -1650,8 +1649,21 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Default**: empty
 - **Description**: Set to `1` when the `vpn` Compose profile is active. Kept in
   sync with `COMPOSE_PROFILES` so internet-facing services attach to Gluetun's
-  network namespace and all of their traffic uses the tunnel.
+  network namespace and all of their traffic uses the tunnel. Manager reads
+  this as the public-web tunnel flag. SearXNG lookups, the `web_search` /
+  `fetch_url` tools, knowledge URL ingest and refresh, web sources, and
+  `curl` / `wget` from `run_command` stay off only when `ZONE_VPN_REQUIRED`
+  is also on.
 - **VPN value**: `1`
+
+### `ZONE_VPN_REQUIRED`
+- **Default**: empty
+- **Description**: When truthy, public web stays offline unless `ZONE_VPN` is
+  on. Empty or `0` allows search and page fetch on the public internet while
+  the VPN profile is off. `make up-vpn` writes `1` the first time this is
+  empty; later `make up` without the vpn profile keeps the value. Set `0` to
+  allow public web with the tunnel down.
+- **VPN value**: `1` after the first `make up-vpn`, unless you set `0`
 
 ### `COMPOSE_PROFILES`
 - **Default**: empty (core services only)
@@ -1679,7 +1691,7 @@ service names bypass the proxy.
 
 ### Manager / zone-server chat
 
-Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). When `SEARCH_ENABLE_WEB_SEARCH` is true, Manager chat automatically queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. When `ZONE_VPN=1`, Manager, LiteLLM, Grafana, and bundled engines share that stack too. Remote model catalog searches also use Gluetun's HTTP proxy when `MODEL_SEARCH_PROXY_URL` is configured. A message can force search on or off with `metadata.web_search`.
+Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). Web search is online when `SEARCH_ENABLE_WEB_SEARCH` is true and public web is allowed: the VPN tunnel is on, or `ZONE_VPN_REQUIRED` is off. Then Manager chat queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. With `ZONE_VPN_REQUIRED` on and `ZONE_VPN` off, the server does not attempt a lookup and does not offer `web_search` or `fetch_url`, even if a message sets `metadata.web_search`. Knowledge URL ingest and refresh, web sources, and `curl` / `wget` from `run_command` stay offline the same way. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. When `ZONE_VPN=1`, Manager, LiteLLM, Grafana, and bundled engines share that stack too. Remote model catalog searches also use Gluetun's HTTP proxy when `MODEL_SEARCH_PROXY_URL` is configured. A message can force search on or off with `metadata.web_search` only while search is online.
 
 ---
 
@@ -2005,7 +2017,7 @@ make up-vpn
 
 Need to find a specific config? Quick lookup:
 
-- **Compose**: COMPOSE_PROFILES, ZONE_VPN
+- **Compose**: COMPOSE_PROFILES, ZONE_VPN, ZONE_VPN_REQUIRED
 - **Authentication**: BASICAUTH_REALM, BASIC_AUTH_USERS_FILE
 - **Docker Versions**: DOCKER_VERSION_TRAEFIK, DOCKER_VERSION_OLLAMA, DOCKER_VERSION_POSTGRES, DOCKER_VERSION_LITELLM, DOCKER_VERSION_GLUETUN, DOCKER_VERSION_SEARXNG, COMFYUI_COMMIT
 - **Domains**: DOMAIN_HOST_WEBUI

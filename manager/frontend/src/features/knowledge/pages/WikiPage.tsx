@@ -1,11 +1,14 @@
 import { Badge, Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { sourcesApi } from '../../../api/sources';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
-import { CreateKnowledgeWizard } from '../components';
-import { useKnowledge } from '../hooks';
-import type { KnowledgeEntry } from '../types';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import type { Source } from '../../sources/types';
+import { CreateKnowledgeWizard, SearchResults } from '../components';
+import { useContextSearch, useKnowledge } from '../hooks';
+import type { KnowledgeEntry, SearchMode } from '../types';
 import './WikiPage.css';
 
 type FilterType = 'all' | 'text' | 'url';
@@ -24,12 +27,44 @@ function urlHost(url: string): string {
   }
 }
 
+const SearchIcon = () => (
+  <svg
+    className="wiki-search-icon"
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <circle cx="11" cy="11" r="8" />
+    <path d="m21 21-4.35-4.35" />
+  </svg>
+);
+
 export default function WikiPage() {
   const { entries, loading, error, refreshing, createEntry, deleteEntry, refreshEntry, readEntry } =
     useKnowledge();
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
+  const {
+    results,
+    total,
+    loading: searchLoading,
+    error: searchError,
+    search,
+    clear,
+  } = useContextSearch();
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [searchQuery, setSearchQuery] = useState('');
+  const [mode, setMode] = useState<SearchMode>('hybrid');
+  const [sources, setSources] = useState<Source[]>([]);
+  const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [sourcesLoading, setSourcesLoading] = useState(true);
   const [filterType, setFilterType] = useState<FilterType>('all');
   const [showCreateWizard, setShowCreateWizard] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<KnowledgeEntry | null>(null);
@@ -41,6 +76,67 @@ export default function WikiPage() {
   useEffect(() => {
     listed.current = entries;
   }, [entries]);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadSources = async () => {
+      if (!workspaceId) {
+        setSources([]);
+        setSourcesLoading(false);
+        return;
+      }
+      try {
+        setSourcesLoading(true);
+        const data = await sourcesApi.getSources(workspaceId, undefined, true);
+        if (mounted) setSources(data);
+      } catch (err) {
+        if (mounted) console.error('Failed to load sources:', err);
+      } finally {
+        if (mounted) setSourcesLoading(false);
+      }
+    };
+    loadSources();
+    return () => {
+      mounted = false;
+    };
+  }, [workspaceId]);
+
+  const runSearch = useCallback(
+    async (query: string) => {
+      const trimmed = query.trim();
+      if (!trimmed) {
+        clear();
+        return;
+      }
+      await search({
+        query: trimmed,
+        mode,
+        source_ids: selectedSources.length > 0 ? selectedSources : undefined,
+        limit: 20,
+      });
+    },
+    [clear, mode, search, selectedSources]
+  );
+
+  useEffect(() => {
+    const trimmed = searchQuery.trim();
+    if (!trimmed) return;
+    const handle = window.setTimeout(() => {
+      void runSearch(trimmed);
+    }, 300);
+    return () => window.clearTimeout(handle);
+  }, [runSearch, searchQuery]);
+
+  const handleSearch = async (e: FormEvent) => {
+    e.preventDefault();
+    await runSearch(searchQuery);
+  };
+
+  const toggleSource = (sourceId: string) => {
+    setSelectedSources((prev) =>
+      prev.includes(sourceId) ? prev.filter((id) => id !== sourceId) : [...prev, sourceId]
+    );
+  };
 
   /// A citation names the entry by id, and the list is one page of a workspace
   /// that carries no content, so the entry is read on its own rather than
@@ -128,6 +224,10 @@ export default function WikiPage() {
     return matchesFilter && matchesSearch;
   });
 
+  const searching = searchQuery.trim().length > 0;
+  const noKnowledge = filteredEntries.length === 0;
+  const showEmpty = !loading && noKnowledge && results.length === 0 && !searchLoading;
+
   const formatDate = (date: string) => {
     if (!date) return '—';
     const parsed = new Date(date);
@@ -156,29 +256,26 @@ export default function WikiPage() {
             <TabsTrigger value="url">URL</TabsTrigger>
           </TabsList>
         </Tabs>
-        <div className="wiki-search">
-          <svg
-            className="wiki-search-icon"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            aria-hidden="true"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+        <form className="search-form wiki-search" onSubmit={handleSearch}>
+          <div className="search-input-wrapper">
+            <span className="search-icon-wrapper">
+              <SearchIcon />
+            </span>
+            <input
+              type="search"
+              placeholder="Search knowledge and sources..."
+              value={searchQuery}
+              onChange={(e) => {
+                const value = e.target.value;
+                setSearchQuery(value);
+                if (!value.trim()) clear();
+              }}
+              aria-label="Search knowledge"
+              className="search-input"
+              disabled={searchLoading}
             />
-          </svg>
-          <input
-            type="search"
-            placeholder="Search knowledge..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            aria-label="Search knowledge"
-          />
-        </div>
+          </div>
+        </form>
         <Button onClick={() => setShowCreateWizard(true)}>
           <PlusIcon />
           Add knowledge
@@ -192,12 +289,68 @@ export default function WikiPage() {
           </div>
         )}
 
+        <div className="search-toolbar">
+          <Button
+            type="button"
+            disabled={searchLoading || !searchQuery.trim()}
+            onClick={() => void runSearch(searchQuery)}
+          >
+            {searchLoading ? <span className="ui-btn-spinner" /> : 'Search'}
+          </Button>
+          <div className="filter-group">
+            <span className="filter-label">Mode</span>
+            <Tabs value={mode} onValueChange={(v) => setMode(v as SearchMode)}>
+              <TabsList>
+                <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
+                <TabsTrigger value="semantic">Semantic</TabsTrigger>
+                <TabsTrigger value="keyword">Keyword</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </div>
+
+          {sources.length > 0 && (
+            <div className="filter-group">
+              <span className="filter-label">Sources</span>
+              <div className="source-pills">
+                {sourcesLoading ? (
+                  <span className="filter-loading">Loading...</span>
+                ) : (
+                  sources.map((source) => (
+                    <button
+                      key={source.id}
+                      type="button"
+                      className={`source-pill ${selectedSources.includes(source.id) ? 'active' : ''}`}
+                      onClick={() => toggleSource(source.id)}
+                      disabled={searchLoading}
+                    >
+                      {source.name}
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {searchError && (
+          <div className="error-banner" role="alert">
+            <span>{searchError}</span>
+            <Button variant="ghost" size="sm" onClick={() => runSearch(searchQuery)}>
+              Retry
+            </Button>
+          </div>
+        )}
+
+        {results.length > 0 && (
+          <SearchResults results={results} total={total} query={searchQuery} />
+        )}
+
         {loading ? (
           <div className="loading-state">
             <span className="loading-spinner" aria-hidden="true" />
             <span className="loading-text">Loading knowledge...</span>
           </div>
-        ) : filteredEntries.length === 0 ? (
+        ) : showEmpty ? (
           <EmptyState
             className="wiki-empty-state"
             icon={
@@ -205,9 +358,9 @@ export default function WikiPage() {
                 <path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
               </svg>
             }
-            title="No knowledge entries found"
+            title={searching ? 'No results found' : 'No knowledge entries found'}
             description={
-              searchQuery || filterType !== 'all'
+              searching || filterType !== 'all'
                 ? 'Try adjusting your filters or search query'
                 : 'Add your first knowledge entry to build your knowledge base'
             }
@@ -220,6 +373,7 @@ export default function WikiPage() {
                   onClick={() => {
                     setFilterType('all');
                     setSearchQuery('');
+                    clear();
                   }}
                 >
                   Show all entries
@@ -227,7 +381,7 @@ export default function WikiPage() {
               )
             }
           />
-        ) : (
+        ) : noKnowledge ? null : (
           <div className="knowledge-grid">
             {filteredEntries.map((entry) => {
               const excerpt = entry.excerpt;

@@ -1,4 +1,4 @@
-import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import {
   AuthProvider,
   EmailVerificationPage,
@@ -10,7 +10,7 @@ import {
   SessionsPage,
 } from './features/auth';
 import { ChatsPage } from './features/chats';
-import { ContextSearchPage, WikiPage } from './features/knowledge';
+import { WikiPage } from './features/knowledge';
 import { ModelsPage, PullProvider } from './features/models';
 import { ProjectsPage } from './features/projects';
 import { AgentSignInPage, OrgSettingsPage, WorkspaceSettingsPage } from './features/settings';
@@ -104,14 +104,7 @@ function App() {
                       </ProtectedRoute>
                     }
                   />
-                  <Route
-                    path="search"
-                    element={
-                      <ProtectedRoute requiredPermission={PERMISSIONS.SOURCES.READ}>
-                        <ContextSearchPage />
-                      </ProtectedRoute>
-                    }
-                  />
+                  <Route path="search" element={<Navigate to="/wiki" replace />} />
                   <Route
                     path="wiki"
                     element={

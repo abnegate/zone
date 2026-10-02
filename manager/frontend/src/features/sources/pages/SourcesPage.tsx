@@ -49,17 +49,43 @@ function formatVerified(at: string): string {
 
 function SourceSkeleton() {
   return (
-    <div className="sources-list" aria-hidden="true">
-      {SKELETON_ROWS.map((row) => (
-        <div key={row} className="source-card card card--list skeleton-card">
-          <div className="source-card-title">
-            <div className="skeleton skeleton-title" />
-            <div className="skeleton skeleton-badge" />
-          </div>
-          <div className="skeleton skeleton-text" />
-          <div className="skeleton skeleton-text short" />
-        </div>
-      ))}
+    <div className="sources-table-wrapper" aria-hidden="true">
+      <table className="sources-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Status</th>
+            <th>URL</th>
+            <th>Verified</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {SKELETON_ROWS.map((row) => (
+            <tr key={row} className="source-card skeleton-card">
+              <td>
+                <div className="skeleton skeleton-title" />
+              </td>
+              <td>
+                <div className="skeleton skeleton-text short" />
+              </td>
+              <td>
+                <div className="skeleton skeleton-badge" />
+              </td>
+              <td>
+                <div className="skeleton skeleton-text" />
+              </td>
+              <td>
+                <div className="skeleton skeleton-text short" />
+              </td>
+              <td>
+                <div className="skeleton skeleton-badge" />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -157,72 +183,104 @@ export default function SourcesPage() {
             action={<Button onClick={() => setShowCreateModal(true)}>Add source</Button>}
           />
         ) : (
-          <div className="sources-list">
-            {sources.map((source) => {
-              const definition = getSourceById(source.source_type);
-              return (
-                <article
-                  key={source.id}
-                  className={`source-card card card--list ${source.is_active ? '' : 'source-inactive'}`.trim()}
-                >
-                  <div className="source-card-title">
-                    {definition && (
-                      <span
-                        className={`source-provider-icon ${definition.iconWrapperClass}`}
-                        aria-hidden="true"
-                      >
-                        {definition.icon}
-                      </span>
-                    )}
-                    <h3 className="source-name">{source.name}</h3>
-                    <span className="source-provider">{getSourceLabel(source.source_type)}</span>
-                    <SourceStatusBadge source={source} />
-                  </div>
-
-                  <p className="source-description">{source.description}</p>
-
-                  <a
-                    className="source-url"
-                    href={source.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    {source.url}
-                  </a>
-
-                  {source.last_error && <p className="source-error">{source.last_error}</p>}
-
-                  <div className="source-card-meta">
-                    <span className="source-meta">
-                      {source.last_verified_at
-                        ? `Verified ${formatVerified(source.last_verified_at)}`
-                        : 'Never verified'}
-                    </span>
-                    <div className="source-actions">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleVerify(source.id)}
-                        loading={verifying === source.id}
-                      >
-                        {verifying === source.id ? 'Verifying...' : 'Verify'}
-                      </Button>
-                      <Button variant="ghost" size="sm" onClick={() => handleToggleActive(source)}>
-                        {source.is_active ? 'Disable' : 'Enable'}
-                      </Button>
-                      <Button
-                        className="source-delete"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleDelete(source.id)}
-                      >
-                        Delete
-                      </Button>
-                    </div>
-                  </div>
-                </article>
-              );
-            })}
+          <div className="sources-table-wrapper">
+            <table className="sources-table" aria-label="Sources">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Status</th>
+                  <th>URL</th>
+                  <th>Verified</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sources.map((source) => {
+                  const definition = getSourceById(source.source_type);
+                  return (
+                    <tr
+                      key={source.id}
+                      className={`source-card ${source.is_active ? '' : 'source-inactive'}`.trim()}
+                    >
+                      <td>
+                        <div className="source-name-cell">
+                          {definition && (
+                            <span
+                              className={`source-provider-icon ${definition.iconWrapperClass}`}
+                              aria-hidden="true"
+                            >
+                              {definition.icon}
+                            </span>
+                          )}
+                          <div className="source-name-copy">
+                            <span className="source-name">{source.name}</span>
+                            {source.description && (
+                              <span className="source-description">{source.description}</span>
+                            )}
+                            {source.last_error && (
+                              <span className="source-error">{source.last_error}</span>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td>
+                        <span className="source-provider">
+                          {getSourceLabel(source.source_type)}
+                        </span>
+                      </td>
+                      <td>
+                        <SourceStatusBadge source={source} />
+                      </td>
+                      <td>
+                        <a
+                          className="source-url"
+                          href={source.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {source.url}
+                        </a>
+                      </td>
+                      <td>
+                        <span className="source-meta">
+                          {source.last_verified_at
+                            ? `Verified ${formatVerified(source.last_verified_at)}`
+                            : 'Never verified'}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="source-actions">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleVerify(source.id)}
+                            loading={verifying === source.id}
+                          >
+                            {verifying === source.id ? 'Verifying...' : 'Verify'}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleToggleActive(source)}
+                          >
+                            {source.is_active ? 'Disable' : 'Enable'}
+                          </Button>
+                          <Button
+                            className="source-delete"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDelete(source.id)}
+                          >
+                            Delete
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
