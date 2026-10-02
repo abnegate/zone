@@ -1042,7 +1042,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         else {
             panic!("expected the window, then the answer: {delivered:?}");
         };
-        assert_eq!(window.name, "five_hour");
+        assert_eq!(window.name, crate::llm::provider::Window::FIVE_HOURS);
         assert_eq!(window.used_percent, Some(43.0));
         assert_eq!(text, "Done.");
 

@@ -9,7 +9,7 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
 
-use super::locks::Locks;
+use super::locks::{Guard, Locks};
 use super::{claude, homes};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
@@ -42,6 +42,13 @@ pub enum Error {
     Home(String),
     #[error("could not read the sign-in: {0}")]
     Database(#[from] sqlx::Error),
+}
+
+/// Holds `login` on this server, against its renewal and every other write to its usage, until
+/// the guard drops. A write to the login's row that holds it first waits for a renewal here,
+/// rather than on a pooled connection the renewal's row lock keeps waiting.
+pub(super) async fn hold(login: Uuid) -> Guard<'static> {
+    RENEWALS.lock(login).await
 }
 
 /// `login`, ready for a turn to run with: a Claude login's token, renewed first when it is about

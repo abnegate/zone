@@ -39,13 +39,6 @@ impl Standing {
         }
     }
 
-    pub(super) fn until(self) -> Option<DateTime<Utc>> {
-        match self {
-            Self::Exhausted { until } => until,
-            Self::Available { .. } | Self::Unknown => None,
-        }
-    }
-
     pub(super) fn usable(self) -> bool {
         !matches!(self, Self::Exhausted { .. })
     }

@@ -859,7 +859,8 @@ auto-updater is off.
 An organization signed in to several accounts runs each chat and task run on
 one of them. Zone picks the account when a chat's first turn or a task run
 starts, and keeps the chat or run there until that account can no longer run
-it. Headroom elsewhere never moves a running chat.
+it, or until the chosen agent can run it again after it moved to the other
+agent. Headroom elsewhere never moves a running chat.
 
 **Picking an account.** Zone ranks every account the organization has signed
 in, of both agents:
@@ -884,12 +885,19 @@ shared until the TTL has passed. An account whose usage endpoint refuses its
 token, or a codex account whose home holds no login to read with, stays a
 candidate on its last reading. The usage windows claude reports while a turn
 runs, and the windows a task run observes, update the account's reading
-without another read.
+without another read: Zone keeps the latest of each window, under the name
+the usage endpoint gives it (`5h`, `7d`, `7d Opus`, `7d Sonnet`), and writes
+them once when the turn or attempt ends, or before it hands over. The window
+usage credits carry a turn past is not one of them. An account no read has
+reached yet takes those windows as a reading that is already due, so its next
+pick reads the rest. A read that lands after a turn wrote a newer window keeps
+that window, and never replaces a reading another server began later.
 
 An account is exhausted once a turn on it hits a usage limit: until the
 limit's own reset, else until its spent window resets by its last reading,
-else for five minutes. One whose last reading has no headroom left is
-exhausted until that window resets. A turn refused for want of usage credits
+else until its spent window resets by a read made there and then (a codex
+limit names no reset of its own), else for five minutes. One whose last
+reading has no headroom left is exhausted until that window resets. A turn refused for want of usage credits
 does not exhaust its account: the refusal says nothing about the subscription,
 so other chats still start there, and only that turn leaves it.
 
@@ -906,10 +914,14 @@ chat is on.
 
 **Staying on it.** The chat records the account its turn ran on, and its next
 turn starts there again while that account is signed in and not exhausted,
-however much more headroom another account has. A task run keeps its account
-across its attempts the same way. When the chat's account has run out by the
-time a new turn starts, the turn starts on the next account in the ranking
-and says so before it answers (see *Handing over in a chat*).
+however much more headroom another account has, as long as it runs the chosen
+agent or no account of the chosen agent can run the turn. A task run keeps its
+account across its attempts the same way. When the chat's account has run out
+by the time a new turn starts, or the workspace now chooses the other agent,
+or a chat that moved to the other agent finds an account of the chosen one
+usable again, the turn starts on the next account in the ranking and says so
+before it answers (see *Handing over in a chat*); a move to the other agent
+replays the transcript in a fresh session.
 
 **Session resume.** A chat keeps a CLI session on the account and agent it
 runs on, so later turns send only what is new. Its first turn pins the
@@ -960,8 +972,9 @@ across the switch, and every switch counts against the turn's own
 {"type":"handover","message_id":"…","from":"jake@example.com","to":"team@example.com","agent":"claude","reason":"limit","resets_at":"2026-10-02T18:00:00Z","carried":true,"at":1834}
 ```
 
-`from` and `to` are the accounts' labels; `reason` is `limit`, `credits` or
-`signed_out`; `resets_at` is when the limit resets, when it said; `carried`
+`from` and `to` are the accounts' labels; `reason` is `limit`, `credits`,
+`signed_out`, or `configured` for a turn that left the other agent for the
+chosen one; `resets_at` is when the limit resets, when it said; `carried`
 says whether the session file moved with the turn; and `at` is how many
 characters of the answer were written before the switch. The console draws a
 divider there, such as "Switched to team@example.com — jake@example.com

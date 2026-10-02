@@ -2156,7 +2156,7 @@ mod tests {
             assert!(!limit.credits);
             assert_eq!(
                 limit.window.as_ref().map(|window| window.name.as_str()),
-                Some("five_hour")
+                Some(Window::FIVE_HOURS)
             );
             let chunk = events
                 .iter()

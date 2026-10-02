@@ -168,11 +168,13 @@ impl Handover {
 }
 
 /// The move a chat's turn makes before it starts, off `previous`'s login onto `resolved`'s, which
-/// the router picked because `previous`'s can no longer run it. The session moves with it when
-/// both run the same agent and its file can be carried, and `resolved` then resumes it.
+/// the router picked because `previous`'s can no longer run it, or runs another agent than
+/// `configured` while `configured` can run it again. The session moves with it when both run the
+/// same agent and its file can be carried, and `resolved` then resumes it.
 pub async fn opening(
     state: &AppState,
     organization: Uuid,
+    configured: AgentKind,
     previous: Option<&ChatSession>,
     resolved: &mut Resolved,
 ) -> Option<Notice> {
@@ -190,7 +192,10 @@ pub async fn opening(
         }
     };
     let from = identity(&row)?;
-    let (reason, resets_at) = standing(&row);
+    let (reason, resets_at) = match from.agent != configured && to.agent == configured {
+        true => (Reason::Configured, None),
+        false => standing(&row),
+    };
     let carried = previous.agent == to.agent
         && from.agent == to.agent
         && sessions::portable(to.agent)
@@ -971,6 +976,7 @@ mod tests {
         let notice = opening(
             &fixture.state,
             fixture.organization,
+            AgentKind::Claude,
             Some(&previous),
             &mut resolved,
         )
@@ -978,6 +984,7 @@ mod tests {
         let unmoved = opening(
             &fixture.state,
             fixture.organization,
+            AgentKind::Claude,
             Some(&ChatSession {
                 login: Some(to.id),
                 ..previous.clone()
@@ -1021,6 +1028,60 @@ mod tests {
             handover.tried,
             vec![from.id],
             "the login left is not tried again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chat_on_another_agent_moves_back_to_the_configured_agent_before_the_turn() {
+        let fixture = Fixture::new().await;
+        let from = fixture.codex("codex@example.com").await;
+        let to = fixture.claude("claude@example.com").await;
+        let previous = ChatSession {
+            login: Some(from.id),
+            id: SESSION.into(),
+            agent: AgentKind::Codex,
+            entry: 3,
+            prompt: Some("a".repeat(64)),
+        };
+        let chosen: Chosen = router::pick(
+            &fixture.state,
+            fixture.organization,
+            AgentKind::Claude,
+            &[],
+            Some(from.id),
+        )
+        .await
+        .expect("the configured agent's login");
+        let mut resolved = backend::on_login(
+            fixture.state.config(),
+            fixture.organization,
+            &chosen,
+            Continuation::Chat(Some(&previous)).session(&chosen),
+        )
+        .expect("a backend on the configured agent's login");
+
+        let notice = opening(
+            &fixture.state,
+            fixture.organization,
+            AgentKind::Claude,
+            Some(&previous),
+            &mut resolved,
+        )
+        .await;
+        fixture.remove().await;
+
+        assert_eq!(chosen.login.id, to.id);
+        assert_eq!(
+            notice,
+            Some(Notice {
+                from: "codex@example.com".into(),
+                to: "claude@example.com".into(),
+                agent: AgentKind::Claude,
+                reason: Reason::Configured,
+                resets_at: None,
+                carried: false,
+                at: 0,
+            })
         );
     }
 }

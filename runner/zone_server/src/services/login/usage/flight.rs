@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::FutureExt;
@@ -12,21 +14,33 @@ use super::snapshot::Snapshot;
 #[derive(Clone)]
 pub(super) struct Flight {
     started: Instant,
+    landed: Arc<AtomicBool>,
     reading: Shared<BoxFuture<'static, Option<Snapshot>>>,
 }
 
 impl Flight {
     pub(super) fn start(reading: impl Future<Output = Option<Snapshot>> + Send + 'static) -> Self {
-        let task = tokio::spawn(reading.in_current_span());
+        let landed = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn({
+            let landed = Arc::clone(&landed);
+            async move {
+                let snapshot = reading.await;
+                landed.store(true, Ordering::Release);
+                snapshot
+            }
+            .in_current_span()
+        });
         Self {
             started: Instant::now(),
+            landed,
             reading: async move { task.await.ok().flatten() }.boxed().shared(),
         }
     }
 
-    /// Whether a refresh shares this reading rather than starting another.
+    /// Whether a refresh shares this reading rather than starting another: while it runs, and
+    /// for the TTL after it started.
     pub(super) fn current(&self, ttl: Duration) -> bool {
-        self.reading.peek().is_none() || self.started.elapsed() < ttl
+        !self.landed.load(Ordering::Acquire) || self.started.elapsed() < ttl
     }
 
     /// The snapshot the reading brought, or `None` when it brought none newer than the one the
@@ -89,6 +103,28 @@ mod tests {
         drop(flight);
 
         finishing.await.expect("the reading to finish unwatched");
+    }
+
+    #[tokio::test]
+    async fn a_reading_every_waiter_left_is_shared_only_for_the_ttl_once_it_lands() {
+        let (finished, finishing) = oneshot::channel();
+        let flight = Flight::start(async move {
+            let _ = finished.send(());
+            Some(snapshot())
+        });
+        let abandoned = flight.clone().landed();
+        drop(abandoned);
+
+        finishing.await.expect("the reading to finish unwatched");
+        while !flight.landed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(flight.current(TTL));
+        assert!(
+            !flight.current(Duration::ZERO),
+            "a reading nobody awaited to its end counted as under way forever"
+        );
     }
 
     #[tokio::test]

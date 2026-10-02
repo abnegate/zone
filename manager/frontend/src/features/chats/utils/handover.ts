@@ -10,6 +10,7 @@ const CAUSES: Record<HandoverReason, string> = {
   limit: 'reached its usage limit',
   credits: 'ran out of credits',
   signed_out: 'was signed out',
+  configured: 'gave way to the configured agent',
 };
 
 const RESETTING: ReadonlySet<HandoverReason> = new Set(['limit', 'credits']);

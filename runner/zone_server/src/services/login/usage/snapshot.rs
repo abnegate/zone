@@ -56,6 +56,18 @@ impl Snapshot {
         }
         self
     }
+
+    /// This reading, which began after `prior` was stored, with every window of `stored` that
+    /// changed since then in place of its namesake: a turn observed it while the reading ran,
+    /// and it is newer than anything the reading says of that window.
+    pub fn under(self, prior: Option<&Snapshot>, stored: &Snapshot) -> Self {
+        stored
+            .windows
+            .iter()
+            .filter(|window| prior.is_none_or(|prior| !prior.windows.contains(window)))
+            .cloned()
+            .fold(self, Self::observed)
+    }
 }
 
 fn headroom(windows: &[Window]) -> Option<f64> {
@@ -187,6 +199,48 @@ mod tests {
         assert_eq!(read.windows.len(), 3);
         assert_eq!(read.fetched_at, at(1_790_000_000));
         assert_eq!(unread.headroom, None);
+    }
+
+    #[test]
+    fn a_reading_keeps_the_windows_observed_while_it_ran_and_takes_the_rest() {
+        let prior = Snapshot::new(
+            vec![
+                window("5h", Some(20.0), Some(1_790_010_000)),
+                window("7d", Some(30.0), Some(1_790_400_000)),
+            ],
+            at(1_790_000_000),
+        );
+        let stored = prior
+            .clone()
+            .observed(window("5h", Some(70.0), Some(1_790_010_000)));
+        let reading = Snapshot::new(
+            vec![
+                window("5h", Some(25.0), Some(1_790_010_000)),
+                window("7d", Some(35.0), Some(1_790_400_000)),
+            ],
+            at(1_790_000_060),
+        );
+
+        let kept = reading.clone().under(Some(&prior), &stored);
+        let unread = reading.under(None, &stored);
+
+        assert_eq!(
+            kept.windows,
+            [
+                window("5h", Some(70.0), Some(1_790_010_000)),
+                window("7d", Some(35.0), Some(1_790_400_000)),
+            ]
+        );
+        assert_eq!(kept.headroom, Some(30.0));
+        assert_eq!(kept.fetched_at, at(1_790_000_060));
+        assert_eq!(
+            unread.windows,
+            [
+                window("5h", Some(70.0), Some(1_790_010_000)),
+                window("7d", Some(30.0), Some(1_790_400_000)),
+            ],
+            "with nothing stored when the reading began, every stored window was observed since"
+        );
     }
 
     #[test]

@@ -11,6 +11,8 @@ pub enum Reason {
     Credits,
     /// The login's sign-in failed and no retry fixes it.
     SignedOut,
+    /// The login runs another agent than the configured one, which can run the chat again.
+    Configured,
 }
 
 impl Reason {
