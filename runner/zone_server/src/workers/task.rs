@@ -6854,16 +6854,7 @@ mod cli_tests {
         /// The organization signs claude in on `access`, in place of any
         /// sign-in it had.
         async fn sign_in(&self, state: &AppState, access: &str) -> LoginIdentity {
-            let sealed = Tokens {
-                access: SecretValue::new(access),
-                refresh: None,
-                expires_at: Utc::now() + TimeDelta::hours(8),
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            }
-            .seal(state.encryption_key())
-            .expect("the tokens to seal");
+            let sealed = sealed(state, access);
             agent_logins::delete_all(&self.pool, self.organization, AgentKind::Claude.as_str())
                 .await
                 .unwrap();
@@ -6885,6 +6876,13 @@ mod cli_tests {
                 agent: AgentKind::Claude,
                 label: AgentKind::Claude.to_string(),
             }
+        }
+
+        /// The organization's claude `login` renews its token to `access`.
+        async fn renew(&self, state: &AppState, login: &LoginIdentity, access: &str) {
+            agent_logins::renew(&self.pool, login.id, &sealed(state, access), None)
+                .await
+                .unwrap();
         }
 
         /// The task names a repository no checkout can be made of.
@@ -7161,7 +7159,7 @@ mod cli_tests {
         let agents = TempDir::new().expect("an agent state root");
         let state = fixture.state(homed(config(&agent, &provider), &agents));
         fixture.choose(PROVIDER_CLAUDE_CODE).await;
-        fixture.sign_in(&state, "first-access").await;
+        let login = fixture.sign_in(&state, "first-access").await;
         let running = {
             let state = state.clone();
             let (run, task) = (fixture.run, fixture.task);
@@ -7169,7 +7167,7 @@ mod cli_tests {
         };
 
         agent.first_attempt().await;
-        fixture.sign_in(&state, "renewed-access").await;
+        fixture.renew(&state, &login, "renewed-access").await;
         agent.release();
         tokio::time::timeout(SPAWN_TIMEOUT * 2, running)
             .await
@@ -7286,6 +7284,20 @@ mod cli_tests {
         );
         assert_eq!(agent.lines(TOKENS), ["first-access", "first-access"]);
         fixture.remove().await;
+    }
+
+    /// Claude tokens on `access`, sealed as zone stores a sign-in.
+    fn sealed(state: &AppState, access: &str) -> String {
+        Tokens {
+            access: SecretValue::new(access),
+            refresh: None,
+            expires_at: Utc::now() + TimeDelta::hours(8),
+            issued_at: None,
+            scope: "user:inference".to_string(),
+            subscription: None,
+        }
+        .seal(state.encryption_key())
+        .expect("the tokens to seal")
     }
 
     /// A run prepared on the organization's claude sign-in, holding `token`.
