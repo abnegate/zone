@@ -67,6 +67,7 @@ async fn the_host_agent_connects_to_zone_and_is_shown_zones_tools() {
             Some(&toolset),
             BuiltinTools::Withheld,
             CodexSandbox::default(),
+            None,
         ))
         .env(Toolset::TOKEN_VARIABLE, toolset.token.expose())
         .stdin(std::process::Stdio::piped())

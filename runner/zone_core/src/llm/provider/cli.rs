@@ -103,6 +103,7 @@ impl CliProvider {
                 self.settings.toolset.as_deref(),
                 self.settings.builtin_tools,
                 self.settings.sandbox,
+                self.settings.session.as_ref(),
             ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -252,6 +253,9 @@ impl CliProvider {
                 }
                 AgentEvent::Window(window) => {
                     tracing::debug!(provider = %self.name, window = %window.name, used_percent = ?window.used_percent, "agent usage window");
+                }
+                AgentEvent::Session(id) => {
+                    tracing::debug!(provider = %self.name, session = %id, "agent session");
                 }
                 AgentEvent::Limited(limit) => {
                     return Err(ProviderError::limited(&self.name, limit));
@@ -472,7 +476,10 @@ fn retained(event: &AgentEvent) -> usize {
         | AgentEvent::Failed(text)
         | AgentEvent::Limited(Limit { message: text, .. }) => text.len(),
         AgentEvent::Tool(call) => call.function.name.len() + '\n'.len_utf8(),
-        AgentEvent::Usage(_) | AgentEvent::Window(_) | AgentEvent::Finished { .. } => 0,
+        AgentEvent::Usage(_)
+        | AgentEvent::Window(_)
+        | AgentEvent::Session(_)
+        | AgentEvent::Finished { .. } => 0,
     }
 }
 
@@ -1793,6 +1800,36 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 .iter()
                 .any(|argument| argument.contains("zone-turn-notarealtoken")),
             "the token reached argv: {arguments:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_session_a_turn_is_given_reaches_the_agents_command_line() {
+        let recorder = Recorder::new();
+        answered(recorder.settings().with_session(crate::llm::Session {
+            id: "5b0c1f7e-8d43-4a77-9a3e-2f0d6c1b9e42".to_string(),
+            resume: true,
+        }))
+        .await;
+
+        let arguments = recorder.arguments();
+        assert_eq!(
+            &arguments[arguments.len() - 3..],
+            [
+                "--resume",
+                "5b0c1f7e-8d43-4a77-9a3e-2f0d6c1b9e42",
+                "--print"
+            ],
+            "{arguments:?}"
+        );
+
+        answered(recorder.settings()).await;
+        let arguments = recorder.arguments();
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == "--resume" || argument == "--session-id"),
+            "a turn given no session was pinned to one: {arguments:?}"
         );
     }
 

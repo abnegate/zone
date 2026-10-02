@@ -19,6 +19,11 @@ const UNAUTHORIZED: &str = "401";
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Event {
+    #[serde(rename = "thread.started")]
+    Started {
+        #[serde(default)]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "item.completed")]
     Completed { item: Item },
     #[serde(rename = "turn.completed")]
@@ -102,6 +107,9 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
     };
 
     match event {
+        Event::Started {
+            thread_id: Some(id),
+        } if !id.is_empty() => events.push(AgentEvent::Session(id)),
         Event::Completed {
             item: Item::Message { text },
         } => events.push(AgentEvent::Text(text)),
@@ -160,6 +168,7 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
         Event::Completed {
             item: Item::Ignored,
         }
+        | Event::Started { .. }
         | Event::Ignored => {}
     }
 }
@@ -470,8 +479,10 @@ mod tests {
     fn an_exhausted_quota_is_a_limit_without_a_reset_time() {
         let events = interpret_all(QUOTA);
 
-        let [AgentEvent::Limited(limit)] = events.as_slice() else {
-            panic!("expected the failed turn, and only it, as a limit: {events:?}");
+        let [AgentEvent::Session(_), AgentEvent::Limited(limit)] = events.as_slice() else {
+            panic!(
+                "expected the session, then the failed turn, and only it, as a limit: {events:?}"
+            );
         };
         assert_eq!(
             limit.message,
@@ -536,7 +547,8 @@ mod tests {
     fn unknown_events_and_noise_are_skipped() {
         let mut events = Vec::new();
         for line in [
-            r#"{"type":"thread.started","thread_id":"x"}"#,
+            r#"{"type":"thread.started"}"#,
+            r#"{"type":"thread.started","thread_id":""}"#,
             r#"{"type":"turn.started"}"#,
             r#"{"type":"item.completed","item":{"type":"invented_next_release"}}"#,
             r#"{"type":"invented_next_release"}"#,

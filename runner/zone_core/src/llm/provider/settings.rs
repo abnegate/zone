@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::credential::Credential;
+use super::session::Session;
 use abnegate_secret::SecretValue;
 
 /// Thirty minutes is the chat turn's own budget, which is what a coding agent
@@ -154,6 +155,9 @@ pub struct CliSettings {
     pub output_limit: usize,
     /// Bytes one event may occupy before it is dropped.
     pub line_limit: usize,
+    /// The agent's own session this turn starts or resumes. `None` lets the
+    /// agent start one of its own choosing.
+    pub session: Option<Session>,
 }
 
 impl Default for CliSettings {
@@ -170,6 +174,7 @@ impl Default for CliSettings {
             timeout: DEFAULT_TIMEOUT,
             output_limit: DEFAULT_OUTPUT_LIMIT,
             line_limit: DEFAULT_LINE_LIMIT,
+            session: None,
         }
     }
 }
@@ -222,6 +227,11 @@ impl CliSettings {
 
     pub fn with_output_limit(mut self, limit: usize) -> Self {
         self.output_limit = limit;
+        self
+    }
+
+    pub fn with_session(mut self, session: Session) -> Self {
+        self.session = Some(session);
         self
     }
 }
@@ -348,6 +358,19 @@ mod tests {
         assert_eq!(settings.builtin_tools, BuiltinTools::Withheld);
         assert_eq!(settings.sandbox, CodexSandbox::WorkspaceWrite);
         assert_eq!(settings.sign_in, SignIn::Instance);
+        assert_eq!(settings.session, None);
+    }
+
+    #[test]
+    fn a_turn_runs_in_a_session_of_the_agents_choosing_until_given_one() {
+        assert_eq!(CliSettings::default().session, None);
+
+        let session = Session {
+            id: "5b0c1f7e-8d43-4a77-9a3e-2f0d6c1b9e42".to_string(),
+            resume: true,
+        };
+        let settings = CliSettings::default().with_session(session.clone());
+        assert_eq!(settings.session, Some(session));
     }
 
     #[test]

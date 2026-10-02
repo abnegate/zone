@@ -27,6 +27,9 @@ const FAILED_SUBTYPE_PREFIX: &str = "error";
 
 const CALL_TYPE: &str = "function";
 
+/// The system event claude opens a turn with, naming its session.
+const INIT_SUBTYPE: &str = "init";
+
 const TOO_MANY_REQUESTS: u16 = 429;
 
 /// claude reports a window's use as a fraction; a [`Window`] holds a percent.
@@ -92,6 +95,13 @@ impl ApiError {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Event {
+    #[serde(rename = "system")]
+    System {
+        #[serde(default)]
+        subtype: Option<String>,
+        #[serde(default)]
+        session_id: Option<String>,
+    },
     #[serde(rename = "assistant")]
     Assistant {
         #[serde(default)]
@@ -331,6 +341,10 @@ impl Reader {
         };
 
         match event {
+            Event::System {
+                subtype: Some(subtype),
+                session_id: Some(id),
+            } if subtype == INIT_SUBTYPE && !id.is_empty() => events.push(AgentEvent::Session(id)),
             Event::Assistant {
                 message,
                 parent_tool_use_id: Some(_),
@@ -355,6 +369,7 @@ impl Reader {
             Event::RateLimit {
                 rate_limit_info: None,
             }
+            | Event::System { .. }
             | Event::Ignored => {}
         }
     }
