@@ -554,6 +554,32 @@ impl Store {
         Ok(count)
     }
 
+    /// The latest `chat_entries.position` of this chat, 0 when it has none.
+    pub async fn latest(&self) -> Result<i64, Error> {
+        Ok(sqlx::query_scalar(
+            "SELECT COALESCE(max(e.position), 0) FROM chat_entries e JOIN chats c ON c.id = e.chat_id \
+             WHERE e.chat_id = $1 AND c.workspace_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(self.chat_id)
+        .bind(self.workspace_id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// The ids of this chat's entries written after `position`, in order.
+    pub async fn after(&self, position: i64) -> Result<Vec<String>, Error> {
+        Ok(sqlx::query_scalar(
+            "SELECT e.id FROM chat_entries e JOIN chats c ON c.id = e.chat_id \
+             WHERE e.chat_id = $1 AND c.workspace_id IS NOT DISTINCT FROM $2 AND e.position > $3 \
+             ORDER BY e.position",
+        )
+        .bind(self.chat_id)
+        .bind(self.workspace_id)
+        .bind(position)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn load(&self) -> Result<History, Error> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")

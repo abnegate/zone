@@ -7,8 +7,9 @@ use zone_core::llm::{AgentKind, LlmBackend};
 
 use crate::config::Config;
 use crate::db::ai_settings::{self, EffectiveAiSettings};
+use crate::db::chats::ChatSession;
 use crate::db::workspaces;
-use crate::services::backend::{self, Resolved, Routing};
+use crate::services::backend::{self, Continuation, Resolved, Routing};
 use crate::services::endpoint::{Endpoint, UrlError};
 use crate::services::stages::Preferences;
 use crate::state::AppState;
@@ -184,6 +185,27 @@ impl Route {
                 exclude,
                 sticky,
                 touch: true,
+                ..Routing::default()
+            },
+        )
+        .await
+    }
+
+    /// [`Self::resolve`] for a chat's turn: kept on the login `previous`, the chat's session,
+    /// runs on, and in that session while the login picked holds it, else in a fresh one.
+    pub async fn chat(
+        &self,
+        state: &AppState,
+        exclude: &[Uuid],
+        previous: Option<&ChatSession>,
+    ) -> Result<Resolved, backend::Error> {
+        self.routed(
+            state,
+            Routing {
+                exclude,
+                sticky: previous.and_then(|session| session.login),
+                touch: true,
+                continuation: Continuation::Chat(previous),
             },
         )
         .await

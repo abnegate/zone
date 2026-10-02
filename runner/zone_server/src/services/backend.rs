@@ -1,8 +1,10 @@
 //! Where a workspace's completions go: the endpoint, or a coding agent CLI.
 
+mod continuation;
 mod resolved;
 mod routing;
 
+pub use continuation::Continuation;
 pub use resolved::Resolved;
 pub use routing::Routing;
 
@@ -131,10 +133,11 @@ pub fn instance(config: &Config) -> LlmBackend {
 ///
 /// A coding agent provider runs on the login [`router::pick`] picks among the organization's,
 /// the configured agent's first, routed by `routing`: in that login's own home and the
-/// organization's working directory for its agent. With no login at all it runs under the
-/// host's sign-in when the instance allows that, and never when every login is exhausted. A
-/// provider whose settings resolved to an endpoint of `origin` [`Origin::Settings`] runs over
-/// HTTP to it, and every other provider runs on the instance default.
+/// organization's working directory for its agent, in the session `routing.continuation` names
+/// for it. With no login at all it runs under the host's sign-in when the instance allows that,
+/// and never when every login is exhausted. A provider whose settings resolved to an endpoint
+/// of `origin` [`Origin::Settings`] runs over HTTP to it, and every other provider runs on the
+/// instance default.
 pub async fn for_settings(
     state: &AppState,
     organization: Uuid,
@@ -157,7 +160,12 @@ pub async fn for_settings(
             }
             Err(error) => return Err(Error::routing(agent, error)),
         };
-    let resolved = on_login(config, organization, &chosen, None)?;
+    let resolved = on_login(
+        config,
+        organization,
+        &chosen,
+        routing.continuation.session(&chosen),
+    )?;
     if routing.touch {
         touch(state, chosen.login.id).await;
     }
@@ -985,6 +993,65 @@ mod tests {
             let (agent, settings) = cli(Ok(fresh.backend));
             assert_eq!(settings.session, None, "{agent} starts a fresh session");
         }
+    }
+
+    #[tokio::test]
+    async fn a_chat_resumes_its_session_only_on_the_login_and_agent_it_ran_on() {
+        let fixture = Fixture::new(PROVIDER_CLAUDE_CODE).await;
+        let state = fixture.state(fixture.config());
+        let first = fixture
+            .add_claude(&state, "first-access", TimeDelta::hours(8))
+            .await;
+        let second = fixture
+            .add_claude(&state, "second-access", TimeDelta::hours(8))
+            .await;
+        let codex = fixture.sign_in_codex().await;
+        let previous = crate::db::chats::ChatSession {
+            login: Some(first),
+            id: "kept".to_string(),
+            agent: AgentKind::Claude,
+            entry: 3,
+            prompt: None,
+        };
+        let kept = Session {
+            id: previous.id.clone(),
+            resume: true,
+        };
+        let on_first = fixture.chosen(&state, first).await;
+        let on_second = fixture.chosen(&state, second).await;
+        let on_codex = fixture.chosen(&state, codex).await;
+        let route = Route::for_workspace(&state, fixture.workspace).await;
+        let chatted = route.chat(&state, &[], Some(&previous)).await;
+        let between = route.resolve(&state, &[], None).await;
+        fixture.remove().await;
+
+        let chat = Continuation::Chat(Some(&previous));
+        assert_eq!(chat.session(&on_first), Some(kept.clone()));
+        let moved = chat
+            .session(&on_second)
+            .expect("claude on another login is pinned to a fresh session");
+        assert!(!moved.resume);
+        assert_ne!(moved.id, previous.id);
+        assert_eq!(chat.session(&on_codex), None, "codex names its own thread");
+        assert!(
+            Continuation::Chat(None)
+                .session(&on_first)
+                .is_some_and(|session| !session.resume)
+        );
+        assert_eq!(Continuation::Unpinned.session(&on_first), None);
+
+        let chatted = chatted.expect("the chat's backend");
+        assert_eq!(
+            chatted.login.map(|identity| identity.id),
+            Some(first),
+            "the chat left the login it runs on"
+        );
+        assert_eq!(cli(Ok(chatted.backend)).1.session, Some(kept));
+        assert_eq!(
+            cli(between.map(|resolved| resolved.backend)).1.session,
+            None,
+            "a run between chat turns was pinned to a session"
+        );
     }
 
     #[tokio::test]

@@ -468,7 +468,10 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         &chat,
         Uuid::new_v4(),
         None,
-        Mode::Generation(LlmBackend::cli(AgentKind::Claude, CliSettings::default())),
+        Mode::Generation(session::Generation::unrouted(LlmBackend::cli(
+            AgentKind::Claude,
+            CliSettings::default(),
+        ))),
         route.endpoint().expect("a usable route").clone(),
     )
     .await
@@ -478,7 +481,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         &chat,
         Uuid::new_v4(),
         None,
-        Mode::Generation(LlmBackend::Http),
+        Mode::Generation(session::Generation::unrouted(LlmBackend::Http)),
         route.into_endpoint().expect("a usable route"),
     )
     .await

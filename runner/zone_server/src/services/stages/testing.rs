@@ -158,7 +158,7 @@ impl AgentWorkspace {
 /// file a sibling test's fork still holds open for writing, and macOS
 /// assesses a new executable on its first run. Run without arguments, it
 /// exits at once.
-fn wait_until_executable(path: &Path) {
+pub fn wait_until_executable(path: &Path) {
     for _ in 0..ATTEMPTS {
         match std::process::Command::new(path)
             .stdin(Stdio::null())
