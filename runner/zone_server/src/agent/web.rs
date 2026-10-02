@@ -429,6 +429,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_url_stays_offline_when_vpn_credentials_are_present() {
+        let _vpn = zone_core::vpn::Hold::configured_off();
+        let result = FetchUrlTool
+            .execute(
+                json!({"url": "https://example.com"}),
+                &ToolContext::default(),
+            )
+            .await
+            .expect("the tool answers");
+        assert!(!result.success, "{result:?}");
+        assert_eq!(result.error.as_deref(), Some(zone_core::vpn::OFFLINE));
+    }
+
+    #[tokio::test]
     async fn fetch_url_stays_offline_until_the_vpn_is_on() {
         let _vpn = zone_core::vpn::Hold::required_off();
         let result = FetchUrlTool

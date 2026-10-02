@@ -1309,7 +1309,7 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ### `SEARCH_ENABLE_WEB_SEARCH`
 - **Default**: `true`
-- **Description**: Extra switch for Zone chat web search through SearXNG. When `ZONE_VPN_REQUIRED` is on, Manager also requires `ZONE_VPN`; with the VPN required and off, search and public page fetch stay offline even when this is `true`.
+- **Description**: Extra switch for Zone chat web search through SearXNG. When the VPN is configured (credentials present, or `ZONE_VPN_REQUIRED` on) and `ZONE_VPN` is off, search and public page fetch stay offline even when this is `true`.
 
 ### `SEARCH_RESULT_COUNT`
 - **Default**: `5`
@@ -1353,17 +1353,17 @@ details, and native macOS / bundled NVIDIA instructions.
   network namespace and all of their traffic uses the tunnel. Manager reads
   this as the public-web tunnel flag. SearXNG lookups, the `web_search` /
   `fetch_url` tools, knowledge URL ingest and refresh, web sources, and
-  `curl` / `wget` from `run_command` stay off only when `ZONE_VPN_REQUIRED`
-  is also on.
+  `curl` / `wget` from `run_command` stay off when the VPN is configured and
+  this is off.
 - **VPN value**: `1`
 
 ### `ZONE_VPN_REQUIRED`
-- **Default**: empty
+- **Default**: empty (infer from VPN credentials)
 - **Description**: When truthy, public web stays offline unless `ZONE_VPN` is
-  on. Empty or `0` allows search and page fetch on the public internet while
-  the VPN profile is off. `make up-vpn` writes `1` the first time this is
-  empty; later `make up` without the vpn profile keeps the value. Set `0` to
-  allow public web with the tunnel down.
+  on. When `0`, public web is allowed even with a WireGuard private key or
+  OpenVPN user in `.env`. Empty infers from those credentials. `make up-vpn`
+  writes `1` the first time this is empty; later `make up` without the vpn
+  profile keeps the value.
 - **VPN value**: `1` after the first `make up-vpn`, unless you set `0`
 
 ### `COMPOSE_PROFILES`
@@ -1392,7 +1392,7 @@ service names bypass the proxy.
 
 ### Manager / zone-server chat
 
-Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). Web search is online when `SEARCH_ENABLE_WEB_SEARCH` is true and public web is allowed: the VPN tunnel is on, or `ZONE_VPN_REQUIRED` is off. Then Manager chat queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. With `ZONE_VPN_REQUIRED` on and `ZONE_VPN` off, the server does not attempt a lookup and does not offer `web_search` or `fetch_url`, even if a message sets `metadata.web_search`. Knowledge URL ingest and refresh, web sources, and `curl` / `wget` from `run_command` stay offline the same way. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. When `ZONE_VPN=1`, Manager, LiteLLM, Grafana, and bundled engines share that stack too. Remote model catalog searches also use Gluetun's HTTP proxy when `MODEL_SEARCH_PROXY_URL` is configured. A message can force search on or off with `metadata.web_search` only while search is online.
+Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). Web search is online when `SEARCH_ENABLE_WEB_SEARCH` is true and public web is allowed: the VPN tunnel is on, or the VPN is not configured. Configured means a WireGuard private key or OpenVPN user is present, or `ZONE_VPN_REQUIRED` is on. Then Manager chat queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. With the VPN configured and `ZONE_VPN` off, the server does not attempt a lookup and does not offer `web_search` or `fetch_url`, even if a message sets `metadata.web_search`, unless `ZONE_VPN_REQUIRED=0`. Knowledge URL ingest and refresh, web sources, and `curl` / `wget` from `run_command` stay offline the same way. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. When `ZONE_VPN=1`, Manager, LiteLLM, Grafana, and bundled engines share that stack too. Remote model catalog searches also use Gluetun's HTTP proxy when `MODEL_SEARCH_PROXY_URL` is configured. A message can force search on or off with `metadata.web_search` only while search is online.
 
 ---
 
