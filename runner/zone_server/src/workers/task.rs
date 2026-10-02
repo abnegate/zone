@@ -2330,6 +2330,7 @@ async fn attempt_run(
     // One timeout covers every turn of the attempt, waiting included: a run
     // parked on a required question is spending the same budget a wedged one
     // would, and a second timer around the wait would end it on different terms.
+    let mut meter = login.map(|login| Meter::new(state, login));
     let turns = async {
         let mut tools = tools;
         let mut context = context;
@@ -2352,7 +2353,7 @@ async fn attempt_run(
                 budget,
                 &callback,
                 agent_tools.as_mut().map(|served| &mut served.calls),
-                login.map(|login| Meter { state, login }),
+                meter.as_mut(),
             )
             .await
             {
@@ -2431,10 +2432,14 @@ async fn attempt_run(
         }
     };
 
-    match tokio::time::timeout_at(deadline, turns).await {
+    let outcome = match tokio::time::timeout_at(deadline, turns).await {
         Ok(outcome) => outcome,
         Err(_) => Err(Fault::timeout()),
+    };
+    if let Some(meter) = meter.as_mut() {
+        meter.record().await;
     }
+    outcome
 }
 
 /// Build the tool set one turn will consume.
@@ -2978,7 +2983,7 @@ async fn run_task_loop(
     budget: LoopBudget,
     callback: &DatabaseTaskCallback,
     calls: Option<&mut mpsc::UnboundedReceiver<AgentEvent>>,
-    meter: Option<Meter<'_>>,
+    mut meter: Option<&mut Meter<'_>>,
 ) -> Result<TurnOutcome, Halt> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
@@ -3104,8 +3109,8 @@ async fn run_task_loop(
             | AgentEvent::Reasoning(_)
             | AgentEvent::ToolApprovalRequired { .. } => {}
             AgentEvent::Window(window) => {
-                if let Some(meter) = meter {
-                    meter.observe(&window).await;
+                if let Some(meter) = meter.as_deref_mut() {
+                    meter.observe(window);
                 }
             }
             AgentEvent::Limited(limit) => return Err(Halt::Limited(Box::new(limit))),
@@ -8304,8 +8309,8 @@ mod cli_tests {
         let windows = snapshot.expect("a snapshot of the login's usage").windows;
         let window = windows
             .iter()
-            .find(|window| window.name == "five_hour")
-            .unwrap_or_else(|| panic!("no five_hour window in {windows:?}"));
+            .find(|window| window.name == zone_core::llm::Window::FIVE_HOURS)
+            .unwrap_or_else(|| panic!("no five-hour window in {windows:?}"));
         assert_eq!(window.used_percent, Some(50.0));
     }
 

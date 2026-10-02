@@ -163,6 +163,12 @@ describe('handover wording', () => {
     );
   });
 
+  it('says a chat left another agent for the configured one, with no reset to wait for', () => {
+    expect(handoverCause(handover({ reason: 'configured', resets_at }), NOW)).toBe(
+      'a@example.com gave way to the configured agent'
+    );
+  });
+
   it('speaks of the previous account when the switch names none', () => {
     expect(handoverCause(handover({ from: undefined }), NOW)).toBe(
       'the previous account reached its usage limit'

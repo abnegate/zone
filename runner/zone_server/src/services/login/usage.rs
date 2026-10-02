@@ -21,7 +21,7 @@ use futures::future::join_all;
 use uuid::Uuid;
 use zone_core::llm::{AgentKind, Window};
 
-use super::credential::Login;
+use super::credential::{self, Login};
 use super::router::Chosen;
 use crate::config::AgentConfig;
 use crate::db::agent_logins;
@@ -125,32 +125,68 @@ pub fn window(window: aiusg::model::Window) -> Window {
     }
 }
 
+/// `chosen`'s usage read from its agent now, however recently it was read, and stored; `None`
+/// when it cannot be read. Every refresh of the login shares this reading from now on.
+pub async fn reread(state: &AppState, chosen: &Chosen) -> Option<Snapshot> {
+    let credential = readable(chosen)?;
+    let ttl = state.config().agents.usage_ttl;
+    let reading = land(
+        state.clone(),
+        chosen.login.id,
+        chosen.agent,
+        credential,
+        chosen.login.snapshot(),
+    );
+    board(chosen.login.id, ttl, true, || Flight::start(reading))
+        .landed()
+        .await
+}
+
+/// The time a snapshot no reading of the agent began is taken at: as long ago as the TTL, so the
+/// next refresh reads the login's usage rather than routing on the windows a turn reported.
+pub fn unread_at(state: &AppState, now: DateTime<Utc>) -> DateTime<Utc> {
+    now.checked_sub_signed(ttl(state))
+        .unwrap_or(DateTime::UNIX_EPOCH)
+}
+
 /// A fresh snapshot of `chosen`'s usage, or `None` when none could be had.
 async fn read(state: &AppState, chosen: &Chosen) -> Option<Snapshot> {
+    let credential = readable(chosen)?;
     let login = chosen.login.id;
-    let credential = match credential(&chosen.resolved) {
-        Ok(credential) => credential,
-        Err(error) => {
+    let ttl = state.config().agents.usage_ttl;
+    board(login, ttl, false, || {
+        Flight::start(fly(state.clone(), login, chosen.agent, credential))
+    })
+    .landed()
+    .await
+}
+
+/// The token `chosen`'s usage is read with, or `None`, said why, when it has none.
+fn readable(chosen: &Chosen) -> Option<Credential> {
+    credential(&chosen.resolved)
+        .inspect_err(|error| {
             tracing::warn!(
-                %login,
+                login = %chosen.login.id,
                 agent = %chosen.agent,
                 %error,
                 "Could not read the login's usage; routing on the snapshot it had"
             );
-            return None;
-        }
-    };
-    let flight = match FLIGHTS.entry(login) {
-        Entry::Occupied(entry) if entry.get().current(state.config().agents.usage_ttl) => {
-            entry.get().clone()
-        }
+        })
+        .ok()
+}
+
+/// The reading of `login`'s usage a refresh waits on: the one under way or started within `ttl`,
+/// unless `anew`, else the one `start` starts. Readings past their TTL are let go of first.
+fn board(login: Uuid, ttl: Duration, anew: bool, start: impl FnOnce() -> Flight) -> Flight {
+    FLIGHTS.retain(|_, flight| flight.current(ttl));
+    match FLIGHTS.entry(login) {
+        Entry::Occupied(entry) if !anew && entry.get().current(ttl) => entry.get().clone(),
         entry => {
-            let flight = Flight::start(fly(state.clone(), login, chosen.agent, credential));
+            let flight = start();
             entry.insert(flight.clone());
             flight
         }
-    };
-    flight.landed().await
+    }
 }
 
 /// Reads `login`'s usage and stores it, unless another server stored a fresh reading meanwhile.
@@ -160,25 +196,40 @@ async fn fly(
     agent: AgentKind,
     credential: Credential,
 ) -> Option<Snapshot> {
-    match agent_logins::get(state.db(), login).await {
+    let prior = match agent_logins::get(state.db(), login).await {
         Ok(None) => return None,
-        Ok(Some(row)) => {
-            if let Some(snapshot) = row
-                .snapshot()
-                .filter(|snapshot| !stale(Some(snapshot.fetched_at), Utc::now(), ttl(&state)))
-            {
-                return Some(snapshot);
-            }
+        Ok(Some(row)) => row.snapshot(),
+        Err(error) => {
+            tracing::warn!(%login, %error, "Could not read the login's stored usage");
+            None
         }
-        Err(error) => tracing::warn!(%login, %error, "Could not read the login's stored usage"),
+    };
+    if let Some(fresh) = prior
+        .as_ref()
+        .filter(|snapshot| !stale(Some(snapshot.fetched_at), Utc::now(), ttl(&state)))
+    {
+        return Some(fresh.clone());
     }
+    land(state, login, agent, credential, prior).await
+}
+
+/// Reads `login`'s usage from its agent and stores it over `prior`, the snapshot stored when the
+/// reading began.
+async fn land(
+    state: AppState,
+    login: Uuid,
+    agent: AgentKind,
+    credential: Credential,
+    prior: Option<Snapshot>,
+) -> Option<Snapshot> {
     match fetch(&state.config().agents, agent, &credential).await {
-        Ok(snapshot) => {
-            if let Err(error) = agent_logins::observe(state.db(), login, &snapshot).await {
+        Ok(snapshot) => match store(&state, login, prior.as_ref(), snapshot.clone()).await {
+            Ok(stored) => stored,
+            Err(error) => {
                 tracing::warn!(%login, %error, "Could not store the login's usage");
+                Some(snapshot)
             }
-            Some(snapshot)
-        }
+        },
         Err(error) => {
             tracing::warn!(
                 %login,
@@ -189,6 +240,30 @@ async fn fly(
             None
         }
     }
+}
+
+/// Stores `reading` over the snapshot `login` has now, which `prior` was when the reading began,
+/// returning the snapshot the login is left with: a reading another server began later stays,
+/// and so does every window a turn observed meanwhile. `None` when the login is gone.
+async fn store(
+    state: &AppState,
+    login: Uuid,
+    prior: Option<&Snapshot>,
+    reading: Snapshot,
+) -> Result<Option<Snapshot>, sqlx::Error> {
+    let _held = credential::hold(login).await;
+    let mut transaction = state.db().begin().await?;
+    let Some(row) = agent_logins::lock(&mut transaction, login).await? else {
+        return Ok(None);
+    };
+    let snapshot = match row.snapshot() {
+        Some(stored) if stored.fetched_at > reading.fetched_at => return Ok(Some(stored)),
+        Some(stored) => reading.under(prior, &stored),
+        None => reading,
+    };
+    agent_logins::observe(&mut *transaction, login, &snapshot).await?;
+    transaction.commit().await?;
+    Ok(Some(snapshot))
 }
 
 fn ttl(state: &AppState) -> TimeDelta {
@@ -433,6 +508,53 @@ mod tests {
         assert_eq!(snapshot.availability(), usage.availability().into());
         assert_eq!(snapshot.availability(), Availability::At(resets_at));
         assert_eq!(snapshot.headroom, Some(usage.headroom()));
+    }
+
+    #[tokio::test]
+    async fn a_reading_past_its_ttl_is_let_go_of_once_another_login_is_read() {
+        let (spent, current) = (Uuid::new_v4(), Uuid::new_v4());
+        board(spent, Duration::ZERO, false, || {
+            Flight::start(async { None })
+        })
+        .landed()
+        .await;
+
+        board(current, Duration::ZERO, false, || {
+            Flight::start(std::future::pending())
+        });
+
+        assert!(
+            !FLIGHTS.contains_key(&spent),
+            "a login's last reading was kept forever"
+        );
+        assert!(FLIGHTS.contains_key(&current));
+    }
+
+    #[tokio::test]
+    async fn a_forced_reading_replaces_the_one_a_refresh_would_share() {
+        let login = Uuid::new_v4();
+        let ttl = Duration::from_secs(60);
+        let shared = Snapshot::new(Vec::new(), at("2026-09-23T06:10:00Z"));
+        let forced = Snapshot::new(Vec::new(), at("2026-09-23T06:20:00Z"));
+        board(login, ttl, false, {
+            let shared = shared.clone();
+            move || Flight::start(async move { Some(shared) })
+        })
+        .landed()
+        .await;
+
+        let again = board(login, ttl, false, || Flight::start(async { None }))
+            .landed()
+            .await;
+        let anew = board(login, ttl, true, {
+            let forced = forced.clone();
+            move || Flight::start(async move { Some(forced) })
+        })
+        .landed()
+        .await;
+
+        assert_eq!(again, Some(shared));
+        assert_eq!(anew, Some(forced));
     }
 
     #[test]

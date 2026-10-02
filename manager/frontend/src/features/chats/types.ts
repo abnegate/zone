@@ -241,7 +241,7 @@ export const HANDOVER_AGENTS = ['claude', 'codex'] as const;
 
 export type HandoverAgent = (typeof HANDOVER_AGENTS)[number];
 
-export const HANDOVER_REASONS = ['limit', 'credits', 'signed_out'] as const;
+export const HANDOVER_REASONS = ['limit', 'credits', 'signed_out', 'configured'] as const;
 
 export type HandoverReason = (typeof HANDOVER_REASONS)[number];
 

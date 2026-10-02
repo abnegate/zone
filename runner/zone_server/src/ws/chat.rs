@@ -2786,13 +2786,18 @@ async fn prepare_chat(
         }
     };
     let mut resolved = route.chat(state, &[], previous.as_ref()).await?;
-    let organization = route
-        .settings()
-        .and_then(|settings| settings.agent())
-        .and_then(|agent| route.organization_on(agent));
-    let opening = match organization {
-        Some(organization) => {
-            handover::opening(state, organization, previous.as_ref(), &mut resolved).await
+    let configured = route.settings().and_then(|settings| settings.agent());
+    let organization = configured.and_then(|agent| route.organization_on(agent));
+    let opening = match organization.zip(configured) {
+        Some((organization, configured)) => {
+            handover::opening(
+                state,
+                organization,
+                configured,
+                previous.as_ref(),
+                &mut resolved,
+            )
+            .await
         }
         None => None,
     };
@@ -3127,6 +3132,7 @@ async fn handle_chat_generation(
     let mut handovers: Vec<Notice> = Vec::new();
     let mut usage: Option<Usage> = None;
     let mut logins: Vec<Uuid> = handover.iter().map(Handover::login).collect();
+    let mut observed = router::Observed::default();
     if let Some(notice) = handover.as_mut().and_then(Handover::opened) {
         publish(
             stream,
@@ -3259,7 +3265,7 @@ async fn handle_chat_generation(
                         Some(AgentEvent::Window(window)) => {
                             tracing::debug!(window=%window.name,used_percent=?window.used_percent,"Observed agent usage window");
                             if let Some(handover) = &handover {
-                                observe(state, handover.login(), window);
+                                observed.observe(handover.login(), window);
                             }
                         }
                         Some(AgentEvent::Session(id)) => {
@@ -3543,6 +3549,7 @@ async fn handle_chat_generation(
             let remaining = stream_deadline.saturating_duration_since(tokio::time::Instant::now());
             let moved = match handover.as_mut() {
                 Some(handover) if !cancelled => {
+                    observed.record(state, handover.login()).await;
                     let session = pinned.as_ref().and_then(|pinned| pinned.id());
                     handover.next(state, &cause, session, remaining).await
                 }
@@ -3769,7 +3776,7 @@ async fn handle_chat_generation(
     }
 
     for login in logins {
-        settle(state, login);
+        settle(state, login, observed.take(login));
     }
 
     let leftover = token_filter.finish();
@@ -3967,17 +3974,15 @@ async fn forget(state: &AppState, chat_id: Uuid) {
     }
 }
 
-/// Records `window`, as the turn on `login` reported it, without holding the answer up for it.
-fn observe(state: &AppState, login: Uuid, window: zone_core::llm::Window) {
-    let state = state.clone();
-    tokio::spawn(async move { router::observe(&state, login, &window).await });
-}
-
 /// Brings what the organization knows of `login`'s usage up to date once a turn on it has
-/// ended, without holding the answer up for it.
-fn settle(state: &AppState, login: Uuid) {
+/// ended, starting from the `windows` the turn observed on it, without holding the answer up for
+/// it.
+fn settle(state: &AppState, login: Uuid, windows: Vec<zone_core::llm::Window>) {
     let state = state.clone();
-    tokio::spawn(async move { router::settle(&state, login).await });
+    tokio::spawn(async move {
+        router::observe(&state, login, &windows).await;
+        router::settle(&state, login).await;
+    });
 }
 
 /// Records `session` as the agent session the chat's turns resume. One that can't be recorded

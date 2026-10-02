@@ -3,10 +3,13 @@
 
 mod chosen;
 mod error;
+mod failure;
+mod observed;
 mod standing;
 
 pub use chosen::Chosen;
 pub use error::Error;
+pub use observed::Observed;
 
 use std::cmp::Ordering;
 
@@ -17,8 +20,9 @@ use zone_core::llm::{AgentKind, Limit, Window};
 
 use super::credential;
 use super::usage::{self, Availability, Snapshot};
-use crate::db::agent_logins::{self, AgentLoginRow};
+use crate::db::agent_logins;
 use crate::state::AppState;
+use failure::Failure;
 use standing::Standing;
 
 /// How long a login a limit refused rests when nothing says when the limit resets.
@@ -27,11 +31,12 @@ const REST: TimeDelta = TimeDelta::minutes(5);
 /// The login a session of `organization` starts on.
 ///
 /// `sticky`, the login the session already runs on, is kept while it is signed in, not tried
-/// this turn and not exhausted, however much headroom another login has. Otherwise every login
-/// but those in `exclude` is resolved, its usage brought up to date, and ranked: `preferred`'s
-/// logins before every other agent's, and within an agent the most headroom first, then those
-/// whose usage is unknown, then the least recently used, then by label. A login that is exhausted
-/// or cannot be resolved is never picked.
+/// this turn and not exhausted, however much headroom another login has, as long as it runs
+/// `preferred`, the configured agent, or no login of `preferred` can run the session. Otherwise
+/// every login but those in `exclude` is resolved, its usage brought up to date, and ranked:
+/// `preferred`'s logins before every other agent's, and within an agent the most headroom first,
+/// then those whose usage is unknown, then the least recently used, then by label. A login that
+/// is exhausted or cannot be resolved is never picked.
 pub async fn pick(
     state: &AppState,
     organization: Uuid,
@@ -45,25 +50,24 @@ pub async fn pick(
         return Err(Error::None);
     }
     let mut failure = Failure::new(preferred);
+    let sticky = sticky.filter(|sticky| !exclude.contains(sticky));
 
     let mut unresolved = None;
-    if let Some(login) = sticky
-        .filter(|sticky| !exclude.contains(sticky))
-        .and_then(|sticky| logins.iter().find(|login| login.id == sticky))
-        && let Some(agent) = AgentKind::named(&login.agent)
+    if let Some(login) = sticky.and_then(|sticky| logins.iter().find(|login| login.id == sticky))
+        && AgentKind::named(&login.agent) == Some(preferred)
         && Standing::of(login, login.snapshot().as_ref(), now).usable()
     {
         match credential::resolve(state, login).await {
             Ok(resolved) => {
                 return Ok(Chosen {
                     login: login.clone(),
-                    agent,
+                    agent: preferred,
                     resolved,
                     snapshot: login.snapshot(),
                 });
             }
             Err(error) => {
-                failure.record(agent, login, error)?;
+                failure.record(preferred, login, error)?;
                 unresolved = Some(login.id);
             }
         }
@@ -110,8 +114,15 @@ pub async fn pick(
         }
     }
     ranked.sort_by(|left, right| order(preferred, left, right));
-    if let Some((_, chosen)) = ranked.into_iter().next() {
-        return Ok(chosen);
+    let kept = match ranked.first() {
+        Some((_, best)) if best.agent != preferred => ranked
+            .iter()
+            .position(|(_, chosen)| Some(chosen.login.id) == sticky)
+            .unwrap_or(0),
+        _ => 0,
+    };
+    if kept < ranked.len() {
+        return Ok(ranked.swap_remove(kept).1);
     }
     if !spent.is_empty() {
         return Err(Error::Exhausted {
@@ -125,11 +136,11 @@ pub async fn pick(
 ///
 /// A limit on paid credits is not the subscription's: the login stays a candidate for every other
 /// session, and the caller leaves it out for the rest of the turn. Any other limit exhausts the
-/// login until the limit's own reset, else until the login's last spent window resets, else for
-/// [`REST`].
+/// login until the limit's own reset, else until the login's last spent window resets, else, when
+/// a reading of the agent's usage made now names no spent window either, for [`REST`].
 pub async fn mark_limited(state: &AppState, login: Uuid, limit: &Limit) {
     let snapshot = match &limit.window {
-        Some(window) => observed(state, login, window).await,
+        Some(window) => observed(state, login, std::slice::from_ref(window)).await,
         None => agent_logins::get(state.db(), login)
             .await
             .map(|row| row.and_then(|row| row.snapshot())),
@@ -138,20 +149,28 @@ pub async fn mark_limited(state: &AppState, login: Uuid, limit: &Limit) {
         return;
     }
     let snapshot = snapshot.unwrap_or_else(|error| {
-        tracing::warn!(%login, %error, "Could not read the login's usage; resting it a while");
+        tracing::warn!(%login, %error, "Could not read the login's usage; reading it again");
         None
     });
-    let until = until(limit, snapshot.as_ref(), Utc::now());
+    let now = Utc::now();
+    let until = match reset(limit, snapshot.as_ref(), now) {
+        Some(reset) => reset,
+        None => self::until(limit, reread(state, login).await.as_ref(), now),
+    };
+    let _held = credential::hold(login).await;
     if let Err(error) = agent_logins::exhaust(state.db(), login, until).await {
         tracing::warn!(%login, %error, %until, "Could not mark the login exhausted");
     }
 }
 
-/// Records `window`, as a turn on `login` reported it, over the window of the same name in the
-/// login's snapshot, without reading the agent's usage.
-pub async fn observe(state: &AppState, login: Uuid, window: &Window) {
-    if let Err(error) = observed(state, login, window).await {
-        tracing::warn!(%login, %error, window = %window.name, "Could not record the login's usage");
+/// Records `windows`, as a turn on `login` reported them, over the windows of the same names in
+/// the login's snapshot in one write, without reading the agent's usage.
+pub async fn observe(state: &AppState, login: Uuid, windows: &[Window]) {
+    if windows.is_empty() {
+        return;
+    }
+    if let Err(error) = observed(state, login, windows).await {
+        tracing::warn!(%login, %error, "Could not record the login's usage");
     }
 }
 
@@ -161,61 +180,74 @@ pub async fn observe(state: &AppState, login: Uuid, window: &Window) {
 ///
 /// A codex login is resolved into its own home first, which takes the organization's device lock.
 pub async fn settle(state: &AppState, login: Uuid) {
+    if let Some(chosen) = chosen(state, login).await {
+        usage::refresh(state, &mut [chosen]).await;
+    }
+}
+
+/// `login`'s usage read from its agent now, however recently it was read, or `None` when it
+/// cannot be.
+async fn reread(state: &AppState, login: Uuid) -> Option<Snapshot> {
+    usage::reread(state, &chosen(state, login).await?).await
+}
+
+/// `login`, resolved for a reading of its usage, or `None`, said why, when it cannot be.
+async fn chosen(state: &AppState, login: Uuid) -> Option<Chosen> {
     let row = match agent_logins::get(state.db(), login).await {
-        Ok(Some(row)) => row,
-        Ok(None) => return,
+        Ok(row) => row?,
         Err(error) => {
-            tracing::warn!(%login, %error, "Could not read the login to settle its usage");
-            return;
+            tracing::warn!(%login, %error, "Could not read the login to read its usage");
+            return None;
         }
     };
-    let Some(agent) = AgentKind::named(&row.agent) else {
-        return;
-    };
+    let agent = AgentKind::named(&row.agent)?;
     let resolved = match credential::resolve(state, &row).await {
         Ok(resolved) => resolved,
         Err(error) => {
-            tracing::warn!(%login, %agent, %error, "Could not settle the login's usage");
-            return;
+            tracing::warn!(%login, %agent, %error, "Could not read the login's usage");
+            return None;
         }
     };
     let snapshot = row.snapshot();
-    usage::refresh(
-        state,
-        &mut [Chosen {
-            login: row,
-            agent,
-            resolved,
-            snapshot,
-        }],
-    )
-    .await;
+    Some(Chosen {
+        login: row,
+        agent,
+        resolved,
+        snapshot,
+    })
 }
 
+/// Writes `windows` over `login`'s snapshot. A login whose usage was never read starts from a
+/// snapshot that is already due a reading, since the windows a turn reports say nothing of the
+/// others.
 async fn observed(
     state: &AppState,
     login: Uuid,
-    window: &Window,
+    windows: &[Window],
 ) -> Result<Option<Snapshot>, sqlx::Error> {
+    let _held = credential::hold(login).await;
     let mut transaction = state.db().begin().await?;
     let Some(row) = agent_logins::lock(&mut transaction, login).await? else {
         return Ok(None);
     };
-    let snapshot = row
-        .snapshot()
-        .unwrap_or_else(|| Snapshot {
-            windows: Vec::new(),
-            headroom: None,
-            fetched_at: Utc::now(),
-        })
-        .observed(window.clone());
+    let unread = || Snapshot::new(Vec::new(), usage::unread_at(state, Utc::now()));
+    let snapshot = windows
+        .iter()
+        .cloned()
+        .fold(row.snapshot().unwrap_or_else(unread), Snapshot::observed);
     agent_logins::observe(&mut *transaction, login, &snapshot).await?;
     transaction.commit().await?;
     Ok(Some(snapshot))
 }
 
-/// When a login `limit` refused can run again.
+/// When a login `limit` refused can run again, else after [`REST`].
 fn until(limit: &Limit, snapshot: Option<&Snapshot>, now: DateTime<Utc>) -> DateTime<Utc> {
+    reset(limit, snapshot, now).unwrap_or(now + REST)
+}
+
+/// When a login `limit` refused can run again, by the limit's own reset, else by the last of the
+/// spent windows in `snapshot`; `None` when neither says.
+fn reset(limit: &Limit, snapshot: Option<&Snapshot>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let spent = snapshot.and_then(|snapshot| match snapshot.availability() {
         Availability::At(at) => Some(at),
         Availability::Now | Availability::Unknown => None,
@@ -224,7 +256,6 @@ fn until(limit: &Limit, snapshot: Option<&Snapshot>, now: DateTime<Utc>) -> Date
         .resets_at
         .filter(|at| *at > now)
         .or_else(|| spent.filter(|at| *at > now))
-        .unwrap_or(now + REST)
 }
 
 fn order(
@@ -255,80 +286,29 @@ fn group(preferred: AgentKind, agent: AgentKind) -> usize {
         .unwrap_or(AgentKind::ALL.len())
 }
 
-/// Why the logins that could not be resolved were left out: the first of the preferred agent's,
-/// else the first of any.
-struct Failure {
-    preferred: AgentKind,
-    first: Option<(AgentKind, credential::Error)>,
-}
-
-impl Failure {
-    fn new(preferred: AgentKind) -> Self {
-        Self {
-            preferred,
-            first: None,
-        }
-    }
-
-    /// Leaves `login` out for `error`, unless the store itself failed. A login signed out
-    /// meanwhile is gone, and says nothing about the others.
-    fn record(
-        &mut self,
-        agent: AgentKind,
-        login: &AgentLoginRow,
-        error: credential::Error,
-    ) -> Result<(), Error> {
-        match error {
-            credential::Error::Database(source) => Err(Error::Database(source)),
-            credential::Error::Deleted => Ok(()),
-            error => {
-                tracing::warn!(
-                    organization = %login.organization_id,
-                    login = %login.id,
-                    %agent,
-                    %error,
-                    "A login cannot be used; routing around it"
-                );
-                let replaces = match &self.first {
-                    None => true,
-                    Some((first, _)) => *first != self.preferred && agent == self.preferred,
-                };
-                if replaces {
-                    self.first = Some((agent, error));
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn into_error(self) -> Error {
-        match self.first {
-            Some((agent, source)) => Error::Unresolved { agent, source },
-            None => Error::None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use abnegate_secret::SecretValue;
+    use chrono::SubsecRound;
     use sqlx::PgPool;
+    use sqlx::postgres::PgPoolOptions;
     use tempfile::TempDir;
     use wiremock::matchers::{any, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::config::{AgentConfig, Config};
-    use crate::db::agent_logins::Insert;
+    use crate::db::agent_logins::{AgentLoginRow, Insert};
     use crate::services::login::claude::Tokens;
     use crate::services::login::credential::Login;
 
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";
-    const FIVE_HOURS: &str = "5h";
-    const SEVEN_DAYS: &str = "7d";
+    const FIVE_HOURS: &str = Window::FIVE_HOURS;
+    const SEVEN_DAYS: &str = Window::SEVEN_DAYS;
     const CLAUDE_USAGE: &str = "/api/oauth/usage";
+    const CODEX_USAGE: &str = "/backend-api/wham/usage";
     const READING: &str = r#"{"five_hour":{"utilization":62.0,"resets_at":"2026-09-23T06:10:00Z"},"seven_day":{"utilization":31.0,"resets_at":"2026-09-28T04:00:00Z"}}"#;
     const READ_HEADROOM: f64 = 38.0;
 
@@ -346,11 +326,15 @@ mod tests {
 
         /// A scene whose agents' usage endpoints are `usage`.
         async fn reading(usage: String) -> Self {
-            let pool = PgPool::connect(
-                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
-            )
-            .await
-            .expect("the test database");
+            Self::pooled(usage, PgPoolOptions::new()).await
+        }
+
+        /// [`Scene::reading`], on a pool made with `options`.
+        async fn pooled(usage: String, options: PgPoolOptions) -> Self {
+            let pool = options
+                .connect(&std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"))
+                .await
+                .expect("the test database");
             let organization = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Login routing', $1::text)",
@@ -396,6 +380,21 @@ mod tests {
                     .await;
             }
             login
+        }
+
+        /// Signs the codex CLI in inside `login`'s home, as a codex sign-in leaves it.
+        fn signed_in(&self, login: Uuid) {
+            let home = self
+                .state
+                .config()
+                .agents
+                .create_login_home(self.organization, AgentKind::Codex, login)
+                .expect("the login's home");
+            std::fs::write(
+                home.join("auth.json"),
+                r#"{"tokens":{"access_token":"codex-access","refresh_token":"codex-refresh","account_id":"acct-42"}}"#,
+            )
+            .expect("the codex sign-in");
         }
 
         async fn insert(&self, agent: AgentKind, label: &str, credential: Option<&str>) -> Uuid {
@@ -765,16 +764,13 @@ mod tests {
         observe(
             &scene.state,
             read,
-            &window(SEVEN_DAYS, 31.0, Some(resets_at)),
+            &[
+                window(SEVEN_DAYS, 31.0, Some(resets_at)),
+                window(FIVE_HOURS, 95.0, before.windows[0].resets_at),
+            ],
         )
         .await;
-        observe(
-            &scene.state,
-            read,
-            &window(FIVE_HOURS, 95.0, before.windows[0].resets_at),
-        )
-        .await;
-        observe(&scene.state, unread, &window(FIVE_HOURS, 12.0, None)).await;
+        observe(&scene.state, unread, &[window(FIVE_HOURS, 12.0, None)]).await;
         let read = scene.stored(read).await.snapshot().expect("a snapshot");
         let unread = scene.stored(unread).await.snapshot().expect("a snapshot");
         let picked = scene
@@ -800,6 +796,265 @@ mod tests {
         assert_eq!(unread.headroom, Some(88.0));
         assert_eq!(picked.agent, AgentKind::Claude);
         usage.verify().await;
+    }
+
+    /// The windows claude's stream reports in `infos`, as the agent's reader reads them.
+    fn streamed(infos: &[serde_json::Value]) -> Vec<Window> {
+        let mut reader = AgentKind::Claude.reader();
+        let mut events = Vec::new();
+        for info in infos {
+            let line = serde_json::json!({"type": "rate_limit_event", "rate_limit_info": info});
+            reader.interpret(&line.to_string(), &mut events);
+        }
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                zone_core::llm::provider::AgentEvent::Window(window) => Some(window),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn used(snapshot: &Snapshot) -> Vec<(&str, Option<f64>)> {
+        snapshot
+            .windows
+            .iter()
+            .map(|window| (window.name.as_str(), window.used_percent))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_window_the_stream_reports_lands_on_the_window_the_usage_endpoint_named() {
+        let usage = answering(Duration::ZERO).await;
+        let scene = Scene::reading(usage.uri()).await;
+        let login = scene.login(AgentKind::Claude, "read", None).await;
+        scene.picked(AgentKind::Claude, &[], None).await;
+
+        observe(
+            &scene.state,
+            login,
+            &streamed(&[
+                serde_json::json!({"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.9, "isUsingOverage": false}),
+                serde_json::json!({"status": "allowed_warning", "rateLimitType": "seven_day", "utilization": 0.4, "isUsingOverage": false}),
+            ]),
+        )
+        .await;
+        let stored = scene.stored(login).await.snapshot().expect("a snapshot");
+        scene.remove().await;
+
+        assert_eq!(
+            used(&stored),
+            [(FIVE_HOURS, Some(90.0)), (SEVEN_DAYS, Some(40.0))],
+            "one window of each name, whoever reported it"
+        );
+        let headroom = stored.headroom.expect("a headroom");
+        assert!((headroom - 10.0).abs() < 1e-9, "{headroom}");
+        assert_eq!(readings(&usage).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_a_streamed_window_starts_is_due_a_reading() {
+        let usage = answering(Duration::ZERO).await;
+        let scene = Scene::reading(usage.uri()).await;
+        let login = scene.login(AgentKind::Claude, "unread", None).await;
+
+        observe(&scene.state, login, &[window(FIVE_HOURS, 90.0, None)]).await;
+        let observed = scene.stored(login).await.snapshot().expect("a snapshot");
+        let chosen = scene.pick(AgentKind::Claude, &[], None).await;
+        let stored = scene.stored(login).await.snapshot().expect("a snapshot");
+        scene.remove().await;
+
+        assert_eq!(observed.headroom, Some(10.0));
+        assert_eq!(
+            readings(&usage).await,
+            1,
+            "a window from the stream held the reading of the others off for a whole TTL"
+        );
+        assert_eq!(headroom(&chosen), Some(READ_HEADROOM));
+        assert_eq!(
+            used(&stored),
+            [(FIVE_HOURS, Some(62.0)), (SEVEN_DAYS, Some(31.0))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_usage_write_waits_out_a_renewal_without_holding_a_connection() {
+        let scene = Scene::pooled(
+            UNREACHABLE.to_string(),
+            PgPoolOptions::new()
+                .max_connections(3)
+                .acquire_timeout(Duration::from_secs(2)),
+        )
+        .await;
+        let login = scene.login(AgentKind::Claude, "renewing", None).await;
+        let renewing = credential::hold(login).await;
+        let mut renewal = scene.pool.begin().await.expect("a renewal's transaction");
+        agent_logins::lock(&mut renewal, login)
+            .await
+            .expect("the renewal's row lock")
+            .expect("the login");
+
+        let writes = (0..4)
+            .map(|used| {
+                let state = scene.state.clone();
+                tokio::spawn(async move {
+                    observe(&state, login, &[window(FIVE_HOURS, f64::from(used), None)]).await;
+                })
+            })
+            .collect::<Vec<_>>();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let meanwhile = sqlx::query("SELECT 1").execute(&scene.pool).await;
+        renewal.commit().await.expect("the renewal to end");
+        drop(renewing);
+        for write in writes {
+            write.await.expect("the write to finish");
+        }
+        let stored = scene.stored(login).await.snapshot().expect("a snapshot");
+        scene.remove().await;
+
+        assert!(
+            meanwhile.is_ok(),
+            "usage writes waiting on the renewal drained the pool: {meanwhile:?}"
+        );
+        assert_eq!(stored.windows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn changing_the_configured_agent_moves_a_chat_off_its_usable_login() {
+        let scene = Scene::new().await;
+        let claude = scene.login(AgentKind::Claude, "claude", Some(90.0)).await;
+        let codex = scene.login(AgentKind::Codex, "codex", None).await;
+
+        let moved = scene
+            .pick(AgentKind::Codex, &[], Some(claude))
+            .await
+            .expect("a login");
+        let kept = scene
+            .pick(AgentKind::Codex, &[], Some(codex))
+            .await
+            .expect("a login");
+        scene.remove().await;
+
+        assert_eq!((moved.login.id, moved.agent), (codex, AgentKind::Codex));
+        assert_eq!(kept.login.id, codex);
+    }
+
+    #[tokio::test]
+    async fn a_chat_on_another_agent_returns_once_the_configured_agent_can_run_it() {
+        let scene = Scene::new().await;
+        let claude = scene.login(AgentKind::Claude, "claude", Some(40.0)).await;
+        let codex = scene.login(AgentKind::Codex, "codex", None).await;
+        let other = scene.login(AgentKind::Codex, "other", Some(90.0)).await;
+        scene
+            .exhaust(claude, Utc::now() + TimeDelta::hours(1))
+            .await;
+
+        let stays = scene.picked(AgentKind::Claude, &[], Some(codex)).await;
+        scene
+            .exhaust(claude, Utc::now() - TimeDelta::seconds(1))
+            .await;
+        let returns = scene.picked(AgentKind::Claude, &[], Some(codex)).await;
+        scene.remove().await;
+
+        assert_eq!(
+            stays, codex,
+            "headroom alone moved a chat between one agent's logins"
+        );
+        assert_ne!(stays, other);
+        assert_eq!(returns, claude);
+    }
+
+    #[tokio::test]
+    async fn a_limit_that_names_no_reset_reads_the_usage_before_resting_the_login() {
+        let resets_at = (Utc::now() + TimeDelta::hours(2)).trunc_subsecs(0);
+        let usage = MockServer::start().await;
+        Mock::given(path(CODEX_USAGE))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"plan_type":"pro","rate_limit":{{"primary_window":{{"used_percent":100,"limit_window_seconds":18000,"reset_at":{}}}}}}}"#,
+                resets_at.timestamp()
+            )))
+            .expect(1)
+            .mount(&usage)
+            .await;
+        let scene = Scene::reading(usage.uri()).await;
+        let limited = scene.login(AgentKind::Codex, "limited", None).await;
+        scene.signed_in(limited);
+        scene
+            .read_at(
+                limited,
+                40.0,
+                Utc::now() + TimeDelta::hours(1),
+                Utc::now() - TimeDelta::hours(1),
+            )
+            .await;
+
+        mark_limited(&scene.state, limited, &limit(false, None)).await;
+        let stored = scene.stored(limited).await;
+        scene.remove().await;
+
+        assert_eq!(
+            stored.exhausted_until,
+            Some(resets_at),
+            "a codex limit rested the login only {REST} on a stale snapshot"
+        );
+        assert_eq!(
+            stored.snapshot().map(|snapshot| snapshot.availability()),
+            Some(Availability::At(resets_at))
+        );
+        usage.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_slow_reading_keeps_a_window_a_turn_observed_while_it_ran() {
+        let usage = answering(Duration::from_millis(800)).await;
+        let scene = Scene::reading(usage.uri()).await;
+        let login = scene.login(AgentKind::Claude, "busy", None).await;
+        let resets_at = Utc::now() + TimeDelta::hours(2);
+        scene
+            .read_at(login, 70.0, resets_at, Utc::now() - TimeDelta::hours(1))
+            .await;
+        let started = Utc::now();
+
+        let (_, ()) = tokio::join!(scene.pick(AgentKind::Claude, &[], None), async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            observe(
+                &scene.state,
+                login,
+                &[window(FIVE_HOURS, 95.0, Some(resets_at))],
+            )
+            .await;
+        });
+        let stored = scene.stored(login).await.snapshot().expect("a snapshot");
+        scene.remove().await;
+
+        assert_eq!(
+            used(&stored),
+            [(FIVE_HOURS, Some(95.0)), (SEVEN_DAYS, Some(31.0))],
+            "the reading wrote its older five-hour window over the one the turn observed"
+        );
+        assert!(stored.fetched_at >= started);
+        assert_eq!(readings(&usage).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_reading_never_overwrites_one_that_began_after_it() {
+        let usage = answering(Duration::from_millis(800)).await;
+        let scene = Scene::reading(usage.uri()).await;
+        let login = scene.login(AgentKind::Claude, "shared", None).await;
+        let resets_at = Utc::now() + TimeDelta::hours(2);
+        scene
+            .read_at(login, 70.0, resets_at, Utc::now() - TimeDelta::hours(1))
+            .await;
+
+        let (chosen, ()) = tokio::join!(scene.pick(AgentKind::Claude, &[], None), async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            scene.read(login, 15.0, resets_at).await;
+        });
+        let stored = scene.stored(login).await.snapshot().expect("a snapshot");
+        scene.remove().await;
+
+        assert_eq!(stored.headroom, Some(15.0));
+        assert_eq!(headroom(&chosen), Some(15.0));
     }
 
     /// A usage endpoint that answers every reading with [`READING`], once `delay` has passed.

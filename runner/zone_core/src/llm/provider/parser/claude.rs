@@ -52,6 +52,15 @@ const INDETERMINATE_REASONS: [&str; 2] = ["fetch_error", "unknown"];
 
 const OVERAGE_INCLUDED_WINDOW: &str = "seven_day_overage_included";
 
+/// claude's stream's name for each window of the plan, beside the name its usage endpoint gives
+/// the same window.
+const WINDOWS: [(&str, &str); 4] = [
+    ("five_hour", Window::FIVE_HOURS),
+    ("seven_day", Window::SEVEN_DAYS),
+    ("seven_day_opus", Window::SEVEN_DAYS_OPUS),
+    ("seven_day_sonnet", Window::SEVEN_DAYS_SONNET),
+];
+
 const FABLE: &str = "Fable";
 const FABLE_LIMIT_REACHED: &str = "You've reached your Fable limit.";
 const REQUIRES_USAGE_CREDITS: &str = " requires usage credits.";
@@ -231,22 +240,36 @@ impl Info {
         Some(format!("{THROTTLED} ({window}, {status})"))
     }
 
-    /// The named window this event reports on, counted as spent in full when
-    /// claude refused a request on it without saying how much was used.
+    /// The named window of the plan this event reports on, under the name
+    /// claude's usage endpoint gives it, counted as spent in full when claude
+    /// refused a request on it without saying how much was used. The window
+    /// usage credits carry a turn past is no part of the plan's usage.
     fn window(&self, refused: bool) -> Option<Window> {
-        let name = self.name.clone()?;
+        let name = self
+            .name
+            .as_deref()
+            .filter(|name| *name != OVERAGE_INCLUDED_WINDOW)?;
         let used_percent = self
             .utilization
             .map(|fraction| fraction * PERCENT)
             .or(refused.then_some(PERCENT));
         Some(Window {
-            name,
+            name: read_as(name).to_string(),
             used_percent,
             used: None,
             limit: None,
             resets_at: self.resets_at,
         })
     }
+}
+
+/// `streamed`, a window as claude's stream names it, as its usage endpoint names it, or as it is
+/// when the endpoint has no such window.
+fn read_as(streamed: &str) -> &str {
+    WINDOWS
+        .iter()
+        .find(|(name, _)| *name == streamed)
+        .map_or(streamed, |(_, read)| read)
 }
 
 /// A field claude may one day send in another shape, read as absent rather
@@ -873,7 +896,7 @@ mod tests {
             assert_eq!(
                 windows(&events),
                 [&Window {
-                    name: "five_hour".to_string(),
+                    name: Window::FIVE_HOURS.to_string(),
                     used_percent: Some(43.0),
                     used: None,
                     limit: None,
@@ -896,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_request_is_a_limit_with_its_reset_time_and_window() {
+    fn a_refused_request_past_the_credits_window_is_a_limit_with_its_reset_time_and_no_window() {
         let events = interpret_all(FABLE_LIMIT_STREAM);
 
         let limits = limits(&events);
@@ -905,17 +928,66 @@ mod tests {
             assert!(limit.credits, "{limit:?}");
             assert_eq!(limit.resets_at, at(1_790_208_000), "{limit:?}");
             assert_eq!(
-                limit.window,
-                Some(Window {
-                    name: "seven_day_overage_included".to_string(),
-                    used_percent: Some(100.0),
-                    used: None,
-                    limit: None,
-                    resets_at: at(1_790_208_000),
-                }),
-                "{limit:?}"
+                limit.window, None,
+                "the window usage credits carry a turn past is no part of the plan's usage"
             );
         }
+    }
+
+    #[test]
+    fn a_window_is_named_as_claudes_usage_endpoint_names_it() {
+        for (streamed, read) in [
+            ("five_hour", Window::FIVE_HOURS),
+            ("seven_day", Window::SEVEN_DAYS),
+            ("seven_day_opus", Window::SEVEN_DAYS_OPUS),
+            ("seven_day_sonnet", Window::SEVEN_DAYS_SONNET),
+            ("hourly_burst", "hourly_burst"),
+        ] {
+            let reported = interpret_all(&limit(json!({
+                "status": "allowed",
+                "rateLimitType": streamed,
+                "utilization": 0.43,
+                "isUsingOverage": false,
+            })));
+            let refused = interpret_all(&stream(&[
+                limit(json!({"status": "rejected", "rateLimitType": streamed})),
+                api_error(SESSION_LIMIT, None).to_string(),
+            ]));
+
+            assert_eq!(
+                windows(&reported)
+                    .iter()
+                    .map(|window| window.name.as_str())
+                    .collect::<Vec<_>>(),
+                [read],
+                "{streamed}"
+            );
+            assert_eq!(
+                limits(&refused)
+                    .iter()
+                    .map(|limit| limit.window.as_ref().map(|window| window.name.as_str()))
+                    .collect::<Vec<_>>(),
+                [Some(read)],
+                "{streamed}"
+            );
+            assert_eq!(
+                limits(&refused)[0].message,
+                throttled(streamed, SESSION_LIMIT),
+                "the worker still reads the window as claude names it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_report_on_the_credits_window_is_no_window_of_the_plan() {
+        let events = interpret_all(&limit(json!({
+            "status": "allowed",
+            "rateLimitType": OVERAGE_INCLUDED_WINDOW,
+            "utilization": 1.0,
+            "isUsingOverage": false,
+        })));
+
+        assert!(windows(&events).is_empty(), "{events:?}");
     }
 
     #[test]
