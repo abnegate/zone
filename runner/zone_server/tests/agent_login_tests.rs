@@ -986,7 +986,8 @@ fn signed_out(agent: AgentKind, provider: &str) -> Value {
     })
 }
 
-/// One login as a status lists it, before any usage was read for it or a turn used it.
+/// One login as a status lists it, before any usage was read for it, a limit spent it or a turn
+/// used it.
 fn login_status(
     id: Uuid,
     label: &str,
@@ -1000,6 +1001,7 @@ fn login_status(
         "plan": plan,
         "state": state,
         "expires_at": expires_at,
+        "exhausted_until": null,
         "usage": null,
         "last_used_at": null,
     })

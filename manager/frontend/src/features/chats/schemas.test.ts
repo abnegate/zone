@@ -91,6 +91,7 @@ describe('a handover', () => {
     message_id: 'msg-2',
     from: 'a@example.com',
     to: 'b@example.com',
+    from_agent: 'claude',
     agent: 'codex',
     reason: 'limit',
     resets_at: '2026-09-23T06:10:00Z',
@@ -104,12 +105,19 @@ describe('a handover', () => {
       kind: 'handover',
       from: 'a@example.com',
       to: 'b@example.com',
+      from_agent: 'claude',
       agent: 'codex',
       reason: 'limit',
       resets_at: '2026-09-23T06:10:00Z',
       carried: false,
       at: 12,
     });
+  });
+
+  it('refuses a switch that does not say which agent it left', () => {
+    const { from_agent: _left, ...unsaid } = stored;
+
+    expect(HandoverSchema.safeParse(unsaid).success).toBe(false);
   });
 
   it('reads the stored record the same way the frame was read', () => {

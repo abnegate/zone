@@ -75,13 +75,13 @@ const alex: AgentAccount = {
 const withAccounts = (...logins: AgentAccount[]): AgentStatus => ({ ...claudeSignedIn, logins });
 const spentUsage = (account: AgentAccount): AgentAccount => ({
   ...account,
+  exhausted_until: '2026-09-23T06:10:00Z',
   usage: account.usage && {
     ...account.usage,
     windows: account.usage.windows.map((window, index) =>
       index === 0 ? { ...window, used_percent: 100 } : window
     ),
     headroom: 0,
-    exhausted_until: '2026-09-23T06:10:00Z',
   },
 });
 const codexSignedOut: AgentStatus = { ...codexPending, state: 'signed_out', pending: null };
@@ -467,7 +467,6 @@ describe('AgentSignIn', () => {
       const accounts = screen.getByRole('list', { name: 'Claude Code accounts' });
       expect(within(accounts).getByText('jake@example.com')).toBeInTheDocument();
       expect(within(accounts).getByText('Claude Max')).toBeInTheDocument();
-      expect(within(accounts).getByText(/Expires Sep 23, 2027/)).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: 'Sign out jake@example.com' }));
 
@@ -513,6 +512,13 @@ describe('AgentSignIn', () => {
       expect(onChange).not.toHaveBeenCalled();
       expect(agentsApi.get).not.toHaveBeenCalled();
       expect(screen.getByRole('button', { name: 'Sign out jake@example.com' })).toBeEnabled();
+    });
+
+    it('shows when an account that cannot renew itself runs out', () => {
+      renderPanel('claude', withAccounts({ ...jake, expires_at: '2027-09-23T04:00:00Z' }));
+
+      const accounts = screen.getByRole('list', { name: 'Claude Code accounts' });
+      expect(within(accounts).getByText(/Expires Sep 23, 2027/)).toBeInTheDocument();
     });
 
     it('leaves out an expiry that has passed while the account still holds', () => {
@@ -1143,6 +1149,28 @@ describe('AgentSignIn', () => {
       expect(screen.getByRole('status')).toHaveTextContent('Signed in');
     });
 
+    it('moves focus to the paste field when the click left it on a container around the panel', async () => {
+      agentsApi.start.mockResolvedValue(claudeLogin(authorize));
+      render(
+        <div role="tabpanel" tabIndex={-1} aria-label="AI">
+          <Harness
+            agent="claude"
+            access="manage"
+            unsaved={false}
+            heading="h4"
+            initial={claudeSignedOut}
+            onChange={mock()}
+          />
+        </div>
+      );
+
+      screen.getByRole('tabpanel').focus();
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in with Claude' }));
+
+      const field = await screen.findByLabelText('Code from claude.com');
+      await waitFor(() => expect(focused(field)).toBe(true));
+    });
+
     it('moves focus to the one-time code once the device sign-in starts', async () => {
       setSystemTime(beforeTheCodeExpires);
       agentsApi.start.mockResolvedValue(prompt);
@@ -1364,9 +1392,7 @@ describe('AgentSignIn', () => {
       const first = within(row('jake@example.com'));
       expect(first.getByText('Claude Max')).toBeInTheDocument();
       expect(first.getByText('Signed in')).toBeInTheDocument();
-      expect(
-        first.getByText('Expires Sep 23, 2027 · Last used 3:50 AM · Usage checked 4:00 AM')
-      ).toBeInTheDocument();
+      expect(first.getByText('Last used 3:50 AM · Usage checked 4:00 AM')).toBeInTheDocument();
       expect(
         meters('jake@example.com').map((meter) => [
           meter.getAttribute('aria-label'),
@@ -1439,18 +1465,25 @@ describe('AgentSignIn', () => {
     });
 
     it('treats an exhaustion whose reset has passed as signed in again', () => {
-      const lapsed = spentUsage(jake);
       renderPanel(
         'claude',
-        withAccounts({
-          ...lapsed,
-          usage: lapsed.usage && { ...lapsed.usage, exhausted_until: '2026-09-23T03:00:00Z' },
-        })
+        withAccounts({ ...spentUsage(jake), exhausted_until: '2026-09-23T03:00:00Z' })
       );
 
       expect(within(row('jake@example.com')).getByText('Signed in')).toBeInTheDocument();
       expect(screen.queryByText('Limit reached')).toBeNull();
       expect(screen.queryByText(/Exhausted until/)).toBeNull();
+    });
+
+    it('shows an account that reached its limit before its usage was ever read', () => {
+      renderPanel('claude', withAccounts({ ...spentUsage(jake), usage: null }, alex));
+
+      const spent = within(row('jake@example.com'));
+      expect(spent.getByText('Limit reached')).toBeInTheDocument();
+      expect(spent.queryByText('Signed in')).toBeNull();
+      expect(spent.getByText('Usage unavailable')).toBeInTheDocument();
+      expect(spent.getByText(/^Exhausted until 6:10 AM/)).toBeInTheDocument();
+      expect(within(row('alex@example.com')).getByText('Signed in')).toBeInTheDocument();
     });
 
     it('says so when an account has no usage reading', () => {

@@ -22,13 +22,8 @@ export function agentName(agent: HandoverAgent): string {
   return AGENT_NAMES[agent];
 }
 
-/**
- * Only the switch before this one knows which agent the turn was on. The first
- * switch has none, and a carried session file only ever moves between logins
- * of the same agent, so anything not carried may have changed agent.
- */
-export function agentChanged(handover: Handover, previous?: Handover): boolean {
-  return previous ? previous.agent !== handover.agent : !handover.carried;
+export function agentChanged(handover: Handover): boolean {
+  return handover.from_agent !== handover.agent;
 }
 
 export function appendHandover(existing: readonly Handover[], handover: Handover): Handover[] {
@@ -51,13 +46,11 @@ export function splitAtHandovers(content: string, handovers: readonly Handover[]
     if (text.trim()) parts.push({ kind: 'text', text, offset: start });
   };
   let start = 0;
-  let previous: Handover | undefined;
   for (const handover of [...handovers].sort((left, right) => left.at - right.at)) {
     const end = Math.min(Math.max(handover.at, start), characters.length);
     pushText(start, end);
-    parts.push({ kind: 'handover', handover, agentChanged: agentChanged(handover, previous) });
+    parts.push({ kind: 'handover', handover, agentChanged: agentChanged(handover) });
     start = end;
-    previous = handover;
   }
   pushText(start, characters.length);
   return parts;

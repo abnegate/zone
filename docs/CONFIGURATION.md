@@ -794,7 +794,7 @@ The panel uses these routes, where `{agent}` is `claude` or `codex`:
 
 | Route | Who | What |
 |-------|-----|------|
-| `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models. Each status's `logins` lists every sign-in of the agent, oldest first, with its `id`, `label`, `plan`, `state`, `expires_at`, `last_used_at` and `usage` (its `windows`, `headroom`, `fetched_at` and `exhausted_until`), read again first when older than `ZONE_AGENT_USAGE_TTL_SECONDS`; the agent's own `state` and `label` are its best sign-in's |
+| `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models. Each status's `logins` lists every sign-in of the agent, oldest first, with its `id`, `label`, `plan`, `state`, `expires_at`, `exhausted_until` (set even when no usage was ever read), `last_used_at` and `usage` (its `windows`, `headroom` and `fetched_at`), read again first when older than `ZONE_AGENT_USAGE_TTL_SECONDS`; the agent's own `state` and `label` are its best sign-in's |
 | `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status, with its `logins` as above. With `?attempt={attempt}`, a Claude status's `error` says why that sign-in failed, to the admin who started it |
 | `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access, and `{"flow":"paste"}` asks for a code to paste even with a callback. A claude answer's `flow` says how its code comes back, `loopback` or `paste`, and its `attempt` names the sign-in. The callback is used only when the request's `Origin` is a localhost address `ZONE_CONSOLE_ORIGINS` lists; `{"flow":"loopback"}` from anywhere else is refused |
 | `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}`; a code that fails carries a `kind`, `invalid_code` (paste again) or `start_again` |
@@ -954,19 +954,21 @@ across the switch, and every switch counts against the turn's own
 "Switching to <account>…", then a `handover` frame:
 
 ```json
-{"type":"handover","message_id":"…","from":"jake@example.com","to":"team@example.com","agent":"claude","reason":"limit","resets_at":"2026-10-02T18:00:00Z","carried":true,"at":1834}
+{"type":"handover","message_id":"…","from":"jake@example.com","to":"team@example.com","from_agent":"claude","agent":"claude","reason":"limit","resets_at":"2026-10-02T18:00:00Z","carried":true,"at":1834}
 ```
 
-`from` and `to` are the accounts' labels; `reason` is `limit`, `credits` or
+`from` and `to` are the accounts' labels; `from_agent` and `agent` are the
+agents the turn left and continues on; `reason` is `limit`, `credits` or
 `signed_out`; `resets_at` is when the limit resets, when it said; `carried`
 says whether the session file moved with the turn; and `at` is how many
 characters of the answer were written before the switch. The console draws a
 divider there, such as "Switched to team@example.com — jake@example.com
-reached its usage limit; resets in 2h 5m", naming the agent only when it
-changed. When the chat's account is already spent as a new turn starts, the
-turn moves before the CLI starts: the `handover` frame, with `at` 0, follows
-`message_start`, and no `status` frame comes first. The assistant message's
-metadata keeps every switch under `handovers`, so the dividers survive a
+reached its usage limit; resets in 2h 5m", naming the agent only when
+`agent` differs from `from_agent`. When the chat's account is already spent
+as a new turn starts, the turn moves before the CLI starts: the `handover`
+frame, with `at` 0, follows `message_start`, and no `status` frame comes
+first. The assistant message's metadata keeps every switch, `from_agent`
+included, under `handovers`, so the dividers survive a
 reload, and, for an answer that switched, the tokens all its accounts spent
 together under `usage`.
 

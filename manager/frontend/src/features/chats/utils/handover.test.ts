@@ -16,6 +16,7 @@ const handover = (overrides: Partial<Handover> = {}): Handover => ({
   kind: 'handover',
   from: 'a@example.com',
   to: 'b@example.com',
+  from_agent: 'claude',
   agent: 'claude',
   reason: 'limit',
   carried: true,
@@ -71,15 +72,23 @@ describe('splitAtHandovers', () => {
     ]);
   });
 
-  it('names the agent on the switch that changed it, judged against the switch before', () => {
-    const toCodex = handover({ at: 1, agent: 'codex', carried: false });
-    const stayed = handover({ at: 2, agent: 'codex', carried: false, to: 'c@example.com' });
+  it('names the agent only on the switch that changed it', () => {
+    const replayed = handover({ at: 1, carried: false });
+    const toCodex = handover({ at: 2, agent: 'codex', carried: false, to: 'c@example.com' });
+    const stayed = handover({
+      at: 3,
+      from_agent: 'codex',
+      agent: 'codex',
+      carried: false,
+      from: 'c@example.com',
+      to: 'd@example.com',
+    });
 
-    const notices = splitAtHandovers('abc', [toCodex, stayed]).filter(
+    const notices = splitAtHandovers('abcd', [replayed, toCodex, stayed]).filter(
       (part) => part.kind === 'handover'
     );
 
-    expect(notices.map((part) => part.agentChanged)).toEqual([true, false]);
+    expect(notices.map((part) => part.agentChanged)).toEqual([false, true, false]);
   });
 });
 
@@ -88,15 +97,13 @@ describe('agentChanged', () => {
     expect(agentChanged(handover({ carried: true }))).toBe(false);
   });
 
-  it('a first switch that replayed may have changed agent', () => {
-    expect(agentChanged(handover({ carried: false }))).toBe(true);
+  it('a first switch that replayed on the same agent did not change it', () => {
+    expect(agentChanged(handover({ carried: false }))).toBe(false);
   });
 
-  it('a later switch compares with the agent the turn was on', () => {
-    const previous = handover({ agent: 'claude' });
-
-    expect(agentChanged(handover({ agent: 'codex', carried: false }), previous)).toBe(true);
-    expect(agentChanged(handover({ agent: 'claude', carried: false }), previous)).toBe(false);
+  it('a switch onto another agent changed it, whichever way it went', () => {
+    expect(agentChanged(handover({ agent: 'codex', carried: false }))).toBe(true);
+    expect(agentChanged(handover({ from_agent: 'codex', carried: false }))).toBe(true);
   });
 });
 

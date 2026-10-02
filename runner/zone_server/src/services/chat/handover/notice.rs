@@ -12,6 +12,9 @@ pub struct Notice {
     pub from: String,
     /// The label of the login the turn continues on.
     pub to: String,
+    /// The agent the turn left.
+    #[serde(serialize_with = "named")]
+    pub from_agent: AgentKind,
     /// The agent the turn continues on.
     #[serde(serialize_with = "named")]
     pub agent: AgentKind,

@@ -68,11 +68,11 @@ mod tests {
                 plan: None,
                 state,
                 expires_at: None,
+                exhausted_until: None,
                 usage: headroom.map(|headroom| UsageStatus {
                     windows: vec![],
                     headroom: Some(headroom),
                     fetched_at: at(1_790_000_000),
-                    exhausted_until: None,
                 }),
                 last_used_at: None,
             },

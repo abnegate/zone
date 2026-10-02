@@ -35,6 +35,7 @@ impl Switch {
         Notice {
             from: self.from.label.clone(),
             to: self.to.label.clone(),
+            from_agent: self.from.agent,
             agent: self.to.agent,
             reason: self.reason,
             resets_at: self.resets_at,

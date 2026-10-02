@@ -14,6 +14,8 @@ pub struct LoginStatus {
     pub plan: Option<String>,
     pub state: State,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Until when the login was marked spent, whether or not its usage was ever read.
+    pub exhausted_until: Option<DateTime<Utc>>,
     pub usage: Option<UsageStatus>,
     pub last_used_at: Option<DateTime<Utc>>,
 }

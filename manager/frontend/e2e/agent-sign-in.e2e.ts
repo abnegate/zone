@@ -55,6 +55,7 @@ const jake = {
   plan: 'Claude Max',
   state: 'signed_in',
   expires_at: '2027-09-23T12:00:00Z',
+  exhausted_until: null,
   usage: {
     windows: [
       { name: '5h', used_percent: 62, used: null, limit: null, resets_at: '2026-09-23T06:10:00Z' },
@@ -62,7 +63,6 @@ const jake = {
     ],
     headroom: 38,
     fetched_at: '2026-09-23T04:00:00Z',
-    exhausted_until: null,
   },
   last_used_at: '2026-09-23T03:50:00Z',
 };
@@ -72,6 +72,7 @@ const alex = {
   plan: 'Claude Pro',
   state: 'signed_in',
   expires_at: '2027-10-01T09:00:00Z',
+  exhausted_until: null,
   usage: {
     windows: [
       { name: '5h', used_percent: 84, used: null, limit: null, resets_at: '2026-09-23T04:42:00Z' },
@@ -86,7 +87,6 @@ const alex = {
     ],
     headroom: 7,
     fetched_at: '2026-09-23T03:59:00Z',
-    exhausted_until: null,
   },
   last_used_at: '2026-09-22T18:20:00Z',
 };
@@ -96,24 +96,27 @@ const sam = {
   plan: 'Claude Max',
   state: 'signed_in',
   expires_at: null,
+  exhausted_until: null,
   usage: null,
   last_used_at: null,
 };
 const spentJake = {
   ...jake,
+  exhausted_until: '2026-09-23T06:10:00Z',
   usage: {
     ...jake.usage,
     windows: [{ ...jake.usage.windows[0], used_percent: 100 }, jake.usage.windows[1]],
     headroom: 0,
-    exhausted_until: '2026-09-23T06:10:00Z',
   },
 };
+const unreadSpentJake = { ...jake, exhausted_until: '2026-09-23T06:10:00Z', usage: null };
 const team = {
   id: '7c6b5a49-3827-4f16-a5e4-d3c2b1a09f8e',
   label: 'team@example.com',
   plan: 'ChatGPT Plus',
   state: 'signed_in',
   expires_at: null,
+  exhausted_until: null,
   usage: {
     windows: [
       { name: '5h', used_percent: 18, used: null, limit: null, resets_at: '2026-09-23T07:30:00Z' },
@@ -121,7 +124,6 @@ const team = {
     ],
     headroom: 82,
     fetched_at: '2026-09-23T04:00:00Z',
-    exhausted_until: null,
   },
   last_used_at: '2026-09-23T02:15:00Z',
 };
@@ -1029,6 +1031,39 @@ test.describe('Coding agent sign-in', () => {
     await expect(other.getByText('Signed in', { exact: true })).toBeVisible();
     await expect(other.getByText('Limit reached', { exact: true })).toHaveCount(0);
     await capture(page, 'exhausted');
+  });
+
+  test('an account that reached its limit before its usage was ever read still says so', async ({
+    page,
+  }) => {
+    await mockApi(page, {
+      role: 'owner',
+      provider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') {
+          return {
+            json: {
+              agents: [
+                status('claude', { ...claudeSignedIn, logins: [unreadSpentJake, alex] }),
+                status('codex'),
+              ],
+            },
+          };
+        }
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto('/org-settings');
+
+    const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
+    const spent = panel.getByRole('listitem').filter({ hasText: 'jake@example.com' });
+    await expect(spent.getByText('Limit reached', { exact: true })).toBeVisible();
+    await expect(spent.getByText('Signed in', { exact: true })).toHaveCount(0);
+    await expect(spent).toContainText('Usage unavailable');
+    await expect(spent).toContainText('Exhausted until 6:10 AM');
+    await expect(spent.getByRole('meter')).toHaveCount(0);
+    await capture(page, 'exhausted-unread');
   });
 
   test('an owner signs one account out and the other stays', async ({ page }) => {

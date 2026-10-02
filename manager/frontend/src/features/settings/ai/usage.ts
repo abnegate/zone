@@ -59,8 +59,11 @@ export function accountLabel(account: Pick<AgentAccount, 'label' | 'plan'>): str
   return account.label ?? account.plan ?? UNNAMED;
 }
 
-export function exhaustedUntil(account: AgentAccount, now: number): string | null {
-  const until = account.usage?.exhausted_until ?? null;
+export function exhaustedUntil(
+  account: Pick<AgentAccount, 'exhausted_until'>,
+  now: number
+): string | null {
+  const until = account.exhausted_until;
   return until !== null && Date.parse(until) > now ? until : null;
 }
 

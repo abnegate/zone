@@ -81,13 +81,14 @@ describe('usage', () => {
 
   it('holds an account exhausted only until its reset', () => {
     expect(exhaustedUntil(account, now)).toBeNull();
-    const spent = {
-      ...account,
-      usage: account.usage && { ...account.usage, exhausted_until: '2026-09-23T06:10:00Z' },
-    };
+    const spent = { ...account, exhausted_until: '2026-09-23T06:10:00Z' };
     expect(exhaustedUntil(spent, now)).toBe('2026-09-23T06:10:00Z');
     expect(exhaustedUntil(spent, Date.parse('2026-09-23T06:10:00Z'))).toBeNull();
-    expect(exhaustedUntil({ ...account, usage: null }, now)).toBeNull();
+  });
+
+  it('holds an account exhausted though its usage was never read', () => {
+    const unread = { ...account, usage: null, exhausted_until: '2026-09-23T06:10:00Z' };
+    expect(exhaustedUntil(unread, now)).toBe('2026-09-23T06:10:00Z');
   });
 
   it('names a time today by the clock, and another day by its date too', () => {

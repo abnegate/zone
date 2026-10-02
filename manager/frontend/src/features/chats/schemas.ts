@@ -212,6 +212,7 @@ export const HandoverSchema = z.object({
   kind: z.literal('handover').default('handover'),
   from: absentWhenEmpty,
   to: z.string().min(1),
+  from_agent: z.enum(HANDOVER_AGENTS),
   agent: z.enum(HANDOVER_AGENTS),
   reason: z.enum(HANDOVER_REASONS).catch('limit'),
   resets_at: absentWhenEmpty,

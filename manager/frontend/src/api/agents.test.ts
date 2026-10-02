@@ -56,7 +56,8 @@ describe('agent status contract', () => {
         label: 'jake@example.com',
         plan: 'Claude Max',
         state: 'signed_in',
-        expires_at: '2027-09-23T04:00:00Z',
+        expires_at: null,
+        exhausted_until: null,
         usage: {
           windows: [
             {
@@ -76,7 +77,6 @@ describe('agent status contract', () => {
           ],
           headroom: 38,
           fetched_at: '2026-09-23T04:00:00Z',
-          exhausted_until: null,
         },
         last_used_at: '2026-09-23T03:50:00Z',
       },

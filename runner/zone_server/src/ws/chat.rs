@@ -5408,6 +5408,7 @@ cat 'DIR/reply.jsonl'
         Notice {
             from: "a@example.com".to_string(),
             to: "c@example.com".to_string(),
+            from_agent: zone_core::llm::AgentKind::Claude,
             agent: zone_core::llm::AgentKind::Codex,
             reason: crate::services::chat::handover::Reason::Limit,
             resets_at: chrono::DateTime::parse_from_rfc3339("2026-09-23T06:10:00Z")
@@ -5435,6 +5436,7 @@ cat 'DIR/reply.jsonl'
                 "message_id": message_id,
                 "from": "a@example.com",
                 "to": "c@example.com",
+                "from_agent": "claude",
                 "agent": "codex",
                 "reason": "limit",
                 "resets_at": "2026-09-23T06:10:00Z",
@@ -5482,6 +5484,7 @@ cat 'DIR/reply.jsonl'
                 "handovers": [{
                     "from": "a@example.com",
                     "to": "c@example.com",
+                    "from_agent": "claude",
                     "agent": "codex",
                     "reason": "limit",
                     "resets_at": "2026-09-23T06:10:00Z",

@@ -2953,6 +2953,7 @@ describe('ChatsPage', () => {
           message_id: 'moved',
           from: 'a@example.com',
           to: 'b@example.com',
+          from_agent: 'claude',
           agent: 'codex',
           reason: 'limit',
           resets_at: resetsAt(),
@@ -2994,6 +2995,7 @@ describe('ChatsPage', () => {
                   kind: 'handover',
                   from: 'a@example.com',
                   to: 'b@example.com',
+                  from_agent: 'claude',
                   agent: 'codex',
                   reason: 'limit',
                   resets_at: resetsAt(),
@@ -3014,6 +3016,42 @@ describe('ChatsPage', () => {
       expect(answer?.firstElementChild?.textContent).toBe('Started here.');
       expect(answer?.lastElementChild?.textContent).toBe('Finished there.');
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('leaves the agent out of a divider whose replay stayed on the same agent', async () => {
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          {
+            ...mockChatWithMessages.messages[1],
+            content: 'Started here. Finished there.',
+            metadata: {
+              handovers: [
+                {
+                  kind: 'handover',
+                  from: 'a@example.com',
+                  to: 'b@example.com',
+                  from_agent: 'claude',
+                  agent: 'claude',
+                  reason: 'limit',
+                  resets_at: resetsAt(),
+                  carried: false,
+                  at: 14,
+                },
+              ],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const note = await screen.findByRole('note');
+      expect(note).toHaveTextContent(
+        'Switched to b@example.com — a@example.com reached its usage limit; resets in 2h 10m'
+      );
+      expect(note).not.toHaveTextContent('Claude');
     });
 
     it('draws no divider on a reply that stayed on one account', async () => {

@@ -37,7 +37,6 @@ export const UsageSchema = z.object({
   windows: z.array(UsageWindowSchema),
   headroom: z.number().nullable(),
   fetched_at: TimestampSchema,
-  exhausted_until: TimestampSchema.nullable(),
 });
 
 export const AgentAccountSchema = z.object({
@@ -46,6 +45,7 @@ export const AgentAccountSchema = z.object({
   plan: z.string().nullable(),
   state: LoginStateSchema,
   expires_at: TimestampSchema.nullable(),
+  exhausted_until: TimestampSchema.nullable(),
   usage: UsageSchema.nullable(),
   last_used_at: TimestampSchema.nullable(),
 });

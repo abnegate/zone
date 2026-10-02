@@ -90,7 +90,16 @@ const SIGNED_OUT: &str = "signed_out";
 const RESETS_AT: &str = "resets_at";
 
 /// The fields a handover frame and its stored record share.
-const HANDOVER_FIELDS: [&str; 7] = ["from", "to", "agent", "reason", RESETS_AT, "carried", "at"];
+const HANDOVER_FIELDS: [&str; 8] = [
+    "from",
+    "to",
+    "from_agent",
+    "agent",
+    "reason",
+    RESETS_AT,
+    "carried",
+    "at",
+];
 
 /// The directory under each test's own that holds its organizations' agent
 /// homes, by which a run looked up on `PATH` is passed to that test's stand-in.
@@ -188,6 +197,7 @@ enum Reset {
 struct Expected<'a> {
     from: &'a str,
     to: &'a str,
+    from_agent: AgentKind,
     agent: AgentKind,
     reason: &'a str,
     carried: bool,
@@ -833,6 +843,7 @@ fn assert_handover(frame: &Value, start: &Value, expected: &Expected<'_>) {
     assert_eq!(frame["message_id"], start["message_id"], "{frame}");
     assert_eq!(frame["from"], expected.from, "{frame}");
     assert_eq!(frame["to"], expected.to, "{frame}");
+    assert_eq!(frame["from_agent"], expected.from_agent.as_str(), "{frame}");
     assert_eq!(frame["agent"], expected.agent.as_str(), "{frame}");
     assert_eq!(frame["reason"], expected.reason, "{frame}");
     assert_eq!(frame["carried"], expected.carried, "{frame}");
@@ -895,6 +906,7 @@ async fn a_turn_that_hits_its_limit_continues_on_another_login_in_the_same_messa
         &Expected {
             from: ALICE.label,
             to: BOB.label,
+            from_agent: AgentKind::Claude,
             agent: AgentKind::Claude,
             reason: LIMIT,
             carried: true,
@@ -990,6 +1002,7 @@ async fn a_handover_without_a_session_file_replays_the_transcript() {
         &Expected {
             from: ALICE.label,
             to: BOB.label,
+            from_agent: AgentKind::Claude,
             agent: AgentKind::Claude,
             reason: LIMIT,
             carried: false,
@@ -1053,6 +1066,7 @@ async fn a_chat_whose_agent_is_spent_continues_on_the_other_agent() {
         &Expected {
             from: ALICE.label,
             to: CAROL,
+            from_agent: AgentKind::Claude,
             agent: AgentKind::Codex,
             reason: LIMIT,
             carried: false,
@@ -1210,6 +1224,7 @@ async fn a_sticky_login_exhausted_elsewhere_is_left_before_the_turn_spawns() {
         &Expected {
             from: ALICE.label,
             to: BOB.label,
+            from_agent: AgentKind::Claude,
             agent: AgentKind::Claude,
             reason: LIMIT,
             carried: true,
@@ -1304,6 +1319,7 @@ async fn a_credits_limit_hands_over_and_ends_with_the_credits_wording_when_none_
         &Expected {
             from: ALICE.label,
             to: BOB.label,
+            from_agent: AgentKind::Claude,
             agent: AgentKind::Claude,
             reason: CREDITS,
             carried: true,
@@ -1347,6 +1363,7 @@ async fn a_signed_out_login_hands_over_and_says_so() {
         &Expected {
             from: ALICE.label,
             to: BOB.label,
+            from_agent: AgentKind::Claude,
             agent: AgentKind::Claude,
             reason: SIGNED_OUT,
             carried: true,
